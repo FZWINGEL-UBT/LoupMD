@@ -11,9 +11,12 @@
 from __future__ import annotations
 
 import argparse
+import collections
 import hashlib
 import json
+import math
 import os
+import struct
 import sys
 from pathlib import Path
 
@@ -162,10 +165,65 @@ def emit_conv_fwd(lx, groups=(0, 1, 2), name=None):
     name = name or f"gconv_fwd_L{lx}"
     sel = [(k, p) for k, p in enumerate(paths) if p[0] in groups]
     nacc = sum(2 * l3 + 1 for _, (_, _, l3) in sel)
-    body, body_pair = [], []
+    def _f32(x):
+        return struct.unpack("f", struct.pack("f", x))[0]
+
+    cg_terms = collections.OrderedDict()
+    path_pairs = {}
     acc_off = 0
     for k, (l1, l2, l3) in sel:
         W = o3.wigner_3j(l1, l2, l3, dtype=torch.float64).numpy()
+        p_keys = []
+        for m3 in range(2 * l3 + 1):
+            I = acc_off + m3
+            for m1 in range(2 * l1 + 1):
+                tlist = [(_f32(float(W[m1, m2, m3])), l2 * l2 + m2) for m2 in range(2 * l2 + 1) if abs(W[m1, m2, m3]) > 1e-12]
+                if tlist:
+                    assert (I, m1) not in cg_terms, (I, m1)
+                    cg_terms[(I, m1)] = tlist
+                    p_keys.append((I, m1))
+        path_pairs[k] = p_keys
+        acc_off += 2 * l3 + 1
+
+    acc_scale, cg_use, extras = {}, {}, collections.OrderedDict()
+    for I in range(nacc):
+        singles = [abs(t[0][0]) for (i, _), t in cg_terms.items() if i == I and len(t) == 1]
+        if singles:
+            cnt = collections.Counter(round(s, 6) for s in singles)
+            best = max(cnt.items(), key=lambda kv: kv[1])[0]
+            sc = next(s for s in singles if round(s, 6) == best)
+        else:
+            sc = abs(next(t for (i, _), t in cg_terms.items() if i == I)[0][0])
+        acc_scale[I] = sc
+        for (i, m1), tlist in cg_terms.items():
+            if i != I:
+                continue
+            norm = [(c / sc, ec) for c, ec in tlist]
+            if len(norm) == 1 and abs(abs(norm[0][0]) - 1.0) < 1e-6:
+                cg_use[(I, m1)] = ("-" if norm[0][0] < 0 else "", norm[0][1])
+                continue
+            sign = -1.0 if norm[0][0] < 0 else 1.0
+            key = tuple(sorted((ec, round(sign * c, 7)) for c, ec in norm))
+            if key not in extras:
+                extras[key] = 16 + len(extras)
+            cg_use[(I, m1)] = ("-" if sign < 0 else "", extras[key])
+
+    ED = 4 * math.ceil((16 + len(extras)) / 4)
+    def _extra_code(pad, idx_expr):
+        if not extras:
+            return ""
+        ls = [f"{pad}{{ float* p = s_sh + ({idx_expr}) * ED;"]
+        for key, eslot in extras.items():
+            expr = " + ".join(f"{lit(c)} * p[{ec}]" for ec, c in key)
+            ls.append(f"{pad}  p[{eslot}] = {expr};")
+        ls.append(f"{pad}}}")
+        return "\n" + "\n".join(ls)
+
+    extra_hi = _extra_code("      ", "ch - 32")
+    extra_lo = _extra_code("          ", "ch")
+
+    body, body_pair = [], []
+    for k, (l1, l2, l3) in sel:
         decode = [
             f"        const uint2 c = __ldg(tq + {k} * C + ch);",
             "        const unsigned eb0 = (c.y & 0x0F800000u) + bias_shift;",
@@ -174,33 +232,25 @@ def emit_conv_fwd(lx, groups=(0, 1, 2), name=None):
             "        const float r1 = __uint_as_float((c.y & 0x7FFFF0u) | eb0);",
             "        const float r2 = __uint_as_float((__funnelshift_l(c.x, c.x, 20) & 0x7FF800u) | eb0);",
             "        const float r3 = __uint_as_float((__funnelshift_l(c.y, c.y, 19) & 0x7F8000u) | eb0);",
-            "        const float w = fmaf(s3, r3, fmaf(s2, r2, fmaf(s1, r1, fmaf(nw_hb, eb_f, r0))));",
+            "        const float w = fmaf(pw.z, r3, fmaf(pw.y, r2, fmaf(pw.x, r1, fmaf(pw.w, eb_f, r0))));",
         ]
-        m1_used = sorted({m1 for m1 in range(2 * l1 + 1) for m2 in range(2 * l2 + 1) for m3 in range(2 * l3 + 1) if abs(W[m1, m2, m3]) > 1e-12})
+        m1_used = sorted({m1 for _, m1 in path_pairs[k]})
         body.append(f"      {{ // path {k} ({l1},{l2},{l3})")
         body += decode
         body_pair.append(f"      {{ // path {k} ({l1},{l2},{l3}) pair")
         body_pair += decode
-        body_pair.append("        const float wB = fmaf(s3B, r3, fmaf(s2B, r2, fmaf(s1B, r1, fmaf(nw_hbB, eb_f, r0))));")
+        body_pair.append("        const float wB = fmaf(pwB.z, r3, fmaf(pwB.y, r2, fmaf(pwB.x, r1, fmaf(pwB.w, eb_f, r0))));")
         for m1 in m1_used:
             body.append(f"        const float xi_{m1} = __ldg(x{l1} + ((int64_t)snd * {2 * l1 + 1} + {m1}) * C + ch);")
             body_pair.append(f"        const float xi_{m1} = __ldg(x{l1} + ((int64_t)snd * {2 * l1 + 1} + {m1}) * C + ch);")
             body_pair.append(f"        const float xiB_{m1} = __ldg(x{l1} + ((int64_t)sndB * {2 * l1 + 1} + {m1}) * C + ch);")
-        for m3 in range(2 * l3 + 1):
-            t1, t2 = [], []
-            for m1 in range(2 * l1 + 1):
-                for m2 in range(2 * l2 + 1):
-                    v = W[m1, m2, m3]
-                    if abs(v) > 1e-12:
-                        t1.append(f"{lit(v)} * xi_{m1} * she[{l2 * l2 + m2}]")
-                        t2.append(f"{lit(v)} * xiB_{m1} * sheB[{l2 * l2 + m2}]")
-            if t1:
-                body.append(f"        acc[{acc_off + m3}] = fmaf(w, {' + '.join(t1)}, acc[{acc_off + m3}]);")
-                body_pair.append(f"        acc[{acc_off + m3}] = fmaf(w, {' + '.join(t1)}, acc[{acc_off + m3}]);")
-                body_pair.append(f"        acc[{acc_off + m3}] = fmaf(wB, {' + '.join(t2)}, acc[{acc_off + m3}]);")
+        for I, m1 in path_pairs[k]:
+            sg, eslot = cg_use[(I, m1)]
+            body.append(f"        acc[{I}] = fmaf(w * xi_{m1}, {sg}she[{eslot}], acc[{I}]);")
+            body_pair.append(f"        acc[{I}] = fmaf(w * xi_{m1}, {sg}she[{eslot}], acc[{I}]);")
+            body_pair.append(f"        acc[{I}] = fmaf(wB * xiB_{m1}, {sg}sheB[{eslot}], acc[{I}]);")
         body.append("      }")
         body_pair.append("      }")
-        acc_off += 2 * l3 + 1
 
     stores = []
     acc_off = 0
@@ -208,7 +258,10 @@ def emit_conv_fwd(lx, groups=(0, 1, 2), name=None):
         _, j = slot[k]
         n = count[l3]
         for m3 in range(2 * l3 + 1):
-            stores.append(f"  mid{l3}[((int64_t)rcv * {2 * l3 + 1} + {m3}) * {n} * C + {j} * C + ch] = acc[{acc_off + m3}];")
+            I = acc_off + m3
+            sc = acc_scale[I]
+            mult = "" if abs(sc - 1.0) < 1e-7 else f" * {lit(sc)}"
+            stores.append(f"  mid{l3}[((int64_t)rcv * {2 * l3 + 1} + {m3}) * {n} * C + {j} * C + ch] = acc[{I}]{mult};")
         acc_off += 2 * l3 + 1
 
     x_args = ", ".join(f"const float* __restrict__ x{l}" for l in range(lx + 1))
@@ -221,17 +274,17 @@ __global__ void __launch_bounds__(MAX_T) {name}(
     const int* __restrict__ species, const uint2* __restrict__ packed_table, const float4* __restrict__ density_table,
     unsigned bias_shift, {x_args}, {m_args}, float* __restrict__ D) {{
   const int C = C_FIX ? C_FIX : C_arg;
-  constexpr int TILE = 32, ED = 16;
+  constexpr int TILE = 32, ED = {ED};
   static_assert(R >= 1 && R <= 15, "bar.sync id limit");
   __shared__ int s_snd_all[R][TILE];
-  __shared__ float s_t_all[R][TILE];
+  __shared__ __align__(16) float4 s_pw_all[R][TILE];
   __shared__ int64_t s_tq_all[R][TILE];
   __shared__ __align__(16) float s_sh_all[R][TILE * ED];
   const int half = R == 1 ? 0 : (threadIdx.x >> 7), ch = R == 1 ? threadIdx.x : (threadIdx.x & 127);
   const int rcv = blockIdx.x * R + half;
   if (rcv >= N) return;
   int* s_snd = s_snd_all[half];
-  float* s_t = s_t_all[half];
+  float4* s_pw = s_pw_all[half];
   int64_t* s_tq = s_tq_all[half];
   float* s_sh = s_sh_all[half];
   const int sa = species[rcv];
@@ -249,7 +302,7 @@ __global__ void __launch_bounds__(MAX_T) {name}(
     if (ch >= 32 && ch - 32 < cnt) {{
       const float4 vl = __ldg(vec_len + base + (ch - 32));
       if (sh_perm) loup::edge_sh16(vl.y, vl.z, vl.x, vl.w, reinterpret_cast<float4*>(s_sh + (ch - 32) * ED));
-      else         loup::edge_sh16(vl.x, vl.y, vl.z, vl.w, reinterpret_cast<float4*>(s_sh + (ch - 32) * ED));
+      else         loup::edge_sh16(vl.x, vl.y, vl.z, vl.w, reinterpret_cast<float4*>(s_sh + (ch - 32) * ED));{extra_hi}
     }}
     if (ch < 32) {{
       float d_edge = 0.0f;
@@ -268,8 +321,10 @@ __global__ void __launch_bounds__(MAX_T) {name}(
           locate_spline(grid, vl.w, iv, t, sxi);
           slab = (int64_t)pr * I + iv;
         }}
+        const float s = t - 0.5f, s_sq = s * s;
+        const float s1 = s * 0x1.0p-8f, s2 = s_sq * 0x1.0p-14f, s3 = s * s_sq * 0x1.0p-19f;
         s_snd[ch] = snd;
-        s_t[ch] = t;
+        s_pw[ch] = make_float4(s1, s2, s3, -1.5f * (1.0f + s1 + s2 + s3));
         s_tq[ch] = slab * ({n_paths} * (int64_t)C);
         if (density_table) {{
           const float4 dc = __ldg(density_table + slab);
@@ -278,7 +333,7 @@ __global__ void __launch_bounds__(MAX_T) {name}(
         if (C < 64) {{
           const float4 vl = __ldg(vec_len + e);
           if (sh_perm) loup::edge_sh16(vl.y, vl.z, vl.x, vl.w, reinterpret_cast<float4*>(s_sh + ch * ED));
-          else         loup::edge_sh16(vl.x, vl.y, vl.z, vl.w, reinterpret_cast<float4*>(s_sh + ch * ED));
+          else         loup::edge_sh16(vl.x, vl.y, vl.z, vl.w, reinterpret_cast<float4*>(s_sh + ch * ED));{extra_lo}
         }}
       }}
       if (density_table) {{
@@ -290,16 +345,12 @@ __global__ void __launch_bounds__(MAX_T) {name}(
     sync_grp();
     for (int k = 0; k < cnt;) {{
       const int snd = s_snd[k];
-      const float t = s_t[k], s = t - 0.5f, s_sq = s * s;
-      const float s1 = s * 0x1.0p-8f, s2 = s_sq * 0x1.0p-14f, s3 = s * s_sq * 0x1.0p-19f;
-      const float nw_hb = -1.5f * (1.0f + s1 + s2 + s3);
+      const float4 pw = s_pw[k];
       const float* she = s_sh + k * ED;
       const uint2* tq = packed_table + s_tq[k];
       if (PAIR && k + 1 < cnt && s_tq[k + 1] == s_tq[k]) {{
         const int sndB = s_snd[k + 1];
-        const float sB = s_t[k + 1] - 0.5f, sB_sq = sB * sB;
-        const float s1B = sB * 0x1.0p-8f, s2B = sB_sq * 0x1.0p-14f, s3B = sB * sB_sq * 0x1.0p-19f;
-        const float nw_hbB = -1.5f * (1.0f + s1B + s2B + s3B);
+        const float4 pwB = s_pw[k + 1];
         const float* sheB = she + ED;
 {chr(10).join(body_pair)}
         k += 2;

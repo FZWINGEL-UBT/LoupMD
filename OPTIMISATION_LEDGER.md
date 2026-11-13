@@ -53,6 +53,7 @@ Conventions:
 | [tab-far-edge-4byte](#tab-far-edge-4byte) | 4-byte table rows for far edges (T2) | – | spec | REJECTED | – | `w'` +0.9% / +1.9%, spline +1.4% / +3.4% (5060 Ti / Ada) | [§3.3][s33] |
 | [spl-receiver-order](#spl-receiver-order) | Receiver / sublattice ordering in `spline` and `w'` for L1/L2 slab locality | – | spec | NOT BUILT | – | untried (`SrTiO3` O sublattices interleaved; Morton off < L2) | `OMAT0_SPEEDUP_BRIEF.md` |
 | [spl-r6-r8](#spl-r6-r8) | Unpaired `R=6` or `R=8` spline blocks if register pressure drops <= 80 | – | spec | NOT BUILT | – | untried (`R=5` at 96 regs already won `SrTiO3`) | `OMAT0_SPEEDUP_BRIEF.md` |
+| [spl-v6-cubic-cg-fold](#spl-v6-cubic-cg-fold) | `w'` cubic decode (`d_cubic_packed8_1`) + staged per-edge CG linear forms in `s_sh` (`ED = 36`, `TILE = 16`) | `_emit_spline_forward1` | spec | DEFAULT (5060 Ti only) | S15 | 5060 Ti `SrTiO3` 8.40 -> 8.28 ms (`0.985`, `R1p` 1,403 -> 1,306 us), `NbCl5` 1.863 -> 1.853 (`0.994`); all `LOUP_SPLINE_VARIANT` gates pass | this file |
 
 ### Interaction-1 chain as a whole
 
@@ -189,6 +190,7 @@ Conventions:
 | [gen-first-bwd-edge](#gen-first-bwd-edge) | Edge-parallel layer-0 backward + ZBL + force/virial assembly (`tabled_outer_sum0_backward_kernel` design) | `first_bwd_edge_kernel` | gen (`first_hidden`, `J - 1 <= 96`) | DEFAULT (5060 Ti only) | S12 | OMAT-S `SrTiO3` 5.62 -> 5.13 ms/step (0.913); OFF23-M water 8.65 -> 8.28 (0.957); OMAT-M gen 10.30 -> 9.80 (0.951); MH-1 0.990, POLAR-1-M 0.995 | this file |
 | [gen-gprod-ro1-fused](#gen-gprod-ro1-fused) | Fused product fwd + linear/bias/silu/linear readout (`ro_H = 16`) + product bwd (`sc1_fused` generalisation) + 128-thread `gprod_fwd`/`bwd` | `gprod_ro1_fused_<sig>`, `launch_prod` | gen (`ro_folded`, `readout == 1`, `ro_H == 16`; `C % 128 == 0`) | DEFAULT (5060 Ti only) | S13 | OMAT-S `SrTiO3` 5.12 -> 4.99 ms/step (0.976); OFF23-M water 8.29 -> 8.16 (0.984); OMAT-M gen 9.81 -> 9.67 (0.986); POLAR-1-M `NbCl5` 27.28 -> 27.14 (0.995) | this file |
 | [gen-gconv-cfix-preloc](#gen-gconv-cfix-preloc) | `C_FIX` (`96/128/224`) template on `gconv_bwd_L0/L1` (`gconv_bwd_L1<true,128>`: `REG:128 -> 62`) + prelocated `act_slab`/`act_t_sx` from `scatter_active_edges_kernel` (`pair_sym && C_x <= 256`) + 256 thr on `L1` | `C_FIX`, `PRELOC`, `preloc_grid()` | gen (`C = 96/128/224`; preloc `pair_sym && C_x <= 256`) | DEFAULT (5060 Ti only) | S14 | OMAT-S `SrTiO3` 4.91 -> 4.73 ms/step (0.964); OFF23-M water 8.00 -> 7.43 (0.928); MH-1 `NbCl5` 12.82 -> 12.50 (0.976); POLAR-1-M 27.20 -> 27.06 (0.995); OMAT-M gen 9.67 -> 8.91 (0.921, `1.051x` spec) | this file |
+| [gen-conv-fwd-cg-fold](#gen-conv-fwd-cg-fold) | Staged per-edge CG linear forms in `s_sh` (`ED = 16/36/72`) + per-edge `s_pw` polynomial scalars in `gconv_fwd` | `emit_conv_fwd` | gen | DEFAULT (5060 Ti only) | S15 | OMAT-S `SrTiO3` 4.82 -> 4.77 ms/step (`0.989`); MH-1 `NaCl` 1.75 -> 1.71 (`0.981`); OFF23-M water 7.53 -> 7.51 (`0.997`, `L1` 1,688 -> 1,572 us); OFF23-L water 28.30 -> 28.00 (`0.989`, `L2b` 3,029 -> 2,898 us); POLAR-1-M `NbCl5` 25.02 -> 24.99 (`0.999`) | this file |
 
 ### MACE-POLAR-1 long range (`src/polar.cu`)
 
@@ -205,6 +207,8 @@ Conventions:
 | [pol-contig-weights](#pol-contig-weights) | Per-degree contiguous `Wpot` / `Wq` / `le_W*` slices, fused `qnew = qin + out` | – | POLAR | REJECTED | S7 | ABBA b/a 0.952-1.045, mixed | this file |
 | [pol-kpass-32](#pol-kpass-32) | 32-thread blocks for the per-atom k-space passes when N <= 512 | – | POLAR | REJECTED | S7 | NaCl 216 (with pol-contig-weights): +7.4% (S), +6.0% (M) | this file |
 | [pol-k-split](#pol-k-split) | Per-atom k passes split over k chunks (`blockIdx.y`), chunk partials reduced in fixed order | `k_chunk`, `k_reduce_kernel` | POLAR | DEFAULT (5060 Ti only) | S8 | ABBA b/a 0.876 (S NaCl 1,728) to 0.978 (L NaCl 216); M `NbCl5` 0.928 | this file |
+| [pol-2d3d-nodiv](#pol-2d3d-nodiv) | 2D/3D div-free grids for `add_bias`/`bcast_mul`/`inv` + fused `inv2_kernel` | – | POLAR | REJECTED | S15 | `POLAR-1-M` `NbCl5` quick ABBA `b/a = 1.0004` (27.06 -> 27.07 ms; DRAM-BW bound) | this file |
+| [pol-sf-tiled](#pol-sf-tiled) | Multi-`k`-vector warp tiling (`8` warps = `8` `k`-vectors) sharing SoA `s_X[NC][129]` + `s_frac[3][129]` (`TILE = 128`, `float4` `X` loads) | `sf_kernel_tiled<NC, TK>`, `launch_sf` | POLAR | DEFAULT (5060 Ti only) | S15 | `sf_kernel<16/8/4>` 900/455/233 -> 316/150/84 us; ABBA (fresh plans) `POLAR-1-M` `NbCl5` 27.00 -> 25.00 ms (`0.926`), `NaCl` 4.41 -> 4.36 (`0.990`), `S` `NaCl` 1.92 -> 1.86 (`0.966`), `L` `NaCl` 8.36 -> 8.31 (`0.993`) | this file |
 
 ### Measurements without a switch
 
@@ -358,6 +362,14 @@ Each entry has the same fields. Unless stated, the system is OMAT-0 medium on th
 - Status: NOT BUILT.
 - What: `R=5` unpaired (96 regs, 640 threads = 20 warps/block) already won `SrTiO3` on both GPUs. Check whether trimming `acc[40]` / `she[16]` register pressure lets `R=6` or `R=8` fit at <= 80 registers for higher occupancy and L1 slab sharing.
 - Sources: `OMAT0_SPEEDUP_BRIEF.md`.
+
+<a id="spl-v6-cubic-cg-fold"></a>
+#### spl-v6-cubic-cg-fold: `w'` cubic decode and staged CG linear forms in `spline_forward_inter1`
+- Stage: S15 (14 November 2026).
+- What: switched `spline_forward_inter1` (`python/gen_kernels.py`, `src/engine.cu`) from the 3-coefficient `d_packed8_table_1` + unfolded decode to `d_cubic_packed8_1` (`cubic_bias_shift`) with the `w'` bias-folded cubic decode and warp-staged `s_pw` (`float4`) polynomial factors; grouped per-edge Clebsch-Gordan `CONST * she[m]` linear forms into 18 shared-memory slots (`ED = 36`) computed once per edge in warp 1, applied accumulator scales at store, and narrowed `TILE` from 32 to 16 so `R = 5` stays at `REG:96, STACK:0, SHARED:14784` inside the 16 KB carveout.
+- Status: DEFAULT (5060 Ti only).
+- Measured (5060 Ti): frozen `SrTiO3` (`R1p`) `1,403.4 -> 1,305.9 us`, all kernels `8,075 -> 7,860 us/eval`; ABBA vs `c24b6c4`: `SrTiO3` `8.4024 -> 8.2752 ms/step` (`0.9848`; with `LOUP_DEBUG_SPLINE`: `8.4259 -> 8.2714`, `0.9817`), `NbCl5` `1.8630 -> 1.8525` (`0.9944`). `mace-omat-0-medium` oxide gate passes on default plus every forced `LOUP_SPLINE_VARIANT` (`R1, R1p, R4, R4p, R5`).
+- Sources: this file; `.internal/research/2026-11-14-omat0-medium-speedup-candidates.md` (v6); commit `ca23b3c`.
 
 ### Interaction-1 chain as a whole
 
@@ -1113,6 +1125,14 @@ POLAR-1 NaCl 3x3x3 (216) and POLAR-1-M `NbCl5` 3x3x3 (1,944).
 - Measured (5060 Ti, clean ABBA vs S13): OMAT-0 small `SrTiO3` 4.91 -> 4.73 ms/step (`0.964`), OFF23-M water 8.00 -> 7.43 (`0.928`), MH-1 `NbCl5` 12.82 -> 12.50 (`0.976`), POLAR-1-M `NbCl5` 27.20 -> 27.06 (`0.995`), OMAT-0 medium generic `SrTiO3` 9.67 -> 8.91 (`0.921`; `ab_mode.py`: `8.73 ms` vs specialised `8.31 ms` = `1.051x`, down from `1.273x` pre-S10). Oxide, OFF23-S/M organic, MH-1, POLAR-1-M crystals gates pass; `cmp_libs.py` passes on OMAT-S, OFF23-S/M/L, MH-1, POLAR-1-M.
 - Sources: this file.
 
+<a id="gen-conv-fwd-cg-fold"></a>
+#### gen-conv-fwd-cg-fold: staged CG linear forms and `s_pw` in `gconv_fwd`
+- Stage: S15 (14 November 2026).
+- What: applied the same per-edge Clebsch-Gordan linear-form staging (`ED = 16/36/72` for `lx = 0/1/2` in `s_sh`, computed once per edge where `edge_sh16` runs) and warp-0 `s_pw` (`float4`) polynomial scaling to `emit_conv_fwd` in `python/gen_generic.py`.
+- Status: DEFAULT (5060 Ti only).
+- Measured (5060 Ti): `OFF23-M` water `gconv_fwd_L1` `1,687.8 -> 1,572.4 us` (`7.5261 -> 7.5063 ms`, `b/a = 0.9974`); `OMAT-0` small `SrTiO3` `4.8219 -> 4.7672` (`0.9886`); `MH-1` `NaCl` `1.7464 -> 1.7138` (`0.9813`); `OFF23-L` water `gconv_fwd_L2b` `3,029.3 -> 2,897.5 us` (`28.3006 -> 27.9964 ms`, `0.9893`); `POLAR-1-M` `NbCl5` `25.0199 -> 24.9920` (`0.9989`). Cached 3x gates pass on `OMAT-0` medium/small, `OFF23-S/M/L`, `OFF24-M`, `MH-1` (crystals + organic), `POLAR-1-S/M`; `67` pytest tests pass.
+- Sources: this file.
+
 <a id="rv8-fixes"></a>
 #### rv8-fixes: eighth review pass (`loupmd-review-20261112.md`, U1-U9)
 - Stage: S9.
@@ -1215,6 +1235,23 @@ POLAR-1 NaCl 3x3x3 (216) and POLAR-1-M `NbCl5` 3x3x3 (1,944).
 - Measured: kernels (POLAR-1-M `NbCl5`, nsys): `grad_pass<2>` 924-964 -> 225 us, `feat_pass` 402-449 -> 107 us, `grad_pass<1>` 250-267 -> 72 us. ABBA b/a against S8, fresh GEMM plans on both sides: POLAR-1-M `NbCl5` 0.928 (29.92 -> 27.75 ms), NaCl 216 0.958; POLAR-1-S NaCl 216 0.906, NaCl 1,728 0.876; POLAR-1-L NaCl 216 0.978. Gates PASS: POLAR-1-S (NaNbO3_c0 energy row at 0.679 meV/atom, see STATUS 5.2), POLAR-1-M (worst force 1.32), POLAR-1-L (CPU refs, worst 1.15).
 - Status: DEFAULT.
 - Sources: this file.
+
+<a id="pol-2d3d-nodiv"></a>
+#### pol-2d3d-nodiv: 2D/3D div-free elementwise grids and fused `inv2_kernel`
+- Stage: S15 (14 November 2026).
+- What: replaced `int64` div/mod indexing in `add_bias_kernel`, `bcast_mul_kernel`, `bcast_mul_bwd_kernel`, `inv_kernel`, `inv_bwd_kernel` with 2D/3D grid coordinates and fused two `inv_kernel` calls into `inv2_kernel`.
+- Status: REJECTED.
+- Measured (5060 Ti, `POLAR-1-M` `NbCl5`): `inv2` cut `2 * 80 -> 116 us`, while `bcast_mul` (`36.5 -> 36.1 us`), `bcast_mul_bwd` (`86.8 -> 90.2 us`), and `inv_bwd` (`112.0 -> 110.2 us`) stayed DRAM-bandwidth bound; quick 2x128 ABBA `27.0598 -> 27.0719 ms` (`b/a = 1.0004`). Reverted.
+- Sources: this file.
+
+<a id="pol-sf-tiled"></a>
+#### pol-sf-tiled: multi-`k`-vector warp tiling around SoA shared-`X` in `sf_kernel`
+- Switch: `sf_kernel_tiled<NC, TK>`, `launch_sf` in `src/polar.cu` (`TK = 8` for `K >= 288`, `TK = 4` for `K >= 144`, fallback `sf_kernel_1`).
+- Stage: S15 (14 November 2026).
+- What: `sf_kernel` previously ran 1 block per `k`, so all `K` blocks re-read `X[N, NC]` and `frac` through L1/L2 (`sf_kernel<16/8/4>` scaled linearly `900 / 455 / 233 us` on `NbCl5`). Now `TK` warps (`8` `k`-vectors per 256-thread block) share one SoA tile `s_X[NC][129]` (`float4` global loads) and `s_frac[3][129]` (`TILE = 128`), keeping `STACK:0` via `__launch_bounds__(TK * 32)` without a `minBlocks` cap.
+- Status: DEFAULT (5060 Ti only).
+- Measured (5060 Ti): `POLAR-1-M` `NbCl5` kernel avg `sf_kernel<16/8/4>` `899.9 / 454.9 / 232.8 -> 316.1 / 150.4 / 83.5 us`; fresh-plan ABBA vs `1e110f4`: `POLAR-1-M` `NbCl5` `27.0013 -> 24.9966 ms/step` (`b/a = 0.9258`), `NaCl` 216 `4.4061 -> 4.3599` (`0.9895`), `POLAR-1-S` `NaCl` 216 `1.9230 -> 1.8569` (`0.9657`), `POLAR-1-L` `NaCl` 216 `8.3614 -> 8.3058` (`0.9934`). `POLAR-1-S/M` crystals gates pass; `POLAR-1-L` exactness verified vs `1e110f4` via `cmp_libs.py` (`nacl216` `dF = 4.33e-7`, `nbcl5` `dF = 1.21e-3`; CPU float64 stress ref for `POLAR-1-L` `NbCl5` not re-run due to >6 min CPU autograd runtime).
+- Sources: this file; commit `c24b6c4`.
 
 ### Measurements without a switch
 
