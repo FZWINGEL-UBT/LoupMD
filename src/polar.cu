@@ -51,10 +51,91 @@ __device__ __forceinline__ void kphase(const float* nk, unsigned s1, unsigned s2
 // Structure factors per k over atoms: SC[k][j] = sum_a X[a][j] cos(theta_ak), SS likewise with sin (NC = 4, 8, 16).
 // Accumulates in float32 over 1024-atom chunks (<= 8 terms per thread) and folds into double at each chunk boundary,
 // avoiding 1/64-rate FP64 adds in the inner loop while matching feat_pass_kernel / grad_pass_kernel precision.
+template <int NC, int TK>
+__global__ void __launch_bounds__(TK * 32) sf_kernel_tiled(
+    int N, int K, const float* __restrict__ kinfo, const unsigned* __restrict__ frac,
+    const float* __restrict__ X, double* __restrict__ SC, double* __restrict__ SS) {
+    constexpr int TILE = 128;
+    constexpr int N4 = NC / 4;
+    const int tid = threadIdx.x, lane = tid & 31, warp = tid >> 5;
+    const int k = blockIdx.x * TK + warp;
+    const bool valid_k = k < K;
+    int n0 = 0, n1 = 0, n2 = 0;
+    if (valid_k) {
+        const float* nk = kinfo + k * KI;
+        n0 = (int)nk[0]; n1 = (int)nk[1]; n2 = (int)nk[2];
+    }
+    __shared__ unsigned s_frac[3][TILE + 1];
+    __shared__ float s_X[NC][TILE + 1];
+    __shared__ double s_tot[TK][2 * NC];
+    if (lane < 2 * NC) s_tot[warp][lane] = 0.0;
+    const float4* X4 = reinterpret_cast<const float4*>(X);
+
+    for (int chunk = 0; chunk < N; chunk += 1024) {
+        const int chunk_end = min(N, chunk + 1024);
+        float fc[NC], fs[NC];
+        #pragma unroll
+        for (int j = 0; j < NC; ++j) fc[j] = fs[j] = 0.0f;
+
+        for (int base = chunk; base < chunk_end; base += TILE) {
+            const int cnt = min(TILE, chunk_end - base);
+            __syncthreads();
+            for (int i = tid; i < cnt * 3; i += TK * 32)
+                s_frac[i % 3][i / 3] = __ldg(frac + (size_t)base * 3 + i);
+            for (int i = tid; i < cnt * N4; i += TK * 32) {
+                const int al = i / N4, q = (i % N4) * 4;
+                const float4 v = __ldg(X4 + (int64_t)base * N4 + i);
+                s_X[q + 0][al] = v.x;
+                s_X[q + 1][al] = v.y;
+                s_X[q + 2][al] = v.z;
+                s_X[q + 3][al] = v.w;
+            }
+            __syncthreads();
+            if (valid_k) {
+                for (int off = 0; off < cnt; off += 32) {
+                    const int al = off + lane;
+                    if (al < cnt) {
+                        const unsigned ph = (unsigned)n0 * s_frac[0][al] + (unsigned)n1 * s_frac[1][al] +
+                                            (unsigned)n2 * s_frac[2][al];
+                        float s, c;
+                        sincospif(2.0f * ((float)(int)ph * 2.3283064365386963e-10f), &s, &c);
+                        #pragma unroll
+                        for (int j = 0; j < NC; ++j) {
+                            const float v = s_X[j][al];
+                            fc[j] = fmaf(v, c, fc[j]);
+                            fs[j] = fmaf(v, s, fs[j]);
+                        }
+                    }
+                }
+            }
+        }
+        if (valid_k) {
+            #pragma unroll
+            for (int j = 0; j < NC; ++j) {
+                double dc = (double)fc[j], ds = (double)fs[j];
+                #pragma unroll
+                for (int off = 16; off > 0; off >>= 1) {
+                    dc += __shfl_xor_sync(0xffffffffu, dc, off);
+                    ds += __shfl_xor_sync(0xffffffffu, ds, off);
+                }
+                if (lane == 0) {
+                    s_tot[warp][j] += dc;
+                    s_tot[warp][NC + j] += ds;
+                }
+            }
+        }
+    }
+    __syncwarp();
+    if (valid_k && lane < NC) {
+        SC[(int64_t)k * NC + lane] = s_tot[warp][lane];
+        SS[(int64_t)k * NC + lane] = s_tot[warp][NC + lane];
+    }
+}
+
 template <int NC>
-__global__ void __launch_bounds__(128) sf_kernel(int N, int K, const float* __restrict__ kinfo,
-                                                 const unsigned* __restrict__ frac, const float* __restrict__ X,
-                                                 double* __restrict__ SC, double* __restrict__ SS) {
+__global__ void __launch_bounds__(128) sf_kernel_1(int N, int K, const float* __restrict__ kinfo,
+                                                   const unsigned* __restrict__ frac, const float* __restrict__ X,
+                                                   double* __restrict__ SC, double* __restrict__ SS) {
     static_assert(NC % 4 == 0, "NC must be a multiple of 4 for float4 loads");
     constexpr int BLK = 128;
     constexpr int N4 = NC / 4;
@@ -63,19 +144,16 @@ __global__ void __launch_bounds__(128) sf_kernel(int N, int K, const float* __re
     const float* nk = kinfo + k * KI;
     const float n0 = nk[0], n1 = nk[1], n2 = nk[2];
     const float4* X4 = reinterpret_cast<const float4*>(X);
-
     __shared__ unsigned s_frac[BLK * 3];
     __shared__ double red[4][2 * NC];
     __shared__ double tot[2 * NC];
     const int tid = threadIdx.x, lane = tid & 31, warp = tid >> 5;
     if (tid < 2 * NC) tot[tid] = 0.0;
-
     for (int chunk = 0; chunk < N; chunk += BLK * 8) {
         const int chunk_end = min(N, chunk + BLK * 8);
         float fc[NC], fs[NC];
         #pragma unroll
         for (int j = 0; j < NC; ++j) fc[j] = fs[j] = 0.0f;
-
         for (int base = chunk; base < chunk_end; base += BLK) {
             const int cnt = min(BLK, chunk_end - base);
             __syncthreads();
@@ -125,6 +203,14 @@ __global__ void __launch_bounds__(128) sf_kernel(int N, int K, const float* __re
     __syncthreads();
     if (tid < NC) SC[(int64_t)k * NC + tid] = tot[tid];
     else if (tid < 2 * NC) SS[(int64_t)k * NC + tid - NC] = tot[tid];
+}
+
+template <int NC>
+static void launch_sf(cudaStream_t st, int N, int K, const float* kinfo, const unsigned* frac, const float* X,
+                      double* SC, double* SS) {
+    if (K >= 288) sf_kernel_tiled<NC, 8><<<(K + 7) / 8, 256, 0, st>>>(N, K, kinfo, frac, X, SC, SS);
+    else if (K >= 144) sf_kernel_tiled<NC, 4><<<(K + 3) / 4, 128, 0, st>>>(N, K, kinfo, frac, X, SC, SS);
+    else sf_kernel_1<NC><<<K, 128, 0, st>>>(N, K, kinfo, frac, X, SC, SS);
 }
 
 // Forward feature coefficients per k and spin channel: rho from the structure factors, V = kappa rho,
@@ -1420,7 +1506,7 @@ void PolarLR::record(cudaStream_t st, int N, const GemmFn& gemm,
     auto features = [&](const float* q, double* SFq, float* AB, float* pot) {
         double* SCq = SFq;
         double* SSq = SFq + (size_t)P.K_cap * 8;
-        sf_kernel<8><<<K, 128, 0, st>>>(N, K, P.kinfo, P.fracu, q, SCq, SSq);
+        launch_sf<8>(st, N, K, P.kinfo, P.fracu, q, SCq, SSq);
         feat_coef_kernel<<<blocks_for(K), 256, 0, st>>>(K, P.kinfo, alpha, beta, SCq, SSq, AB);
         feat_pass_kernel<<<kgrid, 128, 0, st>>>(N, K, kc, P.kinfo, P.fracu, AB, P.f16, P.kpart);
         if (kgrid.y > 1)
@@ -1545,7 +1631,7 @@ void PolarLR::record(cudaStream_t st, int N, const GemmFn& gemm,
     }
     // ---------------- Coulomb energy
     qtot_kernel<<<blocks_for((int64_t)N * 4), 256, 0, st>>>(N, P.qfin, P.qt);
-    sf_kernel<4><<<K, 128, 0, st>>>(N, K, P.kinfo, P.fracu, P.qt, P.SC, P.SS);
+    launch_sf<4>(st, N, K, P.kinfo, P.fracu, P.qt, P.SC, P.SS);
     energy_kernel<<<blocks_for(K), 256, 0, st>>>(K, P.kinfo, alpha, e_scale, P.SC, P.SS, energy);
 
     // ================= backward
@@ -1629,7 +1715,7 @@ void PolarLR::record(cudaStream_t st, int N, const GemmFn& gemm,
         join();
         // pot = (features(q_in) - si(q_in)) / norms
         pot_bwd_kernel<<<blocks_for((int64_t)N * 2), 256, 0, st>>>(N, P.fc, P.dpot, P.g16, P.dq2);
-        sf_kernel<16><<<K, 128, 0, st>>>(N, K, P.kinfo, P.fracu, P.g16, P.SC, P.SS);
+        launch_sf<16>(st, N, K, P.kinfo, P.fracu, P.g16, P.SC, P.SS);
         // features_from_q again for rho is not needed: the backward coefficients take GA/GB only
         bwd_coef_kernel<<<blocks_for(K), 256, 0, st>>>(K, 2, 0, P.kinfo, alpha, beta, e_scale, P.SC, P.SS, nullptr,
                                                        nullptr, P.dk);
