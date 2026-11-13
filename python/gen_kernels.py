@@ -11,9 +11,11 @@ Generates self-contained CUDA C++ kernels for:
 """
 from __future__ import annotations
 
+import collections
 import math
 import os
 import re
+import struct
 import sys
 from pathlib import Path
 
@@ -363,28 +365,80 @@ def _emit_spline_forward1(schedule, blocks, C=128):
     n_acc = len(slots)
     q_dim = len(schedule.paths) * C
 
+    def _f32(x):
+        return struct.unpack("f", struct.pack("f", x))[0]
+
+    # Group (k_acc, ic) terms per path so each per-edge CG linear form of the SH is computed once in shared memory.
+    cg_terms = collections.OrderedDict()
+    path_pairs = {}
+    for p in schedule.paths:
+        p_map = collections.OrderedDict()
+        for o in p.outputs:
+            k_acc = acc_slot[o.accumulator.name]
+            for t in o.terms:
+                p_map.setdefault((k_acc, t.input_component), []).append(
+                    (_f32(float(t.coefficient)), p.edge_start + t.edge_component)
+                )
+        for key, tlist in p_map.items():
+            assert key not in cg_terms, f"duplicate (acc, ic) across paths: {key}"
+            cg_terms[key] = tlist
+        path_pairs[p.weight_start] = list(p_map.keys())
+
+    acc_scale, cg_use, extras = {}, {}, collections.OrderedDict()
+    for k_acc in range(n_acc):
+        singles = [abs(t[0][0]) for (i, _), t in cg_terms.items() if i == k_acc and len(t) == 1]
+        if singles:
+            cnt = collections.Counter(round(s, 6) for s in singles)
+            best = max(cnt.items(), key=lambda kv: kv[1])[0]
+            sc = next(s for s in singles if round(s, 6) == best)
+        else:
+            sc = abs(next(t for (i, _), t in cg_terms.items() if i == k_acc)[0][0])
+        acc_scale[k_acc] = sc
+        for (i, ic), tlist in cg_terms.items():
+            if i != k_acc:
+                continue
+            norm = [(c / sc, ec) for c, ec in tlist]
+            if len(norm) == 1 and abs(abs(norm[0][0]) - 1.0) < 1e-6:
+                cg_use[(k_acc, ic)] = ("-" if norm[0][0] < 0 else "", norm[0][1])
+                continue
+            sign = -1.0 if norm[0][0] < 0 else 1.0
+            key = tuple(sorted((ec, round(sign * c, 7)) for c, ec in norm))
+            if key not in extras:
+                extras[key] = 16 + len(extras)
+            cg_use[(k_acc, ic)] = ("-" if sign < 0 else "", extras[key])
+
+    ED = 4 * math.ceil((16 + len(extras)) / 4)
+    extra_lines = []
+    if extras:
+        extra_lines.append("            { float* p = s_sh + (ch - 32) * ED;  // per-edge CG linear forms shared by all channels")
+        for key, eslot in extras.items():
+            expr = " + ".join(f"{_lit(c)} * p[{ec}]" for ec, c in key)
+            extra_lines.append(f"              p[{eslot}] = {expr};")
+        extra_lines.append("            }")
+    extra_block = ("\n" + "\n".join(extra_lines)) if extra_lines else ""
+
     # Input map: xi[(p.input_start, comp, dim)] -> expression loading from x0 or x1
     # In OMAT-0 medium inter[1], input irreps are 128x0e (start=0, dim=1) and 128x1o (start=128, dim=3)
     body = []
-    body_pair = []  # two edges sharing one slab: edge A (snd, s, she) and edge B (sndB, sB, sheB)
+    body_pair = []  # two edges sharing one slab: edge A (snd, pw, she) and edge B (sndB, pwB, sheB)
     for p in schedule.paths:
         wstart = p.weight_start
         decode = [
             f"                const uint2 c = __ldg(tq + {wstart});",
-            "                const unsigned eb = ((c.y & 63u) << 23) + bias_shift;",
-            "                const float hb = __uint_as_float(eb | 0x400000u);",
-            "                const float a0 = __uint_as_float(((c.x >> 9) & 0x7FFFFEu) | eb) - hb;",
-            "                const float a1 = __uint_as_float(((c.y >> 3) & 0x7FFFF8u) | eb) - hb;",
-            "                const float a2 = __uint_as_float((__funnelshift_l(c.y, c.x, 13) & 0x7FFF80u) | eb) - hb;",
+            "                const unsigned eb = (c.y & 0x0F800000u) + bias_shift;",
+            "                const float eb_f = __uint_as_float(eb);",
+            "                const float a0 = __uint_as_float((c.x & 0x7FFFF8u) | eb);",
+            "                const float a1 = __uint_as_float((c.y & 0x7FFFF0u) | eb);",
+            "                const float a2 = __uint_as_float((__funnelshift_l(c.x, c.x, 20) & 0x7FF800u) | eb);",
+            "                const float a3 = __uint_as_float((__funnelshift_l(c.y, c.y, 19) & 0x7F8000u) | eb);",
         ]
         body.append(f"            {{  // path weight_start={wstart}")
         body += decode
-        body.append("                const float w = fmaf(s2, a2, fmaf(s, a1, a0));")
+        body.append("                const float w = fmaf(pw.z, a3, fmaf(pw.y, a2, fmaf(pw.x, a1, fmaf(pw.w, eb_f, a0))));")
         body_pair.append(f"            {{  // path weight_start={wstart} (pair)")
         body_pair += decode
-        body_pair.append("                const float w = fmaf(s2, a2, fmaf(s, a1, a0));")
-        body_pair.append("                const float wB = fmaf(s2B, a2, fmaf(sB, a1, a0));")
-        # Determine which x components this path reads
+        body_pair.append("                const float w = fmaf(pw.z, a3, fmaf(pw.y, a2, fmaf(pw.x, a1, fmaf(pw.w, eb_f, a0))));")
+        body_pair.append("                const float wB = fmaf(pwB.z, a3, fmaf(pwB.y, a2, fmaf(pwB.x, a1, fmaf(pwB.w, eb_f, a0))));")
         x_needed = sorted({t.input_component for o in p.outputs for t in o.terms})
         for ic in x_needed:
             for out, sfx, sv in ((body, "", "snd"), (body_pair, "", "snd"), (body_pair, "B", "sndB")):
@@ -392,14 +446,11 @@ def _emit_spline_forward1(schedule, blocks, C=128):
                     out.append(f"                const float xi{sfx}_{ic} = __ldg(x0 + (int64_t){sv} * {C} + ch);")
                 else:
                     out.append(f"                const float xi{sfx}_{ic} = __ldg(x1 + ((int64_t){sv} * 3 + {ic}) * {C} + ch);")
-        for o in p.outputs:
-            k_acc = acc_slot[o.accumulator.name]
-            for t in o.terms:
-                clit = _lit(float(t.coefficient))
-                ic, ec = t.input_component, p.edge_start + t.edge_component
-                body.append(f"                acc[{k_acc}] = fmaf(w * xi_{ic}, {clit} * she[{ec}], acc[{k_acc}]);")
-                body_pair.append(f"                acc[{k_acc}] = fmaf(w * xi_{ic}, {clit} * she[{ec}], acc[{k_acc}]);")
-                body_pair.append(f"                acc[{k_acc}] = fmaf(wB * xiB_{ic}, {clit} * sheB[{ec}], acc[{k_acc}]);")
+        for k_acc, ic in path_pairs[wstart]:
+            sg, eslot = cg_use[(k_acc, ic)]
+            body.append(f"                acc[{k_acc}] = fmaf(w * xi_{ic}, {sg}she[{eslot}], acc[{k_acc}]);")
+            body_pair.append(f"                acc[{k_acc}] = fmaf(w * xi_{ic}, {sg}she[{eslot}], acc[{k_acc}]);")
+            body_pair.append(f"                acc[{k_acc}] = fmaf(wB * xiB_{ic}, {sg}sheB[{eslot}], acc[{k_acc}]);")
         body.append("            }")
         body_pair.append("            }")
 
@@ -407,7 +458,9 @@ def _emit_spline_forward1(schedule, blocks, C=128):
     for k_acc, s_acc in enumerate(slots):
         g, width, base, stride = bmap[s_acc.start]
         off = base + s_acc.component * stride
-        stores.append(f"    m1_{g}[(int64_t)rcv * {width} + {off} + ch] = acc[{k_acc}];")
+        sc = acc_scale[k_acc]
+        mult = "" if abs(sc - 1.0) < 1e-7 else f" * {_lit(sc)}"
+        stores.append(f"    m1_{g}[(int64_t)rcv * {width} + {off} + ch] = acc[{k_acc}]{mult};")
 
     src = f"""
 // R receivers per block (128 threads each, synchronised per receiver by named barrier 1 + index). R > 1 lets the
@@ -432,18 +485,18 @@ __global__ void __launch_bounds__(128 * R) spline_forward_inter1(
     float* __restrict__ m1_0, float* __restrict__ m1_1,
     float* __restrict__ m1_2, float* __restrict__ m1_3,
     float* __restrict__ out_density1) {{
-    constexpr int TILE = 32;
-    constexpr int ED = 16;
+    constexpr int TILE = 16;
+    constexpr int ED = {ED};
     static_assert(R >= 1 && R <= 15, "per-receiver named barriers use ids 1..15");
     constexpr int64_t Q = {q_dim};
     __shared__ int s_snd_all[R][TILE];
-    __shared__ float s_t_all[R][TILE];
+    __shared__ __align__(16) float4 s_pw_all[R][TILE];
     __shared__ int64_t s_tq_all[R][TILE];
     __shared__ __align__(16) float s_sh_all[R][TILE * ED];
     const int half = R == 1 ? 0 : threadIdx.x >> 7, ch = R == 1 ? threadIdx.x : threadIdx.x & 127;
     const int rcv = blockIdx.x * R + half;
     int* s_snd = s_snd_all[half];
-    float* s_t = s_t_all[half];
+    float4* s_pw = s_pw_all[half];
     int64_t* s_tq = s_tq_all[half];
     float* s_sh = s_sh_all[half];
     float acc[{n_acc}];
@@ -458,9 +511,9 @@ __global__ void __launch_bounds__(128 * R) spline_forward_inter1(
     for (int64_t base = eb; base < ee; base += TILE) {{
         const int count_in = (int)(ee - base < TILE ? ee - base : TILE);
         if (ch >= 32 && ch - 32 < count_in) {{
-            // Warp 1 computes the staged edges' SH while warp 0 gathers their metadata.
+            // Warp 1 computes the staged edges' SH and per-edge CG linear forms while warp 0 gathers metadata.
             const float4 vl = __ldg(vec_len + base + (ch - 32));
-            loup::edge_sh16(vl.x, vl.y, vl.z, vl.w, reinterpret_cast<float4*>(s_sh + (ch - 32) * ED));
+            loup::edge_sh16(vl.x, vl.y, vl.z, vl.w, reinterpret_cast<float4*>(s_sh + (ch - 32) * ED));{extra_block}
         }}
         if (ch < 32) {{
             float d_edge = 0.0f;
@@ -468,8 +521,10 @@ __global__ void __launch_bounds__(128 * R) spline_forward_inter1(
                 const int64_t e = base + ch;
                 const int64_t slab = (int64_t)act_slab[e];
                 const float t_k = act_t_sx[e].x;
+                const float sk = t_k - 0.5f, sk2 = sk * sk;
+                const float q1 = sk * 0x1.0p-8f, q2 = sk2 * 0x1.0p-14f, q3 = sk * sk2 * 0x1.0p-19f;
                 s_snd[ch] = senders[e];
-                s_t[ch] = t_k;
+                s_pw[ch] = make_float4(q1, q2, q3, -1.5f * (1.0f + q1 + q2 + q3));
                 s_tq[ch] = slab * Q;
                 const float4 dc = __ldg(density_table + slab);
                 d_edge = fmaf(t_k, fmaf(t_k, fmaf(t_k, dc.w, dc.z), dc.y), dc.x);
@@ -481,14 +536,14 @@ __global__ void __launch_bounds__(128 * R) spline_forward_inter1(
         asm volatile("bar.sync %0, 128;" :: "r"(half + 1) : "memory");  // this receiver's 4 warps only
         for (int k = 0; k < count_in;) {{
             const int snd = s_snd[k];
-            const float t = s_t[k], s = t - 0.5f, s2 = s * s;
+            const float4 pw = s_pw[k];
             const float* she = s_sh + k * ED;
             const uint2* tq = packed_table + s_tq[k] + ch;
             if (PAIR && k + 1 < count_in && s_tq[k + 1] == s_tq[k]) {{
                 // The next edge reads the same table slab (same pair and interval; a receiver's edges are sorted by
                 // (pair, r)): decode each coefficient once for both.
                 const int sndB = s_snd[k + 1];
-                const float sB = s_t[k + 1] - 0.5f, s2B = sB * sB;
+                const float4 pwB = s_pw[k + 1];
                 const float* sheB = she + ED;
 {chr(10).join(body_pair)}
                 k += 2;

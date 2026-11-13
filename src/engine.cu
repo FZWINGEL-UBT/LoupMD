@@ -1092,8 +1092,8 @@ static void launch_spline(LoupHandle* h, int rpb, bool pair) {
                             : (pair ? spline_forward_inter1<1, true> : spline_forward_inter1<1, false>);
     kernel<<<(N + rpb - 1) / rpb, 128 * rpb, 0, h->stream>>>(
         N, h->d_act_row_ptr + N, h->d_x0, h->d_x1, h->d_act_vec_len, h->d_act_senders, h->d_act_row_ptr,
-        h->d_act_slab, h->d_act_t_sx, h->model.d_packed8_table_1, h->model.d_density_table_1,
-        h->model.bias_shift,
+        h->d_act_slab, h->d_act_t_sx, h->model.d_cubic_packed8_1, h->model.d_density_table_1,
+        h->model.cubic_bias_shift,
         h->d_m1_0, h->d_m1_1, h->d_m1_2, h->d_m1_3, h->d_D1);
 }
 
