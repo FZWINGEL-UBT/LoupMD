@@ -313,6 +313,11 @@ float64 reference does not fit the GPU (OFF23-L / 23b / 24 on the 16 GB 5060 Ti,
 
 POLAR-1-S NaNbO3_c0 is far from float32-exact in MACE itself (MACE float32 vs float64: 27-90 eV/A force,
 0.38-1.15 eV/A^3 stress; FastMACE excludes the configuration); LoupMD's error there is 0.15-0.34 of that.
+Its energy row is not reproducible run to run: LoupMD's energy there takes one of a few discrete values per
+process (dE/atom 0.074, 0.167, 0.679, 0.988 or 2.320 meV against float64; identical within a process, the same set
+for the S7 and S8 builds; a discrete set points to the per-process GEMM plan choice, not verified), and MACE's own float32 error, the gate's
+bound, also changes between runs (0.44 meV in one). With 2.320 the row failed once for S7 and once for S8 and
+passed for S8 in another run; force and stress ratios stayed at or below 0.29.
 `tests/test_gate_wrapper.py` runs the gate for OMAT-0 small, OFF23-S / M, MH-1 (two sets) and POLAR-1-S / M.
 
 ### 5.3 MD Speed (`python/bench_family.py`: Langevin 300 K, 1 fs, skin 0.5 A, 100 warm-up + median of 6 x 256 steps)
@@ -343,6 +348,25 @@ These are FastMACE's adopted configurations; its non-adopted POLAR-1-L pair-`w'`
 The FastMACE column is its documented numbers (`docs/benchmarks.md`, `docs/optimisation-ledger.md`,
 `results/ada-5060-screen-20261110/`), not re-measured here. POLAR-1 rows run with float32 SIMT GEMMs (5.4).
 POLAR-1-S / -L on NbCl5 3x3x3 are not listed: the model is unstable there (5.5).
+
+S8 (13 November, 5060 Ti only; ledger gen-conv-l2-split, gen-first-bwd-v2, gen-conv-fwd-r1, gen-conv-fwd-l2-split,
+gen-first-fwd-race). Times are the S8 side of ABBA runs against S7 (`ab_fam.py`, same protocol as above):
+
+| Model | System | S7 | S8 | b/a |
+|---|---|---|---|---|
+| OMAT-0 small | SrTiO3 / NbCl5 | 6.511 / 1.456 | **6.109 / 1.381** | 0.938 / 0.948 |
+| OFF23 small / medium / large | water 2x2x2 | 3.869 / 9.427 / 34.198 | **3.793 / 8.927 / 29.714** | 0.980 / 0.947 / 0.869 |
+| OFF23 medium | water_216 | 1.549 | **1.431** | 0.924 |
+| OFF24 medium | water 2x2x2 | 13.685 | **12.762** | 0.933 |
+| MH-1 `omat_pbe` | NaCl 3x3x3 | 1.841 | **1.792** | 0.974 |
+| POLAR-1 S / M / L | NaCl 3x3x3 | 2.140 / 4.787 / 8.856 | **2.136 / 4.638 / 8.739** | 0.998 / 0.969 / 0.987 |
+| POLAR-1-M | NbCl5 | 30.031 | **30.068** | 1.001 |
+
+POLAR-1-S / -M NaCl rows are with freshly tuned GEMM plans on both sides (ledger meas-plan-variance: with each
+build's cached plans they read 1.019 / 1.013). Against FastMACE (same cells, adopted configurations): POLAR-1-S 2-4%
+faster, POLAR-1-M NaCl 1-3% slower, NbCl5 3-5% faster, POLAR-1-L 10-11% faster; MH-1 33-38% faster. Gates: every
+set in 5.2 passes except the POLAR-1-S NaNbO3_c0 energy row in one of six S8 runs (and one of five S7 runs; see
+5.2); 55 tests pass.
 
 ### 5.4 Fixes Found by the Family Work
 - **POLAR LayerNorm-MLP reverse wrote its GEMM output over its own input** (`mlp_bwd`: after the first hidden layer

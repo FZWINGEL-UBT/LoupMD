@@ -174,6 +174,13 @@ Conventions:
 | [gen-conv-v2](#gen-conv-v2) | Conv kernels with 8-byte cubic tables, staged edges, R-receiver forward, late pull-back backward; warp-staged first layer | `python/gen_generic.py`, `first_fwd/bwd_kernel` | gen | DEFAULT (5060 Ti only) | S7 | ABBA b/a 0.688 (OMAT-S `SrTiO3`) to 0.987 (POLAR-1-S) | this file |
 | [gen-skinny-gemm](#gen-skinny-gemm) | Own kernels for products with N <= 16 or K <= 16 (warp K-split, thread per output) in place of cuBLAS | – | gen, POLAR, OMAT-M | REJECTED | S7 | ABBA b/a 1.040 (OMAT-S `SrTiO3`), 1.009 (POLAR-1-M `NbCl5`), 1.016 (OMAT-M `SrTiO3`) | this file |
 | [gen-first-bwd-tail](#gen-first-bwd-tail) | First-layer backward: the per-edge `sh16_grad` tail batched one edge per lane | – | gen | REJECTED | S7 | ABBA b/a 1.040 (OMAT-S `SrTiO3`), 1.017 (OFF23-M water) | this file |
+| [gen-conv-l2-split](#gen-conv-l2-split) | lx 2 conv backward split: the 10 paths with x degree <= 1 in the late pull-back form, the 7 with x degree 2 kept explicit | `gconv_bwd_L2lp` + `gconv_bwd_L2` | gen (OFF23-L, POLAR-1-L) | DEFAULT (5060 Ti only) | S8 | ABBA b/a 0.925 (OFF23-L water 2x2x2) | this file |
+| [gen-first-fwd-race](#gen-first-fwd-race) | `first_fwd_kernel`: species-segment end in two parity slots | – | gen | FIX | S8 | no timing change expected; forces at noise level | this file |
+| [gen-first-bwd-v2](#gen-first-bwd-v2) | First-layer backward: receiver's `G` rows staged once in swizzled shared memory; one edge per half-warp | `first_bwd_kernel<STAGE_G>` | gen | DEFAULT (5060 Ti only) | S8 | ABBA b/a 0.948 (OMAT-S `SrTiO3`), 0.982 (OFF23-M water), 0.986 (OMAT-S `NbCl5`), 0.996 (MH-1) | this file |
+| [gen-conv-fwd-r1](#gen-conv-fwd-r1) | Conv forward at C = 128 with one receiver per block (was 4 for lx 0, 2 for lx 1) | `launch_conv_fwd` | gen | DEFAULT (5060 Ti only) | S8 | ABBA b/a 0.949-0.989 | this file |
+| [gen-conv-fwd-l2-split](#gen-conv-fwd-l2-split) | lx 2 conv forward as two kernels by x degree | `gconv_fwd_L2a` / `L2b` | gen (OFF23-L, POLAR-1-L) | DEFAULT (5060 Ti only) | S8 | OFF23-L water forward 7.6 -> 3.1 + 3.1 ms | this file |
+| [gen-conv-bwd-128](#gen-conv-bwd-128) | Conv backward (lx 0 / 1) with 128-thread blocks | – | gen | REJECTED | S8 | ABBA b/a 0.997 (OMAT-S), 0.992 (OFF23-M): below resolution, halves per-receiver warps on small cells | this file |
+| [gen-conv-fwd-l1-split](#gen-conv-fwd-l1-split) | lx 1 conv forward as two kernels by x degree | – | gen | REJECTED | S8 | 1.70 -> 1.78-1.87 ms (x degree 1 kernel alone at 128 registers) | this file |
 
 ### MACE-POLAR-1 long range (`src/polar.cu`)
 
@@ -200,6 +207,7 @@ Conventions:
 | [meas-nve-drift](#meas-nve-drift) | NVE drift, `SrTiO3`, 1 ps | MEASUREMENT | -0.00011 / -0.00012 meV/atom/ps | [§1][s1] |
 | [meas-ada-counters](#meas-ada-counters) | Ada performance counters | BLOCKED | `ERR_NVGPUCTRPERM`, needs admin | [§4.1 #2][s41] |
 | [meas-family-bench](#meas-family-bench) | MD speed of every family, both GPUs, against FastMACE's documented numbers | MEASUREMENT | POLAR-1 level to 20% slower than FastMACE (11 Nov lines) | [§5][s5] |
+| [meas-plan-variance](#meas-plan-variance) | GEMM plans differ between library builds | MEASUREMENT | POLAR-1-M NaCl 216 S8/S7 b/a 1.013 with each build's cached plans, 0.969 after both retuned | this file |
 
 ## Chronology
 
@@ -992,6 +1000,59 @@ POLAR-1 NaCl 3x3x3 (216) and POLAR-1-M `NbCl5` 3x3x3 (1,944).
 - Why: [INFERENCE] the kernel's `G` and table reads rely on L1, and the 17 KB buffer costs carveout and resident blocks; the serial tail was not the limiter.
 - Sources: this file.
 
+<a id="gen-conv-l2-split"></a>
+#### gen-conv-l2-split: late pull-back for the lx 2 backward's degree <= 1 paths
+- Switch: `emit_conv_bwd_lp(2)` -> `gconv_bwd_L2lp`, `emit_conv_bwd_L2(groups=(2,))` -> `gconv_bwd_L2` in `python/gen_generic.py`; `launch_conv_bwd` runs both (the first owns the density term, the second gets `dD = nullptr`).
+- Stage: S8.
+- What: the ten paths of x degree <= 1 are exactly lx 1's path set, so lx 1's late pull-back kernel indexed into the 17-path table covers them; the seven x degree 2 paths (no Cartesian form, as in FastMACE's `wprime_pullback`) keep the per-channel SH gradient. Falsifier first: with either group removed the old kernel took 7.15 ms (degree <= 1) and 6.92 ms (degree 2) of 13.9 ms on OFF23-L water.
+- Status: DEFAULT.
+- Measured: OFF23-L water backward 13.59 ms -> 4.46 + 7.47 ms per call (nsys, frozen cell); ABBA b/a 0.925 (33.91 -> 31.36 ms/step). Forces vs S7: 9.8e-7 eV/A (run-to-run 2.1e-6). OFF23-L organic gate PASS (worst stress 1.94).
+- Sources: this file.
+
+<a id="gen-first-fwd-race"></a>
+#### gen-first-fwd-race: species-segment end in parity slots
+- Stage: S8 (review T2, `loupmd-review-20261112.md`).
+- What: `first_fwd_kernel` kept a receiver's species-segment end in one shared int; when a species had no edge no barrier separated the other warps' read from thread 0's write for the next species. Now `s_ee[s & 1]`: the next barrier bounds thread 0's lead to one slot.
+- Status: FIX.
+- Measured: forces unchanged at noise level (OMAT-S, MH-1, OFF23-M, POLAR-1-S). `tests/test_families.py::test_receiver_with_an_empty_species_segment_matches_mace` (OMAT-S, MH-1) covers the path, receivers with an empty species segment between non-empty ones, against MACE float64; it cannot force the warp timing of the race itself.
+- Sources: this file.
+
+<a id="gen-first-bwd-v2"></a>
+#### gen-first-bwd-v2: staged gradient rows and half-warp edges in the first-layer backward
+- Switch: `first_bwd_kernel<STAGE_G>` (staged when 16 S (J - 1) floats fit in 46 KB of dynamic shared memory).
+- Stage: S8.
+- What: ncu (OMAT-S `SrTiO3`): issue slots 79% busy, 17.2 active threads per warp, L1 hit 97%: instruction-bound on half-empty warps. (1) the receiver's `G[m][s Jp + j]` (identical for all its edges) staged once, m innermost in float4 chunks swizzled by `(k >> 1) & 3`: 4 conflict-free shared loads per column instead of 16 global ones; (2) each half-warp owns an edge and strides the J = 66 columns by 16 (5 passes per two edges instead of 3 per edge, the third with 2 lanes), the `sh16_grad` tail on lanes 0 and 16 together. Arithmetic per column unchanged.
+- Status: DEFAULT.
+- Measured: kernel 1,114 -> ~809 us (OMAT-S `SrTiO3`), 929 -> 723 us (OFF23-M water). ABBA b/a: OMAT-S `SrTiO3` 0.948, OFF23-M water 0.982, OMAT-S `NbCl5` 0.986, MH-1 `SrTiO3` 0.996. Forces at noise level.
+- Sources: this file.
+
+<a id="gen-conv-fwd-r1"></a>
+#### gen-conv-fwd-r1: one receiver per conv-forward block
+- Stage: S8.
+- What: gen-conv-v2 packed 4 (lx 0) / 2 (lx 1) receivers per block at C = 128; every block lasts as long as its busiest receiver, and ncu showed achieved occupancy at half the theoretical (33% of 66%, 16% of 33%).
+- Status: DEFAULT.
+- Measured: kernels 676 -> 495 us (OMAT-S `gconv_fwd_L0`; R = 2: 1,060 us), 2,054 -> 1,664 us (OFF23-M `gconv_fwd_L1`; R = 4: 1,772 us). ABBA b/a: OMAT-S `SrTiO3` 0.981, OFF23-M water 0.956, water_216 0.949, POLAR-1-M NaCl 216 0.989.
+- Sources: this file.
+
+<a id="gen-conv-fwd-l2-split"></a>
+#### gen-conv-fwd-l2-split: lx 2 conv forward by x degree
+- Switch: `emit_conv_fwd(2, groups=...)` -> `gconv_fwd_L2a` (x degree <= 1, owns the density) and `gconv_fwd_L2b` (x degree 2, `density_table = nullptr`).
+- Stage: S8.
+- What: the single kernel held 71 accumulators at 174 registers (one 256-thread block per SM); the halves hold 40 / 31 at 122 / 102 registers.
+- Status: DEFAULT.
+- Measured: OFF23-L water forward 7.59-7.69 -> 3.10 + 3.13 ms (nsys, frozen cell); forces vs before 9.8e-7 eV/A.
+- Sources: this file.
+
+<a id="gen-conv-bwd-128"></a>
+#### gen-conv-bwd-128: 128-thread conv backward blocks
+- Stage: S8. Status: REJECTED.
+- Measured: kernels -4% (lx 0 and 1, nsys); ABBA b/a 0.997 (OMAT-S `SrTiO3`), 0.992 (OFF23-M water). 64 threads: +17% / +22%. Below resolution, and it halves the warps per receiver on 216-atom POLAR cells. Sources: this file.
+
+<a id="gen-conv-fwd-l1-split"></a>
+#### gen-conv-fwd-l1-split: lx 1 conv forward by x degree
+- Stage: S8. Status: REJECTED.
+- Measured: 1.70 ms -> 0.58 + 1.20-1.29 ms (OFF23-M water); the x degree 1 kernel alone needs 128 registers, more than the joint 122. Sources: this file.
+
 ### MACE-POLAR-1 long range
 
 <a id="pol-double-sf"></a>
@@ -1109,6 +1170,13 @@ POLAR-1 NaCl 3x3x3 (216) and POLAR-1-M `NbCl5` 3x3x3 (1,944).
 - Measured: see [§5][s5]. Against FastMACE's raw A/B lines of 11 November (same 3x3x3 cells) LoupMD's POLAR-1 is level to 20% slower (S 1.13, M 1.16 / 1.20, L 1.03 on the 5060 Ti; M 1.01 / 1.07 on the Ada). MH-1 NaCl 216 atoms 2.33 ms against FastMACE's documented 2.65-2.90 ms (5060 Ti, `matpes_r2scan`).
 - Correction: an earlier version of the status table compared with FastMACE's October baseline (`SPEC.md` 3.3) and made LoupMD's POLAR-1 look 1.5-1.9x faster; that comparison was wrong.
 - Sources: [§5][s5].
+
+<a id="meas-plan-variance"></a>
+#### meas-plan-variance: GEMM plan choice between builds
+- What: the plan cache file is keyed by a hash of the whole library, so every build tunes its own plans; winners within 3% of the runner-up are re-timed in each process. On GEMM-bound small POLAR cells the plans one build pins can differ from another's by more than the code change under test.
+- Measured (5060 Ti, S8 against S7): POLAR-1-S NaCl 216 1.019 and POLAR-1-M NaCl 216 1.013 with each build's existing plans; after moving all plan files aside 0.998 / 1.006 (S) and 0.969 (M). nsys of one POLAR-1-S evaluate: every non-GEMM kernel identical, one shape at 80 us (`sgemm128`, S7's plan) against 54 us (cuBLAS, S8's).
+- Why it matters: A/B rows of GEMM-bound cells need fresh plans on both sides; and a tuner that times candidates inside the captured graph (rather than isolated) could recover the spread for users. Not built.
+- Sources: this file.
 
 [status]: STATUS_AND_PROFILE.md
 [s1]: STATUS_AND_PROFILE.md#1-benchmark--verification-summary

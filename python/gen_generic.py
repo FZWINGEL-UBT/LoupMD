@@ -153,13 +153,17 @@ def fit_conversion(l1, l2, l3):
     assert res < 1e-12, (l1, l2, l3, res)
     return M.numpy()
 
-def emit_conv_fwd(lx):
+def emit_conv_fwd(lx, groups=(0, 1, 2), name=None):
+    """Forward conv over layout(lx)'s paths whose x degree is in ``groups`` (table stride: all paths). A kernel
+    launched with density_table = nullptr leaves D alone, so a split launch computes the density once."""
     paths, slot, count = layout(lx)
     n_paths = len(paths)
-    nacc = sum(2 * l3 + 1 for _, _, l3 in paths)
+    name = name or f"gconv_fwd_L{lx}"
+    sel = [(k, p) for k, p in enumerate(paths) if p[0] in groups]
+    nacc = sum(2 * l3 + 1 for _, (_, _, l3) in sel)
     body, body_pair = [], []
     acc_off = 0
-    for k, (l1, l2, l3) in enumerate(paths):
+    for k, (l1, l2, l3) in sel:
         W = o3.wigner_3j(l1, l2, l3, dtype=torch.float64).numpy()
         decode = [
             f"        const uint2 c = __ldg(tq + {k} * C + ch);",
@@ -199,7 +203,7 @@ def emit_conv_fwd(lx):
 
     stores = []
     acc_off = 0
-    for k, (l1, l2, l3) in enumerate(paths):
+    for k, (l1, l2, l3) in sel:
         _, j = slot[k]
         n = count[l3]
         for m3 in range(2 * l3 + 1):
@@ -209,7 +213,7 @@ def emit_conv_fwd(lx):
     x_args = ", ".join(f"const float* __restrict__ x{l}" for l in range(lx + 1))
     m_args = ", ".join(f"float* __restrict__ mid{l}" for l in range(4))
     return f"""template <int R, bool PAIR, int MAX_T = (R == 1 ? 256 : 128 * R)>
-__global__ void __launch_bounds__(MAX_T) gconv_fwd_L{lx}(
+__global__ void __launch_bounds__(MAX_T) {name}(
     int N, int C, int S, int I, SplineGrid grid, int sh_perm, int pair_sym,
     const int* __restrict__ row_ptr, const int* __restrict__ senders, const float4* __restrict__ vec_len,
     const int* __restrict__ species, const uint2* __restrict__ packed_table, const float4* __restrict__ density_table,
@@ -300,13 +304,19 @@ __global__ void __launch_bounds__(MAX_T) gconv_fwd_L{lx}(
 }}
 """
 
-def emit_conv_bwd_L01(lx):
-    assert lx in (0, 1)
+def emit_conv_bwd_lp(lx):
+    """Late pull-back backward over layout(lx)'s paths with x degree <= 1: every path for lx 0 / 1; for lx 2 the ten
+    paths of lx 1 indexed into the 17-path table (gconv_bwd_L2lp, which also owns the density term); the x degree 2
+    paths then run in gconv_bwd_L2."""
     paths, slot, count = layout(lx)
     n_paths = len(paths)
+    xl = min(lx, 1)
+    name = f"gconv_bwd_L{lx}" if lx <= 1 else "gconv_bwd_L2lp"
     slots = []
     n_slots = 0
     for k, (l1, l2, l3) in enumerate(paths):
+        if l1 > 1:
+            continue
         form = _lp_form(l1, l2, l3)
         sz = 2 * l3 + 1
         slots.append((k, l1, l2, l3, form, n_slots, sz))
@@ -337,7 +347,7 @@ def emit_conv_bwd_L01(lx):
 
     ch_body.append("      const float x0 = __ldg(x0_p + (int64_t)snd * C + ch);")
     ch_body.append("      float dx0_acc = 0.0f;")
-    if lx >= 1:
+    if xl >= 1:
         ch_body.append("      const float xx = __ldg(x1_p + ((int64_t)snd * 3 + 0) * C + ch);")
         ch_body.append("      const float xy = __ldg(x1_p + ((int64_t)snd * 3 + 1) * C + ch);")
         ch_body.append("      const float xz = __ldg(x1_p + ((int64_t)snd * 3 + 2) * C + ch);")
@@ -437,17 +447,17 @@ def emit_conv_bwd_L01(lx):
 
     ch_body.append("      if (WANT_DX) {")
     ch_body.append("        atomicAdd(dx0_p + (int64_t)snd * C + ch, dx0_acc);")
-    if lx >= 1:
+    if xl >= 1:
         ch_body.append("        atomicAdd(dx1_p + ((int64_t)snd * 3 + 0) * C + ch, dx1_0);")
         ch_body.append("        atomicAdd(dx1_p + ((int64_t)snd * 3 + 1) * C + ch, dx1_1);")
         ch_body.append("        atomicAdd(dx1_p + ((int64_t)snd * 3 + 2) * C + ch, dx1_2);")
     ch_body.append("      }")
 
-    x_args = ", ".join(f"const float* __restrict__ x{l}_p" for l in range(lx + 1))
+    x_args = ", ".join(f"const float* __restrict__ x{l}_p" for l in range(xl + 1))
     dm_args = ", ".join(f"const float* __restrict__ dmid{l}" for l in range(4))
-    dx_args = ", ".join(f"float* __restrict__ dx{l}_p" for l in range(lx + 1))
+    dx_args = ", ".join(f"float* __restrict__ dx{l}_p" for l in range(xl + 1))
     return f"""template <bool WANT_DX>
-__global__ void __launch_bounds__(256) gconv_bwd_L{lx}(
+__global__ void __launch_bounds__(256) {name}(
     int N, int C, int S, int I, SplineGrid grid, int sh_perm, int pair_sym,
     const int* __restrict__ row_ptr, const int* __restrict__ senders, const float4* __restrict__ vec_len,
     const int* __restrict__ species, const uint2* __restrict__ packed_table, const float4* __restrict__ density_table,
@@ -506,16 +516,33 @@ __global__ void __launch_bounds__(256) gconv_bwd_L{lx}(
 }}
 """
 
-def emit_conv_bwd_L2():
+def emit_conv_bwd_L2(groups=(0, 1, 2)):
     lx = 2
     paths, slot, count = layout(lx)
     n_paths = len(paths)
     by_l1 = {0: [], 1: [], 2: []}
     for k, (l1, l2, l3) in enumerate(paths):
         by_l1[l1].append((k, l1, l2, l3))
+    # The receiver's dmid values of the emitted paths, staged once per block (they depend on (receiver, channel)
+    # only): s_g[ch * GS + gofs[k] + m3], GS odd so the channel-strided reads are bank-conflict free.
+    gofs, GS = {}, 0
+    for l1 in groups:
+        for k, _, _, l3 in by_l1[l1]:
+            gofs[k] = GS
+            GS += 2 * l3 + 1
+    if GS % 2 == 0:
+        GS += 1
+    pro = ["  for (int ch = tid; ch < C; ch += blockDim.x) {"]
+    for l1 in groups:
+        for k, _, _, l3 in by_l1[l1]:
+            _, j = slot[k]
+            for m3 in range(2 * l3 + 1):
+                pro.append(f"    s_g[ch * {GS} + {gofs[k] + m3}] = __ldg(dmid{l3} + ((int64_t)rcv * {2 * l3 + 1} + {m3}) * {count[l3]} * C + {j} * C + ch);")
+    pro.append("  }")
+    pro.append("  __syncthreads();")
 
     ch_body = []
-    for l1 in (0, 1, 2):
+    for l1 in groups:
         ch_body.append(f"      {{ // a = {l1} group")
         for m in range(2 * l1 + 1):
             ch_body.append(f"        const float x{l1}_{m} = __ldg(x{l1}_p + ((int64_t)snd * {2 * l1 + 1} + {m}) * C + ch);")
@@ -535,7 +562,7 @@ def emit_conv_bwd_L2():
             ch_body.append("          const float R = fmaf(s3, r3, fmaf(s2, r2, fmaf(s1, r1, fmaf(nw_hb, eb_f, r0))));")
             ch_body.append("          const float dw = fmaf(ds3, r3, fmaf(ds2, r2, fmaf(ndt_hb, eb_f, r1)));")
             for m3 in range(2 * l3 + 1):
-                ch_body.append(f"          const float g{m3} = __ldg(dmid{l3} + ((int64_t)rcv * {2 * l3 + 1} + {m3}) * {n} * C + {j} * C + ch);")
+                ch_body.append(f"          const float g{m3} = s_g[ch * {GS} + {gofs[k] + m3}];")
             A = {}
             for m1 in range(2 * l1 + 1):
                 for m2 in range(2 * l2 + 1):
@@ -563,15 +590,18 @@ def emit_conv_bwd_L2():
     x_args = ", ".join(f"const float* __restrict__ x{l}_p" for l in range(lx + 1))
     dm_args = ", ".join(f"const float* __restrict__ dmid{l}" for l in range(4))
     dx_args = ", ".join(f"float* __restrict__ dx{l}_p" for l in range(lx + 1))
-    return f"""template <bool WANT_DX>
+    return f"""constexpr int kGconvBwdL2GS = {GS};  // staged dmid floats per channel (dynamic smem C * GS)
+template <bool WANT_DX>
 __global__ void __launch_bounds__(128) gconv_bwd_L2(
     int N, int C, int S, int I, SplineGrid grid, int sh_perm, int pair_sym,
     const int* __restrict__ row_ptr, const int* __restrict__ senders, const float4* __restrict__ vec_len,
     const int* __restrict__ species, const uint2* __restrict__ packed_table, const float4* __restrict__ density_table,
     unsigned bias_shift, {x_args}, {dm_args}, const float* __restrict__ dD, {dx_args}, float* __restrict__ edge_dvec) {{
   __shared__ float s_dy[4][16];
+  extern __shared__ float s_g[];
   const int rcv = blockIdx.x, tid = threadIdx.x, wid = tid >> 5, lane = tid & 31, n_warps = blockDim.x >> 5;
   if (rcv >= N) return;
+{chr(10).join(pro)}
   const int sa = species[rcv];
   const float dD1_r = dD ? __ldg(dD + rcv) : 0.0f;
   const int eb = row_ptr[rcv], ee = row_ptr[rcv + 1];
@@ -647,7 +677,9 @@ __global__ void __launch_bounds__(128) gconv_bwd_L2(
 
 
 def emit_conv_bwd(lx):
-    return emit_conv_bwd_L2() if lx == 2 else emit_conv_bwd_L01(lx)
+    if lx == 2:
+        return emit_conv_bwd_lp(2) + "\n" + emit_conv_bwd_L2(groups=(2,))
+    return emit_conv_bwd_lp(lx)
 
 # ----------------------------------------------------------------------------------------------- products
 def _ssa(lines, i, op):
@@ -759,7 +791,11 @@ def main():
              '#include "kernels_common.cuh"', "#include <cuda_runtime.h>", "#include <cstdint>", "",
              sh16_grad_source()]
     for lx in LX:
-        parts.append(emit_conv_fwd(lx))
+        if lx == 2:  # two kernels by x degree (<= 1: 40 accumulators, 2: 31) instead of one at 71
+            parts.append(emit_conv_fwd(2, groups=(0, 1), name="gconv_fwd_L2a"))
+            parts.append(emit_conv_fwd(2, groups=(2,), name="gconv_fwd_L2b"))
+        else:
+            parts.append(emit_conv_fwd(lx))
         parts.append(emit_conv_bwd(lx))
     table = []
     seen = set()

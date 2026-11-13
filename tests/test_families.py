@@ -65,6 +65,30 @@ def test_generic_model_without_neighbour_pairs_matches_mace(model, symbols):
     assert np.abs(f).max() < 1e-6
 
 
+@pytest.mark.parametrize("model", ["mace-omat-0-small.model", "mace-mh-1.model"])
+def test_receiver_with_an_empty_species_segment_matches_mace(model):
+    """Two Sr and an O within the cutoff, the Ti beyond it: each Sr receives O and Sr edges but none from Ti, the
+    species between them, and the O receives only Sr. The first layer walks a receiver's edges by sender species, so
+    an empty segment between two non-empty ones must leave its slot zero and the next one intact (the path of the
+    review T2 race in first_fwd_kernel; that race itself depends on warp timing and cannot be forced here)."""
+    import torch
+    from ase import Atoms
+    from mace.calculators import MACECalculator
+
+    path = find_model(model)
+    at = Atoms("Sr2OTi", positions=[(5.0, 5.0, 5.0), (8.6, 5.0, 5.0), (6.8, 6.6, 5.4), (20.0, 20.0, 20.0)],
+               cell=[30.0] * 3, pbc=True)
+    eng = LoupEngine(ensure_loup_bundle(path, sorted(set(at.get_atomic_numbers().tolist()))))
+    eng.set_system(at.get_atomic_numbers(), at.get_masses())
+    e, f, _ = eng.evaluate(at.positions, at.cell.array)
+    heads = list(getattr(torch.load(path, map_location="cpu", weights_only=False), "heads", None) or [])
+    head = {"head": next((h for h in ("omat_pbe", "default", "Default") if h in heads), heads[-1])} if len(heads) > 1 else {}
+    ref = at.copy()
+    ref.calc = MACECalculator(model_paths=path, device="cpu", default_dtype="float64", **head)
+    assert abs(e - ref.get_potential_energy()) < 1e-4 * len(at)
+    assert np.abs(f - ref.get_forces()).max() < 5e-4
+
+
 def _rattled_srtio3(rep: int, sigma: float, seed: int):
     from conftest import srtio3
 

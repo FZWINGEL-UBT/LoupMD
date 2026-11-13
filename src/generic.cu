@@ -306,7 +306,9 @@ __global__ void __launch_bounds__(256) first_fwd_kernel(
     const int* __restrict__ row_ptr, const int* __restrict__ senders, const float4* __restrict__ vec_len,
     const int* __restrict__ species, const float4* __restrict__ table,
     float* __restrict__ s0, float* __restrict__ s1, float* __restrict__ s2, float* __restrict__ s3, float* __restrict__ D) {
-    __shared__ int s_iv[32], s_ee;
+    // s_ee alternates by species parity: with no edge of species s there is no barrier between this iteration's read
+    // and thread 0's write for s + 1, but the next barrier bounds thread 0's lead to one slot.
+    __shared__ int s_iv[32], s_ee[2];
     __shared__ float s_t[32];
     __shared__ __align__(16) float s_sh[32 * 16];
     const int a = blockIdx.x, tid = threadIdx.x;
@@ -326,10 +328,10 @@ __global__ void __launch_bounds__(256) first_fwd_kernel(
                 p += 32;
             }
             if (p > e_end) p = e_end;
-            if (tid == 0) s_ee = p;
+            if (tid == 0) s_ee[s & 1] = p;
         }
         __syncthreads();
-        const int e_s_end = s_ee;
+        const int e_s_end = s_ee[s & 1];
         float acc[16];
         #pragma unroll
         for (int m = 0; m < 16; ++m) acc[m] = 0.0f;
@@ -379,19 +381,43 @@ __global__ void __launch_bounds__(256) first_fwd_kernel(
     if (tid == Jp) D[a] = dsum;
 }
 
+// STAGE_G: the receiver's gradient rows G[m][s Jp + j] (16 x K floats, the same for all its edges) are staged once in
+// shared memory, m innermost in float4 chunks swizzled by (k >> 1) & 3 so a warp's column-consecutive float4 reads
+// are bank-conflict free: 4 shared loads per column instead of 16 global ones. Without it (K too large for shared
+// memory) the rows are read from global memory per edge.
+template <bool STAGE_G>
 __global__ void __launch_bounds__(256) first_bwd_kernel(
     int N, int S, int I, int J, SplineGrid grid, int sh_perm, int pair_sym,
     const int* __restrict__ row_ptr, const int* __restrict__ senders, const float4* __restrict__ vec_len,
     const int* __restrict__ species, const float4* __restrict__ table,
     const float* __restrict__ g0, const float* __restrict__ g1, const float* __restrict__ g2, const float* __restrict__ g3,
     const float* __restrict__ dD, float* __restrict__ edge_dvec) {
-    __shared__ float s_dy[8][16];
+    __shared__ float s_dy[8][32];
+    extern __shared__ float4 s_G4[];
     const int a = blockIdx.x, tid = threadIdx.x, wid = tid >> 5, lane = tid & 31, n_warps = blockDim.x >> 5;
     if (a >= N) return;
     const int Jp = J - 1, K = S * Jp, sa = species[a];
     const float dDa = dD ? __ldg(dD + a) : 0.0f;
     const int eb = row_ptr[a], ee = row_ptr[a + 1];
-    for (int e = eb + wid; e < ee; e += n_warps) {
+    if (STAGE_G) {
+        float* s_G = reinterpret_cast<float*>(s_G4);
+        for (int idx = tid; idx < 16 * K; idx += blockDim.x) {
+            const int m = idx / K, k = idx - m * K;
+            const float v = m == 0 ? __ldg(g0 + (int64_t)a * K + k)
+                          : m < 4 ? __ldg(g1 + ((int64_t)a * 3 + m - 1) * K + k)
+                          : m < 9 ? __ldg(g2 + ((int64_t)a * 5 + m - 4) * K + k)
+                                  : __ldg(g3 + ((int64_t)a * 7 + m - 9) * K + k);
+            s_G[(k * 4 + ((m >> 2) ^ ((k >> 1) & 3))) * 4 + (m & 3)] = v;
+        }
+        __syncthreads();
+    }
+    // Each half-warp owns one edge and strides the J columns by 16: J = 66 takes 5 passes per two edges instead of 3
+    // per edge (the third with 2 of 32 lanes), and the serial tail runs on lanes 0 and 16 together. Edges are taken in
+    // pairs so the loop and its shuffles stay warp-convergent; an odd last edge leaves its partner half idle.
+    const int half = lane >> 4, hl = lane & 15;
+    for (int base = eb + 2 * wid; base < ee; base += 2 * n_warps) {
+        const bool valid = base + half < ee;
+        const int e = valid ? base + half : base;
         const float4 vl = __ldg(vec_len + e);
         const int s = species[senders[e]];
         const int pr = pair_sym ? loup::sym_pair(s, sa, S) : s * S + sa;
@@ -406,7 +432,7 @@ __global__ void __launch_bounds__(256) first_bwd_kernel(
         #pragma unroll
         for (int m = 0; m < 16; ++m) dY[m] = 0.0f;
         float er = 0.0f;
-        for (int j = lane; j < J; j += 32) {
+        for (int j = hl; j < J; j += 16) {
             const float4 cf = __ldg(table + ((int64_t)pr * I + iv) * J + j);
             const float v = fmaf(t, fmaf(t, fmaf(t, cf.w, cf.z), cf.y), cf.x);
             const float dv = fmaf(t, fmaf(t, 3.0f * cf.w, 2.0f * cf.z), cf.y) * sxi;
@@ -414,13 +440,22 @@ __global__ void __launch_bounds__(256) first_bwd_kernel(
                 er = fmaf(dDa, dv, er);
             } else {
                 float G[16];
-                G[0] = __ldg(g0 + (int64_t)a * K + s * Jp + j);
-                #pragma unroll
-                for (int m = 0; m < 3; ++m) G[1 + m] = __ldg(g1 + ((int64_t)a * 3 + m) * K + s * Jp + j);
-                #pragma unroll
-                for (int m = 0; m < 5; ++m) G[4 + m] = __ldg(g2 + ((int64_t)a * 5 + m) * K + s * Jp + j);
-                #pragma unroll
-                for (int m = 0; m < 7; ++m) G[9 + m] = __ldg(g3 + ((int64_t)a * 7 + m) * K + s * Jp + j);
+                if (STAGE_G) {
+                    const int k = s * Jp + j, sw = (k >> 1) & 3;
+                    #pragma unroll
+                    for (int q = 0; q < 4; ++q) {
+                        const float4 c = s_G4[k * 4 + (q ^ sw)];
+                        G[4 * q] = c.x; G[4 * q + 1] = c.y; G[4 * q + 2] = c.z; G[4 * q + 3] = c.w;
+                    }
+                } else {
+                    G[0] = __ldg(g0 + (int64_t)a * K + s * Jp + j);
+                    #pragma unroll
+                    for (int m = 0; m < 3; ++m) G[1 + m] = __ldg(g1 + ((int64_t)a * 3 + m) * K + s * Jp + j);
+                    #pragma unroll
+                    for (int m = 0; m < 5; ++m) G[4 + m] = __ldg(g2 + ((int64_t)a * 5 + m) * K + s * Jp + j);
+                    #pragma unroll
+                    for (int m = 0; m < 7; ++m) G[9 + m] = __ldg(g3 + ((int64_t)a * 7 + m) * K + s * Jp + j);
+                }
                 float gcol = 0.0f;
                 #pragma unroll
                 for (int m = 0; m < 16; ++m) {
@@ -430,6 +465,7 @@ __global__ void __launch_bounds__(256) first_bwd_kernel(
                 er = fmaf(gcol, dv, er);
             }
         }
+        // Fold dY[0..15] over each half's 16 lanes (xor 1, 2, 4, 8 stay inside a half): lane hl ends with dY[hl].
         dY[0] = 0.0f;
         float v8[8];
         const bool p0 = (lane & 1) != 0;
@@ -444,18 +480,17 @@ __global__ void __launch_bounds__(256) first_bwd_kernel(
         #pragma unroll
         for (int k = 0; k < 2; ++k) v2[k] = (p2 ? v4[2 * k + 1] : v4[2 * k]) + __shfl_xor_sync(0xffffffffu, p2 ? v4[2 * k] : v4[2 * k + 1], 4);
         const bool p3 = (lane & 8) != 0;
-        float v0 = (p3 ? v2[1] : v2[0]) + __shfl_xor_sync(0xffffffffu, p3 ? v2[0] : v2[1], 8);
-        v0 += __shfl_xor_sync(0xffffffffu, v0, 16);
-        if (lane < 16) s_dy[wid][lane] = v0;
+        const float v0 = (p3 ? v2[1] : v2[0]) + __shfl_xor_sync(0xffffffffu, p3 ? v2[0] : v2[1], 8);
+        s_dy[wid][lane] = v0;
         #pragma unroll
-        for (int off = 16; off > 0; off >>= 1) er += __shfl_xor_sync(0xffffffffu, er, off);
+        for (int off = 8; off > 0; off >>= 1) er += __shfl_xor_sync(0xffffffffu, er, off);
         __syncwarp();
-        if (lane == 0) {
+        if (hl == 0 && valid) {
             const float dd = vl.w > loup::EPS_SH ? vl.w : loup::EPS_SH;
             const float inv_d = 1.0f / dd;
             const float x = ux * inv_d, y = uy * inv_d, z = uz * inv_d;
             float gx, gy, gz;
-            ::sh16_grad(x, y, z, s_dy[wid], gx, gy, gz);
+            ::sh16_grad(x, y, z, &s_dy[wid][half * 16], gx, gy, gz);
             const float dot = x * gx + y * gy + z * gz;
             float fx = x * er + (gx - x * dot) * inv_d;
             float fy = y * er + (gy - y * dot) * inv_d;
@@ -465,6 +500,7 @@ __global__ void __launch_bounds__(256) first_bwd_kernel(
             edge_dvec[(int64_t)e * 3 + 1] += fy;
             edge_dvec[(int64_t)e * 3 + 2] += fz;
         }
+        __syncwarp();
     }
 }
 __global__ void zero_edge_kernel(const int* __restrict__ E_dev, float* __restrict__ p) {
@@ -929,9 +965,11 @@ void launch_conv_fwd(int lx, cudaStream_t st, int N, int C, int S, int I, const 
                      const int* rp, const int* snd, const float4* vl, const int* sp, const uint2* packed,
                      const float4* dens, unsigned bias_shift, float* const* x, float* const* mid, float* D) {
     if (lx == 0) {
+        // One receiver per block: with 4 (or 2) per block each block lasted as long as its busiest receiver and achieved
+        // occupancy was half the theoretical (5060 Ti: 676 -> 495 us on OMAT-S SrTiO3).
         if (C == 128)
-            gconv_fwd_L0<4, true><<<(N + 3) / 4, 512, 0, st>>>(N, C, S, I, sg, perm, psym, rp, snd, vl, sp, packed,
-                                                                dens, bias_shift, x[0], mid[0], mid[1], mid[2], mid[3], D);
+            gconv_fwd_L0<1, true><<<N, 128, 0, st>>>(N, C, S, I, sg, perm, psym, rp, snd, vl, sp, packed,
+                                                      dens, bias_shift, x[0], mid[0], mid[1], mid[2], mid[3], D);
         else if (C <= 256)
             gconv_fwd_L0<1, false><<<N, C, 0, st>>>(N, C, S, I, sg, perm, psym, rp, snd, vl, sp, packed, dens,
                                                     bias_shift, x[0], mid[0], mid[1], mid[2], mid[3], D);
@@ -939,10 +977,9 @@ void launch_conv_fwd(int lx, cudaStream_t st, int N, int C, int S, int I, const 
             gconv_fwd_L0<1, false, 512><<<N, C, 0, st>>>(N, C, S, I, sg, perm, psym, rp, snd, vl, sp, packed, dens,
                                                          bias_shift, x[0], mid[0], mid[1], mid[2], mid[3], D);
     } else if (lx == 1) {
-        if (C == 128)
-            gconv_fwd_L1<2, true><<<(N + 1) / 2, 256, 0, st>>>(N, C, S, I, sg, perm, psym, rp, snd, vl, sp, packed,
-                                                                dens, bias_shift, x[0], x[1], mid[0], mid[1], mid[2],
-                                                                mid[3], D);
+        if (C == 128)  // one receiver per block, as lx 0 (2,054 -> 1,664 us on OFF23-M water)
+            gconv_fwd_L1<1, true><<<N, 128, 0, st>>>(N, C, S, I, sg, perm, psym, rp, snd, vl, sp, packed,
+                                                      dens, bias_shift, x[0], x[1], mid[0], mid[1], mid[2], mid[3], D);
         else if (C <= 256)
             gconv_fwd_L1<1, false><<<N, C, 0, st>>>(N, C, S, I, sg, perm, psym, rp, snd, vl, sp, packed, dens,
                                                     bias_shift, x[0], x[1], mid[0], mid[1], mid[2], mid[3], D);
@@ -950,12 +987,19 @@ void launch_conv_fwd(int lx, cudaStream_t st, int N, int C, int S, int I, const 
             gconv_fwd_L1<1, false, 512><<<N, C, 0, st>>>(N, C, S, I, sg, perm, psym, rp, snd, vl, sp, packed, dens,
                                                          bias_shift, x[0], x[1], mid[0], mid[1], mid[2], mid[3], D);
     } else {
-        if (C <= 256)
-            gconv_fwd_L2<1, true><<<N, C, 0, st>>>(N, C, S, I, sg, perm, psym, rp, snd, vl, sp, packed, dens,
-                                                   bias_shift, x[0], x[1], x[2], mid[0], mid[1], mid[2], mid[3], D);
-        else
-            gconv_fwd_L2<1, false, 512><<<N, C, 0, st>>>(N, C, S, I, sg, perm, psym, rp, snd, vl, sp, packed, dens,
-                                                         bias_shift, x[0], x[1], x[2], mid[0], mid[1], mid[2], mid[3], D);
+        // Two kernels by x degree (<= 1: 40 accumulators, 2: 31) instead of one holding 71: 174 -> 122 / 102
+        // registers, two blocks per SM (OFF23-L water 7.6 -> 3.1 + 3.1 ms). The second skips the density (D once).
+        if (C <= 256) {
+            gconv_fwd_L2a<1, true><<<N, C, 0, st>>>(N, C, S, I, sg, perm, psym, rp, snd, vl, sp, packed, dens,
+                                                    bias_shift, x[0], x[1], x[2], mid[0], mid[1], mid[2], mid[3], D);
+            gconv_fwd_L2b<1, true><<<N, C, 0, st>>>(N, C, S, I, sg, perm, psym, rp, snd, vl, sp, packed, nullptr,
+                                                    bias_shift, x[0], x[1], x[2], mid[0], mid[1], mid[2], mid[3], D);
+        } else {
+            gconv_fwd_L2a<1, false, 512><<<N, C, 0, st>>>(N, C, S, I, sg, perm, psym, rp, snd, vl, sp, packed, dens,
+                                                          bias_shift, x[0], x[1], x[2], mid[0], mid[1], mid[2], mid[3], D);
+            gconv_fwd_L2b<1, false, 512><<<N, C, 0, st>>>(N, C, S, I, sg, perm, psym, rp, snd, vl, sp, packed, nullptr,
+                                                          bias_shift, x[0], x[1], x[2], mid[0], mid[1], mid[2], mid[3], D);
+        }
     }
 }
 
@@ -992,14 +1036,32 @@ void launch_conv_bwd(int lx, cudaStream_t st, int N, int C, int S, int I, const 
                                                       bias_shift, x[0], x[1], dmid[0], dmid[1], dmid[2], dmid[3], dD,
                                                       dx[0], dx[1], edge_dvec);
     } else {
-        if (want_dx)
-            gconv_bwd_L2<true><<<N, 128, 0, st>>>(N, C, S, I, sg, perm, psym, rp, snd, vl, sp, packed, dens,
-                                                  bias_shift, x[0], x[1], x[2], dmid[0], dmid[1], dmid[2], dmid[3], dD,
-                                                  dx[0], dx[1], dx[2], edge_dvec);
-        else
-            gconv_bwd_L2<false><<<N, 128, 0, st>>>(N, C, S, I, sg, perm, psym, rp, snd, vl, sp, packed, dens,
-                                                   bias_shift, x[0], x[1], x[2], dmid[0], dmid[1], dmid[2], dmid[3], dD,
-                                                   dx[0], dx[1], dx[2], edge_dvec);
+        // The ten x degree <= 1 paths in the late pull-back form (with the density term), then the seven x degree 2
+        // paths with the per-channel SH gradient (dD = nullptr: counted once). Both add into edge_dvec in order.
+        const size_t smem = (size_t)C * 44 * sizeof(float), smem_g = (size_t)C * kGconvBwdL2GS * sizeof(float);
+        if (smem > 48000) {
+            auto fn = want_dx ? gconv_bwd_L2lp<true> : gconv_bwd_L2lp<false>;
+            CUDA_CHECK_THROW(cudaFuncSetAttribute((const void*)fn, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)smem));
+        }
+        if (smem_g > 48000) {
+            auto fn = want_dx ? gconv_bwd_L2<true> : gconv_bwd_L2<false>;
+            CUDA_CHECK_THROW(cudaFuncSetAttribute((const void*)fn, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)smem_g));
+        }
+        if (want_dx) {
+            gconv_bwd_L2lp<true><<<N, 256, smem, st>>>(N, C, S, I, sg, perm, psym, rp, snd, vl, sp, packed, dens,
+                                                       bias_shift, x[0], x[1], dmid[0], dmid[1], dmid[2], dmid[3], dD,
+                                                       dx[0], dx[1], edge_dvec);
+            gconv_bwd_L2<true><<<N, 128, smem_g, st>>>(N, C, S, I, sg, perm, psym, rp, snd, vl, sp, packed, dens,
+                                                  bias_shift, x[0], x[1], x[2], dmid[0], dmid[1], dmid[2], dmid[3],
+                                                  nullptr, dx[0], dx[1], dx[2], edge_dvec);
+        } else {
+            gconv_bwd_L2lp<false><<<N, 256, smem, st>>>(N, C, S, I, sg, perm, psym, rp, snd, vl, sp, packed, dens,
+                                                        bias_shift, x[0], x[1], dmid[0], dmid[1], dmid[2], dmid[3], dD,
+                                                        dx[0], dx[1], edge_dvec);
+            gconv_bwd_L2<false><<<N, 128, smem_g, st>>>(N, C, S, I, sg, perm, psym, rp, snd, vl, sp, packed, dens,
+                                                   bias_shift, x[0], x[1], x[2], dmid[0], dmid[1], dmid[2], dmid[3],
+                                                   nullptr, dx[0], dx[1], dx[2], edge_dvec);
+        }
     }
 }
 
@@ -1295,10 +1357,17 @@ void GenericModel::record(const GenericPassInputs& in) {
                 }
                 join();
             }
-            first_bwd_kernel<<<N, 256, 0, st>>>(N, S, L->intervals, L->J, L->grid, sh_perm_, L->pair_sym,
-                                                in.act_row_ptr, in.act_senders, in.act_vec_len, in.species, L->table,
-                                                L->S0[0], L->S0[1], L->S0[2], L->S0[3], density ? L->dD : nullptr,
-                                                d_edge_dvec_);
+            const size_t g_smem = (size_t)16 * S * (L->J - 1) * sizeof(float);
+            if (g_smem <= 46 * 1024)  // + 2 KB static shared memory within the 48 KB default
+                first_bwd_kernel<true><<<N, 256, g_smem, st>>>(
+                    N, S, L->intervals, L->J, L->grid, sh_perm_, L->pair_sym, in.act_row_ptr, in.act_senders,
+                    in.act_vec_len, in.species, L->table, L->S0[0], L->S0[1], L->S0[2], L->S0[3],
+                    density ? L->dD : nullptr, d_edge_dvec_);
+            else
+                first_bwd_kernel<false><<<N, 256, 0, st>>>(
+                    N, S, L->intervals, L->J, L->grid, sh_perm_, L->pair_sym, in.act_row_ptr, in.act_senders,
+                    in.act_vec_len, in.species, L->table, L->S0[0], L->S0[1], L->S0[2], L->S0[3],
+                    density ? L->dD : nullptr, d_edge_dvec_);
             continue;
         }
         // dmid (aliases mid: the forward values are dead) = dlin @ W_lin^T (or dmsgf @ W_lin_folded^T)
