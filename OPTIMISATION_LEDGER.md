@@ -184,6 +184,7 @@ Conventions:
 | [rv8-fixes](#rv8-fixes) | Eighth review pass: packed-table error check at load, cuBLAS workspace per lane, reorder carries Langevin noise, MD needs a state, safe edge growth, band / plan / input checks, unstable gate row opt-in | `kPackedTableMaxRelErr`, `cublas_bind`, `--include-unstable` | all | FIX | S9 | accuracy and robustness, no speed change intended | this file |
 | [gen-zbl-in-assembly](#gen-zbl-in-assembly) | ZBL computed in the force-assembly pass (float32, skip beyond the largest ZBL cutoff) instead of its own pass | `assemble_forces_kernel(ZblParams)` | gen (ZBL models: OMAT-S, MH-1) | DEFAULT (5060 Ti only) | S10 | OMAT-S `SrTiO3`: 389 -> 221 us per call | this file |
 | [gen-first-bwd-assembly](#gen-first-bwd-assembly) | Force / virial assembly (and ZBL) folded into the first-layer backward | – | gen | REJECTED | S10 | 990-1,029 -> 1,113-2,243 us | this file |
+| [gen-first-hidden-k0-align](#gen-first-hidden-k0-align) | Layer 0 `first_hidden` `K` alignment (drop zero bias col 64, pad nonzero `K` to 16) to unlock `sgemm128` + `3xTF32` | `GenericLayer::K0` | gen (`first_hidden`) | DEFAULT (5060 Ti only) | S11 | OMAT-S `SrTiO3` 5.88 -> 5.62 ms/step (0.956); OFF23-M water 8.85 -> 8.67 (0.979); OMAT-M gen 10.56 -> 10.30 (0.976) | this file |
 
 ### MACE-POLAR-1 long range (`src/polar.cu`)
 
@@ -1071,6 +1072,13 @@ POLAR-1 NaCl 3x3x3 (216) and POLAR-1-M `NbCl5` 3x3x3 (1,944).
 - Stage: S10. Status: REJECTED.
 - What: `first_bwd_kernel` is the last per-edge kernel, so it could finish each edge: total dE/dvec, sender force by atomics, receiver force and virial reduced per block. The specialised path does this, but its layer-0 backward is edge-parallel (one edge per lane); the generic one finishes an edge on one lane per half-warp.
 - Measured (OMAT-S `SrTiO3`): with ZBL in the tail 2,243 us (128 registers, FP64 on two lanes per warp), without it 1,113 us, with `__launch_bounds__(256, 3)` (80 registers) 1,142 us, against 790 + 201 (separate assembly) = 990 us. The serial tail, not occupancy, is the cost.
+- Sources: this file.
+
+<a id="gen-first-hidden-k0-align"></a>
+#### gen-first-hidden-k0-align: layer-0 `K` alignment (`sgemm128` + `3xTF32`)
+- Stage: S11.
+- What: `export_generic.py` wrote `J - 1 = 65` columns (64 radial + 1 bias) into `first_C0`, making `K = 195` (`S=3`) or `130` (`S=2`) and blocking both `sgemm128` (`K % 16 == 0, N % 4 == 0`) and `HybCubin` (`K % 4 == 0, N % 4 == 0`) on all layer-0 `S0 @ C0` / `dS0 = dlin @ C0^T` GEMMs. In `GenericModel::load()`, if column `J - 2` of `first_C0` is identically zero across all species and degrees (all `ScaleShiftMACE` models: OMAT-0, OFF23/23b/24, MP), it is stripped from `C0` and `table` (`J: 66 -> 65, K = 64 S`). Otherwise (nonlinear models: POLAR-1, MH-1), `K0` is padded to a multiple of 16 with zero rows in `C0` and trailing zeros written by `first_fwd_kernel`.
+- Measured (5060 Ti, ABBA): OMAT-0 small `SrTiO3` 5.88 -> 5.62 ms/step (`0.956`), OMAT-0 medium generic `SrTiO3` 10.56 -> 10.30 (`0.976`), OFF23-M water 8.85 -> 8.67 (`0.979`), MH-1 `NbCl5` 13.27 -> 13.16 (`0.992`), POLAR-1-M `NbCl5` 27.37 -> 27.35 (`0.999`). Oxide, crystals, organic gates pass.
 - Sources: this file.
 
 <a id="rv8-fixes"></a>

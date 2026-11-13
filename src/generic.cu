@@ -21,9 +21,9 @@ struct GenericLayer {
     int C_in = 0, C_x = 0, C_msg = 0, C_out = 0;
     int n_paths = 0, n_l3[4] = {0, 0, 0, 0};
     int intervals = 0, Q1 = 0, pair_sym = 0;
-    int first_hidden = 0, J = 0;  // layer 0 as an outer sum over the radial chain's J columns (see first_fwd_kernel)
-    float* C0[4] = {};            // [S (J - 1), lin_cols]
-    float* S0[4] = {};            // [N, 2l+1, S (J - 1)] (the backward reuses it for dS0)
+    int first_hidden = 0, J = 0, K0 = 0;  // layer 0 outer sum over J columns; K0 = S * (J - 1) padded to 16
+    float* C0[4] = {};                    // [K0, lin_cols] (per species when skip_folded)
+    float* S0[4] = {};                    // [N, 2l+1, K0] (the backward reuses it for dS0)
     int has_sc = 0, sc_species = 0, readout = -1, ro_H = 0, prod_species = 0, prod_segw = 0;
     int skip_folded = 0, ro_folded = 0;
     int lin_cols[4] = {0, 0, 0, 0};
@@ -310,7 +310,7 @@ __global__ void assemble_forces_kernel(const int* __restrict__ E_dev, int S, con
 // density, summed into D. One block per receiver, one thread per column; a receiver's edges are grouped by ascending
 // sender species (the neighbour list's contract), so each species slot is written once (zeros if it has no edge).
 __global__ void __launch_bounds__(256) first_fwd_kernel(
-    int N, int S, int I, int J, SplineGrid grid, int sh_perm, int pair_sym,
+    int N, int S, int I, int J, int K0, SplineGrid grid, int sh_perm, int pair_sym,
     const int* __restrict__ row_ptr, const int* __restrict__ senders, const float4* __restrict__ vec_len,
     const int* __restrict__ species, const float4* __restrict__ table,
     float* __restrict__ s0, float* __restrict__ s1, float* __restrict__ s2, float* __restrict__ s3, float* __restrict__ D) {
@@ -376,15 +376,24 @@ __global__ void __launch_bounds__(256) first_fwd_kernel(
             __syncthreads();
         }
         if (tid < Jp) {
-            s0[(int64_t)a * K + s * Jp + tid] = acc[0];
+            s0[(int64_t)a * K0 + s * Jp + tid] = acc[0];
             #pragma unroll
-            for (int m = 0; m < 3; ++m) s1[((int64_t)a * 3 + m) * K + s * Jp + tid] = acc[1 + m];
+            for (int m = 0; m < 3; ++m) s1[((int64_t)a * 3 + m) * K0 + s * Jp + tid] = acc[1 + m];
             #pragma unroll
-            for (int m = 0; m < 5; ++m) s2[((int64_t)a * 5 + m) * K + s * Jp + tid] = acc[4 + m];
+            for (int m = 0; m < 5; ++m) s2[((int64_t)a * 5 + m) * K0 + s * Jp + tid] = acc[4 + m];
             #pragma unroll
-            for (int m = 0; m < 7; ++m) s3[((int64_t)a * 7 + m) * K + s * Jp + tid] = acc[9 + m];
+            for (int m = 0; m < 7; ++m) s3[((int64_t)a * 7 + m) * K0 + s * Jp + tid] = acc[9 + m];
         }
         e_cur = e_s_end;
+    }
+    if (tid < K0 - K) {
+        s0[(int64_t)a * K0 + K + tid] = 0.0f;
+        #pragma unroll
+        for (int m = 0; m < 3; ++m) s1[((int64_t)a * 3 + m) * K0 + K + tid] = 0.0f;
+        #pragma unroll
+        for (int m = 0; m < 5; ++m) s2[((int64_t)a * 5 + m) * K0 + K + tid] = 0.0f;
+        #pragma unroll
+        for (int m = 0; m < 7; ++m) s3[((int64_t)a * 7 + m) * K0 + K + tid] = 0.0f;
     }
     if (tid == Jp) D[a] = dsum;
 }
@@ -395,7 +404,7 @@ __global__ void __launch_bounds__(256) first_fwd_kernel(
 // memory) the rows are read from global memory per edge.
 template <bool STAGE_G>
 __global__ void __launch_bounds__(256) first_bwd_kernel(
-    int N, int S, int I, int J, SplineGrid grid, int sh_perm, int pair_sym,
+    int N, int S, int I, int J, int K0, SplineGrid grid, int sh_perm, int pair_sym,
     const int* __restrict__ row_ptr, const int* __restrict__ senders, const float4* __restrict__ vec_len,
     const int* __restrict__ species, const float4* __restrict__ table,
     const float* __restrict__ g0, const float* __restrict__ g1, const float* __restrict__ g2, const float* __restrict__ g3,
@@ -411,10 +420,10 @@ __global__ void __launch_bounds__(256) first_bwd_kernel(
         float* s_G = reinterpret_cast<float*>(s_G4);
         for (int idx = tid; idx < 16 * K; idx += blockDim.x) {
             const int m = idx / K, k = idx - m * K;
-            const float v = m == 0 ? __ldg(g0 + (int64_t)a * K + k)
-                          : m < 4 ? __ldg(g1 + ((int64_t)a * 3 + m - 1) * K + k)
-                          : m < 9 ? __ldg(g2 + ((int64_t)a * 5 + m - 4) * K + k)
-                                  : __ldg(g3 + ((int64_t)a * 7 + m - 9) * K + k);
+            const float v = m == 0 ? __ldg(g0 + (int64_t)a * K0 + k)
+                          : m < 4 ? __ldg(g1 + ((int64_t)a * 3 + m - 1) * K0 + k)
+                          : m < 9 ? __ldg(g2 + ((int64_t)a * 5 + m - 4) * K0 + k)
+                                  : __ldg(g3 + ((int64_t)a * 7 + m - 9) * K0 + k);
             s_G[(k * 4 + ((m >> 2) ^ ((k >> 1) & 3))) * 4 + (m & 3)] = v;
         }
         __syncthreads();
@@ -456,13 +465,13 @@ __global__ void __launch_bounds__(256) first_bwd_kernel(
                         G[4 * q] = c.x; G[4 * q + 1] = c.y; G[4 * q + 2] = c.z; G[4 * q + 3] = c.w;
                     }
                 } else {
-                    G[0] = __ldg(g0 + (int64_t)a * K + s * Jp + j);
+                    G[0] = __ldg(g0 + (int64_t)a * K0 + s * Jp + j);
                     #pragma unroll
-                    for (int m = 0; m < 3; ++m) G[1 + m] = __ldg(g1 + ((int64_t)a * 3 + m) * K + s * Jp + j);
+                    for (int m = 0; m < 3; ++m) G[1 + m] = __ldg(g1 + ((int64_t)a * 3 + m) * K0 + s * Jp + j);
                     #pragma unroll
-                    for (int m = 0; m < 5; ++m) G[4 + m] = __ldg(g2 + ((int64_t)a * 5 + m) * K + s * Jp + j);
+                    for (int m = 0; m < 5; ++m) G[4 + m] = __ldg(g2 + ((int64_t)a * 5 + m) * K0 + s * Jp + j);
                     #pragma unroll
-                    for (int m = 0; m < 7; ++m) G[9 + m] = __ldg(g3 + ((int64_t)a * 7 + m) * K + s * Jp + j);
+                    for (int m = 0; m < 7; ++m) G[9 + m] = __ldg(g3 + ((int64_t)a * 7 + m) * K0 + s * Jp + j);
                 }
                 float gcol = 0.0f;
                 #pragma unroll
@@ -630,22 +639,42 @@ void GenericModel::load(const Bundle& b) {
         // message linear widths
         const bool nl = L->kind == 4;
         for (int l = 0; l < 4; ++l) L->lin_cols[l] = (nl && l == 0) ? 4 * L->C_msg : L->C_msg;
+        std::vector<float> c0_pad[4];
+        if (L->first_hidden) {
+            const int Jp = L->J - 1;
+            std::vector<float> c0_raw[4];
+            bool bias_zero = L->J > 2;
+            for (int l = 0; l < 4; ++l) {
+                const int nc = L->lin_cols[l];
+                c0_raw[l] = b.f32(p + "first_C0_" + std::to_string(l), {S_ * Jp, nc});
+                for (int s = 0; s < S_ && bias_zero; ++s)
+                    for (int j = 0; j < nc; ++j)
+                        if (c0_raw[l][((size_t)s * Jp + Jp - 1) * nc + j] != 0.0f) bias_zero = false;
+            }
+            const int Jp_new = bias_zero ? Jp - 1 : Jp;
+            if (bias_zero) L->J = Jp_new + 1;
+            L->K0 = ((S_ * Jp_new + 15) / 16) * 16;
+            for (int l = 0; l < 4; ++l) {
+                const int nc = L->lin_cols[l];
+                c0_pad[l].assign((size_t)L->K0 * nc, 0.0f);
+                for (int s = 0; s < S_; ++s)
+                    memcpy(&c0_pad[l][(size_t)s * Jp_new * nc], &c0_raw[l][(size_t)s * Jp * nc],
+                           (size_t)Jp_new * nc * sizeof(float));
+            }
+        }
         if (L->skip_folded) {
             for (int l = 0; l < 4; ++l) {
                 const auto wsk = b.f32(p + "W_skip_msg_" + std::to_string(l), {S_, L->C_msg, L->C_msg});
                 const auto wlin = b.f32(p + "W_lin_" + std::to_string(l), {L->n_l3[l] * L->C_x, L->C_msg});
                 L->W_lin[l] = upload(W, fold_species(wlin.data(), L->n_l3[l] * L->C_x, L->C_msg, wsk.data(), S_, L->C_msg));
-                if (L->first_hidden) {
-                    const auto c0 = b.f32(p + "first_C0_" + std::to_string(l), {S_ * (L->J - 1), L->C_msg});
-                    L->C0[l] = upload(W, fold_species(c0.data(), S_ * (L->J - 1), L->C_msg, wsk.data(), S_, L->C_msg));
-                }
+                if (L->first_hidden)
+                    L->C0[l] = upload(W, fold_species(c0_pad[l].data(), L->K0, L->C_msg, wsk.data(), S_, L->C_msg));
             }
         } else {
             for (int l = 0; l < 4; ++l)
                 L->W_lin[l] = upload(W, b.f32(p + "W_lin_" + std::to_string(l), {L->n_l3[l] * L->C_x, L->lin_cols[l]}));
             if (L->first_hidden)
-                for (int l = 0; l < 4; ++l)
-                    L->C0[l] = upload(W, b.f32(p + "first_C0_" + std::to_string(l), {S_ * (L->J - 1), L->lin_cols[l]}));
+                for (int l = 0; l < 4; ++l) L->C0[l] = upload(W, c0_pad[l]);
         }
         if (nl) {
             const std::vector<double> ab = b.f64(p + "alpha_beta", {2});
@@ -706,8 +735,17 @@ void GenericModel::load(const Bundle& b) {
             const int Ptab = L->pair_sym ? S_ * (S_ + 1) / 2 : P;
             const std::vector<float> tab = b.f32(p + "spline", {Ptab, L->intervals, L->Q1, 4});
             if (L->first_hidden) {
-                std::vector<float4> host(tab.size() / 4);
-                memcpy(host.data(), tab.data(), tab.size() * sizeof(float));
+                const size_t PI = (size_t)Ptab * L->intervals;
+                const float4* src = reinterpret_cast<const float4*>(tab.data());
+                std::vector<float4> host(PI * L->J);
+                if (L->J == L->Q1) {
+                    memcpy(host.data(), src, PI * L->J * sizeof(float4));
+                } else {
+                    for (size_t pi = 0; pi < PI; ++pi) {
+                        memcpy(&host[pi * L->J], &src[pi * L->Q1], (size_t)(L->J - 1) * sizeof(float4));
+                        host[pi * L->J + L->J - 1] = src[pi * L->Q1 + L->Q1 - 1];
+                    }
+                }
                 L->table = upload(W, host);
             } else {
                 const int Q = L->n_paths * L->C_x;
@@ -936,7 +974,7 @@ void GenericModel::alloc_system(int N) {
             L->dx[l] = (t > 0) ? zalloc(n * dimL(l) * L->C_x) : nullptr;
         }
         if (L->first_hidden)
-            for (int l = 0; l < 4; ++l) L->S0[l] = alloc(n * dimL(l) * (size_t)S_ * (L->J - 1));
+            for (int l = 0; l < 4; ++l) L->S0[l] = alloc(n * dimL(l) * (size_t)L->K0);
         for (int l = 0; l < 4; ++l) {
             L->mid[l] = L->first_hidden ? nullptr : alloc(n * dimL(l) * L->n_l3[l] * L->C_x);
             if (L->skip_folded) {
@@ -1171,9 +1209,9 @@ void GenericModel::record(const GenericPassInputs& in) {
             if (L->lmax_x > 0) join();
         }
         if (L->first_hidden) {
-            const int Kh = S * (L->J - 1);
+            const int Kh = L->K0;
             first_fwd_kernel<<<N, ((std::max(L->J, 64) + 31) / 32) * 32, 0, st>>>(
-                N, S, L->intervals, L->J, L->grid, sh_perm_, L->pair_sym, in.act_row_ptr, in.act_senders,
+                N, S, L->intervals, L->J, L->K0, L->grid, sh_perm_, L->pair_sym, in.act_row_ptr, in.act_senders,
                 in.act_vec_len, in.species, L->table, L->S0[0], L->S0[1], L->S0[2], L->S0[3], L->D);
             if (L->skip_folded) {
                 fork();
@@ -1372,7 +1410,7 @@ void GenericModel::record(const GenericPassInputs& in) {
         const bool density = L->kind >= 2;
         if (L->first_hidden) {
             // dS0 (aliases S0) = dlin @ C0^T (or dmsgf @ C0_folded^T when skip_folded)
-            const int Kh = S * (L->J - 1);
+            const int Kh = L->K0;
             if (L->skip_folded) {
                 fork();
                 for (int l = 0; l < 4; ++l)
@@ -1397,12 +1435,12 @@ void GenericModel::record(const GenericPassInputs& in) {
             const size_t g_smem = (size_t)16 * S * (L->J - 1) * sizeof(float);
             if (g_smem <= 46 * 1024)  // + 2 KB static shared memory within the 48 KB default
                 first_bwd_kernel<true><<<N, 256, g_smem, st>>>(
-                    N, S, L->intervals, L->J, L->grid, sh_perm_, L->pair_sym, in.act_row_ptr, in.act_senders,
+                    N, S, L->intervals, L->J, L->K0, L->grid, sh_perm_, L->pair_sym, in.act_row_ptr, in.act_senders,
                     in.act_vec_len, in.species, L->table, L->S0[0], L->S0[1], L->S0[2], L->S0[3],
                     density ? L->dD : nullptr, d_edge_dvec_);
             else
                 first_bwd_kernel<false><<<N, 256, 0, st>>>(
-                    N, S, L->intervals, L->J, L->grid, sh_perm_, L->pair_sym, in.act_row_ptr, in.act_senders,
+                    N, S, L->intervals, L->J, L->K0, L->grid, sh_perm_, L->pair_sym, in.act_row_ptr, in.act_senders,
                     in.act_vec_len, in.species, L->table, L->S0[0], L->S0[1], L->S0[2], L->S0[3],
                     density ? L->dD : nullptr, d_edge_dvec_);
             continue;

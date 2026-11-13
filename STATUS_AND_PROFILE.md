@@ -391,6 +391,7 @@ Against FastMACE's adopted configurations LoupMD's POLAR-1 is now 11-13% faster 
 references).
 
 S10 (ZBL in the force-assembly pass, `gen-zbl-in-assembly`): OMAT-0 small `SrTiO3` 6.06 -> **5.87 ms/step** (0.969); MH-1 `NbCl5` 13.33 -> 13.27, OFF23 medium water 8.88 -> 8.85, POLAR-1-M `NbCl5` 27.28 -> 27.34.
+S11 (layer-0 `K0` alignment, `gen-first-hidden-k0-align`): OMAT-0 small `SrTiO3` 5.88 -> **5.62 ms/step** (0.956); OFF23-M water 8.85 -> **8.67** (0.979); OMAT-0 medium generic `SrTiO3` 10.56 -> **10.30** (0.976); MH-1 `NbCl5` 13.27 -> 13.16 (0.992).
 
 ### 5.4 Fixes Found by the Family Work
 - **POLAR LayerNorm-MLP reverse wrote its GEMM output over its own input** (`mlp_bwd`: after the first hidden layer
