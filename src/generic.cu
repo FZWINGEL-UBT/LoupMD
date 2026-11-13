@@ -25,6 +25,7 @@ struct GenericLayer {
     float* C0[4] = {};            // [S (J - 1), lin_cols]
     float* S0[4] = {};            // [N, 2l+1, S (J - 1)] (the backward reuses it for dS0)
     int has_sc = 0, sc_species = 0, readout = -1, ro_H = 0, prod_species = 0, prod_segw = 0;
+    int skip_folded = 0, ro_folded = 0;
     int lin_cols[4] = {0, 0, 0, 0};
     int sc_has[3] = {0, 0, 0};
     SplineGrid grid{};
@@ -34,9 +35,9 @@ struct GenericLayer {
     float4* table = nullptr;
     float *W_up[3] = {}, *W_lin[4] = {}, *W_res[3] = {}, *W_2[4] = {}, *W_skip_msg[4] = {}, *W_sc[3] = {}, *W_p[3] = {};
     float* prod_w = nullptr;
-    float *ro_w = nullptr, *ro_W1 = nullptr, *ro_b1 = nullptr, *ro_W2 = nullptr, *ro_Wm = nullptr, *ro_bm = nullptr;
+    float *ro_w = nullptr, *ro_W1 = nullptr, *ro_W1_sc = nullptr, *ro_b1 = nullptr, *ro_W2 = nullptr,
+          *ro_Wm = nullptr, *ro_bm = nullptr;
     std::vector<void*> weights;
-    // per-system buffers
     float* h_in[4] = {};  // not owned: previous layer's hout (or the embedding gather)
     float* dh_in[4] = {}; // not owned: previous layer's dhout (nullptr for layer 0)
     float *x[3] = {}, *mid[4] = {}, *D = nullptr, *lin[4] = {}, *res[3] = {}, *gout[4] = {}, *msgf[4] = {};
@@ -474,6 +475,25 @@ void GenericModel::load(const Bundle& b) {
         d_embedding_ = upload(tmp_owner, b.f32("embedding", {S_, C0_}));
     }
     const int P = S_ * S_;
+    const bool has_lr = b.has_meta("has_lr") && b.meta_int("has_lr");
+    auto fold_mat = [](const float* A, int M, int K, const float* B, int N) {
+        std::vector<float> out((size_t)M * N);
+        for (int m = 0; m < M; ++m)
+            for (int n = 0; n < N; ++n) {
+                double s = 0.0;
+                for (int k = 0; k < K; ++k) s += (double)A[(size_t)m * K + k] * (double)B[(size_t)k * N + n];
+                out[(size_t)m * N + n] = (float)s;
+            }
+        return out;
+    };
+    auto fold_species = [&](const float* A, int M, int K, const float* B_s, int Ss, int N) {
+        std::vector<float> out((size_t)Ss * M * N);
+        for (int s = 0; s < Ss; ++s) {
+            auto sub = fold_mat(A, M, K, B_s + (size_t)s * K * N, N);
+            memcpy(out.data() + (size_t)s * M * N, sub.data(), sub.size() * sizeof(float));
+        }
+        return out;
+    };
     for (int t = 0; t < n_layers_; ++t) {
         auto* L = new GenericLayer();
         layers_.push_back(L);
@@ -517,17 +537,31 @@ void GenericModel::load(const Bundle& b) {
         if (npaths != L->n_paths) throw std::runtime_error("generic bundle: path count mismatch");
         const int Q = L->n_paths * L->C_x;
         L->Q1 = L->first_hidden ? L->J : Q + 1;
+        L->skip_folded = (L->kind == 0 || L->kind == 2);
+        L->ro_folded = (t == n_layers_ - 1 && !has_lr && L->lmax_out == 0 && L->readout > 0);
         auto& W = L->weights;
         for (int l = 0; l <= L->lmax_x; ++l)
             L->W_up[l] = upload(W, b.f32(p + "W_up_" + std::to_string(l), {L->C_in, L->C_x}));
         // message linear widths
         const bool nl = L->kind == 4;
         for (int l = 0; l < 4; ++l) L->lin_cols[l] = (nl && l == 0) ? 4 * L->C_msg : L->C_msg;
-        for (int l = 0; l < 4; ++l)
-            L->W_lin[l] = upload(W, b.f32(p + "W_lin_" + std::to_string(l), {L->n_l3[l] * L->C_x, L->lin_cols[l]}));
-        if (L->first_hidden)
+        if (L->skip_folded) {
+            for (int l = 0; l < 4; ++l) {
+                const auto wsk = b.f32(p + "W_skip_msg_" + std::to_string(l), {S_, L->C_msg, L->C_msg});
+                const auto wlin = b.f32(p + "W_lin_" + std::to_string(l), {L->n_l3[l] * L->C_x, L->C_msg});
+                L->W_lin[l] = upload(W, fold_species(wlin.data(), L->n_l3[l] * L->C_x, L->C_msg, wsk.data(), S_, L->C_msg));
+                if (L->first_hidden) {
+                    const auto c0 = b.f32(p + "first_C0_" + std::to_string(l), {S_ * (L->J - 1), L->C_msg});
+                    L->C0[l] = upload(W, fold_species(c0.data(), S_ * (L->J - 1), L->C_msg, wsk.data(), S_, L->C_msg));
+                }
+            }
+        } else {
             for (int l = 0; l < 4; ++l)
-                L->C0[l] = upload(W, b.f32(p + "first_C0_" + std::to_string(l), {S_ * (L->J - 1), L->lin_cols[l]}));
+                L->W_lin[l] = upload(W, b.f32(p + "W_lin_" + std::to_string(l), {L->n_l3[l] * L->C_x, L->lin_cols[l]}));
+            if (L->first_hidden)
+                for (int l = 0; l < 4; ++l)
+                    L->C0[l] = upload(W, b.f32(p + "first_C0_" + std::to_string(l), {S_ * (L->J - 1), L->lin_cols[l]}));
+        }
         if (nl) {
             const std::vector<double> ab = b.f64(p + "alpha_beta", {2});
             L->alpha = (float)ab[0];
@@ -541,22 +575,20 @@ void GenericModel::load(const Bundle& b) {
             for (int l = 0; l < 4; ++l)
                 L->W_2[l] = upload(W, b.f32(p + "W_2_" + std::to_string(l), {L->C_msg, L->C_msg}));
         }
-        if (L->kind == 0 || L->kind == 2) {
-            for (int l = 0; l < 4; ++l)
-                L->W_skip_msg[l] = upload(W, b.f32(p + "W_skip_msg_" + std::to_string(l), {S_, L->C_msg, L->C_msg}));
-        }
+        std::vector<float> h_wsc0;
         if (L->has_sc) {
             L->sc_species = mi("sc_species");
             const int Ss = L->sc_species ? S_ : 1;
             for (int l = 0; l <= std::min(L->lmax_out, L->lmax_in); ++l) {
                 const std::string key = p + "W_sc_" + std::to_string(l);
                 if (b.has(key)) {
-                    L->W_sc[l] = upload(W, b.f32(key, {Ss, L->C_in, L->C_out}));
+                    auto wsc = b.f32(key, {Ss, L->C_in, L->C_out});
+                    if (L->ro_folded && l == 0) h_wsc0 = std::move(wsc);
+                    else L->W_sc[l] = upload(W, wsc);
                     L->sc_has[l] = 1;
                 }
             }
         }
-        // spline grid + table
         {
             const std::vector<double> g = b.f64(p + "grid", {-1, 3});
             const int nb = (int)(g.size() / 3);
@@ -598,28 +630,47 @@ void GenericModel::load(const Bundle& b) {
             L->prod_segw = mi("prod_segments_w");
             if (L->prod_segw != L->prod->segments_w) throw std::runtime_error("generic bundle: product segments mismatch");
             L->prod_w = upload(W, b.f32(p + "prod_w", {L->prod_species ? S_ : 1, L->prod_segw, L->C_msg}));
-            for (int l = 0; l <= L->lmax_out; ++l)
-                L->W_p[l] = upload(W, b.f32(p + "W_p_" + std::to_string(l), {L->C_out, L->C_out}));
-        }
-        // readout
-        if (L->readout == 0) {
-            L->ro_w = upload(W, b.f32(p + "ro_w", {L->C_out}));
-        } else if (L->readout == 1 || L->readout == 2) {
-            L->ro_H = mi("ro_H");
-            L->ro_W1 = upload(W, b.f32(p + "ro_W1", {L->C_out, L->ro_H}));
-            L->ro_b1 = upload(W, b.f32(p + "ro_b1", {L->ro_H}));
-            L->ro_W2 = upload(W, b.f32(p + "ro_W2", {L->ro_H}));
-            L->ro_act_c = (float)b.f64(p + "ro_act_c", {1})[0];
-            if (L->readout == 2) {
-                L->ro_Wm = upload(W, b.f32(p + "ro_Wm", {L->ro_H, L->ro_H}));
-                L->ro_bm = upload(W, b.f32(p + "ro_bm", {L->ro_H}));
+            std::vector<float> h_wp0;
+            for (int l = 0; l <= L->lmax_out; ++l) {
+                auto wp = b.f32(p + "W_p_" + std::to_string(l), {L->C_out, L->C_out});
+                if (L->ro_folded && l == 0) h_wp0 = std::move(wp);
+                else L->W_p[l] = upload(W, wp);
             }
-        } else if (L->readout != -1) {
-            throw std::runtime_error("generic bundle: unknown readout kind");
+            // readout
+            if (L->readout == 0) {
+                L->ro_w = upload(W, b.f32(p + "ro_w", {L->C_out}));
+            } else if (L->readout == 1 || L->readout == 2) {
+                L->ro_H = mi("ro_H");
+                const auto row1 = b.f32(p + "ro_W1", {L->C_out, L->ro_H});
+                if (L->ro_folded) {
+                    L->ro_W1 = upload(W, fold_mat(h_wp0.data(), L->C_out, L->C_out, row1.data(), L->ro_H));
+                    if (L->sc_has[0]) {
+                        const int Ss = L->sc_species ? S_ : 1;
+                        std::vector<float> fsc((size_t)Ss * L->C_in * L->ro_H);
+                        for (int s = 0; s < Ss; ++s) {
+                            auto sub = fold_mat(h_wsc0.data() + (size_t)s * L->C_in * L->C_out, L->C_in, L->C_out,
+                                                row1.data(), L->ro_H);
+                            memcpy(fsc.data() + (size_t)s * L->C_in * L->ro_H, sub.data(), sub.size() * sizeof(float));
+                        }
+                        L->ro_W1_sc = upload(W, fsc);
+                    }
+                } else {
+                    L->ro_W1 = upload(W, row1);
+                }
+                L->ro_b1 = upload(W, b.f32(p + "ro_b1", {L->ro_H}));
+                L->ro_W2 = upload(W, b.f32(p + "ro_W2", {L->ro_H}));
+                L->ro_act_c = (float)b.f64(p + "ro_act_c", {1})[0];
+                if (L->readout == 2) {
+                    L->ro_Wm = upload(W, b.f32(p + "ro_Wm", {L->ro_H, L->ro_H}));
+                    L->ro_bm = upload(W, b.f32(p + "ro_bm", {L->ro_H}));
+                }
+            } else if (L->readout != -1) {
+                throw std::runtime_error("generic bundle: unknown readout kind");
+            }
         }
     }
     if (layers_.back()->readout < 0) throw std::runtime_error("generic bundle: the last layer has no readout");
-    if (b.has_meta("has_lr") && b.meta_int("has_lr")) {
+    if (has_lr) {
         lr_ = new PolarLR();
         lr_->load(b, S_, n_layers_);
         for (auto* L : layers_)
@@ -678,7 +729,8 @@ void GenericModel::alloc_system(int N) {
     size_t zbytes = 0;
     for (int t = 0; t < n_layers_; ++t) {
         GenericLayer* L = layers_[t];
-        for (int l = 0; l <= L->lmax_out; ++l) zbytes += align256(n * dimL(l) * L->C_out * sizeof(float));
+        if (!L->ro_folded)
+            for (int l = 0; l <= L->lmax_out; ++l) zbytes += align256(n * dimL(l) * L->C_out * sizeof(float));
         if (t > 0)
             for (int l = 0; l <= L->lmax_x; ++l) zbytes += align256(n * dimL(l) * L->C_x * sizeof(float));
         if (L->kind >= 2) zbytes += align256(n * sizeof(float));
@@ -705,18 +757,20 @@ void GenericModel::alloc_system(int N) {
             for (int l = 0; l < 4; ++l) L->S0[l] = alloc(n * dimL(l) * (size_t)S_ * (L->J - 1));
         for (int l = 0; l < 4; ++l) {
             L->mid[l] = L->first_hidden ? nullptr : alloc(n * dimL(l) * L->n_l3[l] * L->C_x);
-            L->lin[l] = alloc(n * dimL(l) * L->lin_cols[l]);
-            L->dlin[l] = alloc(n * dimL(l) * L->lin_cols[l]);
+            if (L->skip_folded) {
+                L->lin[l] = nullptr;
+                L->dlin[l] = nullptr;
+                L->msgf[l] = alloc(n * dimL(l) * L->C_msg);
+            } else {
+                L->lin[l] = alloc(n * dimL(l) * L->lin_cols[l]);
+                L->dlin[l] = alloc(n * dimL(l) * L->lin_cols[l]);
+                L->msgf[l] = (L->kind == 1 || L->kind == 3) ? L->lin[l] : alloc(n * dimL(l) * L->C_msg);
+            }
             L->dmsgf[l] = alloc(n * dimL(l) * L->C_msg);
             if (L->kind == 4) {
                 L->gout[l] = alloc(n * dimL(l) * L->C_msg);
                 L->dgout[l] = alloc(n * dimL(l) * L->C_msg);
                 L->dpre[l] = (t > 0 && l <= L->lmax_x) ? alloc(n * dimL(l) * L->lin_cols[l]) : nullptr;
-                L->msgf[l] = alloc(n * dimL(l) * L->C_msg);
-            } else if (L->kind == 0 || L->kind == 2) {
-                L->msgf[l] = alloc(n * dimL(l) * L->C_msg);
-            } else {
-                L->msgf[l] = L->lin[l];
             }
         }
         if (L->kind == 4)
@@ -726,8 +780,8 @@ void GenericModel::alloc_system(int N) {
         for (int l = 0; l <= L->lmax_out; ++l) {
             L->y[l] = alloc(n * dimL(l) * L->C_out);
             L->dy[l] = alloc(n * dimL(l) * L->C_out);
-            L->hout[l] = alloc(n * dimL(l) * L->C_out);
-            L->dhout[l] = zalloc(n * dimL(l) * L->C_out);
+            L->hout[l] = L->ro_folded ? nullptr : alloc(n * dimL(l) * L->C_out);
+            L->dhout[l] = L->ro_folded ? nullptr : zalloc(n * dimL(l) * L->C_out);
         }
         if (L->ro_H) {
             L->hid = alloc(n * L->ro_H);
@@ -858,38 +912,53 @@ void GenericModel::record(const GenericPassInputs& in) {
                                                                    L->pair_sym, in.act_row_ptr, in.act_senders,
                                                                    in.act_vec_len, in.species, L->table, L->S0[0],
                                                                    L->S0[1], L->S0[2], L->S0[3], L->D);
-            fork();
-            for (int l = 0; l < 4; ++l) {
-                lane(l);
-                in.gemm(false, N * dimL(l), L->lin_cols[l], Kh, 1.0f, L->S0[l], Kh, L->C0[l], L->lin_cols[l], 0.0f,
-                        L->lin[l], L->lin_cols[l]);
-            }
-            if (L->kind == 4) {
-                for (int l = 0; l <= L->lmax_x; ++l) {
-                    lane(4 + l);
-                    in.gemm(false, N * dimL(l), L->lin_cols[l], Cx, 1.0f, L->x[l], Cx, L->W_res[l], L->lin_cols[l],
-                            0.0f, L->res[l], L->lin_cols[l]);
+            if (L->skip_folded) {
+                fork();
+                for (int l = 0; l < 4; ++l)
+                    species_gemm(false, l, Kh, Cm, L->S0[l], L->C0[l], (int64_t)Kh * Cm, 0.0f, L->msgf[l], 4 * l);
+                join();
+            } else {
+                fork();
+                for (int l = 0; l < 4; ++l) {
+                    lane(l);
+                    in.gemm(false, N * dimL(l), L->lin_cols[l], Kh, 1.0f, L->S0[l], Kh, L->C0[l], L->lin_cols[l],
+                            0.0f, L->lin[l], L->lin_cols[l]);
                 }
+                if (L->kind == 4) {
+                    for (int l = 0; l <= L->lmax_x; ++l) {
+                        lane(4 + l);
+                        in.gemm(false, N * dimL(l), L->lin_cols[l], Cx, 1.0f, L->x[l], Cx, L->W_res[l],
+                                L->lin_cols[l], 0.0f, L->res[l], L->lin_cols[l]);
+                    }
+                }
+                join();
             }
-            join();
         } else {
             launch_conv_fwd(L->lmax_x, dim3(N), dim3(Cx), st, N, Cx, S, L->intervals, L->Q1, L->grid, sh_perm_,
                             L->pair_sym, in.act_row_ptr, in.act_senders, in.act_vec_len, in.species, L->table, L->x,
                             L->mid, L->D);
-            fork();
-            for (int l = 0; l < 4; ++l) {
-                lane(l);
-                in.gemm(false, N * dimL(l), L->lin_cols[l], L->n_l3[l] * Cx, 1.0f, L->mid[l], L->n_l3[l] * Cx,
-                        L->W_lin[l], L->lin_cols[l], 0.0f, L->lin[l], L->lin_cols[l]);
-            }
-            if (L->kind == 4) {
-                for (int l = 0; l <= L->lmax_x; ++l) {
-                    lane(4 + l);
-                    in.gemm(false, N * dimL(l), L->lin_cols[l], Cx, 1.0f, L->x[l], Cx, L->W_res[l], L->lin_cols[l],
-                            0.0f, L->res[l], L->lin_cols[l]);
+            if (L->skip_folded) {
+                fork();
+                for (int l = 0; l < 4; ++l)
+                    species_gemm(false, l, L->n_l3[l] * Cx, Cm, L->mid[l], L->W_lin[l],
+                                 (int64_t)L->n_l3[l] * Cx * Cm, 0.0f, L->msgf[l], 4 * l);
+                join();
+            } else {
+                fork();
+                for (int l = 0; l < 4; ++l) {
+                    lane(l);
+                    in.gemm(false, N * dimL(l), L->lin_cols[l], L->n_l3[l] * Cx, 1.0f, L->mid[l], L->n_l3[l] * Cx,
+                            L->W_lin[l], L->lin_cols[l], 0.0f, L->lin[l], L->lin_cols[l]);
                 }
+                if (L->kind == 4) {
+                    for (int l = 0; l <= L->lmax_x; ++l) {
+                        lane(4 + l);
+                        in.gemm(false, N * dimL(l), L->lin_cols[l], Cx, 1.0f, L->x[l], Cx, L->W_res[l],
+                                L->lin_cols[l], 0.0f, L->res[l], L->lin_cols[l]);
+                    }
+                }
+                join();
             }
-            join();
         }
         if (L->kind == 4) {
             gate_fwd_kernel<<<N, Cm, 0, st>>>(N, Cm, L->lmax_x, L->D, L->alpha, L->beta, L->gate_cs, L->gate_cg,
@@ -903,35 +972,47 @@ void GenericModel::record(const GenericPassInputs& in) {
                 in.gemm(false, N * dimL(l), Cm, Cm, 1.0f, L->gout[l], Cm, L->W_2[l], Cm, 0.0f, L->msgf[l], Cm);
             }
             join();
-        } else if (L->kind == 0 || L->kind == 2) {
-            fork();
-            for (int l = 0; l < 4; ++l)
-                species_gemm(false, l, Cm, Cm, L->lin[l], L->W_skip_msg[l], (int64_t)Cm * Cm, 0.0f, L->msgf[l], 4 * l);
-            join();
         }
         const float* Dp = (L->kind == 2 || L->kind == 3) ? L->D : nullptr;
         launch_prod(L->prod, false, st, N, Cm, L->msgf, Dp, L->prod_w,
                     L->prod_species ? (int64_t)L->prod_segw * Cm : 0, in.species, L->y, nullptr, nullptr);
-        if (L->lmax_out > 0) fork();
-        for (int l = 0; l <= L->lmax_out; ++l) {
-            if (L->lmax_out > 0) lane(l);
-            in.gemm(false, N * dimL(l), Co, Co, 1.0f, L->y[l], Co, L->W_p[l], Co, 0.0f, L->hout[l], Co);
-            if (L->sc_has[l]) {
-                if (L->sc_species)
-                    species_gemm(false, l, L->C_in, Co, L->h_in[l], L->W_sc[l], (int64_t)L->C_in * Co, 1.0f, L->hout[l]);
-                else
-                    in.gemm(false, N * dimL(l), Co, L->C_in, 1.0f, L->h_in[l], L->C_in, L->W_sc[l], Co, 1.0f,
-                            L->hout[l], Co);
+        if (!L->ro_folded) {
+            if (L->lmax_out > 0) fork();
+            for (int l = 0; l <= L->lmax_out; ++l) {
+                if (L->lmax_out > 0) lane(l);
+                in.gemm(false, N * dimL(l), Co, Co, 1.0f, L->y[l], Co, L->W_p[l], Co, 0.0f, L->hout[l], Co);
+                if (L->sc_has[l]) {
+                    if (L->sc_species)
+                        species_gemm(false, l, L->C_in, Co, L->h_in[l], L->W_sc[l], (int64_t)L->C_in * Co, 1.0f,
+                                     L->hout[l]);
+                    else
+                        in.gemm(false, N * dimL(l), Co, L->C_in, 1.0f, L->h_in[l], L->C_in, L->W_sc[l], Co, 1.0f,
+                                L->hout[l], Co);
+                }
             }
+            if (L->lmax_out > 0) join();
         }
-        if (L->lmax_out > 0) join();
-        // readout (energy) and its gradient seed into dhout[0]
+        // readout (energy) and its gradient seed into dhout[0] (or dhid directly when ro_folded)
         if (L->readout == 0) {
             ro_linear_kernel<<<(N + 7) / 8, 256, 0, st>>>(N, Co, L->hout[0], L->ro_w, L->dhout[0], in.energy);
         } else if (L->readout > 0) {
             const int H = L->ro_H;
             const unsigned gH = (unsigned)(((int64_t)N * H + 255) / 256);
-            in.gemm(false, N, H, Co, 1.0f, L->hout[0], Co, L->ro_W1, H, 0.0f, L->hid, H);
+            if (L->ro_folded) {
+                in.gemm(false, N, H, Co, 1.0f, L->y[0], Co, L->ro_W1, H, 0.0f, L->hid, H);
+                if (L->sc_has[0]) {
+                    if (L->sc_species) {
+                        fork();
+                        species_gemm(false, 0, L->C_in, H, L->h_in[0], L->ro_W1_sc, (int64_t)L->C_in * H, 1.0f,
+                                     L->hid, 0);
+                        join();
+                    } else {
+                        in.gemm(false, N, H, L->C_in, 1.0f, L->h_in[0], L->C_in, L->ro_W1_sc, H, 1.0f, L->hid, H);
+                    }
+                }
+            } else {
+                in.gemm(false, N, H, Co, 1.0f, L->hout[0], Co, L->ro_W1, H, 0.0f, L->hid, H);
+            }
             if (L->readout == 1) {
                 ro_mlp_kernel<<<gH, 256, 0, st>>>(N, H, L->ro_act_c, L->hid, L->ro_b1, L->ro_W2, nullptr, L->dhid,
                                                   in.energy, 1);
@@ -948,7 +1029,8 @@ void GenericModel::record(const GenericPassInputs& in) {
                 CUDA_CHECK_THROW(cudaMemcpyAsync(L->dhid, L->hid2, (size_t)N * H * sizeof(float),
                                                  cudaMemcpyDeviceToDevice, st));
             }
-            in.gemm(true, N, Co, H, 1.0f, L->dhid, H, L->ro_W1, H, 1.0f, L->dhout[0], Co);
+            if (!L->ro_folded)
+                in.gemm(true, N, Co, H, 1.0f, L->dhid, H, L->ro_W1, H, 1.0f, L->dhout[0], Co);
         }
     }
     if (has_zbl_ && has_edges) {
@@ -973,23 +1055,41 @@ void GenericModel::record(const GenericPassInputs& in) {
     for (int t = n_layers_ - 1; t >= 0; --t) {
         GenericLayer* L = layers_[t];
         const int Cx = L->C_x, Cm = L->C_msg, Co = L->C_out;
-        const bool fork_p = L->lmax_out > 0 || (L->has_sc && t > 0);
-        if (fork_p) fork();
-        for (int l = 0; l <= L->lmax_out; ++l) {
-            if (fork_p) lane(l);
-            in.gemm(true, N * dimL(l), Co, Co, 1.0f, L->dhout[l], Co, L->W_p[l], Co, 0.0f, L->dy[l], Co);
-            if (L->sc_has[l] && t > 0) {
+        if (L->ro_folded) {
+            const int H = L->ro_H;
+            const bool fork_sc = L->sc_has[0] && t > 0;
+            if (fork_sc) fork();
+            if (fork_sc) lane(0);
+            in.gemm(true, N, Co, H, 1.0f, L->dhid, H, L->ro_W1, H, 0.0f, L->dy[0], Co);
+            if (fork_sc) {
                 if (L->sc_species)
-                    species_gemm(true, l, Co, L->C_in, L->dhout[l], L->W_sc[l], (int64_t)L->C_in * Co, 1.0f,
-                                 L->dh_in[l], 4);
+                    species_gemm(true, 0, H, L->C_in, L->dhid, L->ro_W1_sc, (int64_t)L->C_in * H, 1.0f,
+                                 L->dh_in[0], 1);
                 else {
-                    lane(4 + l);
-                    in.gemm(true, N * dimL(l), L->C_in, Co, 1.0f, L->dhout[l], Co, L->W_sc[l], Co, 1.0f, L->dh_in[l],
-                            L->C_in);
+                    lane(1);
+                    in.gemm(true, N, L->C_in, H, 1.0f, L->dhid, H, L->ro_W1_sc, H, 1.0f, L->dh_in[0], L->C_in);
+                }
+                join();
+            }
+        } else {
+            const bool fork_p = L->lmax_out > 0 || (L->has_sc && t > 0);
+            if (fork_p) fork();
+            for (int l = 0; l <= L->lmax_out; ++l) {
+                if (fork_p) lane(l);
+                in.gemm(true, N * dimL(l), Co, Co, 1.0f, L->dhout[l], Co, L->W_p[l], Co, 0.0f, L->dy[l], Co);
+                if (L->sc_has[l] && t > 0) {
+                    if (L->sc_species)
+                        species_gemm(true, l, Co, L->C_in, L->dhout[l], L->W_sc[l], (int64_t)L->C_in * Co, 1.0f,
+                                     L->dh_in[l], 4);
+                    else {
+                        lane(4 + l);
+                        in.gemm(true, N * dimL(l), L->C_in, Co, 1.0f, L->dhout[l], Co, L->W_sc[l], Co, 1.0f,
+                                L->dh_in[l], L->C_in);
+                    }
                 }
             }
+            if (fork_p) join();
         }
-        if (fork_p) join();
         const float* Dp = (L->kind == 2 || L->kind == 3) ? L->D : nullptr;
         float* dDp = (L->kind == 2 || L->kind == 3) ? L->dD : nullptr;
         // product backward: gradient of the product input
@@ -997,12 +1097,7 @@ void GenericModel::record(const GenericPassInputs& in) {
         for (int l = 0; l < 4; ++l) dm[l] = (L->kind == 1 || L->kind == 3) ? L->dlin[l] : L->dmsgf[l];
         launch_prod(L->prod, true, st, N, Cm, L->msgf, Dp, L->prod_w,
                     L->prod_species ? (int64_t)L->prod_segw * Cm : 0, in.species, L->dy, dm, dDp);
-        if (L->kind == 0 || L->kind == 2) {
-            fork();
-            for (int l = 0; l < 4; ++l)
-                species_gemm(true, l, Cm, Cm, L->dmsgf[l], L->W_skip_msg[l], (int64_t)Cm * Cm, 0.0f, L->dlin[l], 4 * l);
-            join();
-        } else if (L->kind == 4) {
+        if (L->kind == 4) {
             fork();
             for (int l = 0; l < 4; ++l) {
                 lane(l);
@@ -1020,13 +1115,49 @@ void GenericModel::record(const GenericPassInputs& in) {
         }
         const bool density = L->kind >= 2;
         if (L->first_hidden) {
-            // dS0 (aliases S0) = dlin @ C0^T, then the per-edge chain-column gradients
+            // dS0 (aliases S0) = dlin @ C0^T (or dmsgf @ C0_folded^T when skip_folded)
             const int Kh = S * (L->J - 1);
+            if (L->skip_folded) {
+                fork();
+                for (int l = 0; l < 4; ++l)
+                    species_gemm(true, l, Cm, Kh, L->dmsgf[l], L->C0[l], (int64_t)Kh * Cm, 0.0f, L->S0[l], 4 * l);
+                join();
+            } else {
+                fork();
+                for (int l = 0; l < 4; ++l) {
+                    lane(l);
+                    in.gemm(true, N * dimL(l), Kh, L->lin_cols[l], 1.0f, L->dlin[l], L->lin_cols[l], L->C0[l],
+                            L->lin_cols[l], 0.0f, L->S0[l], Kh);
+                }
+                if (L->kind == 4 && t > 0) {
+                    for (int l = 0; l <= L->lmax_x; ++l) {
+                        lane(4 + l);
+                        in.gemm(true, N * dimL(l), Cx, L->lin_cols[l], 1.0f, L->dpre[l], L->lin_cols[l], L->W_res[l],
+                                L->lin_cols[l], 1.0f, L->dx[l], Cx);
+                    }
+                }
+                join();
+            }
+            first_bwd_kernel<<<N, ((L->J + 31) / 32) * 32, 0, st>>>(N, S, L->intervals, L->J, L->grid, sh_perm_,
+                                                                   L->pair_sym, in.act_row_ptr, in.act_senders,
+                                                                   in.act_vec_len, in.species, L->table, L->S0[0],
+                                                                   L->S0[1], L->S0[2], L->S0[3],
+                                                                   density ? L->dD : nullptr, d_edge_dvec_);
+            continue;
+        }
+        // dmid (aliases mid: the forward values are dead) = dlin @ W_lin^T (or dmsgf @ W_lin_folded^T)
+        if (L->skip_folded) {
+            fork();
+            for (int l = 0; l < 4; ++l)
+                species_gemm(true, l, Cm, L->n_l3[l] * Cx, L->dmsgf[l], L->W_lin[l],
+                             (int64_t)L->n_l3[l] * Cx * Cm, 0.0f, L->mid[l], 4 * l);
+            join();
+        } else {
             fork();
             for (int l = 0; l < 4; ++l) {
                 lane(l);
-                in.gemm(true, N * dimL(l), Kh, L->lin_cols[l], 1.0f, L->dlin[l], L->lin_cols[l], L->C0[l],
-                        L->lin_cols[l], 0.0f, L->S0[l], Kh);
+                in.gemm(true, N * dimL(l), L->n_l3[l] * Cx, L->lin_cols[l], 1.0f, L->dlin[l], L->lin_cols[l],
+                        L->W_lin[l], L->lin_cols[l], 0.0f, L->mid[l], L->n_l3[l] * Cx);
             }
             if (L->kind == 4 && t > 0) {
                 for (int l = 0; l <= L->lmax_x; ++l) {
@@ -1036,28 +1167,7 @@ void GenericModel::record(const GenericPassInputs& in) {
                 }
             }
             join();
-            first_bwd_kernel<<<N, ((L->J + 31) / 32) * 32, 0, st>>>(N, S, L->intervals, L->J, L->grid, sh_perm_,
-                                                                   L->pair_sym, in.act_row_ptr, in.act_senders,
-                                                                   in.act_vec_len, in.species, L->table, L->S0[0],
-                                                                   L->S0[1], L->S0[2], L->S0[3],
-                                                                   density ? L->dD : nullptr, d_edge_dvec_);
-            continue;
         }
-        // dmid (aliases mid: the forward values are dead) = dlin @ W_lin^T (overlapped with W_res^T when t > 0)
-        fork();
-        for (int l = 0; l < 4; ++l) {
-            lane(l);
-            in.gemm(true, N * dimL(l), L->n_l3[l] * Cx, L->lin_cols[l], 1.0f, L->dlin[l], L->lin_cols[l], L->W_lin[l],
-                    L->lin_cols[l], 0.0f, L->mid[l], L->n_l3[l] * Cx);
-        }
-        if (L->kind == 4 && t > 0) {
-            for (int l = 0; l <= L->lmax_x; ++l) {
-                lane(4 + l);
-                in.gemm(true, N * dimL(l), Cx, L->lin_cols[l], 1.0f, L->dpre[l], L->lin_cols[l], L->W_res[l],
-                        L->lin_cols[l], 1.0f, L->dx[l], Cx);
-            }
-        }
-        join();
         launch_conv_bwd(L->lmax_x, dim3(N), dim3(Cx), st, N, Cx, S, L->intervals, L->Q1, L->grid, sh_perm_,
                         L->pair_sym, in.act_row_ptr, in.act_senders, in.act_vec_len, in.species, L->table, L->x, L->mid,
                         density ? L->dD : nullptr, L->dx, t > 0 ? 1 : 0, d_edge_dvec_);
