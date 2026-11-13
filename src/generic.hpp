@@ -39,6 +39,9 @@ struct GenericPassInputs {
     const double* pos64;       // [N, 3] positions (device order; the long-range k-space terms read them)
     int compute_stress;
     GemmFn gemm;
+    std::function<void()> gemm_fork;
+    std::function<void(int)> gemm_lane;
+    std::function<void()> gemm_join;
 };
 
 struct GenericLayer;
@@ -87,6 +90,8 @@ private:
     int N_ = 0, E_cap_ = 0;
     std::vector<void*> sys_allocs_;
     float* d_edge_dvec_ = nullptr;  // [E_cap, 3]
+    void* d_zero_slab_ = nullptr;
+    size_t zero_slab_bytes_ = 0;
     float* d_h0_ = nullptr;         // [N, C0] layer-0 node features
     float* d_scratch_ = nullptr;    // gradient scratch
     size_t scratch_floats_ = 0;

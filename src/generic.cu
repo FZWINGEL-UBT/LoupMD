@@ -117,9 +117,8 @@ __global__ void gate_bwd_kernel(int N, int C, int lx, const float* __restrict__ 
                                 const float* __restrict__ res2, const float* __restrict__ g0,
                                 const float* __restrict__ g1, const float* __restrict__ g2,
                                 const float* __restrict__ g3, float* __restrict__ dp0, float* __restrict__ dp1,
-                                float* __restrict__ dp2, float* __restrict__ dp3, float* __restrict__ dl0,
-                                float* __restrict__ dl1, float* __restrict__ dl2, float* __restrict__ dl3,
-                                float* __restrict__ dD) {
+                                float* __restrict__ dp2, float* __restrict__ dl0, float* __restrict__ dl1,
+                                float* __restrict__ dl2, float* __restrict__ dl3, float* __restrict__ dD) {
     const int a = blockIdx.x, c = threadIdx.x;
     if (a >= N) return;
     const float s = 1.0f / (D[a] * beta + alpha);
@@ -129,14 +128,14 @@ __global__ void gate_bwd_kernel(int N, int C, int lx, const float* __restrict__ 
     {
         const float p = pre0(c);
         const float d = g0[(int64_t)a * C + c] * cs * dsilu_f(p);
-        dp0[r0 + c] = d;
+        if (dp0) dp0[r0 + c] = d;
         dl0[r0 + c] = d * s;
         acc = fmaf(d, lin0[r0 + c], acc);
     }
     const float* lins[3] = {lin1, lin2, lin3};
     const float* ress[3] = {res1, res2, nullptr};
     const float* gs[3] = {g1, g2, g3};
-    float* dps[3] = {dp1, dp2, dp3};
+    float* dps[2] = {dp1, dp2};
     float* dls[3] = {dl1, dl2, dl3};
     #pragma unroll
     for (int l = 1; l <= 3; ++l) {
@@ -145,6 +144,7 @@ __global__ void gate_bwd_kernel(int N, int C, int lx, const float* __restrict__ 
         const float g = cg * sg;
         const float* li = lins[l - 1];
         const float* re = (l <= lx) ? ress[l - 1] : nullptr;
+        float* dpl = (l <= lx && l <= 2) ? dps[l - 1] : nullptr;
         float dg = 0.0f;
         for (int m = 0; m < 2 * l + 1; ++m) {
             const int64_t idx = ((int64_t)a * (2 * l + 1) + m) * C + c;
@@ -152,12 +152,12 @@ __global__ void gate_bwd_kernel(int N, int C, int lx, const float* __restrict__ 
             const float go = gs[l - 1][idx];
             dg = fmaf(go, p, dg);
             const float d = go * g;
-            dps[l - 1][idx] = d;
+            if (dpl) dpl[idx] = d;
             dls[l - 1][idx] = d * s;
             acc = fmaf(d, li[idx], acc);
         }
         const float dgp = dg * cg * sg * (1.0f - sg);
-        dp0[r0 + l * C + c] = dgp;
+        if (dp0) dp0[r0 + l * C + c] = dgp;
         dl0[r0 + l * C + c] = dgp * s;
         acc = fmaf(dgp, lin0[r0 + l * C + c], acc);
     }
@@ -647,6 +647,9 @@ void GenericModel::free_system() {
     if (lr_) lr_->free_system();
     for (void* p : sys_allocs_) cudaFree(p);
     sys_allocs_.clear();
+    if (d_zero_slab_) cudaFree(d_zero_slab_);
+    d_zero_slab_ = nullptr;
+    zero_slab_bytes_ = 0;
     if (d_edge_dvec_) cudaFree(d_edge_dvec_);
     d_edge_dvec_ = nullptr;
     E_cap_ = 0;
@@ -655,6 +658,9 @@ void GenericModel::free_system() {
         // keep configuration and weights; drop buffer pointers
         std::fill(std::begin(L->h_in), std::end(L->h_in), nullptr);
         std::fill(std::begin(L->dh_in), std::end(L->dh_in), nullptr);
+        std::fill(std::begin(L->dx), std::end(L->dx), nullptr);
+        std::fill(std::begin(L->dhout), std::end(L->dhout), nullptr);
+        L->dD = nullptr;
     }
 }
 
@@ -667,12 +673,33 @@ void GenericModel::alloc_system(int N) {
         return p;
     };
     const size_t n = (size_t)N;
+    auto align256 = [](size_t b) { return (b + 255) & ~size_t(255); };
+    // Pack every zero-initialized per-step gradient accumulator into one contiguous slab (1 cudaMemsetAsync/step).
+    size_t zbytes = 0;
+    for (int t = 0; t < n_layers_; ++t) {
+        GenericLayer* L = layers_[t];
+        for (int l = 0; l <= L->lmax_out; ++l) zbytes += align256(n * dimL(l) * L->C_out * sizeof(float));
+        if (t > 0)
+            for (int l = 0; l <= L->lmax_x; ++l) zbytes += align256(n * dimL(l) * L->C_x * sizeof(float));
+        if (L->kind >= 2) zbytes += align256(n * sizeof(float));
+    }
+    if (zbytes) {
+        CUDA_CHECK_THROW(cudaMalloc(&d_zero_slab_, zbytes));
+        zero_slab_bytes_ = zbytes;
+    }
+    char* zbase = static_cast<char*>(d_zero_slab_);
+    size_t zoff = 0;
+    auto zalloc = [&](size_t floats) -> float* {
+        float* p = reinterpret_cast<float*>(zbase + zoff);
+        zoff += align256(floats * sizeof(float));
+        return p;
+    };
     d_h0_ = alloc(n * C0_);
     for (int t = 0; t < n_layers_; ++t) {
         GenericLayer* L = layers_[t];
         for (int l = 0; l <= L->lmax_x; ++l) {
             L->x[l] = alloc(n * dimL(l) * L->C_x);
-            L->dx[l] = alloc(n * dimL(l) * L->C_x);
+            L->dx[l] = (t > 0) ? zalloc(n * dimL(l) * L->C_x) : nullptr;
         }
         if (L->first_hidden)
             for (int l = 0; l < 4; ++l) L->S0[l] = alloc(n * dimL(l) * (size_t)S_ * (L->J - 1));
@@ -684,7 +711,7 @@ void GenericModel::alloc_system(int N) {
             if (L->kind == 4) {
                 L->gout[l] = alloc(n * dimL(l) * L->C_msg);
                 L->dgout[l] = alloc(n * dimL(l) * L->C_msg);
-                L->dpre[l] = alloc(n * dimL(l) * L->lin_cols[l]);
+                L->dpre[l] = (t > 0 && l <= L->lmax_x) ? alloc(n * dimL(l) * L->lin_cols[l]) : nullptr;
                 L->msgf[l] = alloc(n * dimL(l) * L->C_msg);
             } else if (L->kind == 0 || L->kind == 2) {
                 L->msgf[l] = alloc(n * dimL(l) * L->C_msg);
@@ -695,12 +722,12 @@ void GenericModel::alloc_system(int N) {
         if (L->kind == 4)
             for (int l = 0; l <= L->lmax_x; ++l) L->res[l] = alloc(n * dimL(l) * L->lin_cols[l]);
         L->D = alloc(n);
-        L->dD = alloc(n);
+        L->dD = (L->kind >= 2) ? zalloc(n) : nullptr;
         for (int l = 0; l <= L->lmax_out; ++l) {
             L->y[l] = alloc(n * dimL(l) * L->C_out);
             L->dy[l] = alloc(n * dimL(l) * L->C_out);
             L->hout[l] = alloc(n * dimL(l) * L->C_out);
-            L->dhout[l] = alloc(n * dimL(l) * L->C_out);
+            L->dhout[l] = zalloc(n * dimL(l) * L->C_out);
         }
         if (L->ro_H) {
             L->hid = alloc(n * L->ro_H);
@@ -790,32 +817,26 @@ void GenericModel::record(const GenericPassInputs& in) {
     const auto& start = *in.species_start;
     const auto& count = *in.species_count;
     const int S = S_;
+    auto fork = [&] { if (in.gemm_fork) in.gemm_fork(); };
+    auto lane = [&](int k) { if (in.gemm_lane) in.gemm_lane(k); };
+    auto join = [&] { if (in.gemm_join) in.gemm_join(); };
     // species-grouped GEMM: rows of degree l for each species with its own weight block
     auto species_gemm = [&](bool transB, int l, int K, int Nc, const float* A, const float* W, int64_t w_stride,
-                            float beta, float* C) {
+                            float beta, float* C, int lane_base = -1) {
         const int d = dimL(l);
         for (int s = 0; s < S; ++s) {
             if (count[s] == 0) continue;
+            if (lane_base >= 0) lane(lane_base + s);
             const int64_t row0 = (int64_t)start[s] * d;
             in.gemm(transB, count[s] * d, Nc, K, 1.0f, A + row0 * K, K, W + (w_stride ? s * w_stride : 0),
                     transB ? K : Nc, beta, C + row0 * Nc, Nc);
         }
     };
 
-    CUDA_CHECK_THROW(cudaMemsetAsync(in.energy, 0, sizeof(double), st));
-    CUDA_CHECK_THROW(cudaMemsetAsync(in.forces, 0, (size_t)N * 3 * sizeof(double), st));
-    CUDA_CHECK_THROW(cudaMemsetAsync(in.virial, 0, 6 * sizeof(double), st));
-    // A system that never had a pair within the cutoff has no edge arrays (E_cap == 0): the three edge-sized
-    // launches are skipped (a zero-sized grid is a launch error), the per-receiver kernels see empty rows.
+    // in.energy / in.forces / in.virial live in engine.cu's d_zero_slab and are already zeroed by record_force_pass.
     const bool has_edges = in.E_cap > 0;
     if (has_edges) zero_edge_kernel<<<(3 * in.E_cap + 255) / 256, 256, 0, st>>>(in.E_dev, d_edge_dvec_);
-    for (auto* L : layers_) {
-        for (int l = 0; l <= L->lmax_out; ++l)
-            CUDA_CHECK_THROW(cudaMemsetAsync(L->dhout[l], 0, (size_t)N * dimL(l) * L->C_out * sizeof(float), st));
-        for (int l = 0; l <= L->lmax_x; ++l)
-            CUDA_CHECK_THROW(cudaMemsetAsync(L->dx[l], 0, (size_t)N * dimL(l) * L->C_x * sizeof(float), st));
-        CUDA_CHECK_THROW(cudaMemsetAsync(L->dD, 0, (size_t)N * sizeof(float), st));
-    }
+    if (zero_slab_bytes_) CUDA_CHECK_THROW(cudaMemsetAsync(d_zero_slab_, 0, zero_slab_bytes_, st));
 
     gather_rows_kernel<<<(unsigned)(((int64_t)N * C0_ + 255) / 256), 256, 0, st>>>(N, C0_, in.species, d_embedding_, d_h0_);
 
@@ -823,45 +844,77 @@ void GenericModel::record(const GenericPassInputs& in) {
     for (int t = 0; t < n_layers_; ++t) {
         GenericLayer* L = layers_[t];
         const int Cx = L->C_x, Cm = L->C_msg, Co = L->C_out;
-        if (!L->first_hidden || L->kind == 4)  // the hidden-table layer 0 needs x only for the nonlinear residual
-            for (int l = 0; l <= L->lmax_x; ++l)
+        if (!L->first_hidden || L->kind == 4) {  // the hidden-table layer 0 needs x only for the nonlinear residual
+            if (L->lmax_x > 0) fork();
+            for (int l = 0; l <= L->lmax_x; ++l) {
+                if (L->lmax_x > 0) lane(l);
                 in.gemm(false, N * dimL(l), Cx, L->C_in, 1.0f, L->h_in[l], L->C_in, L->W_up[l], Cx, 0.0f, L->x[l], Cx);
+            }
+            if (L->lmax_x > 0) join();
+        }
         if (L->first_hidden) {
             const int Kh = S * (L->J - 1);
             first_fwd_kernel<<<N, ((L->J + 31) / 32) * 32, 0, st>>>(N, S, L->intervals, L->J, L->grid, sh_perm_,
                                                                    L->pair_sym, in.act_row_ptr, in.act_senders,
                                                                    in.act_vec_len, in.species, L->table, L->S0[0],
                                                                    L->S0[1], L->S0[2], L->S0[3], L->D);
-            for (int l = 0; l < 4; ++l)
+            fork();
+            for (int l = 0; l < 4; ++l) {
+                lane(l);
                 in.gemm(false, N * dimL(l), L->lin_cols[l], Kh, 1.0f, L->S0[l], Kh, L->C0[l], L->lin_cols[l], 0.0f,
                         L->lin[l], L->lin_cols[l]);
+            }
+            if (L->kind == 4) {
+                for (int l = 0; l <= L->lmax_x; ++l) {
+                    lane(4 + l);
+                    in.gemm(false, N * dimL(l), L->lin_cols[l], Cx, 1.0f, L->x[l], Cx, L->W_res[l], L->lin_cols[l],
+                            0.0f, L->res[l], L->lin_cols[l]);
+                }
+            }
+            join();
         } else {
             launch_conv_fwd(L->lmax_x, dim3(N), dim3(Cx), st, N, Cx, S, L->intervals, L->Q1, L->grid, sh_perm_,
                             L->pair_sym, in.act_row_ptr, in.act_senders, in.act_vec_len, in.species, L->table, L->x,
                             L->mid, L->D);
-            for (int l = 0; l < 4; ++l)
+            fork();
+            for (int l = 0; l < 4; ++l) {
+                lane(l);
                 in.gemm(false, N * dimL(l), L->lin_cols[l], L->n_l3[l] * Cx, 1.0f, L->mid[l], L->n_l3[l] * Cx,
                         L->W_lin[l], L->lin_cols[l], 0.0f, L->lin[l], L->lin_cols[l]);
+            }
+            if (L->kind == 4) {
+                for (int l = 0; l <= L->lmax_x; ++l) {
+                    lane(4 + l);
+                    in.gemm(false, N * dimL(l), L->lin_cols[l], Cx, 1.0f, L->x[l], Cx, L->W_res[l], L->lin_cols[l],
+                            0.0f, L->res[l], L->lin_cols[l]);
+                }
+            }
+            join();
         }
         if (L->kind == 4) {
-            for (int l = 0; l <= L->lmax_x; ++l)
-                in.gemm(false, N * dimL(l), L->lin_cols[l], Cx, 1.0f, L->x[l], Cx, L->W_res[l], L->lin_cols[l], 0.0f,
-                        L->res[l], L->lin_cols[l]);
             gate_fwd_kernel<<<N, Cm, 0, st>>>(N, Cm, L->lmax_x, L->D, L->alpha, L->beta, L->gate_cs, L->gate_cg,
                                               L->lin[0], L->lin[1], L->lin[2], L->lin[3], L->res[0],
                                               L->lmax_x >= 1 ? L->res[1] : nullptr,
                                               L->lmax_x >= 2 ? L->res[2] : nullptr, L->gout[0], L->gout[1],
                                               L->gout[2], L->gout[3]);
-            for (int l = 0; l < 4; ++l)
+            fork();
+            for (int l = 0; l < 4; ++l) {
+                lane(l);
                 in.gemm(false, N * dimL(l), Cm, Cm, 1.0f, L->gout[l], Cm, L->W_2[l], Cm, 0.0f, L->msgf[l], Cm);
+            }
+            join();
         } else if (L->kind == 0 || L->kind == 2) {
+            fork();
             for (int l = 0; l < 4; ++l)
-                species_gemm(false, l, Cm, Cm, L->lin[l], L->W_skip_msg[l], (int64_t)Cm * Cm, 0.0f, L->msgf[l]);
+                species_gemm(false, l, Cm, Cm, L->lin[l], L->W_skip_msg[l], (int64_t)Cm * Cm, 0.0f, L->msgf[l], 4 * l);
+            join();
         }
         const float* Dp = (L->kind == 2 || L->kind == 3) ? L->D : nullptr;
         launch_prod(L->prod, false, st, N, Cm, L->msgf, Dp, L->prod_w,
                     L->prod_species ? (int64_t)L->prod_segw * Cm : 0, in.species, L->y, nullptr, nullptr);
+        if (L->lmax_out > 0) fork();
         for (int l = 0; l <= L->lmax_out; ++l) {
+            if (L->lmax_out > 0) lane(l);
             in.gemm(false, N * dimL(l), Co, Co, 1.0f, L->y[l], Co, L->W_p[l], Co, 0.0f, L->hout[l], Co);
             if (L->sc_has[l]) {
                 if (L->sc_species)
@@ -871,6 +924,7 @@ void GenericModel::record(const GenericPassInputs& in) {
                             L->hout[l], Co);
             }
         }
+        if (L->lmax_out > 0) join();
         // readout (energy) and its gradient seed into dhout[0]
         if (L->readout == 0) {
             ro_linear_kernel<<<(N + 7) / 8, 256, 0, st>>>(N, Co, L->hout[0], L->ro_w, L->dhout[0], in.energy);
@@ -911,24 +965,31 @@ void GenericModel::record(const GenericPassInputs& in) {
             hs.emplace_back(L->hout, L->hout + L->lmax_out + 1);
             dhs.emplace_back(L->dhout, L->dhout + L->lmax_out + 1);
         }
-        lr_->record(st, N, in.gemm, in.species, in.pos64, hs, dhs, in.energy, in.forces, in.compute_stress, in.virial);
+        lr_->record(st, N, in.gemm, in.gemm_fork, in.gemm_lane, in.gemm_join, in.species, in.pos64, hs, dhs,
+                    in.energy, in.forces, in.compute_stress, in.virial);
     }
 
     // ---------------- backward
     for (int t = n_layers_ - 1; t >= 0; --t) {
         GenericLayer* L = layers_[t];
         const int Cx = L->C_x, Cm = L->C_msg, Co = L->C_out;
+        const bool fork_p = L->lmax_out > 0 || (L->has_sc && t > 0);
+        if (fork_p) fork();
         for (int l = 0; l <= L->lmax_out; ++l) {
+            if (fork_p) lane(l);
             in.gemm(true, N * dimL(l), Co, Co, 1.0f, L->dhout[l], Co, L->W_p[l], Co, 0.0f, L->dy[l], Co);
             if (L->sc_has[l] && t > 0) {
                 if (L->sc_species)
                     species_gemm(true, l, Co, L->C_in, L->dhout[l], L->W_sc[l], (int64_t)L->C_in * Co, 1.0f,
-                                 L->dh_in[l]);
-                else
+                                 L->dh_in[l], 4);
+                else {
+                    lane(4 + l);
                     in.gemm(true, N * dimL(l), L->C_in, Co, 1.0f, L->dhout[l], Co, L->W_sc[l], Co, 1.0f, L->dh_in[l],
                             L->C_in);
+                }
             }
         }
+        if (fork_p) join();
         const float* Dp = (L->kind == 2 || L->kind == 3) ? L->D : nullptr;
         float* dDp = (L->kind == 2 || L->kind == 3) ? L->dD : nullptr;
         // product backward: gradient of the product input
@@ -937,29 +998,44 @@ void GenericModel::record(const GenericPassInputs& in) {
         launch_prod(L->prod, true, st, N, Cm, L->msgf, Dp, L->prod_w,
                     L->prod_species ? (int64_t)L->prod_segw * Cm : 0, in.species, L->dy, dm, dDp);
         if (L->kind == 0 || L->kind == 2) {
+            fork();
             for (int l = 0; l < 4; ++l)
-                species_gemm(true, l, Cm, Cm, L->dmsgf[l], L->W_skip_msg[l], (int64_t)Cm * Cm, 0.0f, L->dlin[l]);
+                species_gemm(true, l, Cm, Cm, L->dmsgf[l], L->W_skip_msg[l], (int64_t)Cm * Cm, 0.0f, L->dlin[l], 4 * l);
+            join();
         } else if (L->kind == 4) {
-            for (int l = 0; l < 4; ++l)
+            fork();
+            for (int l = 0; l < 4; ++l) {
+                lane(l);
                 in.gemm(true, N * dimL(l), Cm, Cm, 1.0f, L->dmsgf[l], Cm, L->W_2[l], Cm, 0.0f, L->dgout[l], Cm);
+            }
+            join();
             gate_bwd_kernel<<<N, Cm, 0, st>>>(N, Cm, L->lmax_x, L->D, L->alpha, L->beta, L->gate_cs, L->gate_cg,
                                               L->lin[0], L->lin[1], L->lin[2], L->lin[3], L->res[0],
                                               L->lmax_x >= 1 ? L->res[1] : nullptr,
                                               L->lmax_x >= 2 ? L->res[2] : nullptr, L->dgout[0], L->dgout[1],
-                                              L->dgout[2], L->dgout[3], L->dpre[0], L->dpre[1], L->dpre[2],
-                                              L->dpre[3], L->dlin[0], L->dlin[1], L->dlin[2], L->dlin[3], L->dD);
-            if (t > 0)  // dx feeds only dh_in, which layer 0 does not have
-                for (int l = 0; l <= L->lmax_x; ++l)
-                    in.gemm(true, N * dimL(l), Cx, L->lin_cols[l], 1.0f, L->dpre[l], L->lin_cols[l], L->W_res[l],
-                            L->lin_cols[l], 1.0f, L->dx[l], Cx);
+                                              L->dgout[2], L->dgout[3], t > 0 ? L->dpre[0] : nullptr,
+                                              (t > 0 && L->lmax_x >= 1) ? L->dpre[1] : nullptr,
+                                              (t > 0 && L->lmax_x >= 2) ? L->dpre[2] : nullptr, L->dlin[0], L->dlin[1],
+                                              L->dlin[2], L->dlin[3], L->dD);
         }
         const bool density = L->kind >= 2;
         if (L->first_hidden) {
             // dS0 (aliases S0) = dlin @ C0^T, then the per-edge chain-column gradients
             const int Kh = S * (L->J - 1);
-            for (int l = 0; l < 4; ++l)
+            fork();
+            for (int l = 0; l < 4; ++l) {
+                lane(l);
                 in.gemm(true, N * dimL(l), Kh, L->lin_cols[l], 1.0f, L->dlin[l], L->lin_cols[l], L->C0[l],
                         L->lin_cols[l], 0.0f, L->S0[l], Kh);
+            }
+            if (L->kind == 4 && t > 0) {
+                for (int l = 0; l <= L->lmax_x; ++l) {
+                    lane(4 + l);
+                    in.gemm(true, N * dimL(l), Cx, L->lin_cols[l], 1.0f, L->dpre[l], L->lin_cols[l], L->W_res[l],
+                            L->lin_cols[l], 1.0f, L->dx[l], Cx);
+                }
+            }
+            join();
             first_bwd_kernel<<<N, ((L->J + 31) / 32) * 32, 0, st>>>(N, S, L->intervals, L->J, L->grid, sh_perm_,
                                                                    L->pair_sym, in.act_row_ptr, in.act_senders,
                                                                    in.act_vec_len, in.species, L->table, L->S0[0],
@@ -967,16 +1043,32 @@ void GenericModel::record(const GenericPassInputs& in) {
                                                                    density ? L->dD : nullptr, d_edge_dvec_);
             continue;
         }
-        // dmid (aliases mid: the forward values are dead) = dlin @ W_lin^T
-        for (int l = 0; l < 4; ++l)
+        // dmid (aliases mid: the forward values are dead) = dlin @ W_lin^T (overlapped with W_res^T when t > 0)
+        fork();
+        for (int l = 0; l < 4; ++l) {
+            lane(l);
             in.gemm(true, N * dimL(l), L->n_l3[l] * Cx, L->lin_cols[l], 1.0f, L->dlin[l], L->lin_cols[l], L->W_lin[l],
                     L->lin_cols[l], 0.0f, L->mid[l], L->n_l3[l] * Cx);
+        }
+        if (L->kind == 4 && t > 0) {
+            for (int l = 0; l <= L->lmax_x; ++l) {
+                lane(4 + l);
+                in.gemm(true, N * dimL(l), Cx, L->lin_cols[l], 1.0f, L->dpre[l], L->lin_cols[l], L->W_res[l],
+                        L->lin_cols[l], 1.0f, L->dx[l], Cx);
+            }
+        }
+        join();
         launch_conv_bwd(L->lmax_x, dim3(N), dim3(Cx), st, N, Cx, S, L->intervals, L->Q1, L->grid, sh_perm_,
                         L->pair_sym, in.act_row_ptr, in.act_senders, in.act_vec_len, in.species, L->table, L->x, L->mid,
                         density ? L->dD : nullptr, L->dx, t > 0 ? 1 : 0, d_edge_dvec_);
-        if (t > 0)
-            for (int l = 0; l <= L->lmax_x; ++l)
+        if (t > 0) {
+            if (L->lmax_x > 0) fork();
+            for (int l = 0; l <= L->lmax_x; ++l) {
+                if (L->lmax_x > 0) lane(l);
                 in.gemm(true, N * dimL(l), L->C_in, Cx, 1.0f, L->dx[l], Cx, L->W_up[l], Cx, 1.0f, L->dh_in[l], L->C_in);
+            }
+            if (L->lmax_x > 0) join();
+        }
     }
     if (has_edges)
         assemble_forces_kernel<<<(in.E_cap + 255) / 256, 256, 0, st>>>(in.E_dev, in.act_vec_len, in.act_senders,

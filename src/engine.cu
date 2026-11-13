@@ -654,7 +654,9 @@ static inline void sgemm_rm(
     if (transA || lda != K || ldc != N || ldb != (transB ? K : N)) {
         cublasOperation_t opB = transB ? CUBLAS_OP_T : CUBLAS_OP_N;
         cublasOperation_t opA = transA ? CUBLAS_OP_T : CUBLAS_OP_N;
+        if (strm != h->stream) CUBLAS_CHECK_THROW(cublasSetStream(h->cublas, strm));
         CUBLAS_CHECK_THROW(cublasSgemm(h->cublas, opB, opA, N, M, K, &alpha, B, ldb, A, lda, &beta, C, ldc));
+        if (strm != h->stream) CUBLAS_CHECK_THROW(cublasSetStream(h->cublas, h->stream));
         return;
     }
     auto key = std::make_tuple(M, N, K, transB, beta != 0.0f);
@@ -1220,6 +1222,9 @@ static void record_force_pass(LoupHandle* h, int compute_stress) {
                       float beta, float* C, int ldc) {
             sgemm_rm(h, false, transB, M, Nc, K, alpha, A, lda, B, ldb, beta, C, ldc);
         };
+        in.gemm_fork = [h] { gemm_fork(h); };
+        in.gemm_lane = [h](int lane) { gemm_lane(h, lane); };
+        in.gemm_join = [h] { gemm_join(h); };
         h->gen->record(in);
         return;
     }

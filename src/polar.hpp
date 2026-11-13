@@ -29,7 +29,9 @@ public:
     void alloc_system(int N);
     void free_system();
     // h[t][l] / dh[t][l]: layer t's node features [N, 2l+1, C] and their gradient accumulators
-    void record(cudaStream_t st, int N, const GemmFn& gemm, const int* species, const double* pos64,
+    void record(cudaStream_t st, int N, const GemmFn& gemm,
+                const std::function<void()>& fork, const std::function<void(int)>& lane,
+                const std::function<void()>& join, const int* species, const double* pos64,
                 const std::vector<std::vector<float*>>& h, const std::vector<std::vector<float*>>& dh, double* energy,
                 double* forces, int compute_stress, double* virial);
 
