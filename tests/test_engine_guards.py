@@ -28,8 +28,9 @@ def test_run_needs_positions_and_starts_from_rest_after_a_new_system():
 
     eng.set_system(z, m)  # the same handle, a new system: its velocities must not survive
     eng.evaluate(at.positions, at.cell.array)
-    st = eng.run_nve(1)  # the perfect lattice from rest stays (almost) at rest
-    assert st.final_temperature_k < 1.0
+    _, vel, _, _ = eng.get_state()
+    assert not vel.any()
+    eng.run_nve(1)  # and a run is accepted after only evaluate
 
 
 @pytest.mark.parametrize("temp_k,friction", [(float("nan"), 0.01), (-1.0, 0.01), (300.0, float("inf")), (300.0, -0.01)])
@@ -44,7 +45,7 @@ def test_langevin_rejects_bad_temperature_or_friction(temp_k, friction):
     assert np.isfinite(eng.run_langevin(1).final_temperature_k)  # the state was not touched
 
 
-def test_a_packed_table_far_beyond_the_gated_error_is_refused(tmp_path):
+def test_a_packed_table_far_beyond_the_gated_error_is_refused(tmp_path, capfd):
     path = find_model("mace-omat-0-small.model")
     good = ensure_loup_bundle(path, [8, 22, 38])
     meta, T = read_bundle(good)
@@ -59,6 +60,7 @@ def test_a_packed_table_far_beyond_the_gated_error_is_refused(tmp_path):
     write_bundle(bad, meta, T)
     with pytest.raises(RuntimeError):
         LoupEngine(bad)
+    assert "8-byte table error" in capfd.readouterr().err  # refused by the packing check, not an earlier one
 
 
 @pytest.mark.parametrize("model", ["mace-omat-0-medium.model", "mace-omat-0-small.model"])

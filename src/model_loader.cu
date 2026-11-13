@@ -134,7 +134,7 @@ void LoupModelGPU::load(const loup::Bundle& b, const char* path) {
         for (int k = 0; k < grid1.n_bands; ++k)
             for (int i = 0; i < grid1.counts[k]; ++i) {
                 ih[grid1.offsets[k] + i] = grid1.inv_h[k];
-                phys[grid1.offsets[k] + i] = grid1.starts[k] + (i + 1) / grid1.inv_h[k] > loup::kPackedPhysicalR;
+                phys[grid1.offsets[k] + i] = grid1.starts[k] + i / grid1.inv_h[k] >= loup::kPackedPhysicalR - 1e-6;
             }
         loup::PackErrTracker perr(1280);
         for (size_t i = 0; i < sp1_n; ++i) {

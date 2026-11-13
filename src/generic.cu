@@ -758,7 +758,7 @@ void GenericModel::load(const Bundle& b) {
                 for (int k = 0; k < L->grid.n_bands; ++k)
                     for (int i = 0; i < L->grid.counts[k]; ++i) {
                         ih[L->grid.offsets[k] + i] = L->grid.inv_h[k];
-                        phys[L->grid.offsets[k] + i] = L->grid.starts[k] + (i + 1) / L->grid.inv_h[k] > loup::kPackedPhysicalR;
+                        phys[L->grid.offsets[k] + i] = L->grid.starts[k] + i / L->grid.inv_h[k] >= loup::kPackedPhysicalR - 1e-6;
                     }
                 loup::PackErrTracker perr(Q);
                 for (size_t pi = 0; pi < PI; ++pi) {

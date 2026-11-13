@@ -53,7 +53,7 @@ class Bundle;
 // value or slope (d/dr) over all intervals and pairs. The bundles gated so far measure 2.7e-5 (POLAR-1-L) to 1.7e-4
 // (OFF23 medium); OMAT-0 small's 1.0e-4 costs about 1.2 of the gate's 3 units. A guard against tables far outside what
 // has been gated, not a certificate: the gate stays the acceptance test. Measured over the whole table and,
-// separately, over the intervals reaching r >= kPackedPhysicalR (the export certificate's second region, where MD
+// separately, over the intervals lying wholly in r >= kPackedPhysicalR (the export certificate's second region, where MD
 // edges lie), so large short-range values cannot hide a larger relative error in the physical range.
 constexpr double kPackedTableMaxRelErr = 5e-4;
 constexpr double kPackedPhysicalR = 1.0;
