@@ -676,6 +676,11 @@ void GenericModel::load(const Bundle& b) {
                     const double a0 = g[3 * k], b0 = g[3 * k + 1];
                     const int n = (int)g[3 * k + 2];
                     if (!(b0 > a0) || n < 1) throw std::runtime_error("generic bundle: bad spline band");
+                    // locate_spline assumes ascending, contiguous bands that end at r_max
+                    if (k > 0 && std::abs(a0 - g[3 * (k - 1) + 1]) > 1e-6)
+                        throw std::runtime_error("generic bundle: spline bands not contiguous");
+                    if (k == nb - 1 && std::abs(b0 - (double)r_max_) > 1e-4)
+                        throw std::runtime_error("generic bundle: last spline band does not end at r_max");
                     L->grid.starts[k] = (float)a0;
                     L->grid.ends[k] = (float)b0;
                     L->grid.inv_h[k] = (float)(n / (b0 - a0));
@@ -743,6 +748,19 @@ void GenericModel::load(const Bundle& b) {
                     return (uint32_t)(q + (int64_t(1) << (nb - 1)));
                 };
                 auto rotr = [](uint32_t v, int k) { return (v >> k) | (v << (32 - k)); };
+                auto deq = [](uint32_t u, int ei, int sh, int nb) {
+                    return (double)((int64_t)u - (int64_t(1) << (nb - 1))) * std::ldexp(1.0, ei - sh - nb + 1);
+                };
+                // Packing error per column (path x channel), exact maxima over every interval and pair, value and
+                // d/dr, over the whole table and over the intervals reaching the physical region (PackErrTracker).
+                std::vector<double> ih(L->intervals);
+                std::vector<char> phys(L->intervals);
+                for (int k = 0; k < L->grid.n_bands; ++k)
+                    for (int i = 0; i < L->grid.counts[k]; ++i) {
+                        ih[L->grid.offsets[k] + i] = L->grid.inv_h[k];
+                        phys[L->grid.offsets[k] + i] = L->grid.starts[k] + (i + 1) / L->grid.inv_h[k] > loup::kPackedPhysicalR;
+                    }
+                loup::PackErrTracker perr(Q);
                 for (size_t pi = 0; pi < PI; ++pi) {
                     for (int q = 0; q < Q; ++q) {
                         const float4 cf = src[pi * L->Q1 + q];
@@ -759,8 +777,19 @@ void GenericModel::load(const Bundle& b) {
                         uint32_t eb_code = (uint32_t)(ei - emin);
                         host_cubic[idx].x = (u0 << 3) | rotr(u2 << 11, 20);
                         host_cubic[idx].y = (u1 << 4) | rotr(u3 << 15, 19) | (eb_code << 23);
+                        const double av[4] = {a0, a1, a2, a3};
+                        const double dv[4] = {deq(u0, ei, 0, 20) - a0, deq(u1, ei, 8, 19) - a1,
+                                              deq(u2, ei, 14, 12) - a2, deq(u3, ei, 19, 8) - a3};
+                        const size_t iv = pi % (size_t)L->intervals;
+                        perr.add(q, phys[iv] != 0, ih[iv], av, dv);
                     }
                 }
+                const double rel = perr.rel();
+                if (std::getenv("LOUP_DEBUG_PACK")) fprintf(stderr, "pack L%d: %.3e\n", t, rel);
+                if (rel > loup::kPackedTableMaxRelErr)
+                    throw std::runtime_error("generic bundle layer " + std::to_string(t) + ": 8-byte table error " +
+                                             std::to_string(rel) + " of the column maximum exceeds " +
+                                             std::to_string(loup::kPackedTableMaxRelErr));
                 L->packed_table = upload(W, host_cubic);
             }
         }
@@ -954,6 +983,7 @@ void GenericModel::ensure_edges(int E_cap) {
     if (E_cap <= E_cap_) return;
     if (d_edge_dvec_) cudaFree(d_edge_dvec_);
     d_edge_dvec_ = nullptr;
+    E_cap_ = 0;  // a failed allocation must not leave the old capacity on a null array
     CUDA_CHECK_THROW(cudaMalloc(&d_edge_dvec_, (size_t)E_cap * 3 * sizeof(float)));
     E_cap_ = E_cap;
 }

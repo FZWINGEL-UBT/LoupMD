@@ -2,6 +2,7 @@
 """Accuracy gate for LoupMD against MACE float64 and float32 references (3x float32 rule).
 
   python test_gate.py [MODEL] [--head H] [--generic] [--set oxide|organic|crystals] [--ref-device cpu] [--no-ref-cache]
+                      [--include-unstable]
 
 The MACE references are cached (LOUP_GATE_CACHE, default ~/.cache/loupmd/gate_refs; see ref_cache_path for the key);
 --no-ref-cache recomputes and overwrites them.
@@ -150,6 +151,12 @@ def make_organic():
     return _configs(bases, [(0.01, 0.02), (-0.008, 0.04)])
 
 
+# Configurations where the model itself is not float32-reproducible, left out unless --include-unstable: POLAR-1-S on
+# NaNbO3_c0 gives forces near 236,000 eV/A, MACE float32 is 27-90 eV/A off float64 there and LoupMD's energy takes one
+# of several per-process values (STATUS 5.2); FastMACE excludes the configuration too. Keyed by (model stem, config).
+UNSTABLE = {("MACE-POLAR-1-S", "NaNbO3_c0")}
+
+
 def make_crystals():
     def rep_to(at, length=13.0):
         n = [max(1, int(np.ceil(length / h))) for h in at.cell.cellpar()[:3]]
@@ -252,6 +259,7 @@ def main():
                     "float64 reference does not fit the GPU)")
     ap.add_argument("--no-ref-cache", action="store_true", help="recompute the MACE references (and overwrite the "
                     "cached ones) instead of reading them from LOUP_GATE_CACHE (default ~/.cache/loupmd/gate_refs)")
+    ap.add_argument("--include-unstable", action="store_true", help="also gate the configurations in UNSTABLE")
     args = ap.parse_args()
     model_path, head = args.model, args.head
     if head is None:  # the exporter's default head of a multi-head model, named explicitly for MACECalculator
@@ -262,7 +270,12 @@ def main():
             head = next((h for h in ("omat_pbe", "default", "Default") if h in heads), heads[-1])
             print(f"head: {head}")
     configs = {"oxide": make_structures, "organic": make_organic, "crystals": make_crystals}[args.set]()
-    print(f"{args.set} set: " + ", ".join(f"{n} ({len(a)})" for n, a in configs[::2]))
+    if not args.include_unstable:
+        skipped = [n for n, _ in configs if (Path(model_path).stem, n) in UNSTABLE]
+        configs = [(n, a) for n, a in configs if (Path(model_path).stem, n) not in UNSTABLE]
+        if skipped:
+            print(f"left out (model not float32-reproducible there, --include-unstable): {', '.join(skipped)}")
+    print(f"{args.set} set: " + ", ".join(f"{n} ({len(a)})" for n, a in configs))
     import torch
 
     cache = ref_cache_path(model_path, head, args.set, args.ref_device, configs)

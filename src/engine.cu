@@ -641,6 +641,14 @@ static const float* weight_kn(LoupHandle* h, const float* B, int N, int K, cudaS
     return bt;
 }
 
+// The legacy handle serves every stream; cublasSetStream resets its workspace to cuBLAS's shared default pool, so the
+// lane's own workspace is bound with it (cuBLAS: a workspace per stream, else results may differ from run to run when
+// streams run concurrently). Each workspace serves one stream, where cuBLASLt and legacy calls run in order.
+static void cublas_bind(LoupHandle* h, cudaStream_t s, void* ws) {
+    CUBLAS_CHECK_THROW(cublasSetStream(h->cublas, s));
+    CUBLAS_CHECK_THROW(cublasSetWorkspace(h->cublas, ws, h->cublas_ws_bytes));
+}
+
 static inline void sgemm_rm(
     LoupHandle* h, bool transA, bool transB,
     int M, int N, int K,
@@ -654,9 +662,9 @@ static inline void sgemm_rm(
     if (transA || lda != K || ldc != N || ldb != (transB ? K : N)) {
         cublasOperation_t opB = transB ? CUBLAS_OP_T : CUBLAS_OP_N;
         cublasOperation_t opA = transA ? CUBLAS_OP_T : CUBLAS_OP_N;
-        if (strm != h->stream) CUBLAS_CHECK_THROW(cublasSetStream(h->cublas, strm));
+        cublas_bind(h, strm, ws_p);
         CUBLAS_CHECK_THROW(cublasSgemm(h->cublas, opB, opA, N, M, K, &alpha, B, ldb, A, lda, &beta, C, ldc));
-        if (strm != h->stream) CUBLAS_CHECK_THROW(cublasSetStream(h->cublas, h->stream));
+        cublas_bind(h, h->stream, h->d_cublas_ws);
         return;
     }
     auto key = std::make_tuple(M, N, K, transB, beta != 0.0f);
@@ -694,9 +702,9 @@ static inline void sgemm_rm(
             cublasLtMatrixLayoutDestroy(plan.layA); cublasLtMatrixLayoutDestroy(plan.layB);
             cublasLtMatrixLayoutDestroy(plan.layC); cublasLtMatmulDescDestroy(plan.desc);
             cublasOperation_t opB = transB ? CUBLAS_OP_T : CUBLAS_OP_N;
-            CUBLAS_CHECK_THROW(cublasSetStream(h->cublas, strm));
+            cublas_bind(h, strm, ws_p);
             CUBLAS_CHECK_THROW(cublasSgemm(h->cublas, opB, CUBLAS_OP_N, N, M, K, &alpha, B, ldb, A, lda, &beta, C, ldc));
-            CUBLAS_CHECK_THROW(cublasSetStream(h->cublas, h->stream));
+            cublas_bind(h, h->stream, h->d_cublas_ws);
             return;
         }
         plan.algo = res[0].algo;
@@ -710,7 +718,7 @@ static inline void sgemm_rm(
                     hit_disk = true;
                 }
             } else if (dp.use_hyb) {
-                if (h->hyb.loaded && alpha == 1.0f && beta == 0.0f && (K & 3) == 0 && (N & 3) == 0 &&
+                if (dp.hyb_tile < 3 && h->hyb.loaded && alpha == 1.0f && beta == 0.0f && (K & 3) == 0 && (N & 3) == 0 &&
                     ((((uintptr_t)A | (uintptr_t)B) & 15) == 0)) {
                     plan.use_hyb = true;
                     plan.hyb_tile = dp.hyb_tile;
@@ -830,8 +838,13 @@ static inline void sgemm_rm(
 static int ensure_edge_capacity(LoupHandle* h, int needed) {
     if (needed <= h->E_cap) return 0;
     int cap = std::max(needed + needed / 4 + 1024, 4096);
+    // Capacity 0 and no graphs until every array is reallocated: after a failed allocation a later call grows again
+    // instead of running on freed or null arrays.
+    h->invalidate_graphs();
+    h->E_cap = 0;
     auto reallocp = [&](auto*& p, size_t elem_sz) {
         if (p) cudaFree(p);
+        p = nullptr;
         return cudaMalloc(&p, (size_t)cap * elem_sz);
     };
     CUDA_CHECK(reallocp(h->d_senders, sizeof(int)));
@@ -854,7 +867,6 @@ static int ensure_edge_capacity(LoupHandle* h, int needed) {
     CUDA_CHECK(reallocp(h->d_edge_force_1, 3 * sizeof(float)));
     if (h->gen) h->gen->ensure_edges(cap);
     h->E_cap = cap;
-    h->invalidate_graphs();
     return 0;
 }
 
@@ -934,8 +946,11 @@ static int rebuild_neighbors(LoupHandle* h) {
                                            cudaMemcpyDeviceToDevice, h->stream));
                 return 0;
             };
+            // d_rnd_vel: a rebuild in an unpipelined Langevin step falls between the half-kicks, and the second one
+            // must reuse the noise the first drew for the same atom.
             if (gather(h->d_pos64, 3) || gather(h->d_vel64, 3) || gather(h->d_forces_f64, 3) ||
-                gather(h->d_masses, 1) || gather(h->d_inv_masses, 1) || gather(h->d_sqrt_inv_masses, 1)) return -1;
+                gather(h->d_masses, 1) || gather(h->d_inv_masses, 1) || gather(h->d_sqrt_inv_masses, 1) ||
+                gather(h->d_rnd_vel, 3)) return -1;
             std::vector<int> old_perm = h->perm;
             for (int i = 0; i < N; ++i) h->perm[i] = old_perm[h->h_order[i]];
             CUDA_CHECK(cudaMemsetAsync(h->d_bin_counts, 0, n_bins * sizeof(int), h->stream));
@@ -1112,6 +1127,8 @@ static void tune_rebuild_variants(LoupHandle* h) {
         h->variants_tuned = true;
         return;
     }
+    // No pair inside r_max + skin: the active-edge arrays were never written. Time later, on a list with edges.
+    if (h->E_graph == 0) return;
     h->variants_tuned = true;
     EventPairGuard ev;
     cudaEvent_t e0 = ev.e0, e1 = ev.e1;
@@ -1489,9 +1506,9 @@ LoupHandle* loup_create(const char* loup_path, int device_id) {
         CUDA_CHECK_THROW(cudaDeviceGetAttribute(&h->l2_bytes, cudaDevAttrL2CacheSize, device_id));
         CUDA_CHECK_THROW(cudaStreamCreate(&h->stream));
         CUBLAS_CHECK_THROW(cublasCreate(&h->cublas));
-        CUBLAS_CHECK_THROW(cublasSetStream(h->cublas, h->stream));
         CUBLAS_CHECK_THROW(cublasLtCreate(&h->cublas_lt));
         CUDA_CHECK_THROW(cudaMalloc(&h->d_cublas_ws, h->cublas_ws_bytes));
+        cublas_bind(h, h->stream, h->d_cublas_ws);
         CUDA_CHECK_THROW(cudaMallocHost(&h->h_reb_pinned, 4 * sizeof(int)));  // [0..1] flags, [2] step-disp bits
         CUDA_CHECK_THROW(cudaEventCreateWithFlags(&h->ev_reb[0], cudaEventDisableTiming));
         CUDA_CHECK_THROW(cudaEventCreateWithFlags(&h->ev_reb[1], cudaEventDisableTiming));
@@ -1613,6 +1630,9 @@ static int set_system_impl(LoupHandle* h, int n_atoms, const int* atomic_numbers
     CUDA_CHECK(cudaMemcpyAsync(h->d_inv_masses, inv_m_sorted.data(), n_atoms * sizeof(double), cudaMemcpyHostToDevice, h->stream));
     CUDA_CHECK(cudaMemcpyAsync(h->d_sqrt_inv_masses, sim_sorted.data(), n_atoms * sizeof(double), cudaMemcpyHostToDevice, h->stream));
     CUDA_CHECK(cudaMalloc(&h->d_rnd_vel, (size_t)n_atoms * 3 * sizeof(double)));
+    // Only set_state writes velocities: an evaluate-then-run sequence starts from rest, not from stale memory.
+    CUDA_CHECK(cudaMemsetAsync(h->d_vel64, 0, (size_t)n_atoms * 3 * sizeof(double), h->stream));
+    CUDA_CHECK(cudaMemsetAsync(h->d_rnd_vel, 0, (size_t)n_atoms * 3 * sizeof(double), h->stream));
     CUDA_CHECK(cudaMalloc(&h->d_need_rebuild, sizeof(int)));
     CUDA_CHECK(cudaMalloc(&h->d_max_step_disp2, sizeof(unsigned int)));
     CUDA_CHECK(cudaMemsetAsync(h->d_max_step_disp2, 0, sizeof(unsigned int), h->stream));
@@ -1862,7 +1882,8 @@ static int run_md_loop(
     LoupHandle* h, int kind, int n_steps, double dt_fs,
     double temp_k, double friction_per_fs, unsigned long long seed, LoupMDStats* out_stats
 ) {
-    if (!h || h->N <= 0 || n_steps <= 0 || !(dt_fs > 0.0)) return -1;
+    // nl_valid: positions and a neighbour list exist (set_state or evaluate ran and its rebuild completed).
+    if (!h || h->N <= 0 || !h->nl_valid || n_steps <= 0 || !std::isfinite(dt_fs) || !(dt_fs > 0.0)) return -1;
     CUDA_CHECK(cudaSetDevice(h->device_id));
     const int N = h->N;
     const int gridN = (N + 255) / 256;
@@ -2080,6 +2101,7 @@ static int run_langevin_impl(
     LoupHandle* h, int n_steps, double dt_fs, double temp_k,
     double friction_per_fs, unsigned long long seed, LoupMDStats* out_stats
 ) {
+    if (!std::isfinite(temp_k) || temp_k < 0.0 || !std::isfinite(friction_per_fs) || friction_per_fs < 0.0) return -1;
     return run_md_loop(h, 1, n_steps, dt_fs, temp_k, friction_per_fs, seed, out_stats);
 }
 
@@ -2127,7 +2149,7 @@ static int get_state_impl(LoupHandle* h, double* out_positions, double* out_velo
 }
 
 static int profile_force_impl(LoupHandle* h, int warmup, int n_calls, double* out_total_us) {
-    if (!h || h->N <= 0) return -1;
+    if (!h || h->N <= 0 || !h->nl_valid || warmup < 0 || n_calls <= 0) return -1;
     CUDA_CHECK(cudaSetDevice(h->device_id));
     if (ensure_force_graph(h, 0) != 0) return -1;
     for (int i = 0; i < warmup; ++i) {

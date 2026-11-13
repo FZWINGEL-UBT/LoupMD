@@ -50,9 +50,12 @@ int loup_evaluate(
 );
 
 // Initialize MD state (positions [n_atoms, 3] in A, velocities [n_atoms, 3] in ASE units, i.e. A per ASE time unit
-// as returned by ase.Atoms.get_velocities(); cell [3, 3] in A).
+// as returned by ase.Atoms.get_velocities(); cell [3, 3] in A). Velocities are zero after loup_set_system until
+// this call sets them (a run after only loup_evaluate starts from rest).
 int loup_set_state(LoupHandle* h, const double* positions, const double* velocities, const double* cell);
 
+// The run and profile calls return -1 unless positions and a neighbour list exist (loup_set_state or loup_evaluate
+// after loup_set_system, with the last rebuild completed).
 // Run NVE Velocity-Verlet steps (`dt_fs` in fs). Rebuilds skin neighbour list only when max_disp > skin/2.
 int loup_run_nve(LoupHandle* h, int n_steps, double dt_fs, LoupMDStats* out_stats);
 

@@ -318,6 +318,11 @@ process (dE/atom 0.074, 0.167, 0.679, 0.988 or 2.320 meV against float64; identi
 for the S7 and S8 builds; a discrete set points to the per-process GEMM plan choice, not verified), and MACE's own float32 error, the gate's
 bound, also changes between runs (0.44 meV in one). With 2.320 the row failed once for S7 and once for S8 and
 passed for S8 in another run; force and stress ratios stayed at or below 0.29.
+Since S9 the gate leaves the configuration out (`--include-unstable` gates it; FastMACE excludes it too). A cuBLAS
+workspace per lane (review U4) left the per-process values as they were, with plans re-timed per process
+(inconclusive). Both loaders also measure the 8-byte tables'
+error at load (exact maxima, value and d/dr, whole table and r >= 1 A) and refuse above 5e-4 of the column maximum;
+current bundles measure 2.7e-5 to 1.7e-4 (ledger rv8-fixes).
 `tests/test_gate_wrapper.py` runs the gate for OMAT-0 small, OFF23-S / M, MH-1 (two sets) and POLAR-1-S / M.
 The MACE references are cached per model, set, head and reference GPU (`LOUP_GATE_CACHE`, default
 `~/.cache/loupmd/gate_refs`; `--no-ref-cache` recomputes):

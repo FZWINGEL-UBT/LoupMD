@@ -125,6 +125,18 @@ void LoupModelGPU::load(const loup::Bundle& b, const char* path) {
             else if (q < -lim) q = -lim;
             return (uint32_t)(q + (int64_t(1) << (nb - 1)));
         };
+        auto deq = [](uint32_t u, int ei, int sh, int nb) {
+            return (double)((int64_t)u - (int64_t(1) << (nb - 1))) * std::ldexp(1.0, ei - sh - nb + 1);
+        };
+        // Packing error per column, as GenericModel::load measures it (PackErrTracker, kPackedTableMaxRelErr).
+        std::vector<double> ih(grid1.total_intervals);
+        std::vector<char> phys(grid1.total_intervals);
+        for (int k = 0; k < grid1.n_bands; ++k)
+            for (int i = 0; i < grid1.counts[k]; ++i) {
+                ih[grid1.offsets[k] + i] = grid1.inv_h[k];
+                phys[grid1.offsets[k] + i] = grid1.starts[k] + (i + 1) / grid1.inv_h[k] > loup::kPackedPhysicalR;
+            }
+        loup::PackErrTracker perr(1280);
         for (size_t i = 0; i < sp1_n; ++i) {
             const float4 cf = host_sp[i];
             double a0 = (double)cf.x + 0.5 * (double)cf.y + 0.25 * (double)cf.z + 0.125 * (double)cf.w;
@@ -143,7 +155,17 @@ void LoupModelGPU::load(const loup::Bundle& b, const char* path) {
             auto rotr = [](uint32_t v, int k) { return (v >> k) | (v << (32 - k)); };
             host_cubic[i].x = (u0 << 3) | rotr(u2 << 11, 20);
             host_cubic[i].y = (u1 << 4) | rotr(u3 << 15, 19) | (eb_code << 23);
+            const size_t iv = (i / 1280) % (size_t)grid1.total_intervals;
+            const double av[4] = {a0, a1, a2, a3};
+            const double dv[4] = {deq(u0, ei, 0, 20) - a0, deq(u1, ei, 8, 19) - a1, deq(u2, ei, 14, 12) - a2,
+                                  deq(u3, ei, 19, 8) - a3};
+            perr.add((int)(i % 1280), phys[iv] != 0, ih[iv], av, dv);
         }
+        const double rel = perr.rel();
+        if (std::getenv("LOUP_DEBUG_PACK")) fprintf(stderr, "pack interaction 1: %.3e\n", rel);
+        if (rel > loup::kPackedTableMaxRelErr)
+            throw std::runtime_error(std::string(path) + ": 8-byte interaction-1 table error " + std::to_string(rel) +
+                                     " of the column maximum exceeds " + std::to_string(loup::kPackedTableMaxRelErr));
         d_cubic_packed8_1 = upload(host_cubic);
     }
     {
