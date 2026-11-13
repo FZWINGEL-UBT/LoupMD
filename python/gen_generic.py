@@ -86,191 +86,568 @@ def w3j(l1, l2, l3):
     return o3.wigner_3j(l1, l2, l3, dtype=torch.float64).numpy()
 
 
-def conv_layout(lx):
-    paths = eg.conv_paths(lx)
-    slot = {}  # path k -> (l3, j: index within the paths of degree l3)
-    count = {l: 0 for l in range(4)}
-    for k, (_, _, l3) in enumerate(paths):
-        slot[k] = (l3, count[l3])
-        count[l3] += 1
-    return paths, slot, count
-
-
 def _ptr_args(prefix, ls, const=True):
     q = "const float* __restrict__" if const else "float* __restrict__"
     return ", ".join(f"{q} {prefix}{l}" for l in ls)
 
 
+def _lp_form(a, l, L):
+    if a == 0 and L == l: return "scalar"
+    if a == 1 and L == l + 1: return "raise"
+    if a == 1 and L == l - 1: return "lower"
+    raise ValueError((a, l, L))
+
+def _lp_sym2(q):
+    q0, q1, q2, q3, q4 = q.unbind(-1)
+    return torch.stack([torch.stack([q0, q1, q2], -1), torch.stack([q1, q3, q4], -1),
+                        torch.stack([q2, q4, -q0 - q3], -1)], -2)
+
+def _lp_sym3n(q, n):
+    q0, q1, q2, q3, q4, q5, q6 = q.unbind(-1)
+    nx, ny, nz = n.unbind(-1)
+    qxx = q0 * nx + q1 * ny + q2 * nz
+    qxy = q1 * nx + q3 * ny + q4 * nz
+    qxz = q2 * nx + q4 * ny + (-q0 - q3) * nz
+    qyy = q3 * nx + q5 * ny + q6 * nz
+    qyz = q4 * nx + q6 * ny + (-q1 - q5) * nz
+    return torch.stack([torch.stack([qxx, qxy, qxz], -1), torch.stack([qxy, qyy, qyz], -1),
+                        torch.stack([qxz, qyz, -qxx - qyy], -1)], -2)
+
+def _lp_cartesian_f(a, l, L, x, n, q):
+    if L == 0: h, gh = q[..., 0], torch.zeros_like(n)
+    elif L == 1: h, gh = (q * n).sum(-1), q.expand_as(n)
+    elif L == 2:
+        v = torch.einsum("...ij,...j->...i", _lp_sym2(q), n)
+        h, gh = (n * v).sum(-1), 2.0 * v
+    else:
+        v = torch.einsum("...ij,...j->...i", _lp_sym3n(q, n), n)
+        h, gh = (n * v).sum(-1), 3.0 * v
+    k = _lp_form(a, l, L)
+    if k == "scalar": return x[..., 0] * h
+    if k == "raise": return (x * gh).sum(-1)
+    return (x * n).sum(-1) * h - (n * n).sum(-1) * (x * gh).sum(-1) / (2 * L + 1)
+
+def lit(v):
+    return float(np.float32(v)).hex() + "f"
+
+def layout(lx):
+    paths = eg.conv_paths(lx)
+    count = [0, 0, 0, 0]
+    slot = []
+    for _, _, l3 in paths:
+        slot.append((l3, count[l3]))
+        count[l3] += 1
+    return paths, slot, count
+
+def fit_conversion(l1, l2, l3):
+    W3 = o3.wigner_3j(l1, l2, l3, dtype=torch.float64)
+    gen = torch.Generator().manual_seed(20261113)
+    x = torch.randn(96, 2 * l1 + 1, generator=gen, dtype=torch.float64)
+    n = torch.randn(96, 3, generator=gen, dtype=torch.float64)
+    y = o3.spherical_harmonics(l2, n, normalize=False, normalization="component")
+    target = torch.einsum("ijo,si,sj->so", W3, x, y)
+    eye = torch.eye(2 * l3 + 1, dtype=torch.float64)
+    phi = torch.stack([_lp_cartesian_f(l1, l2, l3, x, n, eye[c].expand(96, -1)) for c in range(2 * l3 + 1)], -1)
+    M = torch.linalg.lstsq(phi, target).solution
+    res = float((phi @ M - target).abs().max() / target.abs().max().clamp_min(1e-300))
+    assert res < 1e-12, (l1, l2, l3, res)
+    return M.numpy()
+
 def emit_conv_fwd(lx):
-    paths, slot, count = conv_layout(lx)
-    L = []
-    L.append(f'extern "C" __global__ void __launch_bounds__(512) gconv_fwd_L{lx}(')
-    L.append("    int N, int C, int S, int I, int Q1, SplineGrid grid, int sh_perm, int pair_sym,")
-    L.append("    const int* __restrict__ row_ptr, const int* __restrict__ senders, const float4* __restrict__ vec_len,")
-    L.append("    const int* __restrict__ species, const float4* __restrict__ table,")
-    L.append(f"    {_ptr_args('x', range(lx + 1))},")
-    L.append(f"    {_ptr_args('mid', range(4), const=False)}, float* __restrict__ D) {{")
-    L.append("  const int a = blockIdx.x, c = threadIdx.x;")
-    L.append("  if (a >= N) return;")
-    L.append("  const int sa = species[a];")
+    paths, slot, count = layout(lx)
+    n_paths = len(paths)
     nacc = sum(2 * l3 + 1 for _, _, l3 in paths)
-    L.append(f"  float acc[{nacc}];")
-    L.append(f"  #pragma unroll\n  for (int i = 0; i < {nacc}; ++i) acc[i] = 0.0f;")
-    L.append("  float dsum = 0.0f;")
-    L.append("  const int e_end = row_ptr[a + 1];")
-    L.append("  for (int e = row_ptr[a]; e < e_end; ++e) {")
-    L.append("    const float4 vl = vec_len[e];")
-    L.append("    const int s = senders[e];")
-    L.append("    float4 Yv[4];")
-    L.append("    if (sh_perm) loup::edge_sh16(vl.y, vl.z, vl.x, vl.w, Yv); else loup::edge_sh16(vl.x, vl.y, vl.z, vl.w, Yv);")
-    L.append("    const float Y[16] = {Yv[0].x, Yv[0].y, Yv[0].z, Yv[0].w, Yv[1].x, Yv[1].y, Yv[1].z, Yv[1].w,")
-    L.append("                         Yv[2].x, Yv[2].y, Yv[2].z, Yv[2].w, Yv[3].x, Yv[3].y, Yv[3].z, Yv[3].w};")
-    L.append("    int iv; float t, sxi;")
-    L.append("    locate_spline(grid, vl.w, iv, t, sxi);")
-    L.append("    const int pr = pair_sym ? loup::sym_pair(species[s], sa, S) : species[s] * S + sa;")
-    L.append("    const float4* tp = table + ((int64_t)pr * I + iv) * Q1;")
-    for l in range(lx + 1):
-        for m in range(2 * l + 1):
-            L.append(f"    const float x{l}_{m} = __ldg(x{l} + ((int64_t)s * {2 * l + 1} + {m}) * C + c);")
-    off = 0
+    body, body_pair = [], []
+    acc_off = 0
     for k, (l1, l2, l3) in enumerate(paths):
-        W = w3j(l1, l2, l3)
-        L.append(f"    {{ const float4 cf = __ldg(tp + {k} * C + c);")
-        L.append("      const float R = fmaf(t, fmaf(t, fmaf(t, cf.w, cf.z), cf.y), cf.x);")
+        W = o3.wigner_3j(l1, l2, l3, dtype=torch.float64).numpy()
+        decode = [
+            f"        const uint2 c = __ldg(tq + {k} * C + ch);",
+            "        const unsigned eb0 = (c.y & 0x0F800000u) + bias_shift;",
+            "        const float eb_f = __uint_as_float(eb0);",
+            "        const float r0 = __uint_as_float((c.x & 0x7FFFF8u) | eb0);",
+            "        const float r1 = __uint_as_float((c.y & 0x7FFFF0u) | eb0);",
+            "        const float r2 = __uint_as_float((__funnelshift_l(c.x, c.x, 20) & 0x7FF800u) | eb0);",
+            "        const float r3 = __uint_as_float((__funnelshift_l(c.y, c.y, 19) & 0x7F8000u) | eb0);",
+            "        const float w = fmaf(s3, r3, fmaf(s2, r2, fmaf(s1, r1, fmaf(nw_hb, eb_f, r0))));",
+        ]
+        m1_used = sorted({m1 for m1 in range(2 * l1 + 1) for m2 in range(2 * l2 + 1) for m3 in range(2 * l3 + 1) if abs(W[m1, m2, m3]) > 1e-12})
+        body.append(f"      {{ // path {k} ({l1},{l2},{l3})")
+        body += decode
+        body_pair.append(f"      {{ // path {k} ({l1},{l2},{l3}) pair")
+        body_pair += decode
+        body_pair.append("        const float wB = fmaf(s3B, r3, fmaf(s2B, r2, fmaf(s1B, r1, fmaf(nw_hbB, eb_f, r0))));")
+        for m1 in m1_used:
+            body.append(f"        const float xi_{m1} = __ldg(x{l1} + ((int64_t)snd * {2 * l1 + 1} + {m1}) * C + ch);")
+            body_pair.append(f"        const float xi_{m1} = __ldg(x{l1} + ((int64_t)snd * {2 * l1 + 1} + {m1}) * C + ch);")
+            body_pair.append(f"        const float xiB_{m1} = __ldg(x{l1} + ((int64_t)sndB * {2 * l1 + 1} + {m1}) * C + ch);")
         for m3 in range(2 * l3 + 1):
-            terms = []
+            t1, t2 = [], []
             for m1 in range(2 * l1 + 1):
                 for m2 in range(2 * l2 + 1):
                     v = W[m1, m2, m3]
                     if abs(v) > 1e-12:
-                        terms.append(f"{lit(v)} * x{l1}_{m1} * Y[{l2 * l2 + m2}]")
-            if terms:
-                L.append(f"      acc[{off + m3}] = fmaf(R, {' + '.join(terms)}, acc[{off + m3}]);")
-        L.append("    }")
-        off += 2 * l3 + 1
-    L.append("    if (c == 0) {")
-    L.append("      const float4 cf = __ldg(tp + Q1 - 1);")
-    L.append("      dsum += fmaf(t, fmaf(t, fmaf(t, cf.w, cf.z), cf.y), cf.x);")
-    L.append("    }")
-    L.append("  }")
-    off = 0
+                        t1.append(f"{lit(v)} * xi_{m1} * she[{l2 * l2 + m2}]")
+                        t2.append(f"{lit(v)} * xiB_{m1} * sheB[{l2 * l2 + m2}]")
+            if t1:
+                body.append(f"        acc[{acc_off + m3}] = fmaf(w, {' + '.join(t1)}, acc[{acc_off + m3}]);")
+                body_pair.append(f"        acc[{acc_off + m3}] = fmaf(w, {' + '.join(t1)}, acc[{acc_off + m3}]);")
+                body_pair.append(f"        acc[{acc_off + m3}] = fmaf(wB, {' + '.join(t2)}, acc[{acc_off + m3}]);")
+        body.append("      }")
+        body_pair.append("      }")
+        acc_off += 2 * l3 + 1
+
+    stores = []
+    acc_off = 0
     for k, (l1, l2, l3) in enumerate(paths):
         _, j = slot[k]
         n = count[l3]
         for m3 in range(2 * l3 + 1):
-            L.append(f"  mid{l3}[((int64_t)a * {2 * l3 + 1} + {m3}) * {n} * C + {j} * C + c] = acc[{off + m3}];")
-        off += 2 * l3 + 1
-    L.append("  if (c == 0) D[a] = dsum;")
-    L.append("}")
-    return "\n".join(L) + "\n"
+            stores.append(f"  mid{l3}[((int64_t)rcv * {2 * l3 + 1} + {m3}) * {n} * C + {j} * C + ch] = acc[{acc_off + m3}];")
+        acc_off += 2 * l3 + 1
+
+    x_args = ", ".join(f"const float* __restrict__ x{l}" for l in range(lx + 1))
+    m_args = ", ".join(f"float* __restrict__ mid{l}" for l in range(4))
+    return f"""template <int R, bool PAIR, int MAX_T = (R == 1 ? 256 : 128 * R)>
+__global__ void __launch_bounds__(MAX_T) gconv_fwd_L{lx}(
+    int N, int C, int S, int I, SplineGrid grid, int sh_perm, int pair_sym,
+    const int* __restrict__ row_ptr, const int* __restrict__ senders, const float4* __restrict__ vec_len,
+    const int* __restrict__ species, const uint2* __restrict__ packed_table, const float4* __restrict__ density_table,
+    unsigned bias_shift, {x_args}, {m_args}, float* __restrict__ D) {{
+  constexpr int TILE = 32, ED = 16;
+  static_assert(R >= 1 && R <= 15, "bar.sync id limit");
+  __shared__ int s_snd_all[R][TILE];
+  __shared__ float s_t_all[R][TILE];
+  __shared__ int64_t s_tq_all[R][TILE];
+  __shared__ __align__(16) float s_sh_all[R][TILE * ED];
+  const int half = R == 1 ? 0 : (threadIdx.x >> 7), ch = R == 1 ? threadIdx.x : (threadIdx.x & 127);
+  const int rcv = blockIdx.x * R + half;
+  if (rcv >= N) return;
+  int* s_snd = s_snd_all[half];
+  float* s_t = s_t_all[half];
+  int64_t* s_tq = s_tq_all[half];
+  float* s_sh = s_sh_all[half];
+  const int sa = species[rcv];
+  float acc[{nacc}];
+  #pragma unroll
+  for (int i = 0; i < {nacc}; ++i) acc[i] = 0.0f;
+  float dsum = 0.0f;
+  const int eb = row_ptr[rcv], ee = row_ptr[rcv + 1];
+  auto sync_grp = [&]() {{
+    if (R == 1) __syncthreads();
+    else asm volatile("bar.sync %0, 128;" :: "r"(half + 1) : "memory");
+  }};
+  for (int base = eb; base < ee; base += TILE) {{
+    const int cnt = (ee - base < TILE) ? (ee - base) : TILE;
+    if (ch >= 32 && ch - 32 < cnt) {{
+      const float4 vl = __ldg(vec_len + base + (ch - 32));
+      if (sh_perm) loup::edge_sh16(vl.y, vl.z, vl.x, vl.w, reinterpret_cast<float4*>(s_sh + (ch - 32) * ED));
+      else         loup::edge_sh16(vl.x, vl.y, vl.z, vl.w, reinterpret_cast<float4*>(s_sh + (ch - 32) * ED));
+    }}
+    if (ch < 32) {{
+      float d_edge = 0.0f;
+      if (ch < cnt) {{
+        const int e = base + ch;
+        const float4 vl = __ldg(vec_len + e);
+        const int snd = senders[e];
+        const int pr = pair_sym ? loup::sym_pair(species[snd], sa, S) : species[snd] * S + sa;
+        int iv; float t, sxi;
+        locate_spline(grid, vl.w, iv, t, sxi);
+        const int64_t slab = (int64_t)pr * I + iv;
+        s_snd[ch] = snd;
+        s_t[ch] = t;
+        s_tq[ch] = slab * ({n_paths} * (int64_t)C);
+        if (density_table) {{
+          const float4 dc = __ldg(density_table + slab);
+          d_edge = fmaf(t, fmaf(t, fmaf(t, dc.w, dc.z), dc.y), dc.x);
+        }}
+        if (C < 64) {{
+          if (sh_perm) loup::edge_sh16(vl.y, vl.z, vl.x, vl.w, reinterpret_cast<float4*>(s_sh + ch * ED));
+          else         loup::edge_sh16(vl.x, vl.y, vl.z, vl.w, reinterpret_cast<float4*>(s_sh + ch * ED));
+        }}
+      }}
+      if (density_table) {{
+        #pragma unroll
+        for (int off = 16; off > 0; off >>= 1) d_edge += __shfl_xor_sync(0xffffffffu, d_edge, off);
+        if (ch == 0) dsum += d_edge;
+      }}
+    }}
+    sync_grp();
+    for (int k = 0; k < cnt;) {{
+      const int snd = s_snd[k];
+      const float t = s_t[k], s = t - 0.5f, s_sq = s * s;
+      const float s1 = s * 0x1.0p-8f, s2 = s_sq * 0x1.0p-14f, s3 = s * s_sq * 0x1.0p-19f;
+      const float nw_hb = -1.5f * (1.0f + s1 + s2 + s3);
+      const float* she = s_sh + k * ED;
+      const uint2* tq = packed_table + s_tq[k];
+      if (PAIR && k + 1 < cnt && s_tq[k + 1] == s_tq[k]) {{
+        const int sndB = s_snd[k + 1];
+        const float sB = s_t[k + 1] - 0.5f, sB_sq = sB * sB;
+        const float s1B = sB * 0x1.0p-8f, s2B = sB_sq * 0x1.0p-14f, s3B = sB * sB_sq * 0x1.0p-19f;
+        const float nw_hbB = -1.5f * (1.0f + s1B + s2B + s3B);
+        const float* sheB = she + ED;
+{chr(10).join(body_pair)}
+        k += 2;
+      }} else {{
+{chr(10).join(body)}
+        k += 1;
+      }}
+    }}
+    sync_grp();
+  }}
+  if (density_table && ch == 0) D[rcv] = dsum;
+{chr(10).join(stores)}
+}}
+"""
+
+def emit_conv_bwd_L01(lx):
+    assert lx in (0, 1)
+    paths, slot, count = layout(lx)
+    n_paths = len(paths)
+    slots = []
+    n_slots = 0
+    for k, (l1, l2, l3) in enumerate(paths):
+        form = _lp_form(l1, l2, l3)
+        sz = 2 * l3 + 1
+        slots.append((k, l1, l2, l3, form, n_slots, sz))
+        n_slots += sz
+    QS = ((n_slots + 3) // 4) * 4
+    if (QS // 4) % 2 == 0:
+        QS += 4
+
+    pro = ["  for (int ch = tid; ch < C; ch += blockDim.x) {"]
+    for k, l1, l2, l3, form, q0, sz in slots:
+        M = fit_conversion(l1, l2, l3)
+        _, j = slot[k]
+        n = count[l3]
+        for o in range(2 * l3 + 1):
+            pro.append(f"    const float g_{k}_{o} = __ldg(dmid{l3} + ((int64_t)rcv * {2 * l3 + 1} + {o}) * {n} * C + {j} * C + ch);")
+        for s_idx in range(sz):
+            terms = [f"{lit(M[s_idx, o])} * g_{k}_{o}" for o in range(2 * l3 + 1) if abs(M[s_idx, o]) > 1e-12]
+            pro.append(f"    s_q[ch * {QS} + {q0 + s_idx}] = {' + '.join(terms) if terms else '0.0f'};")
+    pro.append("  }")
+    pro.append("  __syncthreads();")
+
+    ch_body = []
+    ch_body.append(f"      const float4* sq4 = reinterpret_cast<const float4*>(s_q + ch * {QS});")
+    for idx in range(QS // 4):
+        ch_body.append(f"      const float4 Q{idx} = sq4[{idx}];")
+    def q_ref(s_idx):
+        return f"Q{s_idx // 4}.{['x', 'y', 'z', 'w'][s_idx % 4]}"
+
+    ch_body.append("      const float x0 = __ldg(x0_p + (int64_t)snd * C + ch);")
+    ch_body.append("      float dx0_acc = 0.0f;")
+    if lx >= 1:
+        ch_body.append("      const float xx = __ldg(x1_p + ((int64_t)snd * 3 + 0) * C + ch);")
+        ch_body.append("      const float xy = __ldg(x1_p + ((int64_t)snd * 3 + 1) * C + ch);")
+        ch_body.append("      const float xz = __ldg(x1_p + ((int64_t)snd * 3 + 2) * C + ch);")
+        ch_body.append("      float dx1_0 = 0.0f, dx1_1 = 0.0f, dx1_2 = 0.0f;")
+
+    for k, l1, l2, l3, form, q0, sz in slots:
+        ch_body.append(f"      {{ // path {k} ({l1},{l2},{l3}) {form}")
+        ch_body.append(f"        const uint2 c = __ldg(tq + {k} * C + ch);")
+        ch_body.append("        const unsigned eb0 = (c.y & 0x0F800000u) + bias_shift;")
+        ch_body.append("        const float eb_f = __uint_as_float(eb0);")
+        ch_body.append("        const float r0 = __uint_as_float((c.x & 0x7FFFF8u) | eb0);")
+        ch_body.append("        const float r1 = __uint_as_float((c.y & 0x7FFFF0u) | eb0);")
+        ch_body.append("        const float r2 = __uint_as_float((__funnelshift_l(c.x, c.x, 20) & 0x7FF800u) | eb0);")
+        ch_body.append("        const float r3 = __uint_as_float((__funnelshift_l(c.y, c.y, 19) & 0x7F8000u) | eb0);")
+        ch_body.append("        const float w = fmaf(s3, r3, fmaf(s2, r2, fmaf(s1, r1, fmaf(nw_hb, eb_f, r0))));")
+        ch_body.append("        const float dw = fmaf(ds3, r3, fmaf(ds2, r2, fmaf(ndt_hb, eb_f, r1)));")
+        qs = [q_ref(q0 + i) for i in range(sz)]
+        if l3 == 1 and form != "raise":
+            ch_body.append(f"        const float h = {qs[0]} * nx + {qs[1]} * ny + {qs[2]} * nz;")
+        elif l3 == 2:
+            ch_body.append(f"        const float qzz = -{qs[0]} - {qs[3]};")
+            ch_body.append(f"        const float vx = {qs[0]} * nx + {qs[1]} * ny + {qs[2]} * nz;")
+            ch_body.append(f"        const float vy = {qs[1]} * nx + {qs[3]} * ny + {qs[4]} * nz;")
+            ch_body.append(f"        const float vz = {qs[2]} * nx + {qs[4]} * ny + qzz * nz;")
+            if form != "raise":
+                ch_body.append("        const float h = nx * vx + ny * vy + nz * vz;")
+        elif l3 == 3:
+            ch_body.append(f"        const float q7 = -{qs[0]} - {qs[3]}, q8 = -{qs[1]} - {qs[5]};")
+            ch_body.append(f"        const float Qxx = {qs[0]} * nx + {qs[1]} * ny + {qs[2]} * nz;")
+            ch_body.append(f"        const float Qxy = {qs[1]} * nx + {qs[3]} * ny + {qs[4]} * nz;")
+            ch_body.append(f"        const float Qxz = {qs[2]} * nx + {qs[4]} * ny + q7 * nz;")
+            ch_body.append(f"        const float Qyy = {qs[3]} * nx + {qs[5]} * ny + {qs[6]} * nz;")
+            ch_body.append(f"        const float Qyz = {qs[4]} * nx + {qs[6]} * ny + q8 * nz;")
+            ch_body.append("        const float Qzz = -Qxx - Qyy;")
+            ch_body.append("        const float vx = Qxx * nx + Qxy * ny + Qxz * nz;")
+            ch_body.append("        const float vy = Qxy * nx + Qyy * ny + Qyz * nz;")
+            ch_body.append("        const float vz = Qxz * nx + Qyz * ny + Qzz * nz;")
+            if form != "raise":
+                ch_body.append("        const float h = nx * vx + ny * vy + nz * vz;")
+        if form == "scalar":
+            if l3 == 0:
+                ch_body.append(f"        if (WANT_DX) dx0_acc = fmaf(w, {qs[0]}, dx0_acc);")
+                ch_body.append(f"        pull_R = fmaf(dw, x0 * {qs[0]}, pull_R);")
+            elif l3 == 1:
+                ch_body.append("        const float wx = w * x0;")
+                ch_body.append(f"        pull_Gx = fmaf(wx, {qs[0]}, pull_Gx); pull_Gy = fmaf(wx, {qs[1]}, pull_Gy); pull_Gz = fmaf(wx, {qs[2]}, pull_Gz);")
+                ch_body.append("        if (WANT_DX) dx0_acc = fmaf(w, h, dx0_acc);")
+                ch_body.append("        pull_R = fmaf(dw, x0 * h, pull_R);")
+            else:
+                ch_body.append(f"        const float wx = {float(l3):.1f}f * w * x0;")
+                ch_body.append("        pull_Gx = fmaf(wx, vx, pull_Gx); pull_Gy = fmaf(wx, vy, pull_Gy); pull_Gz = fmaf(wx, vz, pull_Gz);")
+                ch_body.append("        if (WANT_DX) dx0_acc = fmaf(w, h, dx0_acc);")
+                ch_body.append("        pull_R = fmaf(dw, x0 * h, pull_R);")
+        elif form == "raise":
+            if l3 == 1:
+                ch_body.append(f"        pull_R = fmaf(dw, xx * {qs[0]} + xy * {qs[1]} + xz * {qs[2]}, pull_R);")
+                ch_body.append(f"        if (WANT_DX) {{ dx1_0 = fmaf(w, {qs[0]}, dx1_0); dx1_1 = fmaf(w, {qs[1]}, dx1_1); dx1_2 = fmaf(w, {qs[2]}, dx1_2); }}")
+            elif l3 == 2:
+                ch_body.append("        pull_R = fmaf(dw, 2.0f * (xx * vx + xy * vy + xz * vz), pull_R);")
+                ch_body.append("        const float w2 = 2.0f * w;")
+                ch_body.append("        if (WANT_DX) { dx1_0 = fmaf(w2, vx, dx1_0); dx1_1 = fmaf(w2, vy, dx1_1); dx1_2 = fmaf(w2, vz, dx1_2); }")
+                ch_body.append(f"        pull_Gx = fmaf(w2, {qs[0]} * xx + {qs[1]} * xy + {qs[2]} * xz, pull_Gx);")
+                ch_body.append(f"        pull_Gy = fmaf(w2, {qs[1]} * xx + {qs[3]} * xy + {qs[4]} * xz, pull_Gy);")
+                ch_body.append(f"        pull_Gz = fmaf(w2, {qs[2]} * xx + {qs[4]} * xy + qzz * xz, pull_Gz);")
+            else:
+                ch_body.append("        pull_R = fmaf(dw, 3.0f * (xx * vx + xy * vy + xz * vz), pull_R);")
+                ch_body.append("        const float w3 = 3.0f * w, w6 = 6.0f * w;")
+                ch_body.append("        if (WANT_DX) { dx1_0 = fmaf(w3, vx, dx1_0); dx1_1 = fmaf(w3, vy, dx1_1); dx1_2 = fmaf(w3, vz, dx1_2); }")
+                ch_body.append("        pull_Gx = fmaf(w6, Qxx * xx + Qxy * xy + Qxz * xz, pull_Gx);")
+                ch_body.append("        pull_Gy = fmaf(w6, Qxy * xx + Qyy * xy + Qyz * xz, pull_Gy);")
+                ch_body.append("        pull_Gz = fmaf(w6, Qxz * xx + Qyz * xy + Qzz * xz, pull_Gz);")
+        else:  # lower
+            k_inv = 1.0 / (2 * l3 + 1)
+            ch_body.append("        const float A = xx * nx + xy * ny + xz * nz;")
+            if l3 == 0:
+                ch_body.append(f"        const float wq = w * {qs[0]};")
+                ch_body.append("        pull_Gx = fmaf(wq, xx, pull_Gx); pull_Gy = fmaf(wq, xy, pull_Gy); pull_Gz = fmaf(wq, xz, pull_Gz);")
+                ch_body.append("        if (WANT_DX) { dx1_0 = fmaf(wq, nx, dx1_0); dx1_1 = fmaf(wq, ny, dx1_1); dx1_2 = fmaf(wq, nz, dx1_2); }")
+                ch_body.append(f"        pull_R = fmaf(dw, A * {qs[0]}, pull_R);")
+            elif l3 == 1:
+                ch_body.append(f"        const float B = xx * {qs[0]} + xy * {qs[1]} + xz * {qs[2]};")
+                ch_body.append(f"        pull_R = fmaf(dw, A * h - {lit(k_inv)} * B, pull_R);")
+                ch_body.append(f"        const float wh = w * h, wA = w * A, wk = w * {lit(k_inv)};")
+                ch_body.append(f"        pull_Gx = fmaf(wh, xx, fmaf(wA, {qs[0]}, pull_Gx));")
+                ch_body.append(f"        pull_Gy = fmaf(wh, xy, fmaf(wA, {qs[1]}, pull_Gy));")
+                ch_body.append(f"        pull_Gz = fmaf(wh, xz, fmaf(wA, {qs[2]}, pull_Gz));")
+                ch_body.append(f"        if (WANT_DX) {{ dx1_0 = fmaf(wh, nx, fmaf(-wk, {qs[0]}, dx1_0)); dx1_1 = fmaf(wh, ny, fmaf(-wk, {qs[1]}, dx1_1)); dx1_2 = fmaf(wh, nz, fmaf(-wk, {qs[2]}, dx1_2)); }}")
+            else:  # l3 == 2
+                ch_body.append("        const float B2 = xx * vx + xy * vy + xz * vz;")
+                ch_body.append(f"        pull_R = fmaf(dw, A * h - {lit(2.0 * k_inv)} * B2, pull_R);")
+                ch_body.append(f"        const float wh = w * h, wA2 = 2.0f * w * A, wk2 = {lit(2.0 * k_inv)} * w;")
+                ch_body.append(f"        pull_Gx = fmaf(wh, xx, fmaf(wA2, vx, fmaf(-wk2, {qs[0]} * xx + {qs[1]} * xy + {qs[2]} * xz, pull_Gx)));")
+                ch_body.append(f"        pull_Gy = fmaf(wh, xy, fmaf(wA2, vy, fmaf(-wk2, {qs[1]} * xx + {qs[3]} * xy + {qs[4]} * xz, pull_Gy)));")
+                ch_body.append(f"        pull_Gz = fmaf(wh, xz, fmaf(wA2, vz, fmaf(-wk2, {qs[2]} * xx + {qs[4]} * xy + qzz * xz, pull_Gz)));")
+                ch_body.append("        if (WANT_DX) { dx1_0 = fmaf(wh, nx, fmaf(-wk2, vx, dx1_0)); dx1_1 = fmaf(wh, ny, fmaf(-wk2, vy, dx1_1)); dx1_2 = fmaf(wh, nz, fmaf(-wk2, vz, dx1_2)); }")
+        ch_body.append("      }")
+
+    ch_body.append("      if (WANT_DX) {")
+    ch_body.append("        atomicAdd(dx0_p + (int64_t)snd * C + ch, dx0_acc);")
+    if lx >= 1:
+        ch_body.append("        atomicAdd(dx1_p + ((int64_t)snd * 3 + 0) * C + ch, dx1_0);")
+        ch_body.append("        atomicAdd(dx1_p + ((int64_t)snd * 3 + 1) * C + ch, dx1_1);")
+        ch_body.append("        atomicAdd(dx1_p + ((int64_t)snd * 3 + 2) * C + ch, dx1_2);")
+    ch_body.append("      }")
+
+    x_args = ", ".join(f"const float* __restrict__ x{l}_p" for l in range(lx + 1))
+    dm_args = ", ".join(f"const float* __restrict__ dmid{l}" for l in range(4))
+    dx_args = ", ".join(f"float* __restrict__ dx{l}_p" for l in range(lx + 1))
+    return f"""template <bool WANT_DX>
+__global__ void __launch_bounds__(256) gconv_bwd_L{lx}(
+    int N, int C, int S, int I, SplineGrid grid, int sh_perm, int pair_sym,
+    const int* __restrict__ row_ptr, const int* __restrict__ senders, const float4* __restrict__ vec_len,
+    const int* __restrict__ species, const uint2* __restrict__ packed_table, const float4* __restrict__ density_table,
+    unsigned bias_shift, {x_args}, {dm_args}, const float* __restrict__ dD, {dx_args}, float* __restrict__ edge_dvec) {{
+  extern __shared__ float s_q[];
+  const int rcv = blockIdx.x, tid = threadIdx.x, wid = tid >> 5, lane = tid & 31, n_warps = blockDim.x >> 5;
+  if (rcv >= N) return;
+  const int sa = species[rcv];
+  const float dD1_r = dD ? __ldg(dD + rcv) : 0.0f;
+{chr(10).join(pro)}
+  const int eb = row_ptr[rcv], ee = row_ptr[rcv + 1];
+  for (int e = eb + wid; e < ee; e += n_warps) {{
+    const float4 vl = __ldg(vec_len + e);
+    const int snd = senders[e];
+    const float ux = sh_perm ? vl.y : vl.x, uy = sh_perm ? vl.z : vl.y, uz = sh_perm ? vl.x : vl.z;
+    const float dd = vl.w > loup::EPS_SH ? vl.w : loup::EPS_SH;
+    const float inv_d = 1.0f / dd;
+    const float nx = ux * inv_d, ny = uy * inv_d, nz = uz * inv_d;
+    int iv; float t, sxi;
+    locate_spline(grid, vl.w, iv, t, sxi);
+    const float s = t - 0.5f, s_sq = s * s;
+    const float s1 = s * 0x1.0p-8f, s2 = s_sq * 0x1.0p-14f, s3 = s * s_sq * 0x1.0p-19f;
+    const float ds2 = (2.0f * s) * 0x1.0p-6f, ds3 = (3.0f * s_sq) * 0x1.0p-11f;
+    const float nw_hb = -1.5f * (1.0f + s1 + s2 + s3), ndt_hb = -1.5f * (1.0f + ds2 + ds3);
+    const int pr = pair_sym ? loup::sym_pair(species[snd], sa, S) : species[snd] * S + sa;
+    const int64_t slab = (int64_t)pr * I + iv;
+    const uint2* tq = packed_table + slab * ({n_paths} * (int64_t)C);
+    float pull_Gx = 0.0f, pull_Gy = 0.0f, pull_Gz = 0.0f, pull_R = 0.0f;
+    for (int ch = lane; ch < C; ch += 32) {{
+{chr(10).join(ch_body)}
+    }}
+    #pragma unroll
+    for (int off = 16; off > 0; off >>= 1) {{
+      pull_Gx += __shfl_xor_sync(0xffffffffu, pull_Gx, off);
+      pull_Gy += __shfl_xor_sync(0xffffffffu, pull_Gy, off);
+      pull_Gz += __shfl_xor_sync(0xffffffffu, pull_Gz, off);
+      pull_R  += __shfl_xor_sync(0xffffffffu, pull_R,  off);
+    }}
+    if (lane == 0) {{
+      float ddens = 0.0f;
+      if (dD && dD1_r != 0.0f) {{
+        const float4 dc = __ldg(density_table + slab);
+        ddens = fmaf(t, fmaf(3.0f * dc.w, t, 2.0f * dc.z), dc.y) * sxi;
+      }}
+      const float fn = pull_Gx * nx + pull_Gy * ny + pull_Gz * nz;
+      const float rad = fmaf(pull_R, sxi * 0x1.0p-8f, dD1_r * ddens);
+      float fx = fmaf(nx, rad - fn * inv_d, pull_Gx * inv_d);
+      float fy = fmaf(ny, rad - fn * inv_d, pull_Gy * inv_d);
+      float fz = fmaf(nz, rad - fn * inv_d, pull_Gz * inv_d);
+      if (sh_perm) {{ const float tx = fx, ty = fy, tz = fz; fx = tz; fy = tx; fz = ty; }}
+      edge_dvec[(int64_t)e * 3 + 0] += fx;
+      edge_dvec[(int64_t)e * 3 + 1] += fy;
+      edge_dvec[(int64_t)e * 3 + 2] += fz;
+    }}
+  }}
+}}
+"""
+
+def emit_conv_bwd_L2():
+    lx = 2
+    paths, slot, count = layout(lx)
+    n_paths = len(paths)
+    by_l1 = {0: [], 1: [], 2: []}
+    for k, (l1, l2, l3) in enumerate(paths):
+        by_l1[l1].append((k, l1, l2, l3))
+
+    ch_body = []
+    for l1 in (0, 1, 2):
+        ch_body.append(f"      {{ // a = {l1} group")
+        for m in range(2 * l1 + 1):
+            ch_body.append(f"        const float x{l1}_{m} = __ldg(x{l1}_p + ((int64_t)snd * {2 * l1 + 1} + {m}) * C + ch);")
+            ch_body.append(f"        float gx{l1}_{m} = 0.0f;")
+        for k, _, l2, l3 in by_l1[l1]:
+            W = o3.wigner_3j(l1, l2, l3, dtype=torch.float64).numpy()
+            _, j = slot[k]
+            n = count[l3]
+            ch_body.append(f"        {{ // path {k} ({l1},{l2},{l3})")
+            ch_body.append(f"          const uint2 c = __ldg(tq + {k} * C + ch);")
+            ch_body.append("          const unsigned eb0 = (c.y & 0x0F800000u) + bias_shift;")
+            ch_body.append("          const float eb_f = __uint_as_float(eb0);")
+            ch_body.append("          const float r0 = __uint_as_float((c.x & 0x7FFFF8u) | eb0);")
+            ch_body.append("          const float r1 = __uint_as_float((c.y & 0x7FFFF0u) | eb0);")
+            ch_body.append("          const float r2 = __uint_as_float((__funnelshift_l(c.x, c.x, 20) & 0x7FF800u) | eb0);")
+            ch_body.append("          const float r3 = __uint_as_float((__funnelshift_l(c.y, c.y, 19) & 0x7F8000u) | eb0);")
+            ch_body.append("          const float R = fmaf(s3, r3, fmaf(s2, r2, fmaf(s1, r1, fmaf(nw_hb, eb_f, r0))));")
+            ch_body.append("          const float dw = fmaf(ds3, r3, fmaf(ds2, r2, fmaf(ndt_hb, eb_f, r1)));")
+            for m3 in range(2 * l3 + 1):
+                ch_body.append(f"          const float g{m3} = __ldg(dmid{l3} + ((int64_t)rcv * {2 * l3 + 1} + {m3}) * {n} * C + {j} * C + ch);")
+            A = {}
+            for m1 in range(2 * l1 + 1):
+                for m2 in range(2 * l2 + 1):
+                    terms = [f"{lit(W[m1, m2, m3])} * g{m3}" for m3 in range(2 * l3 + 1) if abs(W[m1, m2, m3]) > 1e-12]
+                    if terms:
+                        ch_body.append(f"          const float A{m1}_{m2} = {' + '.join(terms)};")
+                        A[m1, m2] = f"A{m1}_{m2}"
+            tr = [f"{A[m1, m2]} * x{l1}_{m1} * Y{l2 * l2 + m2}" for (m1, m2) in A]
+            ch_body.append(f"          pull_R = fmaf({' + '.join(tr) if tr else '0.0f'}, dw, pull_R);")
+            for m2 in range(2 * l2 + 1):
+                terms = [f"{A[m1, m2]} * x{l1}_{m1}" for m1 in range(2 * l1 + 1) if (m1, m2) in A]
+                if terms:
+                    ch_body.append(f"          dY[{l2 * l2 + m2}] = fmaf(R, {' + '.join(terms)}, dY[{l2 * l2 + m2}]);")
+            for m1 in range(2 * l1 + 1):
+                terms = [f"{A[m1, m2]} * Y{l2 * l2 + m2}" for m2 in range(2 * l2 + 1) if (m1, m2) in A]
+                if terms:
+                    ch_body.append(f"          gx{l1}_{m1} = fmaf(R, {' + '.join(terms)}, gx{l1}_{m1});")
+            ch_body.append("        }")
+        ch_body.append("        if (WANT_DX) {")
+        for m in range(2 * l1 + 1):
+            ch_body.append(f"          atomicAdd(dx{l1}_p + ((int64_t)snd * {2 * l1 + 1} + {m}) * C + ch, gx{l1}_{m});")
+        ch_body.append("        }")
+        ch_body.append("      }")
+
+    x_args = ", ".join(f"const float* __restrict__ x{l}_p" for l in range(lx + 1))
+    dm_args = ", ".join(f"const float* __restrict__ dmid{l}" for l in range(4))
+    dx_args = ", ".join(f"float* __restrict__ dx{l}_p" for l in range(lx + 1))
+    return f"""template <bool WANT_DX>
+__global__ void __launch_bounds__(128) gconv_bwd_L2(
+    int N, int C, int S, int I, SplineGrid grid, int sh_perm, int pair_sym,
+    const int* __restrict__ row_ptr, const int* __restrict__ senders, const float4* __restrict__ vec_len,
+    const int* __restrict__ species, const uint2* __restrict__ packed_table, const float4* __restrict__ density_table,
+    unsigned bias_shift, {x_args}, {dm_args}, const float* __restrict__ dD, {dx_args}, float* __restrict__ edge_dvec) {{
+  __shared__ float s_dy[4][16];
+  const int rcv = blockIdx.x, tid = threadIdx.x, wid = tid >> 5, lane = tid & 31, n_warps = blockDim.x >> 5;
+  if (rcv >= N) return;
+  const int sa = species[rcv];
+  const float dD1_r = dD ? __ldg(dD + rcv) : 0.0f;
+  const int eb = row_ptr[rcv], ee = row_ptr[rcv + 1];
+  for (int e = eb + wid; e < ee; e += n_warps) {{
+    const float4 vl = __ldg(vec_len + e);
+    const int snd = senders[e];
+    const float ux = sh_perm ? vl.y : vl.x, uy = sh_perm ? vl.z : vl.y, uz = sh_perm ? vl.x : vl.z;
+    const float dd = vl.w > loup::EPS_SH ? vl.w : loup::EPS_SH;
+    const float inv_d = 1.0f / dd;
+    const float nx = ux * inv_d, ny = uy * inv_d, nz = uz * inv_d;
+    float4 Yv[4];
+    loup::edge_sh16(ux, uy, uz, vl.w, Yv);
+    const float Y0=Yv[0].x, Y1=Yv[0].y, Y2=Yv[0].z, Y3=Yv[0].w, Y4=Yv[1].x, Y5=Yv[1].y, Y6=Yv[1].z, Y7=Yv[1].w,
+                Y8=Yv[2].x, Y9=Yv[2].y, Y10=Yv[2].z, Y11=Yv[2].w, Y12=Yv[3].x, Y13=Yv[3].y, Y14=Yv[3].z, Y15=Yv[3].w;
+    int iv; float t, sxi;
+    locate_spline(grid, vl.w, iv, t, sxi);
+    const float s = t - 0.5f, s_sq = s * s;
+    const float s1 = s * 0x1.0p-8f, s2 = s_sq * 0x1.0p-14f, s3 = s * s_sq * 0x1.0p-19f;
+    const float ds2 = (2.0f * s) * 0x1.0p-6f, ds3 = (3.0f * s_sq) * 0x1.0p-11f;
+    const float nw_hb = -1.5f * (1.0f + s1 + s2 + s3), ndt_hb = -1.5f * (1.0f + ds2 + ds3);
+    const int pr = pair_sym ? loup::sym_pair(species[snd], sa, S) : species[snd] * S + sa;
+    const int64_t slab = (int64_t)pr * I + iv;
+    const uint2* tq = packed_table + slab * ({n_paths} * (int64_t)C);
+    float dY[16];
+    #pragma unroll
+    for (int i = 0; i < 16; ++i) dY[i] = 0.0f;
+    float pull_R = 0.0f;
+    for (int ch = lane; ch < C; ch += 32) {{
+{chr(10).join(ch_body)}
+    }}
+    // 16-shuffle fold of dY[0..15] across 32 lanes (constant array indices so dY stays in registers!)
+    dY[0] = 0.0f;
+    float v8[8];
+    const bool p0 = (lane & 1) != 0;
+    #pragma unroll
+    for (int k = 0; k < 8; ++k) v8[k] = (p0 ? dY[2 * k + 1] : dY[2 * k]) + __shfl_xor_sync(0xffffffffu, p0 ? dY[2 * k] : dY[2 * k + 1], 1);
+    float v4[4];
+    const bool p1 = (lane & 2) != 0;
+    #pragma unroll
+    for (int k = 0; k < 4; ++k) v4[k] = (p1 ? v8[2 * k + 1] : v8[2 * k]) + __shfl_xor_sync(0xffffffffu, p1 ? v8[2 * k] : v8[2 * k + 1], 2);
+    float v2[2];
+    const bool p2 = (lane & 4) != 0;
+    #pragma unroll
+    for (int k = 0; k < 2; ++k) v2[k] = (p2 ? v4[2 * k + 1] : v4[2 * k]) + __shfl_xor_sync(0xffffffffu, p2 ? v4[2 * k] : v4[2 * k + 1], 4);
+    const bool p3 = (lane & 8) != 0;
+    float v0 = (p3 ? v2[1] : v2[0]) + __shfl_xor_sync(0xffffffffu, p3 ? v2[0] : v2[1], 8);
+    v0 += __shfl_xor_sync(0xffffffffu, v0, 16);
+    if (lane < 16) s_dy[wid][lane] = v0;
+    #pragma unroll
+    for (int off = 16; off > 0; off >>= 1) pull_R += __shfl_xor_sync(0xffffffffu, pull_R, off);
+    __syncwarp();
+    if (lane == 0) {{
+      float ddens = 0.0f;
+      if (dD && dD1_r != 0.0f) {{
+        const float4 dc = __ldg(density_table + slab);
+        ddens = fmaf(t, fmaf(3.0f * dc.w, t, 2.0f * dc.z), dc.y) * sxi;
+      }}
+      float gx, gy, gz;
+      sh16_grad(nx, ny, nz, s_dy[wid], gx, gy, gz);
+      const float dot = nx * gx + ny * gy + nz * gz;
+      const float rad = fmaf(pull_R, sxi * 0x1.0p-8f, dD1_r * ddens);
+      float fx = fmaf(nx, rad - dot * inv_d, gx * inv_d);
+      float fy = fmaf(ny, rad - dot * inv_d, gy * inv_d);
+      float fz = fmaf(nz, rad - dot * inv_d, gz * inv_d);
+      if (sh_perm) {{ const float tx = fx, ty = fy, tz = fz; fx = tz; fy = tx; fz = ty; }}
+      edge_dvec[(int64_t)e * 3 + 0] += fx;
+      edge_dvec[(int64_t)e * 3 + 1] += fy;
+      edge_dvec[(int64_t)e * 3 + 2] += fz;
+    }}
+  }}
+}}
+"""
 
 
 def emit_conv_bwd(lx):
-    paths, slot, count = conv_layout(lx)
-    L = []
-    L.append(f'extern "C" __global__ void __launch_bounds__(512) gconv_bwd_L{lx}(')
-    L.append("    int N, int C, int S, int I, int Q1, SplineGrid grid, int sh_perm, int pair_sym,")
-    L.append("    const int* __restrict__ row_ptr, const int* __restrict__ senders, const float4* __restrict__ vec_len,")
-    L.append("    const int* __restrict__ species, const float4* __restrict__ table,")
-    L.append(f"    {_ptr_args('x', range(lx + 1))},")
-    L.append(f"    {_ptr_args('dmid', range(4))}, const float* __restrict__ dD,")
-    L.append(f"    {_ptr_args('dx', range(lx + 1), const=False)}, int want_dx, float* __restrict__ edge_dvec) {{")
-    L.append("  const int a = blockIdx.x, c = threadIdx.x, lane = c & 31;")
-    L.append("  if (a >= N) return;")
-    L.append("  const int sa = species[a];")
-    # gradient of mid per path, kept in registers
-    G = {}
-    for k, (l1, l2, l3) in enumerate(paths):
-        _, j = slot[k]
-        n = count[l3]
-        for m3 in range(2 * l3 + 1):
-            G[k, m3] = f"G{k}_{m3}"
-            L.append(f"  const float G{k}_{m3} = __ldg(dmid{l3} + ((int64_t)a * {2 * l3 + 1} + {m3}) * {n} * C + {j} * C + c);")
-    L.append("  const float dDa = dD ? dD[a] : 0.0f;")
-    L.append("  const int e_end = row_ptr[a + 1];")
-    L.append("  for (int e = row_ptr[a]; e < e_end; ++e) {")
-    L.append("    const float4 vl = vec_len[e];")
-    L.append("    const int s = senders[e];")
-    L.append("    float4 Yv[4];")
-    L.append("    const float ux = sh_perm ? vl.y : vl.x, uy = sh_perm ? vl.z : vl.y, uz = sh_perm ? vl.x : vl.z;")
-    L.append("    loup::edge_sh16(ux, uy, uz, vl.w, Yv);")
-    L.append("    const float Y[16] = {Yv[0].x, Yv[0].y, Yv[0].z, Yv[0].w, Yv[1].x, Yv[1].y, Yv[1].z, Yv[1].w,")
-    L.append("                         Yv[2].x, Yv[2].y, Yv[2].z, Yv[2].w, Yv[3].x, Yv[3].y, Yv[3].z, Yv[3].w};")
-    L.append("    int iv; float t, sxi;")
-    L.append("    locate_spline(grid, vl.w, iv, t, sxi);")
-    L.append("    const int pr = pair_sym ? loup::sym_pair(species[s], sa, S) : species[s] * S + sa;")
-    L.append("    const float4* tp = table + ((int64_t)pr * I + iv) * Q1;")
-    for l in range(lx + 1):
-        for m in range(2 * l + 1):
-            L.append(f"    const float x{l}_{m} = __ldg(x{l} + ((int64_t)s * {2 * l + 1} + {m}) * C + c);")
-            L.append(f"    float gx{l}_{m} = 0.0f;")
-    L.append("    float dY[16];")
-    L.append("    #pragma unroll\n    for (int i = 0; i < 16; ++i) dY[i] = 0.0f;")
-    L.append("    float er = 0.0f;")
-    for k, (l1, l2, l3) in enumerate(paths):
-        W = w3j(l1, l2, l3)
-        L.append(f"    {{ const float4 cf = __ldg(tp + {k} * C + c);")
-        L.append("      const float R = fmaf(t, fmaf(t, fmaf(t, cf.w, cf.z), cf.y), cf.x);")
-        L.append("      const float dR = fmaf(t, fmaf(t, 3.0f * cf.w, 2.0f * cf.z), cf.y) * sxi;")
-        # A[m1][m2] = sum_m3 W G[m3]
-        A = {}
-        for m1 in range(2 * l1 + 1):
-            for m2 in range(2 * l2 + 1):
-                terms = [f"{lit(W[m1, m2, m3])} * {G[k, m3]}" for m3 in range(2 * l3 + 1) if abs(W[m1, m2, m3]) > 1e-12]
-                if terms:
-                    nm = f"A{m1}_{m2}"
-                    L.append(f"      const float {nm} = {' + '.join(terms)};")
-                    A[m1, m2] = nm
-        # tR = sum A x Y
-        tr = [f"{A[m1, m2]} * x{l1}_{m1} * Y[{l2 * l2 + m2}]" for (m1, m2) in A]
-        L.append(f"      const float tR = {' + '.join(tr) if tr else '0.0f'};")
-        L.append("      er = fmaf(tR, dR, er);")
-        for m2 in range(2 * l2 + 1):
-            terms = [f"{A[m1, m2]} * x{l1}_{m1}" for m1 in range(2 * l1 + 1) if (m1, m2) in A]
-            if terms:
-                L.append(f"      dY[{l2 * l2 + m2}] = fmaf(R, {' + '.join(terms)}, dY[{l2 * l2 + m2}]);")
-        for m1 in range(2 * l1 + 1):
-            terms = [f"{A[m1, m2]} * Y[{l2 * l2 + m2}]" for m2 in range(2 * l2 + 1) if (m1, m2) in A]
-            if terms:
-                L.append(f"      gx{l1}_{m1} = fmaf(R, {' + '.join(terms)}, gx{l1}_{m1});")
-        L.append("    }")
-    L.append("    if (c == 0 && dDa != 0.0f) {")
-    L.append("      const float4 cf = __ldg(tp + Q1 - 1);")
-    L.append("      er = fmaf(dDa, fmaf(t, fmaf(t, 3.0f * cf.w, 2.0f * cf.z), cf.y) * sxi, er);")
-    L.append("    }")
-    L.append("    if (want_dx) {")
-    for l in range(lx + 1):
-        for m in range(2 * l + 1):
-            L.append(f"      atomicAdd(dx{l} + ((int64_t)s * {2 * l + 1} + {m}) * C + c, gx{l}_{m});")
-    L.append("    }")
-    L.append("    // This thread's share of dE/dvec (radial part + SH part through the unit vector), reduced over the warp")
-    L.append("    // and added once per warp: no block-wide barrier per edge.")
-    L.append("    const float dd = vl.w > loup::EPS_SH ? vl.w : loup::EPS_SH;")
-    L.append("    const float inv_d = 1.0f / dd;")
-    L.append("    const float x = ux * inv_d, y = uy * inv_d, z = uz * inv_d;")
-    L.append("    dY[0] = 0.0f;")
-    L.append("    float gx, gy, gz;")
-    L.append("    sh16_grad(x, y, z, dY, gx, gy, gz);")
-    L.append("    const float dot = x * gx + y * gy + z * gz;")
-    L.append("    float fx = x * er + (gx - x * dot) * inv_d;")
-    L.append("    float fy = y * er + (gy - y * dot) * inv_d;")
-    L.append("    float fz = z * er + (gz - z * dot) * inv_d;")
-    L.append("    #pragma unroll")
-    L.append("    for (int off = 16; off > 0; off >>= 1) {")
-    L.append("      fx += __shfl_xor_sync(0xffffffffu, fx, off);")
-    L.append("      fy += __shfl_xor_sync(0xffffffffu, fy, off);")
-    L.append("      fz += __shfl_xor_sync(0xffffffffu, fz, off);")
-    L.append("    }")
-    L.append("    if (lane == 0) {")
-    L.append("      if (sh_perm) { const float tx = fx, ty = fy, tz = fz; fx = tz; fy = tx; fz = ty; }")
-    L.append("      atomicAdd(edge_dvec + (int64_t)e * 3 + 0, fx);")
-    L.append("      atomicAdd(edge_dvec + (int64_t)e * 3 + 1, fy);")
-    L.append("      atomicAdd(edge_dvec + (int64_t)e * 3 + 2, fz);")
-    L.append("    }")
-    L.append("  }")
-    L.append("}")
-    return "\n".join(L) + "\n"
-
+    return emit_conv_bwd_L2() if lx == 2 else emit_conv_bwd_L01(lx)
 
 # ----------------------------------------------------------------------------------------------- products
 def _ssa(lines, i, op):

@@ -33,6 +33,9 @@ struct GenericLayer {
     const GProdKernels* prod = nullptr;
     // weights (device)
     float4* table = nullptr;
+    uint2* packed_table = nullptr;
+    float4* density_table = nullptr;
+    unsigned cubic_bias_shift = 0;
     float *W_up[3] = {}, *W_lin[4] = {}, *W_res[3] = {}, *W_2[4] = {}, *W_skip_msg[4] = {}, *W_sc[3] = {}, *W_p[3] = {};
     float* prod_w = nullptr;
     float *ro_w = nullptr, *ro_W1 = nullptr, *ro_W1_sc = nullptr, *ro_b1 = nullptr, *ro_W2 = nullptr,
@@ -298,134 +301,172 @@ __global__ void assemble_forces_kernel(const int* __restrict__ E_dev, const floa
 // has species s of col_j(r) Y_lm, with col the radial chain's columns [h c, c] (j < J - 1); column J - 1 is the edge
 // density, summed into D. One block per receiver, one thread per column; a receiver's edges are grouped by ascending
 // sender species (the neighbour list's contract), so each species slot is written once (zeros if it has no edge).
-__global__ void first_fwd_kernel(int N, int S, int I, int J, SplineGrid grid, int sh_perm, int pair_sym,
-                                 const int* __restrict__ row_ptr, const int* __restrict__ senders,
-                                 const float4* __restrict__ vec_len, const int* __restrict__ species,
-                                 const float4* __restrict__ table, float* __restrict__ s0, float* __restrict__ s1,
-                                 float* __restrict__ s2, float* __restrict__ s3, float* __restrict__ D) {
-    const int a = blockIdx.x, j = threadIdx.x;
-    if (a >= N || j >= J) return;
+__global__ void __launch_bounds__(256) first_fwd_kernel(
+    int N, int S, int I, int J, SplineGrid grid, int sh_perm, int pair_sym,
+    const int* __restrict__ row_ptr, const int* __restrict__ senders, const float4* __restrict__ vec_len,
+    const int* __restrict__ species, const float4* __restrict__ table,
+    float* __restrict__ s0, float* __restrict__ s1, float* __restrict__ s2, float* __restrict__ s3, float* __restrict__ D) {
+    __shared__ int s_iv[32], s_ee;
+    __shared__ float s_t[32];
+    __shared__ __align__(16) float s_sh[32 * 16];
+    const int a = blockIdx.x, tid = threadIdx.x;
+    if (a >= N) return;
     const int Jp = J - 1, K = S * Jp, sa = species[a];
-    float* outs[4] = {s0, s1, s2, s3};
     const int e_end = row_ptr[a + 1];
-    int e = row_ptr[a];
+    int e_cur = row_ptr[a];
     float dsum = 0.0f;
     for (int s = 0; s < S; ++s) {
+        if (tid < 32) {
+            int p = e_cur;
+            while (p < e_end) {
+                const int idx = p + tid;
+                const bool ok = (idx < e_end) && (species[senders[idx]] == s);
+                const unsigned mask = __ballot_sync(0xffffffffu, ok);
+                if (mask != 0xffffffffu) { p += __ffs(~mask) - 1; break; }
+                p += 32;
+            }
+            if (p > e_end) p = e_end;
+            if (tid == 0) s_ee = p;
+        }
+        __syncthreads();
+        const int e_s_end = s_ee;
         float acc[16];
         #pragma unroll
         for (int m = 0; m < 16; ++m) acc[m] = 0.0f;
         const int pr = pair_sym ? loup::sym_pair(s, sa, S) : s * S + sa;
-        for (; e < e_end && species[senders[e]] == s; ++e) {
-            const float4 vl = vec_len[e];
-            int iv;
-            float t, sxi;
-            locate_spline(grid, vl.w, iv, t, sxi);
-            const float4 cf = __ldg(table + ((int64_t)pr * I + iv) * J + j);
-            const float v = fmaf(t, fmaf(t, fmaf(t, cf.w, cf.z), cf.y), cf.x);
-            if (j == Jp) {
-                dsum += v;
-                continue;
+        for (int base = e_cur; base < e_s_end; base += 32) {
+            const int cnt = (e_s_end - base < 32) ? (e_s_end - base) : 32;
+            if (tid < cnt) {
+                const float4 vl = __ldg(vec_len + base + tid);
+                int iv; float t, sxi;
+                locate_spline(grid, vl.w, iv, t, sxi);
+                s_iv[tid] = iv;
+                s_t[tid] = t;
             }
-            float4 Yv[4];
-            if (sh_perm) loup::edge_sh16(vl.y, vl.z, vl.x, vl.w, Yv);
-            else loup::edge_sh16(vl.x, vl.y, vl.z, vl.w, Yv);
-            const float Y[16] = {Yv[0].x, Yv[0].y, Yv[0].z, Yv[0].w, Yv[1].x, Yv[1].y, Yv[1].z, Yv[1].w,
-                                 Yv[2].x, Yv[2].y, Yv[2].z, Yv[2].w, Yv[3].x, Yv[3].y, Yv[3].z, Yv[3].w};
-            #pragma unroll
-            for (int m = 0; m < 16; ++m) acc[m] = fmaf(v, Y[m], acc[m]);
+            if (tid >= 32 && tid - 32 < cnt) {
+                const float4 vl = __ldg(vec_len + base + (tid - 32));
+                if (sh_perm) loup::edge_sh16(vl.y, vl.z, vl.x, vl.w, reinterpret_cast<float4*>(s_sh + (tid - 32) * 16));
+                else         loup::edge_sh16(vl.x, vl.y, vl.z, vl.w, reinterpret_cast<float4*>(s_sh + (tid - 32) * 16));
+            }
+            __syncthreads();
+            if (tid < J) {
+                for (int k = 0; k < cnt; ++k) {
+                    const float4 cf = __ldg(table + ((int64_t)pr * I + s_iv[k]) * J + tid);
+                    const float t = s_t[k];
+                    const float v = fmaf(t, fmaf(t, fmaf(t, cf.w, cf.z), cf.y), cf.x);
+                    if (tid == Jp) {
+                        dsum += v;
+                    } else {
+                        const float* sh = s_sh + k * 16;
+                        #pragma unroll
+                        for (int m = 0; m < 16; ++m) acc[m] = fmaf(v, sh[m], acc[m]);
+                    }
+                }
+            }
+            __syncthreads();
         }
-        if (j < Jp) {
+        if (tid < Jp) {
+            s0[(int64_t)a * K + s * Jp + tid] = acc[0];
             #pragma unroll
-            for (int l = 0; l < 4; ++l)
-                #pragma unroll
-                for (int m = 0; m < 2 * l + 1; ++m)
-                    outs[l][((int64_t)a * (2 * l + 1) + m) * K + s * Jp + j] = acc[l * l + m];
+            for (int m = 0; m < 3; ++m) s1[((int64_t)a * 3 + m) * K + s * Jp + tid] = acc[1 + m];
+            #pragma unroll
+            for (int m = 0; m < 5; ++m) s2[((int64_t)a * 5 + m) * K + s * Jp + tid] = acc[4 + m];
+            #pragma unroll
+            for (int m = 0; m < 7; ++m) s3[((int64_t)a * 7 + m) * K + s * Jp + tid] = acc[9 + m];
         }
+        e_cur = e_s_end;
     }
-    if (j == Jp) D[a] = dsum;
+    if (tid == Jp) D[a] = dsum;
 }
 
-// Reverse of first_fwd_kernel: per edge, dE/dcol_j = sum_m dS0[j][m] Y_m gives the radial derivative through the
-// table slope, dE/dY_m = sum_j dS0[j][m] col_j the angular part; each thread turns its share into dE/dvec, reduced
-// over the warp and added once per warp.
-__global__ void first_bwd_kernel(int N, int S, int I, int J, SplineGrid grid, int sh_perm, int pair_sym,
-                                 const int* __restrict__ row_ptr, const int* __restrict__ senders,
-                                 const float4* __restrict__ vec_len, const int* __restrict__ species,
-                                 const float4* __restrict__ table, const float* __restrict__ g0,
-                                 const float* __restrict__ g1, const float* __restrict__ g2,
-                                 const float* __restrict__ g3, const float* __restrict__ dD,
-                                 float* __restrict__ edge_dvec) {
-    const int a = blockIdx.x, j = threadIdx.x, lane = threadIdx.x & 31;
+__global__ void __launch_bounds__(256) first_bwd_kernel(
+    int N, int S, int I, int J, SplineGrid grid, int sh_perm, int pair_sym,
+    const int* __restrict__ row_ptr, const int* __restrict__ senders, const float4* __restrict__ vec_len,
+    const int* __restrict__ species, const float4* __restrict__ table,
+    const float* __restrict__ g0, const float* __restrict__ g1, const float* __restrict__ g2, const float* __restrict__ g3,
+    const float* __restrict__ dD, float* __restrict__ edge_dvec) {
+    __shared__ float s_dy[8][16];
+    const int a = blockIdx.x, tid = threadIdx.x, wid = tid >> 5, lane = tid & 31, n_warps = blockDim.x >> 5;
     if (a >= N) return;
     const int Jp = J - 1, K = S * Jp, sa = species[a];
-    const float* gs[4] = {g0, g1, g2, g3};
-    const bool active = j < J;
-    const float dDa = (dD && j == Jp) ? dD[a] : 0.0f;
-    const int e_end = row_ptr[a + 1];
-    int e = row_ptr[a];
-    for (int s = 0; s < S; ++s) {
-        float G[16];
-        #pragma unroll
-        for (int l = 0; l < 4; ++l)
-            #pragma unroll
-            for (int m = 0; m < 2 * l + 1; ++m)
-                G[l * l + m] = (active && j < Jp) ? gs[l][((int64_t)a * (2 * l + 1) + m) * K + s * Jp + j] : 0.0f;
+    const float dDa = dD ? __ldg(dD + a) : 0.0f;
+    const int eb = row_ptr[a], ee = row_ptr[a + 1];
+    for (int e = eb + wid; e < ee; e += n_warps) {
+        const float4 vl = __ldg(vec_len + e);
+        const int s = species[senders[e]];
         const int pr = pair_sym ? loup::sym_pair(s, sa, S) : s * S + sa;
-        // every thread of the block walks the same edges (warp-uniform loop bounds for the shuffles)
-        for (; e < e_end && species[senders[e]] == s; ++e) {
-            const float4 vl = vec_len[e];
-            int iv;
-            float t, sxi;
-            locate_spline(grid, vl.w, iv, t, sxi);
-            float v = 0.0f, dv = 0.0f;
-            if (active) {
-                const float4 cf = __ldg(table + ((int64_t)pr * I + iv) * J + j);
-                v = fmaf(t, fmaf(t, fmaf(t, cf.w, cf.z), cf.y), cf.x);
-                dv = fmaf(t, fmaf(t, 3.0f * cf.w, 2.0f * cf.z), cf.y) * sxi;
+        int iv; float t, sxi;
+        locate_spline(grid, vl.w, iv, t, sxi);
+        const float ux = sh_perm ? vl.y : vl.x, uy = sh_perm ? vl.z : vl.y, uz = sh_perm ? vl.x : vl.z;
+        float4 Yv[4];
+        loup::edge_sh16(ux, uy, uz, vl.w, Yv);
+        const float Y[16] = {Yv[0].x, Yv[0].y, Yv[0].z, Yv[0].w, Yv[1].x, Yv[1].y, Yv[1].z, Yv[1].w,
+                             Yv[2].x, Yv[2].y, Yv[2].z, Yv[2].w, Yv[3].x, Yv[3].y, Yv[3].z, Yv[3].w};
+        float dY[16];
+        #pragma unroll
+        for (int m = 0; m < 16; ++m) dY[m] = 0.0f;
+        float er = 0.0f;
+        for (int j = lane; j < J; j += 32) {
+            const float4 cf = __ldg(table + ((int64_t)pr * I + iv) * J + j);
+            const float v = fmaf(t, fmaf(t, fmaf(t, cf.w, cf.z), cf.y), cf.x);
+            const float dv = fmaf(t, fmaf(t, 3.0f * cf.w, 2.0f * cf.z), cf.y) * sxi;
+            if (j == Jp) {
+                er = fmaf(dDa, dv, er);
+            } else {
+                float G[16];
+                G[0] = __ldg(g0 + (int64_t)a * K + s * Jp + j);
+                #pragma unroll
+                for (int m = 0; m < 3; ++m) G[1 + m] = __ldg(g1 + ((int64_t)a * 3 + m) * K + s * Jp + j);
+                #pragma unroll
+                for (int m = 0; m < 5; ++m) G[4 + m] = __ldg(g2 + ((int64_t)a * 5 + m) * K + s * Jp + j);
+                #pragma unroll
+                for (int m = 0; m < 7; ++m) G[9 + m] = __ldg(g3 + ((int64_t)a * 7 + m) * K + s * Jp + j);
+                float gcol = 0.0f;
+                #pragma unroll
+                for (int m = 0; m < 16; ++m) {
+                    gcol = fmaf(G[m], Y[m], gcol);
+                    dY[m] = fmaf(G[m], v, dY[m]);
+                }
+                er = fmaf(gcol, dv, er);
             }
-            const float ux = sh_perm ? vl.y : vl.x, uy = sh_perm ? vl.z : vl.y, uz = sh_perm ? vl.x : vl.z;
-            float4 Yv[4];
-            loup::edge_sh16(ux, uy, uz, vl.w, Yv);
-            const float Y[16] = {Yv[0].x, Yv[0].y, Yv[0].z, Yv[0].w, Yv[1].x, Yv[1].y, Yv[1].z, Yv[1].w,
-                                 Yv[2].x, Yv[2].y, Yv[2].z, Yv[2].w, Yv[3].x, Yv[3].y, Yv[3].z, Yv[3].w};
-            float gcol = 0.0f, dY[16];
-            #pragma unroll
-            for (int m = 0; m < 16; ++m) {
-                gcol = fmaf(G[m], Y[m], gcol);
-                dY[m] = G[m] * v;
-            }
-            float er = gcol * dv + dDa * dv;
-            dY[0] = 0.0f;
+        }
+        dY[0] = 0.0f;
+        float v8[8];
+        const bool p0 = (lane & 1) != 0;
+        #pragma unroll
+        for (int k = 0; k < 8; ++k) v8[k] = (p0 ? dY[2 * k + 1] : dY[2 * k]) + __shfl_xor_sync(0xffffffffu, p0 ? dY[2 * k] : dY[2 * k + 1], 1);
+        float v4[4];
+        const bool p1 = (lane & 2) != 0;
+        #pragma unroll
+        for (int k = 0; k < 4; ++k) v4[k] = (p1 ? v8[2 * k + 1] : v8[2 * k]) + __shfl_xor_sync(0xffffffffu, p1 ? v8[2 * k] : v8[2 * k + 1], 2);
+        float v2[2];
+        const bool p2 = (lane & 4) != 0;
+        #pragma unroll
+        for (int k = 0; k < 2; ++k) v2[k] = (p2 ? v4[2 * k + 1] : v4[2 * k]) + __shfl_xor_sync(0xffffffffu, p2 ? v4[2 * k] : v4[2 * k + 1], 4);
+        const bool p3 = (lane & 8) != 0;
+        float v0 = (p3 ? v2[1] : v2[0]) + __shfl_xor_sync(0xffffffffu, p3 ? v2[0] : v2[1], 8);
+        v0 += __shfl_xor_sync(0xffffffffu, v0, 16);
+        if (lane < 16) s_dy[wid][lane] = v0;
+        #pragma unroll
+        for (int off = 16; off > 0; off >>= 1) er += __shfl_xor_sync(0xffffffffu, er, off);
+        __syncwarp();
+        if (lane == 0) {
             const float dd = vl.w > loup::EPS_SH ? vl.w : loup::EPS_SH;
             const float inv_d = 1.0f / dd;
             const float x = ux * inv_d, y = uy * inv_d, z = uz * inv_d;
             float gx, gy, gz;
-            sh16_grad(x, y, z, dY, gx, gy, gz);
+            ::sh16_grad(x, y, z, s_dy[wid], gx, gy, gz);
             const float dot = x * gx + y * gy + z * gz;
             float fx = x * er + (gx - x * dot) * inv_d;
             float fy = y * er + (gy - y * dot) * inv_d;
             float fz = z * er + (gz - z * dot) * inv_d;
-            #pragma unroll
-            for (int off = 16; off > 0; off >>= 1) {
-                fx += __shfl_xor_sync(0xffffffffu, fx, off);
-                fy += __shfl_xor_sync(0xffffffffu, fy, off);
-                fz += __shfl_xor_sync(0xffffffffu, fz, off);
-            }
-            if (lane == 0) {
-                if (sh_perm) {
-                    const float tx = fx, ty = fy, tz = fz;
-                    fx = tz;
-                    fy = tx;
-                    fz = ty;
-                }
-                atomicAdd(edge_dvec + (int64_t)e * 3 + 0, fx);
-                atomicAdd(edge_dvec + (int64_t)e * 3 + 1, fy);
-                atomicAdd(edge_dvec + (int64_t)e * 3 + 2, fz);
-            }
+            if (sh_perm) { const float tx = fx, ty = fy, tz = fz; fx = tz; fy = tx; fz = ty; }
+            edge_dvec[(int64_t)e * 3 + 0] += fx;
+            edge_dvec[(int64_t)e * 3 + 1] += fy;
+            edge_dvec[(int64_t)e * 3 + 2] += fz;
         }
     }
 }
-
 __global__ void zero_edge_kernel(const int* __restrict__ E_dev, float* __restrict__ p) {
     const int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i < 3 * *E_dev) p[i] = 0.0f;
@@ -615,9 +656,77 @@ void GenericModel::load(const Bundle& b) {
             if (off != L->intervals) throw std::runtime_error("generic bundle: spline intervals mismatch");
             const int Ptab = L->pair_sym ? S_ * (S_ + 1) / 2 : P;
             const std::vector<float> tab = b.f32(p + "spline", {Ptab, L->intervals, L->Q1, 4});
-            std::vector<float4> host(tab.size() / 4);
-            memcpy(host.data(), tab.data(), tab.size() * sizeof(float));
-            L->table = upload(W, host);
+            if (L->first_hidden) {
+                std::vector<float4> host(tab.size() / 4);
+                memcpy(host.data(), tab.data(), tab.size() * sizeof(float));
+                L->table = upload(W, host);
+            } else {
+                const int Q = L->n_paths * L->C_x;
+                const size_t PI = (size_t)Ptab * L->intervals;
+                const size_t sp_n = PI * Q;
+                const float4* src = reinterpret_cast<const float4*>(tab.data());
+                if (L->kind >= 2) {
+                    std::vector<float4> dens(PI);
+                    for (size_t pi = 0; pi < PI; ++pi) dens[pi] = src[pi * L->Q1 + Q];
+                    L->density_table = upload(W, dens);
+                }
+                int emin = 1000, emax = -1000;
+                std::vector<int> exps(sp_n, 0);
+                for (size_t pi = 0; pi < PI; ++pi) {
+                    for (int q = 0; q < Q; ++q) {
+                        const float4 cf = src[pi * L->Q1 + q];
+                        double a0 = (double)cf.x + 0.5 * (double)cf.y + 0.25 * (double)cf.z + 0.125 * (double)cf.w;
+                        double a1 = (double)cf.y + (double)cf.z + 0.75 * (double)cf.w;
+                        double a2 = (double)cf.z + 1.5 * (double)cf.w;
+                        double a3 = (double)cf.w;
+                        double top = std::max({std::abs(a0), std::abs(a1) * 256.0, std::abs(a2) * 16384.0,
+                                               std::abs(a3) * 524288.0});
+                        const size_t idx = pi * Q + q;
+                        if (top > 0.0) {
+                            int e = (int)std::floor(std::log2(top)) + 1;
+                            exps[idx] = e;
+                            if (e < emin) emin = e;
+                            if (e > emax) emax = e;
+                        } else {
+                            exps[idx] = 1000000;
+                        }
+                    }
+                }
+                if (emin > emax) emin = emax = 0;
+                if (emax - emin > 31) emin = emax - 31;
+                if (emin < -108 || emax > 125)
+                    throw std::runtime_error("generic spline coefficients outside CUBIC_PACKED8 exponent range");
+                L->cubic_bias_shift = (unsigned)(128 + emin) << 23;
+                std::vector<uint2> host_cubic(sp_n);
+                auto qval = [](double v, int ei, int sh, int nb) -> uint32_t {
+                    int64_t lim = (int64_t(1) << (nb - 1)) - 1;
+                    double step = std::ldexp(1.0, ei - sh - nb + 1);
+                    int64_t q = std::llround(v / step);
+                    if (q > lim) q = lim;
+                    else if (q < -lim) q = -lim;
+                    return (uint32_t)(q + (int64_t(1) << (nb - 1)));
+                };
+                auto rotr = [](uint32_t v, int k) { return (v >> k) | (v << (32 - k)); };
+                for (size_t pi = 0; pi < PI; ++pi) {
+                    for (int q = 0; q < Q; ++q) {
+                        const float4 cf = src[pi * L->Q1 + q];
+                        const size_t idx = pi * Q + q;
+                        double a0 = (double)cf.x + 0.5 * (double)cf.y + 0.25 * (double)cf.z + 0.125 * (double)cf.w;
+                        double a1 = (double)cf.y + (double)cf.z + 0.75 * (double)cf.w;
+                        double a2 = (double)cf.z + 1.5 * (double)cf.w;
+                        double a3 = (double)cf.w;
+                        int ei = (exps[idx] == 1000000 || exps[idx] < emin) ? emin : exps[idx];
+                        uint32_t u0 = qval(a0, ei, 0, 20);
+                        uint32_t u1 = qval(a1, ei, 8, 19);
+                        uint32_t u2 = qval(a2, ei, 14, 12);
+                        uint32_t u3 = qval(a3, ei, 19, 8);
+                        uint32_t eb_code = (uint32_t)(ei - emin);
+                        host_cubic[idx].x = (u0 << 3) | rotr(u2 << 11, 20);
+                        host_cubic[idx].y = (u1 << 4) | rotr(u3 << 15, 19) | (eb_code << 23);
+                    }
+                }
+                L->packed_table = upload(W, host_cubic);
+            }
         }
         // product
         {
@@ -816,33 +925,82 @@ void GenericModel::ensure_edges(int E_cap) {
 // ------------------------------------------------------------------------------------------------- force pass
 namespace {
 
-void launch_conv_fwd(int lx, dim3 grid, dim3 block, cudaStream_t st, int N, int C, int S, int I, int Q1,
-                     const SplineGrid& sg, int perm, int psym, const int* rp, const int* snd, const float4* vl, const int* sp,
-                     const float4* tab, float* const* x, float* const* mid, float* D) {
-    if (lx == 0)
-        gconv_fwd_L0<<<grid, block, 0, st>>>(N, C, S, I, Q1, sg, perm, psym, rp, snd, vl, sp, tab, x[0], mid[0], mid[1],
-                                             mid[2], mid[3], D);
-    else if (lx == 1)
-        gconv_fwd_L1<<<grid, block, 0, st>>>(N, C, S, I, Q1, sg, perm, psym, rp, snd, vl, sp, tab, x[0], x[1], mid[0],
-                                             mid[1], mid[2], mid[3], D);
-    else
-        gconv_fwd_L2<<<grid, block, 0, st>>>(N, C, S, I, Q1, sg, perm, psym, rp, snd, vl, sp, tab, x[0], x[1], x[2],
-                                             mid[0], mid[1], mid[2], mid[3], D);
+void launch_conv_fwd(int lx, cudaStream_t st, int N, int C, int S, int I, const SplineGrid& sg, int perm, int psym,
+                     const int* rp, const int* snd, const float4* vl, const int* sp, const uint2* packed,
+                     const float4* dens, unsigned bias_shift, float* const* x, float* const* mid, float* D) {
+    if (lx == 0) {
+        if (C == 128)
+            gconv_fwd_L0<4, true><<<(N + 3) / 4, 512, 0, st>>>(N, C, S, I, sg, perm, psym, rp, snd, vl, sp, packed,
+                                                                dens, bias_shift, x[0], mid[0], mid[1], mid[2], mid[3], D);
+        else if (C <= 256)
+            gconv_fwd_L0<1, false><<<N, C, 0, st>>>(N, C, S, I, sg, perm, psym, rp, snd, vl, sp, packed, dens,
+                                                    bias_shift, x[0], mid[0], mid[1], mid[2], mid[3], D);
+        else
+            gconv_fwd_L0<1, false, 512><<<N, C, 0, st>>>(N, C, S, I, sg, perm, psym, rp, snd, vl, sp, packed, dens,
+                                                         bias_shift, x[0], mid[0], mid[1], mid[2], mid[3], D);
+    } else if (lx == 1) {
+        if (C == 128)
+            gconv_fwd_L1<2, true><<<(N + 1) / 2, 256, 0, st>>>(N, C, S, I, sg, perm, psym, rp, snd, vl, sp, packed,
+                                                                dens, bias_shift, x[0], x[1], mid[0], mid[1], mid[2],
+                                                                mid[3], D);
+        else if (C <= 256)
+            gconv_fwd_L1<1, false><<<N, C, 0, st>>>(N, C, S, I, sg, perm, psym, rp, snd, vl, sp, packed, dens,
+                                                    bias_shift, x[0], x[1], mid[0], mid[1], mid[2], mid[3], D);
+        else
+            gconv_fwd_L1<1, false, 512><<<N, C, 0, st>>>(N, C, S, I, sg, perm, psym, rp, snd, vl, sp, packed, dens,
+                                                         bias_shift, x[0], x[1], mid[0], mid[1], mid[2], mid[3], D);
+    } else {
+        if (C <= 256)
+            gconv_fwd_L2<1, true><<<N, C, 0, st>>>(N, C, S, I, sg, perm, psym, rp, snd, vl, sp, packed, dens,
+                                                   bias_shift, x[0], x[1], x[2], mid[0], mid[1], mid[2], mid[3], D);
+        else
+            gconv_fwd_L2<1, false, 512><<<N, C, 0, st>>>(N, C, S, I, sg, perm, psym, rp, snd, vl, sp, packed, dens,
+                                                         bias_shift, x[0], x[1], x[2], mid[0], mid[1], mid[2], mid[3], D);
+    }
 }
 
-void launch_conv_bwd(int lx, dim3 grid, dim3 block, cudaStream_t st, int N, int C, int S, int I, int Q1,
-                     const SplineGrid& sg, int perm, int psym, const int* rp, const int* snd, const float4* vl, const int* sp,
-                     const float4* tab, float* const* x, float* const* dmid, const float* dD, float* const* dx,
-                     int want_dx, float* edge_dvec) {
-    if (lx == 0)
-        gconv_bwd_L0<<<grid, block, 0, st>>>(N, C, S, I, Q1, sg, perm, psym, rp, snd, vl, sp, tab, x[0], dmid[0], dmid[1],
-                                             dmid[2], dmid[3], dD, dx[0], want_dx, edge_dvec);
-    else if (lx == 1)
-        gconv_bwd_L1<<<grid, block, 0, st>>>(N, C, S, I, Q1, sg, perm, psym, rp, snd, vl, sp, tab, x[0], x[1], dmid[0],
-                                             dmid[1], dmid[2], dmid[3], dD, dx[0], dx[1], want_dx, edge_dvec);
-    else
-        gconv_bwd_L2<<<grid, block, 0, st>>>(N, C, S, I, Q1, sg, perm, psym, rp, snd, vl, sp, tab, x[0], x[1], x[2],
-                                             dmid[0], dmid[1], dmid[2], dmid[3], dD, dx[0], dx[1], dx[2], want_dx, edge_dvec);
+void launch_conv_bwd(int lx, cudaStream_t st, int N, int C, int S, int I, const SplineGrid& sg, int perm, int psym,
+                     const int* rp, const int* snd, const float4* vl, const int* sp, const uint2* packed,
+                     const float4* dens, unsigned bias_shift, float* const* x, float* const* dmid, const float* dD,
+                     float* const* dx, bool want_dx, float* edge_dvec) {
+    if (lx == 0) {
+        const size_t smem = (size_t)C * 20 * sizeof(float);
+        if (smem > 48000) {
+            auto fn = want_dx ? gconv_bwd_L0<true> : gconv_bwd_L0<false>;
+            CUDA_CHECK_THROW(cudaFuncSetAttribute((const void*)fn, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)smem));
+        }
+        if (want_dx)
+            gconv_bwd_L0<true><<<N, 256, smem, st>>>(N, C, S, I, sg, perm, psym, rp, snd, vl, sp, packed, dens,
+                                                     bias_shift, x[0], dmid[0], dmid[1], dmid[2], dmid[3], dD, dx[0],
+                                                     edge_dvec);
+        else
+            gconv_bwd_L0<false><<<N, 256, smem, st>>>(N, C, S, I, sg, perm, psym, rp, snd, vl, sp, packed, dens,
+                                                      bias_shift, x[0], dmid[0], dmid[1], dmid[2], dmid[3], dD, dx[0],
+                                                      edge_dvec);
+    } else if (lx == 1) {
+        const size_t smem = (size_t)C * 44 * sizeof(float);
+        if (smem > 48000) {
+            auto fn = want_dx ? gconv_bwd_L1<true> : gconv_bwd_L1<false>;
+            CUDA_CHECK_THROW(cudaFuncSetAttribute((const void*)fn, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)smem));
+        }
+        if (want_dx)
+            gconv_bwd_L1<true><<<N, 256, smem, st>>>(N, C, S, I, sg, perm, psym, rp, snd, vl, sp, packed, dens,
+                                                     bias_shift, x[0], x[1], dmid[0], dmid[1], dmid[2], dmid[3], dD,
+                                                     dx[0], dx[1], edge_dvec);
+        else
+            gconv_bwd_L1<false><<<N, 256, smem, st>>>(N, C, S, I, sg, perm, psym, rp, snd, vl, sp, packed, dens,
+                                                      bias_shift, x[0], x[1], dmid[0], dmid[1], dmid[2], dmid[3], dD,
+                                                      dx[0], dx[1], edge_dvec);
+    } else {
+        if (want_dx)
+            gconv_bwd_L2<true><<<N, 128, 0, st>>>(N, C, S, I, sg, perm, psym, rp, snd, vl, sp, packed, dens,
+                                                  bias_shift, x[0], x[1], x[2], dmid[0], dmid[1], dmid[2], dmid[3], dD,
+                                                  dx[0], dx[1], dx[2], edge_dvec);
+        else
+            gconv_bwd_L2<false><<<N, 128, 0, st>>>(N, C, S, I, sg, perm, psym, rp, snd, vl, sp, packed, dens,
+                                                   bias_shift, x[0], x[1], x[2], dmid[0], dmid[1], dmid[2], dmid[3], dD,
+                                                   dx[0], dx[1], dx[2], edge_dvec);
+    }
 }
 
 void launch_prod(const GProdKernels* k, bool backward, cudaStream_t st, int N, int C, float* const* m, const float* D,
@@ -908,10 +1066,9 @@ void GenericModel::record(const GenericPassInputs& in) {
         }
         if (L->first_hidden) {
             const int Kh = S * (L->J - 1);
-            first_fwd_kernel<<<N, ((L->J + 31) / 32) * 32, 0, st>>>(N, S, L->intervals, L->J, L->grid, sh_perm_,
-                                                                   L->pair_sym, in.act_row_ptr, in.act_senders,
-                                                                   in.act_vec_len, in.species, L->table, L->S0[0],
-                                                                   L->S0[1], L->S0[2], L->S0[3], L->D);
+            first_fwd_kernel<<<N, ((std::max(L->J, 64) + 31) / 32) * 32, 0, st>>>(
+                N, S, L->intervals, L->J, L->grid, sh_perm_, L->pair_sym, in.act_row_ptr, in.act_senders,
+                in.act_vec_len, in.species, L->table, L->S0[0], L->S0[1], L->S0[2], L->S0[3], L->D);
             if (L->skip_folded) {
                 fork();
                 for (int l = 0; l < 4; ++l)
@@ -934,9 +1091,9 @@ void GenericModel::record(const GenericPassInputs& in) {
                 join();
             }
         } else {
-            launch_conv_fwd(L->lmax_x, dim3(N), dim3(Cx), st, N, Cx, S, L->intervals, L->Q1, L->grid, sh_perm_,
-                            L->pair_sym, in.act_row_ptr, in.act_senders, in.act_vec_len, in.species, L->table, L->x,
-                            L->mid, L->D);
+            launch_conv_fwd(L->lmax_x, st, N, Cx, S, L->intervals, L->grid, sh_perm_, L->pair_sym, in.act_row_ptr,
+                            in.act_senders, in.act_vec_len, in.species, L->packed_table, L->density_table,
+                            L->cubic_bias_shift, L->x, L->mid, L->D);
             if (L->skip_folded) {
                 fork();
                 for (int l = 0; l < 4; ++l)
@@ -1138,11 +1295,10 @@ void GenericModel::record(const GenericPassInputs& in) {
                 }
                 join();
             }
-            first_bwd_kernel<<<N, ((L->J + 31) / 32) * 32, 0, st>>>(N, S, L->intervals, L->J, L->grid, sh_perm_,
-                                                                   L->pair_sym, in.act_row_ptr, in.act_senders,
-                                                                   in.act_vec_len, in.species, L->table, L->S0[0],
-                                                                   L->S0[1], L->S0[2], L->S0[3],
-                                                                   density ? L->dD : nullptr, d_edge_dvec_);
+            first_bwd_kernel<<<N, 256, 0, st>>>(N, S, L->intervals, L->J, L->grid, sh_perm_, L->pair_sym,
+                                                in.act_row_ptr, in.act_senders, in.act_vec_len, in.species, L->table,
+                                                L->S0[0], L->S0[1], L->S0[2], L->S0[3], density ? L->dD : nullptr,
+                                                d_edge_dvec_);
             continue;
         }
         // dmid (aliases mid: the forward values are dead) = dlin @ W_lin^T (or dmsgf @ W_lin_folded^T)
@@ -1168,9 +1324,9 @@ void GenericModel::record(const GenericPassInputs& in) {
             }
             join();
         }
-        launch_conv_bwd(L->lmax_x, dim3(N), dim3(Cx), st, N, Cx, S, L->intervals, L->Q1, L->grid, sh_perm_,
-                        L->pair_sym, in.act_row_ptr, in.act_senders, in.act_vec_len, in.species, L->table, L->x, L->mid,
-                        density ? L->dD : nullptr, L->dx, t > 0 ? 1 : 0, d_edge_dvec_);
+        launch_conv_bwd(L->lmax_x, st, N, Cx, S, L->intervals, L->grid, sh_perm_, L->pair_sym, in.act_row_ptr,
+                        in.act_senders, in.act_vec_len, in.species, L->packed_table, L->density_table,
+                        L->cubic_bias_shift, L->x, L->mid, density ? L->dD : nullptr, L->dx, t > 0, d_edge_dvec_);
         if (t > 0) {
             if (L->lmax_x > 0) fork();
             for (int l = 0; l <= L->lmax_x; ++l) {
