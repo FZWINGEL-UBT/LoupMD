@@ -1,0 +1,10 @@
+# Build products (make; objects are per CUDA_ARCH, see the Makefile)
+*.o
+libloupmd.so
+
+# Python
+__pycache__/
+.pytest_cache/
+
+# Scratch scripts and logs of a working session
+.tmp_o/

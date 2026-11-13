@@ -1,0 +1,365 @@
+# LoupMD Current State, Kernel Profiles, and Open Ideas
+
+Snapshot date: 2026-11-13 (sixth update, 14:15: review round 6 fixes S1, S5, S6, S7; sections 3.2, 4.2 and the
+FastMACE column of 5.3. The kernel profiles and timings of sections 1, 2 and 5.3 are from the fifth update.)
+Target model of the specialised kernels (sections 1-4): MACE-OMAT-0 medium (float32, 128 channels, l <= 3,
+correlation 3, cutoff 6.0 A). Every other supported family (MACE-OMAT-0 small, MACE-OFF23/23b/24, MACE-MH-1,
+MACE-POLAR-1 S/M/L) runs on the generic path: section 5.
+Verified GPUs:
+- **RTX 5060 Ti** (`sm_120`, Windows/WSL2 WDDM, CUDA 13, 36 SMs, 32 MB L2)
+- **RTX 4000 Ada** (`sm_89`, `leeloo`, Linux, 48 SMs, 48 MB L2; no performance-counter permission, so `ncu` numbers are 5060 Ti only)
+
+---
+
+## 1. Benchmark & Verification Summary
+
+Standard MD benchmark: median of 6 x 256 Langevin steps (300 K, 1 fs, skin 0.5 A, friction 0.01/fs) after 100 warmup steps (`python/bench_md.py`). Every change below was A/B tested in both build orders on both GPUs (`bench_md.py ... LOUP_LIB=<A> LOUP_LIB=<B>` and reversed): on Ada the first run of an ABBA sequence is systematically fastest, which biases order A by ~+0.6% against the new build, so a change is adopted only if it wins or ties in both orders.
+Standard single-point gate: 3x MACE float32-vs-float64 rule (`python/test_gate.py` + `NbCl5` 576-atom strained, rattled cell).
+
+| Metric | RTX 5060 Ti (`sm_120`) | RTX 4000 Ada (`sm_89`) |
+|---|---|---|
+| `NbCl5` 3x3x3 (1,944 atoms, S=2) Langevin | **1.849 ms/step** | **2.054 ms/step** |
+| `SrTiO3` 10x10x10 (5,000 atoms, S=3) Langevin | **8.458 ms/step** | **9.27 ms/step** |
+| `test_gate.py` (4 configs: `NaCl` c0/c1, `SrTiO3` c0/c1) | PASS (force ratio <= 1.25) | PASS (force ratio <= 1.20) |
+| `NbCl5` single-config gate (576 atoms, 1% strain, 0.05 A rattle) | PASS (force 0.51, stress 0.83) | PASS (force 0.49, stress 0.69) |
+| `SrTiO3` NVE (10x10x10, 1 fs, 300 K, 1 ps after 200 Langevin steps) | drift -0.00011 meV/at/ps (std 0.00036) | drift -0.00012 meV/at/ps (std 0.00037) |
+
+`bench_md` numbers are the mean of two runs of the final build (Ada run-to-run spread on `SrTiO3` is ~2%: 9.17 / 9.37). The `SrTiO3` 20x20x20 and single-point `evaluate()` timings of the previous snapshot were not re-measured.
+
+System-size scaling (5060 Ti, `SrTiO3` n x n x n, Langevin, after 60 warm-up steps; us per atom-step): 135 atoms 3.00 (0.405 ms/step), 320 atoms 2.18, 1,080 atoms 1.73, 5,000 atoms 1.66-1.68, 20,480 atoms 1.69-1.71, 40,000 atoms 1.71-1.72 (the rebuild-time choices stay R5 spline; `w'` picks 512 threads at 40k atoms). Large systems scale linearly; below ~1,000 atoms fixed latencies dominate (section 4.1).
+
+Timeline on the two standard systems (ms/step, `bench_md.py`):
+
+| Stage | 5060 Ti `NbCl5` | 5060 Ti `SrTiO3` | Ada `NbCl5` | Ada `SrTiO3` |
+|---|---|---|---|---|
+| Session baseline (pre-CUBIC_PACKED8) | 2.384 | 11.380 | 2.533 | 12.985 |
+| + `CUBIC_PACKED8` + `hyb_sm120` + `E_graph` bucketing | 2.187 | 10.458 | 2.353 | 11.764 |
+| + receiver-owned i0 forward, i0 bwd prefetch, `DeviceSegmentedSort`, `shift_cart`, `sc1_fused`, spatial reorder (>L2), forked GEMMs | 2.089 | 9.939 | 2.260 | 11.184 |
+| + items 12-26 | 1.930 | 8.858 | 2.090 | 10.021 |
+| + items 27-29 (shift-free decode, 2^8 radial derivative, 4-receiver spline on `sm_89`) | 1.904 | 8.646 | 2.088 | 9.576 |
+| + items 29-31 completed (per-system spline / `w'` variants, own SGEMM) | **1.849** | **8.458** | **2.054** | **9.27** |
+
+---
+
+## 2. Detailed Kernel Profile (Current Build)
+
+Captured with `nsys --capture-range=cudaProfilerApi --cuda-graph-trace=node` over 100 Langevin steps after 50 warmup steps (profiler range opened with `cudaProfilerStart` around `run_langevin`); stage spans are medians over steps of the gaps between the custom kernels (rebuild steps excluded by the median). "Span" is wall-clock GPU time of a stage (GEMM groups overlap on side streams). The spline / `w'` variants are already chosen at the first rebuild of the warm-up. The profiled span is within ~3% of unprofiled `bench_md` (5060 Ti `SrTiO3` 8.23 vs 8.46 ms).
+
+### 2.1 Stage Spans (steady-state non-rebuild step, us)
+
+| Stage | 5060 Ti `SrTiO3` | 5060 Ti `NbCl5` | Ada `SrTiO3` | Ada `NbCl5` |
+|---|---:|---:|---:|---:|
+| `i0_fwd` (`tabled_outer_sum0_forward_kernel`) | 259.0 | 43.0 | 312.4 | 58.6 |
+| `compose0_fwd` GEMMs | 299.7 | 88.8 | 351.7 | 88.7 |
+| `sc0_forward` | 105.1 | 24.4 | 156.3 | 29.6 |
+| `skip16` + `W_up` GEMMs | 66.5 | 28.7 | 66.0 | 27.2 |
+| `spline_forward_inter1` (chosen: R5 / R1 paired / R5 / R4 paired) | 1,927.5 | 314.5 | 2,382.3 | 442.7 |
+| `lin1` forward GEMMs | 468.6 | 200.6 | 562.9 | 193.4 |
+| `sc1_fused` | 222.4 | 58.0 | 232.7 | 68.3 |
+| `lin1` backward GEMMs | 549.7 | 175.7 | 557.8 | 196.7 |
+| `wprime_backward_inter1_rcv` | 2,961.0 | 443.3 | 3,168.1 | 510.9 |
+| `W_up^T` + skip backward GEMMs | 72.0 | 36.9 | 74.2 | 35.7 |
+| `sc0_backward` | 230.9 | 63.0 | 273.8 | 84.8 |
+| `compose0_bwd` GEMMs | 368.4 | 87.9 | 337.1 | 88.3 |
+| `i0_bwd` (+ fused force/virial assembly) | 523.9 | 109.7 | 645.8 | 135.6 |
+| Integrator, active-edge compaction, memset, gaps | 126.2 | 45.1 | 140.8 | 60.4 |
+| **Step span** | **8,232.0** | **1,723.6** | **9,267.6** | **2,025.5** |
+| GEMM groups (sum of spans) | 1,825.0 (22.2%) | 618.6 (35.9%) | 1,949.7 (21.0%) | 630.0 (31.1%) |
+
+GPU idle inside a step is now ~20 us (5060 Ti `SrTiO3`); the 120 us/step of idle caused by split-K memset nodes is gone (item 22).
+
+### 2.2 Top Kernels by Time per Step (us, kernel sum incl. side streams)
+
+| Kernel | 5060 Ti `SrTiO3` | 5060 Ti `NbCl5` | Ada `SrTiO3` | Ada `NbCl5` |
+|---|---:|---:|---:|---:|
+| `wprime_backward_inter1_rcv` | 3,009 | 462 | 3,188 | 512 |
+| `spline_forward_inter1` | 2,008 | 331 | 2,381 | 442 |
+| own `sgemm128_kernel` | 1,507 | 424 | 226 | 0 |
+| `fm_tf32x3_rc_*` / `fm_tf32x3_rr_*` (hybrid) | 417 / 288 | 137 / 57 | 1,179 / 750 | 434 / 491 |
+| cuBLAS SIMT `Kernel2` / `ampere_sgemm` / `magma` | 352 / 0 / 33 | 467 / 0 / 0 | 0 / 538 / 0 | 0 / 60 / 0 |
+| `tabled_outer_sum0_backward_kernel` | 537 | 111 | 649 | 134 |
+| `tabled_outer_sum0_forward_kernel` | 272 | 50 | 314 | 58 |
+| `sc0_backward` / `sc1_fused` / `sc0_forward` | 238 / 226 / 110 | 64 / 60 / 25 | 277 / 235 / 158 | 86 / 68 / 30 |
+| `scatter_active_edges` + `compute_and_count_active` | 54 + 47 | 7 + 12 | 40 + 51 | 7 + 16 |
+| `langevin_first_half` | 10.6 | 7.8 | 13.4 | 8.1 |
+| **Kernel sum / step** | **9,151** | **2,232** | **10,060** | **2,370** |
+
+### 2.3 Neighbour Rebuild (kernel medians per rebuild)
+
+Cadence at skin 0.5 A, 300 K, 1 fs: ~1 rebuild every 15 steps on `SrTiO3`, every ~22 on `NbCl5`.
+
+| Kernel | 5060 Ti `SrTiO3` | Ada `SrTiO3` | 5060 Ti `NbCl5` | Ada `NbCl5` |
+|---|---:|---:|---:|---:|
+| `fill_neighbors_kernel` | 287 | 401 | 163 | 186 |
+| `count_neighbors_kernel` | 150 | 209 | 116 | 150 |
+| `gather_sorted_edges_kernel` | 36 | 46 | 7 | 9 |
+
+### 2.4 Kernel Resource Usage (`cuobjdump -res-usage`; shared includes the 1 KB `sm_120` driver reserve)
+
+| Kernel | `sm_120` Reg / Stack / Smem | `sm_89` Reg / Stack / Smem |
+|---|---|---|
+| `wprime_backward_inter1_rcv` (`512, 2`; 256 or 512 threads) | 64 / 8 / 23,552 B (4 B spill outside the channel loop) | 64 / 0 / 22,528 B |
+| `wprime_backward_inter1` (`256, 4`, N < 512 fallback) | 64 / 0 / 24,388 B | 64 / 0 / 23,364 B |
+| `spline_forward_inter1<1, paired / unpaired>` (`128`) | 96 / 79 regs, 3,584 B | 122 / 72 regs, 2,560 B |
+| `spline_forward_inter1<4, paired / unpaired>` (`512`) | 123 / 94 regs, 11,264 B | 126 / 93 regs, 10,240 B |
+| `spline_forward_inter1<5, unpaired>` (`640`) | 96 / 0 / 13,824 B | 95 / 0 / 12,800 B |
+| `sgemm128_kernel` (`256, 2`, own SGEMM; + 48 KB dynamic) | 128 / 0 / 1,024 B | 128 / 0 / 0 B |
+| `tabled_outer_sum0_forward_kernel` (`128`, warp per receiver) | 96 / 0 / 9,216 B | 80 / 0 / 8,192 B |
+| `tabled_outer_sum0_backward_kernel` (`128`) | 80 / 0 / 11,456 B | 80 / 8 / 10,432 B |
+| `sc1_fused` (`128, 4`) | 113 / 0 / 2,128 B | 104 / 0 / 1,104 B |
+| `sc0_forward` (`128`) | 72 / 0 / 1,056 B | 72 / 0 / 32 B |
+| `sc0_backward` (`128, 4`) | 128 / 0 / 1,040 B | 128 / 32 / 16 B |
+| `scatter_active_edges_kernel` (`128`) | 40 / 0 / 0 B | 40 / 0 / 0 B |
+| `compute_and_count_active_kernel` (`128`) | 40 / 0 / 0 B | 40 / 0 / 0 B |
+| `fill_neighbors_kernel` / `count_neighbors_kernel` (`32`) | 64 / 48 | 64 / 52 |
+
+The `sm_89` stacks are frames without spills (`ptxas -v`: 0 bytes spill stores/loads).
+
+### 2.5 Nsight Compute Facts (`SrTiO3` 5k, RTX 5060 Ti, current kernels)
+
+| Kernel | Time | Occupancy | Key counters |
+|---|---:|---:|---|
+| `wprime_backward_inter1_rcv` | 3.01 ms | 63% | issue slots 80% busy (issue-bound, `not_selected` dominant); 760 M instructions (818 M before items 27-28); L2 5.3 GB |
+| `spline_forward_inter1<1>` | 2.04 ms | 41% (96 regs) | L2 83%, issue 71%; L2 traffic 3.92 GB, L1 hit 5%. `<4>`: 33% occupancy, L1 hit 36%, L2 2.66 GB, 1.96 ms (`SrTiO3`) but `NbCl5` +7-10% |
+| `tabled_outer_sum0_backward_kernel` | 0.56 ms | 37% | L1 requests per edge ~29 -> ~11 (SH staged, `float2` channel pairs); equal time at 64 and 100 KB carveout |
+| `tabled_outer_sum0_forward_kernel` | 0.25 ms | 39% | L1 hit 53% at the 64 KB configuration (33% at the default 100 KB, 305 us) |
+| `scatter_active_edges_kernel` | 0.05 ms | 80% | no SH output (item 24); was 0.11-0.16 ms |
+
+---
+
+## 3. Current Architecture & Hardening Status
+
+### 3.1 Implemented Optimisations
+1. **`CUBIC_PACKED8` (`d_cubic_packed8_1`)**: `wprime_backward_inter1` reads an 8-byte exact cubic table (`20/19/12/8` signed quantized coefficients around `s = t - 0.5`, 5-bit shared exponent clamped to `emax - 31`) instead of 16-byte `float4`.
+2. **Hybrid `tf32x3` + `fp16` cubin for `sm_120`**: `cubins/tf32x3_hyb_sm120.cubin`; `sm_80` cubin used on Ada (`sm_89`).
+3. **`E_graph` bucketing + `cub::DeviceSegmentedSort::StableSortPairs`**: edge grid rounded to 8192; rebuild sort is ~16 us instead of ~2.3 ms.
+4. **Receiver-owned i0 forward**: register accumulation per sender-species run, zero writes for absent species; eliminates atomics and the 61 MB per-step `S0/D0` zero-fill. Guarded at rebuild end by `check_row_species_order_kernel`.
+5. **Lane-parallel metadata prefetch in i0 backward**: the chunk's metadata is loaded across lanes and broadcast via shuffles.
+6. **`sc1_fused`**: fuses `sc1_forward`, `128->16->1->16->128` readout forward/backward, and `sc1_backward` into one `N x 128` launch.
+7. **Cartesian float64 shifts (`d_shift_cart`)**: precomputed at rebuild; removes cell dependence from the force graph.
+8. **L2-gated spatial atom reorder**: above `N * 4096 > l2_bytes`, Morton reorder within species groups every 16th rebuild.
+9. **Side-stream GEMM fork/join**: 8 non-blocking side streams with per-stream 4 MB cuBLASLt workspaces.
+10. **Non-destructive `evaluate()`**: keeps velocities, skips rebuilds when `max_disp < skin/2` and cell unchanged.
+11. **GEMM autotuning**: up to 32 cuBLASLt candidates + 3 hybrid tiles; fork disabled during autotune.
+12. **1-receiver-per-block `wprime_backward_inter1_rcv`** (`N >= 512`; edge-tiled kernel kept for `N < 512`): stages the receiver's q once per block; -170 us on both GPUs.
+13. **Packed edge arrays**: `act_vec_len` (`float4` x, y, z, r) and `act_t_sx` (`float2`).
+14. **i0 backward fused with force/virial assembly (T5)**: `force_virial_assemble_kernel`, `d_dsh0`, `d_dr0` removed; 32-edge warp chunks.
+15. **Float32 pre-test + 32-thread blocks in `count`/`fill_neighbors` (T3)**: borderline pairs re-checked in float64; rebuild 1,222 -> 510 us (5060 Ti), 1,121 -> 684 us (Ada).
+16. **Memory aliasing + persistent GEMM plan cache**: `dm1 -> m1`, `dh0 -> h0`, `dS0 -> S0`; plans in `~/.cache/loupmd/plans_<gpu>_sm<cc>_lt<ver>_hyb<0|1>.bin` (`LOUP_RETUNE`, `LOUP_CACHE_DIR`); cold-start `evaluate` 1.3 s -> 0.21 s (5060 Ti), 0.76 s -> 0.05 s (Ada).
+17. **Per-arch L1 carveouts** (`tune_l1`): smallest shared-memory configuration that keeps occupancy for the gather kernels (values measured per arch; see `engine.cu`).
+18. **Selective cold-L2 GEMM autotune**: operands larger than half the L2 are timed with a flushed L2 (they stream from DRAM in the force pass); Ada's `lin1_fwd` group 672 -> 575 us.
+19. **Coalesced SH stores** in `scatter_active_edges` (superseded by item 24).
+20. **Paired-edge `spline_forward_inter1`**: two consecutive edges of a receiver that read the same table slab (sorted by `(pair, r)`) decode it once: table loads per edge 1 -> 0.805 (`SrTiO3`), 0.927 (`NbCl5`); spline -7% (5060 Ti), -3% (Ada) on `SrTiO3`.
+21. **Channel-major staged q in `wprime_backward_inter1_rcv`**: `s_q[channel * 44 + slot]` (11 x 16 B, odd) so each lane reads its 40 q values as 10 conflict-free `LDS.128`; w' -1.7% (5060 Ti), -2.5% (Ada).
+22. **No split-K cuBLASLt algorithms** (`CUBLASLT_MATMUL_PREF_REDUCTION_SCHEME_MASK = NONE`; plan cache `LOUPPLN3`): their per-launch workspace memsets left the 5060 Ti idle ~120 us per step; also deterministic.
+23. **i0 backward SH staging + `float2` channel pairs**: the chunk's SH are staged in the warp's result rows (stride 20, `LDS.128` broadcast), coefficients and dS0 rows load as `float2`; 685 -> 564 us (5060 Ti), 736 -> 668 us (Ada).
+24. **SH computed where staged, not stored** (`edge_sh16`): `scatter_active_edges` no longer writes 64 B/edge (24 MB per step at 5k atoms); i0 forward/backward and spline forward compute the 16 values from `act_vec_len` while staging. Dead `edge_sh3_forward_kernel` and `common_kernels.cu` removed; rebuild sort key scratch moved to `d_edge_force_1`.
+25. **Warp-per-receiver i0 forward**: 4 receivers per 128-thread block, 2 channels per lane (`float2` coefficient loads, one SH broadcast per two channels), per-edge D0 term at staging; 390 -> 245 us (5060 Ti, 64 KB carveout), 415 -> 304 us (Ada).
+26. **Langevin integrator**: first half launched with 32-thread blocks (its FP64 Box-Muller is FP64-throughput bound on consumer GPUs: 14.9 -> 8.0 us on `NbCl5`), step-counter increment folded into the second half (one graph node less); random stream bit-identical.
+27. **Shift-free 8-byte cubic decode in `w'`**: the loader packs each coefficient's mantissa bits at their float position (`x = u0<<3 | rotr(u2<<11, 20)`, `y = u1<<4 | rotr(u3<<15, 19) | eb<<23`), so a coefficient decodes as one `LOP3` (mask + OR with the biased exponent) or one funnel shift + `LOP3`; inner loop 480 -> 448 static instructions, `w'` 3,177 -> 3,065 us (5060 Ti). MD: 5060 Ti -0.5% / -1.2% (A), -0.8% / -1.3% (B); Ada +0.4% / -0.8% (A), -0.6% / -1.1% (B) (`NbCl5` / `SrTiO3`).
+28. **`w'` radial derivative scaled by 2^8**: `radial_dt = fma(ds3', d3, fma(ds2', d2, d1))` with `ds2' = 2^8 ds2`, `ds3' = 2^8 ds3` and one `2^-8` at the edge epilogue (bit-identical: power-of-two scaling), dropping one `FMUL` per path; `w'` 3,069 -> 3,010 us, 774 -> 760 M instructions (5060 Ti). MD: 5060 Ti -0.1% / -0.5% (A), -0.5% / -0.6% (B); Ada tie.
+29. **Multi-receiver spline blocks, chosen per system** (`spline_forward_inter1<R, PAIR>`, `choose_spline_rpb`, `tune_rebuild_variants`): with R consecutive receivers per 128R-thread block (per-receiver named barriers, smallest shared-memory carveout), receivers of a symmetric crystal walk the same slabs at the same time and the later reads hit L1 (`SrTiO3` 5060 Ti, R = 4: L1 hit 5% -> 36%, L2 3.92 -> 2.66 GB). The block keeps all its warps' registers until its slowest receiver finishes, so the gain depends on the system, and so does the paired-edge decode (item 13; it costs 17-30 registers). Five variants are compiled: R = 1 and R = 4 with and without pairing, and R = 5 unpaired (640 threads at 94-96 registers: 20 warps). The default is R = 4 paired where it keeps the resident warp count of R = 1 paired (`sm_89`), else R = 1 paired; at the first MD rebuild of a system (thermalised positions; the ideal starting lattice favours sharing everywhere) all five are timed on the last force pass's inputs and the fastest is adopted if >= 2% faster than the current one (`LOUP_DEBUG_SPLINE=1` prints the timings).
+    Spline us at the first rebuild (R1 / R1 paired / R4 / R4 paired / R5 -> choice): 5060 Ti `SrTiO3` 2,029 / 1,953 / 1,828 / 1,847 / 1,798 -> R5; 5060 Ti `NbCl5` 317 / 316 / 330 / 344 / 319 -> R1 paired; Ada `SrTiO3` 2,601 / 2,593 / 2,260 / 2,270 / 2,187 -> R5; Ada `NbCl5` 431 / 418 / 411 / 423 / 419 -> R4.
+    MD, step by step (A / B orders): occupancy rule only (R1 paired vs R4 paired) vs item 28: Ada `NbCl5` +1.5% / +0.3%, `SrTiO3` -3.1% / -3.6% (5060 Ti unchanged). + rebuild-time choice between those two: 5060 Ti `NbCl5` +0.1% / -0.3%, `SrTiO3` -0.8% / -0.8%; Ada tie. + unpaired and R5 variants: 5060 Ti `NbCl5` +0.4% / -0.2%, `SrTiO3` -0.1% / -0.3%; Ada `NbCl5` +0.8% / -0.2%, `SrTiO3` -0.4% / -0.9% (Ada order A carries the ~+0.6% first-run bias).
+30. **Own SIMT SGEMM as an autotune candidate** (`src/sgemm.cu`, `loup::sgemm128`): 128 x 128 x 16 block tiles, 256 threads with 8 x 8 outputs each, 3-stage `cp.async` pipeline (A kept m-major, so a warp's A fragment reads are 2-address broadcasts; B k-major), 126 registers, 48 KB shared memory, 2 blocks (16 warps) per SM where cuBLAS' SIMT kernels run 8 warps at 200-210 registers. A transposed B operand is always a model weight, so `weight_kn` keeps a [K, N] copy per weight (made in the uncaptured autotune pass). Each output is one in-order `fmaf` chain over k (bit-identical to `cublasSgemm` on all tested shapes). `sgemm_rm` times it next to the cuBLASLt heuristics and the hybrid cubins (plan cache `LOUPPLN4`, `use_own`; `LOUP_DEBUG_GEMM=1` prints every choice). Cold-L2 microbenchmark (5060 Ti, us): `lin1` l=1 / l=2 / l=3 forward 132 / 196 / 181 (cuBLASLt's pick 136 / 207 / 175, `cublasSgemm` 236 / 370 / 185); `compose0` forward (M = 48,000, K = 192) 195 vs 210. It is picked for the large `lin1` / `lin1^T` / `compose0` forward products on the 5060 Ti. N = 192 (`compose0` backward) runs 128 x 64 tiles instead of a half-empty 128 x 128 tile (111 registers, 36 KB): the 5060 Ti autotune then picks it over the hybrid cubin for all seven `SrTiO3` products (sum 297 -> 248 us); MD tie on both GPUs (5060 Ti `NbCl5` +0.5% / +0.0%, `SrTiO3` -0.1% / -0.4%; Ada +1.2% / +1.0% (A), +0.0% / -0.2% (B)).
+    MD: first version (register-staged, 2 stages) vs item 29: 5060 Ti `NbCl5` -1.6% / -2.0%, `SrTiO3` -0.6% / -0.7% (A / B); Ada +0.8% / +0.2% (A), -0.2% / -0.3% (B). `cp.async` version vs the first: 5060 Ti `NbCl5` -1.4% / -1.3%, `SrTiO3` -0.1% / -0.4%; Ada +1.1% / +0.5% (A), -0.3% / +0.0% (B).
+31. **`w'` block size chosen per system** (`wprime_backward_inter1_rcv` at `(512, 2)` launch bounds, warp stride `blockDim.x / 32`, launched with 256 or 512 threads; timed with the spline variants in `tune_rebuild_variants`): 512-thread blocks stage one receiver's q per 16 warps, halving the shared memory per SM (more L1: 5060 Ti L1 hit 5.9% -> 10.5%, L2 5.27 -> 5.05 GB). Ada `SrTiO3` `w'` 3,230 -> 3,130 us (picked); 5060 Ti 3,009 -> 3,034 us and Ada `NbCl5` 519 -> 511 us (within 2%: 256 kept). MD: 5060 Ti tie (+0.6% / -0.1% `NbCl5`, -0.1% / -0.1% `SrTiO3`); Ada `SrTiO3` -1.0% / -1.2%, `NbCl5` +1.4% (A, first-run bias) / +0.2% (B).
+
+### 3.2 Correctness / API Fixes Applied (from code review)
+- **H1**: Langevin Philox offset advanced by `step * 16` (12 outputs consumed/step; previously overlapped at `step * 2`).
+- **H2**: Langevin `friction_per_fs` converted via `/ ASE_FS` to match ASE units; header documents ASE velocity units.
+- **H3**: `d_step_counter` zeroed only in `loup_set_system` (persists across `run_*` calls).
+- **H4**: Cubic-table exponent span > 31 clamped to `emax - 31`; unused `float4` fallback removed.
+- **H5**: All C entry points wrapped in `guarded(...)` (closes open stream captures, resets `gemm_stream`/`gemm_ws`, returns `-1`).
+- **L3**: `ensure_cub_tmp` invalidates graphs on growth; `cudaGetLastError()` checked after warm-up pass and each rebuild.
+- **L4**: `fill_neighbors_kernel` guards its cursor with `cursor < row_ptr[i + 1]`.
+- **Review round 5** (`loupmd-review-20261112.md`, fifth pass):
+  - F1: `test_gate.py` adds the 576-atom `NbCl5` cell (receiver-owned `w'`) and gates every forced kernel path: `LOUP_SPLINE_VARIANT=R1|R1p|R4|R4p|R5`, `LOUP_WPRIME_THREADS=512`, `LOUP_WPRIME_RCV=1` on the small cells, `LOUP_REORDER=0|1` (reorder on vs off agree to 5e-7 eV/A).
+  - F2: `ensure_cub_tmp` synchronises the stream before freeing. F3: the per-system variant timing is reported as `LoupMDStats::tune_ms` and excluded from `step_ms` (aliasing of the timed buffers documented). F4: the plan cache file name carries an FNV hash of the library file; plans whose winner leads by < 3% are not persisted; `LOUP_CACHE_DIR` / `LOUP_RETUNE` documented in `include/loupmd.h`. F5: `loup_debug_tensors` removed (unused, model-specific). F6: scope guards for the autotune buffers and events. F7: the spline's named-barrier conditions are stated in the generator, with `static_assert(R <= 15)`.
+  - M1: the MD loop starts unpipelined (each step's skin check is read before its force pass: exact for any skin, including 0) and switches to the pipelined loop once 4 x the largest per-step displacement (tracked on the device by the first-half kernels) is below skin/2; the pipelined check lowers its threshold by three times that displacement (two steps of lag, one of margin for a step longer than any so far: with only the lag, 1 of ~1,600 steps of the 300 K benchmarks ran on an incomplete list), and any step that still did is counted in `LoupMDStats::dangerous_builds` (and drops back to the unpipelined loop; 0 in every benchmark of section 5 on both GPUs). MD speed unchanged (`bench_md.py`: 5060 Ti `NbCl5` 1.836, `SrTiO3` 8.454 ms/step, 1.832 / 8.441 with the two-step margin; Ada 2.056 / 9.262).
+  - M2: `loup_set_system` validates Z, masses and skin before freeing the old system. M3: singular / zero / non-finite cells and non-finite positions or velocities are rejected; the engine is documented as fully periodic.
+  - M6: bundles are a self-describing container (`LOUPC001`, `python/bundle.py`, `src/bundle.cu`): named, typed, shaped arrays plus a meta text entry (architecture, exporter version, model sha256, kernel signature); every array is shape-checked, truncated files and trailing bytes are rejected, files are closed on every path; `ScaleShift` shift is folded into E0; the bundle cache key is the model's content hash + species + head + path + exporter version; the specialised bundle must match the compiled kernels' signature (`generated_kernels_signature.h`).
+  - M7: `tests/` (pytest): NVE energy conservation, skin list vs rebuild-every-step trajectory, hot small-skin Langevin without dangerous builds, `tune_ms` reporting, evaluate-after-MD, and the error paths (unknown species, bad masses / skin / cell / positions / velocities, MD without a system, truncated / padded / missing bundles); `tests/test_gate_wrapper.py` runs the gate. 24 tests pass on both GPUs.
+- **Review round 6** (`loupmd-review-20261112.md`, sixth pass; fixed 13 Nov 14:00, each with a test that failed first). Verified on the RTX 5060 Ti only: 35 tests pass, the gate passes for every family (worst force ratio 1.31, stress 1.95), `bench_md.py` unchanged (NbCl5 1.81, SrTiO3 8.33 ms/step). **Not yet built or run on the Ada.**
+  - S1: the unpipelined skin check also reports whether any atom is beyond the pipelined (three-step) threshold (bit 4 of the flag, `check_skin_kernel`); the loop switches to pipelining only if that bit is clear or the list was rebuilt in the same step. Before: 9 force calls on an incomplete list in 60 switches of `test_switch_to_pipelined_loop_never_uses_an_incomplete_list`; now 0. `LoupMDStats::pipelined_steps` reports how many steps ran pipelined.
+  - S5: `PolarLR::set_cell` reports every cell change, so the force graph is re-captured and no longer carries the first cell's volume factors (NaCl 2x2x2, POLAR-1-S, strain 3e-4 on the same engine: 1e-6 eV/atom, 9e-5 eV/A and 3e-7 eV/A^3 against a fresh engine before; identical now). `test_polar_energy_follows_a_small_cell_change_on_the_same_engine`.
+  - S6: `python/loupmd.py` stores the atom count only after `loup_set_system` succeeded and refuses arrays of the wrong shape (before: a rejected `set_system` of another size made the next `evaluate` write past its arrays; the test process segfaulted).
+  - S7: a generic model's pass also runs when no pair lies within the cutoff (isolated atoms: MACE-MH-1 was off by 0.56 eV per atom, MACE-POLAR-1-S by 0.64 eV; MACE-OFF23 small and OMAT-0 small were unaffected). `test_generic_model_without_neighbour_pairs_matches_mace`.
+
+### 3.3 Ruled Out (Measured)
+- **T2 / 4-byte far-edge table rows**: slower on both GPUs (5060 Ti `w'` 3,286 -> 3,316 us, spline 2,211 -> 2,242 us; Ada `w'` 3,561 -> 3,628 us, spline 2,974 -> 3,075 us).
+- **T1 / 2-channel vectorized `w'`**: -1.6% at `(256, 3)` on 5060 Ti, +2.3% on Ada.
+- **Pre-transposed forward GEMM weights (old idea 1)**: 5060 Ti tie, Ada +1.0% / +0.3%.
+- **`sh` shuffle broadcast in i0 backward (old idea 3)**: tie; superseded by item 23 (staged SH).
+- **`spline_forward` `(128, 7)` / min-blocks 5 on `sm_89`**: spills; Ada +17% / +3%.
+- **T4 grouped species GEMM (`fm_tf32x3_species_rr_64x64`)** for `compose0_fwd` + `skip16`: 5060 Ti +1.7% (`NbCl5`) / +0.8% (`SrTiO3`); the grouped launch is slower than the forked per-species GEMMs.
+- **T6 per-atom energy array**: +0.5% / +0.1% (5060 Ti); the extra reduction launch costs more than the removed atomics.
+- **T7 receiver-owned i0 backward**: +1.8% / +1.1% (5060 Ti); per-chunk edge parallelism beats per-receiver runs.
+- **Paired edges in `w'`**: instructions -3% to -6% but 64 -> 80/128 registers (spills at 64); 3.23 -> 3.28/3.35 ms.
+- **2/4-pass channel staging in `w'`** (smaller `s_dout`, more L1): 3.23 -> 3.40 / 3.80 ms.
+- **Interaction-1 chain split into two receiver halves on two streams** (spline/GEMM/w' overlap) and high-priority GEMM streams: 5060 Ti +0.9% (`NbCl5`) / +0.7% (`SrTiO3`).
+- **Global cold-L2 autotune** (all GEMMs timed cold): Ada `NbCl5` +2.9%; kept only for operands larger than half the L2 (item 18).
+- **Receiver remap for spline L1 locality** (blocks strided over the receiver range): tie.
+- **`spline_forward` 16-edge tiles**: tie.
+- **Single-pass active-edge compaction** (decoupled look-back over 4-row tiles, pass-1 vectors cached in shared memory): kernel 96 -> 80 us on 5060 Ti `SrTiO3`, equal on `NbCl5`; MD tie on both GPUs in both orders, so the simpler count + scan + scatter path stays.
+- **Interaction-1 chain over L2-sized receiver chunks** (spline + `lin1` + `sc1` + `lin1^T` + `w'` per chunk so `m1`/`dm1` stay in L2): 5060 Ti 1,700-atom chunks +2.4% / +0.2%, 1,000 +2.4% / +1.1%, 650 +2.6% / +2.8% (`NbCl5` / `SrTiO3`); per-chunk launch and tail costs exceed the DRAM savings (the `lin1` GEMMs run at ~50% DRAM, latency-limited).
+- **`w'` scalar-path `x0` hoisting** (accumulate the `x0`-scaled pull terms of the four `a = 0` paths, multiply once per channel): -2 M instructions, but spills at 64 registers (3,016 -> 3,086 us) and is still slower at `(256, 3)` / 80 registers (2,992 -> 3,018 us).
+- **`w'` `(256, 3)` launch bounds** (80 registers, 50% occupancy): 5060 Ti 3,013 -> 2,992 us, Ada 3,184 -> 3,184 / 3,221 us; below A/B resolution.
+- **Paired 5-receiver spline blocks** (640 threads at 96 registers): spill 48-72 B and lose to R = 1 / R = 4 (the unpaired R = 5 of item 29 fits without spills). Timing R = 1 vs R = 4 in the uncaptured setup pass picks R = 4 for `NbCl5` too (the ideal starting lattice shares slabs), hence the rebuild-time choice of item 29. Lockstep R = 2/4 (block-wide barriers, max tile count) is slower than per-receiver named barriers.
+- **SM-local persistent `w'`** (grid = resident blocks, receivers handed out from per-SM contiguous ranges via `%smid` and atomic cursors, stealing at the end, so co-resident blocks work on neighbouring receivers): L1 hit 5.7% -> 12%, L2 bytes unchanged (5.3 -> 5.4 GB), 40 B stack from the extra loop state; 3,014 -> 3,240 us (5060 Ti).
+- **Reversed block order in the kernels between GEMMs** (spline, `sc0_forward`, `sc1_fused`, `w'`, `sc0_backward`, i0 forward/backward walk receivers from the top, so they first read the rows the preceding GEMM wrote last and leave the rows the next GEMM reads first in L2): step span 8,274 -> 8,285 us (5060 Ti `SrTiO3`), no stage gained more than 6 us.
+- **SGEMM variants** (microbenchmark / MD, 5060 Ti): `cp.async` 4 stages with BK = 8: 1.2-1.5x slower than BK = 16 (twice the barriers, 32-byte row segments); register-staged with BK = 8 or 1 block per SM: 5-30% slower; extra 64 x 128 and 128 x 64 tiles as autotune candidates (for small M and N = 192): picked in isolation but `NbCl5` +1.6% / +0.8% in the pass; 64 x 128 tiles for every N = 128 product (cold microbenchmark 7-8% faster than 128 x 128 on the 5060 Ti: `lin1` l=1/2/3 forward 115 / 181 / 172 vs 126 / 196 / 185 us; on Ada still behind `cublasSgemm` for l=1/2): MD `NbCl5` +1.7% / +1.8%, `SrTiO3` +0.5% / +0.8% (5060 Ti), Ada +1.1% / +0.2% (A), -0.0% / -0.2% (B). Isolated cold timings of these tile shapes do not carry over to the concurrent GEMM groups.
+- **Row-chunked hybrid GEMM for cold operands** (launch the 64-wide hybrid tiles per quarter-L2 row chunk so the second column tile re-reads A from L2): never chosen by the cold autotune on either GPU (Ada `lin1` forward stays on cuBLASLt at 148 / 228 / 209 us).
+- **i0 backward micro-variants** (5060 Ti `SrTiO3`; SASS stall sampling puts ~14% of the samples on the first FFMA consuming the edge's coefficient loads): next edge's coefficients prefetched into registers (96 registers): 551 -> 571 us; coefficient loads moved to the top of the edge iteration (80 registers): 554 -> 564 us; `grad_a` summed in 4 interleaved partial sums: 554 -> 626 us (+4 M instructions, worse schedule).
+- **`w'` table loads without L1 allocation** (`ld.global.nc.L1::no_allocate`, to keep L1 for the sender rows): L1 hit 9.7% -> 1.3%, L2 5.06 -> 5.53 GB, 3,022 -> 3,120 us (5060 Ti); adjacent warps do re-read table rows through L1.
+- **GEMM groups serialised** (no side streams): 5060 Ti `NbCl5` +5.7% / +5.0%, `SrTiO3` +2.1% / +2.0%: the concurrent lanes matter.
+- **Per-group own-SGEMM policy tuned in context** (products of a fork group collected; at a second uncaptured pass each group is timed whole under three policies: as autotuned per product / own wherever eligible / never own; the fastest kept per group signature). Group timings differ a lot from the per-product picks (e.g. `SrTiO3` `lin1^T` group 637 -> 552 us with own everywhere, timed as a captured graph with a warm L2), but MD gained only 5060 Ti `NbCl5` -0.4% to -0.8%, `SrTiO3` +0.1% / +0.2%, Ada tie in both variants (stream-timed, graph-timed); with a cold L2 per launch the policies mostly tie and the timings get noisy. Not worth the collection / replay machinery.
+- **`sc0` per species overlapped with the other species' compose0 products** (forward: `sc0_forward` of species s on its l = 3 lane after its four products; backward: `sc0_backward` of species s, then its four products, while the next species' `sc0_backward` runs; 16 side streams): 5060 Ti `SrTiO3` i0 forward end -> spline start 470 -> 489 us, `w'` end -> i0 backward start 600 -> 647 us (the DRAM-bound `sc0` kernels compete with the products); `NbCl5` -4 / +1 us.
+- **Other earlier drops**: receiver-warp segmented float64 force reduction, 2-edge unroll in spline (pre-pairing), `sc0_backward` `(128, 3)`, overlapping `skip16` GEMMs across spline, per-species i0 forward, cubic table in forward, Morton reorder below L2.
+
+---
+
+## 4. Open Ideas & Priorities
+
+### 4.1 Remaining Performance Opportunities
+
+All 13 ideas of the previous list are resolved: adopted (2, 5, 7, 9, 10, 13 = items 12-16), ruled out (1, 3, 4, 6, 8, 12; section 3.3), or deferred (11, below).
+
+| Priority | Idea | Target & Estimate | Notes / Falsifier |
+|---|---|---|---|
+| **1** | **Fuse `lin1` into the interaction-1 kernels** | `m1`/`dm1` are `N x 4864` floats (97 MB at 5k atoms) written by spline / `lin1^T` and read back by `lin1` / `w'`; the `lin1` groups are 529 + 597 us on 5060 Ti `SrTiO3` | Not feasible inside the current one-receiver-per-block spline: each block would read all 655 KB of `W_lin1` (~3.3 GB extra L2 traffic per step for an already L2-bound kernel), and sharing it across R receivers needs R x 38 accumulator registers (spline is at 96-122). Needs a different decomposition (e.g. a receiver-tiled tensor-core GEMM consuming spline output tiles from shared memory). |
+| **2** | **Ada performance counters** | all Ada tuning so far is timing-only | `ERR_NVGPUCTRPERM` on `leeloo`; needs `NVreg_RestrictProfilingToAdminUsers=0` (admin) before Ada-specific `ncu` work (`w'` is 9% slower on Ada than on the 5060 Ti although Ada has 33% more SMs; spline gained 10% from L1 slab sharing there, so Ada looks L2-sensitive). |
+| **3** | **Small-system latency (< ~1,000 atoms)** | 135-atom `SrTiO3` step 358 us (median span): GEMM groups 115 us (32%; ~25 tiny products, each ~6-13 us in the graph regardless of size), edge-tiled `w'` 100 us, spline 58 us (135 one-receiver blocks), i0 backward 28 us | Split-K for the own SGEMM (partials per K slice, last block of a tile sums them in z order) was tried: the isolated autotune cannot rank such products (every candidate times 6-14 us, launch-bound), and forcing split 2 / 4 for every eligible product raised the 135-atom GEMM groups 123 -> 147 / 158 us (step 367 -> 392 / 409 us), so the per-GEMM floor in the graph is launch/completion latency, not the K pipeline. Grouped launches were tried too: products of a fork group collected and, when each has fewer tiles than SMs, issued as one own-SGEMM launch (problem table, 64 x 64 tiles below two blocks per SM): 135-atom GEMM groups 114 -> 101 us (step 355 -> 345 us on the 5060 Ti, wall time -3% to -5%; 320 atoms within noise; Ada 135 atoms +2%), but the refactored kernel cost the 5060 Ti benchmarks +1.2% / +0.9% (`NbCl5`) and +0.3% / +0.2% (`SrTiO3`); dropped. The spline is not the problem: even at 135 atoms its 135 blocks keep ~15 warps per SM issuing (R4 picked, 64 us); an edge-split variant (one receiver per block, edges over 2 / 4 thread groups, fixed-order shared-memory reduction) measured 98 / 82 us there and 1.4-1.6x slower at 5,000 atoms. |
+| **4** | **Larger / adaptive skin (`T10`)** | 0.5-1.5% at 5,000 atoms, ~10% at 135 atoms | Changes the benchmark configuration; owner decision. |
+| **5** | **Generic path (section 5): gate in the GEMM epilogue** | MH-1 SrTiO3 (5060 Ti): gate forward + backward 15% of the step, ~1 GB of DRAM traffic per call; GEMMs ~50% | The gate reads the `linear_2`-side rows a GEMM just wrote and writes rows the next GEMM reads; fusing it into the own SGEMM's epilogue / prologue removes one round trip per direction. Falsifier: gate kernels already at ~DRAM bandwidth, so the ceiling is their full time (~7 ms of 47); stop if the fused GEMM loses more than it saves. |
+
+### 4.2 Open Review Hardening Items (Correctness / Robustness)
+M1-M3, M7 and F1-F7 are resolved, and S1, S5, S6, S7 of the sixth pass (section 3.2). Open from the sixth pass:
+- **S8 (rest of M6)**: the specialised path's kernel signature is a hand-written literal and does not cover the factored product basis (the generic path hashes it); `export_omat0.py` prints its spline certificates without enforcing them; the bundle cache key relies on a manual `EXPORT_VERSION`, and a bundle the loader rejects is never re-exported.
+- **S3 (tests)**: MD tests cover OMAT-0 medium only; add NVE conservation for a generic family and POLAR, and a replication test (a cell against its own 2x2x2 or 3x1x1 replica) for every family, above one GEMM tile.
+- **S2**: the running maximum of the step displacement never decays, so one fast step keeps the loop unpipelined until the next `set_state` (hydrogen at 300 K: always unpipelined at skin 0.5).
+- **S4, S9 (small)**: MD graphs re-captured on every `run` call; one object directory for all architectures; `temp_k` / `friction_per_fs` not validated; force below the first spline knot on the generic path; unchecked negative `lmax` and meta integers in bundles; three k-space buffers never freed and `set_cell` not exception-safe in `polar.cu`; exporter accepts models by class name only.
+- **Ada**: the round 6 fixes are verified on the 5060 Ti only.
+
+---
+
+## 5. Model Families (Generic Path)
+
+Supported, as in FastMACE: MACE-OMAT-0 small, MACE-OFF23 small / medium / large, MACE-OFF23b medium, MACE-OFF24
+medium, MACE-MH-1 (any head, one per bundle; default `omat_pbe`) and MACE-POLAR-1 S / M / L. MACE-OMAT-0 medium
+keeps the specialised kernels of sections 1-4 (`LOUP_GENERIC=1` forces the generic path, used to cross-check it).
+
+### 5.1 Pipeline
+- `python/export.py` picks the exporter: `export_omat0.py` (specialised, `arch=omat0_medium_spec`) when
+  `check_architecture` accepts the model, else `export_generic.py` (`arch=generic`). Both write the `LOUPC001`
+  container (section 3.2, M6); `ensure_loup_bundle(model, Z, head=...)` caches by model content hash, species, head,
+  path and exporter version.
+- `export_generic.py` extracts every linear map by probing the float64 e3nn modules with basis inputs (`probe_linear`,
+  `probe_species_linear`), so e3nn path weights, `1/avg_num_neighbors`, the normalize2mom constants of SiLU / gates,
+  ScaleShift (scale into the readouts and ZBL, shift into E0) and the selected head (E0 row, readout column,
+  `mask_head` block) are folded numerically. Conv tensor-product paths are checked to be multiples of
+  `wigner_3j(l1, l2, l3)`; the factor goes into the radial table. Radial functions (Bessel + cutoff + Agnesi
+  transform + MLP, for the nonlinear blocks with the source / target species embeddings, and the edge density) are
+  fitted per species pair (symmetric pairs unless the block embeds sender and receiver separately) with FastMACE's
+  certified cubic-Hermite spline (`spline.fit`; the export refuses a certificate above 1, i.e. a spline error
+  above the float32 network's own rounding error on FastMACE's `radial.certify` points).
+  Products: FastMACE's factored symmetric contraction (`sc_factored.factor` / `fold_weights`), kernels keyed by a
+  signature of the factored program.
+- `python/ref_generic.py`: a float64 PyTorch executor of the bundle (same algorithm as the CUDA path, autograd forces
+  and stress), used to check exports against MACE float64 and to localise CUDA-vs-model differences.
+- `python/gen_generic.py` -> `src/generated_generic.cuh`: conv forward / backward for x irreps up to 0e+1o+2e
+  (one block per receiver, one thread per channel, radial spline per edge; the backward reduces
+  each edge's dE/dvec per warp, sender-feature gradients by atomics), the factored products (3 configurations) and
+  the SH gradient (sympy).
+- `src/generic.cu`: layer loop forward and reverse with GEMMs through the engine's autotuned `sgemm_rm`: linear_up,
+  conv, message linear, density / `avg_num_neighbors` / `(beta D + alpha)` normalisation, the nonlinear blocks'
+  residual linear, gate and linear_2, species skip connections, product + product linear, readouts (linear, SiLU MLP,
+  bias MLP), ZBL, force / virial assembly. Layer 0 (input = species embedding) runs as an outer sum over the radial
+  chain's 66 columns per sender species, with the conv weights, the layer input, the path factors and the message
+  linear folded into one matrix per degree (`first_fwd_kernel` / `first_bwd_kernel`): its table is 66 columns
+  instead of 4 C + 1.
+- `src/polar.cu` (MACE-POLAR-1): per-layer spin-charge sources, the layer feature mixer, the Fukui constraint, two
+  SCF steps of GTO electrostatic features (k-space: structure factors per k over atoms, feature / gradient passes per
+  atom over k with tiled k data, double accumulation, exact fixed-point phases n . s mod 1) and the one-body charge
+  update (embeddings, sparse uvu products as GEMMs, LayerNorm MLP, gated readout), the local electron energy and the
+  k-space Coulomb energy, forward and reverse. Neutral singlet systems in zero external field, fully periodic.
+  The stress includes the k-space terms' cell dependence (MACE PR 1718, as FastMACE): the installed PolarMACE
+  (0.3.16) hands those terms the unstrained geometry, so its autograd stress misses up to 2e-5 eV/A^3 (NaCl); the
+  gate's stress reference for POLAR is the float64 energy's finite difference.
+
+### 5.2 Gates (`python/test_gate.py MODEL --set ...`; 3x MACE float32-vs-float64 rule, cells strained / rattled)
+Sets as FastMACE's: `oxide` (NaCl, SrTiO3), `organic` (urea 3x3x3, naphthalene 2x2x2, paracetamol 2x2x2,
+water_216), `crystals` (NaCl, NaNbO3, NbCl5 R2SCAN cells); two configurations each. `--ref-device cpu` where the
+float64 reference does not fit the GPU (OFF23-L / 23b / 24 on the 16 GB 5060 Ti, OFF23-L and POLAR-1-L on the
+20 GB Ada).
+
+| Model | Set | RTX 5060 Ti | RTX 4000 Ada |
+|---|---|---|---|
+| OMAT-0 small | oxide | PASS | PASS |
+| OFF23 small / medium | organic | PASS / PASS | PASS / PASS |
+| OFF23 large, OFF23b medium, OFF24 medium | organic | PASS (CPU refs) | PASS (worst 1.46 / 1.23 / 0.27; OFF23-L CPU refs) |
+| MH-1 `omat_pbe`, `matpes_r2scan` | crystals | PASS | PASS |
+| MH-1 `omol` | organic | PASS | PASS |
+| POLAR-1-S | crystals | PASS (worst ratio 1.30) | PASS (worst 0.99) |
+| POLAR-1-M | crystals | PASS (worst 0.97) | PASS (worst 1.14) |
+| POLAR-1-L | crystals | PASS (worst 1.16) | PASS (CPU refs; worst 2.69, force NaNbO3_c0) |
+
+POLAR-1-S NaNbO3_c0 is far from float32-exact in MACE itself (MACE float32 vs float64: 27-90 eV/A force,
+0.38-1.15 eV/A^3 stress; FastMACE excludes the configuration); LoupMD's error there is 0.15-0.34 of that.
+`tests/test_gate_wrapper.py` runs the gate for OMAT-0 small, OFF23-S / M, MH-1 (two sets) and POLAR-1-S / M.
+
+### 5.3 MD Speed (`python/bench_family.py`: Langevin 300 K, 1 fs, skin 0.5 A, 100 warm-up + median of 6 x 256 steps)
+
+| Model | System (atoms) | 5060 Ti ms/step | Ada ms/step | FastMACE (documented) |
+|---|---|---|---|---|
+| OMAT-0 medium (specialised) | NbCl5 (1,944) / SrTiO3 (5,000) | 1.843 / 8.488 | 2.085 / 9.384 | |
+| OMAT-0 small | NbCl5 / SrTiO3 | 2.175 / 10.014 | 2.263 / 10.824 | |
+| OFF23 small / medium / large | water 2x2x2 (5,184) | 5.593 / 13.093 / 47.829 | 5.960 / 14.620 / 59.736 | |
+| OFF23b medium / OFF24 medium | water 2x2x2 | 19.680 / 19.602 | 22.060 / 22.010 | |
+| OFF23 medium | water_216 (648) | 2.121 | 1.969 | H200 1.80 |
+| MH-1 `omat_pbe` | NaCl 3x3x3 (216) | 2.334 | 2.001 | 5060 Ti 2.65-2.90 (`matpes_r2scan`) |
+| MH-1 `omat_pbe` | NbCl5 / SrTiO3 | 15.017 / 46.386 | 16.233 / 51.176 | 5060 Ti NbCl5 18.7-21.3 |
+| MH-1 `omol` | water 2x2x2 | 50.345 | 54.863 | |
+| POLAR-1 S / M / L | NaCl 3x3x3 (216) | 2.492 / 5.273 / 10.076 | 2.291 / 4.928 / 10.227 | 5060 Ti 2.19-2.23 / 4.51-4.59 / 9.74-9.81; Ada M 4.88-4.90 |
+| POLAR-1 S / M / L | NaCl 6x6x6 (1,728) | 15.975 / 30.484 / 59.997 | 16.149 / 33.263 / 71.207 | |
+| POLAR-1-M | NbCl5 | 37.682 | 39.984 | 5060 Ti 31.1-31.5; Ada 37.4 |
+
+FastMACE column: its documented numbers (`docs/benchmarks.md`, `docs/optimisation-ledger.md`; 24 October -
+12 November 2026 with its own protocol; not re-measured here; FastMACE's MH-1 cells use `matpes_r2scan`, OFF on
+the H200 only). The POLAR-1 entries are FastMACE's raw A/B lines of 11 November
+(`FastMACE/results/ada-5060-screen-20261110/`, commit `edfc0115`, same 3x3x3 cells): against them LoupMD's POLAR-1
+is level to 20% slower (S 1.13, M 1.16 / 1.20, L 1.03 on the 5060 Ti; M 1.01 / 1.07 on the Ada). An earlier version
+of this table quoted the October baseline of FastMACE's `SPEC.md` section 3.3 (Ada 3.9 / 7.7 / 15.4 and 68.3),
+which made LoupMD look 1.5-1.9x faster. The specialised OMAT-0 medium rows are `bench_family.py` runs (section 1 has the `bench_md.py`
+numbers). POLAR-1 rows run with float32 SIMT GEMMs (5.4); that costs 2-3% (5060 Ti) and 5-7% (Ada) against the
+3xTF32 GEMMs of the other families. POLAR-1-S / -L on NbCl5 3x3x3 are not listed: the model is unstable there
+(5.5).
+
+### 5.4 Fixes Found by the Family Work
+- **POLAR LayerNorm-MLP reverse wrote its GEMM output over its own input** (`mlp_bwd`: after the first hidden layer
+  the destination buffer was the one holding dz). Harmless while one GEMM tile covered all rows; from ~1,700 atoms
+  the tiles raced: perfect NaCl 6x6x6 with POLAR-1-S had 3-11 eV/A forces (random per call) and MD went to NaN.
+  Smaller cells changed at the rounding level (perfect NaCl 7x4x4: residual force 1.1e-4 -> 2.5e-6 eV/A). Fixed
+  (alternating scratch buffers, LayerNorm reverse in place).
+- **k-space phases as exact fixed point**: fractional coordinates are stored as 32-bit fixed point and n . s mod 1
+  comes out of wrapping integer arithmetic, so the phase error no longer grows with |n| (elongated NaCl 10x4x4,
+  perfect lattice: residual force 3.0e-4 -> 8.7e-5 eV/A).
+- **Long-range models use float32 SIMT GEMMs only**: with the 3xTF32 hybrid GEMMs the RTX 4000 Ada failed the
+  POLAR-1-S / -L stress gates (NaCl stress ratios 3.4-5.2, POLAR-1-L NaNbO3 up to 6.3) and POLAR-1-S NaNbO3_c0
+  returned NaN; with SIMT GEMMs every POLAR configuration passes on both GPUs (5.2). Other families keep the
+  hybrid GEMMs (their gates pass on both GPUs).
+- **Pipelined MD margin** (section 3.2, M1): 1 of ~1,600 steps of three 300 K benchmarks had run on an
+  incomplete list with a two-step margin; three steps: 0 in every run.
+
+### 5.5 Known Limitations
+- MACE-POLAR-1: neutral, singlet, zero field, fully periodic (`include/loupmd.h`).
+- MACE-POLAR-1 itself is not stable in 300 K MD on some larger cells: NbCl5 3x3x3 (S, L) and SrTiO3 from 6x6x6
+  (M). MACE's own float64 forces after 5 fs of NVE from the same start agree with LoupMD (SrTiO3 6x6x6, POLAR-1-M:
+  max |F| 84.83 eV/A in both, difference 7e-4 eV/A; NbCl5 3x3x3, POLAR-1-S: 6.74 eV/A after 1 fs in both, from
+  0.61 eV/A at the unrelaxed ideal cell). The same models are stable on NaCl (all sizes run) and NbCl5 2x2x2.
+  `bench_family.py` marks such runs `UNSTABLE`.
+- Bundles of models with nonlinear (ordered-pair) radial blocks are large: MH-1 74-200 MB, POLAR-1-L 790 MB for
+  3 species.
+- Generic-path hot spots (5060 Ti, nsys, SrTiO3 5,000 atoms): MH-1 47 ms/step = SIMT SGEMMs ~50% (cuBLAS CUTLASS
+  SIMT and the own SGEMM, chosen by the autotune), conv backward / forward of layer 1 12% / 8%, gate backward /
+  forward 10% / 5% (estimated ~1 GB of traffic per backward call: near DRAM bandwidth), first-layer outer sum 5%, products 5%.

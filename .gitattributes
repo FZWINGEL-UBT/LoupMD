@@ -1,0 +1,3 @@
+# The tree is edited from Windows and from WSL: keep every file byte for byte (LF line ends), no conversion.
+* -text
+*.cubin binary
