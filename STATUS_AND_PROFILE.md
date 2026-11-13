@@ -1,7 +1,7 @@
 # LoupMD Current State, Kernel Profiles, and Open Ideas
 
-Snapshot date: 2026-11-13 (sixth update, 14:15: review round 6 fixes S1, S5, S6, S7; sections 3.2, 4.2 and the
-FastMACE column of 5.3. The kernel profiles and timings of sections 1, 2 and 5.3 are from the fifth update.)
+Snapshot date: 2026-11-13 (seventh update: generic-path and POLAR speed work S7, 5060 Ti only, section 5.3 and
+the ledger's S7 entries; the workstations were ruled out by the owner. Sections 1-2 are from the fifth update.)
 Every optimisation tried so far, adopted or not, is indexed in [OPTIMISATION_LEDGER.md](OPTIMISATION_LEDGER.md);
 a new attempt adds its ledger row and entry together with the numbers recorded here.
 Target model of the specialised kernels (sections 1-4): MACE-OMAT-0 medium (float32, 128 channels, l <= 3,
@@ -317,30 +317,32 @@ POLAR-1-S NaNbO3_c0 is far from float32-exact in MACE itself (MACE float32 vs fl
 
 ### 5.3 MD Speed (`python/bench_family.py`: Langevin 300 K, 1 fs, skin 0.5 A, 100 warm-up + median of 6 x 256 steps)
 
-| Model | System (atoms) | 5060 Ti ms/step | Ada ms/step | FastMACE (documented) |
-|---|---|---|---|---|
-| OMAT-0 medium (specialised) | NbCl5 (1,944) / SrTiO3 (5,000) | 1.843 / 8.488 | 2.085 / 9.384 | |
-| OMAT-0 small | NbCl5 / SrTiO3 | 2.175 / 10.014 | 2.263 / 10.824 | |
-| OFF23 small / medium / large | water 2x2x2 (5,184) | 5.593 / 13.093 / 47.829 | 5.960 / 14.620 / 59.736 | |
-| OFF23b medium / OFF24 medium | water 2x2x2 | 19.680 / 19.602 | 22.060 / 22.010 | |
-| OFF23 medium | water_216 (648) | 2.121 | 1.969 | H200 1.80 |
-| MH-1 `omat_pbe` | NaCl 3x3x3 (216) | 2.334 | 2.001 | 5060 Ti 2.65-2.90 (`matpes_r2scan`) |
-| MH-1 `omat_pbe` | NbCl5 / SrTiO3 | 15.017 / 46.386 | 16.233 / 51.176 | 5060 Ti NbCl5 18.7-21.3 |
-| MH-1 `omol` | water 2x2x2 | 50.345 | 54.863 | |
-| POLAR-1 S / M / L | NaCl 3x3x3 (216) | 2.492 / 5.273 / 10.076 | 2.291 / 4.928 / 10.227 | 5060 Ti 2.19-2.23 / 4.51-4.59 / 9.74-9.81; Ada M 4.88-4.90 |
-| POLAR-1 S / M / L | NaCl 6x6x6 (1,728) | 15.975 / 30.484 / 59.997 | 16.149 / 33.263 / 71.207 | |
-| POLAR-1-M | NbCl5 | 37.682 | 39.984 | 5060 Ti 31.1-31.5; Ada 37.4 |
+| Model | System (atoms) | 5060 Ti ms/step (S7) | 5060 Ti before S7 | Ada (before S7) | FastMACE (documented, 5060 Ti unless noted) |
+|---|---|---|---|---|---|
+| OMAT-0 medium (specialised) | NbCl5 (1,944) / SrTiO3 (5,000) | 1.834 / 8.376 | 1.843 / 8.488 | 2.085 / 9.384 | |
+| OMAT-0 small | NbCl5 / SrTiO3 | **1.432 / 6.416** | 2.175 / 10.014 | 2.263 / 10.824 | |
+| OFF23 small / medium / large | water 2x2x2 (5,184) | **3.869 / 9.311 / 33.722** | 5.593 / 13.093 / 47.829 | 5.960 / 14.620 / 59.736 | |
+| OFF23b medium / OFF24 medium | water 2x2x2 | **13.585 / 13.518** | 19.680 / 19.602 | 22.060 / 22.010 | |
+| OFF23 medium | water_216 (648) | **1.553** | 2.121 | 1.969 | H200 1.80 |
+| MH-1 `omat_pbe` | NaCl 3x3x3 (216) | **1.780** | 2.334 | 2.001 | 2.65-2.90 (`matpes_r2scan`) |
+| MH-1 `omat_pbe` | NbCl5 / SrTiO3 | **13.781 / 41.388** | 15.017 / 46.386 | 16.233 / 51.176 | NbCl5 18.7-21.3 |
+| MH-1 `omol` | water 2x2x2 | **43.302** | 50.345 | 54.863 | |
+| POLAR-1 S / M / L | NaCl 3x3x3 (216) | **2.167 / 4.671 / 8.907** | 2.492 / 5.273 / 10.076 | 2.291 / 4.928 / 10.227 | 2.19-2.23 / 4.51-4.59 / 9.74-9.81; Ada M 4.88-4.90 |
+| POLAR-1 S / M / L | NaCl 6x6x6 (1,728) | **11.637 / 25.418 / 51.876** | 15.975 / 30.484 / 59.997 | 16.149 / 33.263 / 71.207 | |
+| POLAR-1-M | NbCl5 | **29.739** | 37.682 | 39.984 | 31.1-31.5; Ada 37.4 |
 
-FastMACE column: its documented numbers (`docs/benchmarks.md`, `docs/optimisation-ledger.md`; 24 October -
-12 November 2026 with its own protocol; not re-measured here; FastMACE's MH-1 cells use `matpes_r2scan`, OFF on
-the H200 only). The POLAR-1 entries are FastMACE's raw A/B lines of 11 November
-(`FastMACE/results/ada-5060-screen-20261110/`, commit `edfc0115`, same 3x3x3 cells): against them LoupMD's POLAR-1
-is level to 20% slower (S 1.13, M 1.16 / 1.20, L 1.03 on the 5060 Ti; M 1.01 / 1.07 on the Ada). An earlier version
-of this table quoted the October baseline of FastMACE's `SPEC.md` section 3.3 (Ada 3.9 / 7.7 / 15.4 and 68.3),
-which made LoupMD look 1.5-1.9x faster. The specialised OMAT-0 medium rows are `bench_family.py` runs (section 1 has the `bench_md.py`
-numbers). POLAR-1 rows run with float32 SIMT GEMMs (5.4); that costs 2-3% (5060 Ti) and 5-7% (Ada) against the
-3xTF32 GEMMs of the other families. POLAR-1-S / -L on NbCl5 3x3x3 are not listed: the model is unstable there
-(5.5).
+S7 (13 November, ledger entries pol-sf-f32, gen-fork-zero-slab, gen-skip-fold, gen-conv-v2): GEMM lanes and one zero
+slab in the generic and long-range passes, the skip-message and readout-tail folds, conv kernels with the
+specialised path's 8-byte cubic tables, staged edges, multi-receiver forward and late pull-back backward, and
+float32-chunked structure factors. Every gate passes on the 5060 Ti (section 5.2 sets); 47 tests pass. The Ada
+column is the fifth update's (the workstations were not used for S7). Against FastMACE's raw A/B lines of 11
+November on the same 3x3x3 cells, LoupMD's POLAR-1 is now 1-3% faster (S), 2-4% slower (M, NaCl 216), 4-6% faster
+(M, NbCl5) and 9% faster (L); MH-1 NaCl 216 is 33-39% faster than FastMACE's documented `matpes_r2scan` range.
+These are FastMACE's adopted configurations; its non-adopted POLAR-1-L pair-`w'` variant runs NaCl 216 in
+9.11-9.19 ms (slower on NbCl5), which LoupMD's 8.907 still beats by 2-3%.
+The FastMACE column is its documented numbers (`docs/benchmarks.md`, `docs/optimisation-ledger.md`,
+`results/ada-5060-screen-20261110/`), not re-measured here. POLAR-1 rows run with float32 SIMT GEMMs (5.4).
+POLAR-1-S / -L on NbCl5 3x3x3 are not listed: the model is unstable there (5.5).
 
 ### 5.4 Fixes Found by the Family Work
 - **POLAR LayerNorm-MLP reverse wrote its GEMM output over its own input** (`mlp_bwd`: after the first hidden layer

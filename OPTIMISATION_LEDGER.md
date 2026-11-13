@@ -168,6 +168,12 @@ Conventions:
 | [gen-factored-products](#gen-factored-products) | FastMACE's factored symmetric contraction, kernels by program signature | `gprod_*` | gen | DEFAULT | S6 | design | [§5.1][s51] |
 | [gen-certified-spline](#gen-certified-spline) | FastMACE's certified cubic-Hermite radial spline per pair | `spline.fit` | gen | DEFAULT | S6 | export refuses certificate > 1 | [§5.1][s51] |
 | [gen-profile](#gen-profile) | nsys profile of MH-1 `SrTiO3` | – | gen | MEASUREMENT | S6 | SGEMMs ~50%, conv 20%, gate 15% | [§5.5][s55] |
+| [gen-fork-zero-slab](#gen-fork-zero-slab) | GEMM fork / join lanes in `GenericModel` and `PolarLR`, one zero slab per pass, dead gate-backward stores cut | `GenericPassInputs::gemm_fork/lane/join` | gen + POLAR | DEFAULT (5060 Ti only) | S7 | 5060 Ti ABBA b/a 0.914-0.990 (all families) | this file |
+| [gen-cublas-stream](#gen-cublas-stream) | `cublasSgemm` fallback ignored the GEMM lane's stream | `sgemm_rm` | both | FIX | S7 | POLAR-1-M gate ratios 1e4-4e5 -> PASS | this file |
+| [gen-skip-fold](#gen-skip-fold) | `W_skip_msg` folded into `W_lin` / `C0` per species; last layer's `W_p` / `W_sc` folded into `ro_W1` | `GenericLayer::skip_folded`, `ro_folded` | gen | DEFAULT (5060 Ti only) | S7 | ABBA b/a 0.939-0.991 (OMAT-S, OFF, MH-1) | this file |
+| [gen-conv-v2](#gen-conv-v2) | Conv kernels with 8-byte cubic tables, staged edges, R-receiver forward, late pull-back backward; warp-staged first layer | `python/gen_generic.py`, `first_fwd/bwd_kernel` | gen | DEFAULT (5060 Ti only) | S7 | ABBA b/a 0.688 (OMAT-S `SrTiO3`) to 0.987 (POLAR-1-S) | this file |
+| [gen-skinny-gemm](#gen-skinny-gemm) | Own kernels for products with N <= 16 or K <= 16 (warp K-split, thread per output) in place of cuBLAS | – | gen, POLAR, OMAT-M | REJECTED | S7 | ABBA b/a 1.040 (OMAT-S `SrTiO3`), 1.009 (POLAR-1-M `NbCl5`), 1.016 (OMAT-M `SrTiO3`) | this file |
+| [gen-first-bwd-tail](#gen-first-bwd-tail) | First-layer backward: the per-edge `sh16_grad` tail batched one edge per lane | – | gen | REJECTED | S7 | ABBA b/a 1.040 (OMAT-S `SrTiO3`), 1.017 (OFF23-M water) | this file |
 
 ### MACE-POLAR-1 long range (`src/polar.cu`)
 
@@ -180,6 +186,9 @@ Conventions:
 | [pol-precise-math](#pol-precise-math) | Precise `expf` / `sqrt` for the float32 stress error | – | POLAR | REJECTED | S6 | no change | this file |
 | [pol-stress-diagnosis](#pol-stress-diagnosis) | Where POLAR's float32 stress error comes from | – | POLAR | MEASUREMENT | S6 | local electron energy term; k-space virial to 1e-10 | this file |
 | [pol-set-cell](#pol-set-cell) | Re-capture the force graph on every cell change | `PolarLR::set_cell` | POLAR | FIX | round 6 | strained cell on a reused engine: 1e-6 eV/atom, 9e-5 eV/A off -> identical | [§3.2 S5][s32] |
+| [pol-sf-f32](#pol-sf-f32) | Structure factors: float32 chunk sums folded into double, coalesced `float4` loads | `sf_kernel<NC>` | POLAR | DEFAULT (5060 Ti only) | S7 | ABBA b/a 0.833 (M `NbCl5`) to 0.987 (L NaCl) | this file |
+| [pol-contig-weights](#pol-contig-weights) | Per-degree contiguous `Wpot` / `Wq` / `le_W*` slices, fused `qnew = qin + out` | – | POLAR | REJECTED | S7 | ABBA b/a 0.952-1.045, mixed | this file |
+| [pol-kpass-32](#pol-kpass-32) | 32-thread blocks for the per-atom k-space passes when N <= 512 | – | POLAR | REJECTED | S7 | NaCl 216 (with pol-contig-weights): +7.4% (S), +6.0% (M) | this file |
 
 ### Measurements without a switch
 
@@ -879,8 +888,8 @@ Each entry has the same fields. Unless stated, the system is OMAT-0 medium on th
 ### Generic path
 
 Families: MACE-OMAT-0 small, MACE-OFF23 S / M / L, OFF23b M, OFF24 M, MACE-MH-1 (any head), MACE-POLAR-1 S / M / L.
-These items are design decisions of the first version (12-13 November 2026); none was A/B-timed against an
-alternative.
+The first entries below are design decisions of the first version (12-13 November 2026), not A/B-timed against an
+alternative; the S7 entries from gen-fork-zero-slab on carry ABBA measurements (5060 Ti only).
 
 <a id="gen-probe-export"></a>
 #### gen-probe-export: probe-based weight extraction
@@ -922,6 +931,66 @@ alternative.
 - Status: MEASUREMENT.
 - Measured: SIMT SGEMMs ~50% (cuBLAS CUTLASS SIMT kernels 39%, own SGEMM 8%, magma 2%), `gconv_bwd_L1` 11.7%, `gconv_fwd_L1` 7.9%, gate backward 9.6%, gate forward 4.7%, first-layer kernels 4.7%, products 4.6%.
 - Sources: [§5.5][s55].
+
+The entries below are speed work of 13 November 2026 (stage S7), A/B-timed on the RTX 5060 Ti only: the owner
+ruled the workstations out (planned power outage), so none of them has an Ada measurement. Method:
+`.tmp_o/ab_fam.py` (`bench_family.py` protocol, one process per side, order a b b a; b/a < 1 is faster).
+Cells: OMAT-0 small `SrTiO3` 5,000 atoms; OFF23 medium `water_216` (648) and water 2x2x2 (5,184); MH-1 `SrTiO3`;
+POLAR-1 NaCl 3x3x3 (216) and POLAR-1-M `NbCl5` 3x3x3 (1,944).
+
+<a id="gen-fork-zero-slab"></a>
+#### gen-fork-zero-slab: GEMM lanes, one zero slab, dead stores
+- Switch: `GenericPassInputs::gemm_fork / gemm_lane / gemm_join` (engine side streams), passed into `PolarLR::record`; `GenericModel::d_zero_slab_`, `PolarLR` `bwd_zero_slab`.
+- Stage: S7.
+- What: the per-degree and per-species GEMMs of each layer, and the source / mixer / readout GEMMs of the long-range part, run on the engine's side streams; the per-step gradient accumulators sit in one slab cleared by one memset; `gate_bwd_kernel` no longer stores `dp` buffers that are never read (layer 0, l = 3) and the dead `dnw[2]` is gone.
+- Status: DEFAULT.
+- Measured (b/a against the build before, which already had pol-sf-f32): OMAT-S 0.987, OFF23-M 0.961 / 0.990, MH-1 0.975, POLAR-1-S 0.918, POLAR-1-M 0.974 / 0.963 (NaCl / `NbCl5`), POLAR-1-L 0.914. Gates: all families PASS; 47 tests pass.
+- Sources: this file (commit `1310ddc`).
+
+<a id="gen-cublas-stream"></a>
+#### gen-cublas-stream: cuBLAS fallback on the lane's stream
+- Switch: `sgemm_rm` in `src/engine.cu`.
+- Stage: S7.
+- What: GEMMs with a non-packed layout (POLAR's strided `Wpot` / `Wq` column blocks) fall back to `cublasSgemm`, which ran on the main stream even when a fork lane was selected, so it raced the side-stream GEMMs writing its operands.
+- Status: FIX (found by the gate after gen-fork-zero-slab).
+- Measured: POLAR-1-M crystals gate force / stress ratios 1.4e4-4e5 (energies off by 15-145 meV/atom) -> every row PASS (worst 0.72 / 0.72).
+- Sources: this file.
+
+<a id="gen-skip-fold"></a>
+#### gen-skip-fold: skip-message and readout-tail folds
+- Switch: `GenericLayer::skip_folded` (blocks of kind agnostic / density), `GenericLayer::ro_folded` (last layer, scalar output, no long range, MLP readout).
+- Stage: S7.
+- What: the per-species `W_skip_msg` that follows the message linear is folded at load (in float64) into a per-species `W_lin` (and `C0` for the first layer), removing one species GEMM per degree in each direction; on the last layer `hout = y W_p + h_in W_sc` feeds only the readout's first linear, so `W_p ro_W1` and `W_sc ro_W1` replace three GEMMs by two narrower ones. Exactness checked on CPU against MACE float64 (OMAT-S 4.9e-6 meV/atom, 4.1e-8 eV/A; OFF23-M 1.3e-5, 4.2e-8).
+- Status: DEFAULT.
+- Measured: OMAT-S 0.947, OFF23-M 0.939 / 0.956, MH-1 0.991. Gates PASS (OMAT-S worst force 0.91, OFF23-M 0.21, MH-1 0.64); 47 tests pass.
+- Sources: this file (commit `7fff54d`).
+
+<a id="gen-conv-v2"></a>
+#### gen-conv-v2: conv and first-layer kernels rewritten
+- Switch: `python/gen_generic.py` -> `gconv_fwd_L{0,1,2}<R, PAIR>`, `gconv_bwd_L{0,1,2}<WANT_DX>`; `first_fwd_kernel`, `first_bwd_kernel` in `src/generic.cu`.
+- Stage: S7.
+- What: (1) the conv tables are re-packed at load into the specialised path's 8-byte cubic format (`CUBIC_PACKED8`, 5-bit shared exponent; error 1e-4 to 1.8e-3 of each interval's largest value on every cached bundle, CPU check), with the edge density in its own `float4` table; (2) the forward stages each 32-edge tile's sender, spline offset and SH in shared memory, 4 (lx 0) or 2 (lx 1) receivers per block at C = 128, paired decode of edges sharing a slab; (3) the backward of lx 0 / 1 uses the late pull-back of FastMACE's `wprime_pullback` (q = M g staged per channel, geometry differentiated once per edge from 4 warp-reduced scalars; formulas checked against e3nn autograd to 1e-15 for all 14 paths), lx 2 keeps the per-channel SH gradient with a 16-shuffle fold, one warp per edge, no atomics on `edge_dvec`; (4) the first layer stages SH per 32-edge tile in the forward and walks edges per warp in the backward. Zero spills at the chosen bounds (`ptxas -v`, `sm_120`).
+- Status: DEFAULT.
+- Measured: OMAT-S 0.688, OFF23-M 0.789 / 0.753, MH-1 0.907, POLAR-1-S 0.987, POLAR-1-M 0.968 / 0.982, POLAR-1-L 0.971. Gates PASS for OMAT-S (worst force 1.23), OFF23-S, OFF23-M, MH-1, POLAR-1-S / -M (worst 1.71); 47 tests pass.
+- Sources: this file (commit `3e526d5`).
+
+<a id="gen-skinny-gemm"></a>
+#### gen-skinny-gemm: own kernels for skinny products
+- Stage: S7.
+- What: `sgemm_rm` routed every product with N <= 16 or K <= 16 (any strides) to two own kernels: N <= 16 with eight warps splitting K over 4 rows and a fixed-order reduction; K <= 16 with one thread per output. Target: the strided POLAR `Wpot` / `Wq` products (`cublasSgemm` fallback, `magma_sgemmEx` 55-93 us each at 216 atoms; a 216 x 8 output with K = 2560 got a handful of CTAs).
+- Status: REJECTED.
+- Measured: the POLAR launches dropped to ~7 us each (nsys), but OMAT-S's packed N = 16 / K = 16 products at 5,000 rows ran 32-45 us against ~16 us for the cuBLAS / hybrid tiles. ABBA b/a: OMAT-S `SrTiO3` 1.040, POLAR-1-M `NbCl5` 1.009, OMAT-M `SrTiO3` 1.016 (the specialised path's two `skip16` products took the route; it never runs `first_bwd`). POLAR-1-M crystals gate passed (worst 1.27).
+- Why: unconditional routing loses on large-M shapes; a per-call tuner candidate repeats [gemm-group-policy](#gemm-group-policy). A retry should be one static rule for the strided long-K shapes only, judged by MD A/B.
+- Sources: this file.
+
+<a id="gen-first-bwd-tail"></a>
+#### gen-first-bwd-tail: batched first-layer backward tail
+- Stage: S7.
+- What: `first_bwd_kernel` ran `sh16_grad` and the force projection on lane 0 once per edge; each warp instead buffered 32 edges' reduced `dY[16]` and `er` in shared memory (17 KB per block) and finished them one edge per lane. Arithmetic unchanged.
+- Status: REJECTED.
+- Measured: ABBA b/a against gen-skinny-gemm: OMAT-S `SrTiO3` 1.040, OFF23-M water 2x2x2 1.017.
+- Why: [INFERENCE] the kernel's `G` and table reads rely on L1, and the 17 KB buffer costs carveout and resident blocks; the serial tail was not the limiter.
+- Sources: this file.
 
 ### MACE-POLAR-1 long range
 
@@ -979,6 +1048,31 @@ alternative.
 - Status: FIX.
 - Measured: NaCl 2x2x2, POLAR-1-S, strain 3e-4 on the same engine: 1e-6 eV/atom, 9e-5 eV/A and 3e-7 eV/A^3 against a fresh engine before; identical now.
 - Sources: [§3.2 S5][s32].
+
+<a id="pol-sf-f32"></a>
+#### pol-sf-f32: structure factors in float32 chunks
+- Switch: `sf_kernel<NC>` (128 threads per k).
+- Stage: S7.
+- What: each thread sums its atoms' `X cos` / `X sin` in float32 over 1,024-atom chunks and folds them into double per chunk (as the feature and gradient passes already did), with coalesced `float4` loads of X; before, every term was a 1/64-rate FP64 add.
+- Status: DEFAULT.
+- Measured: POLAR-1-S NaCl 0.942, POLAR-1-M NaCl 0.973, `NbCl5` 0.833, POLAR-1-L NaCl 0.987. Gates POLAR-1-S / -M / -L PASS.
+- Sources: this file (commit `9417f4a`).
+
+<a id="pol-contig-weights"></a>
+#### pol-contig-weights: per-degree contiguous SCF weights
+- Stage: S7.
+- What: `Wpot` / `Wq` (and the electron-energy `le_Wq` / `le_Wv`) sliced at load into one contiguous matrix per degree so their GEMMs take the packed `cublasLt` / own-SGEMM path instead of the strided `cublasSgemm` fallback; `qnew = qin + out` in one kernel instead of a copy and an add.
+- Status: REJECTED.
+- Measured (b/a against gen-conv-v2): POLAR-1-S NaCl 1.008, POLAR-1-M NaCl 0.952, `NbCl5` 0.993, POLAR-1-L NaCl 1.045. Gates passed. Mixed on one GPU; not kept.
+- Sources: this file.
+
+<a id="pol-kpass-32"></a>
+#### pol-kpass-32: small blocks for the per-atom k-space passes
+- Stage: S7.
+- What: `feat_pass_kernel` / `grad_pass_kernel` with 32 threads per block for N <= 512, to spread 216 atoms over more SMs.
+- Status: REJECTED.
+- Measured (together with pol-contig-weights): POLAR-1-S NaCl 1.074, POLAR-1-M NaCl 1.060; each block then re-stages the same k tiles, which costs more than the extra SMs gain.
+- Sources: this file.
 
 ### Measurements without a switch
 
