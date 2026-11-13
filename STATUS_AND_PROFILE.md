@@ -319,6 +319,10 @@ for the S7 and S8 builds; a discrete set points to the per-process GEMM plan cho
 bound, also changes between runs (0.44 meV in one). With 2.320 the row failed once for S7 and once for S8 and
 passed for S8 in another run; force and stress ratios stayed at or below 0.29.
 `tests/test_gate_wrapper.py` runs the gate for OMAT-0 small, OFF23-S / M, MH-1 (two sets) and POLAR-1-S / M.
+The MACE references are cached per model, set, head and reference GPU (`LOUP_GATE_CACHE`, default
+`~/.cache/loupmd/gate_refs`; `--no-ref-cache` recomputes):
+a repeat gate costs only LoupMD's evaluations (POLAR-1-S crystals 40 -> 6 s; the ~30 min of the POLAR-1-L CPU-reference
+gate is the references), and the float32 bound no longer changes between runs.
 
 ### 5.3 MD Speed (`python/bench_family.py`: Langevin 300 K, 1 fs, skin 0.5 A, 100 warm-up + median of 6 x 256 steps)
 

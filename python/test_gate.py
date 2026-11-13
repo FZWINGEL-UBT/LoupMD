@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 """Accuracy gate for LoupMD against MACE float64 and float32 references (3x float32 rule).
 
-  python test_gate.py [MODEL] [--head H] [--generic] [--set oxide|organic|crystals]
+  python test_gate.py [MODEL] [--head H] [--generic] [--set oxide|organic|crystals] [--ref-device cpu] [--no-ref-cache]
+
+The MACE references are cached (LOUP_GATE_CACHE, default ~/.cache/loupmd/gate_refs; see ref_cache_path for the key);
+--no-ref-cache recomputes and overwrites them.
 
 Structure sets: "oxide" (NaCl, SrTiO3, NbCl5; the default), "organic" (urea, naphthalene, paracetamol, the
 648-atom water box; MACE-OFF's set) and "crystals" (NaCl, NaNbO3, NbCl5 R2SCAN cells; FastMACE's MH-1 / POLAR set).
@@ -25,7 +28,74 @@ from ase.build import bulk
 from ase.io import read as ase_read
 from mace.calculators import MACECalculator
 
-from loupmd import LoupEngine, ensure_loup_bundle
+from loupmd import LoupEngine, _model_digest, ensure_loup_bundle
+
+# MACE references (float64, float32, and PolarMACE's finite-difference stress) do not depend on LoupMD, so they are
+# cached: repeat gates of the large models (CPU references, ~30 min for POLAR-1-L) take seconds, and the float32
+# bound (MACE's own run-to-run noise) is the same in every run. The key covers everything a reference depends on.
+REF_CACHE_FORMAT = "gate-refs-1"
+FD_STRESS_H = 1e-5
+
+
+def ref_device_tag(ref_device):
+    """The reference device as it affects rounding: for CUDA the GPU model, compute capability and CUDA version
+    (a reference computed on another GPU is not reused), for the CPU the machine type."""
+    import platform
+
+    import torch
+
+    if ref_device.startswith("cuda") and torch.cuda.is_available():
+        idx = torch.device(ref_device).index or 0
+        cap = torch.cuda.get_device_capability(idx)
+        return f"cuda:{torch.cuda.get_device_name(idx)}:sm{cap[0]}{cap[1]}:cuda{torch.version.cuda}"
+    return f"{ref_device}:{platform.machine()}"
+
+
+def ref_cache_path(model_path, head, set_name, ref_device, configs):
+    import hashlib
+
+    import mace
+    import torch
+
+    h = hashlib.sha256()
+    for part in (REF_CACHE_FORMAT, _model_digest(model_path), str(head), set_name, ref_device_tag(ref_device),
+                 getattr(mace, "__version__", "?"), torch.__version__, repr(FD_STRESS_H)):
+        h.update(part.encode() + b"\0")
+    for name, at in configs:
+        h.update(name.encode() + b"\0")
+        h.update(np.ascontiguousarray(at.get_atomic_numbers(), dtype=np.int64).tobytes())
+        h.update(np.ascontiguousarray(at.positions, dtype=np.float64).tobytes())
+        h.update(np.ascontiguousarray(at.cell.array, dtype=np.float64).tobytes())
+        h.update(np.asarray(at.pbc, dtype=np.int8).tobytes())
+    root = Path(os.environ.get("LOUP_GATE_CACHE") or Path.home() / ".cache" / "loupmd" / "gate_refs")
+    return root / f"{Path(model_path).stem}_{set_name}_{h.hexdigest()[:20]}.npz"
+
+
+def load_refs(path, n):
+    """The cached references, or None if absent or unreadable (a truncated or foreign file is recomputed)."""
+    if not path.exists():
+        return None
+    try:
+        with np.load(path) as z:
+            ref = lambda p, i: (float(z[f"{p}e"][i]), np.array(z[f"{p}f{i}"]), np.array(z[f"{p}s"][i]))  # noqa: E731
+            return ([ref("r64", i) for i in range(n)], [ref("r32", i) for i in range(n)],
+                    [np.array(z["sref"][i]) for i in range(n)])
+    except Exception as exc:  # noqa: BLE001 (any unreadable cache entry means: recompute)
+        print(f"ignoring unreadable reference cache {path}: {exc}")
+        return None
+
+
+def save_refs(path, ref64, ref32, stress_ref):
+    arrays = {"sref": np.stack(stress_ref)}
+    for p, refs in (("r64", ref64), ("r32", ref32)):
+        arrays[f"{p}e"] = np.array([e for e, _, _ in refs])
+        arrays[f"{p}s"] = np.stack([s for _, _, s in refs])
+        for i, (_, f, _) in enumerate(refs):
+            arrays[f"{p}f{i}"] = f
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.stem + f".tmp{os.getpid()}.npz")
+    np.savez(tmp, **arrays)
+    os.replace(tmp, path)
 
 
 def read_bundle_meta(path):
@@ -140,7 +210,7 @@ def eval_mace(model_path: str, dtype: str, configs, head=None, device="cuda"):
     return out
 
 
-def fd_stress(model_path, configs, device="cuda", h=1e-5):
+def fd_stress(model_path, configs, device="cuda", h=FD_STRESS_H):
     """Stress as the float64 MACE energy's central difference under symmetric strain (positions and cell strained,
     so the reciprocal cell and the volume follow). For PolarMACE this is the corrected stress (MACE PR 1718, as
     FastMACE): the installed PolarMACE's autograd stress leaves out the k-space terms' cell dependence."""
@@ -180,6 +250,8 @@ def main():
     ap.add_argument("--set", default="oxide", choices=("oxide", "organic", "crystals"))
     ap.add_argument("--ref-device", default="cuda", help="device of the MACE references (cpu for models whose "
                     "float64 reference does not fit the GPU)")
+    ap.add_argument("--no-ref-cache", action="store_true", help="recompute the MACE references (and overwrite the "
+                    "cached ones) instead of reading them from LOUP_GATE_CACHE (default ~/.cache/loupmd/gate_refs)")
     args = ap.parse_args()
     model_path, head = args.model, args.head
     if head is None:  # the exporter's default head of a multi-head model, named explicitly for MACECalculator
@@ -191,20 +263,28 @@ def main():
             print(f"head: {head}")
     configs = {"oxide": make_structures, "organic": make_organic, "crystals": make_crystals}[args.set]()
     print(f"{args.set} set: " + ", ".join(f"{n} ({len(a)})" for n, a in configs[::2]))
-    print("Running MACE float64 reference...")
-    ref64 = eval_mace(model_path, "float64", configs, head, args.ref_device)
-    print("Running MACE float32 reference...")
-    ref32 = eval_mace(model_path, "float32", configs, head, args.ref_device)
     import torch
 
-    polar = type(torch.load(model_path, map_location="cpu", weights_only=False)).__name__ == "PolarMACE"
-    # Stress reference per config: MACE float64 autograd, or for PolarMACE the corrected float64 stress (finite
-    # differences); the float32 noise level stays the MACE float32-vs-float64 autograd difference (both carry the
-    # same local float32 rounding).
-    stress_ref = [s for _, _, s in ref64]
-    if polar:
-        print("PolarMACE: stress reference from float64 energy differences (corrected k-space cell dependence)")
-        stress_ref = fd_stress(model_path, configs, args.ref_device)
+    cache = ref_cache_path(model_path, head, args.set, args.ref_device, configs)
+    cached = None if args.no_ref_cache else load_refs(cache, len(configs))
+    if cached is not None:
+        print(f"MACE references from {cache}")
+        ref64, ref32, stress_ref = cached
+    else:
+        print("Running MACE float64 reference...")
+        ref64 = eval_mace(model_path, "float64", configs, head, args.ref_device)
+        print("Running MACE float32 reference...")
+        ref32 = eval_mace(model_path, "float32", configs, head, args.ref_device)
+        polar = type(torch.load(model_path, map_location="cpu", weights_only=False)).__name__ == "PolarMACE"
+        # Stress reference per config: MACE float64 autograd, or for PolarMACE the corrected float64 stress (finite
+        # differences); the float32 noise level stays the MACE float32-vs-float64 autograd difference (both carry the
+        # same local float32 rounding).
+        stress_ref = [s for _, _, s in ref64]
+        if polar:
+            print("PolarMACE: stress reference from float64 energy differences (corrected k-space cell dependence)")
+            stress_ref = fd_stress(model_path, configs, args.ref_device)
+        save_refs(cache, ref64, ref32, stress_ref)
+        print(f"MACE references saved to {cache}")
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
     specialised = {}
