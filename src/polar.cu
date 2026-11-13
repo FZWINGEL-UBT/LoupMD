@@ -48,48 +48,83 @@ __device__ __forceinline__ void kphase(const float* nk, unsigned s1, unsigned s2
     sincospif(2.0f * f, &sn, &cs);
 }
 
-// Structure factors per k over atoms: SC[k][j] = sum_a X[a][j] cos(theta_ak), SS likewise with sin (nc <= 16).
+// Structure factors per k over atoms: SC[k][j] = sum_a X[a][j] cos(theta_ak), SS likewise with sin (NC = 4, 8, 16).
+// Accumulates in float32 over 1024-atom chunks (<= 8 terms per thread) and folds into double at each chunk boundary,
+// avoiding 1/64-rate FP64 adds in the inner loop while matching feat_pass_kernel / grad_pass_kernel precision.
 template <int NC>
-__global__ void __launch_bounds__(256) sf_kernel(int N, int K, const float* __restrict__ kinfo,
+__global__ void __launch_bounds__(128) sf_kernel(int N, int K, const float* __restrict__ kinfo,
                                                  const unsigned* __restrict__ frac, const float* __restrict__ X,
                                                  double* __restrict__ SC, double* __restrict__ SS) {
+    static_assert(NC % 4 == 0, "NC must be a multiple of 4 for float4 loads");
+    constexpr int BLK = 128;
+    constexpr int N4 = NC / 4;
     const int k = blockIdx.x;
     if (k >= K) return;
     const float* nk = kinfo + k * KI;
-    double ac[NC], as[NC];
-    #pragma unroll
-    for (int j = 0; j < NC; ++j) ac[j] = as[j] = 0.0;
-    for (int a = threadIdx.x; a < N; a += blockDim.x) {
-        float s, c;
-        kphase(nk, frac[3 * a], frac[3 * a + 1], frac[3 * a + 2], s, c);
+    const float n0 = nk[0], n1 = nk[1], n2 = nk[2];
+    const float4* X4 = reinterpret_cast<const float4*>(X);
+
+    __shared__ unsigned s_frac[BLK * 3];
+    __shared__ double red[4][2 * NC];
+    __shared__ double tot[2 * NC];
+    const int tid = threadIdx.x, lane = tid & 31, warp = tid >> 5;
+    if (tid < 2 * NC) tot[tid] = 0.0;
+
+    for (int chunk = 0; chunk < N; chunk += BLK * 8) {
+        const int chunk_end = min(N, chunk + BLK * 8);
+        float fc[NC], fs[NC];
+        #pragma unroll
+        for (int j = 0; j < NC; ++j) fc[j] = fs[j] = 0.0f;
+
+        for (int base = chunk; base < chunk_end; base += BLK) {
+            const int cnt = min(BLK, chunk_end - base);
+            __syncthreads();
+            for (int i = tid; i < cnt * 3; i += BLK) s_frac[i] = frac[(size_t)base * 3 + i];
+            __syncthreads();
+            if (tid < cnt) {
+                const unsigned ph = (unsigned)(int)n0 * s_frac[3 * tid] + (unsigned)(int)n1 * s_frac[3 * tid + 1] +
+                                    (unsigned)(int)n2 * s_frac[3 * tid + 2];
+                float s, c;
+                sincospif(2.0f * ((float)(int)ph * 2.3283064365386963e-10f), &s, &c);
+                const int a = base + tid;
+                #pragma unroll
+                for (int q = 0; q < N4; ++q) {
+                    const float4 v = __ldg(X4 + (int64_t)a * N4 + q);
+                    fc[4 * q + 0] = fmaf(v.x, c, fc[4 * q + 0]);
+                    fs[4 * q + 0] = fmaf(v.x, s, fs[4 * q + 0]);
+                    fc[4 * q + 1] = fmaf(v.y, c, fc[4 * q + 1]);
+                    fs[4 * q + 1] = fmaf(v.y, s, fs[4 * q + 1]);
+                    fc[4 * q + 2] = fmaf(v.z, c, fc[4 * q + 2]);
+                    fs[4 * q + 2] = fmaf(v.z, s, fs[4 * q + 2]);
+                    fc[4 * q + 3] = fmaf(v.w, c, fc[4 * q + 3]);
+                    fs[4 * q + 3] = fmaf(v.w, s, fs[4 * q + 3]);
+                }
+            }
+        }
         #pragma unroll
         for (int j = 0; j < NC; ++j) {
-            const float x = X[(int64_t)a * NC + j];
-            ac[j] += (double)(x * c);
-            as[j] += (double)(x * s);
+            double dc = (double)fc[j], ds = (double)fs[j];
+            #pragma unroll
+            for (int off = 16; off > 0; off >>= 1) {
+                dc += __shfl_xor_sync(0xffffffffu, dc, off);
+                ds += __shfl_xor_sync(0xffffffffu, ds, off);
+            }
+            if (lane == 0) {
+                red[warp][j] = dc;
+                red[warp][NC + j] = ds;
+            }
         }
-    }
-    __shared__ double red[8][2 * NC];
-    const int lane = threadIdx.x & 31, warp = threadIdx.x >> 5;
-    #pragma unroll
-    for (int j = 0; j < NC; ++j) {
-        #pragma unroll
-        for (int off = 16; off > 0; off >>= 1) {
-            ac[j] += __shfl_xor_sync(0xffffffffu, ac[j], off);
-            as[j] += __shfl_xor_sync(0xffffffffu, as[j], off);
-        }
-        if (lane == 0) {
-            red[warp][j] = ac[j];
-            red[warp][NC + j] = as[j];
+        __syncthreads();
+        if (tid < 2 * NC) {
+            double v = 0.0;
+            #pragma unroll
+            for (int w = 0; w < 4; ++w) v += red[w][tid];
+            tot[tid] += v;
         }
     }
     __syncthreads();
-    if (threadIdx.x < 2 * NC) {
-        double v = 0.0;
-        for (int w = 0; w < (int)(blockDim.x >> 5); ++w) v += red[w][threadIdx.x];
-        if (threadIdx.x < NC) SC[(int64_t)k * NC + threadIdx.x] = v;
-        else SS[(int64_t)k * NC + threadIdx.x - NC] = v;
-    }
+    if (tid < NC) SC[(int64_t)k * NC + tid] = tot[tid];
+    else if (tid < 2 * NC) SS[(int64_t)k * NC + tid - NC] = tot[tid];
 }
 
 // Forward feature coefficients per k and spin channel: rho from the structure factors, V = kappa rho,
@@ -1300,7 +1335,7 @@ void PolarLR::record(cudaStream_t st, int N, const GemmFn& gemm, const int* spec
     auto features = [&](const float* q, double* SFq, float* AB, float* pot) {
         double* SCq = SFq;
         double* SSq = SFq + (size_t)P.K_cap * 8;
-        sf_kernel<8><<<K, 256, 0, st>>>(N, K, P.kinfo, P.fracu, q, SCq, SSq);
+        sf_kernel<8><<<K, 128, 0, st>>>(N, K, P.kinfo, P.fracu, q, SCq, SSq);
         feat_coef_kernel<<<blocks_for(K), 256, 0, st>>>(K, P.kinfo, alpha, beta, SCq, SSq, AB);
         feat_pass_kernel<<<blocks_for(N, 128), 128, 0, st>>>(N, K, P.kinfo, P.fracu, AB, P.f16);
         pot_fwd_kernel<<<blocks_for((int64_t)N * 16), 256, 0, st>>>(N, P.fc, P.f16, q, pot);
@@ -1402,7 +1437,7 @@ void PolarLR::record(cudaStream_t st, int N, const GemmFn& gemm, const int* spec
     }
     // ---------------- Coulomb energy
     qtot_kernel<<<blocks_for((int64_t)N * 4), 256, 0, st>>>(N, P.qfin, P.qt);
-    sf_kernel<4><<<K, 256, 0, st>>>(N, K, P.kinfo, P.fracu, P.qt, P.SC, P.SS);
+    sf_kernel<4><<<K, 128, 0, st>>>(N, K, P.kinfo, P.fracu, P.qt, P.SC, P.SS);
     energy_kernel<<<blocks_for(K), 256, 0, st>>>(K, P.kinfo, alpha, e_scale, P.SC, P.SS, energy);
 
     // ================= backward
@@ -1478,7 +1513,7 @@ void PolarLR::record(cudaStream_t st, int N, const GemmFn& gemm, const int* spec
         }
         // pot = (features(q_in) - si(q_in)) / norms
         pot_bwd_kernel<<<blocks_for((int64_t)N * 2), 256, 0, st>>>(N, P.fc, P.dpot, P.g16, P.dq2);
-        sf_kernel<16><<<K, 256, 0, st>>>(N, K, P.kinfo, P.fracu, P.g16, P.SC, P.SS);
+        sf_kernel<16><<<K, 128, 0, st>>>(N, K, P.kinfo, P.fracu, P.g16, P.SC, P.SS);
         // features_from_q again for rho is not needed: the backward coefficients take GA/GB only
         bwd_coef_kernel<<<blocks_for(K), 256, 0, st>>>(K, 2, 0, P.kinfo, alpha, beta, e_scale, P.SC, P.SS, nullptr,
                                                        nullptr, P.dk);
