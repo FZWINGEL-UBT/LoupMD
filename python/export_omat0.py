@@ -12,6 +12,7 @@ import hashlib
 import os
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 os.environ.setdefault("TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD", "1")
 os.environ.setdefault("CUDA_VISIBLE_DEVICES", "")
@@ -39,10 +40,24 @@ from fastmace.rewrites.radial import _GenericChain, power_basis, spline as rspli
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from bundle import write_bundle  # noqa: E402
 
-EXPORTER_VERSION = 3
+EXPORTER_VERSION = 4
 ARCH = "omat0_medium_spec"
-# What src/generated_kernels.cuh and the specialised engine assume; gen_kernels.py writes the same string.
+# What src/generated_kernels.cuh and the specialised engine assume. The full signature (kernel_signature below)
+# adds the two factored product programs, so gen_kernels.py and this exporter must agree on them too.
 KERNEL_SIGNATURE = "omat0m:C128:h0e+1o/0e:corr3:sh3:paths10"
+
+
+def product_signature(prog, feats, sh) -> str:
+    """Hash of one factored symmetric-contraction program (as export_generic.product_signature): the feature basis the
+    generated product kernel evaluates and the folded weights multiply. FastMACE's factor() chooses it; the kernels
+    get it at generation time and the weights at export time, so both sides record it."""
+    h = hashlib.sha256(repr((sh[0], sh[1], sh[2], prog.nodes, [sorted(f.items()) if f else None for f in feats])).encode())
+    return h.hexdigest()[:16]
+
+
+def kernel_signature(product_sigs) -> str:
+    """The string compared by src/model_loader.cu: architecture literal plus the hashes of products 0 and 1."""
+    return KERNEL_SIGNATURE + "".join(f":p{i}={s}" for i, s in enumerate(product_sigs))
 
 
 def check_architecture(m):
@@ -109,7 +124,14 @@ def export_model(model_path: str, atomic_nums: list[int], out_path: Path):
     chain0_64 = _GenericChain(m64, m64.interactions[0], cols, torch.float64, torch.device("cpu"))
     chain0_32 = _GenericChain(m32, m32.interactions[0], cols, torch.float32, torch.device("cpu"))
     tables0 = rad.fit(chain0_64, sym_pairs, r_max, table_dtype=torch.float32)
-    # Check fit error
+    # FastMACE's acceptance test for this table (its own self-check applies the same): over 12,000 lengths per pair
+    # the float32 table must be no further from the float64 network than the float32 network itself. rad.fit alone
+    # does not ensure that: it accepts a piece at its deepest level whatever the error, and the real table has such
+    # pieces (fit_error 4e-5 against a tolerance of 1e-7), so fit_error is not the criterion.
+    cert0 = rad.certify(SimpleNamespace(**tables0), chain0_64, chain0_32, sym_pairs, r_max)
+    if not cert0["worst"] <= 1.0:
+        raise RuntimeError(f"interaction 0 radial table: certificate {cert0['worst']:.3f} > 1 "
+                           "(the table is less accurate than the float32 network)")
     coef0 = tables0["coef"].contiguous()  # [P_sym, pieces0, 6, 66]
     pcoef0 = power_basis(coef0).contiguous()  # [P_sym, pieces0, 6, 66]
     starts0 = tables0["starts"].contiguous()
@@ -152,7 +174,7 @@ def export_model(model_path: str, atomic_nums: list[int], out_path: Path):
         sc0_32 = mc32.products[0].symmetric_contractions
         sh0 = shape_of(sc0_32)
         terms0 = merged_terms(sc0_32.etp.polynomial)
-        _, _, K0 = factor(terms0, sh0[0], sh0[1], sh0[2])
+        prog0, feats0, K0 = factor(terms0, sh0[0], sh0[1], sh0[2])
         w0_raw = torch.einsum("zau,ab->zbu", sc0.weight.detach(), sc0.projection.detach())[cols].reshape(S, -1)
         w0_factored = fold_weights(w0_raw, K0, sh0[1], sh0[3]).to(torch.float32).contiguous()  # [S, 29, 128]
 
@@ -183,7 +205,7 @@ def export_model(model_path: str, atomic_nums: list[int], out_path: Path):
         sc1_32 = mc32.products[1].symmetric_contractions
         sh1 = shape_of(sc1_32)
         terms1 = merged_terms(sc1_32.etp.polynomial)
-        _, _, K1 = factor(terms1, sh1[0], sh1[1], sh1[2])
+        prog1, feats1, K1 = factor(terms1, sh1[0], sh1[1], sh1[2])
         w1_raw = torch.einsum("zau,ab->zbu", sc1.weight.detach(), sc1.projection.detach())[cols].reshape(S, -1)
         w1_factored = fold_weights(w1_raw, K1, sh1[1], sh1[3]).to(torch.float32).contiguous()  # [S, 13, 128]
 
@@ -225,6 +247,10 @@ def export_model(model_path: str, atomic_nums: list[int], out_path: Path):
         chain1_64, chain1_32, chain1_64.folded, sym_pairs,
         rad.R_LO, r_max, rad.CERTIFY_POINTS, rad.R_PHYSICAL, seed=1
     )
+    # rspline.fit returns after its last round whether or not it passed (as export_generic, which also raises).
+    if not cert1["worst"] <= 1.0:
+        raise RuntimeError(f"interaction 1 radial spline: certificate {cert1['worst']:.3f} > 1 "
+                           "(the spline is less accurate than the float32 network)")
     grid1 = spline_res["grid"]  # [(a, b, n), ...]
     coef1_raw = spline_res["coef"]  # [P_sym, intervals1, 4, 1280]
     intervals1 = int(coef1_raw.shape[1])
@@ -278,7 +304,8 @@ def export_model(model_path: str, atomic_nums: list[int], out_path: Path):
 
     f32 = lambda x: np.asarray(x.numpy() if hasattr(x, "numpy") else x, dtype=np.float32)  # noqa: E731
     meta = dict(
-        arch=ARCH, exporter_version=EXPORTER_VERSION, kernel_signature=KERNEL_SIGNATURE,
+        arch=ARCH, exporter_version=EXPORTER_VERSION,
+        kernel_signature=kernel_signature([product_signature(prog0, feats0, sh0), product_signature(prog1, feats1, sh1)]),
         model_sha256=file_sha256(model_path), S=S, P_sym=P_sym, Z=atomic_nums,
         pieces0=pieces0, n_bins0=n_bins0, n_bands1=n_bands, intervals1=intervals1,
         packed8_bias=int(packed8_bias), has_zbl=has_zbl,
@@ -304,7 +331,7 @@ def export_model(model_path: str, atomic_nums: list[int], out_path: Path):
     print(
         f"Exported {out_path} ({out_path.stat().st_size / 1e6:.2f} MB): "
         f"Z={atomic_nums}, P_sym={P_sym}, pieces0={pieces0}, intervals1={intervals1}, "
-        f"spline1_cert={cert1['worst']:.3f}, packed8_bias={packed8_bias}"
+        f"table0_cert={cert0['worst']:.3f}, spline1_cert={cert1['worst']:.3f}, packed8_bias={packed8_bias}"
     )
 
 

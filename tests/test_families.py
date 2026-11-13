@@ -63,3 +63,95 @@ def test_generic_model_without_neighbour_pairs_matches_mace(model, symbols):
     ref.calc = MACECalculator(model_paths=path, device="cpu", default_dtype="float64", **head)
     assert abs(e - ref.get_potential_energy()) < 1e-4 * nat
     assert np.abs(f).max() < 1e-6
+
+
+def _rattled_srtio3(rep: int, sigma: float, seed: int):
+    from conftest import srtio3
+
+    at = srtio3(rep)
+    at.positions += np.random.default_rng(seed).normal(0.0, sigma, at.positions.shape)
+    return at
+
+
+# model file, base cell, replication (to about 2,000 atoms: several GEMM tiles and thread blocks per species),
+# force tolerance in eV/A. A periodic replica is the same physical system, so only rounding may differ; a kernel
+# whose result depends on where a tile or block ends (as POLAR's backward GEMM did from ~1,700 atoms) breaks this.
+REPLICA_CASES = [
+    # Measured on the RTX 4000 Ada, 13 Nov: 4e-6, -, 5e-6, 1e-6 eV/A for the local models; 7e-4 eV/A for POLAR-1-S,
+    # whose long-range part amplifies rounding with cell size.
+    ("mace-omat-0-medium.model", lambda: _rattled_srtio3(3, 0.04, 31), (4, 2, 2), 5e-5),
+    ("mace-omat-0-small.model", lambda: _rattled_srtio3(3, 0.04, 31), (4, 2, 2), 5e-5),
+    ("mace-mh-1.model", lambda: _rattled_srtio3(3, 0.04, 31), (4, 2, 2), 5e-5),
+    ("MACE-OFF23_small.model", None, (3, 1, 1), 5e-5),  # the 648-atom water box
+    ("MACE-POLAR-1-S.model", lambda: _rattled_nacl(2, 0.04, 32), (4, 4, 2), 3e-3),
+]
+
+
+@pytest.mark.parametrize("model,base,rep,f_tol", REPLICA_CASES, ids=[c[0].split(".model")[0] for c in REPLICA_CASES])
+def test_replicated_cell_gives_the_same_energy_and_forces(model, base, rep, f_tol):
+    path = find_model(model)
+    if base is None:
+        from ase.io import read
+
+        box = next((p for p in ("/mnt/d/Margraf/ResearchModule/Structures/Organic/water_216.extxyz",
+                                "/mnt/homes/zwingel/ResearchModule/Structures/Organic/water_216.extxyz")
+                    if __import__("os").path.exists(p)), None)
+        if box is None:
+            pytest.skip("water_216.extxyz not found")
+        at = read(box)
+    else:
+        at = base()
+    big = at.repeat(rep)
+    eng = LoupEngine(ensure_loup_bundle(path, sorted(set(at.get_atomic_numbers().tolist()))))
+    eng.set_system(at.get_atomic_numbers(), at.get_masses())
+    e1, f1, s1 = eng.evaluate(at.positions, at.cell.array)
+    eng.set_system(big.get_atomic_numbers(), big.get_masses())
+    e2, f2, s2 = eng.evaluate(big.positions, big.cell.array)
+    n, images = len(at), len(big) // len(at)
+    f2 = f2.reshape(images, n, 3)  # ase's repeat keeps each image's atoms together, in the base order
+    print(f"{model}: dE/atom {abs(e2 / len(big) - e1 / n):.2e} eV, dF {np.abs(f2 - f1[None]).max():.2e} eV/A, "
+          f"dS {np.abs(s2 - s1).max():.2e} eV/A^3")
+    assert abs(e2 / len(big) - e1 / n) < 2e-6
+    assert np.abs(f2 - f1[None]).max() < f_tol
+    assert np.abs(s2 - s1).max() < 1e-5
+
+
+NVE_CASES = [
+    ("mace-mh-1.model", lambda: _rattled_srtio3(3, 0.03, 41)),
+    ("MACE-OFF23_small.model", None),
+    ("MACE-POLAR-1-S.model", lambda: _rattled_nacl(2, 0.03, 42)),
+]
+
+
+@pytest.mark.parametrize("model,base", NVE_CASES, ids=[c[0].split(".model")[0] for c in NVE_CASES])
+def test_generic_family_conserves_energy_in_nve(model, base):
+    """Forces that are not the gradient of the energy (a backward step that is not the adjoint of its forward) show
+    as drift; the single-point gate cannot see that."""
+    from conftest import maxwell_velocities
+
+    path = find_model(model)
+    if base is None:
+        from ase.io import read
+
+        box = next((p for p in ("/mnt/d/Margraf/ResearchModule/Structures/Organic/water_216.extxyz",
+                                "/mnt/homes/zwingel/ResearchModule/Structures/Organic/water_216.extxyz")
+                    if __import__("os").path.exists(p)), None)
+        if box is None:
+            pytest.skip("water_216.extxyz not found")
+        at, dt = read(box), 0.5  # hydrogen: half the step
+    else:
+        at, dt = base(), 1.0
+    eng = LoupEngine(ensure_loup_bundle(path, sorted(set(at.get_atomic_numbers().tolist()))))
+    eng.set_system(at.get_atomic_numbers(), at.get_masses(), skin=0.5)
+    eng.set_state(at.positions, maxwell_velocities(at, 300.0, 43), at.cell.array)
+    energies, dangerous = [], 0
+    for _ in range(10):  # 1,000 steps
+        st = eng.run_nve(100, dt)
+        energies.append(st.final_potential_energy_ev + st.final_kinetic_energy_ev)
+        dangerous += st.dangerous_builds
+    e = (np.array(energies) - energies[0]) * 1000.0 / len(at)  # meV/atom
+    slope = np.polyfit(np.arange(len(e)) * 0.1 * dt, e, 1)[0]  # meV/atom/ps
+    print(f"{model}: drift {slope:+.4f} meV/atom/ps, largest excursion {np.abs(e).max():.4f} meV/atom")
+    assert dangerous == 0
+    assert abs(slope) < 0.2, f"NVE drift {slope:.4f} meV/atom/ps"
+    assert np.abs(e).max() < 0.5, f"NVE excursion {np.abs(e).max():.3f} meV/atom"

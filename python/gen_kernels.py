@@ -35,7 +35,7 @@ from fastmace.kernels.oeq_streaming.runtime import NUM_THREADS, render_kernels
 from fastmace.kernels.oeq_streaming.wprime_backward import _stage_layout, factored_paths
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from export_omat0 import KERNEL_SIGNATURE, check_architecture  # noqa: E402
+from export_omat0 import check_architecture, kernel_signature, product_signature  # noqa: E402
 
 
 def _load_model(model_path: str):
@@ -506,6 +506,43 @@ __global__ void __launch_bounds__(128 * R) spline_forward_inter1(
     return src
 
 
+# w' decodes each cubic coefficient as raw_k - hb, raw_k = 2^e (1 + mantissa field), hb = 1.5 * 2^e, and then evaluates
+#   w = d0 + s1 d1 + s2 d2 + s3 d3,  radial_dt = d1 + ds2 d2 + ds3 d3.
+# With DECODE_BIAS_FOLD the four subtractions per path fold into the polynomials:
+#   w = raw0 + s1 raw1 + s2 raw2 + s3 raw3 - 1.5 (1 + s1 + s2 + s3) 2^e, and likewise radial_dt,
+# with the two bias factors computed once per edge: 4 FADD + 1 LOP3 per path become 2 FFMA. The price is the rounding
+# of the bias factor (up to about 2^-23 of 2^e, against a quantisation step of 2^-20 for d0); the gate decides.
+# Off by default: on the RTX 4000 Ada it is a tie (SrTiO3 1.0015 / 0.9955, NbCl5 1.0002 / 0.9925 in two a-b-b-a runs)
+# and the gate's mean stress ratio rises from 0.76 to 0.94 (still passing); the RTX 5060 Ti, where it also removes
+# an 8-byte stack spill, is not measured yet (OPTIMISATION_LEDGER.md, wp-decode-bias-fold).
+# LOUP_GEN_DECODE_FOLD=1 generates the folded form.
+DECODE_BIAS_FOLD = os.environ.get("LOUP_GEN_DECODE_FOLD", "0") == "1"
+DECODE_FOLD_CONSTANTS = (
+    "        const float nw_hb = -1.5f * (1.0f + s1 + s2 + s3), ndt_hb = -1.5f * (1.0f + ds2 + ds3);" + chr(10)
+    if DECODE_BIAS_FOLD else "")
+
+
+def _cubic_decode_lines():
+    raw = [
+        "__uint_as_float((c.x & 0x7FFFF8u) | eb0)",
+        "__uint_as_float((c.y & 0x7FFFF0u) | eb0)",
+        "__uint_as_float((__funnelshift_l(c.x, c.x, 20) & 0x7FF800u) | eb0)",
+        "__uint_as_float((__funnelshift_l(c.y, c.y, 19) & 0x7F8000u) | eb0)",
+    ]
+    pad = "                    "
+    if DECODE_BIAS_FOLD:
+        return [pad + "const float eb_f = __uint_as_float(eb0);"] + [
+            f"{pad}const float r{k} = {raw[k]};" for k in range(4)] + [
+            pad + "const float w = fmaf(s3, r3, fmaf(s2, r2, fmaf(s1, r1, fmaf(nw_hb, eb_f, r0))));",
+            pad + "const float radial_dt = fmaf(ds3, r3, fmaf(ds2, r2, fmaf(ndt_hb, eb_f, r1)));  // 2^8 x d(w)/dt",
+        ]
+    return [pad + "const float hb0 = __uint_as_float(eb0 | 0x400000u);"] + [
+        f"{pad}const float d{k} = {raw[k]} - hb0;" for k in range(4)] + [
+        pad + "const float w = fmaf(s3, d3, fmaf(s2, d2, fmaf(s1, d1, d0)));",
+        pad + "const float radial_dt = fmaf(ds3, d3, fmaf(ds2, d2, d1));  // 2^8 x d(w)/dt",
+    ]
+
+
 def _emit_wprime_backward1(schedule, blocks, C=128):
     # Generates wprime_backward_inter1 with:
     #   LATE_PULLBACK (direct Cartesian forms, no dsh[E, 16])
@@ -548,13 +585,7 @@ def _emit_wprime_backward1(schedule, blocks, C=128):
             f"                {{ // path {p['index']} ({a}, {l}, {L}) {kind}",
             f"                    const uint2 c = __ldg(slab_ptr + {wstart} + channel);",
             "                    const unsigned eb0 = (c.y & 0x0F800000u) + bias_shift;",
-            "                    const float hb0 = __uint_as_float(eb0 | 0x400000u);",
-            "                    const float d0 = __uint_as_float((c.x & 0x7FFFF8u) | eb0) - hb0;",
-            "                    const float d1 = __uint_as_float((c.y & 0x7FFFF0u) | eb0) - hb0;",
-            "                    const float d2 = __uint_as_float((__funnelshift_l(c.x, c.x, 20) & 0x7FF800u) | eb0) - hb0;",
-            "                    const float d3 = __uint_as_float((__funnelshift_l(c.y, c.y, 19) & 0x7F8000u) | eb0) - hb0;",
-            "                    const float w = fmaf(s3, d3, fmaf(s2, d2, fmaf(s1, d1, d0)));",
-            "                    const float radial_dt = fmaf(ds3, d3, fmaf(ds2, d2, d1));  // 2^8 x d(w)/dt",
+            *_cubic_decode_lines(),
         ]
         b += [f"                    const float q{k} = {q[k]};" for k in range(2 * L + 1)]
         q_rcv = []
@@ -763,7 +794,7 @@ extern "C" __global__ void __launch_bounds__(256, 4) wprime_backward_inter1(
             const float t = s_t[k], s = t - 0.5f, s_sq = s * s, sc = s_sx[k];
             const float s1 = s * 0x1.0p-8f, s2 = s_sq * 0x1.0p-14f, s3 = s * s_sq * 0x1.0p-19f;
             const float ds2 = (2.0f * s) * 0x1.0p-6f, ds3 = (3.0f * s_sq) * 0x1.0p-11f;  // radial_dt scaled by 2^8 (exact)
-            const bool sloped = s_sloped[k] != 0;
+{DECODE_FOLD_CONSTANTS}            const bool sloped = s_sloped[k] != 0;
             const float nx = s_nx[k], ny = s_ny[k], nz = s_nz[k];
             const uint2* slab_ptr = spline_table + s_slab[k] * WEIGHT_DIM;
             float pull_Gx = 0.0f, pull_Gy = 0.0f, pull_Gz = 0.0f, pull_R = 0.0f;
@@ -856,7 +887,7 @@ extern "C" __global__ void __launch_bounds__(512, 2) wprime_backward_inter1_rcv(
         const float s = t - 0.5f, s_sq = s * s;
         const float s1 = s * 0x1.0p-8f, s2 = s_sq * 0x1.0p-14f, s3 = s * s_sq * 0x1.0p-19f;
         const float ds2 = (2.0f * s) * 0x1.0p-6f, ds3 = (3.0f * s_sq) * 0x1.0p-11f;  // radial_dt scaled by 2^8 (exact)
-        const uint2* slab_ptr = spline_table + slab * WEIGHT_DIM;
+{DECODE_FOLD_CONSTANTS}        const uint2* slab_ptr = spline_table + slab * WEIGHT_DIM;
         float pull_Gx = 0.0f, pull_Gy = 0.0f, pull_Gz = 0.0f, pull_R = 0.0f;
 
         for (int channel = lane; channel < C; channel += 32) {{
@@ -906,13 +937,14 @@ def main():
     mc = _load_model(model_path)
 
     # 1. Symmetric contractions (prod[0] and prod[1])
-    sc_parts = []
+    sc_parts, product_sigs = [], []
     for idx, emitter in ((0, _emit_sc0), (1, _emit_sc1)):
         sc = mc.products[idx].symmetric_contractions
         sh = shape_of(sc)
         terms = merged_terms(sc.etp.polynomial)
         prog, feats, _ = factor(terms, sh[0], sh[1], sh[2])
         sc_parts.append(emitter(prog, feats, sh[1], sh[3]))
+        product_sigs.append(product_signature(prog, feats, sh))
 
     # 2. Interaction 1 schedule
     class _ProblemWrap:
@@ -936,10 +968,11 @@ def main():
 """
     out_path.write_text(header + "\n".join(sc_parts) + "\n" + fwd1 + "\n" + bwd1)
     print(f"Wrote {out_path} ({out_path.stat().st_size} bytes)")
-    # The loader refuses bundles whose architecture differs from the one these kernels were generated for.
+    # The loader refuses bundles whose architecture or factored product programs differ from the ones these kernels
+    # were generated for (the product kernels above evaluate exactly prog / feats).
     sig_path = out_path.with_name("generated_kernels_signature.h")
-    sig_path.write_text("#pragma once\n// Auto-generated by LoupMD/python/gen_kernels.py; matches export_omat0.KERNEL_SIGNATURE.\n"
-                        f'#define LOUP_KERNEL_SIGNATURE "{KERNEL_SIGNATURE}"\n')
+    sig_path.write_text("#pragma once\n// Auto-generated by LoupMD/python/gen_kernels.py; matches export_omat0.kernel_signature().\n"
+                        f'#define LOUP_KERNEL_SIGNATURE "{kernel_signature(product_sigs)}"\n')
     print(f"Wrote {sig_path}")
 
 

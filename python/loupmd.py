@@ -137,12 +137,27 @@ def _model_digest(model_path: str) -> str:
 
 
 _DIGESTS: dict = {}
-EXPORT_VERSION = 5  # bump with any exporter change that alters bundle contents (either path)
+_PY = Path(__file__).resolve().parent
+# Everything on LoupMD's side that decides a bundle's contents: the exporters, the container writer and the compiled
+# kernels' signature. Their hash is part of the cache key, so a changed exporter or regenerated kernels never find
+# an old bundle, with no version number to remember. (A FastMACE change to the product basis is caught separately:
+# the loader compares the product signatures a bundle carries with the compiled kernels'.)
+EXPORTER_SOURCES = [_PY / name for name in ("export.py", "export_omat0.py", "export_generic.py", "export_polar.py",
+                                            "bundle.py")] + [_PY.parent / "src" / "generated_kernels_signature.h"]
+
+
+def exporter_fingerprint(paths=None) -> str:
+    """Hash of the files in ``paths`` (default EXPORTER_SOURCES), by name and content; a missing file counts as empty."""
+    h = hashlib.sha256()
+    for p in EXPORTER_SOURCES if paths is None else paths:
+        p = Path(p)
+        h.update(p.name.encode() + b"\0" + (p.read_bytes() if p.is_file() else b"") + b"\0")
+    return h.hexdigest()[:16]
 
 
 def ensure_loup_bundle(model_path: str, atomic_numbers: list[int], cache_dir: str | None = None,
                        head: str | None = None, generic: bool | None = None) -> Path:
-    """The cached bundle for (model contents, species, head, path, exporter version), exporting it on a miss.
+    """The cached bundle for (model contents, species, head, path, exporter sources), exporting it on a miss.
 
     The specialised OMAT-0-medium kernels are used when the model has that architecture; ``generic=True`` (or the
     environment variable LOUP_GENERIC=1) forces the generic path. ``head`` selects a multi-head model's head
@@ -152,7 +167,7 @@ def ensure_loup_bundle(model_path: str, atomic_numbers: list[int], cache_dir: st
         generic = os.environ.get("LOUP_GENERIC", "0") == "1"
     cdir = Path(cache_dir or Path.home() / ".cache" / "loupmd")
     cdir.mkdir(parents=True, exist_ok=True)
-    tag = f"{_model_digest(model_path)}|{z_sorted}|{head}|{int(generic)}|v{EXPORT_VERSION}"
+    tag = f"{_model_digest(model_path)}|{z_sorted}|{head}|{int(generic)}|{exporter_fingerprint()}"
     key = hashlib.sha256(tag.encode()).hexdigest()[:16]
     out = cdir / f"{Path(model_path).stem}_{'_'.join(map(str, z_sorted))}_{key}.loup"
     if not out.is_file():

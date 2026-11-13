@@ -1,6 +1,7 @@
-# Build products (make; objects are per CUDA_ARCH, see the Makefile)
+# Build products (make; one object directory per CUDA_ARCH, see the Makefile)
+build/
 *.o
-libloupmd.so
+libloupmd*.so
 
 # Python
 __pycache__/

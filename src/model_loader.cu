@@ -21,8 +21,8 @@ void LoupModelGPU::load(const loup::Bundle& b, const char* path) {
     // Any throw below leaves the partially uploaded arrays to the caller's free_gpu (loup_create destroys the handle).
     if (b.meta("arch") != "omat0_medium_spec")
         throw std::runtime_error(std::string(path) + ": architecture '" + b.meta("arch") + "' is not supported by this build");
-    if (b.meta_int("exporter_version") != 3)
-        throw std::runtime_error(std::string(path) + ": exporter version " + b.meta("exporter_version") + ", expected 3 (re-export)");
+    if (b.meta_int("exporter_version") != 4)
+        throw std::runtime_error(std::string(path) + ": exporter version " + b.meta("exporter_version") + ", expected 4 (re-export)");
     if (b.meta("kernel_signature") != LOUP_KERNEL_SIGNATURE)
         throw std::runtime_error(std::string(path) + ": bundle kernel signature '" + b.meta("kernel_signature") +
                                  "' does not match the compiled kernels '" LOUP_KERNEL_SIGNATURE "'");
