@@ -3,12 +3,12 @@ CUDA_ARCH ?= sm_120
 # One object directory per target architecture. Objects of another -arch link and load without complaint, and every
 # kernel launch then fails with an invalid device function, which once looked like a physics bug.
 OBJDIR = build/$(CUDA_ARCH)
-NVCCFLAGS = -O3 -std=c++17 -arch=$(CUDA_ARCH) -Iinclude -Isrc -diag-suppress=1046 -Xcompiler -fPIC
+NVCCFLAGS = -O3 -std=c++17 -arch=$(CUDA_ARCH) -Iinclude -Isrc -diag-suppress=1046 -Xcompiler -fPIC -MMD -MP
 LDFLAGS = -lcublas -lcublasLt -lcudart -ldl
 
-SRCS = src/bundle.cu src/model_loader.cu src/generic.cu src/polar.cu src/neighbors.cu src/interaction0.cu src/integrator.cu src/sgemm.cu src/engine.cu
+SRCS = src/bundle.cu src/model_loader.cu src/generic.cu src/generated_generic.cu src/polar.cu src/neighbors.cu src/interaction0.cu src/integrator.cu src/sgemm.cu src/engine.cu
 OBJS = $(patsubst src/%.cu,$(OBJDIR)/%.o,$(SRCS))
-HDRS = include/loupmd.h src/model.hpp src/kernels_common.cuh src/generated_kernels.cuh src/generated_kernels_signature.h src/bundle.hpp src/generic.hpp src/polar.hpp src/generated_generic.cuh
+DEPS = $(OBJS:.o=.d)
 
 .PHONY: all objects clean
 
@@ -19,9 +19,8 @@ all: $(OBJDIR)/libloupmd.so
 
 objects: $(OBJS)
 
-$(OBJDIR)/%.o: src/%.cu $(HDRS) | $(OBJDIR)
-	$(NVCC) $(NVCCFLAGS) -c $< -o $@
-
+$(OBJDIR)/%.o: src/%.cu | $(OBJDIR)
+	$(NVCC) $(NVCCFLAGS) -MF $(@:.o=.d) -c $< -o $@
 $(OBJDIR):
 	mkdir -p $@
 
@@ -30,3 +29,5 @@ $(OBJDIR)/libloupmd.so: $(OBJS)
 
 clean:
 	rm -rf build libloupmd.so
+
+-include $(DEPS)
