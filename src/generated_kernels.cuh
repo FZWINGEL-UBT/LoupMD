@@ -2783,6 +2783,7 @@ extern "C" __global__ void __launch_bounds__(256, 4) wprime_backward_inter1(
             const float t = s_t[k], s = t - 0.5f, s_sq = s * s, sc = s_sx[k];
             const float s1 = s * 0x1.0p-8f, s2 = s_sq * 0x1.0p-14f, s3 = s * s_sq * 0x1.0p-19f;
             const float ds2 = (2.0f * s) * 0x1.0p-6f, ds3 = (3.0f * s_sq) * 0x1.0p-11f;  // radial_dt scaled by 2^8 (exact)
+        const float nw_hb = -1.5f * (1.0f + s1 + s2 + s3), ndt_hb = -1.5f * (1.0f + ds2 + ds3);
             const bool sloped = s_sloped[k] != 0;
             const float nx = s_nx[k], ny = s_ny[k], nz = s_nz[k];
             const uint2* slab_ptr = spline_table + s_slab[k] * WEIGHT_DIM;
@@ -2797,13 +2798,13 @@ extern "C" __global__ void __launch_bounds__(256, 4) wprime_backward_inter1(
                 { // path 0 (0, 0, 0) scalar
                     const uint2 c = __ldg(slab_ptr + 0 + channel);
                     const unsigned eb0 = (c.y & 0x0F800000u) + bias_shift;
-                    const float hb0 = __uint_as_float(eb0 | 0x400000u);
-                    const float d0 = __uint_as_float((c.x & 0x7FFFF8u) | eb0) - hb0;
-                    const float d1 = __uint_as_float((c.y & 0x7FFFF0u) | eb0) - hb0;
-                    const float d2 = __uint_as_float((__funnelshift_l(c.x, c.x, 20) & 0x7FF800u) | eb0) - hb0;
-                    const float d3 = __uint_as_float((__funnelshift_l(c.y, c.y, 19) & 0x7F8000u) | eb0) - hb0;
-                    const float w = fmaf(s3, d3, fmaf(s2, d2, fmaf(s1, d1, d0)));
-                    const float radial_dt = fmaf(ds3, d3, fmaf(ds2, d2, d1));  // 2^8 x d(w)/dt
+                    const float eb_f = __uint_as_float(eb0);
+                    const float r0 = __uint_as_float((c.x & 0x7FFFF8u) | eb0);
+                    const float r1 = __uint_as_float((c.y & 0x7FFFF0u) | eb0);
+                    const float r2 = __uint_as_float((__funnelshift_l(c.x, c.x, 20) & 0x7FF800u) | eb0);
+                    const float r3 = __uint_as_float((__funnelshift_l(c.y, c.y, 19) & 0x7F8000u) | eb0);
+                    const float w = fmaf(s3, r3, fmaf(s2, r2, fmaf(s1, r1, fmaf(nw_hb, eb_f, r0))));
+                    const float radial_dt = fmaf(ds3, r3, fmaf(ds2, r2, fmaf(ndt_hb, eb_f, r1)));  // 2^8 x d(w)/dt
                     const float q0 = stage_row[0 + channel];
                     dx0_acc = fmaf(w, q0, dx0_acc);
                     pull_R = fmaf(radial_dt, x0_v * q0, pull_R);
@@ -2811,13 +2812,13 @@ extern "C" __global__ void __launch_bounds__(256, 4) wprime_backward_inter1(
                 { // path 1 (1, 1, 0) lower
                     const uint2 c = __ldg(slab_ptr + 128 + channel);
                     const unsigned eb0 = (c.y & 0x0F800000u) + bias_shift;
-                    const float hb0 = __uint_as_float(eb0 | 0x400000u);
-                    const float d0 = __uint_as_float((c.x & 0x7FFFF8u) | eb0) - hb0;
-                    const float d1 = __uint_as_float((c.y & 0x7FFFF0u) | eb0) - hb0;
-                    const float d2 = __uint_as_float((__funnelshift_l(c.x, c.x, 20) & 0x7FF800u) | eb0) - hb0;
-                    const float d3 = __uint_as_float((__funnelshift_l(c.y, c.y, 19) & 0x7F8000u) | eb0) - hb0;
-                    const float w = fmaf(s3, d3, fmaf(s2, d2, fmaf(s1, d1, d0)));
-                    const float radial_dt = fmaf(ds3, d3, fmaf(ds2, d2, d1));  // 2^8 x d(w)/dt
+                    const float eb_f = __uint_as_float(eb0);
+                    const float r0 = __uint_as_float((c.x & 0x7FFFF8u) | eb0);
+                    const float r1 = __uint_as_float((c.y & 0x7FFFF0u) | eb0);
+                    const float r2 = __uint_as_float((__funnelshift_l(c.x, c.x, 20) & 0x7FF800u) | eb0);
+                    const float r3 = __uint_as_float((__funnelshift_l(c.y, c.y, 19) & 0x7F8000u) | eb0);
+                    const float w = fmaf(s3, r3, fmaf(s2, r2, fmaf(s1, r1, fmaf(nw_hb, eb_f, r0))));
+                    const float radial_dt = fmaf(ds3, r3, fmaf(ds2, r2, fmaf(ndt_hb, eb_f, r1)));  // 2^8 x d(w)/dt
                     const float q0 = stage_row[128 + channel];
                     const float A = xx * nx + xy * ny + xz * nz;
                     const float wq = w * q0;
@@ -2832,13 +2833,13 @@ extern "C" __global__ void __launch_bounds__(256, 4) wprime_backward_inter1(
                 { // path 2 (0, 1, 1) scalar
                     const uint2 c = __ldg(slab_ptr + 256 + channel);
                     const unsigned eb0 = (c.y & 0x0F800000u) + bias_shift;
-                    const float hb0 = __uint_as_float(eb0 | 0x400000u);
-                    const float d0 = __uint_as_float((c.x & 0x7FFFF8u) | eb0) - hb0;
-                    const float d1 = __uint_as_float((c.y & 0x7FFFF0u) | eb0) - hb0;
-                    const float d2 = __uint_as_float((__funnelshift_l(c.x, c.x, 20) & 0x7FF800u) | eb0) - hb0;
-                    const float d3 = __uint_as_float((__funnelshift_l(c.y, c.y, 19) & 0x7F8000u) | eb0) - hb0;
-                    const float w = fmaf(s3, d3, fmaf(s2, d2, fmaf(s1, d1, d0)));
-                    const float radial_dt = fmaf(ds3, d3, fmaf(ds2, d2, d1));  // 2^8 x d(w)/dt
+                    const float eb_f = __uint_as_float(eb0);
+                    const float r0 = __uint_as_float((c.x & 0x7FFFF8u) | eb0);
+                    const float r1 = __uint_as_float((c.y & 0x7FFFF0u) | eb0);
+                    const float r2 = __uint_as_float((__funnelshift_l(c.x, c.x, 20) & 0x7FF800u) | eb0);
+                    const float r3 = __uint_as_float((__funnelshift_l(c.y, c.y, 19) & 0x7F8000u) | eb0);
+                    const float w = fmaf(s3, r3, fmaf(s2, r2, fmaf(s1, r1, fmaf(nw_hb, eb_f, r0))));
+                    const float radial_dt = fmaf(ds3, r3, fmaf(ds2, r2, fmaf(ndt_hb, eb_f, r1)));  // 2^8 x d(w)/dt
                     const float q0 = stage_row[256 + channel];
                     const float q1 = stage_row[640 + channel];
                     const float q2 = stage_row[1024 + channel];
@@ -2853,13 +2854,13 @@ extern "C" __global__ void __launch_bounds__(256, 4) wprime_backward_inter1(
                 { // path 3 (1, 0, 1) raise
                     const uint2 c = __ldg(slab_ptr + 384 + channel);
                     const unsigned eb0 = (c.y & 0x0F800000u) + bias_shift;
-                    const float hb0 = __uint_as_float(eb0 | 0x400000u);
-                    const float d0 = __uint_as_float((c.x & 0x7FFFF8u) | eb0) - hb0;
-                    const float d1 = __uint_as_float((c.y & 0x7FFFF0u) | eb0) - hb0;
-                    const float d2 = __uint_as_float((__funnelshift_l(c.x, c.x, 20) & 0x7FF800u) | eb0) - hb0;
-                    const float d3 = __uint_as_float((__funnelshift_l(c.y, c.y, 19) & 0x7F8000u) | eb0) - hb0;
-                    const float w = fmaf(s3, d3, fmaf(s2, d2, fmaf(s1, d1, d0)));
-                    const float radial_dt = fmaf(ds3, d3, fmaf(ds2, d2, d1));  // 2^8 x d(w)/dt
+                    const float eb_f = __uint_as_float(eb0);
+                    const float r0 = __uint_as_float((c.x & 0x7FFFF8u) | eb0);
+                    const float r1 = __uint_as_float((c.y & 0x7FFFF0u) | eb0);
+                    const float r2 = __uint_as_float((__funnelshift_l(c.x, c.x, 20) & 0x7FF800u) | eb0);
+                    const float r3 = __uint_as_float((__funnelshift_l(c.y, c.y, 19) & 0x7F8000u) | eb0);
+                    const float w = fmaf(s3, r3, fmaf(s2, r2, fmaf(s1, r1, fmaf(nw_hb, eb_f, r0))));
+                    const float radial_dt = fmaf(ds3, r3, fmaf(ds2, r2, fmaf(ndt_hb, eb_f, r1)));  // 2^8 x d(w)/dt
                     const float q0 = stage_row[384 + channel];
                     const float q1 = stage_row[768 + channel];
                     const float q2 = stage_row[1152 + channel];
@@ -2872,13 +2873,13 @@ extern "C" __global__ void __launch_bounds__(256, 4) wprime_backward_inter1(
                 { // path 4 (1, 2, 1) lower
                     const uint2 c = __ldg(slab_ptr + 512 + channel);
                     const unsigned eb0 = (c.y & 0x0F800000u) + bias_shift;
-                    const float hb0 = __uint_as_float(eb0 | 0x400000u);
-                    const float d0 = __uint_as_float((c.x & 0x7FFFF8u) | eb0) - hb0;
-                    const float d1 = __uint_as_float((c.y & 0x7FFFF0u) | eb0) - hb0;
-                    const float d2 = __uint_as_float((__funnelshift_l(c.x, c.x, 20) & 0x7FF800u) | eb0) - hb0;
-                    const float d3 = __uint_as_float((__funnelshift_l(c.y, c.y, 19) & 0x7F8000u) | eb0) - hb0;
-                    const float w = fmaf(s3, d3, fmaf(s2, d2, fmaf(s1, d1, d0)));
-                    const float radial_dt = fmaf(ds3, d3, fmaf(ds2, d2, d1));  // 2^8 x d(w)/dt
+                    const float eb_f = __uint_as_float(eb0);
+                    const float r0 = __uint_as_float((c.x & 0x7FFFF8u) | eb0);
+                    const float r1 = __uint_as_float((c.y & 0x7FFFF0u) | eb0);
+                    const float r2 = __uint_as_float((__funnelshift_l(c.x, c.x, 20) & 0x7FF800u) | eb0);
+                    const float r3 = __uint_as_float((__funnelshift_l(c.y, c.y, 19) & 0x7F8000u) | eb0);
+                    const float w = fmaf(s3, r3, fmaf(s2, r2, fmaf(s1, r1, fmaf(nw_hb, eb_f, r0))));
+                    const float radial_dt = fmaf(ds3, r3, fmaf(ds2, r2, fmaf(ndt_hb, eb_f, r1)));  // 2^8 x d(w)/dt
                     const float q0 = stage_row[512 + channel];
                     const float q1 = stage_row[896 + channel];
                     const float q2 = stage_row[1280 + channel];
@@ -2897,13 +2898,13 @@ extern "C" __global__ void __launch_bounds__(256, 4) wprime_backward_inter1(
                 { // path 5 (0, 2, 2) scalar
                     const uint2 c = __ldg(slab_ptr + 640 + channel);
                     const unsigned eb0 = (c.y & 0x0F800000u) + bias_shift;
-                    const float hb0 = __uint_as_float(eb0 | 0x400000u);
-                    const float d0 = __uint_as_float((c.x & 0x7FFFF8u) | eb0) - hb0;
-                    const float d1 = __uint_as_float((c.y & 0x7FFFF0u) | eb0) - hb0;
-                    const float d2 = __uint_as_float((__funnelshift_l(c.x, c.x, 20) & 0x7FF800u) | eb0) - hb0;
-                    const float d3 = __uint_as_float((__funnelshift_l(c.y, c.y, 19) & 0x7F8000u) | eb0) - hb0;
-                    const float w = fmaf(s3, d3, fmaf(s2, d2, fmaf(s1, d1, d0)));
-                    const float radial_dt = fmaf(ds3, d3, fmaf(ds2, d2, d1));  // 2^8 x d(w)/dt
+                    const float eb_f = __uint_as_float(eb0);
+                    const float r0 = __uint_as_float((c.x & 0x7FFFF8u) | eb0);
+                    const float r1 = __uint_as_float((c.y & 0x7FFFF0u) | eb0);
+                    const float r2 = __uint_as_float((__funnelshift_l(c.x, c.x, 20) & 0x7FF800u) | eb0);
+                    const float r3 = __uint_as_float((__funnelshift_l(c.y, c.y, 19) & 0x7F8000u) | eb0);
+                    const float w = fmaf(s3, r3, fmaf(s2, r2, fmaf(s1, r1, fmaf(nw_hb, eb_f, r0))));
+                    const float radial_dt = fmaf(ds3, r3, fmaf(ds2, r2, fmaf(ndt_hb, eb_f, r1)));  // 2^8 x d(w)/dt
                     const float q0 = stage_row[1408 + channel];
                     const float q1 = stage_row[1792 + channel];
                     const float q2 = stage_row[2176 + channel];
@@ -2922,13 +2923,13 @@ extern "C" __global__ void __launch_bounds__(256, 4) wprime_backward_inter1(
                 { // path 6 (1, 1, 2) raise
                     const uint2 c = __ldg(slab_ptr + 768 + channel);
                     const unsigned eb0 = (c.y & 0x0F800000u) + bias_shift;
-                    const float hb0 = __uint_as_float(eb0 | 0x400000u);
-                    const float d0 = __uint_as_float((c.x & 0x7FFFF8u) | eb0) - hb0;
-                    const float d1 = __uint_as_float((c.y & 0x7FFFF0u) | eb0) - hb0;
-                    const float d2 = __uint_as_float((__funnelshift_l(c.x, c.x, 20) & 0x7FF800u) | eb0) - hb0;
-                    const float d3 = __uint_as_float((__funnelshift_l(c.y, c.y, 19) & 0x7F8000u) | eb0) - hb0;
-                    const float w = fmaf(s3, d3, fmaf(s2, d2, fmaf(s1, d1, d0)));
-                    const float radial_dt = fmaf(ds3, d3, fmaf(ds2, d2, d1));  // 2^8 x d(w)/dt
+                    const float eb_f = __uint_as_float(eb0);
+                    const float r0 = __uint_as_float((c.x & 0x7FFFF8u) | eb0);
+                    const float r1 = __uint_as_float((c.y & 0x7FFFF0u) | eb0);
+                    const float r2 = __uint_as_float((__funnelshift_l(c.x, c.x, 20) & 0x7FF800u) | eb0);
+                    const float r3 = __uint_as_float((__funnelshift_l(c.y, c.y, 19) & 0x7F8000u) | eb0);
+                    const float w = fmaf(s3, r3, fmaf(s2, r2, fmaf(s1, r1, fmaf(nw_hb, eb_f, r0))));
+                    const float radial_dt = fmaf(ds3, r3, fmaf(ds2, r2, fmaf(ndt_hb, eb_f, r1)));  // 2^8 x d(w)/dt
                     const float q0 = stage_row[1536 + channel];
                     const float q1 = stage_row[1920 + channel];
                     const float q2 = stage_row[2304 + channel];
@@ -2949,13 +2950,13 @@ extern "C" __global__ void __launch_bounds__(256, 4) wprime_backward_inter1(
                 { // path 7 (1, 3, 2) lower
                     const uint2 c = __ldg(slab_ptr + 896 + channel);
                     const unsigned eb0 = (c.y & 0x0F800000u) + bias_shift;
-                    const float hb0 = __uint_as_float(eb0 | 0x400000u);
-                    const float d0 = __uint_as_float((c.x & 0x7FFFF8u) | eb0) - hb0;
-                    const float d1 = __uint_as_float((c.y & 0x7FFFF0u) | eb0) - hb0;
-                    const float d2 = __uint_as_float((__funnelshift_l(c.x, c.x, 20) & 0x7FF800u) | eb0) - hb0;
-                    const float d3 = __uint_as_float((__funnelshift_l(c.y, c.y, 19) & 0x7F8000u) | eb0) - hb0;
-                    const float w = fmaf(s3, d3, fmaf(s2, d2, fmaf(s1, d1, d0)));
-                    const float radial_dt = fmaf(ds3, d3, fmaf(ds2, d2, d1));  // 2^8 x d(w)/dt
+                    const float eb_f = __uint_as_float(eb0);
+                    const float r0 = __uint_as_float((c.x & 0x7FFFF8u) | eb0);
+                    const float r1 = __uint_as_float((c.y & 0x7FFFF0u) | eb0);
+                    const float r2 = __uint_as_float((__funnelshift_l(c.x, c.x, 20) & 0x7FF800u) | eb0);
+                    const float r3 = __uint_as_float((__funnelshift_l(c.y, c.y, 19) & 0x7F8000u) | eb0);
+                    const float w = fmaf(s3, r3, fmaf(s2, r2, fmaf(s1, r1, fmaf(nw_hb, eb_f, r0))));
+                    const float radial_dt = fmaf(ds3, r3, fmaf(ds2, r2, fmaf(ndt_hb, eb_f, r1)));  // 2^8 x d(w)/dt
                     const float q0 = stage_row[1664 + channel];
                     const float q1 = stage_row[2048 + channel];
                     const float q2 = stage_row[2432 + channel];
@@ -2978,13 +2979,13 @@ extern "C" __global__ void __launch_bounds__(256, 4) wprime_backward_inter1(
                 { // path 8 (0, 3, 3) scalar
                     const uint2 c = __ldg(slab_ptr + 1024 + channel);
                     const unsigned eb0 = (c.y & 0x0F800000u) + bias_shift;
-                    const float hb0 = __uint_as_float(eb0 | 0x400000u);
-                    const float d0 = __uint_as_float((c.x & 0x7FFFF8u) | eb0) - hb0;
-                    const float d1 = __uint_as_float((c.y & 0x7FFFF0u) | eb0) - hb0;
-                    const float d2 = __uint_as_float((__funnelshift_l(c.x, c.x, 20) & 0x7FF800u) | eb0) - hb0;
-                    const float d3 = __uint_as_float((__funnelshift_l(c.y, c.y, 19) & 0x7F8000u) | eb0) - hb0;
-                    const float w = fmaf(s3, d3, fmaf(s2, d2, fmaf(s1, d1, d0)));
-                    const float radial_dt = fmaf(ds3, d3, fmaf(ds2, d2, d1));  // 2^8 x d(w)/dt
+                    const float eb_f = __uint_as_float(eb0);
+                    const float r0 = __uint_as_float((c.x & 0x7FFFF8u) | eb0);
+                    const float r1 = __uint_as_float((c.y & 0x7FFFF0u) | eb0);
+                    const float r2 = __uint_as_float((__funnelshift_l(c.x, c.x, 20) & 0x7FF800u) | eb0);
+                    const float r3 = __uint_as_float((__funnelshift_l(c.y, c.y, 19) & 0x7F8000u) | eb0);
+                    const float w = fmaf(s3, r3, fmaf(s2, r2, fmaf(s1, r1, fmaf(nw_hb, eb_f, r0))));
+                    const float radial_dt = fmaf(ds3, r3, fmaf(ds2, r2, fmaf(ndt_hb, eb_f, r1)));  // 2^8 x d(w)/dt
                     const float q0 = stage_row[3328 + channel];
                     const float q1 = stage_row[3584 + channel];
                     const float q2 = stage_row[3840 + channel];
@@ -3007,13 +3008,13 @@ extern "C" __global__ void __launch_bounds__(256, 4) wprime_backward_inter1(
                 { // path 9 (1, 2, 3) raise
                     const uint2 c = __ldg(slab_ptr + 1152 + channel);
                     const unsigned eb0 = (c.y & 0x0F800000u) + bias_shift;
-                    const float hb0 = __uint_as_float(eb0 | 0x400000u);
-                    const float d0 = __uint_as_float((c.x & 0x7FFFF8u) | eb0) - hb0;
-                    const float d1 = __uint_as_float((c.y & 0x7FFFF0u) | eb0) - hb0;
-                    const float d2 = __uint_as_float((__funnelshift_l(c.x, c.x, 20) & 0x7FF800u) | eb0) - hb0;
-                    const float d3 = __uint_as_float((__funnelshift_l(c.y, c.y, 19) & 0x7F8000u) | eb0) - hb0;
-                    const float w = fmaf(s3, d3, fmaf(s2, d2, fmaf(s1, d1, d0)));
-                    const float radial_dt = fmaf(ds3, d3, fmaf(ds2, d2, d1));  // 2^8 x d(w)/dt
+                    const float eb_f = __uint_as_float(eb0);
+                    const float r0 = __uint_as_float((c.x & 0x7FFFF8u) | eb0);
+                    const float r1 = __uint_as_float((c.y & 0x7FFFF0u) | eb0);
+                    const float r2 = __uint_as_float((__funnelshift_l(c.x, c.x, 20) & 0x7FF800u) | eb0);
+                    const float r3 = __uint_as_float((__funnelshift_l(c.y, c.y, 19) & 0x7F8000u) | eb0);
+                    const float w = fmaf(s3, r3, fmaf(s2, r2, fmaf(s1, r1, fmaf(nw_hb, eb_f, r0))));
+                    const float radial_dt = fmaf(ds3, r3, fmaf(ds2, r2, fmaf(ndt_hb, eb_f, r1)));  // 2^8 x d(w)/dt
                     const float q0 = stage_row[3456 + channel];
                     const float q1 = stage_row[3712 + channel];
                     const float q2 = stage_row[3968 + channel];
@@ -3215,6 +3216,7 @@ extern "C" __global__ void __launch_bounds__(512, 2) wprime_backward_inter1_rcv(
         const float s = t - 0.5f, s_sq = s * s;
         const float s1 = s * 0x1.0p-8f, s2 = s_sq * 0x1.0p-14f, s3 = s * s_sq * 0x1.0p-19f;
         const float ds2 = (2.0f * s) * 0x1.0p-6f, ds3 = (3.0f * s_sq) * 0x1.0p-11f;  // radial_dt scaled by 2^8 (exact)
+        const float nw_hb = -1.5f * (1.0f + s1 + s2 + s3), ndt_hb = -1.5f * (1.0f + ds2 + ds3);
         const uint2* slab_ptr = spline_table + slab * WEIGHT_DIM;
         float pull_Gx = 0.0f, pull_Gy = 0.0f, pull_Gz = 0.0f, pull_R = 0.0f;
 
@@ -3229,13 +3231,13 @@ extern "C" __global__ void __launch_bounds__(512, 2) wprime_backward_inter1_rcv(
                 { // path 0 (0, 0, 0) scalar
                     const uint2 c = __ldg(slab_ptr + 0 + channel);
                     const unsigned eb0 = (c.y & 0x0F800000u) + bias_shift;
-                    const float hb0 = __uint_as_float(eb0 | 0x400000u);
-                    const float d0 = __uint_as_float((c.x & 0x7FFFF8u) | eb0) - hb0;
-                    const float d1 = __uint_as_float((c.y & 0x7FFFF0u) | eb0) - hb0;
-                    const float d2 = __uint_as_float((__funnelshift_l(c.x, c.x, 20) & 0x7FF800u) | eb0) - hb0;
-                    const float d3 = __uint_as_float((__funnelshift_l(c.y, c.y, 19) & 0x7F8000u) | eb0) - hb0;
-                    const float w = fmaf(s3, d3, fmaf(s2, d2, fmaf(s1, d1, d0)));
-                    const float radial_dt = fmaf(ds3, d3, fmaf(ds2, d2, d1));  // 2^8 x d(w)/dt
+                    const float eb_f = __uint_as_float(eb0);
+                    const float r0 = __uint_as_float((c.x & 0x7FFFF8u) | eb0);
+                    const float r1 = __uint_as_float((c.y & 0x7FFFF0u) | eb0);
+                    const float r2 = __uint_as_float((__funnelshift_l(c.x, c.x, 20) & 0x7FF800u) | eb0);
+                    const float r3 = __uint_as_float((__funnelshift_l(c.y, c.y, 19) & 0x7F8000u) | eb0);
+                    const float w = fmaf(s3, r3, fmaf(s2, r2, fmaf(s1, r1, fmaf(nw_hb, eb_f, r0))));
+                    const float radial_dt = fmaf(ds3, r3, fmaf(ds2, r2, fmaf(ndt_hb, eb_f, r1)));  // 2^8 x d(w)/dt
                     const float q0 = Q0.x;
                     dx0_acc = fmaf(w, q0, dx0_acc);
                     pull_R = fmaf(radial_dt, x0_v * q0, pull_R);
@@ -3243,13 +3245,13 @@ extern "C" __global__ void __launch_bounds__(512, 2) wprime_backward_inter1_rcv(
                 { // path 1 (1, 1, 0) lower
                     const uint2 c = __ldg(slab_ptr + 128 + channel);
                     const unsigned eb0 = (c.y & 0x0F800000u) + bias_shift;
-                    const float hb0 = __uint_as_float(eb0 | 0x400000u);
-                    const float d0 = __uint_as_float((c.x & 0x7FFFF8u) | eb0) - hb0;
-                    const float d1 = __uint_as_float((c.y & 0x7FFFF0u) | eb0) - hb0;
-                    const float d2 = __uint_as_float((__funnelshift_l(c.x, c.x, 20) & 0x7FF800u) | eb0) - hb0;
-                    const float d3 = __uint_as_float((__funnelshift_l(c.y, c.y, 19) & 0x7F8000u) | eb0) - hb0;
-                    const float w = fmaf(s3, d3, fmaf(s2, d2, fmaf(s1, d1, d0)));
-                    const float radial_dt = fmaf(ds3, d3, fmaf(ds2, d2, d1));  // 2^8 x d(w)/dt
+                    const float eb_f = __uint_as_float(eb0);
+                    const float r0 = __uint_as_float((c.x & 0x7FFFF8u) | eb0);
+                    const float r1 = __uint_as_float((c.y & 0x7FFFF0u) | eb0);
+                    const float r2 = __uint_as_float((__funnelshift_l(c.x, c.x, 20) & 0x7FF800u) | eb0);
+                    const float r3 = __uint_as_float((__funnelshift_l(c.y, c.y, 19) & 0x7F8000u) | eb0);
+                    const float w = fmaf(s3, r3, fmaf(s2, r2, fmaf(s1, r1, fmaf(nw_hb, eb_f, r0))));
+                    const float radial_dt = fmaf(ds3, r3, fmaf(ds2, r2, fmaf(ndt_hb, eb_f, r1)));  // 2^8 x d(w)/dt
                     const float q0 = Q0.y;
                     const float A = xx * nx + xy * ny + xz * nz;
                     const float wq = w * q0;
@@ -3266,13 +3268,13 @@ extern "C" __global__ void __launch_bounds__(512, 2) wprime_backward_inter1_rcv(
                 { // path 2 (0, 1, 1) scalar
                     const uint2 c = __ldg(slab_ptr + 256 + channel);
                     const unsigned eb0 = (c.y & 0x0F800000u) + bias_shift;
-                    const float hb0 = __uint_as_float(eb0 | 0x400000u);
-                    const float d0 = __uint_as_float((c.x & 0x7FFFF8u) | eb0) - hb0;
-                    const float d1 = __uint_as_float((c.y & 0x7FFFF0u) | eb0) - hb0;
-                    const float d2 = __uint_as_float((__funnelshift_l(c.x, c.x, 20) & 0x7FF800u) | eb0) - hb0;
-                    const float d3 = __uint_as_float((__funnelshift_l(c.y, c.y, 19) & 0x7F8000u) | eb0) - hb0;
-                    const float w = fmaf(s3, d3, fmaf(s2, d2, fmaf(s1, d1, d0)));
-                    const float radial_dt = fmaf(ds3, d3, fmaf(ds2, d2, d1));  // 2^8 x d(w)/dt
+                    const float eb_f = __uint_as_float(eb0);
+                    const float r0 = __uint_as_float((c.x & 0x7FFFF8u) | eb0);
+                    const float r1 = __uint_as_float((c.y & 0x7FFFF0u) | eb0);
+                    const float r2 = __uint_as_float((__funnelshift_l(c.x, c.x, 20) & 0x7FF800u) | eb0);
+                    const float r3 = __uint_as_float((__funnelshift_l(c.y, c.y, 19) & 0x7F8000u) | eb0);
+                    const float w = fmaf(s3, r3, fmaf(s2, r2, fmaf(s1, r1, fmaf(nw_hb, eb_f, r0))));
+                    const float radial_dt = fmaf(ds3, r3, fmaf(ds2, r2, fmaf(ndt_hb, eb_f, r1)));  // 2^8 x d(w)/dt
                     const float q0 = Q0.z;
                     const float q1 = Q1.y;
                     const float q2 = Q2.x;
@@ -3287,13 +3289,13 @@ extern "C" __global__ void __launch_bounds__(512, 2) wprime_backward_inter1_rcv(
                 { // path 3 (1, 0, 1) raise
                     const uint2 c = __ldg(slab_ptr + 384 + channel);
                     const unsigned eb0 = (c.y & 0x0F800000u) + bias_shift;
-                    const float hb0 = __uint_as_float(eb0 | 0x400000u);
-                    const float d0 = __uint_as_float((c.x & 0x7FFFF8u) | eb0) - hb0;
-                    const float d1 = __uint_as_float((c.y & 0x7FFFF0u) | eb0) - hb0;
-                    const float d2 = __uint_as_float((__funnelshift_l(c.x, c.x, 20) & 0x7FF800u) | eb0) - hb0;
-                    const float d3 = __uint_as_float((__funnelshift_l(c.y, c.y, 19) & 0x7F8000u) | eb0) - hb0;
-                    const float w = fmaf(s3, d3, fmaf(s2, d2, fmaf(s1, d1, d0)));
-                    const float radial_dt = fmaf(ds3, d3, fmaf(ds2, d2, d1));  // 2^8 x d(w)/dt
+                    const float eb_f = __uint_as_float(eb0);
+                    const float r0 = __uint_as_float((c.x & 0x7FFFF8u) | eb0);
+                    const float r1 = __uint_as_float((c.y & 0x7FFFF0u) | eb0);
+                    const float r2 = __uint_as_float((__funnelshift_l(c.x, c.x, 20) & 0x7FF800u) | eb0);
+                    const float r3 = __uint_as_float((__funnelshift_l(c.y, c.y, 19) & 0x7F8000u) | eb0);
+                    const float w = fmaf(s3, r3, fmaf(s2, r2, fmaf(s1, r1, fmaf(nw_hb, eb_f, r0))));
+                    const float radial_dt = fmaf(ds3, r3, fmaf(ds2, r2, fmaf(ndt_hb, eb_f, r1)));  // 2^8 x d(w)/dt
                     const float q0 = Q0.w;
                     const float q1 = Q1.z;
                     const float q2 = Q2.y;
@@ -3306,13 +3308,13 @@ extern "C" __global__ void __launch_bounds__(512, 2) wprime_backward_inter1_rcv(
                 { // path 4 (1, 2, 1) lower
                     const uint2 c = __ldg(slab_ptr + 512 + channel);
                     const unsigned eb0 = (c.y & 0x0F800000u) + bias_shift;
-                    const float hb0 = __uint_as_float(eb0 | 0x400000u);
-                    const float d0 = __uint_as_float((c.x & 0x7FFFF8u) | eb0) - hb0;
-                    const float d1 = __uint_as_float((c.y & 0x7FFFF0u) | eb0) - hb0;
-                    const float d2 = __uint_as_float((__funnelshift_l(c.x, c.x, 20) & 0x7FF800u) | eb0) - hb0;
-                    const float d3 = __uint_as_float((__funnelshift_l(c.y, c.y, 19) & 0x7F8000u) | eb0) - hb0;
-                    const float w = fmaf(s3, d3, fmaf(s2, d2, fmaf(s1, d1, d0)));
-                    const float radial_dt = fmaf(ds3, d3, fmaf(ds2, d2, d1));  // 2^8 x d(w)/dt
+                    const float eb_f = __uint_as_float(eb0);
+                    const float r0 = __uint_as_float((c.x & 0x7FFFF8u) | eb0);
+                    const float r1 = __uint_as_float((c.y & 0x7FFFF0u) | eb0);
+                    const float r2 = __uint_as_float((__funnelshift_l(c.x, c.x, 20) & 0x7FF800u) | eb0);
+                    const float r3 = __uint_as_float((__funnelshift_l(c.y, c.y, 19) & 0x7F8000u) | eb0);
+                    const float w = fmaf(s3, r3, fmaf(s2, r2, fmaf(s1, r1, fmaf(nw_hb, eb_f, r0))));
+                    const float radial_dt = fmaf(ds3, r3, fmaf(ds2, r2, fmaf(ndt_hb, eb_f, r1)));  // 2^8 x d(w)/dt
                     const float q0 = Q1.x;
                     const float q1 = Q1.w;
                     const float q2 = Q2.z;
@@ -3334,13 +3336,13 @@ extern "C" __global__ void __launch_bounds__(512, 2) wprime_backward_inter1_rcv(
                 { // path 5 (0, 2, 2) scalar
                     const uint2 c = __ldg(slab_ptr + 640 + channel);
                     const unsigned eb0 = (c.y & 0x0F800000u) + bias_shift;
-                    const float hb0 = __uint_as_float(eb0 | 0x400000u);
-                    const float d0 = __uint_as_float((c.x & 0x7FFFF8u) | eb0) - hb0;
-                    const float d1 = __uint_as_float((c.y & 0x7FFFF0u) | eb0) - hb0;
-                    const float d2 = __uint_as_float((__funnelshift_l(c.x, c.x, 20) & 0x7FF800u) | eb0) - hb0;
-                    const float d3 = __uint_as_float((__funnelshift_l(c.y, c.y, 19) & 0x7F8000u) | eb0) - hb0;
-                    const float w = fmaf(s3, d3, fmaf(s2, d2, fmaf(s1, d1, d0)));
-                    const float radial_dt = fmaf(ds3, d3, fmaf(ds2, d2, d1));  // 2^8 x d(w)/dt
+                    const float eb_f = __uint_as_float(eb0);
+                    const float r0 = __uint_as_float((c.x & 0x7FFFF8u) | eb0);
+                    const float r1 = __uint_as_float((c.y & 0x7FFFF0u) | eb0);
+                    const float r2 = __uint_as_float((__funnelshift_l(c.x, c.x, 20) & 0x7FF800u) | eb0);
+                    const float r3 = __uint_as_float((__funnelshift_l(c.y, c.y, 19) & 0x7F8000u) | eb0);
+                    const float w = fmaf(s3, r3, fmaf(s2, r2, fmaf(s1, r1, fmaf(nw_hb, eb_f, r0))));
+                    const float radial_dt = fmaf(ds3, r3, fmaf(ds2, r2, fmaf(ndt_hb, eb_f, r1)));  // 2^8 x d(w)/dt
                     const float q0 = Q2.w;
                     const float q1 = Q3.z;
                     const float q2 = Q4.y;
@@ -3360,13 +3362,13 @@ extern "C" __global__ void __launch_bounds__(512, 2) wprime_backward_inter1_rcv(
                 { // path 6 (1, 1, 2) raise
                     const uint2 c = __ldg(slab_ptr + 768 + channel);
                     const unsigned eb0 = (c.y & 0x0F800000u) + bias_shift;
-                    const float hb0 = __uint_as_float(eb0 | 0x400000u);
-                    const float d0 = __uint_as_float((c.x & 0x7FFFF8u) | eb0) - hb0;
-                    const float d1 = __uint_as_float((c.y & 0x7FFFF0u) | eb0) - hb0;
-                    const float d2 = __uint_as_float((__funnelshift_l(c.x, c.x, 20) & 0x7FF800u) | eb0) - hb0;
-                    const float d3 = __uint_as_float((__funnelshift_l(c.y, c.y, 19) & 0x7F8000u) | eb0) - hb0;
-                    const float w = fmaf(s3, d3, fmaf(s2, d2, fmaf(s1, d1, d0)));
-                    const float radial_dt = fmaf(ds3, d3, fmaf(ds2, d2, d1));  // 2^8 x d(w)/dt
+                    const float eb_f = __uint_as_float(eb0);
+                    const float r0 = __uint_as_float((c.x & 0x7FFFF8u) | eb0);
+                    const float r1 = __uint_as_float((c.y & 0x7FFFF0u) | eb0);
+                    const float r2 = __uint_as_float((__funnelshift_l(c.x, c.x, 20) & 0x7FF800u) | eb0);
+                    const float r3 = __uint_as_float((__funnelshift_l(c.y, c.y, 19) & 0x7F8000u) | eb0);
+                    const float w = fmaf(s3, r3, fmaf(s2, r2, fmaf(s1, r1, fmaf(nw_hb, eb_f, r0))));
+                    const float radial_dt = fmaf(ds3, r3, fmaf(ds2, r2, fmaf(ndt_hb, eb_f, r1)));  // 2^8 x d(w)/dt
                     const float q0 = Q3.x;
                     const float q1 = Q3.w;
                     const float q2 = Q4.z;
@@ -3387,13 +3389,13 @@ extern "C" __global__ void __launch_bounds__(512, 2) wprime_backward_inter1_rcv(
                 { // path 7 (1, 3, 2) lower
                     const uint2 c = __ldg(slab_ptr + 896 + channel);
                     const unsigned eb0 = (c.y & 0x0F800000u) + bias_shift;
-                    const float hb0 = __uint_as_float(eb0 | 0x400000u);
-                    const float d0 = __uint_as_float((c.x & 0x7FFFF8u) | eb0) - hb0;
-                    const float d1 = __uint_as_float((c.y & 0x7FFFF0u) | eb0) - hb0;
-                    const float d2 = __uint_as_float((__funnelshift_l(c.x, c.x, 20) & 0x7FF800u) | eb0) - hb0;
-                    const float d3 = __uint_as_float((__funnelshift_l(c.y, c.y, 19) & 0x7F8000u) | eb0) - hb0;
-                    const float w = fmaf(s3, d3, fmaf(s2, d2, fmaf(s1, d1, d0)));
-                    const float radial_dt = fmaf(ds3, d3, fmaf(ds2, d2, d1));  // 2^8 x d(w)/dt
+                    const float eb_f = __uint_as_float(eb0);
+                    const float r0 = __uint_as_float((c.x & 0x7FFFF8u) | eb0);
+                    const float r1 = __uint_as_float((c.y & 0x7FFFF0u) | eb0);
+                    const float r2 = __uint_as_float((__funnelshift_l(c.x, c.x, 20) & 0x7FF800u) | eb0);
+                    const float r3 = __uint_as_float((__funnelshift_l(c.y, c.y, 19) & 0x7F8000u) | eb0);
+                    const float w = fmaf(s3, r3, fmaf(s2, r2, fmaf(s1, r1, fmaf(nw_hb, eb_f, r0))));
+                    const float radial_dt = fmaf(ds3, r3, fmaf(ds2, r2, fmaf(ndt_hb, eb_f, r1)));  // 2^8 x d(w)/dt
                     const float q0 = Q3.y;
                     const float q1 = Q4.x;
                     const float q2 = Q4.w;
@@ -3419,13 +3421,13 @@ extern "C" __global__ void __launch_bounds__(512, 2) wprime_backward_inter1_rcv(
                 { // path 8 (0, 3, 3) scalar
                     const uint2 c = __ldg(slab_ptr + 1024 + channel);
                     const unsigned eb0 = (c.y & 0x0F800000u) + bias_shift;
-                    const float hb0 = __uint_as_float(eb0 | 0x400000u);
-                    const float d0 = __uint_as_float((c.x & 0x7FFFF8u) | eb0) - hb0;
-                    const float d1 = __uint_as_float((c.y & 0x7FFFF0u) | eb0) - hb0;
-                    const float d2 = __uint_as_float((__funnelshift_l(c.x, c.x, 20) & 0x7FF800u) | eb0) - hb0;
-                    const float d3 = __uint_as_float((__funnelshift_l(c.y, c.y, 19) & 0x7F8000u) | eb0) - hb0;
-                    const float w = fmaf(s3, d3, fmaf(s2, d2, fmaf(s1, d1, d0)));
-                    const float radial_dt = fmaf(ds3, d3, fmaf(ds2, d2, d1));  // 2^8 x d(w)/dt
+                    const float eb_f = __uint_as_float(eb0);
+                    const float r0 = __uint_as_float((c.x & 0x7FFFF8u) | eb0);
+                    const float r1 = __uint_as_float((c.y & 0x7FFFF0u) | eb0);
+                    const float r2 = __uint_as_float((__funnelshift_l(c.x, c.x, 20) & 0x7FF800u) | eb0);
+                    const float r3 = __uint_as_float((__funnelshift_l(c.y, c.y, 19) & 0x7F8000u) | eb0);
+                    const float w = fmaf(s3, r3, fmaf(s2, r2, fmaf(s1, r1, fmaf(nw_hb, eb_f, r0))));
+                    const float radial_dt = fmaf(ds3, r3, fmaf(ds2, r2, fmaf(ndt_hb, eb_f, r1)));  // 2^8 x d(w)/dt
                     const float q0 = Q6.z;
                     const float q1 = Q7.x;
                     const float q2 = Q7.z;
@@ -3448,13 +3450,13 @@ extern "C" __global__ void __launch_bounds__(512, 2) wprime_backward_inter1_rcv(
                 { // path 9 (1, 2, 3) raise
                     const uint2 c = __ldg(slab_ptr + 1152 + channel);
                     const unsigned eb0 = (c.y & 0x0F800000u) + bias_shift;
-                    const float hb0 = __uint_as_float(eb0 | 0x400000u);
-                    const float d0 = __uint_as_float((c.x & 0x7FFFF8u) | eb0) - hb0;
-                    const float d1 = __uint_as_float((c.y & 0x7FFFF0u) | eb0) - hb0;
-                    const float d2 = __uint_as_float((__funnelshift_l(c.x, c.x, 20) & 0x7FF800u) | eb0) - hb0;
-                    const float d3 = __uint_as_float((__funnelshift_l(c.y, c.y, 19) & 0x7F8000u) | eb0) - hb0;
-                    const float w = fmaf(s3, d3, fmaf(s2, d2, fmaf(s1, d1, d0)));
-                    const float radial_dt = fmaf(ds3, d3, fmaf(ds2, d2, d1));  // 2^8 x d(w)/dt
+                    const float eb_f = __uint_as_float(eb0);
+                    const float r0 = __uint_as_float((c.x & 0x7FFFF8u) | eb0);
+                    const float r1 = __uint_as_float((c.y & 0x7FFFF0u) | eb0);
+                    const float r2 = __uint_as_float((__funnelshift_l(c.x, c.x, 20) & 0x7FF800u) | eb0);
+                    const float r3 = __uint_as_float((__funnelshift_l(c.y, c.y, 19) & 0x7F8000u) | eb0);
+                    const float w = fmaf(s3, r3, fmaf(s2, r2, fmaf(s1, r1, fmaf(nw_hb, eb_f, r0))));
+                    const float radial_dt = fmaf(ds3, r3, fmaf(ds2, r2, fmaf(ndt_hb, eb_f, r1)));  // 2^8 x d(w)/dt
                     const float q0 = Q6.w;
                     const float q1 = Q7.y;
                     const float q2 = Q7.w;

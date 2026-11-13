@@ -512,11 +512,11 @@ __global__ void __launch_bounds__(128 * R) spline_forward_inter1(
 #   w = raw0 + s1 raw1 + s2 raw2 + s3 raw3 - 1.5 (1 + s1 + s2 + s3) 2^e, and likewise radial_dt,
 # with the two bias factors computed once per edge: 4 FADD + 1 LOP3 per path become 2 FFMA. The price is the rounding
 # of the bias factor (up to about 2^-23 of 2^e, against a quantisation step of 2^-20 for d0); the gate decides.
-# Off by default: on the RTX 4000 Ada it is a tie (SrTiO3 1.0015 / 0.9955, NbCl5 1.0002 / 0.9925 in two a-b-b-a runs)
-# and the gate's mean stress ratio rises from 0.76 to 0.94 (still passing); the RTX 5060 Ti, where it also removes
-# an 8-byte stack spill, is not measured yet (OPTIMISATION_LEDGER.md, wp-decode-bias-fold).
-# LOUP_GEN_DECODE_FOLD=1 generates the folded form.
-DECODE_BIAS_FOLD = os.environ.get("LOUP_GEN_DECODE_FOLD", "0") == "1"
+# Adopted 13 November 2026 (OPTIMISATION_LEDGER.md, wp-decode-bias-fold): RTX 5060 Ti SrTiO3 0.9929 / 0.9948 and
+# NbCl5 0.9951 / 0.9938 in two a-b-b-a runs, 24 instructions and the 8-byte stack spill fewer; RTX 4000 Ada a tie
+# (1.0015 / 0.9955). The gate passes on both, with ratios inside its own run-to-run spread.
+# LOUP_GEN_DECODE_FOLD=0 regenerates the unfolded form for an A/B.
+DECODE_BIAS_FOLD = os.environ.get("LOUP_GEN_DECODE_FOLD", "1") != "0"
 DECODE_FOLD_CONSTANTS = (
     "        const float nw_hb = -1.5f * (1.0f + s1 + s2 + s3), ndt_hb = -1.5f * (1.0f + ds2 + ds3);" + chr(10)
     if DECODE_BIAS_FOLD else "")

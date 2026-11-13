@@ -51,6 +51,8 @@ Conventions:
 | [spl-unroll2](#spl-unroll2) | 2-edge unroll (before pairing) | – | spec | REJECTED | – | not recorded | [§3.3][s33] |
 | [spl-cubic-forward](#spl-cubic-forward) | The 8-byte cubic table in the forward too | – | spec | REJECTED | – | not recorded | [§3.3][s33] |
 | [tab-far-edge-4byte](#tab-far-edge-4byte) | 4-byte table rows for far edges (T2) | – | spec | REJECTED | – | `w'` +0.9% / +1.9%, spline +1.4% / +3.4% (5060 Ti / Ada) | [§3.3][s33] |
+| [spl-receiver-order](#spl-receiver-order) | Receiver / sublattice ordering in `spline` and `w'` for L1/L2 slab locality | – | spec | NOT BUILT | – | untried (`SrTiO3` O sublattices interleaved; Morton off < L2) | `OMAT0_SPEEDUP_BRIEF.md` |
+| [spl-r6-r8](#spl-r6-r8) | Unpaired `R=6` or `R=8` spline blocks if register pressure drops <= 80 | – | spec | NOT BUILT | – | untried (`R=5` at 96 regs already won `SrTiO3`) | `OMAT0_SPEEDUP_BRIEF.md` |
 
 ### Interaction-1 chain as a whole
 
@@ -78,7 +80,7 @@ Conventions:
 | [wp-launch-256-3](#wp-launch-256-3) | `(256, 3)` launch bounds, 80 registers | – | spec | REJECTED | – | below A/B resolution | [§3.3][s33] |
 | [wp-persistent](#wp-persistent) | SM-local persistent blocks with `%smid` cursors | – | spec | REJECTED | – | 3,014 -> 3,240 us | [§3.3][s33] |
 | [wp-no-allocate](#wp-no-allocate) | Table loads with `L1::no_allocate` | – | spec | REJECTED | – | 3,022 -> 3,120 us | [§3.3][s33] |
-| [wp-decode-bias-fold](#wp-decode-bias-fold) | Fold the four `- hb` subtractions of the cubic decode into the polynomials | `LOUP_GEN_DECODE_FOLD=1` (generator, off) | spec | BLOCKED (5060 Ti not measured); Ada: tie | – | Ada `SrTiO3` 1.0015 / 0.9955; -24 / -16 instructions; stress ratio 0.76 -> 0.94 | this file |
+| [wp-decode-bias-fold](#wp-decode-bias-fold) | Fold the four `- hb` subtractions of the cubic decode into the polynomials | `LOUP_GEN_DECODE_FOLD` (generator, on) | spec | DEFAULT (13 Nov) | – | 5060 Ti `SrTiO3` 0.9929 / 0.9948 / 0.9925, `NbCl5` 0.9951 / 0.9938 / 0.9965; Ada tie; -24 / -16 instructions | this file |
 
 ### Interaction 0 and the symmetric contractions
 
@@ -98,6 +100,7 @@ Conventions:
 | [sc-sc0-overlap](#sc-sc0-overlap) | `sc0` per species beside the other species' `compose0` products | – | spec | REJECTED | – | +19 / +47 us on the `SrTiO3` stage gaps | [§3.3][s33] |
 | [frc-segmented-f64](#frc-segmented-f64) | Receiver-warp segmented float64 force reduction | – | spec | REJECTED | – | not recorded | [§3.3][s33] |
 | [frc-per-atom-energy](#frc-per-atom-energy) | Per-atom energy array instead of atomics (T6) | – | spec | REJECTED | – | +0.5% / +0.1% (5060 Ti) | [§3.3][s33] |
+| [i0-bwd-rcv-warp-agg](#i0-bwd-rcv-warp-agg) | Warp-aggregate receiver `atomicAdd`s in `tabled_outer_sum0_backward_kernel` | – | spec | NOT BUILT | – | untried (1-2 receivers/warp -> ~2x fewer force atomics) | `OMAT0_SPEEDUP_BRIEF.md` |
 
 ### GEMMs and the autotune
 
@@ -121,6 +124,7 @@ Conventions:
 | [gemm-skip16-overlap](#gemm-skip16-overlap) | `skip16` GEMMs overlapped across the spline | – | spec | REJECTED | – | not recorded | [§3.3][s33] |
 | [gemm-simt-for-lr](#gemm-simt-for-lr) | Float32 SIMT GEMMs only for long-range models | `GenericModel::has_lr` | POLAR | DEFAULT (scoped: POLAR) | S6 | gate: Ada POLAR-S / -L failures -> all pass; cost +0% to +7% | [§5.4][s54] |
 | [gen-gate-epilogue](#gen-gate-epilogue) | Gate in the own SGEMM's epilogue / prologue | – | gen | NOT BUILT | – | ceiling ~7 of 47 ms (MH-1 `SrTiO3`, 5060 Ti) | [§4.1 #5][s41] |
+| [gemm-cold-l2-ada-fix](#gemm-cold-l2-ada-fix) | Fix Ada `22 MiB < L2/2` cold-L2 rule for `lin1_fwd l=1` + wider 3xTF32 `mma` tiles | – | both | NOT BUILT | – | untried (`lin1_fwd l=1` timed hot on Ada despite 97 MB `m1`) | `OMAT0_SPEEDUP_BRIEF.md` |
 
 ### Scheduling, memory and edge data
 
@@ -138,6 +142,8 @@ Conventions:
 | [mem-reorder](#mem-reorder) | Morton reorder within species groups every 16th rebuild, above L2 | `LOUP_REORDER` | both | DEFAULT (scoped: N x 4 KB > L2) | S2 | part of S1 -> S2 | [§3.1 #8][s31] |
 | [mem-reorder-small](#mem-reorder-small) | Morton reorder below L2 size | – | spec | REJECTED | – | not recorded | [§3.3][s33] |
 | [mem-shift-cart](#mem-shift-cart) | Cartesian float64 shifts precomputed at rebuild | `d_shift_cart` | both | DEFAULT | S2 | removes the cell from the force graph | [§3.1 #7][s31] |
+| [mem-l2-persist-x](#mem-l2-persist-x) | CUDA Graph `AccessPolicyWindow` (~10-12 MiB) on `x0`+`x1` in `spline`/`w'` | – | spec | NOT BUILT | – | untried (`x0+x1` = 9.77 MiB on `SrTiO3`; check `ncu` hit rate first) | `OMAT0_SPEEDUP_BRIEF.md` |
+| [mem-l1-carveout-retune](#mem-l1-carveout-retune) | Re-check `tune_l1` shared/L1 carveouts on `w'` and `i0_bwd` after items 23-31 | `tune_l1` | spec | NOT BUILT | – | untried (carveouts tuned before later kernel rewrites) | `OMAT0_SPEEDUP_BRIEF.md` |
 
 ### Neighbour list, integrator and MD loop
 
@@ -150,6 +156,7 @@ Conventions:
 | [md-adaptive-pipeline](#md-adaptive-pipeline) | Start unpipelined, pipeline once the step displacement allows | `LoupMDStats::dangerous_builds`, `pipelined_steps` | both | DEFAULT | S6 | MD unchanged; dangerous builds 1 / ~1,600 steps -> 0 with a 3-step margin | [§3.2 M1, S1][s32], [§5.4][s54] |
 | [md-skin](#md-skin) | Larger / adaptive skin (T10) | – | both | PENDING (owner) | – | 0.5-1.5% at 5,000 atoms, ~10% at 135 atoms | [§4.1 #4][s41] |
 | [md-small-systems](#md-small-systems) | Small-system latency (< ~1,000 atoms) | – | spec | NOT BUILT (open) | – | 135 atoms: GEMM groups 32% of 358 us | [§4.1 #3][s41] |
+| [comp-active-edge-tighten](#comp-active-edge-tighten) | Tighten active-edge compaction (`compute_and_count_active` + `scatter_active_edges`) | – | both | NOT BUILT | – | untried (101 us/step on `SrTiO3` 5060 Ti, `tmp_vec_len` round-trip) | `OMAT0_SPEEDUP_BRIEF.md` |
 
 ### Generic path (other model families, 12-13 November 2026)
 
@@ -231,6 +238,12 @@ Do not retry these unless the stated condition changes.
 | Shift-free decode for the forward's PACKED8 table | untried: the layout change of `w'` (S4) applied to `spline_forward_inter1`; the forward is L2-bound on the 5060 Ti, so expect little there | external suggestion, 13 Nov |
 | Exponent field without the add | untried: if all table exponents fall in one 32-wide block, `(c.y & mask) \| prefix` is one LOP3 instead of AND + IADD per path in `w'` | external suggestion, 13 Nov |
 | Dead `y1` store in `sc1_fused` | untried, trivial: `d_y1` ([N, 128]) is written every step and read nowhere since `loup_debug_tensors` was removed | external suggestion, 13 Nov |
+| Receiver / sublattice ordering in `spline` and `w'` | untried: group receivers by species / oxygen sublattice / spatial cell so co-resident SMs share table slabs (`Morton` is off at `N=5,000`) | [spl-receiver-order](#spl-receiver-order) |
+| Unpaired `R=6` or `R=8` spline blocks | untried: check if trimming `acc[40]`/`she[16]` register pressure fits <= 80 regs | [spl-r6-r8](#spl-r6-r8) |
+| CUDA Graph L2 persistence (`AccessPolicyWindow`) on `x0+x1` | untried: ~10-12 MiB persistent window (`SrTiO3` `x0+x1` = 9.77 MiB), check `ncu` eviction first | [mem-l2-persist-x](#mem-l2-persist-x) |
+| Cold-L2 rule for Ada `lin1_fwd l=1` + wider 3xTF32 `mma` tiles | untried: `22.0 MiB < 24 MiB` (`L2/2`) times `lin1_fwd l=1` hot on Ada; check `LOUP_DEBUG_GEMM=1` and `128x64`/`64x128` 3xTF32 tiles on 5060 Ti | [gemm-cold-l2-ada-fix](#gemm-cold-l2-ada-fix) |
+| Warp-aggregate `rcv` `atomicAdd`s in `i0_bwd` | untried: 1-2 receivers per 32-edge warp (`SrTiO3`); check `ncu` atomic stall counters first | [i0-bwd-rcv-warp-agg](#i0-bwd-rcv-warp-agg) |
+| Active-edge compaction (`101 us`) & `tune_l1` re-check | untried: `compute_and_count_active` + `scatter_active_edges` (`tmp_vec_len` round-trip); re-check `w'`/`i0_bwd` carveouts | [comp-active-edge-tighten](#comp-active-edge-tighten), [mem-l1-carveout-retune](#mem-l1-carveout-retune) |
 
 ## Appendix: entries
 
@@ -306,6 +319,18 @@ Each entry has the same fields. Unless stated, the system is OMAT-0 medium on th
 - Measured: 5060 Ti `w'` 3,286 -> 3,316 us, spline 2,211 -> 2,242 us; Ada `w'` 3,561 -> 3,628 us, spline 2,974 -> 3,075 us.
 - Sources: [§3.3][s33].
 
+<a id="spl-receiver-order"></a>
+#### spl-receiver-order: receiver / sublattice ordering for slab locality
+- Status: NOT BUILT.
+- What: at `N = 5,000`, `mem-reorder` is off (`N * 4 KB < L2`). In `SrTiO3`, the 3,000 oxygen atoms sit in three interleaved sublattices `(0.5,0.5,0)`, `(0.5,0,0.5)`, `(0,0.5,0.5)` in caller order, so consecutive receivers in `R=4/5` blocks mix sublattices. Ordering receivers (or block walk order) by species/sublattice or spatial cell keeps co-resident SMs on the same `(pair, r)` slabs (cf. FastMACE `BLOCK_ORDER`). Do **not** replace the `(sym_pair, r)` edge sort with `sender_idx` (that breaks `PAIR` and slab reuse).
+- Sources: `OMAT0_SPEEDUP_BRIEF.md`.
+
+<a id="spl-r6-r8"></a>
+#### spl-r6-r8: unpaired `R=6` / `R=8` spline blocks
+- Status: NOT BUILT.
+- What: `R=5` unpaired (96 regs, 640 threads = 20 warps/block) already won `SrTiO3` on both GPUs. Check whether trimming `acc[40]` / `she[16]` register pressure lets `R=6` or `R=8` fit at <= 80 registers for higher occupancy and L1 slab sharing.
+- Sources: `OMAT0_SPEEDUP_BRIEF.md`.
+
 ### Interaction-1 chain as a whole
 
 <a id="int1-radial-low-rank"></a>
@@ -352,23 +377,32 @@ Each entry has the same fields. Unless stated, the system is OMAT-0 medium on th
 
 <a id="wp-decode-bias-fold"></a>
 #### wp-decode-bias-fold: bias of the cubic decode folded into the polynomials
-- Switch: `LOUP_GEN_DECODE_FOLD=1` when running `python/gen_kernels.py` (off by default; it changes both `w'` kernels).
+- Switch: `LOUP_GEN_DECODE_FOLD` when running `python/gen_kernels.py` (on by default since 13 November; `=0`
+  regenerates the unfolded form). It changes both `w'` kernels.
 - What: each coefficient is decoded as `raw_k - hb` with `hb = 1.5 * 2^e`. Substituting into `w` and `radial_dt`
   gives `w = raw0 + s1 raw1 + s2 raw2 + s3 raw3 - 1.5 (1 + s1 + s2 + s3) 2^e` (and likewise the slope), with the two
   bias factors computed once per edge: 4 FADD + 1 LOP3 per path become 2 FFMA. External suggestion, 13 November.
-- Status: BLOCKED on a quiet RTX 5060 Ti (another process held that GPU on 13 November). On the Ada it is a tie, so
-  it is not adopted there on its own.
-- Measured (13 November, both libraries built from the same tree, differing only in this switch):
+- Status: DEFAULT since 13 November. A win on the 5060 Ti in all three runs, a tie on the Ada, the gate passes on
+  both: the adoption bar of `OMAT0_SPEEDUP_BRIEF.md`.
+- Measured (13 November, libraries built from the same tree, differing only in this switch; `bench_md.py`, order
+  a b b a, twice per GPU):
   - SASS, `wprime_backward_inter1_rcv`: `sm_120` 1,000 -> 976 instructions and the 8-byte stack spill disappears;
     `sm_89` 1,016 -> 1,000; 64 registers on both, before and after.
-  - RTX 4000 Ada, `bench_md.py`, order a b b a, twice: `SrTiO3` 9.316 -> 9.331 ms (1.0015) and 9.455 -> 9.413 ms
-    (0.9955); `NbCl5` 1.0002 and 0.9925. Within the run-to-run spread, and the run drifts upward by about 1.5%
-    from first to last side, which favours neither.
-  - Accuracy, Ada: 46 tests pass; the default gate passes all 30 rows, but its ratios rise: force mean 0.690 -> 0.713
-    (max 1.31 -> 1.37), stress mean 0.764 -> 0.940 (max 1.14 -> 1.37). The cause is the rounding of the bias factor
-    (about 2^-23 of each entry's scale, the same for every weight of an edge), against exact subtractions before.
-- To decide: A/B on the 5060 Ti with `libloupmd_fold.so` (kept beside `libloupmd.so` on both machines). Adopt only if
-  it wins there in both orders; a tie on both GPUs with a worse stress ratio is a rejection.
+  - RTX 5060 Ti: `SrTiO3` 8.241 -> 8.183 ms (0.9929) and 8.308 -> 8.265 ms (0.9948); `NbCl5` 1.799 -> 1.790 (0.9951)
+    and 1.807 -> 1.796 (0.9938). In all four neighbouring `SrTiO3` pairs the folded side is faster (0.3 to 0.9%).
+    A third run after the final rebuild: `SrTiO3` 8.285 -> 8.223 ms (0.9925), `NbCl5` 1.803 -> 1.797 (0.9965).
+  - RTX 4000 Ada: `SrTiO3` 9.316 -> 9.331 ms (1.0015) and 9.455 -> 9.413 ms (0.9955); `NbCl5` 1.0002 and 0.9925: a
+    tie.
+  - Accuracy: the default gate passes all 30 rows on both GPUs. On the 5060 Ti, two gate runs per library: mean
+    stress ratio 1.385 / 1.187 unfolded against 1.080 / 1.210 folded (max 2.36 / 2.32 against 1.77 / 1.80); mean
+    force ratio 0.702 / 0.670 against 0.698 / 0.696. The gate's ratios vary by about 15% from run to run, more than
+    any difference between the two. (A single run each on the Ada, 0.764 against 0.940 for stress, had looked like
+    a cost; it is inside that spread.)
+  - Ada: 46 tests pass with the folded library (twice).
+- Verified with the fold on: 5060 Ti 47 tests and the full gate for all eight model sets (78 rows, worst force
+  ratio 1.45, stress 2.27); Ada 46 tests (OMAT-0 small skipped) and the default gate. The full family gate was not
+  rerun on the Ada with the fold (the workstations were closed for a power outage); the fold touches only the
+  OMAT-0 medium kernels, which the default gate covers.
 - Sources: this file.
 
 <a id="wp-cubic-packed8"></a>
@@ -550,6 +584,12 @@ Each entry has the same fields. Unless stated, the system is OMAT-0 medium on th
 - Why: the extra reduction launch costs more than the removed atomics.
 - Sources: [§3.3][s33].
 
+<a id="i0-bwd-rcv-warp-agg"></a>
+#### i0-bwd-rcv-warp-agg: warp-aggregated `rcv` force atomics in `i0_bwd`
+- Status: NOT BUILT.
+- What: `tabled_outer_sum0_backward_kernel` (`src/interaction0.cu:421-426`) performs 3 `double atomicAdd`s for `rcv` and 3 for `snd` on every active edge. Because active edges are receiver-sorted (~75 edges/atom on `SrTiO3`), a 32-edge warp spans 1-2 receivers; warp-aggregating `rcv` contributions before `atomicAdd` roughly halves `forces_f64` atomic traffic. Falsifier: check `ncu` atomic stall counters first; stop if no material stall or < 0.5% MD gain.
+- Sources: `OMAT0_SPEEDUP_BRIEF.md`.
+
 ### GEMMs and the autotune
 
 <a id="gemm-hybrid-cubin"></a>
@@ -683,6 +723,12 @@ Each entry has the same fields. Unless stated, the system is OMAT-0 medium on th
 - Falsifier: stop if the fused GEMM loses more than the gate kernels cost.
 - Sources: [§4.1 #5][s41], [§5.5][s55].
 
+<a id="gemm-cold-l2-ada-fix"></a>
+#### gemm-cold-l2-ada-fix: cold-L2 classification on Ada `lin1_fwd l=1` + wider 3xTF32 `mma` tiles
+- Status: NOT BUILT.
+- What: on Ada (`l2_bytes = 48 MiB`), `sgemm_rm`'s `M * K * 4 > l2_bytes / 2` threshold (`24 MiB`) times `lin1_fwd l=1` (`15000 * 384 * 4 = 22.0 MiB`) **hot**, even though `m1_0..3` total 97 MB and stream from DRAM; also check `lin1_bwd` (`db_l` vs `m1_l`) and `LOUP_DEBUG_GEMM=1` picks on both GPUs. Separately, `HybCubin` only provides `64x64`, `32x64`, `64x32` tiles (beaten by `sgemm128` on 5060 Ti `lin1`); test `128x64` / `64x128` 3xTF32 `mma` tiles.
+- Sources: `OMAT0_SPEEDUP_BRIEF.md`.
+
 ### Scheduling, memory and edge data
 
 <a id="sched-side-streams"></a>
@@ -760,6 +806,18 @@ Each entry has the same fields. Unless stated, the system is OMAT-0 medium on th
 #### mem-shift-cart: Cartesian float64 shifts
 - Switch: `d_shift_cart`. Stage: S2 (item 7). What: precomputed at rebuild; removes the cell from the force graph. Status: DEFAULT. Sources: [§3.1 #7][s31].
 
+<a id="mem-l2-persist-x"></a>
+#### mem-l2-persist-x: CUDA Graph L2 persistence (`AccessPolicyWindow`) for `x0 + x1`
+- Status: NOT BUILT.
+- What: attach `cudaKernelNodeAttributeAccessPolicyWindow` to the `spline_forward_inter1` and `wprime_backward_inter1_rcv` graph nodes for `x0 + x1` (`9.77 MiB` on `SrTiO3`), with `cudaLimitPersistingL2CacheSize` around `10-12 MiB` (leaving >= 20 MiB on 5060 Ti for table slabs). Gate on checking `ncu` L2 hit rate on `x0`/`x1` first (`spline` writes `m1` after the edge loop, not during it, so `x0`/`x1` may already stay L2-resident).
+- Sources: `OMAT0_SPEEDUP_BRIEF.md`.
+
+<a id="mem-l1-carveout-retune"></a>
+#### mem-l1-carveout-retune: re-check `tune_l1` carveouts after items 23-31
+- Status: NOT BUILT.
+- What: `tune_l1` shared/L1 carveouts in `src/engine.cu` were measured before items 23-31 (`i0_bwd` staging, `w'` `s_q` / `wp_threads`); re-checking `w'` and `i0_bwd` carveouts is cheap.
+- Sources: `OMAT0_SPEEDUP_BRIEF.md`.
+
 ### Neighbour list, integrator and MD loop
 
 <a id="nl-bucketing-sort"></a>
@@ -811,6 +869,12 @@ Each entry has the same fields. Unless stated, the system is OMAT-0 medium on th
 - Status: NOT BUILT (open).
 - Measured: 135-atom `SrTiO3` step 358 us: GEMM groups 115 us (32%; ~25 tiny products at ~6-13 us each regardless of size), edge-tiled `w'` 100 us, spline 58 us, i0 backward 28 us. Tried and rejected: gemm-split-k-own, gemm-grouped-launch, spl-edge-split.
 - Sources: [§4.1 #3][s41].
+
+<a id="comp-active-edge-tighten"></a>
+#### comp-active-edge-tighten: active-edge compaction pass
+- Status: NOT BUILT.
+- What: `compute_and_count_active` (47 us) + `DeviceScan::ExclusiveSum` + `scatter_active_edges` (54 us) take ~101 us/step on 5060 Ti `SrTiO3`, writing and re-reading `d_tmp_vec_len`. Note single-pass decoupled look-back compaction (`edge-compaction-1pass`) was already rejected as an MD tie.
+- Sources: `OMAT0_SPEEDUP_BRIEF.md`.
 
 ### Generic path
 
