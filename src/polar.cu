@@ -153,9 +153,12 @@ __global__ void feat_coef_kernel(int K, const float* __restrict__ kinfo, float a
 }
 
 // f[a][ch][j] = sum_k AB_A cos + AB_B sin (2 channels x 8). One thread per atom, k-data tiled in shared memory.
-__global__ void __launch_bounds__(128) feat_pass_kernel(int N, int K, const float* __restrict__ kinfo,
+// blockIdx.y takes the k range [y kc, (y + 1) kc): with one thread per atom a few thousand atoms fill under one
+// warp per scheduler, so the k sum is split over blocks. With gridDim.y > 1 each chunk writes its double sums to
+// part[y][a][16] and k_reduce_kernel adds the chunks in order (deterministic).
+__global__ void __launch_bounds__(128) feat_pass_kernel(int N, int K, int kc, const float* __restrict__ kinfo,
                                                         const unsigned* __restrict__ frac, const float* __restrict__ AB,
-                                                        float* __restrict__ f) {
+                                                        float* __restrict__ f, double* __restrict__ part) {
     constexpr int TK = 64;
     __shared__ float sk[TK][3];
     __shared__ float sab[TK][32];
@@ -169,8 +172,9 @@ __global__ void __launch_bounds__(128) feat_pass_kernel(int N, int K, const floa
     double accd[16];
     #pragma unroll
     for (int j = 0; j < 16; ++j) accd[j] = 0.0;
-    for (int k0 = 0; k0 < K; k0 += TK) {
-        const int nk = min(TK, K - k0);
+    const int kb = blockIdx.y * kc, ke = min(K, kb + kc);
+    for (int k0 = kb; k0 < ke; k0 += TK) {
+        const int nk = min(TK, ke - k0);
         __syncthreads();
         for (int i = threadIdx.x; i < nk * 3; i += blockDim.x) sk[i / 3][i % 3] = kinfo[(k0 + i / 3) * KI + i % 3];
         for (int i = threadIdx.x; i < nk * 32; i += blockDim.x) sab[i / 32][i % 32] = AB[(int64_t)(k0 + i / 32) * 32 + i % 32];
@@ -189,9 +193,15 @@ __global__ void __launch_bounds__(128) feat_pass_kernel(int N, int K, const floa
         #pragma unroll
         for (int j = 0; j < 16; ++j) accd[j] += (double)acc[j];
     }
-    if (a < N)
-        #pragma unroll
-        for (int j = 0; j < 16; ++j) f[(int64_t)a * 16 + j] = (float)accd[j];
+    if (a < N) {
+        if (gridDim.y == 1) {
+            #pragma unroll
+            for (int j = 0; j < 16; ++j) f[(int64_t)a * 16 + j] = (float)accd[j];
+        } else {
+            #pragma unroll
+            for (int j = 0; j < 16; ++j) part[((int64_t)blockIdx.y * N + a) * 16 + j] = accd[j];
+        }
+    }
 }
 
 // Backward coefficients per k. Features mode (energy_mode 0, 2 channels): from GA/GB (structure factors of the
@@ -354,12 +364,15 @@ __global__ void lr_virial_kernel(int K, int energy_mode, const float* __restrict
 
 // Per-atom backward over k: dq[a][ch][m] += sum_k Dq c + Eq s; dtheta = sum_m q (-Dq s + Eq c)
 // + sum_j g (-A s + B c) (receiver side, features mode); forces[a] -= sum_k dtheta k.
+// k range over blockIdx.y as in feat_pass_kernel; with gridDim.y > 1 the chunk's dq sums (NCH * 4) and force terms
+// (3) go to part[y][a][11] and k_reduce_kernel applies them in chunk order.
 template <int NCH, bool RECV>
-__global__ void __launch_bounds__(128) grad_pass_kernel(int N, int K, const float* __restrict__ kinfo,
+__global__ void __launch_bounds__(128) grad_pass_kernel(int N, int K, int kc, const float* __restrict__ kinfo,
                                                         const unsigned* __restrict__ frac, const float* __restrict__ q,
                                                         int q_stride, const float* __restrict__ dk,
                                                         const float* __restrict__ g, const float* __restrict__ AB,
-                                                        float* __restrict__ dq, int dq_stride, double* __restrict__ forces) {
+                                                        float* __restrict__ dq, int dq_stride, double* __restrict__ forces,
+                                                        double* __restrict__ part) {
     constexpr int TK = 32;
     __shared__ float sk[TK][6];
     __shared__ float sd[TK][NCH * 8];
@@ -384,12 +397,13 @@ __global__ void __launch_bounds__(128) grad_pass_kernel(int N, int K, const floa
     double dqd[NCH * 4], fxd = 0.0, fyd = 0.0, fzd = 0.0;
     #pragma unroll
     for (int j = 0; j < NCH * 4; ++j) dqd[j] = 0.0;
-    for (int k0 = 0; k0 < K; k0 += TK) {
+    const int kb = blockIdx.y * kc, ke = min(K, kb + kc);
+    for (int k0 = kb; k0 < ke; k0 += TK) {
         float dqa[NCH * 4];  // per-tile partial sums, folded into double accumulators
         #pragma unroll
         for (int j = 0; j < NCH * 4; ++j) dqa[j] = 0.0f;
         float fx = 0.0f, fy = 0.0f, fz = 0.0f;
-        const int nk = min(TK, K - k0);
+        const int nk = min(TK, ke - k0);
         __syncthreads();
         for (int i = threadIdx.x; i < nk * 6; i += blockDim.x) sk[i / 6][i % 6] = kinfo[(k0 + i / 6) * KI + i % 6];
         for (int i = threadIdx.x; i < nk * NCH * 8; i += blockDim.x)
@@ -427,14 +441,38 @@ __global__ void __launch_bounds__(128) grad_pass_kernel(int N, int K, const floa
         fzd += fz;
     }
     if (a < N) {
-        #pragma unroll
-        for (int ch = 0; ch < NCH; ++ch)
+        if (gridDim.y == 1) {
             #pragma unroll
-            for (int m = 0; m < 4; ++m) dq[(int64_t)a * dq_stride + ch * 4 + m] += (float)dqd[ch * 4 + m];
-        atomicAdd(forces + 3 * a, -fxd);
-        atomicAdd(forces + 3 * a + 1, -fyd);
-        atomicAdd(forces + 3 * a + 2, -fzd);
+            for (int ch = 0; ch < NCH; ++ch)
+                #pragma unroll
+                for (int m = 0; m < 4; ++m) dq[(int64_t)a * dq_stride + ch * 4 + m] += (float)dqd[ch * 4 + m];
+            atomicAdd(forces + 3 * a, -fxd);
+            atomicAdd(forces + 3 * a + 1, -fyd);
+            atomicAdd(forces + 3 * a + 2, -fzd);
+        } else {
+            double* p = part + ((int64_t)blockIdx.y * N + a) * 11;
+            #pragma unroll
+            for (int j = 0; j < NCH * 4; ++j) p[j] = dqd[j];
+            p[8] = fxd;
+            p[9] = fyd;
+            p[10] = fzd;
+        }
     }
+}
+
+// The k chunks' partial sums in chunk order. width 16: f[a][j] = sum_y part (feat_pass). width 11: dq[a][j] +=
+// sum_y part[..][j] (j < ndq), forces[a] -= sum_y part[..][8..10] (grad_pass).
+__global__ void k_reduce_kernel(int N, int ks, int width, int ndq, const double* __restrict__ part,
+                                float* __restrict__ out, int out_stride, double* __restrict__ forces) {
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= N * width) return;
+    const int a = i / width, j = i - a * width;
+    if (width == 11 && j >= ndq && j < 8) return;  // slots grad_pass<1> does not write
+    double s = 0.0;
+    for (int y = 0; y < ks; ++y) s += part[((int64_t)y * N + a) * width + j];
+    if (width == 16) out[(int64_t)a * 16 + j] = (float)s;
+    else if (j < 8) { if (j < ndq) out[(int64_t)a * out_stride + j] += (float)s; }
+    else atomicAdd(forces + 3 * a + (j - 8), -s);
 }
 
 // SF of the feature gradient needs g [N][16]; the energy needs SF of qt = q_a + q_b [N][4]
@@ -872,6 +910,21 @@ __global__ void spin_grad_kernel(int N, const float* __restrict__ g, float* __re
 
 inline unsigned blocks_for(int64_t n, int b = 256) { return (unsigned)((n + b - 1) / b); }
 
+// k chunks for the per-atom k passes: enough blocks for ~2 per SM (at most k_splits_max(N) chunks), chunks a
+// multiple of 64 (both tiles).
+inline int k_splits_max(int N) {
+    static int sms = [] { int d = 0, s = 0; cudaGetDevice(&d); cudaDeviceGetAttribute(&s, cudaDevAttrMultiProcessorCount, d); return s > 0 ? s : 1; }();
+    const int atom_blocks = (int)blocks_for(N, 128);
+    return (2 * sms + atom_blocks - 1) / atom_blocks;
+}
+inline int k_chunk(int N, int K) {
+    int ks = k_splits_max(N);
+    const int max_ks = (K + 63) / 64;
+    if (ks > max_ks) ks = max_ks;
+    if (ks < 1) ks = 1;
+    return ((K + ks - 1) / ks + 63) / 64 * 64;
+}
+
 }  // namespace
 
 // ------------------------------------------------------------------------------------------------------------ impl
@@ -926,6 +979,7 @@ struct PolarLR::Impl {
     double *SC = nullptr, *SS = nullptr;  // per k structure factors
     float* dk = nullptr;                  // per k backward coefficients
     double* red = nullptr;                              // fukui reductions, 8 per use
+    double* kpart = nullptr;  // k-split partial sums: [k_splits_max(N)][N][16] (feat_pass) or [..][N][11]
     std::vector<Step> steps;
     // local electron energy state
     float *qin_le = nullptr, *qu[3] = {}, *vu[3] = {}, *Zq[3] = {}, *Zv[3] = {}, *lex0 = nullptr, *le_e = nullptr;
@@ -1243,6 +1297,7 @@ void PolarLR::alloc_system(int N) {
     P.qfin = P.sys(n * 8);
     P.qt = P.sys(n * 4);
     P.f16 = P.sys(n * 16);
+    P.kpart = reinterpret_cast<double*>(P.sys(2 * (size_t)k_splits_max(N) * n * 16));
     P.g16 = P.sys(n * 16);
     P.dq = zalloc(n * 8);
     P.dq2 = zalloc(n * 8);
@@ -1342,6 +1397,8 @@ void PolarLR::record(cudaStream_t st, int N, const GemmFn& gemm,
     double* red_f0 = P.red;                       // first fukui
     auto red_step = [&](int i) { return P.red + 8 * (1 + i); };
     frac_kernel<<<blocks_for(N), 256, 0, st>>>(N, pos64, P.minv, P.fracu);
+    const int kc = k_chunk(N, K);
+    const dim3 kgrid(blocks_for(N, 128), (unsigned)((K + kc - 1) / kc));
 
     const std::vector<float*>& hL = h[P.L - 1];
     // ---------------- sources, mixer, and Fukui projection (independent across lanes)
@@ -1365,7 +1422,10 @@ void PolarLR::record(cudaStream_t st, int N, const GemmFn& gemm,
         double* SSq = SFq + (size_t)P.K_cap * 8;
         sf_kernel<8><<<K, 128, 0, st>>>(N, K, P.kinfo, P.fracu, q, SCq, SSq);
         feat_coef_kernel<<<blocks_for(K), 256, 0, st>>>(K, P.kinfo, alpha, beta, SCq, SSq, AB);
-        feat_pass_kernel<<<blocks_for(N, 128), 128, 0, st>>>(N, K, P.kinfo, P.fracu, AB, P.f16);
+        feat_pass_kernel<<<kgrid, 128, 0, st>>>(N, K, kc, P.kinfo, P.fracu, AB, P.f16, P.kpart);
+        if (kgrid.y > 1)
+            k_reduce_kernel<<<blocks_for((int64_t)N * 16), 256, 0, st>>>(N, (int)kgrid.y, 16, 0, P.kpart, P.f16, 16,
+                                                                          nullptr);
         pot_fwd_kernel<<<blocks_for((int64_t)N * 16), 256, 0, st>>>(N, P.fc, P.f16, q, pot);
     };
     auto mlp_fwd = [&](const Impl::Mlp& m, const float* x, std::vector<float*>& z, std::vector<float*>& act,
@@ -1496,8 +1556,10 @@ void PolarLR::record(cudaStream_t st, int N, const GemmFn& gemm,
     if (compute_stress)
         lr_virial_kernel<<<blocks_for(K), 256, 0, st>>>(K, 1, P.kinfo, P.bc, alpha, beta, e_scale, P.SC, P.SS, nullptr,
                                                         nullptr, virial);
-    grad_pass_kernel<1, false><<<blocks_for(N, 128), 128, 0, st>>>(N, K, P.kinfo, P.fracu, P.qt, 4, P.dk, nullptr,
-                                                                  nullptr, P.dq2, 8, forces);
+    grad_pass_kernel<1, false><<<kgrid, 128, 0, st>>>(N, K, kc, P.kinfo, P.fracu, P.qt, 4, P.dk, nullptr,
+                                                      nullptr, P.dq2, 8, forces, P.kpart);
+    if (kgrid.y > 1)
+        k_reduce_kernel<<<blocks_for((int64_t)N * 11), 256, 0, st>>>(N, (int)kgrid.y, 11, 4, P.kpart, P.dq2, 8, forces);
     // dq2[:, 0:4] holds dE/dqt: both spins get it
     spin_grad_kernel<<<blocks_for((int64_t)N * 4), 256, 0, st>>>(N, P.dq2, P.dq);
     // local electron energy backward
@@ -1574,8 +1636,11 @@ void PolarLR::record(cudaStream_t st, int N, const GemmFn& gemm,
         if (compute_stress)
             lr_virial_kernel<<<blocks_for(K), 256, 0, st>>>(K, 0, P.kinfo, P.bc, alpha, beta, e_scale, s.SFq,
                                                             s.SFq + (size_t)P.K_cap * 8, P.SC, P.SS, virial);
-        grad_pass_kernel<2, true><<<blocks_for(N, 128), 128, 0, st>>>(N, K, P.kinfo, P.fracu, s.qin, 8, P.dk, P.g16,
-                                                                     s.AB, P.dq2, 8, forces);
+        grad_pass_kernel<2, true><<<kgrid, 128, 0, st>>>(N, K, kc, P.kinfo, P.fracu, s.qin, 8, P.dk, P.g16,
+                                                         s.AB, P.dq2, 8, forces, P.kpart);
+        if (kgrid.y > 1)
+            k_reduce_kernel<<<blocks_for((int64_t)N * 11), 256, 0, st>>>(N, (int)kgrid.y, 11, 8, P.kpart, P.dq2, 8,
+                                                                          forces);
         // dq_in -> becomes dE/d q_{i} for the step before
         CUDA_CHECK_THROW(cudaMemcpyAsync(P.dq, P.dq2, (size_t)N * 8 * sizeof(float), cudaMemcpyDeviceToDevice, st));
         if (i > 0) CUDA_CHECK_THROW(cudaMemsetAsync(P.dpot, 0, (size_t)N * 16 * sizeof(float), st));

@@ -368,6 +368,19 @@ faster, POLAR-1-M NaCl 1-3% slower, NbCl5 3-5% faster, POLAR-1-L 10-11% faster; 
 set in 5.2 passes except the POLAR-1-S NaNbO3_c0 energy row in one of six S8 runs (and one of five S7 runs; see
 5.2); 55 tests pass.
 
+S8 + POLAR k split (ledger pol-k-split: the per-atom k-space passes split over k chunks with a fixed-order
+reduction), ABBA against S8 with fresh GEMM plans on both sides, ms/step:
+
+| Model | System | S8 | S8 + k split | b/a | FastMACE (adopted) |
+|---|---|---|---|---|---|
+| POLAR-1-S | NaCl 3x3x3 / 6x6x6 | 2.148 / 11.833 | **1.946 / 10.363** | 0.906 / 0.876 | 2.19-2.23 / – |
+| POLAR-1-M | NaCl 3x3x3 / NbCl5 | 4.801 / 29.917 | **4.598 / 27.751** | 0.958 / 0.928 | 4.51-4.59 / 31.1-31.5 |
+| POLAR-1-L | NaCl 3x3x3 | 8.758 | **8.563** | 0.978 | 9.74-9.81 |
+
+Against FastMACE's adopted configurations LoupMD's POLAR-1 is now 11-13% faster (S), level to 2% slower (M, NaCl
+216), 11-12% faster (M, NbCl5) and 12-13% faster (L). POLAR-1-S / -M / -L crystals gates pass (POLAR-1-L with CPU
+references).
+
 ### 5.4 Fixes Found by the Family Work
 - **POLAR LayerNorm-MLP reverse wrote its GEMM output over its own input** (`mlp_bwd`: after the first hidden layer
   the destination buffer was the one holding dz). Harmless while one GEMM tile covered all rows; from ~1,700 atoms

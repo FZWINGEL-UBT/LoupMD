@@ -196,6 +196,7 @@ Conventions:
 | [pol-sf-f32](#pol-sf-f32) | Structure factors: float32 chunk sums folded into double, coalesced `float4` loads | `sf_kernel<NC>` | POLAR | DEFAULT (5060 Ti only) | S7 | ABBA b/a 0.833 (M `NbCl5`) to 0.987 (L NaCl) | this file |
 | [pol-contig-weights](#pol-contig-weights) | Per-degree contiguous `Wpot` / `Wq` / `le_W*` slices, fused `qnew = qin + out` | – | POLAR | REJECTED | S7 | ABBA b/a 0.952-1.045, mixed | this file |
 | [pol-kpass-32](#pol-kpass-32) | 32-thread blocks for the per-atom k-space passes when N <= 512 | – | POLAR | REJECTED | S7 | NaCl 216 (with pol-contig-weights): +7.4% (S), +6.0% (M) | this file |
+| [pol-k-split](#pol-k-split) | Per-atom k passes split over k chunks (`blockIdx.y`), chunk partials reduced in fixed order | `k_chunk`, `k_reduce_kernel` | POLAR | DEFAULT (5060 Ti only) | S8 | ABBA b/a 0.876 (S NaCl 1,728) to 0.978 (L NaCl 216); M `NbCl5` 0.928 | this file |
 
 ### Measurements without a switch
 
@@ -261,6 +262,8 @@ Do not retry these unless the stated condition changes.
 | Cold-L2 rule for Ada `lin1_fwd l=1` + wider 3xTF32 `mma` tiles | untried: `22.0 MiB < 24 MiB` (`L2/2`) times `lin1_fwd l=1` hot on Ada; check `LOUP_DEBUG_GEMM=1` and `128x64`/`64x128` 3xTF32 tiles on 5060 Ti | [gemm-cold-l2-ada-fix](#gemm-cold-l2-ada-fix) |
 | Warp-aggregate `rcv` `atomicAdd`s in `i0_bwd` | untried: 1-2 receivers per 32-edge warp (`SrTiO3`); check `ncu` atomic stall counters first | [i0-bwd-rcv-warp-agg](#i0-bwd-rcv-warp-agg) |
 | Active-edge compaction (`101 us`) & `tune_l1` re-check | untried: `compute_and_count_active` + `scatter_active_edges` (`tmp_vec_len` round-trip); re-check `w'`/`i0_bwd` carveouts | [comp-active-edge-tighten](#comp-active-edge-tighten), [mem-l1-carveout-retune](#mem-l1-carveout-retune) |
+| Gate reference cache | untried (tooling, not speed): `python/test_gate.py` recomputes the MACE float64 / float32 references and the finite-difference stress on every run (~30 min of the POLAR-1-L CPU-reference gate); cache them keyed by model hash, set, head, config seed, reference device and MACE version. Also fixes the float32 bound between runs (meas-plan-variance, 5.2 NaNbO3_c0) | this file |
+| GEMM plans timed in the captured graph | not built: isolated timings mis-rank plans under concurrent lanes ([meas-plan-variance](#meas-plan-variance): up to ~4% on POLAR NaCl 216); flip near-tie shapes one at a time, recapture, time replays | this file |
 
 ## Appendix: entries
 
@@ -1133,6 +1136,15 @@ POLAR-1 NaCl 3x3x3 (216) and POLAR-1-M `NbCl5` 3x3x3 (1,944).
 - What: `feat_pass_kernel` / `grad_pass_kernel` with 32 threads per block for N <= 512, to spread 216 atoms over more SMs.
 - Status: REJECTED.
 - Measured (together with pol-contig-weights): POLAR-1-S NaCl 1.074, POLAR-1-M NaCl 1.060; each block then re-stages the same k tiles, which costs more than the extra SMs gain.
+- Sources: this file.
+
+<a id="pol-k-split"></a>
+#### pol-k-split: k chunks for the per-atom k-space passes
+- Switch: `k_chunk(N, K)` / `k_splits_max(N)` in `src/polar.cu`; `feat_pass_kernel` and `grad_pass_kernel` take the chunk length and range over `blockIdx.y`; `k_reduce_kernel` adds the chunks.
+- Stage: S8.
+- What: one thread per atom over all k left 1,944 atoms in 16 blocks (< 1 warp per scheduler on 36 SMs). The k sum is now split into enough chunks for ~2 blocks per SM; each chunk keeps its double sums and writes them to `kpart[chunk][atom]`, and `k_reduce_kernel` adds the chunks in chunk order (f assigned; dq added; forces by one atomic per atom and component, as before). One chunk keeps the direct path. A first version adding the chunks with float atomics moved POLAR-1-M `NbCl5` forces by 1.05e-4 eV/A (18x run-to-run) and was replaced; the fixed-order version differs from S8 by 8.1e-6 eV/A against 6.9e-6 run-to-run.
+- Measured: kernels (POLAR-1-M `NbCl5`, nsys): `grad_pass<2>` 924-964 -> 225 us, `feat_pass` 402-449 -> 107 us, `grad_pass<1>` 250-267 -> 72 us. ABBA b/a against S8, fresh GEMM plans on both sides: POLAR-1-M `NbCl5` 0.928 (29.92 -> 27.75 ms), NaCl 216 0.958; POLAR-1-S NaCl 216 0.906, NaCl 1,728 0.876; POLAR-1-L NaCl 216 0.978. Gates PASS: POLAR-1-S (NaNbO3_c0 energy row at 0.679 meV/atom, see STATUS 5.2), POLAR-1-M (worst force 1.32), POLAR-1-L (CPU refs, worst 1.15).
+- Status: DEFAULT.
 - Sources: this file.
 
 ### Measurements without a switch
