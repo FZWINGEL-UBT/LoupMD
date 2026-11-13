@@ -58,11 +58,38 @@ class Bundle;
 constexpr double kPackedTableMaxRelErr = 5e-4;
 constexpr double kPackedPhysicalR = 1.0;
 
-inline double max_abs_cubic_half(double c0, double c1, double c2, double c3);
-inline double max_abs_quad_half(double d0, double d1, double d2);
+// max |c0 + c1 s + c2 s^2 + c3 s^3| over s in [lo, hi]: the endpoints and the real roots of the derivative.
+inline double max_abs_cubic(double c0, double c1, double c2, double c3, double lo, double hi) {
+    auto f = [&](double s) { return std::abs(c0 + s * (c1 + s * (c2 + s * c3))); };
+    double m = std::max(f(lo), f(hi));
+    const double A = 3.0 * c3, B = 2.0 * c2, C = c1;  // derivative A s^2 + B s + C
+    if (A != 0.0) {
+        const double disc = B * B - 4.0 * A * C;
+        if (disc >= 0.0) {
+            const double r = std::sqrt(disc);
+            for (const double s : {(-B + r) / (2.0 * A), (-B - r) / (2.0 * A)})
+                if (s > lo && s < hi) m = std::max(m, f(s));
+        }
+    } else if (B != 0.0) {
+        const double s = -C / B;
+        if (s > lo && s < hi) m = std::max(m, f(s));
+    }
+    return m;
+}
+// max |d0 + d1 s + d2 s^2| over s in [lo, hi]: the endpoints and the vertex.
+inline double max_abs_quad(double d0, double d1, double d2, double lo, double hi) {
+    auto f = [&](double s) { return std::abs(d0 + s * (d1 + s * d2)); };
+    double m = std::max(f(lo), f(hi));
+    if (d2 != 0.0) {
+        const double s = -d1 / (2.0 * d2);
+        if (s > lo && s < hi) m = std::max(m, f(s));
+    }
+    return m;
+}
 
 // Per-column maxima of |value|, |d/dr| and of their packing errors, over the whole table and over the physical
-// region; rel() is the worst error / maximum ratio of either region (see kPackedTableMaxRelErr).
+// region r >= kPackedPhysicalR (an interval straddling it contributes its part above); rel() is the worst
+// error / maximum ratio of either region (see kPackedTableMaxRelErr).
 struct PackErrTracker {
     int cols;
     std::vector<double> m[2][4];  // [all, physical][value, slope, value error, slope error]
@@ -70,14 +97,19 @@ struct PackErrTracker {
         for (auto& region : m)
             for (auto& v : region) v.assign((size_t)n, 0.0);
     }
-    // a: original cubic and d: decoded - original, both in s = t - 1/2 on [-1/2, 1/2]; inv_h: 1 / interval width (A)
-    void add(int col, bool physical, double inv_h, const double a[4], const double d[4]) {
-        const double x[4] = {max_abs_cubic_half(a[0], a[1], a[2], a[3]),
-                             inv_h * max_abs_quad_half(a[1], 2 * a[2], 3 * a[3]),
-                             max_abs_cubic_half(d[0], d[1], d[2], d[3]),
-                             inv_h * max_abs_quad_half(d[1], 2 * d[2], 3 * d[3])};
-        for (int r = 0; r < (physical ? 2 : 1); ++r)
+    // a: original cubic and d: decoded - original, both in s = t - 1/2 on [-1/2, 1/2]; inv_h: 1 / interval width (A);
+    // r0: the interval's start (A). The physical part is s >= (kPackedPhysicalR - r0) inv_h - 1/2.
+    void add(int col, double r0, double inv_h, const double a[4], const double d[4]) {
+        const double s_phys = std::max(-0.5, (kPackedPhysicalR - r0) * inv_h - 0.5);
+        const int regions = s_phys < 0.5 ? 2 : 1;
+        for (int r = 0; r < regions; ++r) {
+            const double lo = r == 0 ? -0.5 : s_phys;
+            const double x[4] = {max_abs_cubic(a[0], a[1], a[2], a[3], lo, 0.5),
+                                 inv_h * max_abs_quad(a[1], 2 * a[2], 3 * a[3], lo, 0.5),
+                                 max_abs_cubic(d[0], d[1], d[2], d[3], lo, 0.5),
+                                 inv_h * max_abs_quad(d[1], 2 * d[2], 3 * d[3], lo, 0.5)};
             for (int k = 0; k < 4; ++k) m[r][k][(size_t)col] = std::max(m[r][k][(size_t)col], x[k]);
+        }
     }
     double rel() const {
         double w = 0.0;
@@ -89,35 +121,6 @@ struct PackErrTracker {
         return w;
     }
 };
-
-// max |c0 + c1 s + c2 s^2 + c3 s^3| over s in [-1/2, 1/2]: the endpoints and the real roots of the derivative.
-inline double max_abs_cubic_half(double c0, double c1, double c2, double c3) {
-    auto f = [&](double s) { return std::abs(c0 + s * (c1 + s * (c2 + s * c3))); };
-    double m = std::max(f(-0.5), f(0.5));
-    const double A = 3.0 * c3, B = 2.0 * c2, C = c1;  // derivative A s^2 + B s + C
-    if (A != 0.0) {
-        const double disc = B * B - 4.0 * A * C;
-        if (disc >= 0.0) {
-            const double r = std::sqrt(disc);
-            for (const double s : {(-B + r) / (2.0 * A), (-B - r) / (2.0 * A)})
-                if (s > -0.5 && s < 0.5) m = std::max(m, f(s));
-        }
-    } else if (B != 0.0) {
-        const double s = -C / B;
-        if (s > -0.5 && s < 0.5) m = std::max(m, f(s));
-    }
-    return m;
-}
-// max |d0 + d1 s + d2 s^2| over s in [-1/2, 1/2]: the endpoints and the vertex.
-inline double max_abs_quad_half(double d0, double d1, double d2) {
-    auto f = [&](double s) { return std::abs(d0 + s * (d1 + s * d2)); };
-    double m = std::max(f(-0.5), f(0.5));
-    if (d2 != 0.0) {
-        const double s = -d1 / (2.0 * d2);
-        if (s > -0.5 && s < 0.5) m = std::max(m, f(s));
-    }
-    return m;
-}
 }  // namespace loup
 
 struct SplineGridHost {

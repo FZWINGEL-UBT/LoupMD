@@ -321,7 +321,7 @@ passed for S8 in another run; force and stress ratios stayed at or below 0.29.
 Since S9 the gate leaves the configuration out (`--include-unstable` gates it; FastMACE excludes it too). A cuBLAS
 workspace per lane (review U4) left the per-process values as they were, with plans re-timed per process
 (inconclusive). Both loaders also measure the 8-byte tables'
-error at load (exact maxima, value and d/dr, whole table and r >= 1 A) and refuse above 5e-4 of the column maximum;
+error at load (exact maxima, value and d/dr, whole table and r >= 1 A clipped exactly) and refuse above 5e-4 of the column maximum;
 current bundles measure 2.7e-5 to 1.7e-4 (ledger rv8-fixes).
 `tests/test_gate_wrapper.py` runs the gate for OMAT-0 small, OFF23-S / M, MH-1 (two sets) and POLAR-1-S / M.
 The MACE references are cached per model, set, head and reference GPU (`LOUP_GATE_CACHE`, default

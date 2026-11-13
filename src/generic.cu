@@ -754,11 +754,11 @@ void GenericModel::load(const Bundle& b) {
                 // Packing error per column (path x channel), exact maxima over every interval and pair, value and
                 // d/dr, over the whole table and over the intervals reaching the physical region (PackErrTracker).
                 std::vector<double> ih(L->intervals);
-                std::vector<char> phys(L->intervals);
+                std::vector<double> r0(L->intervals);
                 for (int k = 0; k < L->grid.n_bands; ++k)
                     for (int i = 0; i < L->grid.counts[k]; ++i) {
                         ih[L->grid.offsets[k] + i] = L->grid.inv_h[k];
-                        phys[L->grid.offsets[k] + i] = L->grid.starts[k] + i / L->grid.inv_h[k] >= loup::kPackedPhysicalR - 1e-6;
+                        r0[L->grid.offsets[k] + i] = L->grid.starts[k] + i / (double)L->grid.inv_h[k];
                     }
                 loup::PackErrTracker perr(Q);
                 for (size_t pi = 0; pi < PI; ++pi) {
@@ -781,7 +781,7 @@ void GenericModel::load(const Bundle& b) {
                         const double dv[4] = {deq(u0, ei, 0, 20) - a0, deq(u1, ei, 8, 19) - a1,
                                               deq(u2, ei, 14, 12) - a2, deq(u3, ei, 19, 8) - a3};
                         const size_t iv = pi % (size_t)L->intervals;
-                        perr.add(q, phys[iv] != 0, ih[iv], av, dv);
+                        perr.add(q, r0[iv], ih[iv], av, dv);
                     }
                 }
                 const double rel = perr.rel();

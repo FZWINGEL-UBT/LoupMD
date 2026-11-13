@@ -80,6 +80,10 @@ void LoupModelGPU::load(const loup::Bundle& b, const char* path) {
             if (i < grid1.n_bands) {
                 if (of[i] != total || co[i] < 1 || !(en[i] > st[i]) || !(ih[i] > 0.0f))
                     throw std::runtime_error(std::string(path) + ": inconsistent interaction-1 spline bands");
+                // locate_spline assumes ascending, contiguous bands that end at r_max
+                if ((i > 0 && std::abs(st[i] - en[i - 1]) > 1e-5f) ||
+                    (i == grid1.n_bands - 1 && std::abs(en[i] - r_max) > 1e-4f))
+                    throw std::runtime_error(std::string(path) + ": interaction-1 spline bands not contiguous up to r_max");
                 total += co[i];
             }
         }
@@ -130,11 +134,11 @@ void LoupModelGPU::load(const loup::Bundle& b, const char* path) {
         };
         // Packing error per column, as GenericModel::load measures it (PackErrTracker, kPackedTableMaxRelErr).
         std::vector<double> ih(grid1.total_intervals);
-        std::vector<char> phys(grid1.total_intervals);
+        std::vector<double> r0(grid1.total_intervals);
         for (int k = 0; k < grid1.n_bands; ++k)
             for (int i = 0; i < grid1.counts[k]; ++i) {
                 ih[grid1.offsets[k] + i] = grid1.inv_h[k];
-                phys[grid1.offsets[k] + i] = grid1.starts[k] + i / grid1.inv_h[k] >= loup::kPackedPhysicalR - 1e-6;
+                r0[grid1.offsets[k] + i] = grid1.starts[k] + i / (double)grid1.inv_h[k];
             }
         loup::PackErrTracker perr(1280);
         for (size_t i = 0; i < sp1_n; ++i) {
@@ -159,7 +163,7 @@ void LoupModelGPU::load(const loup::Bundle& b, const char* path) {
             const double av[4] = {a0, a1, a2, a3};
             const double dv[4] = {deq(u0, ei, 0, 20) - a0, deq(u1, ei, 8, 19) - a1, deq(u2, ei, 14, 12) - a2,
                                   deq(u3, ei, 19, 8) - a3};
-            perr.add((int)(i % 1280), phys[iv] != 0, ih[iv], av, dv);
+            perr.add((int)(i % 1280), r0[iv], ih[iv], av, dv);
         }
         const double rel = perr.rel();
         if (std::getenv("LOUP_DEBUG_PACK")) fprintf(stderr, "pack interaction 1: %.3e\n", rel);
