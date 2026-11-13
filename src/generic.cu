@@ -520,6 +520,249 @@ __global__ void __launch_bounds__(256) first_bwd_kernel(
         __syncwarp();
     }
 }
+
+// Edge-parallel layer-0 backward + ZBL + force/virial assembly (tabled_outer_sum0_backward_kernel design):
+// 4 warps x 32 edges/warp, COLS columns/lane (2 for Jp <= 64, 3 for Jp <= 96); caches dS0 across consecutive
+// active edges with the same (rcv, snd_sp), folds SH gradients in s_edge[4][32][20], then all 32 lanes assemble
+// forces, ZBL and virial in parallel.
+template <int COLS, bool HAS_ZBL, bool STRESS>
+__global__ void __launch_bounds__(128) first_bwd_edge_kernel(
+    const int* __restrict__ E_dev, int S, int I, int J, int K0, SplineGrid grid, int sh_perm, int pair_sym,
+    const int* __restrict__ senders, const int* __restrict__ receivers, const float4* __restrict__ vec_len,
+    const int* __restrict__ species, const float4* __restrict__ table,
+    const float* __restrict__ g0, const float* __restrict__ g1, const float* __restrict__ g2, const float* __restrict__ g3,
+    const float* __restrict__ dD, const float* __restrict__ edge_dvec, ZblParams zbl,
+    double* __restrict__ energy, double* __restrict__ forces, double* __restrict__ virial) {
+    constexpr int CHUNK = 32;
+    const int E = *E_dev;
+    const int tid = threadIdx.x, warp = tid >> 5, warp_id = blockIdx.x * 4 + warp, lane = tid & 31;
+    const int start = warp_id * CHUNK;
+    const int Jp = J - 1;
+
+    __shared__ __align__(16) float s_edge[4][CHUNK][20];
+    double v00 = 0.0, v01 = 0.0, v02 = 0.0, v11 = 0.0, v12 = 0.0, v22 = 0.0;
+    double e_zbl_thread = 0.0;
+
+    if (start < E) {
+        const int stop = (start + CHUNK < E) ? (start + CHUNK) : E;
+        const int cnt = stop - start;
+        int m_iv = 0, m_pr = 0, m_rcv = -1, m_snd = -1, m_sp = -1, m_rcv_sp = -1;
+        float m_t = 0.0f, m_sxi = 0.0f;
+        if (lane < cnt) {
+            const int e = start + lane;
+            const float4 vl = __ldg(vec_len + e);
+            const float ux = sh_perm ? vl.y : vl.x, uy = sh_perm ? vl.z : vl.y, uz = sh_perm ? vl.x : vl.z;
+            loup::edge_sh16(ux, uy, uz, vl.w, reinterpret_cast<float4*>(s_edge[warp][lane]));
+            locate_spline(grid, vl.w, m_iv, m_t, m_sxi);
+            m_rcv = receivers[e];
+            m_snd = senders[e];
+            m_sp = species[m_snd];
+            m_rcv_sp = species[m_rcv];
+            m_pr = pair_sym ? loup::sym_pair(m_sp, m_rcv_sp, S) : m_sp * S + m_rcv_sp;
+        }
+        __syncwarp();
+
+        float blk[COLS][16];
+        #pragma unroll
+        for (int c = 0; c < COLS; ++c)
+            #pragma unroll
+            for (int d = 0; d < 16; ++d) blk[c][d] = 0.0f;
+        float dD_r = 0.0f;
+        int cur_rcv = -1, cur_snd_sp = -1;
+
+        for (int k = 0; k < cnt; ++k) {
+            const int rcv = __shfl_sync(0xffffffffu, m_rcv, k);
+            const int snd_sp = __shfl_sync(0xffffffffu, m_sp, k);
+            if (rcv != cur_rcv || snd_sp != cur_snd_sp) {
+                cur_rcv = rcv;
+                cur_snd_sp = snd_sp;
+                if (COLS == 2 && (Jp & 1) == 0 && (K0 & 1) == 0) {
+                    const int off = snd_sp * Jp + 2 * lane;
+                    const bool ok = 2 * lane + 1 < Jp;
+                    auto ld2 = [&](const float* base, int64_t row, int d) {
+                        if (ok) {
+                            const float2 v = __ldg(reinterpret_cast<const float2*>(base + row * K0 + off));
+                            blk[0][d] = v.x;
+                            blk[1][d] = v.y;
+                        } else {
+                            blk[0][d] = 2 * lane < Jp ? __ldg(base + row * K0 + off) : 0.0f;
+                            blk[1][d] = 0.0f;
+                        }
+                    };
+                    ld2(g0, rcv, 0);
+                    #pragma unroll
+                    for (int d = 0; d < 3; ++d) ld2(g1, (int64_t)rcv * 3 + d, 1 + d);
+                    #pragma unroll
+                    for (int d = 0; d < 5; ++d) ld2(g2, (int64_t)rcv * 5 + d, 4 + d);
+                    #pragma unroll
+                    for (int d = 0; d < 7; ++d) ld2(g3, (int64_t)rcv * 7 + d, 9 + d);
+                } else {
+                    #pragma unroll
+                    for (int c = 0; c < COLS; ++c) {
+                        const int col = (COLS == 2) ? (2 * lane + c) : (c * 32 + lane);
+                        if (col < Jp) {
+                            const int off = snd_sp * Jp + col;
+                            blk[c][0] = __ldg(g0 + (int64_t)rcv * K0 + off);
+                            #pragma unroll
+                            for (int d = 0; d < 3; ++d) blk[c][1 + d] = __ldg(g1 + ((int64_t)rcv * 3 + d) * K0 + off);
+                            #pragma unroll
+                            for (int d = 0; d < 5; ++d) blk[c][4 + d] = __ldg(g2 + ((int64_t)rcv * 5 + d) * K0 + off);
+                            #pragma unroll
+                            for (int d = 0; d < 7; ++d) blk[c][9 + d] = __ldg(g3 + ((int64_t)rcv * 7 + d) * K0 + off);
+                        }
+                    }
+                }
+                if (dD) dD_r = __ldg(dD + rcv);
+            }
+
+            const int iv = __shfl_sync(0xffffffffu, m_iv, k);
+            const int pr = __shfl_sync(0xffffffffu, m_pr, k);
+            const float t = __shfl_sync(0xffffffffu, m_t, k);
+            const float sxi = __shfl_sync(0xffffffffu, m_sxi, k);
+            const float4* tb = table + ((int64_t)pr * I + iv) * J;
+            float pa[COLS], pd[COLS];
+            #pragma unroll
+            for (int c = 0; c < COLS; ++c) {
+                const int col = (COLS == 2) ? (2 * lane + c) : (c * 32 + lane);
+                if (col < Jp) {
+                    const float4 cf = __ldg(tb + col);
+                    pa[c] = fmaf(t, fmaf(t, fmaf(t, cf.w, cf.z), cf.y), cf.x);
+                    pd[c] = fmaf(t, fmaf(t, 3.0f * cf.w, 2.0f * cf.z), cf.y) * sxi;
+                } else {
+                    pa[c] = 0.0f;
+                    pd[c] = 0.0f;
+                }
+            }
+
+            const float4* shv = reinterpret_cast<const float4*>(s_edge[warp][k]);
+            const float4 Y0 = shv[0], Y1 = shv[1], Y2 = shv[2], Y3 = shv[3];
+            const float shk[16] = {Y0.x, Y0.y, Y0.z, Y0.w, Y1.x, Y1.y, Y1.z, Y1.w,
+                                   Y2.x, Y2.y, Y2.z, Y2.w, Y3.x, Y3.y, Y3.z, Y3.w};
+            float grad_a[COLS];
+            #pragma unroll
+            for (int c = 0; c < COLS; ++c) grad_a[c] = 0.0f;
+            float gy[16];
+            #pragma unroll
+            for (int d = 0; d < 16; ++d) {
+                const float sd = shk[d];
+                float gsum = 0.0f;
+                #pragma unroll
+                for (int c = 0; c < COLS; ++c) {
+                    grad_a[c] = fmaf(blk[c][d], sd, grad_a[c]);
+                    gsum = fmaf(blk[c][d], pa[c], gsum);
+                }
+                gy[d] = gsum;
+            }
+
+            // 16-shuffle fold of gy[0..15] across 32 lanes -> lane 1..15 holds dsh[lane]
+            float g8[8];
+            const bool odd = (lane & 1) != 0;
+            #pragma unroll
+            for (int q = 0; q < 8; ++q)
+                g8[q] = (odd ? gy[2 * q + 1] : gy[2 * q]) + __shfl_xor_sync(0xffffffffu, odd ? gy[2 * q] : gy[2 * q + 1], 1);
+            float g4[4];
+            const bool h2 = (lane & 2) != 0;
+            #pragma unroll
+            for (int q = 0; q < 4; ++q)
+                g4[q] = (h2 ? g8[2 * q + 1] : g8[2 * q]) + __shfl_xor_sync(0xffffffffu, h2 ? g8[2 * q] : g8[2 * q + 1], 2);
+            float g2[2];
+            const bool h4 = (lane & 4) != 0;
+            #pragma unroll
+            for (int q = 0; q < 2; ++q)
+                g2[q] = (h4 ? g4[2 * q + 1] : g4[2 * q]) + __shfl_xor_sync(0xffffffffu, h4 ? g4[2 * q] : g4[2 * q + 1], 4);
+            const bool h8 = (lane & 8) != 0;
+            float g1 = (h8 ? g2[1] : g2[0]) + __shfl_xor_sync(0xffffffffu, h8 ? g2[0] : g2[1], 8);
+            g1 += __shfl_xor_sync(0xffffffffu, g1, 16);
+            if (lane >= 1 && lane < 16) s_edge[warp][k][lane] = g1;
+
+            float dr_v = 0.0f;
+            #pragma unroll
+            for (int c = 0; c < COLS; ++c) dr_v = fmaf(grad_a[c], pd[c], dr_v);
+            #pragma unroll
+            for (int off = 16; off > 0; off >>= 1) dr_v += __shfl_xor_sync(0xffffffffu, dr_v, off);
+            if (lane == 0) {
+                if (dD && dD_r != 0.0f) {
+                    const float4 cd = __ldg(tb + Jp);
+                    const float dvd = fmaf(t, fmaf(t, 3.0f * cd.w, 2.0f * cd.z), cd.y) * sxi;
+                    dr_v = fmaf(dD_r, dvd, dr_v);
+                }
+                s_edge[warp][k][0] = dr_v;
+            }
+        }
+        __syncwarp();
+
+        if (lane < cnt) {
+            const int e = start + lane;
+            const float4 vl = __ldg(vec_len + e);
+            const float dd = vl.w > loup::EPS_SH ? vl.w : loup::EPS_SH;
+            const float inv_d = 1.0f / dd;
+            const float ux = sh_perm ? vl.y : vl.x, uy = sh_perm ? vl.z : vl.y, uz = sh_perm ? vl.x : vl.z;
+            const float x = ux * inv_d, y = uy * inv_d, z = uz * inv_d;
+            float gx, gy, gz;
+            ::sh16_grad(x, y, z, s_edge[warp][lane], gx, gy, gz);
+            const float er = s_edge[warp][lane][0];
+            const float dot = x * gx + y * gy + z * gz;
+            float fx = x * er + (gx - x * dot) * inv_d;
+            float fy = y * er + (gy - y * dot) * inv_d;
+            float fz = z * er + (gz - z * dot) * inv_d;
+            if (sh_perm) { const float tx = fx, ty = fy, tz = fz; fx = tz; fy = tx; fz = ty; }
+            fx += edge_dvec[(int64_t)e * 3 + 0];
+            fy += edge_dvec[(int64_t)e * 3 + 1];
+            fz += edge_dvec[(int64_t)e * 3 + 2];
+            if (HAS_ZBL && vl.w < zbl.r_max) {
+                float zen, zg;
+                if (zbl_pair(zbl, m_sp * S + m_rcv_sp, vl.w, zen, zg)) {
+                    e_zbl_thread += zen;
+                    fx += zg * vl.x;
+                    fy += zg * vl.y;
+                    fz += zg * vl.z;
+                }
+            }
+            atomicAdd(forces + m_rcv * 3 + 0, -(double)fx);
+            atomicAdd(forces + m_rcv * 3 + 1, -(double)fy);
+            atomicAdd(forces + m_rcv * 3 + 2, -(double)fz);
+            atomicAdd(forces + m_snd * 3 + 0, (double)fx);
+            atomicAdd(forces + m_snd * 3 + 1, (double)fy);
+            atomicAdd(forces + m_snd * 3 + 2, (double)fz);
+            if (STRESS) {
+                v00 = (double)vl.x * (double)fx;
+                v01 = 0.5 * ((double)vl.x * (double)fy + (double)vl.y * (double)fx);
+                v02 = 0.5 * ((double)vl.x * (double)fz + (double)vl.z * (double)fx);
+                v11 = (double)vl.y * (double)fy;
+                v12 = 0.5 * ((double)vl.y * (double)fz + (double)vl.z * (double)fy);
+                v22 = (double)vl.z * (double)fz;
+            }
+        }
+    }
+    if (HAS_ZBL && __any_sync(0xffffffffu, e_zbl_thread != 0.0)) {
+        #pragma unroll
+        for (int off = 16; off > 0; off >>= 1) e_zbl_thread += __shfl_xor_sync(0xffffffffu, e_zbl_thread, off);
+        if (lane == 0) atomicAdd(energy, e_zbl_thread);
+    }
+    if (STRESS) {
+        #pragma unroll
+        for (int off = 16; off > 0; off >>= 1) {
+            v00 += __shfl_xor_sync(0xffffffffu, v00, off);
+            v01 += __shfl_xor_sync(0xffffffffu, v01, off);
+            v02 += __shfl_xor_sync(0xffffffffu, v02, off);
+            v11 += __shfl_xor_sync(0xffffffffu, v11, off);
+            v12 += __shfl_xor_sync(0xffffffffu, v12, off);
+            v22 += __shfl_xor_sync(0xffffffffu, v22, off);
+        }
+        __shared__ double s_v[4][6];
+        if (lane == 0) {
+            s_v[warp][0] = v00; s_v[warp][1] = v01; s_v[warp][2] = v02;
+            s_v[warp][3] = v11; s_v[warp][4] = v12; s_v[warp][5] = v22;
+        }
+        __syncthreads();
+        if (tid < 6) {
+            double sum = 0.0;
+            #pragma unroll
+            for (int w = 0; w < 4; ++w) sum += s_v[w][tid];
+            if (sum != 0.0) atomicAdd(virial + tid, sum);
+        }
+    }
+}
 __global__ void zero_edge_kernel(const int* __restrict__ E_dev, float* __restrict__ p) {
     const int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i < 3 * *E_dev) p[i] = 0.0f;
@@ -1432,17 +1675,34 @@ void GenericModel::record(const GenericPassInputs& in) {
                 }
                 join();
             }
-            const size_t g_smem = (size_t)16 * S * (L->J - 1) * sizeof(float);
-            if (g_smem <= 46 * 1024)  // + 2 KB static shared memory within the 48 KB default
-                first_bwd_kernel<true><<<N, 256, g_smem, st>>>(
-                    N, S, L->intervals, L->J, L->K0, L->grid, sh_perm_, L->pair_sym, in.act_row_ptr, in.act_senders,
-                    in.act_vec_len, in.species, L->table, L->S0[0], L->S0[1], L->S0[2], L->S0[3],
-                    density ? L->dD : nullptr, d_edge_dvec_);
-            else
-                first_bwd_kernel<false><<<N, 256, 0, st>>>(
-                    N, S, L->intervals, L->J, L->K0, L->grid, sh_perm_, L->pair_sym, in.act_row_ptr, in.act_senders,
-                    in.act_vec_len, in.species, L->table, L->S0[0], L->S0[1], L->S0[2], L->S0[3],
-                    density ? L->dD : nullptr, d_edge_dvec_);
+            if (L->J - 1 <= 96) {
+                if (has_edges) {
+                    using EdgeBwd = void (*)(const int*, int, int, int, int, SplineGrid, int, int, const int*, const int*,
+                                             const float4*, const int*, const float4*, const float*, const float*, const float*,
+                                             const float*, const float*, const float*, ZblParams, double*, double*, double*);
+                    const EdgeBwd tbl[2][2][2] = {
+                        {{first_bwd_edge_kernel<2, false, false>, first_bwd_edge_kernel<2, false, true>},
+                         {first_bwd_edge_kernel<2, true, false>, first_bwd_edge_kernel<2, true, true>}},
+                        {{first_bwd_edge_kernel<3, false, false>, first_bwd_edge_kernel<3, false, true>},
+                         {first_bwd_edge_kernel<3, true, false>, first_bwd_edge_kernel<3, true, true>}}};
+                    tbl[L->J - 1 > 64 ? 1 : 0][has_zbl_ ? 1 : 0][in.compute_stress ? 1 : 0]<<<(in.E_cap + 127) / 128, 128, 0, st>>>(
+                        in.E_dev, S, L->intervals, L->J, L->K0, L->grid, sh_perm_, L->pair_sym, in.act_senders,
+                        in.act_receivers, in.act_vec_len, in.species, L->table, L->S0[0], L->S0[1], L->S0[2], L->S0[3],
+                        density ? L->dD : nullptr, d_edge_dvec_, zbl_p, in.energy, in.forces, in.virial);
+                }
+            } else {
+                const size_t g_smem = (size_t)16 * S * (L->J - 1) * sizeof(float);
+                if (g_smem <= 46 * 1024)  // + 2 KB static shared memory within the 48 KB default
+                    first_bwd_kernel<true><<<N, 256, g_smem, st>>>(
+                        N, S, L->intervals, L->J, L->K0, L->grid, sh_perm_, L->pair_sym, in.act_row_ptr, in.act_senders,
+                        in.act_vec_len, in.species, L->table, L->S0[0], L->S0[1], L->S0[2], L->S0[3],
+                        density ? L->dD : nullptr, d_edge_dvec_);
+                else
+                    first_bwd_kernel<false><<<N, 256, 0, st>>>(
+                        N, S, L->intervals, L->J, L->K0, L->grid, sh_perm_, L->pair_sym, in.act_row_ptr, in.act_senders,
+                        in.act_vec_len, in.species, L->table, L->S0[0], L->S0[1], L->S0[2], L->S0[3],
+                        density ? L->dD : nullptr, d_edge_dvec_);
+            }
             continue;
         }
         // dmid (aliases mid: the forward values are dead) = dlin @ W_lin^T (or dmsgf @ W_lin_folded^T)
@@ -1480,7 +1740,8 @@ void GenericModel::record(const GenericPassInputs& in) {
             if (L->lmax_x > 0) join();
         }
     }
-    if (has_edges) {
+    const bool edge_done = layers_[0]->first_hidden && layers_[0]->J - 1 <= 96;
+    if (has_edges && !edge_done) {
         auto kern = has_zbl_ ? (in.compute_stress ? assemble_forces_kernel<true, true> : assemble_forces_kernel<true, false>)
                              : (in.compute_stress ? assemble_forces_kernel<false, true> : assemble_forces_kernel<false, false>);
         kern<<<(in.E_cap + 255) / 256, 256, 0, st>>>(in.E_dev, S, in.act_vec_len, in.act_senders, in.act_receivers,

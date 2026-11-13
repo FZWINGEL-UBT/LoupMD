@@ -185,6 +185,8 @@ Conventions:
 | [gen-zbl-in-assembly](#gen-zbl-in-assembly) | ZBL computed in the force-assembly pass (float32, skip beyond the largest ZBL cutoff) instead of its own pass | `assemble_forces_kernel(ZblParams)` | gen (ZBL models: OMAT-S, MH-1) | DEFAULT (5060 Ti only) | S10 | OMAT-S `SrTiO3`: 389 -> 221 us per call | this file |
 | [gen-first-bwd-assembly](#gen-first-bwd-assembly) | Force / virial assembly (and ZBL) folded into the first-layer backward | – | gen | REJECTED | S10 | 990-1,029 -> 1,113-2,243 us | this file |
 | [gen-first-hidden-k0-align](#gen-first-hidden-k0-align) | Layer 0 `first_hidden` `K` alignment (drop zero bias col 64, pad nonzero `K` to 16) to unlock `sgemm128` + `3xTF32` | `GenericLayer::K0` | gen (`first_hidden`) | DEFAULT (5060 Ti only) | S11 | OMAT-S `SrTiO3` 5.88 -> 5.62 ms/step (0.956); OFF23-M water 8.85 -> 8.67 (0.979); OMAT-M gen 10.56 -> 10.30 (0.976) | this file |
+| [gen-conv-bwd-lazy-q](#gen-conv-bwd-lazy-q) | Lazy `s_q` loads + register-cap launch bounds on `gconv_bwd_L0/L1/L2` | – | gen | REJECTED | S11 | `gconv_bwd_L1`: 2.67-2.78 -> 2.88-2.95 ms (`STACK:64` spill, or stalled `LDS.128` at 128 regs); `gconv_bwd_L0` 512 threads 1.26 -> 1.31 ms | this file |
+| [gen-first-bwd-edge](#gen-first-bwd-edge) | Edge-parallel layer-0 backward + ZBL + force/virial assembly (`tabled_outer_sum0_backward_kernel` design) | `first_bwd_edge_kernel` | gen (`first_hidden`, `J - 1 <= 96`) | DEFAULT (5060 Ti only) | S12 | OMAT-S `SrTiO3` 5.62 -> 5.13 ms/step (0.913); OFF23-M water 8.65 -> 8.28 (0.957); OMAT-M gen 10.30 -> 9.80 (0.951); MH-1 0.990, POLAR-1-M 0.995 | this file |
 
 ### MACE-POLAR-1 long range (`src/polar.cu`)
 
@@ -1079,6 +1081,20 @@ POLAR-1 NaCl 3x3x3 (216) and POLAR-1-M `NbCl5` 3x3x3 (1,944).
 - Stage: S11.
 - What: `export_generic.py` wrote `J - 1 = 65` columns (64 radial + 1 bias) into `first_C0`, making `K = 195` (`S=3`) or `130` (`S=2`) and blocking both `sgemm128` (`K % 16 == 0, N % 4 == 0`) and `HybCubin` (`K % 4 == 0, N % 4 == 0`) on all layer-0 `S0 @ C0` / `dS0 = dlin @ C0^T` GEMMs. In `GenericModel::load()`, if column `J - 2` of `first_C0` is identically zero across all species and degrees (all `ScaleShiftMACE` models: OMAT-0, OFF23/23b/24, MP), it is stripped from `C0` and `table` (`J: 66 -> 65, K = 64 S`). Otherwise (nonlinear models: POLAR-1, MH-1), `K0` is padded to a multiple of 16 with zero rows in `C0` and trailing zeros written by `first_fwd_kernel`.
 - Measured (5060 Ti, ABBA): OMAT-0 small `SrTiO3` 5.88 -> 5.62 ms/step (`0.956`), OMAT-0 medium generic `SrTiO3` 10.56 -> 10.30 (`0.976`), OFF23-M water 8.85 -> 8.67 (`0.979`), MH-1 `NbCl5` 13.27 -> 13.16 (`0.992`), POLAR-1-M `NbCl5` 27.37 -> 27.35 (`0.999`). Oxide, crystals, organic gates pass.
+- Sources: this file.
+
+<a id="gen-conv-bwd-lazy-q"></a>
+#### gen-conv-bwd-lazy-q: lazy `s_q` loads and launch bounds in `gconv_bwd`
+- Stage: S11. Status: REJECTED.
+- What: `gconv_bwd_L1<true>` uses 128 registers (`REG:128, STACK:0`, 256 threads) vs `wprime_backward_inter1_rcv`'s 64 registers (`STACK:0`, 512 threads). Tried loading `sq4[0..9]` lazily per path instead of all upfront, with `__launch_bounds__(512, 2)` and `(256, 3)`, and 512 threads on `L0`.
+- Measured (5060 Ti, `OFF23-M` water / `OMAT-S` `SrTiO3`): `(512, 2)` and `(256, 3)` spilled (`STACK:64`, 2,875-2,948 vs 2,671-2,776 us), and even uncapped at 128 registers lazy `sq4` loads ran at 2,942 us because preloading all `sq4` lets `nvcc` batch the `LDS.128` reads. `gconv_bwd_L0` at 512 threads ran 1,313 vs 1,257 us. Reverted.
+- Sources: this file.
+
+<a id="gen-first-bwd-edge"></a>
+#### gen-first-bwd-edge: edge-parallel layer-0 backward + ZBL + force/virial assembly
+- Stage: S12.
+- What: `first_bwd_kernel` was receiver-parallel (1 block/atom, dynamic `s_G` staging, half-warp serial tail + separate `assemble_forces_kernel`). Ported the `interaction0.cu` `tabled_outer_sum0_backward_kernel` architecture (`first_bwd_edge_kernel<COLS, HAS_ZBL, STRESS>`, 4 warps x 32 edges/warp, `COLS = 2` for `J - 1 <= 64` with `float2` `dS0` loads and `COLS = 3` for `J - 1 <= 96`): caches `dS0` in registers across consecutive sorted active edges with the same `(rcv, snd_sp)`, folds SH gradients in `s_edge[4][32][20]`, then all 32 lanes run `sh16_grad`, `edge_dvec` sum, float32 ZBL, forces and virial in parallel. Replaces both `first_bwd_kernel` and `assemble_forces_kernel` when `J - 1 <= 96`.
+- Measured (5060 Ti, ABBA): OMAT-0 small `SrTiO3` 5.62 -> 5.13 ms/step (`0.913`, kernel `779+223 -> 526 us`), OFF23-M water 8.65 -> 8.28 (`0.957`, kernel `685+149 -> 362 us`), OMAT-0 medium generic `SrTiO3` 10.30 -> 9.80 (`0.951`), MH-1 `NbCl5` 13.20 -> 13.07 (`0.990`), POLAR-1-M `NbCl5` 27.40 -> 27.27 (`0.995`). Oxide, crystals, organic gates pass.
 - Sources: this file.
 
 <a id="rv8-fixes"></a>
