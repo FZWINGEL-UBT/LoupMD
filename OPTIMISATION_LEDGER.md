@@ -188,6 +188,7 @@ Conventions:
 | [gen-conv-bwd-lazy-q](#gen-conv-bwd-lazy-q) | Lazy `s_q` loads + register-cap launch bounds on `gconv_bwd_L0/L1/L2` | – | gen | REJECTED | S11 | `gconv_bwd_L1`: 2.67-2.78 -> 2.88-2.95 ms (`STACK:64` spill, or stalled `LDS.128` at 128 regs); `gconv_bwd_L0` 512 threads 1.26 -> 1.31 ms | this file |
 | [gen-first-bwd-edge](#gen-first-bwd-edge) | Edge-parallel layer-0 backward + ZBL + force/virial assembly (`tabled_outer_sum0_backward_kernel` design) | `first_bwd_edge_kernel` | gen (`first_hidden`, `J - 1 <= 96`) | DEFAULT (5060 Ti only) | S12 | OMAT-S `SrTiO3` 5.62 -> 5.13 ms/step (0.913); OFF23-M water 8.65 -> 8.28 (0.957); OMAT-M gen 10.30 -> 9.80 (0.951); MH-1 0.990, POLAR-1-M 0.995 | this file |
 | [gen-gprod-ro1-fused](#gen-gprod-ro1-fused) | Fused product fwd + linear/bias/silu/linear readout (`ro_H = 16`) + product bwd (`sc1_fused` generalisation) + 128-thread `gprod_fwd`/`bwd` | `gprod_ro1_fused_<sig>`, `launch_prod` | gen (`ro_folded`, `readout == 1`, `ro_H == 16`; `C % 128 == 0`) | DEFAULT (5060 Ti only) | S13 | OMAT-S `SrTiO3` 5.12 -> 4.99 ms/step (0.976); OFF23-M water 8.29 -> 8.16 (0.984); OMAT-M gen 9.81 -> 9.67 (0.986); POLAR-1-M `NbCl5` 27.28 -> 27.14 (0.995) | this file |
+| [gen-gconv-cfix-preloc](#gen-gconv-cfix-preloc) | `C_FIX` (`96/128/224`) template on `gconv_bwd_L0/L1` (`gconv_bwd_L1<true,128>`: `REG:128 -> 62`) + prelocated `act_slab`/`act_t_sx` from `scatter_active_edges_kernel` (`pair_sym && C_x <= 256`) + 256 thr on `L1` | `C_FIX`, `PRELOC`, `preloc_grid()` | gen (`C = 96/128/224`; preloc `pair_sym && C_x <= 256`) | DEFAULT (5060 Ti only) | S14 | OMAT-S `SrTiO3` 4.91 -> 4.73 ms/step (0.964); OFF23-M water 8.00 -> 7.43 (0.928); MH-1 `NbCl5` 12.82 -> 12.50 (0.976); POLAR-1-M 27.20 -> 27.06 (0.995); OMAT-M gen 9.67 -> 8.91 (0.921, `1.051x` spec) | this file |
 
 ### MACE-POLAR-1 long range (`src/polar.cu`)
 
@@ -1103,6 +1104,13 @@ POLAR-1 NaCl 3x3x3 (216) and POLAR-1-M `NbCl5` 3x3x3 (1,944).
 - Stage: S13.
 - What: generalised `gen_kernels.py`'s `sc1_fused` to `gen_generic.py` (`gprod_ro1_fused_<sig><MAX_B, MIN_BLK>`, `blockDim = C <= 512`, `ro_H = 16`): runs product forward, `s_y @ ro_W1 + sc_skip16 + ro_b1`, `c * silu` energy + derivative, `dhid @ ro_W1^T`, and product backward in one kernel without writing `y0`/`dy0` or launching `ro_W1` GEMMs or `ro_mlp_kernel`. Also switched `gprod_fwd`/`gprod_bwd` from 32 threads/block to `128` threads/block when `C % 128 == 0` (with `(threadIdx.x & 31) == 0` for warp `dD` atomics), helping `POLAR-1-M` (`C = 512`, `gprod_bwd` 435 -> 387 us/call) and layer-0 `gprod`.
 - Measured (5060 Ti, ABBA): OMAT-0 small `SrTiO3` 5.12 -> 4.99 ms/step (`0.976`), OFF23-M water 8.29 -> 8.16 (`0.984`), OMAT-0 medium generic `SrTiO3` 9.81 -> 9.67 (`0.986`, generic-vs-specialised gap now +913 us vs +2,144 us before S10), POLAR-1-M `NbCl5` 27.28 -> 27.14 (`0.995`). Oxide, OFF23-S/M organic, POLAR-1-M crystals gates pass.
+- Sources: this file.
+
+<a id="gen-gconv-cfix-preloc"></a>
+#### gen-gconv-cfix-preloc: `C_FIX` template and prelocated spline indices in `gconv_fwd`/`gconv_bwd`
+- Stage: S14.
+- What: `gconv_bwd_L1<true>` previously held 128 registers (`REG:128, STACK:0`) with runtime `C` and per-edge `locate_spline(grid)` + `species`/`sym_pair` inside the loop. Templated `C_FIX` (`96, 128, 224, 0` on `gconv_bwd_L0/L1` and `128` on `gconv_fwd_L0/L1`) and passed prelocated `act_slab` and `act_t_sx` from `scatter_active_edges_kernel` via `GenericPassInputs` when `pair_sym && C_x <= 256` and `L->grid == preloc_grid()`. `gconv_bwd_L1<true, 128, true>` drops to `REG:62, STACK:0`. On `gconv_bwd_L1<..., 128>`, 256 threads/block beat 512 threads (`OFF23-M` water 2,158 vs 2,297 us; `OMAT-M` generic `SrTiO3` 2,682 vs 2,712 us). (Separately tested `LOUP_REORDER=1` on OMAT-S, OFF23-M, OMAT-M: no win observed at `N <= 5,184`.)
+- Measured (5060 Ti, clean ABBA vs S13): OMAT-0 small `SrTiO3` 4.91 -> 4.73 ms/step (`0.964`), OFF23-M water 8.00 -> 7.43 (`0.928`), MH-1 `NbCl5` 12.82 -> 12.50 (`0.976`), POLAR-1-M `NbCl5` 27.20 -> 27.06 (`0.995`), OMAT-0 medium generic `SrTiO3` 9.67 -> 8.91 (`0.921`; `ab_mode.py`: `8.73 ms` vs specialised `8.31 ms` = `1.051x`, down from `1.273x` pre-S10). Oxide, OFF23-S/M organic, MH-1, POLAR-1-M crystals gates pass; `cmp_libs.py` passes on OMAT-S, OFF23-S/M/L, MH-1, POLAR-1-M.
 - Sources: this file.
 
 <a id="rv8-fixes"></a>

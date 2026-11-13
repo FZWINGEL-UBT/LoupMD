@@ -56,12 +56,14 @@ __device__ __forceinline__ void sh16_grad(float x, float y, float z, const float
   gz = d10*t6 + d13*t20*t7 + d14*t5*z + d3*t0 + d4*t2 + d7*t1*y + d8*t23 - t10*t19 - t13*z - t15*t18 + t15*t27 + t16*t22 - 0x1.0000000000000p-2f*t17*t8 - t27*t8 - t3*z;
 }
 
-template <int R, bool PAIR, int MAX_T = (R == 1 ? 256 : 128 * R)>
+template <int R, bool PAIR, int MAX_T = (R == 1 ? 256 : 128 * R), bool PRELOC = false, int C_FIX = 0>
 __global__ void __launch_bounds__(MAX_T) gconv_fwd_L0(
-    int N, int C, int S, int I, SplineGrid grid, int sh_perm, int pair_sym,
+    int N, int C_arg, int S, int I, SplineGrid grid, int sh_perm, int pair_sym,
     const int* __restrict__ row_ptr, const int* __restrict__ senders, const float4* __restrict__ vec_len,
+    const int* __restrict__ act_slab, const float2* __restrict__ act_t_sx,
     const int* __restrict__ species, const uint2* __restrict__ packed_table, const float4* __restrict__ density_table,
     unsigned bias_shift, const float* __restrict__ x0, float* __restrict__ mid0, float* __restrict__ mid1, float* __restrict__ mid2, float* __restrict__ mid3, float* __restrict__ D) {
+  const int C = C_FIX ? C_FIX : C_arg;
   constexpr int TILE = 32, ED = 16;
   static_assert(R >= 1 && R <= 15, "bar.sync id limit");
   __shared__ int s_snd_all[R][TILE];
@@ -96,12 +98,19 @@ __global__ void __launch_bounds__(MAX_T) gconv_fwd_L0(
       float d_edge = 0.0f;
       if (ch < cnt) {
         const int e = base + ch;
-        const float4 vl = __ldg(vec_len + e);
         const int snd = senders[e];
-        const int pr = pair_sym ? loup::sym_pair(species[snd], sa, S) : species[snd] * S + sa;
-        int iv; float t, sxi;
-        locate_spline(grid, vl.w, iv, t, sxi);
-        const int64_t slab = (int64_t)pr * I + iv;
+        int64_t slab;
+        float t;
+        if (PRELOC) {
+          slab = (int64_t)__ldg(act_slab + e);
+          t = __ldg(act_t_sx + e).x;
+        } else {
+          const float4 vl = __ldg(vec_len + e);
+          const int pr = pair_sym ? loup::sym_pair(species[snd], sa, S) : species[snd] * S + sa;
+          int iv; float sxi;
+          locate_spline(grid, vl.w, iv, t, sxi);
+          slab = (int64_t)pr * I + iv;
+        }
         s_snd[ch] = snd;
         s_t[ch] = t;
         s_tq[ch] = slab * (4 * (int64_t)C);
@@ -110,6 +119,7 @@ __global__ void __launch_bounds__(MAX_T) gconv_fwd_L0(
           d_edge = fmaf(t, fmaf(t, fmaf(t, dc.w, dc.z), dc.y), dc.x);
         }
         if (C < 64) {
+          const float4 vl = __ldg(vec_len + e);
           if (sh_perm) loup::edge_sh16(vl.y, vl.z, vl.x, vl.w, reinterpret_cast<float4*>(s_sh + ch * ED));
           else         loup::edge_sh16(vl.x, vl.y, vl.z, vl.w, reinterpret_cast<float4*>(s_sh + ch * ED));
         }
@@ -304,13 +314,15 @@ __global__ void __launch_bounds__(MAX_T) gconv_fwd_L0(
   mid3[((int64_t)rcv * 7 + 6) * 1 * C + 0 * C + ch] = acc[15];
 }
 
-template <bool WANT_DX>
-__global__ void __launch_bounds__(256) gconv_bwd_L0(
-    int N, int C, int S, int I, SplineGrid grid, int sh_perm, int pair_sym,
+template <bool WANT_DX, int C_FIX = 0, bool PRELOC = false>
+__global__ void __launch_bounds__(512) gconv_bwd_L0(
+    int N, int C_arg, int S, int I, SplineGrid grid, int sh_perm, int pair_sym,
     const int* __restrict__ row_ptr, const int* __restrict__ senders, const float4* __restrict__ vec_len,
+    const int* __restrict__ act_slab, const float2* __restrict__ act_t_sx,
     const int* __restrict__ species, const uint2* __restrict__ packed_table, const float4* __restrict__ density_table,
     unsigned bias_shift, const float* __restrict__ x0_p, const float* __restrict__ dmid0, const float* __restrict__ dmid1, const float* __restrict__ dmid2, const float* __restrict__ dmid3, const float* __restrict__ dD, float* __restrict__ dx0_p, float* __restrict__ edge_dvec) {
   extern __shared__ float s_q[];
+  const int C = C_FIX ? C_FIX : C_arg;
   const int rcv = blockIdx.x, tid = threadIdx.x, wid = tid >> 5, lane = tid & 31, n_warps = blockDim.x >> 5;
   if (rcv >= N) return;
   const int sa = species[rcv];
@@ -358,14 +370,23 @@ __global__ void __launch_bounds__(256) gconv_bwd_L0(
     const float dd = vl.w > loup::EPS_SH ? vl.w : loup::EPS_SH;
     const float inv_d = 1.0f / dd;
     const float nx = ux * inv_d, ny = uy * inv_d, nz = uz * inv_d;
-    int iv; float t, sxi;
-    locate_spline(grid, vl.w, iv, t, sxi);
+    float t, sxi;
+    int64_t slab;
+    if (PRELOC) {
+      slab = (int64_t)__ldg(act_slab + e);
+      const float2 tsx = __ldg(act_t_sx + e);
+      t = tsx.x;
+      sxi = fabsf(tsx.y);
+    } else {
+      int iv;
+      locate_spline(grid, vl.w, iv, t, sxi);
+      const int pr = pair_sym ? loup::sym_pair(species[snd], sa, S) : species[snd] * S + sa;
+      slab = (int64_t)pr * I + iv;
+    }
     const float s = t - 0.5f, s_sq = s * s;
     const float s1 = s * 0x1.0p-8f, s2 = s_sq * 0x1.0p-14f, s3 = s * s_sq * 0x1.0p-19f;
     const float ds2 = (2.0f * s) * 0x1.0p-6f, ds3 = (3.0f * s_sq) * 0x1.0p-11f;
     const float nw_hb = -1.5f * (1.0f + s1 + s2 + s3), ndt_hb = -1.5f * (1.0f + ds2 + ds3);
-    const int pr = pair_sym ? loup::sym_pair(species[snd], sa, S) : species[snd] * S + sa;
-    const int64_t slab = (int64_t)pr * I + iv;
     const uint2* tq = packed_table + slab * (4 * (int64_t)C);
     float pull_Gx = 0.0f, pull_Gy = 0.0f, pull_Gz = 0.0f, pull_R = 0.0f;
     for (int ch = lane; ch < C; ch += 32) {
@@ -482,12 +503,14 @@ __global__ void __launch_bounds__(256) gconv_bwd_L0(
   }
 }
 
-template <int R, bool PAIR, int MAX_T = (R == 1 ? 256 : 128 * R)>
+template <int R, bool PAIR, int MAX_T = (R == 1 ? 256 : 128 * R), bool PRELOC = false, int C_FIX = 0>
 __global__ void __launch_bounds__(MAX_T) gconv_fwd_L1(
-    int N, int C, int S, int I, SplineGrid grid, int sh_perm, int pair_sym,
+    int N, int C_arg, int S, int I, SplineGrid grid, int sh_perm, int pair_sym,
     const int* __restrict__ row_ptr, const int* __restrict__ senders, const float4* __restrict__ vec_len,
+    const int* __restrict__ act_slab, const float2* __restrict__ act_t_sx,
     const int* __restrict__ species, const uint2* __restrict__ packed_table, const float4* __restrict__ density_table,
     unsigned bias_shift, const float* __restrict__ x0, const float* __restrict__ x1, float* __restrict__ mid0, float* __restrict__ mid1, float* __restrict__ mid2, float* __restrict__ mid3, float* __restrict__ D) {
+  const int C = C_FIX ? C_FIX : C_arg;
   constexpr int TILE = 32, ED = 16;
   static_assert(R >= 1 && R <= 15, "bar.sync id limit");
   __shared__ int s_snd_all[R][TILE];
@@ -522,12 +545,19 @@ __global__ void __launch_bounds__(MAX_T) gconv_fwd_L1(
       float d_edge = 0.0f;
       if (ch < cnt) {
         const int e = base + ch;
-        const float4 vl = __ldg(vec_len + e);
         const int snd = senders[e];
-        const int pr = pair_sym ? loup::sym_pair(species[snd], sa, S) : species[snd] * S + sa;
-        int iv; float t, sxi;
-        locate_spline(grid, vl.w, iv, t, sxi);
-        const int64_t slab = (int64_t)pr * I + iv;
+        int64_t slab;
+        float t;
+        if (PRELOC) {
+          slab = (int64_t)__ldg(act_slab + e);
+          t = __ldg(act_t_sx + e).x;
+        } else {
+          const float4 vl = __ldg(vec_len + e);
+          const int pr = pair_sym ? loup::sym_pair(species[snd], sa, S) : species[snd] * S + sa;
+          int iv; float sxi;
+          locate_spline(grid, vl.w, iv, t, sxi);
+          slab = (int64_t)pr * I + iv;
+        }
         s_snd[ch] = snd;
         s_t[ch] = t;
         s_tq[ch] = slab * (10 * (int64_t)C);
@@ -536,6 +566,7 @@ __global__ void __launch_bounds__(MAX_T) gconv_fwd_L1(
           d_edge = fmaf(t, fmaf(t, fmaf(t, dc.w, dc.z), dc.y), dc.x);
         }
         if (C < 64) {
+          const float4 vl = __ldg(vec_len + e);
           if (sh_perm) loup::edge_sh16(vl.y, vl.z, vl.x, vl.w, reinterpret_cast<float4*>(s_sh + ch * ED));
           else         loup::edge_sh16(vl.x, vl.y, vl.z, vl.w, reinterpret_cast<float4*>(s_sh + ch * ED));
         }
@@ -1006,13 +1037,15 @@ __global__ void __launch_bounds__(MAX_T) gconv_fwd_L1(
   mid3[((int64_t)rcv * 7 + 6) * 2 * C + 1 * C + ch] = acc[39];
 }
 
-template <bool WANT_DX>
-__global__ void __launch_bounds__(256) gconv_bwd_L1(
-    int N, int C, int S, int I, SplineGrid grid, int sh_perm, int pair_sym,
+template <bool WANT_DX, int C_FIX = 0, bool PRELOC = false>
+__global__ void __launch_bounds__(512) gconv_bwd_L1(
+    int N, int C_arg, int S, int I, SplineGrid grid, int sh_perm, int pair_sym,
     const int* __restrict__ row_ptr, const int* __restrict__ senders, const float4* __restrict__ vec_len,
+    const int* __restrict__ act_slab, const float2* __restrict__ act_t_sx,
     const int* __restrict__ species, const uint2* __restrict__ packed_table, const float4* __restrict__ density_table,
     unsigned bias_shift, const float* __restrict__ x0_p, const float* __restrict__ x1_p, const float* __restrict__ dmid0, const float* __restrict__ dmid1, const float* __restrict__ dmid2, const float* __restrict__ dmid3, const float* __restrict__ dD, float* __restrict__ dx0_p, float* __restrict__ dx1_p, float* __restrict__ edge_dvec) {
   extern __shared__ float s_q[];
+  const int C = C_FIX ? C_FIX : C_arg;
   const int rcv = blockIdx.x, tid = threadIdx.x, wid = tid >> 5, lane = tid & 31, n_warps = blockDim.x >> 5;
   if (rcv >= N) return;
   const int sa = species[rcv];
@@ -1108,14 +1141,23 @@ __global__ void __launch_bounds__(256) gconv_bwd_L1(
     const float dd = vl.w > loup::EPS_SH ? vl.w : loup::EPS_SH;
     const float inv_d = 1.0f / dd;
     const float nx = ux * inv_d, ny = uy * inv_d, nz = uz * inv_d;
-    int iv; float t, sxi;
-    locate_spline(grid, vl.w, iv, t, sxi);
+    float t, sxi;
+    int64_t slab;
+    if (PRELOC) {
+      slab = (int64_t)__ldg(act_slab + e);
+      const float2 tsx = __ldg(act_t_sx + e);
+      t = tsx.x;
+      sxi = fabsf(tsx.y);
+    } else {
+      int iv;
+      locate_spline(grid, vl.w, iv, t, sxi);
+      const int pr = pair_sym ? loup::sym_pair(species[snd], sa, S) : species[snd] * S + sa;
+      slab = (int64_t)pr * I + iv;
+    }
     const float s = t - 0.5f, s_sq = s * s;
     const float s1 = s * 0x1.0p-8f, s2 = s_sq * 0x1.0p-14f, s3 = s * s_sq * 0x1.0p-19f;
     const float ds2 = (2.0f * s) * 0x1.0p-6f, ds3 = (3.0f * s_sq) * 0x1.0p-11f;
     const float nw_hb = -1.5f * (1.0f + s1 + s2 + s3), ndt_hb = -1.5f * (1.0f + ds2 + ds3);
-    const int pr = pair_sym ? loup::sym_pair(species[snd], sa, S) : species[snd] * S + sa;
-    const int64_t slab = (int64_t)pr * I + iv;
     const uint2* tq = packed_table + slab * (10 * (int64_t)C);
     float pull_Gx = 0.0f, pull_Gy = 0.0f, pull_Gz = 0.0f, pull_R = 0.0f;
     for (int ch = lane; ch < C; ch += 32) {
@@ -1366,12 +1408,14 @@ __global__ void __launch_bounds__(256) gconv_bwd_L1(
   }
 }
 
-template <int R, bool PAIR, int MAX_T = (R == 1 ? 256 : 128 * R)>
+template <int R, bool PAIR, int MAX_T = (R == 1 ? 256 : 128 * R), bool PRELOC = false, int C_FIX = 0>
 __global__ void __launch_bounds__(MAX_T) gconv_fwd_L2a(
-    int N, int C, int S, int I, SplineGrid grid, int sh_perm, int pair_sym,
+    int N, int C_arg, int S, int I, SplineGrid grid, int sh_perm, int pair_sym,
     const int* __restrict__ row_ptr, const int* __restrict__ senders, const float4* __restrict__ vec_len,
+    const int* __restrict__ act_slab, const float2* __restrict__ act_t_sx,
     const int* __restrict__ species, const uint2* __restrict__ packed_table, const float4* __restrict__ density_table,
     unsigned bias_shift, const float* __restrict__ x0, const float* __restrict__ x1, const float* __restrict__ x2, float* __restrict__ mid0, float* __restrict__ mid1, float* __restrict__ mid2, float* __restrict__ mid3, float* __restrict__ D) {
+  const int C = C_FIX ? C_FIX : C_arg;
   constexpr int TILE = 32, ED = 16;
   static_assert(R >= 1 && R <= 15, "bar.sync id limit");
   __shared__ int s_snd_all[R][TILE];
@@ -1406,12 +1450,19 @@ __global__ void __launch_bounds__(MAX_T) gconv_fwd_L2a(
       float d_edge = 0.0f;
       if (ch < cnt) {
         const int e = base + ch;
-        const float4 vl = __ldg(vec_len + e);
         const int snd = senders[e];
-        const int pr = pair_sym ? loup::sym_pair(species[snd], sa, S) : species[snd] * S + sa;
-        int iv; float t, sxi;
-        locate_spline(grid, vl.w, iv, t, sxi);
-        const int64_t slab = (int64_t)pr * I + iv;
+        int64_t slab;
+        float t;
+        if (PRELOC) {
+          slab = (int64_t)__ldg(act_slab + e);
+          t = __ldg(act_t_sx + e).x;
+        } else {
+          const float4 vl = __ldg(vec_len + e);
+          const int pr = pair_sym ? loup::sym_pair(species[snd], sa, S) : species[snd] * S + sa;
+          int iv; float sxi;
+          locate_spline(grid, vl.w, iv, t, sxi);
+          slab = (int64_t)pr * I + iv;
+        }
         s_snd[ch] = snd;
         s_t[ch] = t;
         s_tq[ch] = slab * (17 * (int64_t)C);
@@ -1420,6 +1471,7 @@ __global__ void __launch_bounds__(MAX_T) gconv_fwd_L2a(
           d_edge = fmaf(t, fmaf(t, fmaf(t, dc.w, dc.z), dc.y), dc.x);
         }
         if (C < 64) {
+          const float4 vl = __ldg(vec_len + e);
           if (sh_perm) loup::edge_sh16(vl.y, vl.z, vl.x, vl.w, reinterpret_cast<float4*>(s_sh + ch * ED));
           else         loup::edge_sh16(vl.x, vl.y, vl.z, vl.w, reinterpret_cast<float4*>(s_sh + ch * ED));
         }
@@ -1890,12 +1942,14 @@ __global__ void __launch_bounds__(MAX_T) gconv_fwd_L2a(
   mid3[((int64_t)rcv * 7 + 6) * 4 * C + 1 * C + ch] = acc[39];
 }
 
-template <int R, bool PAIR, int MAX_T = (R == 1 ? 256 : 128 * R)>
+template <int R, bool PAIR, int MAX_T = (R == 1 ? 256 : 128 * R), bool PRELOC = false, int C_FIX = 0>
 __global__ void __launch_bounds__(MAX_T) gconv_fwd_L2b(
-    int N, int C, int S, int I, SplineGrid grid, int sh_perm, int pair_sym,
+    int N, int C_arg, int S, int I, SplineGrid grid, int sh_perm, int pair_sym,
     const int* __restrict__ row_ptr, const int* __restrict__ senders, const float4* __restrict__ vec_len,
+    const int* __restrict__ act_slab, const float2* __restrict__ act_t_sx,
     const int* __restrict__ species, const uint2* __restrict__ packed_table, const float4* __restrict__ density_table,
     unsigned bias_shift, const float* __restrict__ x0, const float* __restrict__ x1, const float* __restrict__ x2, float* __restrict__ mid0, float* __restrict__ mid1, float* __restrict__ mid2, float* __restrict__ mid3, float* __restrict__ D) {
+  const int C = C_FIX ? C_FIX : C_arg;
   constexpr int TILE = 32, ED = 16;
   static_assert(R >= 1 && R <= 15, "bar.sync id limit");
   __shared__ int s_snd_all[R][TILE];
@@ -1930,12 +1984,19 @@ __global__ void __launch_bounds__(MAX_T) gconv_fwd_L2b(
       float d_edge = 0.0f;
       if (ch < cnt) {
         const int e = base + ch;
-        const float4 vl = __ldg(vec_len + e);
         const int snd = senders[e];
-        const int pr = pair_sym ? loup::sym_pair(species[snd], sa, S) : species[snd] * S + sa;
-        int iv; float t, sxi;
-        locate_spline(grid, vl.w, iv, t, sxi);
-        const int64_t slab = (int64_t)pr * I + iv;
+        int64_t slab;
+        float t;
+        if (PRELOC) {
+          slab = (int64_t)__ldg(act_slab + e);
+          t = __ldg(act_t_sx + e).x;
+        } else {
+          const float4 vl = __ldg(vec_len + e);
+          const int pr = pair_sym ? loup::sym_pair(species[snd], sa, S) : species[snd] * S + sa;
+          int iv; float sxi;
+          locate_spline(grid, vl.w, iv, t, sxi);
+          slab = (int64_t)pr * I + iv;
+        }
         s_snd[ch] = snd;
         s_t[ch] = t;
         s_tq[ch] = slab * (17 * (int64_t)C);
@@ -1944,6 +2005,7 @@ __global__ void __launch_bounds__(MAX_T) gconv_fwd_L2b(
           d_edge = fmaf(t, fmaf(t, fmaf(t, dc.w, dc.z), dc.y), dc.x);
         }
         if (C < 64) {
+          const float4 vl = __ldg(vec_len + e);
           if (sh_perm) loup::edge_sh16(vl.y, vl.z, vl.x, vl.w, reinterpret_cast<float4*>(s_sh + ch * ED));
           else         loup::edge_sh16(vl.x, vl.y, vl.z, vl.w, reinterpret_cast<float4*>(s_sh + ch * ED));
         }
@@ -2354,13 +2416,15 @@ __global__ void __launch_bounds__(MAX_T) gconv_fwd_L2b(
   mid3[((int64_t)rcv * 7 + 6) * 4 * C + 3 * C + ch] = acc[30];
 }
 
-template <bool WANT_DX>
-__global__ void __launch_bounds__(256) gconv_bwd_L2lp(
-    int N, int C, int S, int I, SplineGrid grid, int sh_perm, int pair_sym,
+template <bool WANT_DX, int C_FIX = 0, bool PRELOC = false>
+__global__ void __launch_bounds__(512) gconv_bwd_L2lp(
+    int N, int C_arg, int S, int I, SplineGrid grid, int sh_perm, int pair_sym,
     const int* __restrict__ row_ptr, const int* __restrict__ senders, const float4* __restrict__ vec_len,
+    const int* __restrict__ act_slab, const float2* __restrict__ act_t_sx,
     const int* __restrict__ species, const uint2* __restrict__ packed_table, const float4* __restrict__ density_table,
     unsigned bias_shift, const float* __restrict__ x0_p, const float* __restrict__ x1_p, const float* __restrict__ dmid0, const float* __restrict__ dmid1, const float* __restrict__ dmid2, const float* __restrict__ dmid3, const float* __restrict__ dD, float* __restrict__ dx0_p, float* __restrict__ dx1_p, float* __restrict__ edge_dvec) {
   extern __shared__ float s_q[];
+  const int C = C_FIX ? C_FIX : C_arg;
   const int rcv = blockIdx.x, tid = threadIdx.x, wid = tid >> 5, lane = tid & 31, n_warps = blockDim.x >> 5;
   if (rcv >= N) return;
   const int sa = species[rcv];
@@ -2456,14 +2520,23 @@ __global__ void __launch_bounds__(256) gconv_bwd_L2lp(
     const float dd = vl.w > loup::EPS_SH ? vl.w : loup::EPS_SH;
     const float inv_d = 1.0f / dd;
     const float nx = ux * inv_d, ny = uy * inv_d, nz = uz * inv_d;
-    int iv; float t, sxi;
-    locate_spline(grid, vl.w, iv, t, sxi);
+    float t, sxi;
+    int64_t slab;
+    if (PRELOC) {
+      slab = (int64_t)__ldg(act_slab + e);
+      const float2 tsx = __ldg(act_t_sx + e);
+      t = tsx.x;
+      sxi = fabsf(tsx.y);
+    } else {
+      int iv;
+      locate_spline(grid, vl.w, iv, t, sxi);
+      const int pr = pair_sym ? loup::sym_pair(species[snd], sa, S) : species[snd] * S + sa;
+      slab = (int64_t)pr * I + iv;
+    }
     const float s = t - 0.5f, s_sq = s * s;
     const float s1 = s * 0x1.0p-8f, s2 = s_sq * 0x1.0p-14f, s3 = s * s_sq * 0x1.0p-19f;
     const float ds2 = (2.0f * s) * 0x1.0p-6f, ds3 = (3.0f * s_sq) * 0x1.0p-11f;
     const float nw_hb = -1.5f * (1.0f + s1 + s2 + s3), ndt_hb = -1.5f * (1.0f + ds2 + ds3);
-    const int pr = pair_sym ? loup::sym_pair(species[snd], sa, S) : species[snd] * S + sa;
-    const int64_t slab = (int64_t)pr * I + iv;
     const uint2* tq = packed_table + slab * (17 * (int64_t)C);
     float pull_Gx = 0.0f, pull_Gy = 0.0f, pull_Gz = 0.0f, pull_R = 0.0f;
     for (int ch = lane; ch < C; ch += 32) {

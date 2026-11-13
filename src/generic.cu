@@ -1281,106 +1281,100 @@ void GenericModel::ensure_edges(int E_cap) {
 namespace {
 
 void launch_conv_fwd(int lx, cudaStream_t st, int N, int C, int S, int I, const SplineGrid& sg, int perm, int psym,
-                     const int* rp, const int* snd, const float4* vl, const int* sp, const uint2* packed,
-                     const float4* dens, unsigned bias_shift, float* const* x, float* const* mid, float* D) {
+                     const int* rp, const int* snd, const float4* vl, const int* act_slab, const float2* act_t_sx,
+                     bool preloc, const int* sp, const uint2* packed, const float4* dens, unsigned bias_shift,
+                     float* const* x, float* const* mid, float* D) {
     if (lx == 0) {
-        // One receiver per block: with 4 (or 2) per block each block lasted as long as its busiest receiver and achieved
-        // occupancy was half the theoretical (5060 Ti: 676 -> 495 us on OMAT-S SrTiO3).
-        if (C == 128)
-            gconv_fwd_L0<1, true><<<N, 128, 0, st>>>(N, C, S, I, sg, perm, psym, rp, snd, vl, sp, packed,
-                                                      dens, bias_shift, x[0], mid[0], mid[1], mid[2], mid[3], D);
-        else if (C <= 256)
-            gconv_fwd_L0<1, false><<<N, C, 0, st>>>(N, C, S, I, sg, perm, psym, rp, snd, vl, sp, packed, dens,
-                                                    bias_shift, x[0], mid[0], mid[1], mid[2], mid[3], D);
-        else
-            gconv_fwd_L0<1, false, 512><<<N, C, 0, st>>>(N, C, S, I, sg, perm, psym, rp, snd, vl, sp, packed, dens,
-                                                         bias_shift, x[0], mid[0], mid[1], mid[2], mid[3], D);
-    } else if (lx == 1) {
-        if (C == 128)  // one receiver per block, as lx 0 (2,054 -> 1,664 us on OFF23-M water)
-            gconv_fwd_L1<1, true><<<N, 128, 0, st>>>(N, C, S, I, sg, perm, psym, rp, snd, vl, sp, packed,
-                                                      dens, bias_shift, x[0], x[1], mid[0], mid[1], mid[2], mid[3], D);
-        else if (C <= 256)
-            gconv_fwd_L1<1, false><<<N, C, 0, st>>>(N, C, S, I, sg, perm, psym, rp, snd, vl, sp, packed, dens,
-                                                    bias_shift, x[0], x[1], mid[0], mid[1], mid[2], mid[3], D);
-        else
-            gconv_fwd_L1<1, false, 512><<<N, C, 0, st>>>(N, C, S, I, sg, perm, psym, rp, snd, vl, sp, packed, dens,
-                                                         bias_shift, x[0], x[1], mid[0], mid[1], mid[2], mid[3], D);
-    } else {
-        // Two kernels by x degree (<= 1: 40 accumulators, 2: 31) instead of one holding 71: 174 -> 122 / 102
-        // registers, two blocks per SM (OFF23-L water 7.6 -> 3.1 + 3.1 ms). The second skips the density (D once).
-        if (C <= 256) {
-            gconv_fwd_L2a<1, true><<<N, C, 0, st>>>(N, C, S, I, sg, perm, psym, rp, snd, vl, sp, packed, dens,
-                                                    bias_shift, x[0], x[1], x[2], mid[0], mid[1], mid[2], mid[3], D);
-            gconv_fwd_L2b<1, true><<<N, C, 0, st>>>(N, C, S, I, sg, perm, psym, rp, snd, vl, sp, packed, nullptr,
-                                                    bias_shift, x[0], x[1], x[2], mid[0], mid[1], mid[2], mid[3], D);
+        if (C == 128) {
+            auto fn = preloc ? gconv_fwd_L0<1, true, 256, true, 128> : gconv_fwd_L0<1, true, 256, false, 128>;
+            fn<<<N, 128, 0, st>>>(N, C, S, I, sg, perm, psym, rp, snd, vl, act_slab, act_t_sx, sp, packed, dens,
+                                  bias_shift, x[0], mid[0], mid[1], mid[2], mid[3], D);
+        } else if (C <= 256) {
+            auto fn = preloc ? gconv_fwd_L0<1, false, 256, true> : gconv_fwd_L0<1, false, 256, false>;
+            fn<<<N, C, 0, st>>>(N, C, S, I, sg, perm, psym, rp, snd, vl, act_slab, act_t_sx, sp, packed, dens,
+                                bias_shift, x[0], mid[0], mid[1], mid[2], mid[3], D);
         } else {
-            gconv_fwd_L2a<1, false, 512><<<N, C, 0, st>>>(N, C, S, I, sg, perm, psym, rp, snd, vl, sp, packed, dens,
-                                                          bias_shift, x[0], x[1], x[2], mid[0], mid[1], mid[2], mid[3], D);
-            gconv_fwd_L2b<1, false, 512><<<N, C, 0, st>>>(N, C, S, I, sg, perm, psym, rp, snd, vl, sp, packed, nullptr,
-                                                          bias_shift, x[0], x[1], x[2], mid[0], mid[1], mid[2], mid[3], D);
+            auto fn = preloc ? gconv_fwd_L0<1, false, 512, true> : gconv_fwd_L0<1, false, 512, false>;
+            fn<<<N, C, 0, st>>>(N, C, S, I, sg, perm, psym, rp, snd, vl, act_slab, act_t_sx, sp, packed, dens,
+                                bias_shift, x[0], mid[0], mid[1], mid[2], mid[3], D);
+        }
+    } else if (lx == 1) {
+        if (C == 128) {
+            auto fn = preloc ? gconv_fwd_L1<1, true, 256, true, 128> : gconv_fwd_L1<1, true, 256, false, 128>;
+            fn<<<N, 128, 0, st>>>(N, C, S, I, sg, perm, psym, rp, snd, vl, act_slab, act_t_sx, sp, packed, dens,
+                                  bias_shift, x[0], x[1], mid[0], mid[1], mid[2], mid[3], D);
+        } else if (C <= 256) {
+            auto fn = preloc ? gconv_fwd_L1<1, false, 256, true> : gconv_fwd_L1<1, false, 256, false>;
+            fn<<<N, C, 0, st>>>(N, C, S, I, sg, perm, psym, rp, snd, vl, act_slab, act_t_sx, sp, packed, dens,
+                                bias_shift, x[0], x[1], mid[0], mid[1], mid[2], mid[3], D);
+        } else {
+            auto fn = preloc ? gconv_fwd_L1<1, false, 512, true> : gconv_fwd_L1<1, false, 512, false>;
+            fn<<<N, C, 0, st>>>(N, C, S, I, sg, perm, psym, rp, snd, vl, act_slab, act_t_sx, sp, packed, dens,
+                                bias_shift, x[0], x[1], mid[0], mid[1], mid[2], mid[3], D);
+        }
+    } else {
+        if (C <= 256) {
+            auto fa = preloc ? gconv_fwd_L2a<1, true, 256, true> : gconv_fwd_L2a<1, true, 256, false>;
+            auto fb = preloc ? gconv_fwd_L2b<1, true, 256, true> : gconv_fwd_L2b<1, true, 256, false>;
+            fa<<<N, C, 0, st>>>(N, C, S, I, sg, perm, psym, rp, snd, vl, act_slab, act_t_sx, sp, packed, dens,
+                                bias_shift, x[0], x[1], x[2], mid[0], mid[1], mid[2], mid[3], D);
+            fb<<<N, C, 0, st>>>(N, C, S, I, sg, perm, psym, rp, snd, vl, act_slab, act_t_sx, sp, packed, nullptr,
+                                bias_shift, x[0], x[1], x[2], mid[0], mid[1], mid[2], mid[3], D);
+        } else {
+            auto fa = preloc ? gconv_fwd_L2a<1, false, 512, true> : gconv_fwd_L2a<1, false, 512, false>;
+            auto fb = preloc ? gconv_fwd_L2b<1, false, 512, true> : gconv_fwd_L2b<1, false, 512, false>;
+            fa<<<N, C, 0, st>>>(N, C, S, I, sg, perm, psym, rp, snd, vl, act_slab, act_t_sx, sp, packed, dens,
+                                bias_shift, x[0], x[1], x[2], mid[0], mid[1], mid[2], mid[3], D);
+            fb<<<N, C, 0, st>>>(N, C, S, I, sg, perm, psym, rp, snd, vl, act_slab, act_t_sx, sp, packed, nullptr,
+                                bias_shift, x[0], x[1], x[2], mid[0], mid[1], mid[2], mid[3], D);
         }
     }
 }
 
 void launch_conv_bwd(int lx, cudaStream_t st, int N, int C, int S, int I, const SplineGrid& sg, int perm, int psym,
-                     const int* rp, const int* snd, const float4* vl, const int* sp, const uint2* packed,
-                     const float4* dens, unsigned bias_shift, float* const* x, float* const* dmid, const float* dD,
-                     float* const* dx, bool want_dx, float* edge_dvec) {
+                     const int* rp, const int* snd, const float4* vl, const int* act_slab, const float2* act_t_sx,
+                     bool preloc, const int* sp, const uint2* packed, const float4* dens, unsigned bias_shift,
+                     float* const* x, float* const* dmid, const float* dD, float* const* dx, bool want_dx,
+                     float* edge_dvec) {
     if (lx == 0) {
         const size_t smem = (size_t)C * 20 * sizeof(float);
-        if (smem > 48000) {
-            auto fn = want_dx ? gconv_bwd_L0<true> : gconv_bwd_L0<false>;
-            CUDA_CHECK_THROW(cudaFuncSetAttribute((const void*)fn, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)smem));
-        }
-        if (want_dx)
-            gconv_bwd_L0<true><<<N, 256, smem, st>>>(N, C, S, I, sg, perm, psym, rp, snd, vl, sp, packed, dens,
-                                                     bias_shift, x[0], dmid[0], dmid[1], dmid[2], dmid[3], dD, dx[0],
-                                                     edge_dvec);
-        else
-            gconv_bwd_L0<false><<<N, 256, smem, st>>>(N, C, S, I, sg, perm, psym, rp, snd, vl, sp, packed, dens,
-                                                      bias_shift, x[0], dmid[0], dmid[1], dmid[2], dmid[3], dD, dx[0],
-                                                      edge_dvec);
+        auto pick = [&](auto f_p, auto f_n) { return preloc ? f_p : f_n; };
+        auto fn = (C == 128) ? (want_dx ? pick(gconv_bwd_L0<true, 128, true>, gconv_bwd_L0<true, 128, false>)
+                                        : pick(gconv_bwd_L0<false, 128, true>, gconv_bwd_L0<false, 128, false>))
+                : (C == 96)  ? (want_dx ? pick(gconv_bwd_L0<true, 96, true>, gconv_bwd_L0<true, 96, false>)
+                                        : pick(gconv_bwd_L0<false, 96, true>, gconv_bwd_L0<false, 96, false>))
+                             : (want_dx ? pick(gconv_bwd_L0<true, 0, true>, gconv_bwd_L0<true, 0, false>)
+                                        : pick(gconv_bwd_L0<false, 0, true>, gconv_bwd_L0<false, 0, false>));
+        if (smem > 48000) CUDA_CHECK_THROW(cudaFuncSetAttribute((const void*)fn, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)smem));
+        fn<<<N, 256, smem, st>>>(N, C, S, I, sg, perm, psym, rp, snd, vl, act_slab, act_t_sx, sp, packed, dens,
+                                 bias_shift, x[0], dmid[0], dmid[1], dmid[2], dmid[3], dD, dx[0], edge_dvec);
     } else if (lx == 1) {
         const size_t smem = (size_t)C * 44 * sizeof(float);
-        if (smem > 48000) {
-            auto fn = want_dx ? gconv_bwd_L1<true> : gconv_bwd_L1<false>;
-            CUDA_CHECK_THROW(cudaFuncSetAttribute((const void*)fn, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)smem));
-        }
-        if (want_dx)
-            gconv_bwd_L1<true><<<N, 256, smem, st>>>(N, C, S, I, sg, perm, psym, rp, snd, vl, sp, packed, dens,
-                                                     bias_shift, x[0], x[1], dmid[0], dmid[1], dmid[2], dmid[3], dD,
-                                                     dx[0], dx[1], edge_dvec);
-        else
-            gconv_bwd_L1<false><<<N, 256, smem, st>>>(N, C, S, I, sg, perm, psym, rp, snd, vl, sp, packed, dens,
-                                                      bias_shift, x[0], x[1], dmid[0], dmid[1], dmid[2], dmid[3], dD,
-                                                      dx[0], dx[1], edge_dvec);
+        auto pick = [&](auto f_p, auto f_n) { return preloc ? f_p : f_n; };
+        auto fn = (C == 128) ? (want_dx ? pick(gconv_bwd_L1<true, 128, true>, gconv_bwd_L1<true, 128, false>)
+                                        : pick(gconv_bwd_L1<false, 128, true>, gconv_bwd_L1<false, 128, false>))
+                : (C == 224) ? (want_dx ? pick(gconv_bwd_L1<true, 224, true>, gconv_bwd_L1<true, 224, false>)
+                                        : pick(gconv_bwd_L1<false, 224, true>, gconv_bwd_L1<false, 224, false>))
+                             : (want_dx ? pick(gconv_bwd_L1<true, 0, true>, gconv_bwd_L1<true, 0, false>)
+                                        : pick(gconv_bwd_L1<false, 0, true>, gconv_bwd_L1<false, 0, false>));
+        if (smem > 48000) CUDA_CHECK_THROW(cudaFuncSetAttribute((const void*)fn, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)smem));
+        const int thr = 256;
+        fn<<<N, thr, smem, st>>>(N, C, S, I, sg, perm, psym, rp, snd, vl, act_slab, act_t_sx, sp, packed, dens,
+                                 bias_shift, x[0], x[1], dmid[0], dmid[1], dmid[2], dmid[3], dD, dx[0], dx[1],
+                                 edge_dvec);
     } else {
-        // The ten x degree <= 1 paths in the late pull-back form (with the density term), then the seven x degree 2
-        // paths with the per-channel SH gradient (dD = nullptr: counted once). Both add into edge_dvec in order.
         const size_t smem = (size_t)C * 44 * sizeof(float), smem_g = (size_t)C * kGconvBwdL2GS * sizeof(float);
-        if (smem > 48000) {
-            auto fn = want_dx ? gconv_bwd_L2lp<true> : gconv_bwd_L2lp<false>;
-            CUDA_CHECK_THROW(cudaFuncSetAttribute((const void*)fn, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)smem));
-        }
-        if (smem_g > 48000) {
-            auto fn = want_dx ? gconv_bwd_L2<true> : gconv_bwd_L2<false>;
-            CUDA_CHECK_THROW(cudaFuncSetAttribute((const void*)fn, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)smem_g));
-        }
-        if (want_dx) {
-            gconv_bwd_L2lp<true><<<N, 256, smem, st>>>(N, C, S, I, sg, perm, psym, rp, snd, vl, sp, packed, dens,
-                                                       bias_shift, x[0], x[1], dmid[0], dmid[1], dmid[2], dmid[3], dD,
-                                                       dx[0], dx[1], edge_dvec);
-            gconv_bwd_L2<true><<<N, 128, smem_g, st>>>(N, C, S, I, sg, perm, psym, rp, snd, vl, sp, packed, dens,
-                                                  bias_shift, x[0], x[1], x[2], dmid[0], dmid[1], dmid[2], dmid[3],
-                                                  nullptr, dx[0], dx[1], dx[2], edge_dvec);
-        } else {
-            gconv_bwd_L2lp<false><<<N, 256, smem, st>>>(N, C, S, I, sg, perm, psym, rp, snd, vl, sp, packed, dens,
-                                                        bias_shift, x[0], x[1], dmid[0], dmid[1], dmid[2], dmid[3], dD,
-                                                        dx[0], dx[1], edge_dvec);
-            gconv_bwd_L2<false><<<N, 128, smem_g, st>>>(N, C, S, I, sg, perm, psym, rp, snd, vl, sp, packed, dens,
-                                                   bias_shift, x[0], x[1], x[2], dmid[0], dmid[1], dmid[2], dmid[3],
-                                                   nullptr, dx[0], dx[1], dx[2], edge_dvec);
-        }
+        auto flp = want_dx ? (preloc ? gconv_bwd_L2lp<true, 0, true> : gconv_bwd_L2lp<true, 0, false>)
+                           : (preloc ? gconv_bwd_L2lp<false, 0, true> : gconv_bwd_L2lp<false, 0, false>);
+        auto fg = want_dx ? gconv_bwd_L2<true> : gconv_bwd_L2<false>;
+        if (smem > 48000) CUDA_CHECK_THROW(cudaFuncSetAttribute((const void*)flp, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)smem));
+        if (smem_g > 48000) CUDA_CHECK_THROW(cudaFuncSetAttribute((const void*)fg, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)smem_g));
+        flp<<<N, 256, smem, st>>>(N, C, S, I, sg, perm, psym, rp, snd, vl, act_slab, act_t_sx, sp, packed, dens,
+                                  bias_shift, x[0], x[1], dmid[0], dmid[1], dmid[2], dmid[3], dD, dx[0], dx[1],
+                                  edge_dvec);
+        fg<<<N, 128, smem_g, st>>>(N, C, S, I, sg, perm, psym, rp, snd, vl, sp, packed, dens,
+                                   bias_shift, x[0], x[1], x[2], dmid[0], dmid[1], dmid[2], dmid[3],
+                                   nullptr, dx[0], dx[1], dx[2], edge_dvec);
     }
 }
 
@@ -1417,7 +1411,23 @@ void launch_prod_ro1_fused(const GProdKernels* k, cudaStream_t st, int N, int C,
 
 }  // namespace
 
+const SplineGrid* GenericModel::preloc_grid() const {
+    for (int t = 1; t < n_layers_; ++t)
+        if (!layers_[t]->first_hidden && layers_[t]->pair_sym && layers_[t]->C_x <= 256) return &layers_[t]->grid;
+    if (!layers_.empty() && !layers_[0]->first_hidden && layers_[0]->pair_sym && layers_[0]->C_x <= 256)
+        return &layers_[0]->grid;
+    return nullptr;
+}
+int GenericModel::preloc_pair_sym() const {
+    return 1;
+}
 void GenericModel::record(const GenericPassInputs& in) {
+    const SplineGrid* pg = preloc_grid();
+    const int pg_psym = preloc_pair_sym();
+    auto can_preloc = [&](const GenericLayer* L) {
+        return pg != nullptr && in.act_slab != nullptr && in.act_t_sx != nullptr && !L->first_hidden &&
+               L->pair_sym == pg_psym && memcmp(&L->grid, pg, sizeof(SplineGrid)) == 0;
+    };
     const int N = in.N;
     cudaStream_t st = in.stream;
     const auto& start = *in.species_start;
@@ -1492,8 +1502,8 @@ void GenericModel::record(const GenericPassInputs& in) {
             }
         } else {
             launch_conv_fwd(L->lmax_x, st, N, Cx, S, L->intervals, L->grid, sh_perm_, L->pair_sym, in.act_row_ptr,
-                            in.act_senders, in.act_vec_len, in.species, L->packed_table, L->density_table,
-                            L->cubic_bias_shift, L->x, L->mid, L->D);
+                            in.act_senders, in.act_vec_len, in.act_slab, in.act_t_sx, can_preloc(L), in.species,
+                            L->packed_table, L->density_table, L->cubic_bias_shift, L->x, L->mid, L->D);
             if (L->skip_folded) {
                 fork();
                 for (int l = 0; l < 4; ++l)
@@ -1776,8 +1786,9 @@ void GenericModel::record(const GenericPassInputs& in) {
             join();
         }
         launch_conv_bwd(L->lmax_x, st, N, Cx, S, L->intervals, L->grid, sh_perm_, L->pair_sym, in.act_row_ptr,
-                        in.act_senders, in.act_vec_len, in.species, L->packed_table, L->density_table,
-                        L->cubic_bias_shift, L->x, L->mid, density ? L->dD : nullptr, L->dx, t > 0, d_edge_dvec_);
+                        in.act_senders, in.act_vec_len, in.act_slab, in.act_t_sx, can_preloc(L), in.species,
+                        L->packed_table, L->density_table, L->cubic_bias_shift, L->x, L->mid,
+                        density ? L->dD : nullptr, L->dx, t > 0, d_edge_dvec_);
         if (t > 0) {
             if (L->lmax_x > 0) fork();
             for (int l = 0; l <= L->lmax_x; ++l) {

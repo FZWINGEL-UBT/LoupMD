@@ -207,12 +207,14 @@ def emit_conv_fwd(lx, groups=(0, 1, 2), name=None):
 
     x_args = ", ".join(f"const float* __restrict__ x{l}" for l in range(lx + 1))
     m_args = ", ".join(f"float* __restrict__ mid{l}" for l in range(4))
-    return f"""template <int R, bool PAIR, int MAX_T = (R == 1 ? 256 : 128 * R)>
+    return f"""template <int R, bool PAIR, int MAX_T = (R == 1 ? 256 : 128 * R), bool PRELOC = false, int C_FIX = 0>
 __global__ void __launch_bounds__(MAX_T) {name}(
-    int N, int C, int S, int I, SplineGrid grid, int sh_perm, int pair_sym,
+    int N, int C_arg, int S, int I, SplineGrid grid, int sh_perm, int pair_sym,
     const int* __restrict__ row_ptr, const int* __restrict__ senders, const float4* __restrict__ vec_len,
+    const int* __restrict__ act_slab, const float2* __restrict__ act_t_sx,
     const int* __restrict__ species, const uint2* __restrict__ packed_table, const float4* __restrict__ density_table,
     unsigned bias_shift, {x_args}, {m_args}, float* __restrict__ D) {{
+  const int C = C_FIX ? C_FIX : C_arg;
   constexpr int TILE = 32, ED = 16;
   static_assert(R >= 1 && R <= 15, "bar.sync id limit");
   __shared__ int s_snd_all[R][TILE];
@@ -247,12 +249,19 @@ __global__ void __launch_bounds__(MAX_T) {name}(
       float d_edge = 0.0f;
       if (ch < cnt) {{
         const int e = base + ch;
-        const float4 vl = __ldg(vec_len + e);
         const int snd = senders[e];
-        const int pr = pair_sym ? loup::sym_pair(species[snd], sa, S) : species[snd] * S + sa;
-        int iv; float t, sxi;
-        locate_spline(grid, vl.w, iv, t, sxi);
-        const int64_t slab = (int64_t)pr * I + iv;
+        int64_t slab;
+        float t;
+        if (PRELOC) {{
+          slab = (int64_t)__ldg(act_slab + e);
+          t = __ldg(act_t_sx + e).x;
+        }} else {{
+          const float4 vl = __ldg(vec_len + e);
+          const int pr = pair_sym ? loup::sym_pair(species[snd], sa, S) : species[snd] * S + sa;
+          int iv; float sxi;
+          locate_spline(grid, vl.w, iv, t, sxi);
+          slab = (int64_t)pr * I + iv;
+        }}
         s_snd[ch] = snd;
         s_t[ch] = t;
         s_tq[ch] = slab * ({n_paths} * (int64_t)C);
@@ -261,6 +270,7 @@ __global__ void __launch_bounds__(MAX_T) {name}(
           d_edge = fmaf(t, fmaf(t, fmaf(t, dc.w, dc.z), dc.y), dc.x);
         }}
         if (C < 64) {{
+          const float4 vl = __ldg(vec_len + e);
           if (sh_perm) loup::edge_sh16(vl.y, vl.z, vl.x, vl.w, reinterpret_cast<float4*>(s_sh + ch * ED));
           else         loup::edge_sh16(vl.x, vl.y, vl.z, vl.w, reinterpret_cast<float4*>(s_sh + ch * ED));
         }}
@@ -451,13 +461,15 @@ def emit_conv_bwd_lp(lx):
     x_args = ", ".join(f"const float* __restrict__ x{l}_p" for l in range(xl + 1))
     dm_args = ", ".join(f"const float* __restrict__ dmid{l}" for l in range(4))
     dx_args = ", ".join(f"float* __restrict__ dx{l}_p" for l in range(xl + 1))
-    return f"""template <bool WANT_DX>
-__global__ void __launch_bounds__(256) {name}(
-    int N, int C, int S, int I, SplineGrid grid, int sh_perm, int pair_sym,
+    return f"""template <bool WANT_DX, int C_FIX = 0, bool PRELOC = false>
+__global__ void __launch_bounds__(512) {name}(
+    int N, int C_arg, int S, int I, SplineGrid grid, int sh_perm, int pair_sym,
     const int* __restrict__ row_ptr, const int* __restrict__ senders, const float4* __restrict__ vec_len,
+    const int* __restrict__ act_slab, const float2* __restrict__ act_t_sx,
     const int* __restrict__ species, const uint2* __restrict__ packed_table, const float4* __restrict__ density_table,
     unsigned bias_shift, {x_args}, {dm_args}, const float* __restrict__ dD, {dx_args}, float* __restrict__ edge_dvec) {{
   extern __shared__ float s_q[];
+  const int C = C_FIX ? C_FIX : C_arg;
   const int rcv = blockIdx.x, tid = threadIdx.x, wid = tid >> 5, lane = tid & 31, n_warps = blockDim.x >> 5;
   if (rcv >= N) return;
   const int sa = species[rcv];
@@ -471,14 +483,23 @@ __global__ void __launch_bounds__(256) {name}(
     const float dd = vl.w > loup::EPS_SH ? vl.w : loup::EPS_SH;
     const float inv_d = 1.0f / dd;
     const float nx = ux * inv_d, ny = uy * inv_d, nz = uz * inv_d;
-    int iv; float t, sxi;
-    locate_spline(grid, vl.w, iv, t, sxi);
+    float t, sxi;
+    int64_t slab;
+    if (PRELOC) {{
+      slab = (int64_t)__ldg(act_slab + e);
+      const float2 tsx = __ldg(act_t_sx + e);
+      t = tsx.x;
+      sxi = fabsf(tsx.y);
+    }} else {{
+      int iv;
+      locate_spline(grid, vl.w, iv, t, sxi);
+      const int pr = pair_sym ? loup::sym_pair(species[snd], sa, S) : species[snd] * S + sa;
+      slab = (int64_t)pr * I + iv;
+    }}
     const float s = t - 0.5f, s_sq = s * s;
     const float s1 = s * 0x1.0p-8f, s2 = s_sq * 0x1.0p-14f, s3 = s * s_sq * 0x1.0p-19f;
     const float ds2 = (2.0f * s) * 0x1.0p-6f, ds3 = (3.0f * s_sq) * 0x1.0p-11f;
     const float nw_hb = -1.5f * (1.0f + s1 + s2 + s3), ndt_hb = -1.5f * (1.0f + ds2 + ds3);
-    const int pr = pair_sym ? loup::sym_pair(species[snd], sa, S) : species[snd] * S + sa;
-    const int64_t slab = (int64_t)pr * I + iv;
     const uint2* tq = packed_table + slab * ({n_paths} * (int64_t)C);
     float pull_Gx = 0.0f, pull_Gy = 0.0f, pull_Gz = 0.0f, pull_R = 0.0f;
     for (int ch = lane; ch < C; ch += 32) {{

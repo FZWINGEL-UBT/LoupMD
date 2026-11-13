@@ -30,6 +30,8 @@ struct GenericPassInputs {
     const int* act_senders;    // [E]
     const int* act_receivers;  // [E]
     const float4* act_vec_len; // [E] (pos[rcv] - pos[snd] + shift, |v|)
+    const int* act_slab;       // [E] prelocated (pair * I + iv) for preloc_grid()/preloc_pair_sym(), or nullptr
+    const float2* act_t_sx;    // [E] prelocated (t, +/- sx_inv)
     const int* species;        // [N], atoms grouped by species
     const std::vector<int>* species_start;
     const std::vector<int>* species_count;
@@ -69,9 +71,10 @@ public:
     // captured graphs must be re-recorded.
     bool set_cell(const double* cell);
     bool has_lr() const { return lr_ != nullptr; }
+    const SplineGrid* preloc_grid() const;
+    int preloc_pair_sym() const;
     // Records the whole force pass on in.stream (capturable; no host syncs, no allocation).
     void record(const GenericPassInputs& in);
-
 private:
     void free_model();
     int S_ = 0, n_layers_ = 0, sh_perm_ = 0, has_zbl_ = 0;

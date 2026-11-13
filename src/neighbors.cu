@@ -395,7 +395,8 @@ __global__ void compute_and_count_active_kernel(
 // Compacts the active edges (r < r_max) of each receiver row, in row order, with their spline locator. The SH of an
 // edge are not stored: its consumers compute them from act_vec_len where they stage the edge (edge_sh16).
 __global__ void scatter_active_edges_kernel(
-    int N, float r_max, SplineGrid grid,
+    int N, float r_max, SplineGrid grid, int S, int pair_sym,
+    const int* __restrict__ species,
     const int* __restrict__ row_ptr,
     const int* __restrict__ act_row_ptr,
     const int* __restrict__ senders,
@@ -428,15 +429,17 @@ __global__ void scatter_active_edges_kernel(
         if (act) {
             const int dst = out_cursor + __popc(mask & ((1u << lane) - 1u));
             const int p = pairs[e];
-            act_senders[dst] = senders[e];
-            act_receivers[dst] = receivers[e];
+            const int snd = senders[e], rcv = receivers[e];
+            const int p_slab = pair_sym ? p : (species[snd] * S + species[rcv]);
+            act_senders[dst] = snd;
+            act_receivers[dst] = rcv;
             act_pairs[dst] = p;
             act_vec_len[dst] = vl;
-            // Fused spline locator (shared by spline_forward_inter1 and wprime_backward_inter1)
+            // Fused spline locator (shared by spline_forward_inter1, wprime_backward_inter1, and generic preloc convs)
             int iv;
             float t, sx_inv;
             locate_spline(grid, vl.w, iv, t, sx_inv);
-            act_slab[dst] = p * grid.total_intervals + iv;
+            act_slab[dst] = p_slab * grid.total_intervals + iv;
             act_t_sx[dst] = make_float2(t, (vl.w >= grid.starts[0]) ? sx_inv : -sx_inv);
         }
         out_cursor += __popc(mask);

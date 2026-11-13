@@ -78,7 +78,8 @@ __global__ void compute_and_count_active_kernel(
     const int* __restrict__ receivers, const double* __restrict__ shift_cart,
     float4* __restrict__ tmp_vec_len, int* __restrict__ act_deg);
 __global__ void scatter_active_edges_kernel(
-    int N, float r_max, SplineGrid grid, const int* __restrict__ row_ptr, const int* __restrict__ act_row_ptr,
+    int N, float r_max, SplineGrid grid, int S, int pair_sym, const int* __restrict__ species,
+    const int* __restrict__ row_ptr, const int* __restrict__ act_row_ptr,
     const int* __restrict__ senders, const int* __restrict__ receivers, const int* __restrict__ pairs,
     const float4* __restrict__ tmp_vec_len,
     int* __restrict__ act_senders, int* __restrict__ act_receivers, int* __restrict__ act_pairs,
@@ -1186,21 +1187,29 @@ static void record_force_pass(LoupHandle* h, int compute_stress) {
     const int gridE128 = (E + 127) / 128;
 
     SplineGrid sg{};
-    if (h->generic()) {  // the per-edge spline locator is the specialised path's; give it a valid one-band grid
-        sg.n_bands = 1;
-        sg.total_intervals = 1;
-        sg.counts[0] = 1;
-        sg.ends[0] = r_max;
-        sg.inv_h[0] = 1.0f / r_max;
-    } else for (int i = 0; i < 8; ++i) {
-        sg.starts[i] = h->model.grid1.starts[i];
-        sg.ends[i] = h->model.grid1.ends[i];
-        sg.inv_h[i] = h->model.grid1.inv_h[i];
-        sg.offsets[i] = h->model.grid1.offsets[i];
-        sg.counts[i] = h->model.grid1.counts[i];
+    int sg_psym = 1;
+    if (h->generic()) {
+        if (const SplineGrid* pg = h->gen->preloc_grid()) {
+            sg = *pg;
+            sg_psym = h->gen->preloc_pair_sym();
+        } else {
+            sg.n_bands = 1;
+            sg.total_intervals = 1;
+            sg.counts[0] = 1;
+            sg.ends[0] = r_max;
+            sg.inv_h[0] = 1.0f / r_max;
+        }
+    } else {
+        for (int i = 0; i < 8; ++i) {
+            sg.starts[i] = h->model.grid1.starts[i];
+            sg.ends[i] = h->model.grid1.ends[i];
+            sg.inv_h[i] = h->model.grid1.inv_h[i];
+            sg.offsets[i] = h->model.grid1.offsets[i];
+            sg.counts[i] = h->model.grid1.counts[i];
+        }
+        sg.n_bands = h->model.grid1.n_bands;
+        sg.total_intervals = h->model.grid1.total_intervals;
     }
-    sg.n_bands = h->model.grid1.n_bands;
-    sg.total_intervals = h->model.grid1.total_intervals;
 
     // 1. Compute edge vectors, compact active edges (r < r_max) with their spline locator
     const int warpGridN = (N + 3) / 4;  // 4 warps per 128-thread block (1 warp per atom)
@@ -1211,9 +1220,8 @@ static void record_force_pass(LoupHandle* h, int compute_stress) {
     cub::DeviceScan::ExclusiveSum(
         h->d_cub_tmp, act_scan_bytes, h->d_act_deg, h->d_act_row_ptr, N + 1, h->stream);
     loup::scatter_active_edges_kernel<<<warpGridN, 128, 0, h->stream>>>(
-        N, r_max, sg, h->d_row_ptr, h->d_act_row_ptr, h->d_senders, h->d_receivers, h->d_pairs,
-        h->d_tmp_vec_len,
-        h->d_act_senders, h->d_act_receivers, h->d_act_pairs, h->d_act_vec_len,
+        N, r_max, sg, S, sg_psym, h->d_species, h->d_row_ptr, h->d_act_row_ptr, h->d_senders, h->d_receivers,
+        h->d_pairs, h->d_tmp_vec_len, h->d_act_senders, h->d_act_receivers, h->d_act_pairs, h->d_act_vec_len,
         h->d_act_slab, h->d_act_t_sx);
 
     const int* d_E_act = h->d_act_row_ptr + N;
@@ -1227,6 +1235,8 @@ static void record_force_pass(LoupHandle* h, int compute_stress) {
         in.act_senders = h->d_act_senders;
         in.act_receivers = h->d_act_receivers;
         in.act_vec_len = h->d_act_vec_len;
+        in.act_slab = h->d_act_slab;
+        in.act_t_sx = h->d_act_t_sx;
         in.species = h->d_species;
         in.species_start = &h->species_start;
         in.species_count = &h->species_count;
