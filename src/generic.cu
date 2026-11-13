@@ -1399,7 +1399,20 @@ void launch_prod(const GProdKernels* k, bool backward, cudaStream_t st, int N, i
         for (int l = 0; l < 4; ++l) args.push_back((void*)&dm[l]);
         args.push_back(&dD);
     }
-    CUDA_CHECK_THROW(cudaLaunchKernel(backward ? k->bwd : k->fwd, dim3(N, C / 32), dim3(32), args.data(), 0, st));
+    const int blk = (C % 128 == 0) ? 128 : 32;
+    CUDA_CHECK_THROW(cudaLaunchKernel(backward ? k->bwd : k->fwd, dim3(N, C / blk), dim3(blk), args.data(), 0, st));
+}
+
+void launch_prod_ro1_fused(const GProdKernels* k, cudaStream_t st, int N, int C, float* const* m, const float* D,
+                           const float* w, int64_t w_stride, const int* sp, const float* sc_skip16,
+                           const float* ro_W1, const float* ro_b1, const float* ro_W2, float ro_act_c,
+                           float* d_hidden16, double* out_energy, float* const* dm, float* dD) {
+    void* args[] = {&N,          &C,           (void*)&m[0], (void*)&m[1],  (void*)&m[2], (void*)&m[3], &D,
+                    &w,          &w_stride,    &sp,          &sc_skip16,    &ro_W1,       &ro_b1,       &ro_W2,
+                    &ro_act_c,   &d_hidden16,  &out_energy,  (void*)&dm[0], (void*)&dm[1], (void*)&dm[2],
+                    (void*)&dm[3], &dD};
+    const void* fn = (C <= 128) ? k->ro1_128 : (C <= 256) ? k->ro1_256 : k->ro1_512;
+    CUDA_CHECK_THROW(cudaLaunchKernel(fn, dim3(N), dim3(C), args, 0, st));
 }
 
 }  // namespace
@@ -1518,6 +1531,26 @@ void GenericModel::record(const GenericPassInputs& in) {
             join();
         }
         const float* Dp = (L->kind == 2 || L->kind == 3) ? L->D : nullptr;
+        const bool ro1_fused = L->ro_folded && L->readout == 1 && L->ro_H == 16 && L->prod->ro1_128 != nullptr;
+        if (ro1_fused) {
+            if (L->sc_has[0]) {
+                if (L->sc_species) {
+                    fork();
+                    species_gemm(false, 0, L->C_in, 16, L->h_in[0], L->ro_W1_sc, (int64_t)L->C_in * 16, 0.0f, L->hid, 0);
+                    join();
+                } else {
+                    in.gemm(false, N, 16, L->C_in, 1.0f, L->h_in[0], L->C_in, L->ro_W1_sc, 16, 0.0f, L->hid, 16);
+                }
+            }
+            float* dm[4];
+            for (int l = 0; l < 4; ++l) dm[l] = (L->kind == 1 || L->kind == 3) ? L->dlin[l] : L->dmsgf[l];
+            float* dDp = (L->kind == 2 || L->kind == 3) ? L->dD : nullptr;
+            launch_prod_ro1_fused(L->prod, st, N, Cm, L->msgf, Dp, L->prod_w,
+                                  L->prod_species ? (int64_t)L->prod_segw * Cm : 0, in.species,
+                                  L->sc_has[0] ? L->hid : nullptr, L->ro_W1, L->ro_b1, L->ro_W2, L->ro_act_c,
+                                  L->dhid, in.energy, dm, dDp);
+            continue;
+        }
         launch_prod(L->prod, false, st, N, Cm, L->msgf, Dp, L->prod_w,
                     L->prod_species ? (int64_t)L->prod_segw * Cm : 0, in.species, L->y, nullptr, nullptr);
         if (!L->ro_folded) {
@@ -1592,48 +1625,62 @@ void GenericModel::record(const GenericPassInputs& in) {
     for (int t = n_layers_ - 1; t >= 0; --t) {
         GenericLayer* L = layers_[t];
         const int Cx = L->C_x, Cm = L->C_msg, Co = L->C_out;
-        if (L->ro_folded) {
-            const int H = L->ro_H;
-            const bool fork_sc = L->sc_has[0] && t > 0;
-            if (fork_sc) fork();
-            if (fork_sc) lane(0);
-            in.gemm(true, N, Co, H, 1.0f, L->dhid, H, L->ro_W1, H, 0.0f, L->dy[0], Co);
-            if (fork_sc) {
-                if (L->sc_species)
-                    species_gemm(true, 0, H, L->C_in, L->dhid, L->ro_W1_sc, (int64_t)L->C_in * H, 1.0f,
-                                 L->dh_in[0], 1);
-                else {
-                    lane(1);
-                    in.gemm(true, N, L->C_in, H, 1.0f, L->dhid, H, L->ro_W1_sc, H, 1.0f, L->dh_in[0], L->C_in);
+        const bool ro1_fused = L->ro_folded && L->readout == 1 && L->ro_H == 16 && L->prod->ro1_128 != nullptr;
+        if (ro1_fused) {
+            if (L->sc_has[0] && t > 0) {
+                if (L->sc_species) {
+                    fork();
+                    species_gemm(true, 0, 16, L->C_in, L->dhid, L->ro_W1_sc, (int64_t)L->C_in * 16, 1.0f,
+                                 L->dh_in[0], 0);
+                    join();
+                } else {
+                    in.gemm(true, N, L->C_in, 16, 1.0f, L->dhid, 16, L->ro_W1_sc, 16, 1.0f, L->dh_in[0], L->C_in);
                 }
-                join();
             }
         } else {
-            const bool fork_p = L->lmax_out > 0 || (L->has_sc && t > 0);
-            if (fork_p) fork();
-            for (int l = 0; l <= L->lmax_out; ++l) {
-                if (fork_p) lane(l);
-                in.gemm(true, N * dimL(l), Co, Co, 1.0f, L->dhout[l], Co, L->W_p[l], Co, 0.0f, L->dy[l], Co);
-                if (L->sc_has[l] && t > 0) {
+            if (L->ro_folded) {
+                const int H = L->ro_H;
+                const bool fork_sc = L->sc_has[0] && t > 0;
+                if (fork_sc) fork();
+                if (fork_sc) lane(0);
+                in.gemm(true, N, Co, H, 1.0f, L->dhid, H, L->ro_W1, H, 0.0f, L->dy[0], Co);
+                if (fork_sc) {
                     if (L->sc_species)
-                        species_gemm(true, l, Co, L->C_in, L->dhout[l], L->W_sc[l], (int64_t)L->C_in * Co, 1.0f,
-                                     L->dh_in[l], 4);
+                        species_gemm(true, 0, H, L->C_in, L->dhid, L->ro_W1_sc, (int64_t)L->C_in * H, 1.0f,
+                                     L->dh_in[0], 1);
                     else {
-                        lane(4 + l);
-                        in.gemm(true, N * dimL(l), L->C_in, Co, 1.0f, L->dhout[l], Co, L->W_sc[l], Co, 1.0f,
-                                L->dh_in[l], L->C_in);
+                        lane(1);
+                        in.gemm(true, N, L->C_in, H, 1.0f, L->dhid, H, L->ro_W1_sc, H, 1.0f, L->dh_in[0], L->C_in);
+                    }
+                    join();
+                }
+            } else {
+                const bool fork_p = L->lmax_out > 0 || (L->has_sc && t > 0);
+                if (fork_p) fork();
+                for (int l = 0; l <= L->lmax_out; ++l) {
+                    if (fork_p) lane(l);
+                    in.gemm(true, N * dimL(l), Co, Co, 1.0f, L->dhout[l], Co, L->W_p[l], Co, 0.0f, L->dy[l], Co);
+                    if (L->sc_has[l] && t > 0) {
+                        if (L->sc_species)
+                            species_gemm(true, l, Co, L->C_in, L->dhout[l], L->W_sc[l], (int64_t)L->C_in * Co, 1.0f,
+                                         L->dh_in[l], 4);
+                        else {
+                            lane(4 + l);
+                            in.gemm(true, N * dimL(l), L->C_in, Co, 1.0f, L->dhout[l], Co, L->W_sc[l], Co, 1.0f,
+                                    L->dh_in[l], L->C_in);
+                        }
                     }
                 }
+                if (fork_p) join();
             }
-            if (fork_p) join();
+            const float* Dp = (L->kind == 2 || L->kind == 3) ? L->D : nullptr;
+            float* dDp = (L->kind == 2 || L->kind == 3) ? L->dD : nullptr;
+            // product backward: gradient of the product input
+            float* dm[4];
+            for (int l = 0; l < 4; ++l) dm[l] = (L->kind == 1 || L->kind == 3) ? L->dlin[l] : L->dmsgf[l];
+            launch_prod(L->prod, true, st, N, Cm, L->msgf, Dp, L->prod_w,
+                        L->prod_species ? (int64_t)L->prod_segw * Cm : 0, in.species, L->dy, dm, dDp);
         }
-        const float* Dp = (L->kind == 2 || L->kind == 3) ? L->D : nullptr;
-        float* dDp = (L->kind == 2 || L->kind == 3) ? L->dD : nullptr;
-        // product backward: gradient of the product input
-        float* dm[4];
-        for (int l = 0; l < 4; ++l) dm[l] = (L->kind == 1 || L->kind == 3) ? L->dlin[l] : L->dmsgf[l];
-        launch_prod(L->prod, true, st, N, Cm, L->msgf, Dp, L->prod_w,
-                    L->prod_species ? (int64_t)L->prod_segw * Cm : 0, in.species, L->dy, dm, dDp);
         if (L->kind == 4) {
             fork();
             for (int l = 0; l < 4; ++l) {

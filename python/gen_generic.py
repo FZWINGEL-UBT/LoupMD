@@ -29,13 +29,8 @@ from e3nn import o3  # noqa: E402
 import export_generic as eg  # noqa: E402
 
 LX = (0, 1, 2)
-# (model file, product index): one representative per product configuration
-PRODUCT_SOURCES = [
-    ("mace-omat-0-medium.model", 0),  # 16 -> 0e+1o
-    ("mace-omat-0-medium.model", 1),  # 16 -> 0e
-    ("MACE-OFF23_large.model", 0),    # 16 -> 0e+1o+2e
-]
-
+# Discovers every supported *.model in MODELS_DIR (sorted, deduplicated by product_signature); models outside
+# GenericModel's channel/degree bounds (C in 32..512 multiple of 32, seg_in == 16) are skipped with a message.
 
 def lit(v):
     return float(np.float32(v)).hex() + "f"
@@ -698,7 +693,7 @@ def emit_product(sig, prog, feats, sh):
     roots = [u for f in feats for u in (f or {}).values() if u is not None]
     used = prog.used(roots)
     head = [
-        "  const int a = blockIdx.x, c = blockIdx.y * 32 + threadIdx.x;",
+        "  const int a = blockIdx.x, c = blockIdx.y * blockDim.x + threadIdx.x;",
         "  const float s = D ? 1.0f / (D[a] + 1.0f) : 1.0f;",
         "  const float* wr = w + (int64_t)sp[a] * w_stride + c;",
     ]
@@ -708,7 +703,7 @@ def emit_product(sig, prog, feats, sh):
             loads.append(f"  const float x{l * l + m} = __ldg(m{l} + ((int64_t)a * {2 * l + 1} + {m}) * C + c) * s;")
     args_in = "int N, int C, " + _ptr_args("m", range(4)) + \
         ", const float* __restrict__ D, const float* __restrict__ w, int64_t w_stride, const int* __restrict__ sp"
-    F = [f'extern "C" __global__ void __launch_bounds__(32) gprod_fwd_{sig}(',
+    F = [f'extern "C" __global__ void __launch_bounds__(128) gprod_fwd_{sig}(',
          f"    {args_in}, {_ptr_args('y', range(lo + 1), const=False)}) {{"] + head + loads
     for i in used:
         _ssa(F, i, prog.nodes[i])
@@ -724,7 +719,7 @@ def emit_product(sig, prog, feats, sh):
             F.append(f"  y{l}[((int64_t)a * {2 * l + 1} + {m}) * C + c] = o{l * l + m};")
     F.append("}")
 
-    B = [f'extern "C" __global__ void __launch_bounds__(32) gprod_bwd_{sig}(',
+    B = [f'extern "C" __global__ void __launch_bounds__(128) gprod_bwd_{sig}(',
          f"    {args_in}, {_ptr_args('gin', range(lo + 1))},",
          f"    {_ptr_args('dm', range(4), const=False)}, float* __restrict__ dD) {{"] + head + loads
     for l in range(lo + 1):
@@ -774,9 +769,119 @@ def emit_product(sig, prog, feats, sh):
     B += ["  if (dD) {",
           "    #pragma unroll",
           "    for (int off = 16; off > 0; off >>= 1) dot += __shfl_xor_sync(0xffffffffu, dot, off);",
-          "    if (threadIdx.x == 0) atomicAdd(dD + a, -s * dot);",
+          "    if ((threadIdx.x & 31) == 0) atomicAdd(dD + a, -s * dot);",
           "  }",
           "}"]
+    if lo == 0:
+        # Fused product fwd + linear/bias/silu/linear readout fwd&bwd (ro_H = 16) + product bwd, one block per atom
+        # (blockDim = C, 32..512, multiple of 32): generalises sc1_fused across all model families.
+        RF = [
+            "template <int MAX_B, int MIN_BLK>",
+            f"__global__ void __launch_bounds__(MAX_B, MIN_BLK) gprod_ro1_fused_{sig}(",
+            f"    {args_in}, const float* __restrict__ sc_skip16, const float* __restrict__ ro_W1,",
+            "    const float* __restrict__ ro_b1, const float* __restrict__ ro_W2, float ro_act_c,",
+            "    float* __restrict__ d_hidden16, double* __restrict__ out_energy,",
+            f"    {_ptr_args('dm', range(4), const=False)}, float* __restrict__ dD) {{",
+            "  const int a = blockIdx.x, c = threadIdx.x;",
+            "  if (a >= N) return;",
+            "  const float s = D ? 1.0f / (D[a] + 1.0f) : 1.0f;",
+            "  const float* wr = w + (int64_t)sp[a] * w_stride + c;",
+        ] + loads
+        for i in used:
+            _ssa(RF, i, prog.nodes[i])
+        RF.append("  float y0 = 0.0f;")
+        for b, f in enumerate(feats):
+            items = [(cc, u) for cc, u in sorted((f or {}).items()) if u is not None]
+            if items:
+                RF.append(f"  const float w{b} = __ldg(wr + {b} * C);")
+                for cc, u in items:
+                    assert cc == 0
+                    RF.append(f"  y0 = fmaf(w{b}, {_expr(u)}, y0);")
+        RF += [
+            "  __shared__ float s_y[512];",
+            "  __shared__ float s_part[32][16];",
+            "  __shared__ float s_dh[16];",
+            "  s_y[c] = y0;",
+            "  __syncthreads();",
+            "  {",
+            "    const int k = c & 15, c0 = (c >> 4) * 16;",
+            "    float p = 0.0f;",
+            "    #pragma unroll",
+            "    for (int q = 0; q < 16; ++q) p = fmaf(s_y[c0 + q], __ldg(ro_W1 + (c0 + q) * 16 + k), p);",
+            "    s_part[c >> 4][k] = p;",
+            "  }",
+            "  __syncthreads();",
+            "  if (c < 16) {",
+            "    float hsum = (sc_skip16 ? __ldg(sc_skip16 + (int64_t)a * 16 + c) : 0.0f) + __ldg(ro_b1 + c);",
+            "    const int n_chunks = C >> 4;",
+            "    for (int j = 0; j < n_chunks; ++j) hsum += s_part[j][c];",
+            "    const float sig = 1.0f / (1.0f + expf(-hsum));",
+            "    const float w2 = __ldg(ro_W2 + c) * ro_act_c;",
+            "    double e = (double)(hsum * sig) * (double)w2;",
+            "    const float dh = sig * (1.0f + hsum * (1.0f - sig)) * w2;",
+            "    s_dh[c] = dh;",
+            "    d_hidden16[(int64_t)a * 16 + c] = dh;",
+            "    #pragma unroll",
+            "    for (int off = 8; off > 0; off >>= 1) e += __shfl_xor_sync(0x0000ffffu, e, off);",
+            "    if (c == 0) atomicAdd(out_energy, e);",
+            "  }",
+            "  __syncthreads();",
+            "  float g0 = 0.0f;",
+            "  #pragma unroll",
+            "  for (int k = 0; k < 16; ++k) g0 = fmaf(s_dh[k], __ldg(ro_W1 + c * 16 + k), g0);",
+        ]
+        # Backward SSA reusing x0..x15, v_i, and w{b} already in registers
+        adj_rf = {}
+        def add_rf(u, ab):
+            name = f"d{_expr(u)}"
+            a_, b_ = ab
+            if u in adj_rf:
+                RF.append(f"  {name} = fmaf({a_}, {b_}, {name});")
+            else:
+                RF.append(f"  float {name} = {a_} * {b_};")
+            adj_rf[u] = name
+        for b, f in enumerate(feats):
+            items = [(cc, u) for cc, u in sorted((f or {}).items()) if u is not None]
+            for cc, u in items:
+                add_rf(u, (f"w{b}", f"g{cc}"))
+        for i in reversed(used):
+            if i not in adj_rf:
+                continue
+            op, da = prog.nodes[i], adj_rf[i]
+            if op[0] == "mul":
+                add_rf(op[1], (da, _expr(op[2])))
+                add_rf(op[2], (da, _expr(op[1])))
+            elif op[0] == "lin":
+                for cc, u in op[1]:
+                    add_rf(u, (_literal(cc), da))
+            else:
+                for a_, b_ in op[1]:
+                    add_rf(a_, (da, _expr(b_)))
+                    add_rf(b_, (da, _expr(a_)))
+        RF.append("  float dot = 0.0f;")
+        for l in range(4):
+            for m in range(2 * l + 1):
+                i = l * l + m
+                dx = adj_rf.get(-1 - i, "0.0f")
+                RF.append(f"  dot = fmaf({dx}, x{i}, dot);")
+                RF.append(f"  dm{l}[((int64_t)a * {2 * l + 1} + {m}) * C + c] = {dx} * s;")
+        RF += [
+            "  if (dD) {",
+            "    #pragma unroll",
+            "    for (int off = 16; off > 0; off >>= 1) dot += __shfl_xor_sync(0xffffffffu, dot, off);",
+            "    __shared__ float red[16];",
+            "    if ((c & 31) == 0) red[c >> 5] = dot;",
+            "    __syncthreads();",
+            "    if (c == 0) {",
+            "      float total = 0.0f;",
+            "      const int nw = C >> 5;",
+            "      for (int w_i = 0; w_i < nw; ++w_i) total += red[w_i];",
+            "      atomicAdd(dD + a, -s * total);",
+            "    }",
+            "  }",
+            "}",
+        ]
+        return "\n".join(F) + "\n\n" + "\n".join(B) + "\n\n" + "\n".join(RF) + "\n", lo
     return "\n".join(F) + "\n\n" + "\n".join(B) + "\n", lo
 
 
@@ -799,25 +904,40 @@ def main():
         parts.append(emit_conv_bwd(lx))
     table = []
     seen = set()
-    for fname, idx in PRODUCT_SOURCES:
-        m = torch.load(models_dir / fname, map_location="cpu", weights_only=False).float()
+    model_paths = sorted(models_dir.glob("*.model"))
+    if not model_paths:
+        raise FileNotFoundError(f"no .model files found in {models_dir}")
+    for mpath in model_paths:
+        m = torch.load(mpath, map_location="cpu", weights_only=False).float()
         mc = convert_e3nn_cueq(m)
-        sc = mc.products[idx].symmetric_contractions
-        sh = shape_of(sc)
-        prog, feats, _ = factor(merged_terms(sc.etp.polynomial), sh[0], sh[1], sh[2])
-        sig = eg.product_signature(prog, feats, sh)
-        if sig in seen:
-            continue
-        seen.add(sig)
-        src, lo = emit_product(sig, prog, feats, sh)
-        parts.append(src)
-        table.append((sig, lo, sh[1]))
-        print(f"product {fname}[{idx}]: sig {sig}, lmax_out {lo}, segments_w {sh[1]}")
+        for idx, pr in enumerate(mc.products):
+            sc = pr.symmetric_contractions
+            sh = shape_of(sc)
+            if sh is None or sh[0] != 16 or sh[3] < 32 or sh[3] > 512 or sh[3] % 32 != 0:
+                print(f"skip {mpath.name}[{idx}]: unsupported shape {sh}")
+                continue
+            prog, feats, _ = factor(merged_terms(sc.etp.polynomial), sh[0], sh[1], sh[2])
+            sig = eg.product_signature(prog, feats, sh)
+            if sig in seen:
+                continue
+            seen.add(sig)
+            src, lo = emit_product(sig, prog, feats, sh)
+            parts.append(src)
+            table.append((sig, lo, sh[1]))
+            print(f"product {mpath.name}[{idx}]: sig {sig}, lmax_out {lo}, segments_w {sh[1]}")
+    assert table, f"no supported products found in {models_dir}"
     # dispatch table
-    parts.append("struct GProdKernels { const char* sig; int lmax_out; int segments_w; const void* fwd; const void* bwd; };")
+    parts.append("struct GProdKernels { const char* sig; int lmax_out; int segments_w; const void* fwd; const void* bwd; "
+                 "const void* ro1_128; const void* ro1_256; const void* ro1_512; };")
     parts.append("static const GProdKernels kGProd[] = {")
     for sig, lo, segw in table:
-        parts.append(f'    {{"{sig}", {lo}, {segw}, (const void*)gprod_fwd_{sig}, (const void*)gprod_bwd_{sig}}},')
+        if lo == 0:
+            ro = (f"(const void*)gprod_ro1_fused_{sig}<128, 4>, "
+                  f"(const void*)gprod_ro1_fused_{sig}<256, 2>, "
+                  f"(const void*)gprod_ro1_fused_{sig}<512, 1>")
+        else:
+            ro = "nullptr, nullptr, nullptr"
+        parts.append(f'    {{"{sig}", {lo}, {segw}, (const void*)gprod_fwd_{sig}, (const void*)gprod_bwd_{sig}, {ro}}},')
     parts.append("};")
     out.write_text("\n".join(parts) + "\n")
     print(f"Wrote {out} ({out.stat().st_size} bytes)")

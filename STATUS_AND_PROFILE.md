@@ -393,6 +393,7 @@ references).
 S10 (ZBL in the force-assembly pass, `gen-zbl-in-assembly`): OMAT-0 small `SrTiO3` 6.06 -> **5.87 ms/step** (0.969); MH-1 `NbCl5` 13.33 -> 13.27, OFF23 medium water 8.88 -> 8.85, POLAR-1-M `NbCl5` 27.28 -> 27.34.
 S11 (layer-0 `K0` alignment, `gen-first-hidden-k0-align`): OMAT-0 small `SrTiO3` 5.88 -> **5.62 ms/step** (0.956); OFF23-M water 8.85 -> **8.67** (0.979); OMAT-0 medium generic `SrTiO3` 10.56 -> **10.30** (0.976); MH-1 `NbCl5` 13.27 -> 13.16 (0.992).
 S12 (edge-parallel layer-0 backward + ZBL + assembly, `gen-first-bwd-edge`): OMAT-0 small `SrTiO3` 5.62 -> **5.13 ms/step** (0.913); OFF23-M water 8.65 -> **8.28** (0.957); OMAT-0 medium generic `SrTiO3` 10.30 -> **9.80** (0.951); MH-1 `NbCl5` 13.20 -> **13.07** (0.990); POLAR-1-M `NbCl5` 27.40 -> **27.27** (0.995).
+S13 (fused product + `ro1` readout + 128-thread `gprod`, `gen-gprod-ro1-fused`): OMAT-0 small `SrTiO3` 5.12 -> **4.99 ms/step** (0.976, down from 6.06 before S10); OFF23-M water 8.29 -> **8.16** (0.984); OMAT-0 medium generic `SrTiO3` 9.81 -> **9.67** (0.986, kernel gap vs specialised cut from +2,144 to +913 us); POLAR-1-M `NbCl5` 27.28 -> **27.14** (0.995).
 
 ### 5.4 Fixes Found by the Family Work
 - **POLAR LayerNorm-MLP reverse wrote its GEMM output over its own input** (`mlp_bwd`: after the first hidden layer
