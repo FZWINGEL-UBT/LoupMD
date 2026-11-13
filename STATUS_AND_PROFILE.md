@@ -390,6 +390,8 @@ Against FastMACE's adopted configurations LoupMD's POLAR-1 is now 11-13% faster 
 216), 11-12% faster (M, NbCl5) and 12-13% faster (L). POLAR-1-S / -M / -L crystals gates pass (POLAR-1-L with CPU
 references).
 
+S10 (ZBL in the force-assembly pass, `gen-zbl-in-assembly`): OMAT-0 small `SrTiO3` 6.06 -> **5.87 ms/step** (0.969); MH-1 `NbCl5` 13.33 -> 13.27, OFF23 medium water 8.88 -> 8.85, POLAR-1-M `NbCl5` 27.28 -> 27.34.
+
 ### 5.4 Fixes Found by the Family Work
 - **POLAR LayerNorm-MLP reverse wrote its GEMM output over its own input** (`mlp_bwd`: after the first hidden layer
   the destination buffer was the one holding dz). Harmless while one GEMM tile covered all rows; from ~1,700 atoms

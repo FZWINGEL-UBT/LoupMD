@@ -219,65 +219,68 @@ __global__ void ro_act_bwd_kernel(int64_t n, float c, const float* __restrict__ 
     if (i < n) d[i] *= c * dsilu_f(pre[i]);
 }
 
-// ZBL per edge (ordered pair tables): energy and dE/dvec added to edge_dvec.
-__global__ void zbl_kernel(const int* __restrict__ E_dev, int S, const float4* __restrict__ vec_len,
-                           const int* __restrict__ senders, const int* __restrict__ receivers,
-                           const int* __restrict__ species, const float* __restrict__ rc_t,
-                           const float* __restrict__ inv_a_t, const float* __restrict__ pref_t, float c0, float c1,
-                           float c2, float c3, float zp, float* __restrict__ edge_dvec, double* __restrict__ energy) {
-    const int E = *E_dev;
-    const int e = blockIdx.x * blockDim.x + threadIdx.x;
-    double en = 0.0;
-    if (e < E) {
-        const float4 vl = vec_len[e];
-        const int p = species[senders[e]] * S + species[receivers[e]];
-        const float rcf = rc_t[p];
-        if (vl.w > 0.0f && vl.w < rcf) {
-            const double r = vl.w, inv_a = inv_a_t[p], pref = pref_t[p], rc = rcf;
-            const double u = r * inv_a;
-            const double e0 = exp(-3.2 * u), e1 = exp(-0.9423 * u), e2 = exp(-0.4028 * u), e3 = exp(-0.2016 * u);
-            const double phi = c0 * e0 + c1 * e1 + c2 * e2 + c3 * e3;
-            const double dphi = -inv_a * (3.2 * c0 * e0 + 0.9423 * c1 * e1 + 0.4028 * c2 * e2 + 0.2016 * c3 * e3);
-            const double v = pref / r * phi;
-            const double dv = pref / r * (dphi - phi / r);
-            const double s = r / rc;
-            const double s2 = s * s;
-            const double sp = zp == 5.0f ? s2 * s2 * s : pow(s, (double)zp);
-            const double env = 1.0 - ((zp + 1.0) * (zp + 2.0) * 0.5) * sp + (zp * (zp + 2.0)) * sp * s -
-                               (zp * (zp + 1.0) * 0.5) * sp * s * s;
-            const double denv = -(zp * (zp + 1.0) * (zp + 2.0) * 0.5) * (sp / s) * (1.0 - s) * (1.0 - s) / rc;
-            en = v * env;
-            const float g = (float)((dv * env + v * denv) / r);
-            edge_dvec[(int64_t)e * 3 + 0] += g * vl.x;
-            edge_dvec[(int64_t)e * 3 + 1] += g * vl.y;
-            edge_dvec[(int64_t)e * 3 + 2] += g * vl.z;
-        }
-    }
-    #pragma unroll
-    for (int off = 16; off > 0; off >>= 1) en += __shfl_xor_sync(0xffffffffu, en, off);
-    if ((threadIdx.x & 31) == 0 && en != 0.0) atomicAdd(energy, en);
+// ZBL per edge (ordered pair tables), float32 as in MACE's float32 model (the gate's yardstick; FP64 runs at 1/64
+// rate on GeForce parts). Callers skip edges beyond the largest ZBL cutoff (ZblParams::r_max, 0 without ZBL)
+// before reading the tables. Returns false outside the pair's cutoff; otherwise en = the pair energy, dE/dvec = g vec.
+struct ZblParams {
+    const float *rc = nullptr, *inv_a = nullptr, *pref = nullptr;
+    float c0 = 0, c1 = 0, c2 = 0, c3 = 0, p = 5.0f, r_max = 0.0f;
+};
+__device__ __forceinline__ bool zbl_pair(const ZblParams& z, int p, float r, float& en, float& g) {
+    const float rc = z.rc[p];
+    if (!(r > 0.0f && r < rc)) return false;
+    const float inv_a = z.inv_a[p], pref = z.pref[p], zp = z.p;
+    const float u = r * inv_a;
+    const float e0 = expf(-3.2f * u), e1 = expf(-0.9423f * u), e2 = expf(-0.4028f * u), e3 = expf(-0.2016f * u);
+    const float phi = z.c0 * e0 + z.c1 * e1 + z.c2 * e2 + z.c3 * e3;
+    const float dphi = -inv_a * (3.2f * z.c0 * e0 + 0.9423f * z.c1 * e1 + 0.4028f * z.c2 * e2 + 0.2016f * z.c3 * e3);
+    const float inv_r = 1.0f / r;
+    const float vz = pref * inv_r * phi;
+    const float dv = pref * inv_r * (dphi - phi * inv_r);
+    const float sr = r / rc;
+    const float s2 = sr * sr;
+    const float sp = zp == 5.0f ? s2 * s2 * sr : powf(sr, zp);
+    const float env = 1.0f - ((zp + 1.0f) * (zp + 2.0f) * 0.5f) * sp + (zp * (zp + 2.0f)) * sp * sr -
+                      (zp * (zp + 1.0f) * 0.5f) * sp * sr * sr;
+    const float denv = -(zp * (zp + 1.0f) * (zp + 2.0f) * 0.5f) * (sp / sr) * (1.0f - sr) * (1.0f - sr) / rc;
+    en = vz * env;
+    g = (dv * env + vz * denv) * inv_r;
+    return true;
 }
 
-// Forces and virial from dE/dvec per edge (vec = pos[rcv] - pos[snd] + shift).
-__global__ void assemble_forces_kernel(const int* __restrict__ E_dev, const float4* __restrict__ vec_len,
+// Per edge, the last pass of the backward: ZBL, then forces and virial from the total dE/dvec
+// (vec = pos[rcv] - pos[snd] + shift). ZBL used to be a separate pass over all edges before the backward.
+template <bool ZBL, bool STRESS>
+__global__ void assemble_forces_kernel(const int* __restrict__ E_dev, int S, const float4* __restrict__ vec_len,
                                        const int* __restrict__ senders, const int* __restrict__ receivers,
-                                       const float* __restrict__ edge_dvec, int compute_stress,
-                                       double* __restrict__ forces, double* __restrict__ virial) {
+                                       const int* __restrict__ species, ZblParams z,
+                                       const float* __restrict__ edge_dvec, double* __restrict__ forces,
+                                       double* __restrict__ virial, double* __restrict__ energy) {
     const int E = *E_dev;
     const int e = blockIdx.x * blockDim.x + threadIdx.x;
     double v[6] = {0, 0, 0, 0, 0, 0};
+    double en = 0.0;
     if (e < E) {
-        const double fx = edge_dvec[(int64_t)e * 3 + 0], fy = edge_dvec[(int64_t)e * 3 + 1],
-                     fz = edge_dvec[(int64_t)e * 3 + 2];
+        float fxf = edge_dvec[(int64_t)e * 3 + 0], fyf = edge_dvec[(int64_t)e * 3 + 1],
+              fzf = edge_dvec[(int64_t)e * 3 + 2];
         const int s = senders[e], r = receivers[e];
+        float4 vl = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
+        if (ZBL || STRESS) vl = vec_len[e];
+        float zen, g;
+        if (ZBL && vl.w < z.r_max && zbl_pair(z, species[s] * S + species[r], vl.w, zen, g)) {
+            en = zen;
+            fxf += g * vl.x;
+            fyf += g * vl.y;
+            fzf += g * vl.z;
+        }
+        const double fx = fxf, fy = fyf, fz = fzf;
         atomicAdd(forces + r * 3 + 0, -fx);
         atomicAdd(forces + r * 3 + 1, -fy);
         atomicAdd(forces + r * 3 + 2, -fz);
         atomicAdd(forces + s * 3 + 0, fx);
         atomicAdd(forces + s * 3 + 1, fy);
         atomicAdd(forces + s * 3 + 2, fz);
-        if (compute_stress) {
-            const float4 vl = vec_len[e];
+        if (STRESS) {
             v[0] = vl.x * fx;
             v[1] = 0.5 * (vl.x * fy + vl.y * fx);
             v[2] = 0.5 * (vl.x * fz + vl.z * fx);
@@ -286,7 +289,12 @@ __global__ void assemble_forces_kernel(const int* __restrict__ E_dev, const floa
             v[5] = vl.z * fz;
         }
     }
-    if (compute_stress) {
+    if (ZBL) {
+        #pragma unroll
+        for (int off = 16; off > 0; off >>= 1) en += __shfl_xor_sync(0xffffffffu, en, off);
+        if ((threadIdx.x & 31) == 0 && en != 0.0) atomicAdd(energy, en);
+    }
+    if (STRESS) {
         #pragma unroll
         for (int k = 0; k < 6; ++k) {
             double x = v[k];
@@ -1139,6 +1147,12 @@ void GenericModel::record(const GenericPassInputs& in) {
 
     // in.energy / in.forces / in.virial live in engine.cu's d_zero_slab and are already zeroed by record_force_pass.
     const bool has_edges = in.E_cap > 0;
+    ZblParams zbl_p;  // r_max 0 without ZBL
+    if (has_zbl_) {
+        zbl_p.rc = d_zbl_rc_; zbl_p.inv_a = d_zbl_inv_a_; zbl_p.pref = d_zbl_pref_;
+        zbl_p.c0 = zbl_c_[0]; zbl_p.c1 = zbl_c_[1]; zbl_p.c2 = zbl_c_[2]; zbl_p.c3 = zbl_c_[3];
+        zbl_p.p = zbl_p_; zbl_p.r_max = zbl_rmax_;
+    }
     if (has_edges) zero_edge_kernel<<<(3 * in.E_cap + 255) / 256, 256, 0, st>>>(in.E_dev, d_edge_dvec_);
     if (zero_slab_bytes_) CUDA_CHECK_THROW(cudaMemsetAsync(d_zero_slab_, 0, zero_slab_bytes_, st));
 
@@ -1282,13 +1296,6 @@ void GenericModel::record(const GenericPassInputs& in) {
                 in.gemm(true, N, Co, H, 1.0f, L->dhid, H, L->ro_W1, H, 1.0f, L->dhout[0], Co);
         }
     }
-    if (has_zbl_ && has_edges) {
-        zbl_kernel<<<(in.E_cap + 255) / 256, 256, 0, st>>>(in.E_dev, S, in.act_vec_len, in.act_senders,
-                                                          in.act_receivers, in.species, d_zbl_rc_, d_zbl_inv_a_,
-                                                          d_zbl_pref_, zbl_c_[0], zbl_c_[1], zbl_c_[2], zbl_c_[3],
-                                                          zbl_p_, d_edge_dvec_, in.energy);
-    }
-
     // ---------------- long range: energy, k-space forces and its gradient seeds into every layer's dhout
     if (lr_) {
         std::vector<std::vector<float*>> hs, dhs;
@@ -1435,10 +1442,12 @@ void GenericModel::record(const GenericPassInputs& in) {
             if (L->lmax_x > 0) join();
         }
     }
-    if (has_edges)
-        assemble_forces_kernel<<<(in.E_cap + 255) / 256, 256, 0, st>>>(in.E_dev, in.act_vec_len, in.act_senders,
-                                                                      in.act_receivers, d_edge_dvec_, in.compute_stress,
-                                                                      in.forces, in.virial);
+    if (has_edges) {
+        auto kern = has_zbl_ ? (in.compute_stress ? assemble_forces_kernel<true, true> : assemble_forces_kernel<true, false>)
+                             : (in.compute_stress ? assemble_forces_kernel<false, true> : assemble_forces_kernel<false, false>);
+        kern<<<(in.E_cap + 255) / 256, 256, 0, st>>>(in.E_dev, S, in.act_vec_len, in.act_senders, in.act_receivers,
+                                                    in.species, zbl_p, d_edge_dvec_, in.forces, in.virial, in.energy);
+    }
 }
 
 }  // namespace loup

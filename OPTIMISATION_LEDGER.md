@@ -182,6 +182,8 @@ Conventions:
 | [gen-conv-bwd-128](#gen-conv-bwd-128) | Conv backward (lx 0 / 1) with 128-thread blocks | – | gen | REJECTED | S8 | ABBA b/a 0.997 (OMAT-S), 0.992 (OFF23-M): below resolution, halves per-receiver warps on small cells | this file |
 | [gen-conv-fwd-l1-split](#gen-conv-fwd-l1-split) | lx 1 conv forward as two kernels by x degree | – | gen | REJECTED | S8 | 1.70 -> 1.78-1.87 ms (x degree 1 kernel alone at 128 registers) | this file |
 | [rv8-fixes](#rv8-fixes) | Eighth review pass: packed-table error check at load, cuBLAS workspace per lane, reorder carries Langevin noise, MD needs a state, safe edge growth, band / plan / input checks, unstable gate row opt-in | `kPackedTableMaxRelErr`, `cublas_bind`, `--include-unstable` | all | FIX | S9 | accuracy and robustness, no speed change intended | this file |
+| [gen-zbl-in-assembly](#gen-zbl-in-assembly) | ZBL computed in the force-assembly pass (float32, skip beyond the largest ZBL cutoff) instead of its own pass | `assemble_forces_kernel(ZblParams)` | gen (ZBL models: OMAT-S, MH-1) | DEFAULT (5060 Ti only) | S10 | OMAT-S `SrTiO3`: 389 -> 221 us per call | this file |
+| [gen-first-bwd-assembly](#gen-first-bwd-assembly) | Force / virial assembly (and ZBL) folded into the first-layer backward | – | gen | REJECTED | S10 | 990-1,029 -> 1,113-2,243 us | this file |
 
 ### MACE-POLAR-1 long range (`src/polar.cu`)
 
@@ -1056,6 +1058,20 @@ POLAR-1 NaCl 3x3x3 (216) and POLAR-1-M `NbCl5` 3x3x3 (1,944).
 #### gen-conv-fwd-l1-split: lx 1 conv forward by x degree
 - Stage: S8. Status: REJECTED.
 - Measured: 1.70 ms -> 0.58 + 1.20-1.29 ms (OFF23-M water); the x degree 1 kernel alone needs 128 registers, more than the joint 122. Sources: this file.
+
+<a id="gen-zbl-in-assembly"></a>
+#### gen-zbl-in-assembly: ZBL in the force-assembly pass
+- Stage: S10.
+- What: the separate `zbl_kernel` read every active edge and its species, did double-precision `exp` and divisions on the close ones (FP64 at 1/64 rate on GeForce) and wrote back dE/dvec, before the backward. The assembly pass now adds ZBL to each edge's total dE/dvec and sums its energy (warp reduction, double), skipping edges beyond the largest ZBL cutoff (the specialised path's `zbl_r_max_max` early-out); the per-edge terms are float32, as in MACE's float32 model, which is the gate's yardstick.
+- Measured (OMAT-S `SrTiO3`, nsys, frozen cell): `zbl_kernel` 188 + `assemble_forces_kernel` 201 -> 375 us merged in double, 221 us in float32. Forces against the double version at run-to-run noise (1e-6 eV/A).
+- Sources: this file.
+
+<a id="gen-first-bwd-assembly"></a>
+#### gen-first-bwd-assembly: assembly in the first-layer backward
+- Stage: S10. Status: REJECTED.
+- What: `first_bwd_kernel` is the last per-edge kernel, so it could finish each edge: total dE/dvec, sender force by atomics, receiver force and virial reduced per block. The specialised path does this, but its layer-0 backward is edge-parallel (one edge per lane); the generic one finishes an edge on one lane per half-warp.
+- Measured (OMAT-S `SrTiO3`): with ZBL in the tail 2,243 us (128 registers, FP64 on two lanes per warp), without it 1,113 us, with `__launch_bounds__(256, 3)` (80 registers) 1,142 us, against 790 + 201 (separate assembly) = 990 us. The serial tail, not occupancy, is the cost.
+- Sources: this file.
 
 <a id="rv8-fixes"></a>
 #### rv8-fixes: eighth review pass (`loupmd-review-20261112.md`, U1-U9)
