@@ -289,7 +289,7 @@ Do not retry these unless the stated condition changes.
 | Larger / adaptive skin | owner decision (changes the benchmark configuration) | [md-skin](#md-skin) |
 | Gate fused into the generic path's GEMMs | forward prologue fusion falsified (S36: `0.946` of the chain, stop rule 10%); backward epilogue fusion not built (needs per-atom reductions over the `2l + 1` rows across tiles) | [gen-gate-epilogue](#gen-gate-epilogue) |
 | Generic-path GEMMs (~50% of MH-1) | not screened beyond the shared autotune | [gen-profile](#gen-profile) |
-| Decaying step-displacement maximum | open review item S2: one fast step keeps the loop unpipelined | [§4.2][s42] |
+| Decaying step-displacement maximum | open review item S2: one fast step keeps the loop unpipelined. S46: on water the per-step maximum (always an H) exceeds the pipelining threshold `skin / 8` in every step at skin 0.5 (median 0.081 A vs 0.0625), so a decaying maximum would not change water; it matters only for systems near the threshold | [§4.2][s42], [md-skin](#md-skin) |
 | `w'` path order and shared scalars | untried: emit the six `x1` paths before the four `x0` paths (shorter live ranges at the 64-register limit) and add the three `xx / xy / xz` pull terms of paths 1, 4, 7 through one summed scalar (6 FMA per channel). Differs from [wp-x0-hoist](#wp-x0-hoist), which added a live accumulator. Test: SASS count and spill bytes first, then A/B | external suggestion, 13 Nov |
 | Shift-free decode for the forward's PACKED8 table | untried: the layout change of `w'` (S4) applied to `spline_forward_inter1`; the forward is L2-bound on the 5060 Ti, so expect little there | external suggestion, 13 Nov |
 | Exponent field without the add | untried: if all table exponents fall in one 32-wide block, `(c.y & mask) \| prefix` is one LOP3 instead of AND + IADD per path in `w'` | external suggestion, 13 Nov |
@@ -1011,6 +1011,7 @@ Each entry has the same fields. Unless stated, the system is OMAT-0 medium on th
 #### md-skin: larger / adaptive skin (T10)
 - Status: PENDING (owner decision: it changes the benchmark configuration).
 - Measured: estimate 0.5-1.5% at 5,000 atoms, ~10% at 135 atoms.
+- Measured (S46, 5060 Ti, single-step Langevin runs at 300 K / 1 fs after 100 steps, 200 steps): per-step maximum atomic displacement, `OFF23-S` water (5,184 atoms): median 0.0814 A, p10 0.0709, p90 0.0878, max 0.1065, always a hydrogen; `OMAT-0-S` `SrTiO3`: median 0.0171, max 0.0213 (oxygen). The pipelined loop needs `4 x max step displacement < skin / 2`, i.e. `< 0.0625 A` at skin 0.5: water fails in every step (it never pipelines, 0 of 256 steps measured in S34), `SrTiO3` passes with a 3x margin. Water would pipeline from skin ~0.7 A (8 x p90); at skin 1.5 `OFF23-S` water ran 2.90 against 3.13 ms/step at 0.5 (S34; more edges per step but no per-step host round trip and fewer rebuilds).
 - Sources: [§4.1 #4][s41].
 
 <a id="md-small-systems"></a>
