@@ -63,6 +63,18 @@ def test_a_packed_table_far_beyond_the_gated_error_is_refused(tmp_path, capfd):
     assert "8-byte table error" in capfd.readouterr().err  # refused by the packing check, not an earlier one
 
 
+def test_charge_and_spin_are_refused_for_a_model_without_their_embedding(tmp_path):
+    """Only models with a total-charge / spin embedding (MACE-OMOL-0) take them; any other model must not silently
+    ignore a requested charge."""
+    import subprocess
+
+    path = find_model("mace-omat-0-small.model")
+    with pytest.raises(subprocess.CalledProcessError):
+        ensure_loup_bundle(path, [8, 22, 38], cache_dir=str(tmp_path), charge=1)
+    with pytest.raises(subprocess.CalledProcessError):
+        ensure_loup_bundle(path, [8, 22, 38], cache_dir=str(tmp_path), spin_multiplicity=3)
+
+
 @pytest.mark.parametrize("model", ["mace-omat-0-medium.model", "mace-omat-0-small.model"])
 def test_reused_list_after_a_cell_change_sees_a_pair_cross_the_cutoff(model):
     """Strain the cell (forces a rebuild), then move one atom by less than skin/2 so a pair just outside r_max comes

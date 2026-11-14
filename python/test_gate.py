@@ -52,7 +52,7 @@ def ref_device_tag(ref_device):
     return f"{ref_device}:{platform.machine()}"
 
 
-def ref_cache_path(model_path, head, set_name, ref_device, configs):
+def ref_cache_path(model_path, head, set_name, ref_device, configs, charge_spin=None):
     import hashlib
 
     import mace
@@ -62,6 +62,8 @@ def ref_cache_path(model_path, head, set_name, ref_device, configs):
     for part in (REF_CACHE_FORMAT, _model_digest(model_path), str(head), set_name, ref_device_tag(ref_device),
                  getattr(mace, "__version__", "?"), torch.__version__, repr(FD_STRESS_H)):
         h.update(part.encode() + b"\0")
+    if charge_spin is not None and charge_spin != (None, None):  # OMOL-0 settings (keys of other runs unchanged)
+        h.update(f"charge={charge_spin[0]}|spin={charge_spin[1]}".encode() + b"\0")
     for name, at in configs:
         h.update(name.encode() + b"\0")
         h.update(np.ascontiguousarray(at.get_atomic_numbers(), dtype=np.int64).tobytes())
@@ -203,12 +205,22 @@ def make_structures():
     return configs
 
 
-def eval_mace(model_path: str, dtype: str, configs, head=None, device="cuda"):
+def _with_charge_spin(a, charge, spin):
+    """MACECalculator reads the total charge and the spin multiplicity from atoms.info["charge"] / ["spin"]
+    (defaults 0 and 1)."""
+    if charge is not None:
+        a.info["charge"] = int(charge)
+    if spin is not None:
+        a.info["spin"] = int(spin)
+    return a
+
+
+def eval_mace(model_path: str, dtype: str, configs, head=None, device="cuda", charge=None, spin=None):
     kw = {"head": head} if head else {}
     calc = MACECalculator(model_paths=model_path, device=device, default_dtype=dtype, **kw)
     out = []
     for _, at in configs:
-        a = at.copy()
+        a = _with_charge_spin(at.copy(), charge, spin)
         a.calc = calc
         e = float(a.get_potential_energy())
         f = np.asarray(a.get_forces(), dtype=np.float64)
@@ -260,6 +272,8 @@ def main():
     ap.add_argument("--no-ref-cache", action="store_true", help="recompute the MACE references (and overwrite the "
                     "cached ones) instead of reading them from LOUP_GATE_CACHE (default ~/.cache/loupmd/gate_refs)")
     ap.add_argument("--include-unstable", action="store_true", help="also gate the configurations in UNSTABLE")
+    ap.add_argument("--charge", type=int, default=None, help="total charge (models with a charge embedding: OMOL-0)")
+    ap.add_argument("--spin-multiplicity", type=int, default=None, help="2S + 1 (models with a spin embedding)")
     args = ap.parse_args()
     model_path, head = args.model, args.head
     if head is None:  # the exporter's default head of a multi-head model, named explicitly for MACECalculator
@@ -278,16 +292,19 @@ def main():
     print(f"{args.set} set: " + ", ".join(f"{n} ({len(a)})" for n, a in configs))
     import torch
 
-    cache = ref_cache_path(model_path, head, args.set, args.ref_device, configs)
+    cs = (args.charge, args.spin_multiplicity)
+    if cs != (None, None):
+        print(f"charge {args.charge}, spin multiplicity {args.spin_multiplicity}")
+    cache = ref_cache_path(model_path, head, args.set, args.ref_device, configs, cs)
     cached = None if args.no_ref_cache else load_refs(cache, len(configs))
     if cached is not None:
         print(f"MACE references from {cache}")
         ref64, ref32, stress_ref = cached
     else:
         print("Running MACE float64 reference...")
-        ref64 = eval_mace(model_path, "float64", configs, head, args.ref_device)
+        ref64 = eval_mace(model_path, "float64", configs, head, args.ref_device, *cs)
         print("Running MACE float32 reference...")
-        ref32 = eval_mace(model_path, "float32", configs, head, args.ref_device)
+        ref32 = eval_mace(model_path, "float32", configs, head, args.ref_device, *cs)
         polar = type(torch.load(model_path, map_location="cpu", weights_only=False)).__name__ == "PolarMACE"
         # Stress reference per config: MACE float64 autograd, or for PolarMACE the corrected float64 stress (finite
         # differences); the float32 noise level stays the MACE float32-vs-float64 autograd difference (both carry the
@@ -315,7 +332,8 @@ def main():
             for k in VARIANT_KEYS:
                 os.environ.pop(k, None)
             os.environ.update(variant)
-            bundle = ensure_loup_bundle(model_path, list(zs), head=head, generic=args.generic or None)
+            bundle = ensure_loup_bundle(model_path, list(zs), head=head, generic=args.generic or None,
+                                        charge=args.charge, spin_multiplicity=args.spin_multiplicity)
             specialised[key] = read_bundle_meta(bundle).get("arch") != "generic"
             engines[key] = LoupEngine(bundle, device_id=0)
             for k in VARIANT_KEYS:

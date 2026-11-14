@@ -156,18 +156,23 @@ def exporter_fingerprint(paths=None) -> str:
 
 
 def ensure_loup_bundle(model_path: str, atomic_numbers: list[int], cache_dir: str | None = None,
-                       head: str | None = None, generic: bool | None = None) -> Path:
-    """The cached bundle for (model contents, species, head, path, exporter sources), exporting it on a miss.
+                       head: str | None = None, generic: bool | None = None, charge: int | None = None,
+                       spin_multiplicity: int | None = None) -> Path:
+    """The cached bundle for (model contents, species, head, path, charge / spin, exporter sources), exporting it on
+    a miss.
 
     The specialised OMAT-0-medium kernels are used when the model has that architecture; ``generic=True`` (or the
     environment variable LOUP_GENERIC=1) forces the generic path. ``head`` selects a multi-head model's head
-    (default: omat_pbe if present, else the last head)."""
+    (default: omat_pbe if present, else the last head). ``charge`` and ``spin_multiplicity`` (total charge in e and
+    2S + 1) apply to models with a total charge / spin embedding (MACE-OMOL-0; default 0 and 1); the export folds
+    them into the bundle, so each setting is its own bundle. Other models refuse them."""
     z_sorted = sorted({int(z) for z in atomic_numbers})
     if generic is None:
         generic = os.environ.get("LOUP_GENERIC", "0") == "1"
     cdir = Path(cache_dir or Path.home() / ".cache" / "loupmd")
     cdir.mkdir(parents=True, exist_ok=True)
-    tag = f"{_model_digest(model_path)}|{z_sorted}|{head}|{int(generic)}|{exporter_fingerprint()}"
+    tag = (f"{_model_digest(model_path)}|{z_sorted}|{head}|{int(generic)}|{charge}|{spin_multiplicity}|"
+           f"{exporter_fingerprint()}")
     key = hashlib.sha256(tag.encode()).hexdigest()[:16]
     out = cdir / f"{Path(model_path).stem}_{'_'.join(map(str, z_sorted))}_{key}.loup"
     if not out.is_file():
@@ -178,6 +183,10 @@ def ensure_loup_bundle(model_path: str, atomic_numbers: list[int], cache_dir: st
             cmd += ["--head", head]
         if generic:
             cmd.append("--generic")
+        if charge is not None:
+            cmd += ["--charge", str(int(charge))]
+        if spin_multiplicity is not None:
+            cmd += ["--spin-multiplicity", str(int(spin_multiplicity))]
         subprocess.run(cmd, check=True)
     return out
 

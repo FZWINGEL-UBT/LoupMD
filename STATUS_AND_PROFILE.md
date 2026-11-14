@@ -256,8 +256,10 @@ M1-M3, M6, M7 and F1-F7 are resolved, and S1, S3, S5-S8 of the sixth pass (secti
 ## 5. Model Families (Generic Path)
 
 Supported, as in FastMACE: MACE-OMAT-0 small, MACE-OFF23 small / medium / large, MACE-OFF23b medium, MACE-OFF24
-medium, MACE-MH-1 (any head, one per bundle; default `omat_pbe`) and MACE-POLAR-1 S / M / L. MACE-OMAT-0 medium
-keeps the specialised kernels of sections 1-4 (`LOUP_GENERIC=1` forces the generic path, used to cross-check it).
+medium, MACE-MH-1 (any head, one per bundle; default `omat_pbe`), MACE-POLAR-1 S / M / L and MACE-OMOL-0 extra
+large (`MACE-omol-0-extra-large-1024`: 1024 hidden channels; total charge and spin multiplicity per bundle,
+`ensure_loup_bundle(..., charge=Q, spin_multiplicity=M)`, default 0 and 1). MACE-OMAT-0 medium keeps the
+specialised kernels of sections 1-4 (`LOUP_GENERIC=1` forces the generic path, used to cross-check it).
 
 ### 5.1 Pipeline
 - `python/export.py` picks the exporter: `export_omat0.py` (specialised, `arch=omat0_medium_spec`) when
@@ -272,9 +274,19 @@ keeps the specialised kernels of sections 1-4 (`LOUP_GENERIC=1` forces the gener
   transform + MLP, for the nonlinear blocks with the source / target species embeddings, and the edge density) are
   fitted per species pair (symmetric pairs unless the block embeds sender and receiver separately) with FastMACE's
   certified cubic-Hermite spline (`spline.fit`; the export refuses a certificate above 1, i.e. a spline error
-  above the float32 network's own rounding error on FastMACE's `radial.certify` points).
+  above the float32 network's own rounding error on FastMACE's `radial.certify` points). The conv layers' tables are
+  stored as 8-byte cubics (CUBIC_PACKED8); the export then refines every band whose packing error would exceed half
+  the loader's bound (`refine_for_packing`: 2.5e-4 of the column's largest value or r-slope, whole table and
+  r >= 1 A) and re-certifies the refined grid. The gated bundles of the other families already pack within it and
+  are unchanged; OMOL-0's steeper radial functions needed it (layer 1 2.1e-3 before: refused by the loader).
   Products: FastMACE's factored symmetric contraction (`sc_factored.factor` / `fold_weights`), kernels keyed by a
   signature of the factored program.
+- MACE-OMOL-0's joint embedding (total charge, spin multiplicity) is one per-system vector added to every atom's
+  layer-0 features, so the export folds it into each species' embedding row (everything downstream of layer 0 stays
+  species-only) and its embedding readout energy into E0; charge and spin are export arguments (`export.py
+  --charge Q --spin-multiplicity M`, part of the bundle cache key) and are refused for models without the embedding.
+  Hidden widths up to 1024 (gates with one thread per channel, products on 128-channel blocks); the conv width stays
+  at most 512, and the fused product + readout kernel runs only for widths up to 512.
 - `python/ref_generic.py`: a float64 PyTorch executor of the bundle (same algorithm as the CUDA path, autograd forces
   and stress), used to check exports against MACE float64 and to localise CUDA-vs-model differences.
 - `python/gen_generic.py` -> `src/generated_generic.cuh`: conv forward / backward for x irreps up to 0e+1o+2e
@@ -310,6 +322,7 @@ float64 reference does not fit the GPU (OFF23-L / 23b / 24 on the 16 GB 5060 Ti,
 | OFF23 large, OFF23b medium, OFF24 medium | organic | PASS (CPU refs) | PASS (worst 1.46 / 1.23 / 0.27; OFF23-L CPU refs) |
 | MH-1 `omat_pbe`, `matpes_r2scan` | crystals | PASS | PASS |
 | MH-1 `omol` | organic | PASS | PASS |
+| OMOL-0 extra large | organic, neutral singlet / charge +1 doublet | PASS (worst 0.87 / 0.30; stress 1.12 / 0.18) | not run |
 | POLAR-1-S | crystals | PASS (worst ratio 1.30) | PASS (worst 0.99) |
 | POLAR-1-M | crystals | PASS (worst 0.97) | PASS (worst 1.14) |
 | POLAR-1-L | crystals | PASS (worst 1.16) | PASS (CPU refs; worst 2.69, force NaNbO3_c0) |

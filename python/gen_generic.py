@@ -39,7 +39,7 @@ def _ensure_imports():
     np, sp, torch, o3, eg = _np, _sp, _torch, _o3, _eg
 LX = (0, 1, 2)
 # Discovers every supported *.model in MODELS_DIR (sorted, deduplicated by product_signature); models outside
-# GenericModel's channel/degree bounds (C in 32..512 multiple of 32, seg_in == 16) are skipped with a message.
+# GenericModel's channel/degree bounds (product C in 32..1024 multiple of 32, seg_in == 16) are skipped with a message.
 
 def lit(v):
     return float(np.float32(v)).hex() + "f"
@@ -900,7 +900,8 @@ def emit_product(sig, prog, feats, sh):
           "}"]
     if lo == 0:
         # Fused product fwd + linear/bias/silu/linear readout fwd&bwd (ro_H = 16) + product bwd, one block per atom
-        # (blockDim = C, 32..512, multiple of 32): generalises sc1_fused across all model families.
+        # (blockDim = C, 32..512, multiple of 32; generic.cu uses it only for C <= 512): generalises sc1_fused across
+        # all model families.
         RF = [
             "template <int MAX_B, int MIN_BLK>",
             f"__global__ void __launch_bounds__(MAX_B, MIN_BLK) gprod_ro1_fused_{sig}(",
@@ -1194,13 +1195,18 @@ def _hash_files(paths):
     return h.hexdigest()[:16]
 
 
+# Products the generator emits kernels for (GenericModel's bounds: hidden width C in 32..1024, a multiple of 32, and
+# 16 input segments). Part of the IR cache key: the cached per-model items record which products were skipped.
+PRODUCT_C_MIN, PRODUCT_C_MAX = 32, 1024
+
+
 def _ir_hash():
     here = Path(__file__).resolve().parent
     return _hash_files((
         here / "export_generic.py",
         Path("/mnt/d/Margraf/FastMACE/fastmace/kernels/cuda/sc_factored.py"),
         Path("/mnt/d/Margraf/FastMACE/fastmace/kernels/cuda/sc_generated.py"),
-    ))
+    )) + f":C{PRODUCT_C_MIN}-{PRODUCT_C_MAX}"
 
 
 def _code_hash():
@@ -1312,7 +1318,8 @@ def main():
                 for idx, pr in enumerate(mc.products):
                     sc = pr.symmetric_contractions
                     sh = shape_of(sc)
-                    if sh is None or sh[0] != 16 or sh[3] < 32 or sh[3] > 512 or sh[3] % 32 != 0:
+                    if (sh is None or sh[0] != 16 or sh[3] < PRODUCT_C_MIN or sh[3] > PRODUCT_C_MAX
+                            or sh[3] % 32 != 0):
                         ir_items.append({"idx": idx, "skip": str(sh)})
                         continue
                     prog, feats, _ = factor(merged_terms(sc.etp.polynomial), sh[0], sh[1], sh[2])

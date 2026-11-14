@@ -864,8 +864,13 @@ void GenericModel::load(const Bundle& b) {
         L->readout = mi("readout");
         if (L->kind < 0 || L->kind > 4 || L->lmax_x > 2 || L->lmax_in > 3 || L->lmax_out > 2 || L->lmax_x > L->lmax_in)
             throw std::runtime_error("generic bundle layer " + std::to_string(t) + ": unsupported shape");
-        for (int c : {L->C_in, L->C_x, L->C_msg, L->C_out})
-            if (c < 32 || c > 512 || c % 32) throw std::runtime_error("generic bundle: channel counts must be 32..512, multiples of 32");
+        // Hidden widths (C_in / C_msg / C_out: GEMMs, gates with one thread per channel, products on 128-channel
+        // blocks) up to 1024; the conv width C_x up to 512 (the conv kernels size threads and shared memory by it),
+        // except in the hidden-table layer 0, which runs no conv (C_x feeds only its GEMMs).
+        for (int c : {L->C_in, L->C_msg, L->C_out})
+            if (c < 32 || c > 1024 || c % 32) throw std::runtime_error("generic bundle: hidden channel counts must be 32..1024, multiples of 32");
+        if (L->C_x < 32 || L->C_x > (L->first_hidden ? 1024 : 512) || L->C_x % 32)
+            throw std::runtime_error("generic bundle: conv channel count must be 32..512, multiples of 32");
         if (L->C_msg != L->C_out) throw std::runtime_error("generic bundle: product channels differ from the hidden channels");
         if (t == 0 && (L->lmax_in != 0 || L->C_in != C0_)) throw std::runtime_error("generic bundle: layer 0 input");
         if (t > 0) {
@@ -1419,7 +1424,9 @@ void GenericModel::record(const GenericPassInputs& in) {
             join();
         }
         const float* Dp = (L->kind == 2 || L->kind == 3) ? L->D : nullptr;
-        const bool ro1_fused = L->ro_folded && L->readout == 1 && L->ro_H == 16 && L->prod->ro1_128 != nullptr;
+        // the fused product + readout kernel runs one thread per channel (<= 512)
+        const bool ro1_fused = L->ro_folded && L->readout == 1 && L->ro_H == 16 && L->prod->ro1_128 != nullptr &&
+                               L->C_out <= 512;
         if (ro1_fused) {
             if (L->sc_has[0]) {
                 if (L->sc_species) {
@@ -1513,7 +1520,8 @@ void GenericModel::record(const GenericPassInputs& in) {
     for (int t = n_layers_ - 1; t >= 0; --t) {
         GenericLayer* L = layers_[t];
         const int Cx = L->C_x, Cm = L->C_msg, Co = L->C_out;
-        const bool ro1_fused = L->ro_folded && L->readout == 1 && L->ro_H == 16 && L->prod->ro1_128 != nullptr;
+        const bool ro1_fused = L->ro_folded && L->readout == 1 && L->ro_H == 16 && L->prod->ro1_128 != nullptr &&
+                               L->C_out <= 512;
         if (ro1_fused) {
             if (L->sc_has[0] && t > 0) {
                 if (L->sc_species) {

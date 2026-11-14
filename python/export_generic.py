@@ -378,7 +378,141 @@ def load_models(model_path):
     return m64, m32, convert_e3nn_cueq(m64), convert_e3nn_cueq(m32)
 
 
-def export_model(model_path, atomic_nums, out_path, head=None):
+# The engine stores conv-layer radial tables as 8-byte cubics (CUBIC_PACKED8, GenericModel::load in src/generic.cu):
+# one exponent per entry, set by the largest of |a0|, 2^8 |a1|, 2^14 |a2|, 2^19 |a3| (a_k: coefficients in
+# s = t - 1/2), and 20 / 19 / 12 / 8 mantissa bits. Where an interval is coarse for the function's curvature the
+# higher-order terms set the exponent and a0's step grows; the loader refuses a table whose error exceeds
+# kPackedTableMaxRelErr (src/model.hpp) of the column's largest value or r-slope. The export refines such bands to
+# half that bound.
+PACK_MAX_REL_ERR = 5e-4  # kPackedTableMaxRelErr
+PACK_TARGET = 0.5 * PACK_MAX_REL_ERR
+PACK_PHYSICAL_R = 1.0  # kPackedPhysicalR
+PACK_ROUNDS = 8
+
+
+def packed8_band_errors(coef, grid):
+    """Worst CUBIC_PACKED8 error per band of ``grid``: value and r-slope errors over the column maxima, over the whole
+    table and over r >= PACK_PHYSICAL_R, as GenericModel::load measures them (here sampled at 9 points per interval;
+    the loader's check is exact). ``coef``: [P, I, 4, Q] float32 power-basis coefficients in t (the stored table)."""
+    knots = [torch.linspace(a, b, n + 1, dtype=torch.float64)[:-1] for a, b, n in grid]
+    r0 = torch.cat(knots)  # [I] interval starts
+    inv_h = torch.cat([torch.full((n,), n / (b - a), dtype=torch.float64) for a, b, n in grid])  # [I]
+    s = torch.linspace(-0.5, 0.5, 9, dtype=torch.float64)
+    phys = (r0[None, :] + (s[:, None] + 0.5) / inv_h[None, :]) >= PACK_PHYSICAL_R  # [9, I]
+
+    def s_basis(c):  # [I, 4, Q] power basis in t -> a0..a3 in s = t - 1/2
+        c0, c1, c2, c3 = c[:, 0], c[:, 1], c[:, 2], c[:, 3]
+        return (c0 + 0.5 * c1 + 0.25 * c2 + 0.125 * c3, c1 + c2 + 0.75 * c3, c2 + 1.5 * c3, c3)
+
+    def exps(a):
+        top = torch.stack([a[0].abs(), a[1].abs() * 256.0, a[2].abs() * 16384.0, a[3].abs() * 524288.0]).amax(0)
+        e = torch.where(top > 0, torch.floor(torch.log2(top.clamp_min(1e-300))) + 1, torch.full_like(top, 1e9))
+        return e
+
+    P = coef.shape[0]
+    emin, emax = float("inf"), -float("inf")
+    for p in range(P):
+        e = exps(s_basis(coef[p].double()))
+        emax = max(emax, float(e[e < 1e9].max()) if (e < 1e9).any() else emax)
+        emin = min(emin, float(e.min()))
+    emin = max(emin, emax - 31)
+
+    def curves(a, ih):  # value and slope at the sample points: [9, I, Q] each
+        v = a[0][None] + s[:, None, None] * (a[1][None] + s[:, None, None] * (a[2][None] + s[:, None, None] * a[3][None]))
+        d = (a[1][None] + s[:, None, None] * (2 * a[2][None] + 3 * s[:, None, None] * a[3][None])) * ih[None, :, None]
+        return v, d
+
+    def quant_err(a):  # decoded - original coefficients
+        ei = exps(a).clamp_min(emin)
+        ei = torch.where(ei >= 1e9, torch.full_like(ei, emin), ei)
+        d = []
+        for k, (sh, nb) in enumerate(((0, 20), (8, 19), (14, 12), (19, 8))):
+            step = torch.pow(2.0, ei - sh - nb + 1)
+            lim = 2 ** (nb - 1) - 1
+            d.append(torch.clamp(torch.round(a[k] / step), -lim, lim) * step - a[k])
+        return d
+
+    regions = (torch.ones_like(phys), phys)
+    Q = coef.shape[-1]
+    colmax = torch.zeros(2, 2, Q, dtype=torch.float64)  # [region, value / slope, Q]
+    for p in range(P):  # pass 1: column maxima (one pair's samples in memory at a time)
+        v, sl = curves(s_basis(coef[p].double()), inv_h)
+        for region, mask in enumerate(regions):
+            m = mask[:, :, None]
+            colmax[region, 0] = torch.maximum(colmax[region, 0], (v.abs() * m).amax(dim=(0, 1)))
+            colmax[region, 1] = torch.maximum(colmax[region, 1], (sl.abs() * m).amax(dim=(0, 1)))
+        del v, sl
+    worst = torch.zeros(len(r0), dtype=torch.float64)  # pass 2: worst error / column maximum per interval
+    for p in range(P):
+        dv, dsl = curves(quant_err(s_basis(coef[p].double())), inv_h)
+        for region, mask in enumerate(regions):
+            m = mask[:, :, None]
+            for k, de in enumerate((dv, dsl)):
+                rel = (de.abs() * m) / colmax[region, k].clamp_min(1e-300)[None, None, :]
+                worst = torch.maximum(worst, rel.amax(dim=(0, 2)))
+        del dv, dsl
+    out, off = [], 0
+    for _, _, n in grid:
+        out.append(float(worst[off:off + n].max()))
+        off += n
+    return out
+
+
+def refine_for_packing(rspline, rad, ch64, ch32, weight, pairs, r_max, spl):
+    """``spl`` with every band whose CUBIC_PACKED8 error exceeds PACK_TARGET refined (the value error of a band set
+    by its curvature falls about as the spacing squared), and the certificate of the final grid; unchanged (with
+    certificate None) when the fit already packs within the target."""
+    import math
+
+    grid = [tuple(g) for g in spl["grid"]]
+    Q = spl["coef"].shape[-1] - 1  # the density column is stored apart, not packed
+    scores = packed8_band_errors(spl["coef"][..., :Q], grid)
+    if all(sc <= PACK_TARGET for sc in scores):
+        return spl, None, scores
+    weight64 = weight.detach().to(device="cpu", dtype=torch.float64)
+    for _ in range(PACK_ROUNDS):
+        grid = [(a, b, n if sc <= PACK_TARGET else math.ceil(n * 1.05 * math.sqrt(sc / PACK_TARGET)))
+                for (a, b, n), sc in zip(grid, scores)]
+        coef = rspline.coefficients(ch64, weight64, pairs, grid).to(torch.float32)
+        scores = packed8_band_errors(coef[..., :Q], grid)
+        if all(sc <= PACK_TARGET for sc in scores):
+            break
+    else:
+        raise RuntimeError(f"radial table does not pack within {PACK_TARGET} after {PACK_ROUNDS} refinements: {scores}")
+    scorer = rspline._Scorer(ch64, ch32, weight64, pairs, rad.R_LO, r_max, rad.CERTIFY_POINTS, rad.R_PHYSICAL, 1)
+    cert = scorer.certificate(scorer.relative(coef, grid))
+    return dict(grid=[(float(a), float(b), int(n)) for a, b, n in grid], coef=coef), cert, scores
+
+
+def joint_embedding_vector(m64, charge, spin_multiplicity):
+    """MACE's per-graph joint embedding (OMOL-0: total charge and spin multiplicity), in float64: the vector that
+    ScaleShiftMACE adds to every atom's layer-0 node features. None for a model without one (then charge and spin
+    must not be given)."""
+    if not hasattr(m64, "joint_embedding"):
+        if charge is not None or spin_multiplicity is not None:
+            raise ValueError("the model has no total-charge / spin embedding: charge and spin_multiplicity do not apply")
+        return None, {}
+    values = {"total_charge": 0 if charge is None else int(charge),
+              "total_spin": 1 if spin_multiplicity is None else int(spin_multiplicity)}
+    if values["total_spin"] < 1:
+        raise ValueError(f"spin multiplicity {values['total_spin']} must be at least 1")
+    feats = {}
+    for name, spec in m64.embedding_specs.items():
+        if name not in values:
+            raise ValueError(f"unsupported joint embedding feature '{name}'")
+        if spec["per"] != "graph":
+            raise ValueError(f"joint embedding feature '{name}' is per {spec['per']}, expected per graph")
+        if spec["type"] == "categorical":
+            idx = values[name] + int(spec.get("offset", 0))
+            if not 0 <= idx < int(spec["num_classes"]):
+                raise ValueError(f"{name} = {values[name]} is outside the model's range")
+        feats[name] = torch.tensor([float(values[name])], dtype=torch.float64)
+    with torch.no_grad():
+        v = m64.joint_embedding(torch.zeros(1, dtype=torch.long), feats)  # [1, C0]
+    return v[0].detach(), {"charge": values["total_charge"], "spin_multiplicity": values["total_spin"]}
+
+
+def export_model(model_path, atomic_nums, out_path, head=None, charge=None, spin_multiplicity=None):
     from fastmace.rewrites import radial as rad
     from fastmace.rewrites.radial import spline as rspline
 
@@ -425,6 +559,20 @@ def export_model(model_path, atomic_nums, out_path, head=None):
 
     # node embedding (species -> node features of layer 0)
     emb = W_of(probe_linear(m64.node_embedding.linear, o3.Irreps(f"{n_el}x0e"), m64.node_embedding.linear.irreps_out), 0)
+    # OMOL-0: the joint charge / spin embedding is one vector added to every atom's layer-0 features, so it folds into
+    # each species' embedding row (everything downstream of layer 0 stays species-only); the embedding readout then
+    # adds a per-species energy, folded into E0.
+    v_joint, joint_meta = joint_embedding_vector(m64, charge, spin_multiplicity)
+    if v_joint is not None:
+        emb = emb + v_joint.to(emb.dtype)[None, :]
+        meta.update(joint_meta)
+        if hasattr(m64, "embedding_readout"):
+            x = emb[cols].to(torch.float64)
+            heads_t = torch.full((S,), head_idx, dtype=torch.long)
+            with torch.no_grad():
+                e_emb = m64.embedding_readout(x, heads_t)
+            e_emb = e_emb.reshape(S, -1)[:, min(head_idx, e_emb.reshape(S, -1).shape[1] - 1)]
+            e0 += e_emb.detach().numpy().astype(np.float64)
     T["embedding"] = emb[cols].to(torch.float32).numpy()  # [S, C0]
 
     readouts = list(m64.readouts)
@@ -524,6 +672,12 @@ def export_model(model_path, atomic_nums, out_path, head=None):
         else:
             spl, cert = rspline.fit(ch64, ch32, ch64.weight, sym_pairs if sym else pairs, rad.R_LO, r_max,
                                     rad.CERTIFY_POINTS, rad.R_PHYSICAL, seed=1)
+            spl, cert_refined, pack = refine_for_packing(rspline, rad, ch64, ch32, ch64.weight,
+                                                         sym_pairs if sym else pairs, r_max, spl)
+            if cert_refined is not None:
+                cert = cert_refined
+                print(f"layer {t}: radial grid refined for the 8-byte tables (worst band {max(pack):.2e})",
+                      flush=True)
         if cert["worst"] > 1.0:
             raise RuntimeError(f"layer {t}: radial spline certificate {cert['worst']:.3f} > 1")
         grid = spl["grid"]
