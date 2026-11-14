@@ -115,6 +115,8 @@ Conventions:
 | [gemm-plan-cache](#gemm-plan-cache) | Persistent per-GPU plan cache | `LOUP_CACHE_DIR`, `LOUP_RETUNE` | both | DEFAULT | S3; S6 | cold-start `evaluate` 1.3 -> 0.21 s (5060 Ti), 0.76 -> 0.05 s (Ada) | [§3.1 #16][s31], [§3.2 F4][s32] |
 | [gemm-own-sgemm](#gemm-own-sgemm) | Own 128 x 128 x 16 `cp.async` SIMT SGEMM as a candidate | `loup::sgemm128` | both | DEFAULT | S5 | 5060 Ti `NbCl5` -1.6% / -2.0% (first version), -1.4% / -1.3% (`cp.async`) | [§3.1 #30][s31] |
 | [gemm-own-n192](#gemm-own-n192) | 128 x 64 tiles for N = 192 | – | spec | DEFAULT (tie) | S5 | 7 products 297 -> 248 us; MD tie | [§3.1 #30][s31] |
+| [gemm-own-n144](#gemm-own-n144) | `sgemm128_kernel<4, false>` partial-`N` `128 x 64` tiles when `(N % 128) <= 64` (e.g. `N = 144`) | `loup::sgemm128` | both | DEFAULT (5060 Ti only) | S16 | replaces `magma_sgemmEx` on `N = 144` (`POLAR-1-M` `NbCl5` `170.7 -> 76.6 us` in `prof_k`); tie on `M >= 1944` MD | this file |
+| [gemm-own-sgemm64](#gemm-own-sgemm64) | Own `64 x 64 x 16` `cp.async` SIMT SGEMM (`128` threads) scoped to `M <= 1600` | `loup::sgemm64`, `DiskPlan::use_own == 2` | both (`M <= 1600`) | DEFAULT (5060 Ti only) | S16 | fresh-plan ABBA: `POLAR-1-S` `NaCl216` `1.85 -> 1.61 ms` (`0.873`), `POLAR-1-M` `NaCl216` `4.30 -> 3.61` (`0.839`), `POLAR-1-L` `NaCl216` `8.24 -> 7.22` (`0.876`), `MH-1` `NaCl216` `1.71 -> 1.57` (`0.919`), `OFF23-M` `water216` `1.39 -> 1.30` (`0.938`), `MH-1` `NbCl5` tie (`1.0002`) | this file |
 | [gemm-sgemm-variants](#gemm-sgemm-variants) | 4 stages BK = 8; register-staged BK = 8; 1 block / SM; extra 64 x 128 / 128 x 64 tiles | – | spec | REJECTED | S5 | 5-50% slower, or `NbCl5` +0.8% to +1.8% in the pass | [§3.3][s33] |
 | [gemm-pretransposed](#gemm-pretransposed) | Pre-transposed forward weights (old idea 1) | – | spec | REJECTED | – | 5060 Ti tie, Ada +1.0% / +0.3% | [§3.3][s33] |
 | [gemm-grouped-species](#gemm-grouped-species) | One grouped species GEMM for `compose0_fwd` + `skip16` (T4) | `fm_tf32x3_species_rr_64x64` | spec | REJECTED | – | 5060 Ti +1.7% / +0.8% | [§3.3][s33] |
@@ -191,6 +193,9 @@ Conventions:
 | [gen-gprod-ro1-fused](#gen-gprod-ro1-fused) | Fused product fwd + linear/bias/silu/linear readout (`ro_H = 16`) + product bwd (`sc1_fused` generalisation) + 128-thread `gprod_fwd`/`bwd` | `gprod_ro1_fused_<sig>`, `launch_prod` | gen (`ro_folded`, `readout == 1`, `ro_H == 16`; `C % 128 == 0`) | DEFAULT (5060 Ti only) | S13 | OMAT-S `SrTiO3` 5.12 -> 4.99 ms/step (0.976); OFF23-M water 8.29 -> 8.16 (0.984); OMAT-M gen 9.81 -> 9.67 (0.986); POLAR-1-M `NbCl5` 27.28 -> 27.14 (0.995) | this file |
 | [gen-gconv-cfix-preloc](#gen-gconv-cfix-preloc) | `C_FIX` (`96/128/224`) template on `gconv_bwd_L0/L1` (`gconv_bwd_L1<true,128>`: `REG:128 -> 62`) + prelocated `act_slab`/`act_t_sx` from `scatter_active_edges_kernel` (`pair_sym && C_x <= 256`) + 256 thr on `L1` | `C_FIX`, `PRELOC`, `preloc_grid()` | gen (`C = 96/128/224`; preloc `pair_sym && C_x <= 256`) | DEFAULT (5060 Ti only) | S14 | OMAT-S `SrTiO3` 4.91 -> 4.73 ms/step (0.964); OFF23-M water 8.00 -> 7.43 (0.928); MH-1 `NbCl5` 12.82 -> 12.50 (0.976); POLAR-1-M 27.20 -> 27.06 (0.995); OMAT-M gen 9.67 -> 8.91 (0.921, `1.051x` spec) | this file |
 | [gen-conv-fwd-cg-fold](#gen-conv-fwd-cg-fold) | Staged per-edge CG linear forms in `s_sh` (`ED = 16/36/72`) + per-edge `s_pw` polynomial scalars in `gconv_fwd` | `emit_conv_fwd` | gen | DEFAULT (5060 Ti only) | S15 | `gconv_fwd_L1` `1,688 -> 1,572 us` (`OFF23-M`), `L2b` `3,029 -> 2,898 us` (`OFF23-L`); ABBA OMAT-S `SrTiO3` `0.989` (`4.82 -> 4.77 ms`), `OFF23-L` `0.989` (`28.30 -> 28.00`), `OFF23-M` tie (`0.997`), `POLAR-1-M` tie (`0.999`), `MH-1` `0.981` inconclusive (`1.682/1.746` spread) | this file |
+| [gen-conv-bwd-128-regq](#gen-conv-bwd-128-regq) | `128`-thread register-`Q` edge-staged `gconv_bwd_L0/L1_128` (`PAIR = false` / `true`) | – | gen | REJECTED | S16 | `PAIR=false`: `L1` `2,216 -> 2,147 us`, MD `OFF23-M` tie (`0.999`), `OMAT-0-S` `0.997`; `PAIR=true` (`REG:128`): MD `+0.4%`/`+0.8%` | this file |
+| [gen-conv-l1-carve0](#gen-conv-l1-carve0) | `PreferredSharedMemoryCarveout = 0` on generic conv & `first_bwd_edge` kernels | – | gen | REJECTED | S16 | capped `gconv_fwd_L1` to `8.19 KB` & `gconv_bwd_L1` to `32.77 KB` (`1` blk/SM); `OFF23-M` `7,372 -> 11,592 us/eval` | this file |
+| [gen-conv-fwd-l1-r4](#gen-conv-fwd-l1-r4) | `gconv_fwd_L1<4, true, 512, ..., 128, 16>` (`4` receivers/block, `TILE = 16`) | – | gen | REJECTED | S16 | `OMAT-0-M` generic `SrTiO3` `8.79 -> 8.66 ms` (`0.985`), `OFF23-M` water `7.44 -> 7.54` (`1.013`, `REG:124`) | this file |
 
 ### MACE-POLAR-1 long range (`src/polar.cu`)
 
@@ -691,6 +696,23 @@ Each entry has the same fields. Unless stated, the system is OMAT-0 medium on th
 - Measured: 111 registers, 36 KB; the 5060 Ti autotune picks it for all seven `SrTiO3` `compose0` backward products (297 -> 248 us); MD 5060 Ti `NbCl5` +0.5% / +0.0%, `SrTiO3` -0.1% / -0.4%; Ada +1.2% / +1.0% (A), +0.0% / -0.2% (B).
 - Sources: [§3.1 #30][s31].
 
+<a id="gemm-own-n144"></a>
+#### gemm-own-n144: partial-`N` `128 x 64` tiles in `loup::sgemm128`
+- Stage: S16 (14 November 2026).
+- What: extended `loup::sgemm128` (`src/sgemm.cu`) to launch `sgemm128_kernel<4, false>` (`128 x 64` tiles, `REG:105, STACK:0`) whenever `(N % 128) != 0 && (N % 128) <= 64` (such as `N = 144` padded `K0` layers), avoiding nearly half-empty `128 x 128` tiles.
+- Status: DEFAULT (5060 Ti only).
+- Measured (5060 Ti): in `POLAR-1-M` `NbCl5` `prof_k`, partial-`N` `sgemm128` cut that shape from `170.7` to `76.6 us`. (A paired `L2/4` cold-L2 threshold test in `d906545` was reverted in `0a240ec` after mixed `OMAT-0-S` ordering.)
+- Sources: this file; commits `d906545`, `0a240ec`.
+
+<a id="gemm-own-sgemm64"></a>
+#### gemm-own-sgemm64: `64 x 64 x 16` `cp.async` SIMT SGEMM for `M <= 1600`
+- Switch: `loup::sgemm64` (`sgemm64_kernel<FULL_N>` in `src/sgemm.cu`), autotuned when `is_sm120 && M <= 1600`, stored in `DiskPlan::use_own == 2`.
+- Stage: S16 (14 November 2026).
+- What: on small cells (`N = 216..648`, `M <= 1512`), `128 x 128` tiles launched only 2–12 blocks on 36 SMs and cuBLASLt fell back to `magma_sgemmEx_kernel` (e.g. `124 us` on `POLAR-1-S` `M = 216, N = 144, K = 2048`). `sgemm64_kernel` uses `128` threads (`8 x 4` outputs/thread, `REG:103, STACK:0, SHARED:25600`), giving `4x` more threadblocks across SMs. Unscoped `sgemm64` won hot-L2 autotuning on `M = 1944..5832` (`nbcl5`) where cold `A` streams hurt (`+0.68%` `POLAR-1-M`, `+0.25%` `MH-1`), and Ada was not tested, so it is scoped to `sm_120` and `M <= 1600`.
+- Status: DEFAULT (5060 Ti only).
+- Measured (5060 Ti, fresh plans): `POLAR-1-S` `NaCl216` `1.8458 -> 1.6105 ms` (`b/a = 0.8726`), `POLAR-1-M` `NaCl216` `4.2996 -> 3.6069` (`0.8389`), `POLAR-1-L` `NaCl216` `8.2416 -> 7.2164` (`0.8756`), `MH-1` `NaCl216` `1.7089 -> 1.5700` (`0.9187`), `OFF23-M` `water216` `1.3912 -> 1.3047` (`0.9378`), `MH-1` `NbCl5` tie (`12.5860 -> 12.5888`, `1.0002`). Gates pass on `POLAR-1-S/M`, `MH-1` (crystals + organic), `OMAT-0-S/M`, `OFF23-M`; `POLAR-1-L` `cmp_libs` `dF = 2.07e-7` (`nacl216`); pytest suite passes.
+- Sources: this file.
+
 <a id="gemm-sgemm-variants"></a>
 #### gemm-sgemm-variants: other own-SGEMM shapes and pipelines
 - Stage: S5.
@@ -1131,6 +1153,28 @@ POLAR-1 NaCl 3x3x3 (216) and POLAR-1-M `NbCl5` 3x3x3 (1,944).
 - What: applied the same per-edge Clebsch-Gordan linear-form staging (`ED = 16/36/72` for `lx = 0/1/2` in `s_sh`, computed once per edge where `edge_sh16` runs) and warp-0 `s_pw` (`float4`) polynomial scaling to `emit_conv_fwd` in `python/gen_generic.py`.
 - Status: DEFAULT (5060 Ti only).
 - Measured (5060 Ti): kernel profiles `OFF23-M` water `gconv_fwd_L1` `1,687.8 -> 1,572.4 us` (`-6.8%`), `OFF23-L` water `gconv_fwd_L2b` `3,029.3 -> 2,897.5 us` (`-4.4%`); ABBA `OMAT-0` small `SrTiO3` `4.8219 -> 4.7672 ms` (`0.9886`), `OFF23-L` water `28.3006 -> 27.9964 ms` (`0.9893`), `OFF23-M` water tie (`7.5261 -> 7.5063`, `0.9974`), `POLAR-1-M` `NbCl5` tie (`25.0199 -> 24.9920`, `0.9989`), `MH-1` `NaCl` `1.7464 -> 1.7138` (`0.9813`, inconclusive: candidate reps spanned `1.6816` vs `1.7460 ms`). Cached 3x gates pass on `OMAT-0` medium/small, `OFF23-S/M/L`, `OFF24-M`, `MH-1` (crystals + organic), `POLAR-1-S/M`; pytest suite passes.
+- Sources: this file.
+
+<a id="gen-conv-bwd-128-regq"></a>
+#### gen-conv-bwd-128-regq: `128`-thread register-`Q` edge-staged `gconv_bwd`
+- Stage: S16 (14 November 2026).
+- What: replaced `s_q` shared-memory staging and `4`-iteration `ch` loop in `gconv_bwd_L0/L1` (`C = 128`) with `128` threads (`1` channel/thread), `Q` in registers, `32`-edge tile staging, and `s_pull[4][32]` reduction (`PAIR = false` and `true`).
+- Status: REJECTED.
+- Measured (5060 Ti): `PAIR = false` (`L1 REG:80`, `L0 REG:56`, `STACK:0`): `gconv_bwd_L1` `2,216 -> 2,147 us` (`ncu` `L1 Hit 8.51%`, `L2 79.9%`), `OFF23-M` water ABBA `7.405 -> 7.398 ms` (`0.9991` tie), `OMAT-0-S` `SrTiO3` `4.725 -> 4.712` (`0.9972`). Adding staged `s_n/s_pw/s_dpw` + `PAIR = true` hit `REG:128` (`L1`) / `80` (`L0`) and regressed MD (`7.43 -> 7.46 ms`, `4.73 -> 4.77 ms`). Reverted.
+- Sources: this file.
+
+<a id="gen-conv-l1-carve0"></a>
+#### gen-conv-l1-carve0: `PreferredSharedMemoryCarveout = 0` on generic conv & `first_bwd_edge`
+- Stage: S16 (14 November 2026).
+- Status: REJECTED.
+- Measured (5060 Ti, `OFF23-M` water): `ncu` confirmed driver dropped shared config to `8.19 KB` (`gconv_fwd_L1`) and `32.77 KB` (`gconv_bwd_L1`), raising `L1 Hit` `4.5 -> 6.8%` and `9.1 -> 15.1%` but capping each SM to `1` block (`gconv_fwd_L1` `1,537 -> 2,805 us`, `gconv_bwd_L1` `2,242 -> 3,892 us`, `first_bwd_edge` `364 -> 1,140 us`). Reverted.
+- Sources: this file.
+
+<a id="gen-conv-fwd-l1-r4"></a>
+#### gen-conv-fwd-l1-r4: `R = 4, TILE = 16` in `gconv_fwd_L1`
+- Stage: S16 (14 November 2026).
+- Status: REJECTED.
+- Measured (5060 Ti, `REG:124, SHARED:12032`, `L1 Hit 4.5 -> 18.3%`): `OMAT-0-M` generic `SrTiO3` `8.79 -> 8.66 ms` (`0.985`), `OFF23-M` water `7.44 -> 7.54` (`1.013`, `1,571 -> 1,700 us`). Interleaved water molecules lose to higher register count. Reverted (needs per-system selection if pursued).
 - Sources: this file.
 
 <a id="rv8-fixes"></a>

@@ -293,6 +293,7 @@ static uint64_t library_build_hash() {
 struct LoupHandle {
     int device_id = 0;
     int l2_bytes = 0;
+    bool is_sm120 = false;
     cudaStream_t stream = nullptr;
     cublasHandle_t cublas = nullptr;
     cublasLtHandle_t cublas_lt = nullptr;
@@ -318,7 +319,7 @@ struct LoupHandle {
         cublasLtMatmulAlgo_t algo{};
         bool use_hyb = false;
         int hyb_tile = 0;
-        bool use_own = false;  // loup::sgemm128
+        int own_mode = 0;      // 1 = loup::sgemm128, 2 = loup::sgemm64
     };
     std::map<std::tuple<int, int, int, bool, bool>, LtPlan> lt_cache;
     std::map<std::tuple<const float*, int, int>, float*> bt_cache;  // [K, N] copies of transposed weights (weight_kn)
@@ -606,6 +607,7 @@ struct LoupHandle {
 namespace loup {
 void sgemm128_init();
 void sgemm128(int M, int N, int K, const float* A, const float* B, float* C, float beta, cudaStream_t stream);
+void sgemm64(int M, int N, int K, const float* A, const float* B, float* C, float beta, cudaStream_t stream);
 void transpose(int R, int Ccols, const float* in, float* out, cudaStream_t stream);
 }
 
@@ -713,9 +715,9 @@ static inline void sgemm_rm(
         auto dit = h->disk_plans.find(key);
         if (dit != h->disk_plans.end()) {
             const auto& dp = dit->second;
-            if (dp.use_own) {
+            if (dp.use_own == 1 || (dp.use_own == 2 && h->is_sm120)) {
                 if (own_ok) {
-                    plan.use_own = true;
+                    plan.own_mode = dp.use_own;
                     hit_disk = true;
                 }
             } else if (dp.use_hyb) {
@@ -798,18 +800,22 @@ static inline void sgemm_rm(
                 }
                 if (own_ok && (((uintptr_t)d_tmpC & 15) == 0)) {
                     const float* Bkn = own_b();
-                    const float ms = time_min([&] { loup::sgemm128(M, N, K, A, Bkn, d_tmpC, beta, strm); });
-                    if (consider(ms)) { plan.use_own = true; plan.use_hyb = false; }
+                    const float ms128 = time_min([&] { loup::sgemm128(M, N, K, A, Bkn, d_tmpC, beta, strm); });
+                    if (consider(ms128)) { plan.own_mode = 1; plan.use_hyb = false; }
+                    if (h->is_sm120 && M <= 1600) {
+                        const float ms64 = time_min([&] { loup::sgemm64(M, N, K, A, Bkn, d_tmpC, beta, strm); });
+                        if (consider(ms64)) { plan.own_mode = 2; plan.use_hyb = false; }
+                    }
                 }
                 if (getenv("LOUP_DEBUG_GEMM"))
                     fprintf(stderr, "gemm M=%d N=%d K=%d transB=%d beta=%g cold=%d -> %s%d %.1f us\n", M, N, K, (int)transB,
-                            beta, (int)cold, plan.use_own ? "own" : plan.use_hyb ? "hyb" : "lt", plan.use_hyb ? plan.hyb_tile : 0,
-                            best_ms * 1e3f);
+                            beta, (int)cold, plan.own_mode == 2 ? "own64_" : plan.own_mode == 1 ? "own" : plan.use_hyb ? "hyb" : "lt",
+                            plan.use_hyb ? plan.hyb_tile : 0, best_ms * 1e3f);
                 LoupHandle::DiskPlan dp{};
                 dp.M = M; dp.N = N; dp.K = K;
                 dp.transB = transB ? 1 : 0; dp.beta_nz = (beta != 0.0f) ? 1 : 0;
                 dp.use_hyb = plan.use_hyb ? 1 : 0; dp.hyb_tile = (uint8_t)plan.hyb_tile;
-                dp.use_own = plan.use_own ? 1 : 0;
+                dp.use_own = (uint8_t)plan.own_mode;
                 dp.algo = plan.algo;
                 // A winner within 3% of the runner-up is timing noise: use it in this process but re-time next time
                 // instead of pinning it for every later run on this GPU.
@@ -822,8 +828,9 @@ static inline void sgemm_rm(
         it = h->lt_cache.emplace(key, plan).first;
     }
     const auto& plan = it->second;
-    if (plan.use_own && own_ok && (((uintptr_t)C & 15) == 0)) {
-        loup::sgemm128(M, N, K, A, own_b(), C, beta, strm);
+    if (plan.own_mode && own_ok && (((uintptr_t)C & 15) == 0)) {
+        if (plan.own_mode == 2) loup::sgemm64(M, N, K, A, own_b(), C, beta, strm);
+        else                    loup::sgemm128(M, N, K, A, own_b(), C, beta, strm);
         return;
     }
     if (plan.use_hyb && alpha == 1.0f && beta == 0.0f &&
@@ -1514,6 +1521,11 @@ LoupHandle* loup_create(const char* loup_path, int device_id) {
         h = new LoupHandle();
         h->device_id = device_id;
         CUDA_CHECK_THROW(cudaDeviceGetAttribute(&h->l2_bytes, cudaDevAttrL2CacheSize, device_id));
+        {
+            int cc_maj = 0;
+            CUDA_CHECK_THROW(cudaDeviceGetAttribute(&cc_maj, cudaDevAttrComputeCapabilityMajor, device_id));
+            h->is_sm120 = (cc_maj == 12);
+        }
         CUDA_CHECK_THROW(cudaStreamCreate(&h->stream));
         CUBLAS_CHECK_THROW(cublasCreate(&h->cublas));
         CUBLAS_CHECK_THROW(cublasLtCreate(&h->cublas_lt));
