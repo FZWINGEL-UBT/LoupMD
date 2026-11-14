@@ -62,6 +62,9 @@ public:
     float r_max() const { return r_max_; }
     const std::vector<int>& atomic_numbers() const { return Z_; }
     const std::vector<double>& e0() const { return e0_; }
+    int n_layers() const { return n_layers_; }
+    // The compiled product kernels this bundle uses, one signature per layer, joined by ';' (loup_get_info).
+    std::string kernel_signature() const;
 
     // Per-system buffers (N atoms); edge buffers grow with ensure_edges (call outside graph capture).
     void alloc_system(int N);

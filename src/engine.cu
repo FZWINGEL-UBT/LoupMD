@@ -2,6 +2,7 @@
 #include "model.hpp"
 #include "kernels_common.cuh"
 #include "generated_kernels.cuh"
+#include "generated_kernels_signature.h"
 #include "generic.hpp"
 #include "bundle.hpp"
 
@@ -2390,6 +2391,47 @@ int loup_profile_force(LoupHandle* h, int warmup, int n_calls, double* out_total
 
 const char* loup_last_error(const LoupHandle* h) {
     return h ? h->last_error.c_str() : tl_null_error.c_str();
+}
+
+int loup_abi_version(void) { return LOUP_ABI_VERSION; }
+
+const char* loup_version(void) {
+    static const std::string version = [] {
+        char buf[96];
+        snprintf(buf, sizeof(buf), LOUP_VERSION "+%016llx", (unsigned long long)library_build_hash());
+        return std::string(buf);
+    }();
+    return version.c_str();
+}
+
+static int get_info_impl(const LoupHandle* h, LoupInfo* out) {
+    if (!out) { loup::set_error("out is NULL"); return -1; }
+    LoupInfo info{};
+    info.abi = LOUP_ABI_VERSION;
+    cudaDeviceProp prop{};
+    CUDA_CHECK(cudaGetDeviceProperties(&prop, h->device_id));
+    info.compute_capability = prop.major * 10 + prop.minor;
+    memcpy(info.gpu_name, prop.name, std::min(strnlen(prop.name, sizeof(prop.name)), sizeof(info.gpu_name) - 1));
+    info.n_layers = h->gen ? h->gen->n_layers() : 2;
+    info.has_long_range = (h->gen && h->gen->has_lr()) ? 1 : 0;
+    info.specialised = h->gen ? 0 : 1;
+    info.n_species = h->n_species();
+    info.r_max = (double)h->cutoff();
+    const std::string sig = h->gen ? h->gen->kernel_signature() : std::string(LOUP_KERNEL_SIGNATURE);
+    const size_t room = sizeof(info.kernel_signature) - 1;
+    if (sig.size() <= room) {
+        memcpy(info.kernel_signature, sig.data(), sig.size());
+    } else {
+        memcpy(info.kernel_signature, sig.data(), room - 3);
+        memcpy(info.kernel_signature + room - 3, "...", 3);
+    }
+    *out = info;
+    return 0;
+}
+
+int loup_get_info(const LoupHandle* h, LoupInfo* out) {
+    // The error channel is the only state of the handle this call touches.
+    return guarded(const_cast<LoupHandle*>(h), "loup_get_info", [&] { return get_info_impl(h, out); });
 }
 
 }  // extern "C"

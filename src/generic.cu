@@ -1338,6 +1338,15 @@ void GenericModel::setup_chain_fold(const Bundle& b) {
         for (int l = 0; l < 3; ++l) layers_[t]->fold[l] = std::move(out[t][l]);
     chain_fold_ = true;
 }
+std::string GenericModel::kernel_signature() const {
+    std::string out;
+    for (const GenericLayer* L : layers_) {
+        if (!out.empty()) out += ';';
+        out += (L && L->prod && L->prod->sig) ? L->prod->sig : "?";
+    }
+    return out;
+}
+
 // ------------------------------------------------------------------------------------------------- buffers
 bool GenericModel::set_cell(const double* cell) { return lr_ ? lr_->set_cell(cell) : false; }
 

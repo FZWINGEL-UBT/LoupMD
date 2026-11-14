@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import ctypes
 import os
+from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
@@ -15,6 +16,8 @@ from .errors import BackendError, InputError
 
 _c_double_p = ctypes.POINTER(ctypes.c_double)
 _c_int_p = ctypes.POINTER(ctypes.c_int)
+
+ABI_VERSION = 1  # LOUP_ABI_VERSION of include/loupmd.h this binding is written against
 
 
 class LoupMDStats(ctypes.Structure):
@@ -28,6 +31,35 @@ class LoupMDStats(ctypes.Structure):
         ("tune_ms", ctypes.c_double),
         ("pipelined_steps", ctypes.c_int),
     ]
+
+
+class LoupInfo(ctypes.Structure):
+    _fields_ = [
+        ("abi", ctypes.c_int),
+        ("compute_capability", ctypes.c_int),
+        ("n_layers", ctypes.c_int),
+        ("has_long_range", ctypes.c_int),
+        ("specialised", ctypes.c_int),
+        ("n_species", ctypes.c_int),
+        ("r_max", ctypes.c_double),
+        ("gpu_name", ctypes.c_char * 64),
+        ("kernel_signature", ctypes.c_char * 160),
+    ]
+
+
+@dataclass(frozen=True)
+class EngineInfo:
+    """What an engine handle runs (``loup_get_info``)."""
+
+    abi: int
+    compute_capability: int   # of the handle's GPU, major * 10 + minor
+    n_layers: int
+    has_long_range: bool
+    specialised: bool         # the specialised kernels; False on the generic path
+    n_species: int
+    r_max: float              # A
+    gpu_name: str
+    kernel_signature: str
 
 
 _LIB = None
@@ -77,6 +109,22 @@ def _load_lib():
         except OSError as exc:
             raise BackendError(f"cannot load {so_path}", why=str(exc),
                                next_step="Build the library with `make`, or point LOUP_LIB at a build.") from None
+    # The interface version first: nothing else of a library of another version is touched.
+    abi = 0  # a build older than the version call
+    if hasattr(lib, "loup_abi_version"):
+        lib.loup_abi_version.argtypes = []
+        lib.loup_abi_version.restype = ctypes.c_int
+        abi = int(lib.loup_abi_version())
+    if abi != ABI_VERSION:
+        raise BackendError(
+            f"{so_path} has C interface version {abi}, and this loupmd package needs version {ABI_VERSION}",
+            why="the library and the Python package come from different builds",
+            next_step="Rebuild the library from this source tree (`make`), or unset LOUP_LIB.")
+    lib.loup_version.argtypes = []
+    lib.loup_version.restype = ctypes.c_char_p
+    lib.loup_last_error.argtypes = [ctypes.c_void_p]
+    lib.loup_last_error.restype = ctypes.c_char_p
+    lib.loup_get_info.argtypes = [ctypes.c_void_p, ctypes.POINTER(LoupInfo)]
     lib.loup_create.argtypes = [ctypes.c_char_p, ctypes.c_int]
     lib.loup_create.restype = ctypes.c_void_p
     lib.loup_destroy.argtypes = [ctypes.c_void_p]
@@ -91,32 +139,26 @@ def _load_lib():
     lib.loup_get_state.argtypes = [ctypes.c_void_p, _c_double_p, _c_double_p, _c_double_p, _c_double_p]
     lib.loup_profile_force.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_int, _c_double_p]
     for name in ("loup_set_system", "loup_evaluate", "loup_set_state", "loup_run_nve", "loup_run_langevin",
-                 "loup_get_state", "loup_profile_force"):
+                 "loup_get_state", "loup_profile_force", "loup_get_info"):
         getattr(lib, name).restype = ctypes.c_int
-    if hasattr(lib, "loup_last_error"):  # absent from builds older than the error channel
-        lib.loup_last_error.argtypes = [ctypes.c_void_p]
-        lib.loup_last_error.restype = ctypes.c_char_p
     _LIB = lib
     return lib
+
+
+def library_version() -> str:
+    """``loup_version()`` of the loaded library: the release, ``+``, and 16 hex digits identifying the build."""
+    return _load_lib().loup_version().decode("ascii")
 
 
 def last_error(handle=None) -> str:
     """The library's message for the last failed call on ``handle``; without a handle, this thread's last failed
     create. Empty if that call succeeded."""
-    lib = _load_lib()
-    if not hasattr(lib, "loup_last_error"):
-        return ""
-    text = lib.loup_last_error(handle)
+    text = _load_lib().loup_last_error(handle)
     return text.decode("utf-8", errors="replace") if text else ""
 
 
 def _fail(call: str, handle=None):
-    text = last_error(handle)
-    if text:
-        raise BackendError(text, call=call)
-    raise BackendError(f"{call}: failed", why="this build of libloupmd reports no reason (it predates "
-                       "loup_last_error)", next_step="Run again with LOUP_DEBUG_ERRORS=1, or rebuild the library.",
-                       call=call)
+    raise BackendError(last_error(handle) or f"{call}: failed without a message", call=call)
 
 
 def _array(x, shape: tuple, name: str) -> np.ndarray:
@@ -149,6 +191,15 @@ class LoupEngine:
 
     def last_error(self) -> str:
         return last_error(self._h)
+
+    def info(self) -> EngineInfo:
+        raw = LoupInfo()
+        self._check(self._lib.loup_get_info(self._h, ctypes.byref(raw)), "loup_get_info")
+        return EngineInfo(
+            abi=raw.abi, compute_capability=raw.compute_capability, n_layers=raw.n_layers,
+            has_long_range=bool(raw.has_long_range), specialised=bool(raw.specialised), n_species=raw.n_species,
+            r_max=raw.r_max, gpu_name=raw.gpu_name.decode("utf-8", errors="replace"),
+            kernel_signature=raw.kernel_signature.decode("ascii", errors="replace"))
 
     def _check(self, rc: int, call: str):
         if rc != 0:

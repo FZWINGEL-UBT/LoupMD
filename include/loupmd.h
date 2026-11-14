@@ -6,6 +6,16 @@ extern "C" {
 
 typedef struct LoupHandle LoupHandle;
 
+// The version of this C interface. It changes when a call or a struct of this header changes incompatibly; a
+// caller built against another value must not use the library (loupmd/_core.py refuses it).
+#define LOUP_ABI_VERSION 1
+// The release this source belongs to (the same string as loupmd.__version__).
+#define LOUP_VERSION "1.0.0a1"
+
+int loup_abi_version(void);     // LOUP_ABI_VERSION of the loaded library
+const char* loup_version(void); // LOUP_VERSION "+" 16 hex digits: a hash of the library file (the one in the
+                                // GEMM plan cache's file names)
+
 typedef struct {
     double step_ms;                    // GPU time per step, excluding tune_ms
     int rebuilds;
@@ -35,6 +45,20 @@ const char* loup_last_error(const LoupHandle* h);
 // dependence (MACE PR 1718), which the PolarMACE releases up to 0.3.16 leave out.
 LoupHandle* loup_create(const char* loup_path, int device_id);
 void loup_destroy(LoupHandle* h);
+
+// What a handle runs: the model as loaded and the GPU it is on.
+typedef struct {
+    int abi;                    // LOUP_ABI_VERSION of the library
+    int compute_capability;     // of the handle's GPU, major * 10 + minor (120 for sm_120)
+    int n_layers;               // interaction layers of the model
+    int has_long_range;         // 1 for MACE-POLAR-1 (k-space electrostatics), else 0
+    int specialised;            // 1 on the specialised kernels, 0 on the generic path
+    int n_species;              // elements the bundle was exported for
+    double r_max;               // cutoff in A
+    char gpu_name[64];
+    char kernel_signature[160]; // the compiled kernels the bundle needs; ends in "..." if it did not fit
+} LoupInfo;
+int loup_get_info(const LoupHandle* h, LoupInfo* out);
 
 // Set system topology (species as atomic numbers Z[0..n_atoms-1], masses in amu).
 // Internally groups atoms by species for contiguous GEMMs; for systems whose per-atom working set exceeds L2, atoms
