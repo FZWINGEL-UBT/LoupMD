@@ -207,6 +207,116 @@ __global__ void __launch_bounds__(128, 4) sgemm64_kernel(int M, int N, int K, co
     }
 }
 
+// 32 x 32 x 16 block tile, 64 threads with 4 x 4 outputs each, 3-stage cp.async pipeline (12 KB shared memory).
+// Deterministic split-K (blockIdx.z in 0..split_k-1) writes partial slices into ws when split_k > 1.
+template <bool FULL_N>
+__global__ void __launch_bounds__(64) sgemm32_kernel(int M, int N, int K, const float* __restrict__ A,
+                                                     const float* __restrict__ B, float* __restrict__ C,
+                                                     float* __restrict__ ws, float beta, int split_k) {
+    __shared__ __align__(16) float As[kStages][32][kBK];
+    __shared__ __align__(16) float Bs[kStages][kBK][32];
+    const int tid = threadIdx.x, tx = tid & 7, ty = tid >> 3;
+    const int m0 = blockIdx.x * 32, n0 = blockIdx.y * 32;
+    const int ar = tid >> 2, ac = (tid & 3) * 4;
+    const int bk = tid >> 3, bc = (tid & 7) * 4;
+    const bool a_ok0 = m0 + ar < M, a_ok1 = m0 + ar + 16 < M;
+    const bool b_ok = FULL_N || n0 + bc < N;
+    const int nk_tot = K / kBK, sk = blockIdx.z;
+    const int k_per = (nk_tot + split_k - 1) / split_k;
+    const int kb = sk * k_per, ke = min(nk_tot, kb + k_per), nk = ke - kb;
+    if (nk <= 0) return;
+    const float* a0 = A + (size_t)(a_ok0 ? m0 + ar : 0) * K + kb * kBK + ac;
+    const float* a1 = A + (size_t)(a_ok1 ? m0 + ar + 16 : 0) * K + kb * kBK + ac;
+    const float* b0 = B + (size_t)(kb * kBK + bk) * N + (b_ok ? n0 + bc : 0);
+    auto issue = [&](int kt) {
+        const int st = kt % kStages;
+        cp_async16(&As[st][ar][ac], a0 + kt * kBK, a_ok0);
+        cp_async16(&As[st][ar + 16][ac], a1 + kt * kBK, a_ok1);
+        cp_async16(&Bs[st][bk][bc], b0 + (size_t)kt * kBK * N, b_ok);
+        cp_async16(&Bs[st][bk + 8][bc], b0 + (size_t)(kt * kBK + 8) * N, b_ok);
+    };
+#pragma unroll
+    for (int st = 0; st < kStages - 1; ++st) {
+        if (st < nk) {
+            issue(st);
+            cp_async_commit();
+        }
+    }
+    float acc[4][4];
+#pragma unroll
+    for (int i = 0; i < 4; ++i)
+#pragma unroll
+        for (int j = 0; j < 4; ++j) acc[i][j] = 0.0f;
+    for (int kt = 0; kt < nk; ++kt) {
+        if (kt + 1 == nk) asm volatile("cp.async.wait_group 0;");
+        else cp_async_wait_one_pending();
+        __syncthreads();
+        if (kt + kStages - 1 < nk) {
+            issue(kt + kStages - 1);
+            cp_async_commit();
+        }
+        const int st = kt % kStages;
+#pragma unroll
+        for (int kk = 0; kk < kBK; kk += 4) {
+            float4 af[4];
+#pragma unroll
+            for (int i = 0; i < 4; ++i) af[i] = *reinterpret_cast<const float4*>(&As[st][ty * 4 + i][kk]);
+#pragma unroll
+            for (int q = 0; q < 4; ++q) {
+                const float4 bl = *reinterpret_cast<const float4*>(&Bs[st][kk + q][tx * 4]);
+                const float bv[4] = {bl.x, bl.y, bl.z, bl.w};
+#pragma unroll
+                for (int i = 0; i < 4; ++i) {
+                    const float a = q == 0 ? af[i].x : q == 1 ? af[i].y : q == 2 ? af[i].z : af[i].w;
+#pragma unroll
+                    for (int j = 0; j < 4; ++j) acc[i][j] = fmaf(a, bv[j], acc[i][j]);
+                }
+            }
+        }
+    }
+    float* dst = (split_k > 1) ? (ws + (size_t)sk * M * N) : C;
+    const float b_eff = (split_k > 1) ? 0.0f : beta;
+#pragma unroll
+    for (int i = 0; i < 4; ++i) {
+        const int r = m0 + ty * 4 + i;
+        if (r >= M) continue;
+        const int n = n0 + tx * 4;
+        if (!FULL_N && n >= N) continue;
+        float* cp = dst + (size_t)r * N + n;
+        float4 v = make_float4(acc[i][0], acc[i][1], acc[i][2], acc[i][3]);
+        if (b_eff != 0.0f) {
+            const float4 o = *reinterpret_cast<const float4*>(cp);
+            v.x = fmaf(b_eff, o.x, v.x);
+            v.y = fmaf(b_eff, o.y, v.y);
+            v.z = fmaf(b_eff, o.z, v.z);
+            v.w = fmaf(b_eff, o.w, v.w);
+        }
+        *reinterpret_cast<float4*>(cp) = v;
+    }
+}
+
+__global__ void splitk_reduce_kernel(int mn4, int split_k, const float4* __restrict__ ws, float4* __restrict__ C,
+                                     float beta) {
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= mn4) return;
+    float4 sum = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
+    for (int s = 0; s < split_k; ++s) {
+        const float4 v = ws[(size_t)s * mn4 + i];
+        sum.x += v.x;
+        sum.y += v.y;
+        sum.z += v.z;
+        sum.w += v.w;
+    }
+    if (beta != 0.0f) {
+        const float4 o = C[i];
+        sum.x = fmaf(beta, o.x, sum.x);
+        sum.y = fmaf(beta, o.y, sum.y);
+        sum.z = fmaf(beta, o.z, sum.z);
+        sum.w = fmaf(beta, o.w, sum.w);
+    }
+    C[i] = sum;
+}
+
 }  // namespace
 // Prefer the maximum shared-memory carveout so two blocks (48 / 36 KB) fit per SM.
 void sgemm128_init() {
@@ -216,6 +326,8 @@ void sgemm128_init() {
     cudaFuncSetAttribute(sgemm128_kernel<4, false>, cudaFuncAttributePreferredSharedMemoryCarveout, 100);
     cudaFuncSetAttribute(sgemm64_kernel<true>, cudaFuncAttributePreferredSharedMemoryCarveout, 100);
     cudaFuncSetAttribute(sgemm64_kernel<false>, cudaFuncAttributePreferredSharedMemoryCarveout, 100);
+    cudaFuncSetAttribute(sgemm32_kernel<true>, cudaFuncAttributePreferredSharedMemoryCarveout, 100);
+    cudaFuncSetAttribute(sgemm32_kernel<false>, cudaFuncAttributePreferredSharedMemoryCarveout, 100);
 }
 
 // Requirements (checked by the caller): K % 16 == 0, N % 4 == 0, lda = K, ldb = ldc = N, A / B / C 16-byte aligned.
@@ -237,6 +349,19 @@ void sgemm64(int M, int N, int K, const float* A, const float* B, float* C, floa
     else               sgemm64_kernel<false><<<grid, 128, 0, stream>>>(M, N, K, A, B, C, beta);
 }
 
+void sgemm32(int M, int N, int K, const float* A, const float* B, float* C, float* ws, float beta, int split_k,
+             cudaStream_t stream) {
+    if (M <= 0 || N <= 0 || K <= 0) return;
+    const dim3 grid((M + 31) / 32, (N + 31) / 32, split_k);
+    if ((N % 32) == 0) sgemm32_kernel<true><<<grid, 64, 0, stream>>>(M, N, K, A, B, C, ws, beta, split_k);
+    else               sgemm32_kernel<false><<<grid, 64, 0, stream>>>(M, N, K, A, B, C, ws, beta, split_k);
+    if (split_k > 1) {
+        const int mn4 = (int)(((size_t)M * N) >> 2);
+        if (mn4 > 0)
+            splitk_reduce_kernel<<<(mn4 + 255) / 256, 256, 0, stream>>>(
+                mn4, split_k, reinterpret_cast<const float4*>(ws), reinterpret_cast<float4*>(C), beta);
+    }
+}
 // out[C, R] = in[R, C]^T (row-major).
 void transpose(int R, int Ccols, const float* in, float* out, cudaStream_t stream) {
     transpose_kernel<<<dim3((Ccols + 127) / 128, R), 128, 0, stream>>>(R, Ccols, in, out);

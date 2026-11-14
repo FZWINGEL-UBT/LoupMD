@@ -319,7 +319,7 @@ struct LoupHandle {
         cublasLtMatmulAlgo_t algo{};
         bool use_hyb = false;
         int hyb_tile = 0;
-        int own_mode = 0;      // 1 = loup::sgemm128, 2 = loup::sgemm64
+        int own_mode = 0;      // 1 = sgemm128, 2 = sgemm64, 3..5 = sgemm32 (split_k = 1, 2, 4)
     };
     std::map<std::tuple<int, int, int, bool, bool>, LtPlan> lt_cache;
     std::map<std::tuple<const float*, int, int>, float*> bt_cache;  // [K, N] copies of transposed weights (weight_kn)
@@ -608,6 +608,8 @@ namespace loup {
 void sgemm128_init();
 void sgemm128(int M, int N, int K, const float* A, const float* B, float* C, float beta, cudaStream_t stream);
 void sgemm64(int M, int N, int K, const float* A, const float* B, float* C, float beta, cudaStream_t stream);
+void sgemm32(int M, int N, int K, const float* A, const float* B, float* C, float* ws, float beta, int split_k,
+             cudaStream_t stream);
 void transpose(int R, int Ccols, const float* in, float* out, cudaStream_t stream);
 }
 
@@ -715,7 +717,13 @@ static inline void sgemm_rm(
         auto dit = h->disk_plans.find(key);
         if (dit != h->disk_plans.end()) {
             const auto& dp = dit->second;
-            if (dp.use_own == 1 || (dp.use_own == 2 && h->is_sm120)) {
+            auto splitk_ok = [&](uint8_t m) {
+                if (m <= 2) return true;
+                if (m > 5) return false;
+                const int sk = (m == 3) ? 1 : (m == 4 ? 2 : 4);
+                return sk == 1 || (K >= 64 * sk && (size_t)sk * M * N * sizeof(float) <= h->cublas_ws_bytes);
+            };
+            if (dp.use_own == 1 || (dp.use_own >= 2 && dp.use_own <= 5 && h->is_sm120 && splitk_ok(dp.use_own))) {
                 if (own_ok) {
                     plan.own_mode = dp.use_own;
                     hit_disk = true;
@@ -805,12 +813,26 @@ static inline void sgemm_rm(
                     if (h->is_sm120 && M <= 1600) {
                         const float ms64 = time_min([&] { loup::sgemm64(M, N, K, A, Bkn, d_tmpC, beta, strm); });
                         if (consider(ms64)) { plan.own_mode = 2; plan.use_hyb = false; }
+                        for (int idx = 0; idx < 3; ++idx) {
+                            const int sk = 1 << idx;
+                            if (sk > 1 && (K < 64 * sk || (size_t)sk * M * N * sizeof(float) > h->cublas_ws_bytes)) continue;
+                            const float ms32 = time_min([&] {
+                                loup::sgemm32(M, N, K, A, Bkn, d_tmpC, static_cast<float*>(ws_p), beta, sk, strm);
+                            });
+                            if (consider(ms32)) { plan.own_mode = 3 + idx; plan.use_hyb = false; }
+                        }
                     }
                 }
-                if (getenv("LOUP_DEBUG_GEMM"))
-                    fprintf(stderr, "gemm M=%d N=%d K=%d transB=%d beta=%g cold=%d -> %s%d %.1f us\n", M, N, K, (int)transB,
-                            beta, (int)cold, plan.own_mode == 2 ? "own64_" : plan.own_mode == 1 ? "own" : plan.use_hyb ? "hyb" : "lt",
-                            plan.use_hyb ? plan.hyb_tile : 0, best_ms * 1e3f);
+                if (getenv("LOUP_DEBUG_GEMM")) {
+                    const char* tag = plan.own_mode >= 3 ? "own32_"
+                                    : plan.own_mode == 2 ? "own64_"
+                                    : plan.own_mode == 1 ? "own"
+                                    : plan.use_hyb       ? "hyb"
+                                                         : "lt";
+                    const int sub = plan.own_mode >= 3 ? (1 << (plan.own_mode - 3)) : (plan.use_hyb ? plan.hyb_tile : 0);
+                    fprintf(stderr, "gemm M=%d N=%d K=%d transB=%d beta=%g cold=%d -> %s%d %.1f us\n", M, N, K,
+                            (int)transB, beta, (int)cold, tag, sub, best_ms * 1e3f);
+                }
                 LoupHandle::DiskPlan dp{};
                 dp.M = M; dp.N = N; dp.K = K;
                 dp.transB = transB ? 1 : 0; dp.beta_nz = (beta != 0.0f) ? 1 : 0;
@@ -829,8 +851,13 @@ static inline void sgemm_rm(
     }
     const auto& plan = it->second;
     if (plan.own_mode && own_ok && (((uintptr_t)C & 15) == 0)) {
-        if (plan.own_mode == 2) loup::sgemm64(M, N, K, A, own_b(), C, beta, strm);
-        else                    loup::sgemm128(M, N, K, A, own_b(), C, beta, strm);
+        if (plan.own_mode >= 3) {
+            loup::sgemm32(M, N, K, A, own_b(), C, static_cast<float*>(ws_p), beta, 1 << (plan.own_mode - 3), strm);
+        } else if (plan.own_mode == 2) {
+            loup::sgemm64(M, N, K, A, own_b(), C, beta, strm);
+        } else {
+            loup::sgemm128(M, N, K, A, own_b(), C, beta, strm);
+        }
         return;
     }
     if (plan.use_hyb && alpha == 1.0f && beta == 0.0f &&

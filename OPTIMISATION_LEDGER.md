@@ -117,6 +117,7 @@ Conventions:
 | [gemm-own-n192](#gemm-own-n192) | 128 x 64 tiles for N = 192 | – | spec | DEFAULT (tie) | S5 | 7 products 297 -> 248 us; MD tie | [§3.1 #30][s31] |
 | [gemm-own-n144](#gemm-own-n144) | `sgemm128_kernel<4, false>` partial-`N` `128 x 64` tiles when `(N % 128) <= 64` (e.g. `N = 144`) | `loup::sgemm128` | both | DEFAULT (5060 Ti only) | S16 | replaces `magma_sgemmEx` on `N = 144` (`POLAR-1-M` `NbCl5` `170.7 -> 76.6 us` in `prof_k`); tie on `M >= 1944` MD | this file |
 | [gemm-own-sgemm64](#gemm-own-sgemm64) | Own `64 x 64 x 16` `cp.async` SIMT SGEMM (`128` threads) scoped to `M <= 1600` | `loup::sgemm64`, `DiskPlan::use_own == 2` | both (`M <= 1600`) | DEFAULT (5060 Ti only) | S16 | fresh-plan ABBA: `POLAR-1-S` `NaCl216` `1.85 -> 1.61 ms` (`0.873`), `POLAR-1-M` `NaCl216` `4.30 -> 3.61` (`0.839`), `POLAR-1-L` `NaCl216` `8.24 -> 7.22` (`0.876`), `MH-1` `NaCl216` `1.71 -> 1.57` (`0.919`), `OFF23-M` `water216` `1.39 -> 1.30` (`0.938`), `MH-1` `NbCl5` tie (`1.0002`) | this file |
+| [gemm-own-sgemm32](#gemm-own-sgemm32) | Own `32 x 32 x 16` `cp.async` SIMT SGEMM (`64` threads) + deterministic split-K (`1, 2, 4`) into per-stream `4 MB` workspace, scoped to `sm_120` and `M <= 1600` | `loup::sgemm32`, `DiskPlan::use_own` in `3..5` | both (`sm_120`, `M <= 1600`) | DEFAULT (5060 Ti only) | S17 | fresh-plan ABBA: `POLAR-1-S` `NaCl216` `1.65 -> 1.50 ms` (`0.909`), `POLAR-1-M` `NaCl216` `3.70 -> 3.46` (`0.936`), `POLAR-1-L` `NaCl216` `7.28 -> 6.89` (`0.947`), `MH-1` `NaCl216` `1.61 -> 1.53` (`0.948`), `MH-1` `NbCl5` tie (`1.003`) | this file |
 | [gemm-sgemm-variants](#gemm-sgemm-variants) | 4 stages BK = 8; register-staged BK = 8; 1 block / SM; extra 64 x 128 / 128 x 64 tiles | – | spec | REJECTED | S5 | 5-50% slower, or `NbCl5` +0.8% to +1.8% in the pass | [§3.3][s33] |
 | [gemm-pretransposed](#gemm-pretransposed) | Pre-transposed forward weights (old idea 1) | – | spec | REJECTED | – | 5060 Ti tie, Ada +1.0% / +0.3% | [§3.3][s33] |
 | [gemm-grouped-species](#gemm-grouped-species) | One grouped species GEMM for `compose0_fwd` + `skip16` (T4) | `fm_tf32x3_species_rr_64x64` | spec | REJECTED | – | 5060 Ti +1.7% / +0.8% | [§3.3][s33] |
@@ -713,6 +714,14 @@ Each entry has the same fields. Unless stated, the system is OMAT-0 medium on th
 - Measured (5060 Ti, fresh plans): `POLAR-1-S` `NaCl216` `1.8458 -> 1.6105 ms` (`b/a = 0.8726`), `POLAR-1-M` `NaCl216` `4.2996 -> 3.6069` (`0.8389`), `POLAR-1-L` `NaCl216` `8.2416 -> 7.2164` (`0.8756`), `MH-1` `NaCl216` `1.7089 -> 1.5700` (`0.9187`), `OFF23-M` `water216` `1.3912 -> 1.3047` (`0.9378`), `MH-1` `NbCl5` tie (`12.5860 -> 12.5888`, `1.0002`). Gates pass on `POLAR-1-S/M`, `MH-1` (crystals + organic), `OMAT-0-S/M`, `OFF23-M`; `POLAR-1-L` `cmp_libs` `dF = 2.07e-7` (`nacl216`); pytest suite passes.
 - Sources: this file.
 
+<a id="gemm-own-sgemm32"></a>
+#### gemm-own-sgemm32: `32 x 32 x 16` `cp.async` SIMT SGEMM + deterministic split-K for `sm_120` `M <= 1600`
+- Switch: `loup::sgemm32` (`sgemm32_kernel<FULL_N>` + `splitk_reduce_kernel` in `src/sgemm.cu`), autotuned for `split_k` in `{1, 2, 4}` when `is_sm120 && M <= 1600` (with `K >= 64 * sk` and `sk * M * N * 4 <= cublas_ws_bytes`), stored in `DiskPlan::use_own` in `{3, 4, 5}`.
+- Stage: S17 (14 November 2026).
+- What: even with `sgemm64`, `M = 216, N = 8..256` GEMMs in `POLAR-1-S/M/L` and `MH-1` `NaCl216` (`63–71%` of GPU kernel time) launched only `4..16` blocks on 36 SMs (`4` `M`-tiles x `1..4` `N`-tiles), leaving 55–89% of SMs idle (`M=216, N=144, K=2048` took `53.2 us`; `N=16, K=512` took `14.7 us`). `32 x 32` tiles + deterministic split-K (`ws_p` per-stream 4 MB workspace + in-order `splitk_reduce_kernel`, zero atomics/memsets) cut those to `20.8 us` / `7.6 us`.
+- Status: DEFAULT (5060 Ti only).
+- Measured (5060 Ti, fresh plans): `POLAR-1-S` `NaCl216` `1.6451 -> 1.4958 ms` (`b/a = 0.9092`), `POLAR-1-M` `NaCl216` `3.6966 -> 3.4591` (`0.9357`), `POLAR-1-L` `NaCl216` `7.2813 -> 6.8949` (`0.9469`), `MH-1` `NaCl216` `1.6097 -> 1.5264` (`0.9483`), `OFF23-M` `water216` tie (`1.3436 -> 1.3520`, `1.0063`), `MH-1` `NbCl5` tie (`12.5460 -> 12.5867`, `1.0032`). Cached 3x gates pass on `POLAR-1-S/M`, `MH-1` (crystals + organic), `OMAT-0-S/M`, `OFF23-M`; `cmp_libs` `dF <= 3.1e-6`; pytest suite passes (`67 passed`).
+- Sources: this file.
 <a id="gemm-sgemm-variants"></a>
 #### gemm-sgemm-variants: other own-SGEMM shapes and pipelines
 - Stage: S5.
