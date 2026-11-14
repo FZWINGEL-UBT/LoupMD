@@ -255,11 +255,14 @@ M1-M3, M6, M7 and F1-F7 are resolved, and S1, S3, S5-S8 of the sixth pass (secti
 
 ## 5. Model Families (Generic Path)
 
-Supported, as in FastMACE: MACE-OMAT-0 small, MACE-OFF23 small / medium / large, MACE-OFF23b medium, MACE-OFF24
-medium, MACE-MH-1 (any head, one per bundle; default `omat_pbe`), MACE-POLAR-1 S / M / L and MACE-OMOL-0 extra
-large (`MACE-omol-0-extra-large-1024`: 1024 hidden channels; total charge and spin multiplicity per bundle,
-`ensure_loup_bundle(..., charge=Q, spin_multiplicity=M)`, default 0 and 1). MACE-OMAT-0 medium keeps the
-specialised kernels of sections 1-4 (`LOUP_GENERIC=1` forces the generic path, used to cross-check it).
+Supported, as in FastMACE (every label of its model table; local files match its SHA-256): MACE-MP-0 medium and large
+(`2023-12-03-mace-128-L1_epoch-199`, `MACE_MPtrj_2022.9`), MACE-MP-0b3 medium, MACE-MPA-0 medium, MACE-OMAT-0
+small and medium, MACE-MatPES PBE and r2SCAN (`MACE-matpes-*-omat-ft`), MACE-OFF23 small / medium / large,
+MACE-OFF23b medium, MACE-OFF24 medium, MACE-MH-1 (any head, one per bundle; default `omat_pbe`), MACE-POLAR-1
+S / M / L and MACE-OMOL-0 extra large (`MACE-omol-0-extra-large-1024`: 1024 hidden channels; total charge and spin
+multiplicity per bundle, `ensure_loup_bundle(..., charge=Q, spin_multiplicity=M)`, default 0 and 1). MACE-OMAT-0
+medium, MP-0b3 medium, MPA-0 medium and both MatPES models (the same density architecture) run the specialised
+kernels of sections 1-4 (`LOUP_GENERIC=1` forces the generic path, used to cross-check it); the rest the generic path.
 
 ### 5.1 Pipeline
 - `python/export.py` picks the exporter: `export_omat0.py` (specialised, `arch=omat0_medium_spec`) when
@@ -320,8 +323,11 @@ float64 reference does not fit the GPU (OFF23-L / 23b / 24 on the 16 GB 5060 Ti,
 | OMAT-0 small | oxide | PASS | PASS |
 | OFF23 small / medium | organic | PASS / PASS | PASS / PASS |
 | OFF23 large, OFF23b medium, OFF24 medium | organic | PASS (CPU refs) | PASS (worst 1.46 / 1.23 / 0.27; OFF23-L CPU refs) |
-| MH-1 `omat_pbe`, `matpes_r2scan` | crystals | PASS | PASS |
-| MH-1 `omol` | organic | PASS | PASS |
+| MH-1 `omat_pbe`, `matpes_r2scan`, `mp_pbe_refit_add`, `oc20_usemppbe` | crystals | PASS (S59 build: worst force 0.87 / 0.86 / 0.80 / 0.84, stress 0.27 / 0.32 / 0.25 / 0.26) | PASS (first two) |
+| MH-1 `omol`, `spice_wB97M` | organic | PASS (S59 build: worst force 0.32 / 0.28, stress 0.63 / 0.38) | PASS (`omol`) |
+| MP-0 medium, MP-0 large | oxide | PASS (S59 build: worst force 0.72 / 1.31, stress 2.97 / 0.94) | not run |
+| MP-0b3 medium, MPA-0 medium (specialised, every forced variant) | oxide | PASS (S59 build, 30 / 30 rows: worst force 1.06 / 1.68, stress 0.87 / 0.89) | not run |
+| MatPES PBE, r2SCAN (specialised, every forced variant) | crystals | PASS (S59 build, 18 / 18 rows: worst force 0.68 / 1.57, stress 1.10 / 1.04) | not run |
 | OMOL-0 extra large | organic: neutral singlet, +1 doublet, -1 doublet, neutral triplet | PASS (S57 path; worst force 0.86 / 0.31 / 0.82 / 0.79, stress 0.79 / 0.19 / 0.63 / 0.47) | not run |
 | POLAR-1-S | crystals | PASS (worst ratio 1.30) | PASS (worst 0.99) |
 | POLAR-1-M | crystals | PASS (worst 0.97) | PASS (worst 1.14) |
