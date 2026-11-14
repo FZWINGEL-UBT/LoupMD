@@ -1,0 +1,235 @@
+# Stage 1: core API v1 (step-level plan)
+
+Plan tasks S1-T01 to S1-T11 of `PLAN.md`. Written 15 November 2026 on `release/v1` at `bac354c`. Working rules,
+the GPU procedure and the shell variables `PY`, `RUN`, `GPU` are those of `plans/stage-0-ground-rules.md`.
+
+Every task follows the same loop: write the failing test, run it and see it fail for the stated reason, implement,
+run the test and the task's neighbours, commit. A task that changes a kernel or the step also runs the funnel of
+`AGENTS.md` §4 against the baseline library before its commit, and adds its ledger row and status entry.
+
+No figure in this plan is measured. Line numbers are those of `bac354c`.
+
+## Interim layout (until S0-T03)
+
+- New Python: `loupmd/__init__.py`, `loupmd/errors.py`, `loupmd/_core.py`, `loupmd/_legacy.py`.
+- `loupmd._core.LoupEngine` is the ctypes binding of ABI v1. It replaces `python/loupmd.py`'s `LoupEngine` for
+  the tests; `python/loupmd.py` itself is not edited.
+- Tests stay in `tests/` (flat) until S2-T11. `tests/conftest.py` puts the repository root first on `sys.path`.
+- Test command for one file: `$GPU "<task>" -- $RUN $PY -m pytest -q tests/<file>.py`.
+
+## S1-T01: error channel
+
+Files: `src/error.hpp` (new), `src/model.hpp`, `src/engine.cu`, `include/loupmd.h`, `loupmd/errors.py`,
+`loupmd/_core.py`, `loupmd/_legacy.py`, `loupmd/__init__.py`, `tests/conftest.py`, `tests/test_engine.py`,
+`tests/test_engine_guards.py`, `tests/test_error_channel.py` (new), `tests/test_errors.py` (new, no GPU).
+
+Design.
+- `loup::set_error(fmt, ...)` writes a thread-local pending message (`src/error.hpp`, header only: an inline
+  function over an inline `thread_local std::string`, so no new translation unit and no `Makefile` change).
+- `CUDA_CHECK` and `CUBLAS_CHECK` call `set_error` in place of `fprintf(stderr, ...)`. Every explicit refusal in
+  `engine.cu` that returned -1 silently or after a stderr line calls `set_error` with its reason.
+- `guarded(h, name, f)` clears the pending message, runs `f`, and on a failure stores `"<name>: <message>"` in
+  `h->last_error` (in a thread-local string when `h` is NULL). A failure that set no message stores
+  `"<name>: failed without a message"`. A successful call clears `h->last_error`.
+- `loup_create` stores its message in the thread-local string and returns NULL as before.
+- `const char* loup_last_error(const LoupHandle* h)`: the stored text, `""` if the last call succeeded. The
+  pointer is valid until the next call on the handle (NULL: until the next failing call on the thread).
+- `LOUP_DEBUG_ERRORS=1` also prints each stored message to stderr. Without it the library prints nothing on an
+  error. The `LOUP_DEBUG_*` tuning prints are unchanged.
+- Python: `LoupError(what, why=None, next_step=None)` with FastMACE's printed shape; `BackendError(LoupError,
+  RuntimeError)` for a failed library call (attribute `call`); `InputError(LoupError, ValueError)` for arguments
+  the wrapper refuses before the library reads them. Keeping `RuntimeError` and `ValueError` as bases keeps every
+  existing `pytest.raises` valid, including tests that arrive by merge.
+
+Steps.
+1. Test first, no GPU: `tests/test_errors.py` checks the printed form of `LoupError` (what / `Why:` / `Next:`),
+   the bases of `BackendError` and `InputError`, and pickling. Run: fails on the import. Implement
+   `loupmd/errors.py`. Run: passes.
+2. Test first, GPU: `tests/test_error_channel.py`
+   - `test_refusal_text_reaches_python`: an unknown species raises `BackendError` whose text names the atomic
+     number and the bundle's elements; `err.call == "loup_set_system"`.
+   - `test_nothing_on_stderr_for_a_handled_error` (`capfd`): after refused `set_system`, `evaluate` and a failed
+     create, captured stderr is empty.
+   - `test_debug_switch_prints_the_message` (`LOUP_DEBUG_ERRORS=1`, child process): stderr holds the message.
+   - `test_message_is_cleared_by_the_next_successful_call`: `loup_last_error` is `""` after a good call.
+   - `test_create_error_is_per_thread`: a failed create on a worker thread leaves the main thread's text empty.
+   - `test_every_refusal_has_its_own_text`: table of (call, bad argument, expected fragment) over every refusal
+     of `engine.cu`: no system, no positions, steps, timestep, temperature, friction, skin, mass, NULL-free
+     shapes, singular cell, non-finite cell, position and velocity, warm-up and call counts.
+   Run against the baseline library: fails (`loup_last_error` missing).
+3. Edit today's refusal tests (`test_engine.py`, `test_engine_guards.py`): each `pytest.raises(RuntimeError)`
+   gains `match=` with the reason; the packed-table test reads the exception text instead of `capfd`.
+4. Implement the C++ side; build to `libloupmd_cand.so`; implement `loupmd/_core.py`, `_legacy.py`,
+   `__init__.py`; switch `tests/conftest.py`.
+5. Run `tests/test_error_channel.py`, `tests/test_engine.py`, `tests/test_engine_guards.py`,
+   `tests/test_families.py` with `LOUP_LIB` at the candidate; then install the library and run `pytest -q`.
+6. Speed: the change touches no kernel and no launch. Check `cmp` of the SASS of two kernels
+   (`cuobjdump -sass build/sm_120/engine.o`) is not needed; run one quick `bench_md.py` A/B (baseline library
+   against the candidate, both orders) and record it in the task's commit message. No ledger row unless the A/B
+   moves.
+7. Commit `S1-T01: error channel (loup_last_error, LoupError)`; mark the task in `PLAN.md`.
+
+Acceptance (PLAN): each of today's refusal tests asserts the message text; nothing is printed to stderr on a
+handled error.
+
+## S1-T02: ABI version, library version, `loup_get_info`
+
+Files: `include/loupmd.h`, `src/engine.cu`, `loupmd/_core.py`, `loupmd/__init__.py`, `tests/test_abi.py` (new).
+
+1. Tests first: `loup_abi_version() == 1`; `loup_version()` matches `^1\.0\.0\+[0-9a-f]{16}$` and its hash equals
+   `library_build_hash`'s (the plan-cache file name carries it); `get_info()` on an OMAT-0 medium bundle gives
+   `specialised == 1`, `n_layers == 2`, `n_species == 3`, `r_max == 6.0`, `compute_capability == 120`, the GPU
+   name of `nvidia-smi`, `has_long_range == 0`; on OMAT-0 small `specialised == 0` and a non-empty
+   `kernel_signature`; on POLAR-1-S `has_long_range == 1`. A stub library built from a ten-line C file with
+   `loup_abi_version` returning 2 is refused by `_core` with a `BackendError` naming both versions (no GPU), and
+   a library without the symbol (ABI 0) is refused the same way.
+2. Implement: `LOUP_ABI_VERSION`, the three functions, `LoupInfo` as in `PLAN.md` §4.3. `kernel_signature` is the
+   specialised path's `LOUP_KERNEL_SIGNATURE` or the generic layers' product signatures joined by `;`, truncated
+   with a trailing `...` if longer than the field.
+3. Run the new tests and `tests/test_engine.py`; commit `S1-T02: ABI and library version, loup_get_info`.
+
+Acceptance (PLAN): Python refuses a library whose ABI differs, naming both versions.
+
+## S1-T03: keep captured MD graphs across run calls
+
+Files: `src/engine.cu` (`run_md_loop`, `invalidate_md_graphs`), `tests/test_md_graph_reuse.py` (new).
+
+Today `run_md_loop` calls `invalidate_md_graphs()` at entry (line 2080) although `note_params` already records
+kind, dt, temperature, friction and seed.
+
+1. Tests first:
+   - `test_chunked_run_reuses_graphs`: a debug counter of MD graph captures, read through `loup_get_info`'s
+     reserved field or a `LOUP_DEBUG_CAPTURES` stderr line, stays constant over 20 calls of 10 steps with the same
+     arguments and rises when dt, temperature, friction, seed or kind changes.
+   - `test_chunked_trajectory_matches_one_call`: 100 calls of 10 NVE steps against one call of 1,000 steps on
+     `SrTiO3` 3x3x3: positions agree within the spread of two single-call runs of the installed baseline library
+     (measured in the test, floor 1e-9 A).
+   - `test_changed_parameters_take_effect`: after 10 steps at 300 K, 10 steps at 900 K heat the system.
+2. Implement: key = (kind, dt, temperature, friction, seed); graphs are dropped by `invalidate_graphs()` (edge
+   bucket growth, cell change of the long-range part, `free_system`) and by a key change, not at entry. The stress
+   flag is not part of an MD graph today (the MD pass records `compute_stress = 0`); the key gets the field when
+   S4-T06 adds a stress-carrying step.
+3. Acceptance run (GPU, quiet): 100 x 10 steps against 1 x 1,000 Langevin steps on `SrTiO3` 5,000 atoms, both
+   orders, three repeats; the ratio must be within 2%.
+4. Ledger row and status entry (this changes speed for chunked runs); commit `S1-T03: MD graphs kept across run
+   calls`.
+
+## S1-T04: `loup_run` with `LoupIntegrator`
+
+Files: `include/loupmd.h`, `src/engine.cu`, `src/integrator.cu`, `loupmd/_core.py`, `tests/test_run_api.py` (new).
+
+1. Tests first: `loup_run` with `LOUP_NVE` and `LOUP_LANGEVIN` against `loup_run_nve` / `loup_run_langevin` from
+   the same state and seed: final positions differ by no more than two runs of the old entry point differ; a
+   `size` smaller than the first released struct, an unknown `kind` and each integrator kind not yet built
+   (`LOUP_CSVR` ... `LOUP_MTK_NPT`) are refused with a text naming the kind; the old entry points still pass
+   `tests/test_engine.py`.
+2. Implement: `LoupIntegrator` exactly as §4.3; `run_md_loop` takes the struct; `loup_run_nve` and
+   `loup_run_langevin` fill it and call `loup_run`'s implementation. `fix_com` and `thermo_every` are accepted at
+   0 and refused otherwise until S1-T05 / S4-T01.
+3. Kernel list: `nsys profile --cuda-graph-trace=node` of 10 steps before and after; the per-step kernel names
+   and counts are identical. Record the two lists' diff (empty) in the commit message.
+4. Quick A/B (`AGENTS.md` funnel step 4), then commit `S1-T04: loup_run and LoupIntegrator`.
+
+## S1-T05: thermo buffer on the device
+
+Files: `src/thermo.cu` (new; `Makefile` `SRCS` gains it), `src/engine.cu`, `include/loupmd.h`, `loupmd/_core.py`,
+`tests/test_thermo.py` (new).
+
+1. Tests first: with `thermo_every = 20`, 200 NVE steps give 10 rows (steps 20 ... 200); each row's `e_pot` and
+   `e_kin` equal `get_state` and `LoupMDStats` of a second engine stopped at the same step to 1e-12 relative;
+   `conserved` is `e_pot + e_kin` for NVE; a second read returns 0 rows; a full buffer is reported, not
+   overwritten.
+2. Implement: a device ring of `LoupThermoRow`; a kernel at the end of the captured step that reduces the kinetic
+   energy and writes a row when `step % thermo_every == 0` (the step counter already lives on the device);
+   pressure and volume are filled only by a step that carries stress (0 until S4-T06).
+3. Step cost at `thermo_every = 20`: A/B in both orders on `SrTiO3` 5,000 atoms; ledger row.
+4. Commit `S1-T05: device thermo buffer and loup_read_thermo`.
+
+## S1-T06: state blob
+
+Files: `src/engine.cu`, `include/loupmd.h`, `loupmd/_core.py`, `tests/test_state_blob.py` (new).
+
+1. Tests first: export, destroy, create, `set_system`, import: positions, velocities, cell, step counter and the
+   displacement tracker equal the exported ones bitwise (a second export equals the first blob byte for byte);
+   100 further Langevin steps end within the spread of two uninterrupted runs (at most 1e-4 A); a blob with
+   another atom count, another version, a truncated blob and a blob of another species order are refused with a
+   text each; `written` reports the needed size when `capacity` is too small.
+2. Implement: header (magic, version, atom count, species hash), then caller-order arrays. The reference positions
+   of the neighbour list are not part of the blob: import rebuilds the list.
+3. Commit `S1-T06: loup_export_state and loup_import_state`.
+
+## S1-T07: `loup_evaluate2`
+
+Files: `src/engine.cu`, `src/generic.cu`, `include/loupmd.h`, `loupmd/_core.py`, `tests/test_evaluate2.py` (new).
+
+1. Tests first: `LOUP_EVAL_ENERGY_ONLY` equals the full call's energy to 1e-12 relative on OMAT-0 medium, OMAT-0
+   small and MH-1, and writes no forces; `LOUP_EVAL_PER_ATOM` energies sum to the total to 1e-9 relative and
+   follow the caller's atom order; the default graph's kernel list is unchanged (`nsys`); POLAR-1 per-atom
+   energies are refused or defined (decide from `polar.cu` when the task starts and put the choice to the owner
+   if it is a refusal).
+2. Implement: graph variants keyed by flags; the energy-only variant stops after the readouts.
+3. Funnel, ledger note (the default path must be untouched), commit `S1-T07: loup_evaluate2`.
+
+## S1-T08: the three sweeps
+
+Files: `src/domain.hpp` (new), `src/generic.cu`, `src/generic.hpp`, `tests/test_sweeps.py` (new).
+
+1. Tests first: for every generic family with two layers (OMAT-0 small, OFF23 medium, MH-1, MP-0 medium), energy,
+   forces and stress of the composed sweeps differ from the installed baseline library's by no more than two calls
+   of the baseline differ from each other (measured in the test). Models with another layer count (OMOL-0) and
+   the long-range models keep `record` unsplit and are listed as such by `loup_get_info`.
+2. Implement in three commits that each keep the tests green: (a) `Domain` and `LayerState` structs filled from
+   `GenericPassInputs` with `n_ghost == 0`; (b) `record` cut at the two layer boundaries into
+   `sweep1_layer0_forward`, `sweep2_layer1`, `sweep3_layer0_backward` with `keep_activations = true` and
+   `replay_forward = false`; (c) the replay path of sweep 3, tested by calling the sweeps with
+   `keep_activations = false` on the whole system.
+3. Gate for every generic family; full A/B in both orders on `NbCl5` and `SrTiO3` for OMAT-0 small and MH-1.
+4. Ledger row and status entry; commit `S1-T08: generic pass as three sweeps`.
+
+## S1-T09: open domains with ghost atoms
+
+Files: `src/neighbors.cu`, `src/generic.cu`, `src/domain.hpp`, `tests/test_open_domain.py` (new).
+
+1. Test first: a 135-atom periodic `SrTiO3` cell (and the organic and NaCl cells for OFF23 medium and MH-1)
+   evaluated as an open domain whose ghosts are its explicit periodic images within cutoff: energy to 1e-7
+   eV/atom and forces to 3e-6 eV/A of the periodic call, for OMAT-0 small, OFF23 medium and MH-1. The test needs
+   an entry point: an internal `loup_debug_evaluate_domain` exported only in test builds, or a hidden symbol
+   reached through `ctypes`; decide at the task's start.
+2. Implement: neighbour build without shifts where only locals receive; ghost rows of `x` gathered by the caller;
+   `dx` accumulated for ghosts.
+3. Commit `S1-T09: open domains with ghost atoms`.
+
+## S1-T10: memory plan
+
+Files: `src/engine.cu`, `include/loupmd.h`, `loupmd/_core.py`, `tests/test_memory_plan.py` (new).
+
+1. Test first: predicted whole-system bytes within 10% of the measured peak (`cudaMemGetInfo` before
+   `set_system` and after the first evaluate) for 5,000, 20,480 and 40,000 `SrTiO3` atoms on OMAT-0 medium; the
+   same for OMAT-0 small on the generic path at 5,000 atoms.
+2. Implement from the allocation arithmetic of `set_system_impl` (lines 1789-1809 and the buffers around them),
+   `GenericModel::alloc_system` and `ensure_edges`. The tiled fields are 0 until Stage 5.
+3. The 40,000-atom case runs only with the guards of the local GPU (expected well under 12 GiB; check the
+   prediction before the run).
+4. Commit `S1-T10: loup_plan_memory`.
+
+## S1-T11: decaying displacement maximum
+
+Files: `src/engine.cu`, `src/integrator.cu`, `tests/test_pipeline_decay.py` (new).
+
+1. Tests first: water 2x2x2 (OFF23 medium) at 300 K over 5,000 steps reports `pipelined_steps > 0` and
+   `dangerous_builds == 0`; one deliberately fast first step (a single hot atom) no longer keeps a later cold run
+   unpipelined; the existing pipeline tests of `tests/test_engine.py` pass.
+2. Implement: the running maximum is reset at each neighbour rebuild to the maximum seen since the previous one
+   (two-window maximum), so it decays within two rebuild intervals and never drops below the current window's
+   maximum.
+3. Soundness check: `dangerous_builds == 0` on the hot Langevin test (1,200 K) and on water at 500 K.
+4. A/B on the standard benchmarks (they already pipeline; no change expected) and on water; ledger row and status
+   entry; commit `S1-T11: decaying displacement maximum`.
+
+## Exit of Stage 1
+
+1. Merge `round6-hardening`; rebuild.
+2. `pytest -q`, the default gate, the gate for every family of `tests/test_gate_wrapper.py`.
+3. Full A/B against the Stage 0 baseline library in both orders on `NbCl5` and `SrTiO3`.
+4. Mark the tasks in `PLAN.md` with their commits; record the merged commit under §9.
+5. Ask the owner before the tag `v1.0.0a1`.
