@@ -1275,6 +1275,13 @@ POLAR-1 NaCl 3x3x3 (216) and POLAR-1-M `NbCl5` 3x3x3 (1,944).
 - `gprod_bwd` (`MH-1` `NbCl5`): 377 us at 84% DRAM, L2 hit 3%, 153 registers (25% occupancy), long scoreboard 5.31. `gprod_ro1_fused`: 353 us at 80% DRAM, 110 registers, barrier 4.57 / long scoreboard 4.88. Both stream per-atom features from DRAM near the bandwidth floor; only traffic removal (fusion with the neighbouring GEMMs) would help.
 - Sources: this file.
 
+<a id="s28-inpass-gemm-picks"></a>
+#### s28-inpass-gemm-picks: are standalone-tuned GEMM picks wrong inside the pass? (no evidence)
+- Stage: S28 (14 November 2026), 5060 Ti.
+- What: a scratch `LOUP_FORCE_OWN` switch overrode, at dispatch, every GEMM whose tuned plan was an own kernel with one family (`sgemm128`, `sgemm64`, or `sgemm32` without split-K), on fresh plans. MD step time ratio against the tuned plan (two interleaved runs each): `POLAR-1-M` `NaCl216` 1.272 / 1.065 / 1.138, `MH-1` `NaCl216` 1.202 / 1.040 / 1.178, `POLAR-1-L` `NaCl216` 1.189 / 1.038 / 1.162, `MH-1` `NbCl5` 1.010 / 1.023 / 1.162 (own128 / own64 / own32).
+- Conclusion: the standalone autotuner's per-shape mix beats every uniform family in the pass, by 1-27%. This does not exclude a mixed in-pass choice beating it (that needs per-shape perturbations), but gives no sign that the standalone picks are wrong; pass-aware tile selection is not pursued without such evidence.
+- Sources: this file.
+
 <a id="rv8-fixes"></a>
 #### rv8-fixes: eighth review pass (`loupmd-review-20261112.md`, U1-U9)
 - Stage: S9.
