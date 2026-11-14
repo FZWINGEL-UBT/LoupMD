@@ -121,6 +121,98 @@ __global__ void __launch_bounds__(256, 2) sgemm128_kernel(int M, int N, int K, c
     }
 }
 
+// 128 x 96 tiles (8 x 6 outputs per thread) for N == 96 (the C = 96 models), where
+// sgemm128_kernel<8> spends a quarter of its FMAs on padding columns. sm_120 only (launched with N tiles fastest, as
+// sgemm128_kernel<.., true>); same in-order fmaf chain per output, so results are bit-identical. 43 KB shared memory.
+__global__ void __launch_bounds__(256, 2) sgemm96_kernel(int M, int N, int K, const float* __restrict__ A,
+                                                         const float* __restrict__ B, float* __restrict__ C,
+                                                         float beta) {
+    constexpr int BN = 96;
+    extern __shared__ __align__(16) float smem[];
+    float(*As)[128][kBK] = reinterpret_cast<float(*)[128][kBK]>(smem);
+    float(*Bs)[kBK][BN] = reinterpret_cast<float(*)[kBK][BN]>(smem + kStages * 128 * kBK);
+    const int tid = threadIdx.x, tx = tid & 15, ty = tid >> 4;
+    const int m0 = blockIdx.y * 128, n0 = blockIdx.x * BN;
+    // Copy roles: A as in sgemm128_kernel; B's 16 x 96 tile is 384 16-byte chunks, two for the first 128 threads.
+    const int ar = tid >> 2, ac = (tid & 3) * 4;
+    const int bk0 = tid / 24, bc0 = (tid % 24) * 4;
+    const int i1 = tid + 256, bk1 = i1 / 24, bc1 = (i1 % 24) * 4;
+    const bool b1 = i1 < kBK * BN / 4;
+    const bool a_ok0 = m0 + ar < M, a_ok1 = m0 + ar + 64 < M;
+    const float* a0 = A + (size_t)(a_ok0 ? m0 + ar : 0) * K + ac;
+    const float* a1 = A + (size_t)(a_ok1 ? m0 + ar + 64 : 0) * K + ac;
+    const float* bp0 = B + (size_t)bk0 * N + n0 + bc0;
+    const float* bp1 = B + (size_t)(b1 ? bk1 : 0) * N + n0 + (b1 ? bc1 : 0);
+    const int nk = K / kBK;
+    auto issue = [&](int kt) {
+        const int st = kt % kStages;
+        cp_async16(&As[st][ar][ac], a0 + kt * kBK, a_ok0);
+        cp_async16(&As[st][ar + 64][ac], a1 + kt * kBK, a_ok1);
+        cp_async16(&Bs[st][bk0][bc0], bp0 + (size_t)kt * kBK * N, true);
+        if (b1) cp_async16(&Bs[st][bk1][bc1], bp1 + (size_t)kt * kBK * N, true);
+    };
+#pragma unroll
+    for (int st = 0; st < kStages - 1; ++st) {
+        if (st < nk) {
+            issue(st);
+            cp_async_commit();
+        }
+    }
+    float acc[8][6];
+#pragma unroll
+    for (int i = 0; i < 8; ++i)
+#pragma unroll
+        for (int j = 0; j < 6; ++j) acc[i][j] = 0.0f;
+    for (int kt = 0; kt < nk; ++kt) {
+        if (kt + 1 == nk) asm volatile("cp.async.wait_group 0;");
+        else cp_async_wait_one_pending();
+        __syncthreads();
+        if (kt + kStages - 1 < nk) {
+            issue(kt + kStages - 1);
+            cp_async_commit();
+        }
+        const int st = kt % kStages;
+#pragma unroll
+        for (int kk = 0; kk < kBK; kk += 4) {
+            float4 af[8];
+#pragma unroll
+            for (int i = 0; i < 8; ++i) af[i] = *reinterpret_cast<const float4*>(&As[st][(i < 4 ? 0 : 60) + ty * 4 + i][kk]);
+#pragma unroll
+            for (int q = 0; q < 4; ++q) {
+                const float4 bl = *reinterpret_cast<const float4*>(&Bs[st][kk + q][tx * 4]);
+                const float2 bh = *reinterpret_cast<const float2*>(&Bs[st][kk + q][64 + tx * 2]);
+                const float bv[6] = {bl.x, bl.y, bl.z, bl.w, bh.x, bh.y};
+#pragma unroll
+                for (int i = 0; i < 8; ++i) {
+                    const float a = q == 0 ? af[i].x : q == 1 ? af[i].y : q == 2 ? af[i].z : af[i].w;
+#pragma unroll
+                    for (int j = 0; j < 6; ++j) acc[i][j] = fmaf(a, bv[j], acc[i][j]);
+                }
+            }
+        }
+    }
+#pragma unroll
+    for (int i = 0; i < 8; ++i) {
+        const int r = m0 + (i < 4 ? 0 : 60) + ty * 4 + i;
+        if (r >= M) continue;
+        float* cp = C + (size_t)r * N + n0;
+        float4 v = make_float4(acc[i][0], acc[i][1], acc[i][2], acc[i][3]);
+        float2 w = make_float2(acc[i][4], acc[i][5]);
+        if (beta != 0.0f) {
+            const float4 o = *reinterpret_cast<const float4*>(cp + tx * 4);
+            const float2 p = *reinterpret_cast<const float2*>(cp + 64 + tx * 2);
+            v.x = fmaf(beta, o.x, v.x);
+            v.y = fmaf(beta, o.y, v.y);
+            v.z = fmaf(beta, o.z, v.z);
+            v.w = fmaf(beta, o.w, v.w);
+            w.x = fmaf(beta, p.x, w.x);
+            w.y = fmaf(beta, p.y, w.y);
+        }
+        *reinterpret_cast<float4*>(cp + tx * 4) = v;
+        *reinterpret_cast<float2*>(cp + 64 + tx * 2) = w;
+    }
+}
+
 __global__ void transpose_kernel(int R, int Ccols, const float* __restrict__ in, float* __restrict__ out) {
     const int c = blockIdx.x * blockDim.x + threadIdx.x, r = blockIdx.y;
     if (c < Ccols) out[(size_t)c * R + r] = in[(size_t)r * Ccols + c];
@@ -334,6 +426,7 @@ void sgemm128_init() {
     cudaFuncSetAttribute(sgemm64_kernel<false>, cudaFuncAttributePreferredSharedMemoryCarveout, 100);
     cudaFuncSetAttribute(sgemm32_kernel<true>, cudaFuncAttributePreferredSharedMemoryCarveout, 100);
     cudaFuncSetAttribute(sgemm32_kernel<false>, cudaFuncAttributePreferredSharedMemoryCarveout, 100);
+    cudaFuncSetAttribute(sgemm96_kernel, cudaFuncAttributePreferredSharedMemoryCarveout, 100);
 }
 
 namespace {
@@ -343,6 +436,11 @@ void sgemm128_launch(int M, int N, int K, const float* A, const float* B, float*
         const unsigned mt = (M + 127) / 128, nt = (N + bn - 1) / bn;
         return NF ? dim3(nt, mt) : dim3(mt, nt);
     };
+    if (NF && N == 96) {  // sm_120: 128 x 96 tiles instead of a padded 128 x 128 one (only N = 96 was measured)
+        constexpr int smem96 = kStages * (128 * kBK + kBK * 96) * (int)sizeof(float);
+        sgemm96_kernel<<<dim3(N / 96, (M + 127) / 128), 256, smem96, stream>>>(M, N, K, A, B, C, beta);
+        return;
+    }
     if ((N % 128) != 0 && (N % 128) <= 64) {  // e.g. N = 144, 192: 128 x 64 tiles instead of a mostly-empty 128 x 128 tile
         const dim3 grid = grid_of(64);
         if ((N % 64) == 0) sgemm128_kernel<4, true, NF><<<grid, 256, smem_bytes<64>(), stream>>>(M, N, K, A, B, C, beta);
