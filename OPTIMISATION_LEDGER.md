@@ -206,6 +206,7 @@ Conventions:
 | [gen-conv-bwd-l1-c256](#gen-conv-bwd-l1-c256) | `C_FIX = 256` dispatch for `gconv_bwd_L1` (`MACE_MPtrj_2022.9`, `C = 256`, ran runtime `C` at 128 registers) | `launch_conv_bwd` | gen (`C = 256`, lx 1) | DEFAULT (5060 Ti only) | S29 | `REG:128 -> 62`; L1 convs `4928 / 4975 -> 4837 / 4848 us`; ABBA `MPtrj` `SrTiO3` `0.9935` / `0.9896` (both orders) | this file |
 | [gen-conv-fwd-l1-c256](#gen-conv-fwd-l1-c256) | `C_FIX = 256` (`PAIR = false`) dispatch for `gconv_fwd_L1` at `C = 256` | `launch_conv_fwd` | gen (`C = 256`, lx 1) | DEFAULT (5060 Ti only) | S30 | 80 registers (as runtime `C`); `gconv_fwd_L1` `1971 / 1949 -> 1861 / 1860 us`; ABBA `MPtrj` `SrTiO3` `0.9921` / `0.9910` (both orders) | this file |
 | [gen-conv-fwd-l1-pair-c256](#gen-conv-fwd-l1-c256) | `PAIR = true`, `C_FIX = 256` for `gconv_fwd_L1` at `C = 256` | – | gen | REJECTED | S29 | 104 registers; L1 convs tie (`4952 / 4953` vs `4928 / 4975 us`) | this file |
+| [gen-conv-bwd-512thr](#gen-conv-bwd-512thr) | 512-thread blocks for the shared-memory-limited lx 1 / 2 backward convs (`gconv_bwd_L1` at `C = 256`, `gconv_bwd_L2lp` at `C = 224`): one 39-45 KB `s_q` per block shared by 16 warps instead of 8 | `launch_conv_bwd` | gen (`MPtrj`, `OFF23-L`) | DEFAULT (5060 Ti only) | S31 | `bwd_L1` (`MPtrj`) `-12.7%`, `bwd_L2lp` (`OFF23-L` water216) `~-10%`; ABBA `MPtrj` `0.9695 / 0.9685`, `OFF23-L` water216 `0.9825 / 0.9847`, water `0.9825 / 0.9839` | this file |
 
 ### MACE-POLAR-1 long range (`src/polar.cu`)
 
@@ -1303,6 +1304,15 @@ POLAR-1 NaCl 3x3x3 (216) and POLAR-1-M `NbCl5` 3x3x3 (1,944).
 - Status: DEFAULT (5060 Ti only).
 - Measured (5060 Ti): `nsys` `gconv_fwd_L1` per step, two runs: 1971 / 1949 -> 1861 / 1860 us (`-5%`). Fresh-plan ABBA on `MPtrj` `SrTiO3` with the installed binary: `a` = S29 `12.0380`, `b` = new `11.9423` (`0.9921`); reversed `a` = new `11.9519`, `b` = S29 `12.0612` (new / old `0.9910`). `cmp_libs` S29 vs new `dE 1.8e-4` eV total on `E = -39857` eV, `dF 1.2e-6`. 3x gate (`MPtrj`, oxide set, cached references) passes on all six configurations with the installed binary (`dF` ratio <= 1.30, `dS` ratio <= 0.88); `pytest` 67 passed. The installed `libloupmd.so` is the exact binary that was timed and gated.
 - Rejected with it (S29): `PAIR = true` at `C = 256` (`gen-conv-fwd-l1-pair-c256`): 104 registers, L1 convs `4952 / 4953` vs base `4928 / 4975 us`.
+- Sources: this file.
+
+<a id="gen-conv-bwd-512thr"></a>
+#### gen-conv-bwd-512thr: 512-thread blocks for the shared-memory-limited backward convs
+- Switch: `python/gen_generic.py` `launch_conv_bwd`: `gconv_bwd_L1` launches 512 threads when `C == 256`, `gconv_bwd_L2lp` when `C == 224` (otherwise 256); regenerated into `src/generated_generic.cu`. Both kernels already have `__launch_bounds__(512)`; the prologue strides channels by `blockDim.x` and edges by the warp count.
+- Stage: S31 (14 November 2026).
+- What: `ncu` on `MPtrj` `gconv_bwd_L1` (S29 entry) showed 62 registers but 29% achieved occupancy: the per-block `s_q` (`C x 44` floats, 45 KB at `C = 256`, 39 KB at `C = 224`) allows 2 blocks per SM, so 256-thread blocks give 16 warps. With 512 threads the same 2 blocks hold 32 warps; registers (62 x 512 x 2) still fit. At `C = 128` (22.5 KB, 4 blocks of 8 warps) occupancy is already 32 warps, so the change is limited to the measured large-`C` shapes.
+- Status: DEFAULT (5060 Ti only). Each edge is still handled by one warp (`edge_dvec` written once per edge); only the order of the existing `dx` atomics can change.
+- Measured (5060 Ti, scratch build with the guard `C >= 224`, identical device code for these models): `nsys` kernel per step, two runs: `MPtrj` `SrTiO3` `gconv_bwd_L1` 2932 / 2904 -> 2552 / 2544 us; `OFF23-L` water216 `gconv_bwd_L2lp` 600 / 598 -> 557 / 516 us. Fresh-plan ABBA, new / old: `MPtrj` `SrTiO3` `0.9695` (`11.926 -> 11.563 ms`) and reversed `0.9685`; `OFF23-L` water216 `0.9825` / `0.9847`; `OFF23-L` water (5,184 atoms) `0.9825` (`26.95 -> 26.48 ms`) / `0.9839`. `cmp_libs`: `MPtrj` `dE 2.7e-7`, `dF 7.9e-7`; `OFF23-L` water216 `dE 8.7e-6` (of `E = -449493` eV), `dF 2.0e-6`. The adopted guards are exact (`C == 256`, `C == 224`) so untested `C` values keep 256 threads. Final exact-guard binary (installed) vs S30: kernels `MPtrj` `bwd_L1` 2927 / 2946 -> 2545 / 2536 us, `OFF23-L` water216 `bwd_L2lp` 603 / 620 -> 532 / 520 us; ABBA `MPtrj` `0.9703` (`11.930 -> 11.576 ms`) and reversed `1.0302` (new / old `0.9707`), `OFF23-L` water216 `0.9838` and reversed `1.0219` (`0.9786`). 3x gates pass: `MPtrj` oxide all six (`dF` ratio <= 1.34, `dS` <= 1.31), `OFF23-L` organic all eight (`--ref-device cpu`, `dF` <= 0.41, `dS` <= 1.00); `pytest` 67 passed.
 - Sources: this file.
 
 <a id="rv8-fixes"></a>

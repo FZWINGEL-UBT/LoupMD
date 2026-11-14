@@ -415,6 +415,8 @@ S29 (`gen-conv-bwd-l1-c256`, 14 November, 5060 Ti only):
 - `C_FIX = 256` on `gconv_bwd_L1` for `MACE_MPtrj_2022.9` (`C = 256`; runtime `C` held 128 registers, now 62): final installed build vs rebuilt parent, fresh-plan ABBA `SrTiO3` (5,000 atoms) `12.05 -> 11.94 ms/step` (`0.9913`; reversed `0.9912`). 3x gate (oxide) passes; `pytest` 67 passed. Found by a sweep over every installed model; only `MPtrj` uses the `C = 256` lx 1 branches.
 S30 (`gen-conv-fwd-l1-c256`, 14 November, 5060 Ti only):
 - `C_FIX = 256` (`PAIR = false`, 80 registers) on `gconv_fwd_L1` for `MPtrj`: kernel 1960 -> 1860 us, ABBA `SrTiO3` `12.04 -> 11.94 ms/step` (`0.9921`; reversed `0.9910`). 3x gate (oxide) passes; `pytest` 67 passed. S29's `PAIR + C_FIX` forward (104 registers) was a tie.
+S31 (`gen-conv-bwd-512thr`, 14 November, 5060 Ti only):
+- 512-thread blocks for `gconv_bwd_L1` at `C = 256` and `gconv_bwd_L2lp` at `C = 224` (their 39-45 KB `s_q` allowed only 2 blocks = 16 warps per SM): final binary vs S30, fresh-plan ABBA `MPtrj` `SrTiO3` `11.93 -> 11.58 ms/step` (`0.9703`; reversed `0.9707`), `OFF23-L` water216 `3.83 -> 3.76` (`0.9838`; reversed `0.9786`); scratch build `OFF23-L` water (5,184 atoms) `26.95 -> 26.48` (`0.9825` / `0.9839`). 3x gates (`MPtrj` oxide, `OFF23-L` organic) pass; `pytest` 67 passed.
 
 ### 5.4 Fixes Found by the Family Work
 - **POLAR LayerNorm-MLP reverse wrote its GEMM output over its own input** (`mlp_bwd`: after the first hidden layer

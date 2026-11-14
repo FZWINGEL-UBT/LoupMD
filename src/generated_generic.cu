@@ -8652,7 +8652,7 @@ void launch_conv_bwd(int lx, cudaStream_t st, int N, int C, int S, int I, const 
                              : (want_dx ? pick(gconv_bwd_L1<true, 0, true>, gconv_bwd_L1<true, 0, false>)
                                         : pick(gconv_bwd_L1<false, 0, true>, gconv_bwd_L1<false, 0, false>));
         if (smem > 48000) check_cuda(cudaFuncSetAttribute((const void*)fn, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)smem));
-        fn<<<N, 256, smem, st>>>(N, C, S, I, sg, perm, psym, rp, snd, vl, act_slab, act_t_sx, sp, packed, dens,
+        fn<<<N, C == 256 ? 512 : 256, smem, st>>>(N, C, S, I, sg, perm, psym, rp, snd, vl, act_slab, act_t_sx, sp, packed, dens,
                                  bias_shift, x[0], x[1], dmid[0], dmid[1], dmid[2], dmid[3], dD, dx[0], dx[1],
                                  edge_dvec);
     } else {
@@ -8672,7 +8672,7 @@ void launch_conv_bwd(int lx, cudaStream_t st, int N, int C, int S, int I, const 
                                         : pick_lp(gconv_bwd_L2<false, 0, true>, gconv_bwd_L2<false, 0, false>));
         if (smem > 48000) check_cuda(cudaFuncSetAttribute((const void*)flp, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)smem));
         if (smem_g > 48000) check_cuda(cudaFuncSetAttribute((const void*)fg, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)smem_g));
-        flp<<<N, 256, smem, st>>>(N, C, S, I, sg, perm, psym, rp, snd, vl, act_slab, act_t_sx, sp, packed, dens,
+        flp<<<N, C == 224 ? 512 : 256, smem, st>>>(N, C, S, I, sg, perm, psym, rp, snd, vl, act_slab, act_t_sx, sp, packed, dens,
                                   bias_shift, x[0], x[1], dmid[0], dmid[1], dmid[2], dmid[3], dD, dx[0], dx[1],
                                   edge_dvec);
         fg<<<N, 128, smem_g, st>>>(N, C, S, I, sg, perm, psym, rp, snd, vl, act_slab, act_t_sx, sp, packed, dens,
