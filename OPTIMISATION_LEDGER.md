@@ -1327,6 +1327,14 @@ POLAR-1 NaCl 3x3x3 (216) and POLAR-1-M `NbCl5` 3x3x3 (1,944).
 - Measured (5060 Ti): the compiler went to 80 registers with 56-72 B of stack; `nsys` kernel time for the pair, two runs: 761 / 757 -> 1013 / 1023 us (`+34%`).
 - Sources: this file.
 
+<a id="s33-mptrj-l1-after"></a>
+#### s33-mptrj-l1-after: `MPtrj` L1 conv limiters after S29-S31 (no change)
+- Stage: S33 (14 November 2026), 5060 Ti, `ncu`, `MPtrj` `SrTiO3`.
+- `gconv_fwd_L1<1, false, 256, true, 256>`: 1.81 ms, 80 registers, 3 blocks of 256 (register-limited, 50%, achieved 49%); L2 throughput 89.3% (hit 92%), long scoreboard 6.48: L2-bound, so more warps would not help.
+- `gconv_bwd_L1<true, 256, true>` (512 threads): 2.50 ms, achieved 58.7%; SM compute 71.9%, not selected 3.44, long scoreboard 1.72, L2 70%: issue-limited.
+- Both kernels are at a hardware limit for the current algorithm; no launch or occupancy lever remains.
+- Sources: this file.
+
 <a id="s32-specialised-occupancy"></a>
 #### s32-specialised-occupancy: occupancy check of the specialised `w'` / spline kernels (no change)
 - Stage: S32 (14 November 2026), 5060 Ti, `ncu`, `OMAT-0-M` `SrTiO3` (the path also serves `MPA-0`, `MP-0b3` and both `matpes` fine-tunes, where it is ~55% of kernel time).
