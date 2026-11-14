@@ -1522,9 +1522,10 @@ LoupHandle* loup_create(const char* loup_path, int device_id) {
         h->device_id = device_id;
         CUDA_CHECK_THROW(cudaDeviceGetAttribute(&h->l2_bytes, cudaDevAttrL2CacheSize, device_id));
         {
-            int cc_maj = 0;
+            int cc_maj = 0, cc_min = 0;
             CUDA_CHECK_THROW(cudaDeviceGetAttribute(&cc_maj, cudaDevAttrComputeCapabilityMajor, device_id));
-            h->is_sm120 = (cc_maj == 12);
+            CUDA_CHECK_THROW(cudaDeviceGetAttribute(&cc_min, cudaDevAttrComputeCapabilityMinor, device_id));
+            h->is_sm120 = (cc_maj == 12 && cc_min == 0);
         }
         CUDA_CHECK_THROW(cudaStreamCreate(&h->stream));
         CUBLAS_CHECK_THROW(cublasCreate(&h->cublas));
