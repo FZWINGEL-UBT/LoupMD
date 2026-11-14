@@ -412,7 +412,9 @@ S20 (`gemm-own-raster`, 14 November, 5060 Ti only):
 S21 (`gen-first-bwd-edge-minb`, 14 November, 5060 Ti only):
 - `first_bwd_edge_kernel<COLS = 2>` capped at 80 registers in sm_120 device code (latency-bound, 41.7% occupancy at 94 registers): kernel `-6%` (`OMAT-0-S` 510 -> 480 us, `OFF23-M` 358 -> 334 us); step, both argument orders combined: `OMAT-0-S` `0.9954`, `OFF23-M` `0.9979` (one `1.003` run). Lane-per-edge rewrite rejected (`-43%` instructions, but 168 registers: `+13%`). Own `sgemm128` and the `L1` convs profiled near their limits (`s21-limiters` in the ledger).
 S29 (`gen-conv-bwd-l1-c256`, 14 November, 5060 Ti only):
-- `C_FIX = 256` on `gconv_bwd_L1` for `MACE_MPtrj_2022.9` (`C = 256`; runtime `C` held 128 registers, now 62): fresh-plan ABBA `SrTiO3` (5,000 atoms) `12.03 -> 11.95 ms/step` (`0.9935`; reversed `0.9896`). Found by a sweep over every installed model; the `PAIR` forward at `C = 256` was a tie.
+- `C_FIX = 256` on `gconv_bwd_L1` for `MACE_MPtrj_2022.9` (`C = 256`; runtime `C` held 128 registers, now 62): final installed build vs rebuilt parent, fresh-plan ABBA `SrTiO3` (5,000 atoms) `12.05 -> 11.94 ms/step` (`0.9913`; reversed `0.9912`). 3x gate (oxide) passes; `pytest` 67 passed. Found by a sweep over every installed model; only `MPtrj` uses the `C = 256` lx 1 branches.
+S30 (`gen-conv-fwd-l1-c256`, 14 November, 5060 Ti only):
+- `C_FIX = 256` (`PAIR = false`, 80 registers) on `gconv_fwd_L1` for `MPtrj`: kernel 1960 -> 1860 us, ABBA `SrTiO3` `12.04 -> 11.94 ms/step` (`0.9921`; reversed `0.9910`). 3x gate (oxide) passes; `pytest` 67 passed. S29's `PAIR + C_FIX` forward (104 registers) was a tie.
 
 ### 5.4 Fixes Found by the Family Work
 - **POLAR LayerNorm-MLP reverse wrote its GEMM output over its own input** (`mlp_bwd`: after the first hidden layer
