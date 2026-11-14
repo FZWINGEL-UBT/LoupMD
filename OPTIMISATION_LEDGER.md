@@ -164,6 +164,8 @@ Conventions:
 | [md-skin](#md-skin) | Larger / adaptive skin (T10) | – | both | PENDING (owner) | – | 0.5-1.5% at 5,000 atoms, ~10% at 135 atoms | [§4.1 #4][s41] |
 | [md-small-systems](#md-small-systems) | Small-system latency (< ~1,000 atoms) | – | spec | NOT BUILT (open) | – | 135 atoms: GEMM groups 32% of 358 us | [§4.1 #3][s41] |
 | [comp-active-edge-tighten](#comp-active-edge-tighten) | Tighten active-edge compaction (`compute_and_count_active` + `scatter_active_edges`) | – | both | NOT BUILT | – | untried (101 us/step on `SrTiO3` 5060 Ti, `tmp_vec_len` round-trip) | `OMAT0_SPEEDUP_BRIEF.md` |
+| [nl-lane-groups](#nl-lane-groups) | Neighbour count / fill with 8 lanes per atom (neighbouring bins split round-robin; fill keeps the exact row order via per-bin offsets in shared memory) | `kNeighborLanes`, `count/fill_neighbors_kernel`; other GPUs `*_scalar_kernel` | both (`sm_120`) | DEFAULT (5060 Ti only) | S34 | per rebuild `SrTiO3` 433 -> 292 us, `NbCl5` 284 -> 110, water 439 -> 302; ABBA `OFF23-S` water `0.9945` / `0.9856`, `OFF23-M` `0.9961` / `0.9943`, `OMAT-0-S` `0.9961` / `0.9972` | this file |
+| [nl-lane-groups-variants](#nl-lane-groups) | Lane groups striding the slots of each bin (ballot compaction); bins split by lane with lane-major row order | – | both | REJECTED | S34 | slot split: 4x instructions, slower (count 184 -> 292 us); lane-major order: faster (count + fill 492 -> 297 us) but changed the order of equal-key edges, failing `test_replicated_cell...[MACE-POLAR-1-S]` (`dF` 3.25e-3 > 3e-3, deterministic) | this file |
 
 ### Generic path (other model families, 12-13 November 2026)
 
@@ -936,6 +938,16 @@ Each entry has the same fields. Unless stated, the system is OMAT-0 medium on th
 - Status: DEFAULT.
 - Measured: rebuild 1,222 -> 510 us (5060 Ti), 1,121 -> 684 us (Ada).
 - Sources: [§3.1 #15][s31].
+
+<a id="nl-lane-groups"></a>
+#### nl-lane-groups: lane groups per atom for the neighbour count / fill
+- Switch: `src/neighbors.cu` `count_neighbors_kernel` / `fill_neighbors_kernel` (`kNeighborLanes = 8` in `kernels_common.cuh`, 128-thread blocks), dispatched in `rebuild_neighbors` when `h->is_sm120` and the fill's shared table (`16 x nscan` ints) fits in 48 KB; otherwise `count_neighbors_scalar_kernel` / `fill_neighbors_scalar_kernel` (the previous one-thread-per-atom kernels, `sm_89` / `sm_90` SASS identical to S33).
+- Stage: S34 (14 November 2026).
+- What: water never pipelines at skin 0.5 (0 of 256 steps; `OFF23-S` / `OFF23-M`) and rebuilds every ~4 steps (68 / 256), so the rebuild sits on the step's critical path. `ncu` (`OFF23-S` water, 5,184 atoms): the one-thread-per-atom kernels launch 162 warps in all, 8% achieved occupancy, latency-bound (long scoreboard 3.5-4.2; count 184 us, fill 308 us). Now 8 lanes share one atom and split its `(2rx+1)(2ry+1)(2rz+1)` neighbouring bins round-robin; each lane walks its bins with the same float pre-test / float64 band and the same image-shift arithmetic as before. Count reduces in the group. Fill counts each bin's candidates into shared memory, lane 0 turns the counts into running offsets from `row_ptr[i]`, and a second sweep writes each bin's edges at its offset: rows are bit-identical to the one-thread kernels (`MH-1` `NbCl5`, a deterministic path, matches to `dE 3.6e-12`).
+- Status: DEFAULT (5060 Ti only).
+- Measured (5060 Ti): `ncu` count 184 -> 81 us, fill 308 -> ~215 us (occupancy ~55%, now issue-bound at 73-85%). `nsys` medians per rebuild (count + fill): `SrTiO3` 150 + 283 -> 77 + 215 us, `NbCl5` 115 + 169 -> 34 + 76, water 166 + 273 -> 76 + 226. Fresh-plan ABBA with the installed binary, new / old: `OFF23-S` water `0.9945` and reversed `1.0146` (`0.9856`), `OFF23-M` water `0.9961` / `1.0057` (`0.9943`), `OMAT-0-S` `SrTiO3` `0.9961` / `1.0028` (`0.9972`). Gates pass (`OFF23-S` organic 8 / 8, `OMAT-0-S` oxide 6 / 6, `MH-1` crystals 6 / 6, `POLAR-1-S` crystals 5 / 5); `pytest` 67 passed; `test_replicated_cell...[MACE-POLAR-1-S]` `dF` 2.24e-3 (old build 2.19-2.30e-3).
+- Rejected on the way: (1) lanes striding the slots of each bin with a ballot / prefix-popcount compaction (exact order): every lane repeated the per-bin bookkeeping, including its float64 image shifts (FP64 is 1/64 rate here), for ~3.4 atoms per bin: 4x the instructions, issue-bound at 84%, count 184 -> 292 us, fill 308 -> 383 us. (2) Bins split by lane with each lane's edges written as one run (lane-major order, per-lane counts from the count kernel): count + fill 492 -> 297 us, but equal-key edges (stable sort) came out in a different order, which moved `MACE-POLAR-1-S`'s replicated-cell force difference from 2.19e-3 to 3.25e-3 against the test's 3e-3 (deterministic, three runs each); fixed by the per-bin offsets above.
+- Sources: this file.
 
 <a id="int-langevin-32"></a>
 #### int-langevin-32: Langevin first half in 32-thread blocks
