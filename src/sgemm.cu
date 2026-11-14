@@ -126,12 +126,15 @@ void sgemm128_init() {
     cudaFuncSetAttribute(sgemm128_kernel<8, true>, cudaFuncAttributePreferredSharedMemoryCarveout, 100);
     cudaFuncSetAttribute(sgemm128_kernel<8, false>, cudaFuncAttributePreferredSharedMemoryCarveout, 100);
     cudaFuncSetAttribute(sgemm128_kernel<4, true>, cudaFuncAttributePreferredSharedMemoryCarveout, 100);
+    cudaFuncSetAttribute(sgemm128_kernel<4, false>, cudaFuncAttributePreferredSharedMemoryCarveout, 100);
 }
 
 // Requirements (checked by the caller): K % 16 == 0, N % 4 == 0, lda = K, ldb = ldc = N, A / B / C 16-byte aligned.
 void sgemm128(int M, int N, int K, const float* A, const float* B, float* C, float beta, cudaStream_t stream) {
-    if ((N % 128) != 0 && (N % 64) == 0) {  // N = 192: 128 x 64 tiles instead of a half-empty 128 x 128 tile
-        sgemm128_kernel<4, true><<<dim3((M + 127) / 128, N / 64), 256, smem_bytes<64>(), stream>>>(M, N, K, A, B, C, beta);
+    if ((N % 128) != 0 && (N % 128) <= 64) {  // e.g. N = 144, 192: 128 x 64 tiles instead of a mostly-empty 128 x 128 tile
+        const dim3 grid((M + 127) / 128, (N + 63) / 64);
+        if ((N % 64) == 0) sgemm128_kernel<4, true><<<grid, 256, smem_bytes<64>(), stream>>>(M, N, K, A, B, C, beta);
+        else               sgemm128_kernel<4, false><<<grid, 256, smem_bytes<64>(), stream>>>(M, N, K, A, B, C, beta);
         return;
     }
     const dim3 grid((M + 127) / 128, (N + 127) / 128);
