@@ -409,6 +409,8 @@ S19 (`gen-conv-l2-cfix-preloc`, 14 November, 5060 Ti only):
 - `C_FIX` (`128/224`) on the lx 2 convs, `PRELOC` on `gconv_bwd_L2`, prelocated slabs for `pair_sym = 0` models: fresh-plan ABBA `OFF23-L` water 27.81 -> **27.16 ms/step** (`0.977`), water216 3.85 -> **3.79** (`0.985`), `POLAR-1-L` `NaCl216` 6.83 -> **6.77** (`0.991`), `POLAR-1-M` / `MH-1` `NbCl5` tie. The `OFF23-L` gain is the lx 2 `C_FIX` / `PRELOC` (it was already prelocated); `pair_sym = 0` prelocation alone is a tie on `NbCl5`.
 S20 (`gemm-own-raster`, 14 November, 5060 Ti only):
 - Own SGEMMs rasterised `N`-tile-fastest (`sgemm128` via an `N_FASTEST` template only on `sm_120`; other GPUs run SASS identical to S19) so a cold `A` is read once in practice (`13608x512x512` cold 529 -> 425 us): fresh-plan ABBA `MH-1` `NbCl5` 12.52 -> **12.22 ms/step** (`0.977`), `POLAR-1-M` `NbCl5` 24.50 -> **24.19** (`0.987`), `OMAT-0-M` `SrTiO3` 8.18 -> **8.08** (`0.989`), `OFF23-M` water 7.41 -> **7.35** (`0.993`), `OMAT-0-S` / `POLAR-1-S` tie.
+S21 (`gen-first-bwd-edge-minb`, 14 November, 5060 Ti only):
+- `first_bwd_edge_kernel<COLS = 2>` capped at 80 registers in sm_120 device code (latency-bound, 41.7% occupancy at 94 registers): kernel `-6%` (`OMAT-0-S` 510 -> 480 us, `OFF23-M` 358 -> 334 us); step, both argument orders combined: `OMAT-0-S` `0.9954`, `OFF23-M` `0.9979` (one `1.003` run). Lane-per-edge rewrite rejected (`-43%` instructions, but 168 registers: `+13%`). Own `sgemm128` and the `L1` convs profiled near their limits (`s21-limiters` in the ledger).
 
 ### 5.4 Fixes Found by the Family Work
 - **POLAR LayerNorm-MLP reverse wrote its GEMM output over its own input** (`mlp_bwd`: after the first hidden layer

@@ -524,9 +524,16 @@ __global__ void __launch_bounds__(256) first_bwd_kernel(
 // Edge-parallel layer-0 backward + ZBL + force/virial assembly (tabled_outer_sum0_backward_kernel design):
 // 4 warps x 32 edges/warp, COLS columns/lane (2 for Jp <= 64, 3 for Jp <= 96); caches dS0 across consecutive
 // active edges with the same (rcv, snd_sp), folds SH gradients in s_edge[4][32][20], then all 32 lanes assemble
-// forces, ZBL and virial in parallel.
+// forces, ZBL and virial in parallel. Latency-bound (serial shuffle folds): on sm_120, COLS = 2 is capped at 80
+// registers (6 blocks / SM, no spills; 92-96 registers uncapped). COLS = 3 would spill under the cap, and other
+// architectures (not measured) keep the uncapped kernel.
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ == 1200
+#define LOUP_FIRST_BWD_EDGE_MINB2 6
+#else
+#define LOUP_FIRST_BWD_EDGE_MINB2 0
+#endif
 template <int COLS, bool HAS_ZBL, bool STRESS>
-__global__ void __launch_bounds__(128) first_bwd_edge_kernel(
+__global__ void __launch_bounds__(128, COLS == 2 ? LOUP_FIRST_BWD_EDGE_MINB2 : 0) first_bwd_edge_kernel(
     const int* __restrict__ E_dev, int S, int I, int J, int K0, SplineGrid grid, int sh_perm, int pair_sym,
     const int* __restrict__ senders, const int* __restrict__ receivers, const float4* __restrict__ vec_len,
     const int* __restrict__ species, const float4* __restrict__ table,
