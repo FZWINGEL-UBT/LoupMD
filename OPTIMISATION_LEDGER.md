@@ -130,7 +130,7 @@ Conventions:
 | [gemm-grouped-launch](#gemm-grouped-launch) | A fork group's small products in one own-SGEMM launch | – | spec | REJECTED | S5 | 135 atoms step 355 -> 345 us; benchmarks +0.2% to +1.2% | [§4.1 #3][s41] |
 | [gemm-skip16-overlap](#gemm-skip16-overlap) | `skip16` GEMMs overlapped across the spline | – | spec | REJECTED | – | not recorded | [§3.3][s33] |
 | [gemm-simt-for-lr](#gemm-simt-for-lr) | Float32 SIMT GEMMs only for long-range models | `GenericModel::has_lr` | POLAR | DEFAULT (scoped: POLAR) | S6 | gate: Ada POLAR-S / -L failures -> all pass; cost +0% to +7% | [§5.4][s54] |
-| [gen-gate-epilogue](#gen-gate-epilogue) | Gate in the own SGEMM's epilogue / prologue | – | gen | NOT BUILT | – | ceiling ~7 of 47 ms (MH-1 `SrTiO3`, 5060 Ti) | [§4.1 #5][s41] |
+| [gen-gate-epilogue](#gen-gate-epilogue) | Gate forward fused into the `W_2` GEMMs' A load (`A = G * (lin * s)` transformed in shared memory; `gout0` and gates `G` from a pre-pass) | – | gen | REJECTED (falsifier, 5060 Ti only) | S36 | microbench, MH-1 shapes (`N = 5,000`, `C = 512`, random data): gate + 4 GEMMs `3,800 us` (best of own / cuBLAS per `l`) -> fused `3,594` (`0.946`, stop rule `<= 0.90`); bit-exact | this file |
 | [gemm-cold-l2-ada-fix](#gemm-cold-l2-ada-fix) | Fix Ada `22 MiB < L2/2` cold-L2 rule for `lin1_fwd l=1` + wider 3xTF32 `mma` tiles | – | both | NOT BUILT | – | untried (`lin1_fwd l=1` timed hot on Ada despite 97 MB `m1`) | `OMAT0_SPEEDUP_BRIEF.md` |
 
 ### Scheduling, memory and edge data
@@ -281,7 +281,7 @@ Do not retry these unless the stated condition changes.
 | Ada performance counters | blocked on admin rights on `leeloo` | [meas-ada-counters](#meas-ada-counters) |
 | Small-system latency | GEMM launch floor; split-K, grouped launch and edge-split spline rejected | [md-small-systems](#md-small-systems) |
 | Larger / adaptive skin | owner decision (changes the benchmark configuration) | [md-skin](#md-skin) |
-| Gate fused into the generic path's GEMMs | not built; ceiling ~15% of the MH-1 step | [gen-gate-epilogue](#gen-gate-epilogue) |
+| Gate fused into the generic path's GEMMs | forward prologue fusion falsified (S36: `0.946` of the chain, stop rule 10%); backward epilogue fusion not built (needs per-atom reductions over the `2l + 1` rows across tiles) | [gen-gate-epilogue](#gen-gate-epilogue) |
 | Generic-path GEMMs (~50% of MH-1) | not screened beyond the shared autotune | [gen-profile](#gen-profile) |
 | Decaying step-displacement maximum | open review item S2: one fast step keeps the loop unpipelined | [§4.2][s42] |
 | `w'` path order and shared scalars | untried: emit the six `x1` paths before the four `x0` paths (shorter live ranges at the 64-register limit) and add the three `xx / xy / xz` pull terms of paths 1, 4, 7 through one summed scalar (6 FMA per channel). Differs from [wp-x0-hoist](#wp-x0-hoist), which added a live accumulator. Test: SASS count and spill bytes first, then A/B | external suggestion, 13 Nov |
@@ -822,10 +822,11 @@ Each entry has the same fields. Unless stated, the system is OMAT-0 medium on th
 <a id="gen-gate-epilogue"></a>
 #### gen-gate-epilogue: generic gate fused into the GEMMs
 - What: the nonlinear blocks' gate reads the rows a GEMM just wrote and writes rows the next GEMM reads; fuse it into the own SGEMM's epilogue / prologue.
-- Status: NOT BUILT.
-- Measured: ceiling = the gate kernels' time, ~7 of 47 ms (MH-1 `SrTiO3`, 5060 Ti: gate backward 10%, forward 5%).
-- Falsifier: stop if the fused GEMM loses more than the gate kernels cost.
-- Sources: [§4.1 #5][s41], [§5.5][s55].
+- Status: forward REJECTED by its falsifier (S36, 14 November 2026, 5060 Ti only); backward not built.
+- Measured: ceiling = the gate kernels' time. Fresh `nsys` (S36, MH-1 `SrTiO3`): `gate_bwd` 3.71 ms/step (9.4%), `gate_fwd` 2.36 (6.0%) of 39.4 ms. `ncu`: both at 87-89% of DRAM peak, 6-8% issue active (memory-bound; the GEMMs around them run at ~72% issue, ~74% of FP32 peak, and cannot hide them).
+- Falsifier (S36, `.tmp_o/gf_mb.cu`, deleted; standalone, MH-1 layer shapes `N = 5,000`, `C = 512`, random data, median of 20): baseline `gate_fwd` 1,143 us + `W_2` GEMMs `l = 0..3` own `sgemm128` 206 / 575 / 870 / 1,227 us, cuBLAS 198 / 518 / 794 / 1,147 us. Fused: a pre-pass writing `s`, `gout0` and the three gate columns `G` (334 us: it still reads all of `lin0` / `res0`), the `l = 0` GEMM on `gout0`, and for `l = 1..3` an `sgemm128` copy that cp.asyncs the `lin_l` tile and the tile's `G` rows into shared memory and transforms `A = G * (lin * s)` in place (one extra barrier per k-step): 645 / 1,007 / 1,410 us with 2 stages (39 KB), 700 / 1,095 / 1,529 with 3 (58 KB, 1 block / SM); 128 registers with 28 B of spill either way. Chain `3,800 -> 3,594 us` (`0.946`, 2 stages) and `3,856` (`1.015`, 3 stages) against the stop rule `<= 0.90`. Results bit-identical to gate + plain GEMM. The real kernel would need the `res_l` tile as well for `l <= lx` (one more 8 KB stage buffer), so the proxy is optimistic.
+- Why: the fused GEMM loses 12-23% against the plain own / cuBLAS GEMMs (2 stages to fit shared memory, the transform pass and its barrier, spills at the 128-register cap of 2 blocks / SM), which eats most of the gate time it removes.
+- Sources: [§4.1 #5][s41], [§5.5][s55]; this file.
 
 <a id="gemm-cold-l2-ada-fix"></a>
 #### gemm-cold-l2-ada-fix: cold-L2 classification on Ada `lin1_fwd l=1` + wider 3xTF32 `mma` tiles
