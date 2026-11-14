@@ -3476,6 +3476,24 @@ __global__ void __launch_bounds__(128) gconv_bwd_L2(
           const float A2_2 = 0x1.c9f25c0000000p-2f * g0;
           const float A3_3 = 0x1.c9f25c0000000p-2f * g0;
           const float A4_4 = 0x1.c9f25c0000000p-2f * g0;
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ == 1200
+          const float Cg0 = A0_0 * Y4;
+          const float Cg1 = A1_1 * Y5;
+          const float Cg2 = A2_2 * Y6;
+          const float Cg3 = A3_3 * Y7;
+          const float Cg4 = A4_4 * Y8;
+          pull_R = fmaf(x2_0 * Cg0 + x2_1 * Cg1 + x2_2 * Cg2 + x2_3 * Cg3 + x2_4 * Cg4, dw, pull_R);
+          dY[4] = fmaf(R, A0_0 * x2_0, dY[4]);
+          dY[5] = fmaf(R, A1_1 * x2_1, dY[5]);
+          dY[6] = fmaf(R, A2_2 * x2_2, dY[6]);
+          dY[7] = fmaf(R, A3_3 * x2_3, dY[7]);
+          dY[8] = fmaf(R, A4_4 * x2_4, dY[8]);
+          gx2_0 = fmaf(R, Cg0, gx2_0);
+          gx2_1 = fmaf(R, Cg1, gx2_1);
+          gx2_2 = fmaf(R, Cg2, gx2_2);
+          gx2_3 = fmaf(R, Cg3, gx2_3);
+          gx2_4 = fmaf(R, Cg4, gx2_4);
+#else
           pull_R = fmaf(A0_0 * x2_0 * Y4 + A1_1 * x2_1 * Y5 + A2_2 * x2_2 * Y6 + A3_3 * x2_3 * Y7 + A4_4 * x2_4 * Y8, dw, pull_R);
           dY[4] = fmaf(R, A0_0 * x2_0, dY[4]);
           dY[5] = fmaf(R, A1_1 * x2_1, dY[5]);
@@ -3487,6 +3505,7 @@ __global__ void __launch_bounds__(128) gconv_bwd_L2(
           gx2_2 = fmaf(R, A2_2 * Y6, gx2_2);
           gx2_3 = fmaf(R, A3_3 * Y7, gx2_3);
           gx2_4 = fmaf(R, A4_4 * Y8, gx2_4);
+#endif
         }
         { // path 6 (2,1,1)
           const uint2 c = __ldg(tq + 6 * C + ch);
@@ -3512,6 +3531,22 @@ __global__ void __launch_bounds__(128) gconv_bwd_L2(
           const float A3_2 = 0x1.43d1360000000p-2f * g1;
           const float A4_0 = -0x1.43d1360000000p-2f * g0;
           const float A4_2 = 0x1.43d1360000000p-2f * g2;
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ == 1200
+          const float Cg0 = A0_0 * Y1 + A0_2 * Y3;
+          const float Cg1 = A1_0 * Y1 + A1_1 * Y2;
+          const float Cg2 = A2_0 * Y1 + A2_1 * Y2 + A2_2 * Y3;
+          const float Cg3 = A3_1 * Y2 + A3_2 * Y3;
+          const float Cg4 = A4_0 * Y1 + A4_2 * Y3;
+          pull_R = fmaf(x2_0 * Cg0 + x2_1 * Cg1 + x2_2 * Cg2 + x2_3 * Cg3 + x2_4 * Cg4, dw, pull_R);
+          dY[1] = fmaf(R, A0_0 * x2_0 + A1_0 * x2_1 + A2_0 * x2_2 + A4_0 * x2_4, dY[1]);
+          dY[2] = fmaf(R, A1_1 * x2_1 + A2_1 * x2_2 + A3_1 * x2_3, dY[2]);
+          dY[3] = fmaf(R, A0_2 * x2_0 + A2_2 * x2_2 + A3_2 * x2_3 + A4_2 * x2_4, dY[3]);
+          gx2_0 = fmaf(R, Cg0, gx2_0);
+          gx2_1 = fmaf(R, Cg1, gx2_1);
+          gx2_2 = fmaf(R, Cg2, gx2_2);
+          gx2_3 = fmaf(R, Cg3, gx2_3);
+          gx2_4 = fmaf(R, Cg4, gx2_4);
+#else
           pull_R = fmaf(A0_0 * x2_0 * Y1 + A0_2 * x2_0 * Y3 + A1_0 * x2_1 * Y1 + A1_1 * x2_1 * Y2 + A2_0 * x2_2 * Y1 + A2_1 * x2_2 * Y2 + A2_2 * x2_2 * Y3 + A3_1 * x2_3 * Y2 + A3_2 * x2_3 * Y3 + A4_0 * x2_4 * Y1 + A4_2 * x2_4 * Y3, dw, pull_R);
           dY[1] = fmaf(R, A0_0 * x2_0 + A1_0 * x2_1 + A2_0 * x2_2 + A4_0 * x2_4, dY[1]);
           dY[2] = fmaf(R, A1_1 * x2_1 + A2_1 * x2_2 + A3_1 * x2_3, dY[2]);
@@ -3521,6 +3556,7 @@ __global__ void __launch_bounds__(128) gconv_bwd_L2(
           gx2_2 = fmaf(R, A2_0 * Y1 + A2_1 * Y2 + A2_2 * Y3, gx2_2);
           gx2_3 = fmaf(R, A3_1 * Y2 + A3_2 * Y3, gx2_3);
           gx2_4 = fmaf(R, A4_0 * Y1 + A4_2 * Y3, gx2_4);
+#endif
         }
         { // path 7 (2,3,1)
           const uint2 c = __ldg(tq + 7 * C + ch);
@@ -3556,6 +3592,26 @@ __global__ void __launch_bounds__(128) gconv_bwd_L2(
           const float A4_4 = -0x1.1aa69e0000000p-4f * g2;
           const float A4_5 = 0x1.bee9060000000p-3f * g1;
           const float A4_6 = 0x1.11acee0000000p-2f * g2;
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ == 1200
+          const float Cg0 = A0_0 * Y9 + A0_1 * Y10 + A0_2 * Y11 + A0_4 * Y13 + A0_6 * Y15;
+          const float Cg1 = A1_1 * Y10 + A1_2 * Y11 + A1_3 * Y12 + A1_5 * Y14;
+          const float Cg2 = A2_2 * Y11 + A2_3 * Y12 + A2_4 * Y13;
+          const float Cg3 = A3_1 * Y10 + A3_3 * Y12 + A3_4 * Y13 + A3_5 * Y14;
+          const float Cg4 = A4_0 * Y9 + A4_2 * Y11 + A4_4 * Y13 + A4_5 * Y14 + A4_6 * Y15;
+          pull_R = fmaf(x2_0 * Cg0 + x2_1 * Cg1 + x2_2 * Cg2 + x2_3 * Cg3 + x2_4 * Cg4, dw, pull_R);
+          dY[9] = fmaf(R, A0_0 * x2_0 + A4_0 * x2_4, dY[9]);
+          dY[10] = fmaf(R, A0_1 * x2_0 + A1_1 * x2_1 + A3_1 * x2_3, dY[10]);
+          dY[11] = fmaf(R, A0_2 * x2_0 + A1_2 * x2_1 + A2_2 * x2_2 + A4_2 * x2_4, dY[11]);
+          dY[12] = fmaf(R, A1_3 * x2_1 + A2_3 * x2_2 + A3_3 * x2_3, dY[12]);
+          dY[13] = fmaf(R, A0_4 * x2_0 + A2_4 * x2_2 + A3_4 * x2_3 + A4_4 * x2_4, dY[13]);
+          dY[14] = fmaf(R, A1_5 * x2_1 + A3_5 * x2_3 + A4_5 * x2_4, dY[14]);
+          dY[15] = fmaf(R, A0_6 * x2_0 + A4_6 * x2_4, dY[15]);
+          gx2_0 = fmaf(R, Cg0, gx2_0);
+          gx2_1 = fmaf(R, Cg1, gx2_1);
+          gx2_2 = fmaf(R, Cg2, gx2_2);
+          gx2_3 = fmaf(R, Cg3, gx2_3);
+          gx2_4 = fmaf(R, Cg4, gx2_4);
+#else
           pull_R = fmaf(A0_0 * x2_0 * Y9 + A0_1 * x2_0 * Y10 + A0_2 * x2_0 * Y11 + A0_4 * x2_0 * Y13 + A0_6 * x2_0 * Y15 + A1_1 * x2_1 * Y10 + A1_2 * x2_1 * Y11 + A1_3 * x2_1 * Y12 + A1_5 * x2_1 * Y14 + A2_2 * x2_2 * Y11 + A2_3 * x2_2 * Y12 + A2_4 * x2_2 * Y13 + A3_1 * x2_3 * Y10 + A3_3 * x2_3 * Y12 + A3_4 * x2_3 * Y13 + A3_5 * x2_3 * Y14 + A4_0 * x2_4 * Y9 + A4_2 * x2_4 * Y11 + A4_4 * x2_4 * Y13 + A4_5 * x2_4 * Y14 + A4_6 * x2_4 * Y15, dw, pull_R);
           dY[9] = fmaf(R, A0_0 * x2_0 + A4_0 * x2_4, dY[9]);
           dY[10] = fmaf(R, A0_1 * x2_0 + A1_1 * x2_1 + A3_1 * x2_3, dY[10]);
@@ -3569,6 +3625,7 @@ __global__ void __launch_bounds__(128) gconv_bwd_L2(
           gx2_2 = fmaf(R, A2_2 * Y11 + A2_3 * Y12 + A2_4 * Y13, gx2_2);
           gx2_3 = fmaf(R, A3_1 * Y10 + A3_3 * Y12 + A3_4 * Y13 + A3_5 * Y14, gx2_3);
           gx2_4 = fmaf(R, A4_0 * Y9 + A4_2 * Y11 + A4_4 * Y13 + A4_5 * Y14 + A4_6 * Y15, gx2_4);
+#endif
         }
         { // path 11 (2,0,2)
           const uint2 c = __ldg(tq + 11 * C + ch);
@@ -3590,6 +3647,20 @@ __global__ void __launch_bounds__(128) gconv_bwd_L2(
           const float A2_0 = 0x1.c9f25c0000000p-2f * g2;
           const float A3_0 = 0x1.c9f25c0000000p-2f * g3;
           const float A4_0 = 0x1.c9f25c0000000p-2f * g4;
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ == 1200
+          const float Cg0 = A0_0 * Y0;
+          const float Cg1 = A1_0 * Y0;
+          const float Cg2 = A2_0 * Y0;
+          const float Cg3 = A3_0 * Y0;
+          const float Cg4 = A4_0 * Y0;
+          pull_R = fmaf(x2_0 * Cg0 + x2_1 * Cg1 + x2_2 * Cg2 + x2_3 * Cg3 + x2_4 * Cg4, dw, pull_R);
+          dY[0] = fmaf(R, A0_0 * x2_0 + A1_0 * x2_1 + A2_0 * x2_2 + A3_0 * x2_3 + A4_0 * x2_4, dY[0]);
+          gx2_0 = fmaf(R, Cg0, gx2_0);
+          gx2_1 = fmaf(R, Cg1, gx2_1);
+          gx2_2 = fmaf(R, Cg2, gx2_2);
+          gx2_3 = fmaf(R, Cg3, gx2_3);
+          gx2_4 = fmaf(R, Cg4, gx2_4);
+#else
           pull_R = fmaf(A0_0 * x2_0 * Y0 + A1_0 * x2_1 * Y0 + A2_0 * x2_2 * Y0 + A3_0 * x2_3 * Y0 + A4_0 * x2_4 * Y0, dw, pull_R);
           dY[0] = fmaf(R, A0_0 * x2_0 + A1_0 * x2_1 + A2_0 * x2_2 + A3_0 * x2_3 + A4_0 * x2_4, dY[0]);
           gx2_0 = fmaf(R, A0_0 * Y0, gx2_0);
@@ -3597,6 +3668,7 @@ __global__ void __launch_bounds__(128) gconv_bwd_L2(
           gx2_2 = fmaf(R, A2_0 * Y0, gx2_2);
           gx2_3 = fmaf(R, A3_0 * Y0, gx2_3);
           gx2_4 = fmaf(R, A4_0 * Y0, gx2_4);
+#endif
         }
         { // path 12 (2,2,2)
           const uint2 c = __ldg(tq + 12 * C + ch);
@@ -3636,6 +3708,24 @@ __global__ void __launch_bounds__(128) gconv_bwd_L2(
           const float A4_2 = -0x1.e990ce0000000p-3f * g4;
           const float A4_3 = 0x1.a7f9ee0000000p-3f * g3;
           const float A4_4 = -0x1.e990ce0000000p-3f * g2;
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ == 1200
+          const float Cg0 = A0_0 * Y4 + A0_1 * Y5 + A0_2 * Y6 + A0_3 * Y7;
+          const float Cg1 = A1_0 * Y4 + A1_1 * Y5 + A1_2 * Y6 + A1_3 * Y7 + A1_4 * Y8;
+          const float Cg2 = A2_0 * Y4 + A2_1 * Y5 + A2_2 * Y6 + A2_3 * Y7 + A2_4 * Y8;
+          const float Cg3 = A3_0 * Y4 + A3_1 * Y5 + A3_2 * Y6 + A3_3 * Y7 + A3_4 * Y8;
+          const float Cg4 = A4_1 * Y5 + A4_2 * Y6 + A4_3 * Y7 + A4_4 * Y8;
+          pull_R = fmaf(x2_0 * Cg0 + x2_1 * Cg1 + x2_2 * Cg2 + x2_3 * Cg3 + x2_4 * Cg4, dw, pull_R);
+          dY[4] = fmaf(R, A0_0 * x2_0 + A1_0 * x2_1 + A2_0 * x2_2 + A3_0 * x2_3, dY[4]);
+          dY[5] = fmaf(R, A0_1 * x2_0 + A1_1 * x2_1 + A2_1 * x2_2 + A3_1 * x2_3 + A4_1 * x2_4, dY[5]);
+          dY[6] = fmaf(R, A0_2 * x2_0 + A1_2 * x2_1 + A2_2 * x2_2 + A3_2 * x2_3 + A4_2 * x2_4, dY[6]);
+          dY[7] = fmaf(R, A0_3 * x2_0 + A1_3 * x2_1 + A2_3 * x2_2 + A3_3 * x2_3 + A4_3 * x2_4, dY[7]);
+          dY[8] = fmaf(R, A1_4 * x2_1 + A2_4 * x2_2 + A3_4 * x2_3 + A4_4 * x2_4, dY[8]);
+          gx2_0 = fmaf(R, Cg0, gx2_0);
+          gx2_1 = fmaf(R, Cg1, gx2_1);
+          gx2_2 = fmaf(R, Cg2, gx2_2);
+          gx2_3 = fmaf(R, Cg3, gx2_3);
+          gx2_4 = fmaf(R, Cg4, gx2_4);
+#else
           pull_R = fmaf(A0_0 * x2_0 * Y4 + A0_1 * x2_0 * Y5 + A0_2 * x2_0 * Y6 + A0_3 * x2_0 * Y7 + A1_0 * x2_1 * Y4 + A1_1 * x2_1 * Y5 + A1_2 * x2_1 * Y6 + A1_3 * x2_1 * Y7 + A1_4 * x2_1 * Y8 + A2_0 * x2_2 * Y4 + A2_1 * x2_2 * Y5 + A2_2 * x2_2 * Y6 + A2_3 * x2_2 * Y7 + A2_4 * x2_2 * Y8 + A3_0 * x2_3 * Y4 + A3_1 * x2_3 * Y5 + A3_2 * x2_3 * Y6 + A3_3 * x2_3 * Y7 + A3_4 * x2_3 * Y8 + A4_1 * x2_4 * Y5 + A4_2 * x2_4 * Y6 + A4_3 * x2_4 * Y7 + A4_4 * x2_4 * Y8, dw, pull_R);
           dY[4] = fmaf(R, A0_0 * x2_0 + A1_0 * x2_1 + A2_0 * x2_2 + A3_0 * x2_3, dY[4]);
           dY[5] = fmaf(R, A0_1 * x2_0 + A1_1 * x2_1 + A2_1 * x2_2 + A3_1 * x2_3 + A4_1 * x2_4, dY[5]);
@@ -3647,6 +3737,7 @@ __global__ void __launch_bounds__(128) gconv_bwd_L2(
           gx2_2 = fmaf(R, A2_0 * Y4 + A2_1 * Y5 + A2_2 * Y6 + A2_3 * Y7 + A2_4 * Y8, gx2_2);
           gx2_3 = fmaf(R, A3_0 * Y4 + A3_1 * Y5 + A3_2 * Y6 + A3_3 * Y7 + A3_4 * Y8, gx2_3);
           gx2_4 = fmaf(R, A4_1 * Y5 + A4_2 * Y6 + A4_3 * Y7 + A4_4 * Y8, gx2_4);
+#endif
         }
         { // path 15 (2,1,3)
           const uint2 c = __ldg(tq + 15 * C + ch);
@@ -3680,6 +3771,22 @@ __global__ void __launch_bounds__(128) gconv_bwd_L2(
           const float A4_0 = 0x1.11acee0000000p-2f * g0 + 0x1.1aa69e0000000p-4f * g2;
           const float A4_1 = 0x1.bee9060000000p-3f * g5;
           const float A4_2 = -0x1.1aa69e0000000p-4f * g4 + 0x1.11acee0000000p-2f * g6;
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ == 1200
+          const float Cg0 = A0_0 * Y1 + A0_1 * Y2 + A0_2 * Y3;
+          const float Cg1 = A1_0 * Y1 + A1_1 * Y2 + A1_2 * Y3;
+          const float Cg2 = A2_0 * Y1 + A2_1 * Y2 + A2_2 * Y3;
+          const float Cg3 = A3_0 * Y1 + A3_1 * Y2 + A3_2 * Y3;
+          const float Cg4 = A4_0 * Y1 + A4_1 * Y2 + A4_2 * Y3;
+          pull_R = fmaf(x2_0 * Cg0 + x2_1 * Cg1 + x2_2 * Cg2 + x2_3 * Cg3 + x2_4 * Cg4, dw, pull_R);
+          dY[1] = fmaf(R, A0_0 * x2_0 + A1_0 * x2_1 + A2_0 * x2_2 + A3_0 * x2_3 + A4_0 * x2_4, dY[1]);
+          dY[2] = fmaf(R, A0_1 * x2_0 + A1_1 * x2_1 + A2_1 * x2_2 + A3_1 * x2_3 + A4_1 * x2_4, dY[2]);
+          dY[3] = fmaf(R, A0_2 * x2_0 + A1_2 * x2_1 + A2_2 * x2_2 + A3_2 * x2_3 + A4_2 * x2_4, dY[3]);
+          gx2_0 = fmaf(R, Cg0, gx2_0);
+          gx2_1 = fmaf(R, Cg1, gx2_1);
+          gx2_2 = fmaf(R, Cg2, gx2_2);
+          gx2_3 = fmaf(R, Cg3, gx2_3);
+          gx2_4 = fmaf(R, Cg4, gx2_4);
+#else
           pull_R = fmaf(A0_0 * x2_0 * Y1 + A0_1 * x2_0 * Y2 + A0_2 * x2_0 * Y3 + A1_0 * x2_1 * Y1 + A1_1 * x2_1 * Y2 + A1_2 * x2_1 * Y3 + A2_0 * x2_2 * Y1 + A2_1 * x2_2 * Y2 + A2_2 * x2_2 * Y3 + A3_0 * x2_3 * Y1 + A3_1 * x2_3 * Y2 + A3_2 * x2_3 * Y3 + A4_0 * x2_4 * Y1 + A4_1 * x2_4 * Y2 + A4_2 * x2_4 * Y3, dw, pull_R);
           dY[1] = fmaf(R, A0_0 * x2_0 + A1_0 * x2_1 + A2_0 * x2_2 + A3_0 * x2_3 + A4_0 * x2_4, dY[1]);
           dY[2] = fmaf(R, A0_1 * x2_0 + A1_1 * x2_1 + A2_1 * x2_2 + A3_1 * x2_3 + A4_1 * x2_4, dY[2]);
@@ -3689,6 +3796,7 @@ __global__ void __launch_bounds__(128) gconv_bwd_L2(
           gx2_2 = fmaf(R, A2_0 * Y1 + A2_1 * Y2 + A2_2 * Y3, gx2_2);
           gx2_3 = fmaf(R, A3_0 * Y1 + A3_1 * Y2 + A3_2 * Y3, gx2_3);
           gx2_4 = fmaf(R, A4_0 * Y1 + A4_1 * Y2 + A4_2 * Y3, gx2_4);
+#endif
         }
         { // path 16 (2,3,3)
           const uint2 c = __ldg(tq + 16 * C + ch);
@@ -3738,6 +3846,26 @@ __global__ void __launch_bounds__(128) gconv_bwd_L2(
           const float A4_4 = 0x1.5a2cd80000000p-3f * g4 + -0x1.bee9060000000p-4f * g6;
           const float A4_5 = -0x1.bee9060000000p-3f * g3;
           const float A4_6 = -0x1.bee9060000000p-4f * g4;
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ == 1200
+          const float Cg0 = A0_0 * Y9 + A0_1 * Y10 + A0_2 * Y11 + A0_3 * Y12 + A0_4 * Y13 + A0_6 * Y15;
+          const float Cg1 = A1_0 * Y9 + A1_1 * Y10 + A1_2 * Y11 + A1_3 * Y12 + A1_4 * Y13 + A1_5 * Y14 + A1_6 * Y15;
+          const float Cg2 = A2_0 * Y9 + A2_2 * Y11 + A2_3 * Y12 + A2_4 * Y13 + A2_6 * Y15;
+          const float Cg3 = A3_0 * Y9 + A3_1 * Y10 + A3_2 * Y11 + A3_3 * Y12 + A3_4 * Y13 + A3_5 * Y14 + A3_6 * Y15;
+          const float Cg4 = A4_0 * Y9 + A4_2 * Y11 + A4_3 * Y12 + A4_4 * Y13 + A4_5 * Y14 + A4_6 * Y15;
+          pull_R = fmaf(x2_0 * Cg0 + x2_1 * Cg1 + x2_2 * Cg2 + x2_3 * Cg3 + x2_4 * Cg4, dw, pull_R);
+          dY[9] = fmaf(R, A0_0 * x2_0 + A1_0 * x2_1 + A2_0 * x2_2 + A3_0 * x2_3 + A4_0 * x2_4, dY[9]);
+          dY[10] = fmaf(R, A0_1 * x2_0 + A1_1 * x2_1 + A3_1 * x2_3, dY[10]);
+          dY[11] = fmaf(R, A0_2 * x2_0 + A1_2 * x2_1 + A2_2 * x2_2 + A3_2 * x2_3 + A4_2 * x2_4, dY[11]);
+          dY[12] = fmaf(R, A0_3 * x2_0 + A1_3 * x2_1 + A2_3 * x2_2 + A3_3 * x2_3 + A4_3 * x2_4, dY[12]);
+          dY[13] = fmaf(R, A0_4 * x2_0 + A1_4 * x2_1 + A2_4 * x2_2 + A3_4 * x2_3 + A4_4 * x2_4, dY[13]);
+          dY[14] = fmaf(R, A1_5 * x2_1 + A3_5 * x2_3 + A4_5 * x2_4, dY[14]);
+          dY[15] = fmaf(R, A0_6 * x2_0 + A1_6 * x2_1 + A2_6 * x2_2 + A3_6 * x2_3 + A4_6 * x2_4, dY[15]);
+          gx2_0 = fmaf(R, Cg0, gx2_0);
+          gx2_1 = fmaf(R, Cg1, gx2_1);
+          gx2_2 = fmaf(R, Cg2, gx2_2);
+          gx2_3 = fmaf(R, Cg3, gx2_3);
+          gx2_4 = fmaf(R, Cg4, gx2_4);
+#else
           pull_R = fmaf(A0_0 * x2_0 * Y9 + A0_1 * x2_0 * Y10 + A0_2 * x2_0 * Y11 + A0_3 * x2_0 * Y12 + A0_4 * x2_0 * Y13 + A0_6 * x2_0 * Y15 + A1_0 * x2_1 * Y9 + A1_1 * x2_1 * Y10 + A1_2 * x2_1 * Y11 + A1_3 * x2_1 * Y12 + A1_4 * x2_1 * Y13 + A1_5 * x2_1 * Y14 + A1_6 * x2_1 * Y15 + A2_0 * x2_2 * Y9 + A2_2 * x2_2 * Y11 + A2_3 * x2_2 * Y12 + A2_4 * x2_2 * Y13 + A2_6 * x2_2 * Y15 + A3_0 * x2_3 * Y9 + A3_1 * x2_3 * Y10 + A3_2 * x2_3 * Y11 + A3_3 * x2_3 * Y12 + A3_4 * x2_3 * Y13 + A3_5 * x2_3 * Y14 + A3_6 * x2_3 * Y15 + A4_0 * x2_4 * Y9 + A4_2 * x2_4 * Y11 + A4_3 * x2_4 * Y12 + A4_4 * x2_4 * Y13 + A4_5 * x2_4 * Y14 + A4_6 * x2_4 * Y15, dw, pull_R);
           dY[9] = fmaf(R, A0_0 * x2_0 + A1_0 * x2_1 + A2_0 * x2_2 + A3_0 * x2_3 + A4_0 * x2_4, dY[9]);
           dY[10] = fmaf(R, A0_1 * x2_0 + A1_1 * x2_1 + A3_1 * x2_3, dY[10]);
@@ -3751,6 +3879,7 @@ __global__ void __launch_bounds__(128) gconv_bwd_L2(
           gx2_2 = fmaf(R, A2_0 * Y9 + A2_2 * Y11 + A2_3 * Y12 + A2_4 * Y13 + A2_6 * Y15, gx2_2);
           gx2_3 = fmaf(R, A3_0 * Y9 + A3_1 * Y10 + A3_2 * Y11 + A3_3 * Y12 + A3_4 * Y13 + A3_5 * Y14 + A3_6 * Y15, gx2_3);
           gx2_4 = fmaf(R, A4_0 * Y9 + A4_2 * Y11 + A4_3 * Y12 + A4_4 * Y13 + A4_5 * Y14 + A4_6 * Y15, gx2_4);
+#endif
         }
         if (WANT_DX) {
           atomicAdd(dx2_p + ((int64_t)snd * 5 + 0) * C + ch, gx2_0);
