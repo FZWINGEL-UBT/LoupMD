@@ -52,7 +52,7 @@ Conventions:
 | [spl-cubic-forward](#spl-cubic-forward) | The 8-byte cubic table in the forward too | – | spec | REJECTED | – | not recorded | [§3.3][s33] |
 | [tab-far-edge-4byte](#tab-far-edge-4byte) | 4-byte table rows for far edges (T2) | – | spec | REJECTED | – | `w'` +0.9% / +1.9%, spline +1.4% / +3.4% (5060 Ti / Ada) | [§3.3][s33] |
 | [spl-receiver-order](#spl-receiver-order) | Receiver / sublattice ordering in `spline` and `w'` for L1/L2 slab locality | – | spec | NOT BUILT | – | untried (`SrTiO3` O sublattices interleaved; Morton off < L2) | `OMAT0_SPEEDUP_BRIEF.md` |
-| [spl-r6-r8](#spl-r6-r8) | Unpaired `R=6` or `R=8` spline blocks if register pressure drops <= 80 | – | spec | NOT BUILT | – | untried (`R=5` at 96 regs already won `SrTiO3`) | `OMAT0_SPEEDUP_BRIEF.md` |
+| [spl-r6-r8](#spl-r6-r8) | Unpaired `R=6` or `R=8` spline blocks if register pressure drops <= 80 | – | spec | REJECTED (`R=6`, 5060 Ti only); `R=8` not built | S32 | `R=6` as compiled (80 registers, 8 B stack): MD spline `1796 / 1801 -> 1830 / 1863 us` (`+3%`, `OMAT-0-M` `SrTiO3`) | this file |
 | [spl-v6-cubic-cg-fold](#spl-v6-cubic-cg-fold) | `w'` cubic decode (`d_cubic_packed8_1`) + staged per-edge CG linear forms in `s_sh` (`ED = 36`, `TILE = 16`) | `_emit_spline_forward1` | spec | DEFAULT (5060 Ti only) | S15 | 5060 Ti `SrTiO3` 8.40 -> 8.28 ms (`0.985`, `R1p` 1,403 -> 1,306 us), `NbCl5` 1.863 -> 1.853 (`0.994`); all `LOUP_SPLINE_VARIANT` gates pass | this file |
 
 ### Interaction-1 chain as a whole
@@ -286,7 +286,7 @@ Do not retry these unless the stated condition changes.
 | Exponent field without the add | untried: if all table exponents fall in one 32-wide block, `(c.y & mask) \| prefix` is one LOP3 instead of AND + IADD per path in `w'` | external suggestion, 13 Nov |
 | Dead `y1` store in `sc1_fused` | untried, trivial: `d_y1` ([N, 128]) is written every step and read nowhere since `loup_debug_tensors` was removed | external suggestion, 13 Nov |
 | Receiver / sublattice ordering in `spline` and `w'` | untried: group receivers by species / oxygen sublattice / spatial cell so co-resident SMs share table slabs (`Morton` is off at `N=5,000`) | [spl-receiver-order](#spl-receiver-order) |
-| Unpaired `R=6` or `R=8` spline blocks | untried: check if trimming `acc[40]`/`she[16]` register pressure fits <= 80 regs | [spl-r6-r8](#spl-r6-r8) |
+| Unpaired `R=8` spline blocks | `R=6` at 80 registers spilled and lost 3% (S32); `R=8` (1,024 threads) would need <= 64 registers, i.e. more spilling, unless `acc[40]` / `she[16]` pressure is restructured | [spl-r6-r8](#spl-r6-r8) |
 | CUDA Graph L2 persistence (`AccessPolicyWindow`) on `x0+x1` | untried: ~10-12 MiB persistent window (`SrTiO3` `x0+x1` = 9.77 MiB), check `ncu` eviction first | [mem-l2-persist-x](#mem-l2-persist-x) |
 | Cold-L2 rule for Ada `lin1_fwd l=1` + wider 3xTF32 `mma` tiles | untried: `22.0 MiB < 24 MiB` (`L2/2`) times `lin1_fwd l=1` hot on Ada; check `LOUP_DEBUG_GEMM=1` and `128x64`/`64x128` 3xTF32 tiles on 5060 Ti | [gemm-cold-l2-ada-fix](#gemm-cold-l2-ada-fix) |
 | Warp-aggregate `rcv` `atomicAdd`s in `i0_bwd` | untried: 1-2 receivers per 32-edge warp (`SrTiO3`); check `ncu` atomic stall counters first | [i0-bwd-rcv-warp-agg](#i0-bwd-rcv-warp-agg) |
@@ -376,9 +376,10 @@ Each entry has the same fields. Unless stated, the system is OMAT-0 medium on th
 
 <a id="spl-r6-r8"></a>
 #### spl-r6-r8: unpaired `R=6` / `R=8` spline blocks
-- Status: NOT BUILT.
+- Status: `R=6` REJECTED (S32, 5060 Ti only); `R=8` not built.
 - What: `R=5` unpaired (96 regs, 640 threads = 20 warps/block) already won `SrTiO3` on both GPUs. Check whether trimming `acc[40]` / `she[16]` register pressure lets `R=6` or `R=8` fit at <= 80 registers for higher occupancy and L1 slab sharing.
-- Sources: `OMAT0_SPEEDUP_BRIEF.md`.
+- Measured (S32, 5060 Ti, `OMAT-0-M` `SrTiO3`): scratch `launch_spline` swap of `spline_forward_inter1<5, false>` for `<6, false>` (768 threads, `__launch_bounds__(768)` from the template) without restructuring: 80 registers with 8 B of stack. `nsys` MD spline kernel time with `LOUP_SPLINE_VARIANT=R5`, two rounds: R5 1796 / 1801 us, R6 1830 / 1863 us (`+3%`). The tuned R5 is register-limited to one block per SM (41.7% occupancy; `s32-specialised-occupancy`), so more warps would need the register restructuring this entry originally proposed; a plain larger block spills.
+- Sources: `OMAT0_SPEEDUP_BRIEF.md`; this file.
 
 <a id="spl-v6-cubic-cg-fold"></a>
 #### spl-v6-cubic-cg-fold: `w'` cubic decode and staged CG linear forms in `spline_forward_inter1`
