@@ -75,6 +75,16 @@ def test_charge_and_spin_are_refused_for_a_model_without_their_embedding(tmp_pat
         ensure_loup_bundle(path, [8, 22, 38], cache_dir=str(tmp_path), spin_multiplicity=3)
 
 
+def test_fractional_charge_or_spin_is_rejected_before_any_export(tmp_path):
+    """Charge and spin are categorical model inputs: 0.5 must not truncate to a neutral bundle."""
+    path = find_model("mace-omat-0-small.model")
+    with pytest.raises(ValueError, match="charge"):
+        ensure_loup_bundle(path, [8, 22, 38], cache_dir=str(tmp_path), charge=0.5)
+    with pytest.raises(ValueError, match="spin_multiplicity"):
+        ensure_loup_bundle(path, [8, 22, 38], cache_dir=str(tmp_path), spin_multiplicity=1.5)
+    assert not any(tmp_path.iterdir())
+
+
 @pytest.mark.parametrize("model", ["mace-omat-0-medium.model", "mace-omat-0-small.model"])
 def test_reused_list_after_a_cell_change_sees_a_pair_cross_the_cutoff(model):
     """Strain the cell (forces a rebuild), then move one atom by less than skin/2 so a pair just outside r_max comes

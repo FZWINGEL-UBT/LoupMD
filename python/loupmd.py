@@ -166,6 +166,15 @@ def ensure_loup_bundle(model_path: str, atomic_numbers: list[int], cache_dir: st
     (default: omat_pbe if present, else the last head). ``charge`` and ``spin_multiplicity`` (total charge in e and
     2S + 1) apply to models with a total charge / spin embedding (MACE-OMOL-0; default 0 and 1); the export folds
     them into the bundle, so each setting is its own bundle. Other models refuse them."""
+    def integral(name, v):  # categorical model inputs: 0.5 must not round to 0, 1.0 must share 1's bundle
+        if v is None:
+            return None
+        if isinstance(v, bool) or int(v) != v:
+            raise ValueError(f"{name} must be an integer, got {v!r}")
+        return int(v)
+
+    charge = integral("charge", charge)
+    spin_multiplicity = integral("spin_multiplicity", spin_multiplicity)
     z_sorted = sorted({int(z) for z in atomic_numbers})
     if generic is None:
         generic = os.environ.get("LOUP_GENERIC", "0") == "1"
@@ -184,9 +193,9 @@ def ensure_loup_bundle(model_path: str, atomic_numbers: list[int], cache_dir: st
         if generic:
             cmd.append("--generic")
         if charge is not None:
-            cmd += ["--charge", str(int(charge))]
+            cmd += ["--charge", str(charge)]
         if spin_multiplicity is not None:
-            cmd += ["--spin-multiplicity", str(int(spin_multiplicity))]
+            cmd += ["--spin-multiplicity", str(spin_multiplicity)]
         subprocess.run(cmd, check=True)
     return out
 
