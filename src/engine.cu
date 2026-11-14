@@ -747,7 +747,7 @@ static inline void sgemm_rm(
             float* d_tmpC = nullptr;
             void* d_flush = nullptr;
             const size_t flush_bytes = (size_t)std::max(h->l2_bytes, 1 << 20) * 2;
-            const bool cold = (size_t)M * K * sizeof(float) > (size_t)h->l2_bytes / 4;
+            const bool cold = (size_t)M * K * sizeof(float) > (size_t)h->l2_bytes / 2;
             if (cudaMalloc(&tmpC_buf.p, (size_t)M * N * sizeof(float)) == cudaSuccess &&
                 (!cold || cudaMalloc(&flush_buf.p, flush_bytes) == cudaSuccess)) {
                 d_tmpC = static_cast<float*>(tmpC_buf.p);
