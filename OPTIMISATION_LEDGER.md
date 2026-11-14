@@ -1388,6 +1388,7 @@ POLAR-1 NaCl 3x3x3 (216) and POLAR-1-M `NbCl5` 3x3x3 (1,944).
   - `gconv_fwd_L0` (`OMAT-0-S` `SrTiO3`): long scoreboard 34%, of which two per-edge 4-byte `x0[snd]` gathers feeding the first products ~27% and the packed-table decode ~6%; barrier ~10% (tile staging). A variant keeping the next two edges' `x0` in registers one iteration ahead (`sm_120` only, lx 0 only; 59-60 registers at `C = 128`, a 40-byte spill in the runtime-`C` variant) was slower: `nsys` kernel time `733 / 710 -> 774 / 791 us` (`OMAT-0-S`, `+8.5%`), `349 / 344 -> 351 / 346` (`OFF23-S`, tie); results at float32 noise. Reverted.
   - `first_bwd_edge_kernel` (`OMAT-0-S`): short scoreboard (shared memory) 24%, not selected 18%, long scoreboard 16% spread over two `LDG.128` loads (6% / 4%); no single dominant load.
   - `gconv_bwd_L1` (`OFF23-M` water): not selected 34%, long scoreboard 21% (largest single load ~5%), dispatch 12%: issue-limited, as recorded in `s33-mptrj-l1-after`.
+  - OMAT-0 medium (specialised, `SrTiO3`; fresh `nsys`: `w'` 34%, spline 21%, `sgemm128` 21%, i0 backward 6.4% of 8.8 ms of kernels): `wprime_backward_inter1_rcv` not selected 40%, dispatch 15%, long scoreboard 11% with no load above 3%: issue-limited, as `meas-ncu` / S32 found. `tabled_outer_sum0_backward_kernel`: wait 24%, short scoreboard 21%, long scoreboard 17%, no instruction above 4%. No single latency target in either.
 
 <a id="s33-mptrj-l1-after"></a>
 #### s33-mptrj-l1-after: `MPtrj` L1 conv limiters after S29-S31 (no change)
