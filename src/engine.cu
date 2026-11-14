@@ -723,7 +723,13 @@ static inline void sgemm_rm(
                 const int sk = (m == 3) ? 1 : (m == 4 ? 2 : 4);
                 return sk == 1 || (K >= 64 * sk && (size_t)sk * M * N * sizeof(float) <= h->cublas_ws_bytes);
             };
-            if (dp.use_own == 1 || (dp.use_own >= 2 && dp.use_own <= 5 && h->is_sm120 && splitk_ok(dp.use_own))) {
+            auto narrow_ok = [&](uint8_t m) {
+                if (M <= 1600) return true;
+                if (m == 2) return N <= 64 || (M <= 2500 && N <= 160);
+                return N <= 32 || (M <= 2500 && N <= 160);
+            };
+            if (dp.use_own == 1 ||
+                (dp.use_own >= 2 && dp.use_own <= 5 && h->is_sm120 && narrow_ok(dp.use_own) && splitk_ok(dp.use_own))) {
                 if (own_ok) {
                     plan.own_mode = dp.use_own;
                     hit_disk = true;
@@ -810,16 +816,20 @@ static inline void sgemm_rm(
                     const float* Bkn = own_b();
                     const float ms128 = time_min([&] { loup::sgemm128(M, N, K, A, Bkn, d_tmpC, beta, strm); });
                     if (consider(ms128)) { plan.own_mode = 1; plan.use_hyb = false; }
-                    if (h->is_sm120 && M <= 1600) {
-                        const float ms64 = time_min([&] { loup::sgemm64(M, N, K, A, Bkn, d_tmpC, beta, strm); });
-                        if (consider(ms64)) { plan.own_mode = 2; plan.use_hyb = false; }
-                        for (int idx = 0; idx < 3; ++idx) {
-                            const int sk = 1 << idx;
-                            if (sk > 1 && (K < 64 * sk || (size_t)sk * M * N * sizeof(float) > h->cublas_ws_bytes)) continue;
-                            const float ms32 = time_min([&] {
-                                loup::sgemm32(M, N, K, A, Bkn, d_tmpC, static_cast<float*>(ws_p), beta, sk, strm);
-                            });
-                            if (consider(ms32)) { plan.own_mode = 3 + idx; plan.use_hyb = false; }
+                    if (h->is_sm120) {
+                        if (M <= 1600 || N <= 64 || (M <= 2500 && N <= 160)) {
+                            const float ms64 = time_min([&] { loup::sgemm64(M, N, K, A, Bkn, d_tmpC, beta, strm); });
+                            if (consider(ms64)) { plan.own_mode = 2; plan.use_hyb = false; }
+                        }
+                        if (M <= 1600 || N <= 32 || (M <= 2500 && N <= 160)) {
+                            for (int idx = 0; idx < 3; ++idx) {
+                                const int sk = 1 << idx;
+                                if (sk > 1 && (K < 64 * sk || (size_t)sk * M * N * sizeof(float) > h->cublas_ws_bytes)) continue;
+                                const float ms32 = time_min([&] {
+                                    loup::sgemm32(M, N, K, A, Bkn, d_tmpC, static_cast<float*>(ws_p), beta, sk, strm);
+                                });
+                                if (consider(ms32)) { plan.own_mode = 3 + idx; plan.use_hyb = false; }
+                            }
                         }
                     }
                 }
