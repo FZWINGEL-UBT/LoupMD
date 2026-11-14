@@ -95,20 +95,25 @@ Acceptance (PLAN): Python refuses a library whose ABI differs, naming both versi
 Files: `src/engine.cu` (`run_md_loop`, `invalidate_md_graphs`), `tests/test_md_graph_reuse.py` (new).
 
 Today `run_md_loop` calls `invalidate_md_graphs()` at entry (line 2080) although `note_params` already records
-kind, dt, temperature, friction and seed.
+kind, dt, temperature, friction and seed. It also runs a force pass before its first step on every call, which
+alone would cost a tenth of a 10-step call: the acceptance needs both removed.
 
-1. Tests first:
-   - `test_chunked_run_reuses_graphs`: a debug counter of MD graph captures, read through `loup_get_info`'s
-     reserved field or a `LOUP_DEBUG_CAPTURES` stderr line, stays constant over 20 calls of 10 steps with the same
-     arguments and rises when dt, temperature, friction, seed or kind changes.
-   - `test_chunked_trajectory_matches_one_call`: 100 calls of 10 NVE steps against one call of 1,000 steps on
-     `SrTiO3` 3x3x3: positions agree within the spread of two single-call runs of the installed baseline library
-     (measured in the test, floor 1e-9 A).
-   - `test_changed_parameters_take_effect`: after 10 steps at 300 K, 10 steps at 900 K heat the system.
+1. Tests first (`LOUP_DEBUG_GRAPHS` makes the library print a line per MD graph capture and per initial force
+   pass; `LoupMDStats` is not extended, because `python/loupmd.py` allocates it at its present size):
+   - `test_short_calls_reuse_the_graphs_and_the_forces`: after a settling phase, 20 calls of 10 steps print no
+     initial force pass and at most 3 captures (one invalidation); the old code printed 40 or more.
+   - `test_a_run_after_evaluate_needs_no_force_pass_and_one_after_new_positions_does`.
+   - `test_changed_parameters_are_captured_again` for timestep, kind, temperature, friction and seed.
+   - `test_a_changed_thermostat_takes_effect_on_reused_handles`: 100 K then 900 K on one handle.
+   - `test_chunked_trajectory_matches_one_call`: 20 calls of 10 NVE steps against one call of 200 on `SrTiO3`
+     3x3x3: positions within five times the difference of two single-call runs (floor 1e-6 A). The comparison
+     with the baseline library's single call is part of step 3, outside pytest.
 2. Implement: key = (kind, dt, temperature, friction, seed); graphs are dropped by `invalidate_graphs()` (edge
-   bucket growth, cell change of the long-range part, `free_system`) and by a key change, not at entry. The stress
-   flag is not part of an MD graph today (the MD pass records `compute_stress = 0`); the key gets the field when
-   S4-T06 adds a stress-carrying step.
+   bucket growth, scan workspace growth, kernel variant change, cell change of the long-range part,
+   `free_system`) and by a key change, not at entry. `forces_current` on the handle is set by a completed
+   evaluation or run and cleared by new positions; a run starts with a force pass only when it is clear. The
+   stress flag is not part of an MD graph today (the MD pass records `compute_stress = 0`); the key gets the
+   field when S4-T06 adds a stress-carrying step.
 3. Acceptance run (GPU, quiet): 100 x 10 steps against 1 x 1,000 Langevin steps on `SrTiO3` 5,000 atoms, both
    orders, three repeats; the ratio must be within 2%.
 4. Ledger row and status entry (this changes speed for chunked runs); commit `S1-T03: MD graphs kept across run

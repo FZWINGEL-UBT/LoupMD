@@ -87,6 +87,9 @@ int loup_set_state(LoupHandle* h, const double* positions, const double* velocit
 
 // The run and profile calls return -1 unless positions and a neighbour list exist (loup_set_state or loup_evaluate
 // after loup_set_system, with the last rebuild completed).
+// A run may be split into calls of any length at no extra cost: the captured step graphs are kept while the
+// timestep, thermostat settings and seed stay the same, and a call that follows a run or an evaluation at the same
+// positions starts from the forces already on the device.
 // Run NVE Velocity-Verlet steps (`dt_fs` in fs). Rebuilds skin neighbour list only when max_disp > skin/2.
 int loup_run_nve(LoupHandle* h, int n_steps, double dt_fs, LoupMDStats* out_stats);
 
@@ -119,6 +122,8 @@ int loup_profile_force(LoupHandle* h, int warmup, int n_calls, double* out_total
 //   LOUP_SPECIES_TABLES=0  generic models (OMOL-0, MH-1) with layer 0's species-only GEMMs instead of per-species tables.
 //   LOUP_DEBUG_SPLINE, LOUP_DEBUG_GEMM  print the variant / GEMM tuning decisions to stderr.
 //   LOUP_DEBUG_ERRORS  print every failure's message (loup_last_error) to stderr as well.
+//   LOUP_DEBUG_GRAPHS  print a line to stderr for every capture of an MD step graph and for every force pass a run
+//                      call makes before its first step (tests/test_md_graph_reuse.py).
 
 #ifdef __cplusplus
 }

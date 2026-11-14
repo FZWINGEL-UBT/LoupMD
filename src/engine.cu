@@ -572,6 +572,9 @@ struct LoupHandle {
     int n_rebuilds = 0;     // rebuilds since set_system (atom reorder cadence)
     int* d_order_err = nullptr;
     bool nl_valid = false;  // neighbour list built for the current system (ref positions and shifts are set)
+    // d_forces_f64 and d_energy_f64 belong to the positions in d_pos64: the last call was a force evaluation or a
+    // completed run, with no new positions since. A run then starts without a force pass of its own.
+    bool forces_current = false;
 
     void free_system() {
         if (gen) gen->free_system();
@@ -583,6 +586,7 @@ struct LoupHandle {
         apply_overrides();
         variants_tuned = false;
         nl_valid = false;
+        forces_current = false;
         n_rebuilds = 0;
         N = 0;
         auto freep = [](auto*& p) {
@@ -1936,6 +1940,7 @@ static bool valid_input(int n, const double* positions, const double* cell, cons
 
 static int upload_positions(LoupHandle* h, const double* positions, const double* cell) {
     if (!valid_input(h->N, positions, cell, nullptr)) return -1;
+    h->forces_current = false;
     loup::CellMat64 old_cell = h->cell;
     loup::compute_cell_mat(cell, h->cell, h->cell_vol, h->cell_heights);
     const int cell_changed = memcmp(&old_cell, &h->cell, sizeof(old_cell)) != 0 ? 1 : 0;
@@ -2014,6 +2019,7 @@ static int evaluate_impl(
         CUDA_CHECK(cudaMemcpyAsync(v_grad, h->d_virial_grad_f64, 6 * sizeof(double), cudaMemcpyDeviceToHost, h->stream));
     }
     CUDA_CHECK(cudaStreamSynchronize(h->stream));
+    h->forces_current = true;
 
     if (out_energy_ev) *out_energy_ev = h->e0_total + inter_e;
     if (out_forces) {
@@ -2069,12 +2075,19 @@ static int run_md_loop(
         return std::sqrt((double)d2);
     };
 
-    // Initial force evaluation at step 0
-    if (ensure_force_graph(h, 0) != 0) return -1;
-    CUDA_CHECK(cudaGraphLaunch(h->force_graph_exec, h->stream));
+    // Forces at step 0. They are already on the device when the last call on this handle was a force evaluation or
+    // a completed run at these positions, so a run made of many short calls pays one force pass per step and none
+    // per call. (lt_cache: the uncaptured pass of ensure_force_graph, which the MD graphs' capture relies on.)
+    const bool debug_graphs = std::getenv("LOUP_DEBUG_GRAPHS") != nullptr;
+    if (!h->forces_current || h->lt_cache.empty()) {
+        if (ensure_force_graph(h, 0) != 0) return -1;
+        if (debug_graphs) fputs("loupmd: initial force pass\n", stderr);
+        CUDA_CHECK(cudaGraphLaunch(h->force_graph_exec, h->stream));
+    }
     // The Langevin step counter persists across run calls (reset only in loup_set_system), so chunked runs with
     // one seed continue the noise sequence instead of replaying it.
     CUDA_CHECK(cudaStreamSynchronize(h->stream));
+    h->forces_current = false;  // until this call completes: a failure below leaves positions ahead of the forces
 
     double c1 = 0, c2 = 0, k_c3 = 0, k_c4 = 0, k_c5 = 0;
     if (kind == 1) {
@@ -2117,6 +2130,7 @@ static int run_md_loop(
     auto capture = [&](cudaGraph_t& g, cudaGraphExec_t& ge, auto&& body) -> int {
         if (ge) { cudaGraphExecDestroy(ge); ge = nullptr; }
         if (g) { cudaGraphDestroy(g); g = nullptr; }
+        if (debug_graphs) fputs("loupmd: MD graph capture\n", stderr);
         CUDA_CHECK(cudaStreamBeginCapture(h->stream, cudaStreamCaptureModeGlobal));
         body();
         CUDA_CHECK(cudaStreamEndCapture(h->stream, &g));
@@ -2143,8 +2157,13 @@ static int run_md_loop(
         note_params();
         return 0;
     };
-    // The graphs bake in this call's dt, thermostat and seed: drop any from an earlier call.
-    h->invalidate_md_graphs();
+    // The graphs bake in dt, thermostat and seed: those of an earlier call are kept when all of them are the same
+    // (review item S4) and dropped otherwise. Everything else a graph bakes in (edge bucket, scan workspace, kernel
+    // variants, the long-range part's cell) drops the graphs where it changes: invalidate_graphs.
+    if (h->md_graph_kind != kind || h->md_graph_dt != dt_fs || h->md_graph_temp != temp_k ||
+        h->md_graph_fr != friction_per_fs || h->md_graph_seed != seed) {
+        h->invalidate_md_graphs();
+    }
 
     int rebuilds = 0, dangerous = 0;
     double tune_ms = 0.0;
@@ -2254,6 +2273,7 @@ static int run_md_loop(
         out_stats->tune_ms = tune_ms;
         out_stats->pipelined_steps = pipelined_steps;
     }
+    h->forces_current = true;
     return 0;
 }
 
