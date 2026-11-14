@@ -1278,15 +1278,19 @@ void GenericModel::ensure_edges(int E_cap) {
 
 // ------------------------------------------------------------------------------------------------- force pass
 
-const SplineGrid* GenericModel::preloc_grid() const {
-    for (int t = 1; t < n_layers_; ++t)
-        if (!layers_[t]->first_hidden && layers_[t]->pair_sym && layers_[t]->C_x <= 256) return &layers_[t]->grid;
-    if (!layers_.empty() && !layers_[0]->first_hidden && layers_[0]->pair_sym && layers_[0]->C_x <= 256)
-        return &layers_[0]->grid;
+static const GenericLayer* pick_preloc_layer(const std::vector<GenericLayer*>& layers) {
+    for (size_t t = 1; t < layers.size(); ++t)
+        if (!layers[t]->first_hidden && layers[t]->C_x <= 256) return layers[t];
+    if (!layers.empty() && !layers[0]->first_hidden && layers[0]->C_x <= 256) return layers[0];
     return nullptr;
 }
+const SplineGrid* GenericModel::preloc_grid() const {
+    const GenericLayer* L = pick_preloc_layer(layers_);
+    return L ? &L->grid : nullptr;
+}
 int GenericModel::preloc_pair_sym() const {
-    return 1;
+    const GenericLayer* L = pick_preloc_layer(layers_);
+    return L ? L->pair_sym : 1;
 }
 void GenericModel::record(const GenericPassInputs& in) {
     const SplineGrid* pg = preloc_grid();

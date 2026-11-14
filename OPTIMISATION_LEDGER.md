@@ -198,6 +198,7 @@ Conventions:
 | [gen-conv-bwd-128-regq](#gen-conv-bwd-128-regq) | `128`-thread register-`Q` edge-staged `gconv_bwd_L0/L1_128` (`PAIR = false` / `true`) | – | gen | REJECTED | S16 | `PAIR=false`: `L1` `2,216 -> 2,147 us`, MD `OFF23-M` tie (`0.999`), `OMAT-0-S` `0.997`; `PAIR=true` (`REG:128`): MD `+0.4%`/`+0.8%` | this file |
 | [gen-conv-l1-carve0](#gen-conv-l1-carve0) | `PreferredSharedMemoryCarveout = 0` on generic conv & `first_bwd_edge` kernels | – | gen | REJECTED | S16 | capped `gconv_fwd_L1` to `8.19 KB` & `gconv_bwd_L1` to `32.77 KB` (`1` blk/SM); `OFF23-M` `7,372 -> 11,592 us/eval` | this file |
 | [gen-conv-fwd-l1-r4](#gen-conv-fwd-l1-r4) | `gconv_fwd_L1<4, true, 512, ..., 128, 16>` (`4` receivers/block, `TILE = 16`) | – | gen | REJECTED | S16 | `OMAT-0-M` generic `SrTiO3` `8.79 -> 8.66 ms` (`0.985`), `OFF23-M` water `7.44 -> 7.54` (`1.013`, `REG:124`) | this file |
+| [gen-conv-l2-cfix-preloc](#gen-conv-l2-cfix-preloc) | `C_FIX` (`128/224`) on `gconv_fwd_L2a/L2b`, `gconv_bwd_L2lp/L2`; `PRELOC` on `gconv_bwd_L2`; prelocated slabs for `pair_sym = 0` models (`preloc_grid()` / `preloc_pair_sym()` pick the same layer) | `C_FIX`, `PRELOC`, `pick_preloc_layer` | gen (lx 2: OFF23-L, POLAR-1-L; preloc: also POLAR-1-M/L, MH-1) | DEFAULT (5060 Ti only) | S19 | `gconv_bwd_L2lp` `REG:128 -> 62`; ABBA `OFF23-L` water `27.81 -> 27.16 ms` (`0.977`), water216 `0.985`, `POLAR-1-L` `NaCl216` `0.991`; `POLAR-1-M` / `MH-1` `NbCl5` tie | this file |
 
 ### MACE-POLAR-1 long range (`src/polar.cu`)
 
@@ -1194,6 +1195,14 @@ POLAR-1 NaCl 3x3x3 (216) and POLAR-1-M `NbCl5` 3x3x3 (1,944).
 - Stage: S16 (14 November 2026).
 - Status: REJECTED.
 - Measured (5060 Ti, `REG:124, SHARED:12032`, `L1 Hit 4.5 -> 18.3%`): `OMAT-0-M` generic `SrTiO3` `8.79 -> 8.66 ms` (`0.985`), `OFF23-M` water `7.44 -> 7.54` (`1.013`, `1,571 -> 1,700 us`). Interleaved water molecules lose to higher register count. Reverted (needs per-system selection if pursued).
+- Sources: this file.
+
+<a id="gen-conv-l2-cfix-preloc"></a>
+#### gen-conv-l2-cfix-preloc: `C_FIX` and prelocated slabs on the lx 2 convs, prelocation for `pair_sym = 0`
+- Stage: S19 (14 November 2026).
+- What: fresh profiles put the lx 2 convs at 51% of `OFF23-L` water216 kernel time (`gconv_bwd_L2` 838, `L2lp` 666, `fwd_L2a` 426, `L2b` 385 us/step), all with runtime `C` (`REG:125-128`, 23-31% warps active). S14's `C_FIX` / `PRELOC` covered only lx 0 / 1. Added `C_FIX = 128 / 224` dispatch to `gconv_fwd_L2a/L2b`, `gconv_bwd_L2lp`, `gconv_bwd_L2` (plus `PRELOC` on `gconv_bwd_L2`, which still located its spline per edge). Also `preloc_grid()` required `pair_sym`, so `POLAR-1-M/L` and `MH-1` (`pair_sym = 0`) never used `act_slab` / `act_t_sx`; `pick_preloc_layer()` now selects one layer for both `preloc_grid()` and `preloc_pair_sym()` (the layer's own `pair_sym`, matching `scatter_active_edges_kernel`'s slab encoding).
+- Status: DEFAULT (5060 Ti only).
+- Measured (5060 Ti): `ncu` `gconv_bwd_L2lp<.., 224, ..>` `REG:128 -> 62`, `566 -> 590 us` alone but `fwd_L2a` `396 -> 387`, `bwd_L2` `789 -> 766`; fresh-plan ABBA `OFF23-L` water (5,184 atoms) `27.81 -> 27.16 ms` (`0.9766`), water216 `3.850 -> 3.794` (`0.9854`), `POLAR-1-L` `NaCl216` `6.825 -> 6.766` (`0.9913`), `POLAR-1-M` `NbCl5` tie (`1.0018`), `MH-1` `NbCl5` tie (`1.0000`). `cmp_libs` vs S18: `OFF23-L` `dF = 1.4e-6`, `POLAR-1-L` `9.3e-7`, `POLAR-1-M` `NbCl5` `2.0e-4` (`|F|max = 26.8`), `MH-1` `6.6e-7`.
 - Sources: this file.
 
 <a id="rv8-fixes"></a>

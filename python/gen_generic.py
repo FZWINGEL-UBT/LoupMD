@@ -664,14 +664,16 @@ def emit_conv_bwd_L2(groups=(0, 1, 2)):
     dm_args = ", ".join(f"const float* __restrict__ dmid{l}" for l in range(4))
     dx_args = ", ".join(f"float* __restrict__ dx{l}_p" for l in range(lx + 1))
     return f"""constexpr int kGconvBwdL2GS = {GS};  // staged dmid floats per channel (dynamic smem C * GS)
-template <bool WANT_DX>
+template <bool WANT_DX, int C_FIX = 0, bool PRELOC = false>
 __global__ void __launch_bounds__(128) gconv_bwd_L2(
-    int N, int C, int S, int I, SplineGrid grid, int sh_perm, int pair_sym,
+    int N, int C_arg, int S, int I, SplineGrid grid, int sh_perm, int pair_sym,
     const int* __restrict__ row_ptr, const int* __restrict__ senders, const float4* __restrict__ vec_len,
+    const int* __restrict__ act_slab, const float2* __restrict__ act_t_sx,
     const int* __restrict__ species, const uint2* __restrict__ packed_table, const float4* __restrict__ density_table,
     unsigned bias_shift, {x_args}, {dm_args}, const float* __restrict__ dD, {dx_args}, float* __restrict__ edge_dvec) {{
   __shared__ float s_dy[4][16];
   extern __shared__ float s_g[];
+  const int C = C_FIX ? C_FIX : C_arg;
   const int rcv = blockIdx.x, tid = threadIdx.x, wid = tid >> 5, lane = tid & 31, n_warps = blockDim.x >> 5;
   if (rcv >= N) return;
 {chr(10).join(pro)}
@@ -689,14 +691,23 @@ __global__ void __launch_bounds__(128) gconv_bwd_L2(
     loup::edge_sh16(ux, uy, uz, vl.w, Yv);
     const float Y0=Yv[0].x, Y1=Yv[0].y, Y2=Yv[0].z, Y3=Yv[0].w, Y4=Yv[1].x, Y5=Yv[1].y, Y6=Yv[1].z, Y7=Yv[1].w,
                 Y8=Yv[2].x, Y9=Yv[2].y, Y10=Yv[2].z, Y11=Yv[2].w, Y12=Yv[3].x, Y13=Yv[3].y, Y14=Yv[3].z, Y15=Yv[3].w;
-    int iv; float t, sxi;
-    locate_spline(grid, vl.w, iv, t, sxi);
+    float t, sxi;
+    int64_t slab;
+    if (PRELOC) {{
+      slab = (int64_t)__ldg(act_slab + e);
+      const float2 tsx = __ldg(act_t_sx + e);
+      t = tsx.x;
+      sxi = fabsf(tsx.y);
+    }} else {{
+      int iv;
+      locate_spline(grid, vl.w, iv, t, sxi);
+      const int pr = pair_sym ? loup::sym_pair(species[snd], sa, S) : species[snd] * S + sa;
+      slab = (int64_t)pr * I + iv;
+    }}
     const float s = t - 0.5f, s_sq = s * s;
     const float s1 = s * 0x1.0p-8f, s2 = s_sq * 0x1.0p-14f, s3 = s * s_sq * 0x1.0p-19f;
     const float ds2 = (2.0f * s) * 0x1.0p-6f, ds3 = (3.0f * s_sq) * 0x1.0p-11f;
     const float nw_hb = -1.5f * (1.0f + s1 + s2 + s3), ndt_hb = -1.5f * (1.0f + ds2 + ds3);
-    const int pr = pair_sym ? loup::sym_pair(species[snd], sa, S) : species[snd] * S + sa;
-    const int64_t slab = (int64_t)pr * I + iv;
     const uint2* tq = packed_table + slab * ({n_paths} * (int64_t)C);
     float dY[16];
     #pragma unroll
@@ -1009,7 +1020,21 @@ void launch_conv_fwd(int lx, cudaStream_t st, int N, int C, int S, int I, const 
                                 bias_shift, x[0], x[1], mid[0], mid[1], mid[2], mid[3], D);
         }
     } else {
-        if (C <= 256) {
+        if (C == 128) {
+            auto fa = preloc ? gconv_fwd_L2a<1, true, 128, true, 128> : gconv_fwd_L2a<1, true, 128, false, 128>;
+            auto fb = preloc ? gconv_fwd_L2b<1, true, 128, true, 128> : gconv_fwd_L2b<1, true, 128, false, 128>;
+            fa<<<N, 128, 0, st>>>(N, C, S, I, sg, perm, psym, rp, snd, vl, act_slab, act_t_sx, sp, packed, dens,
+                                  bias_shift, x[0], x[1], x[2], mid[0], mid[1], mid[2], mid[3], D);
+            fb<<<N, 128, 0, st>>>(N, C, S, I, sg, perm, psym, rp, snd, vl, act_slab, act_t_sx, sp, packed, nullptr,
+                                  bias_shift, x[0], x[1], x[2], mid[0], mid[1], mid[2], mid[3], D);
+        } else if (C == 224) {
+            auto fa = preloc ? gconv_fwd_L2a<1, true, 256, true, 224> : gconv_fwd_L2a<1, true, 256, false, 224>;
+            auto fb = preloc ? gconv_fwd_L2b<1, true, 256, true, 224> : gconv_fwd_L2b<1, true, 256, false, 224>;
+            fa<<<N, 224, 0, st>>>(N, C, S, I, sg, perm, psym, rp, snd, vl, act_slab, act_t_sx, sp, packed, dens,
+                                  bias_shift, x[0], x[1], x[2], mid[0], mid[1], mid[2], mid[3], D);
+            fb<<<N, 224, 0, st>>>(N, C, S, I, sg, perm, psym, rp, snd, vl, act_slab, act_t_sx, sp, packed, nullptr,
+                                  bias_shift, x[0], x[1], x[2], mid[0], mid[1], mid[2], mid[3], D);
+        } else if (C <= 256) {
             auto fa = preloc ? gconv_fwd_L2a<1, true, 256, true> : gconv_fwd_L2a<1, true, 256, false>;
             auto fb = preloc ? gconv_fwd_L2b<1, true, 256, true> : gconv_fwd_L2b<1, true, 256, false>;
             fa<<<N, C, 0, st>>>(N, C, S, I, sg, perm, psym, rp, snd, vl, act_slab, act_t_sx, sp, packed, dens,
@@ -1059,15 +1084,25 @@ void launch_conv_bwd(int lx, cudaStream_t st, int N, int C, int S, int I, const 
                                  edge_dvec);
     } else {
         const size_t smem = (size_t)C * 44 * sizeof(float), smem_g = (size_t)C * kGconvBwdL2GS * sizeof(float);
-        auto flp = want_dx ? (preloc ? gconv_bwd_L2lp<true, 0, true> : gconv_bwd_L2lp<true, 0, false>)
-                           : (preloc ? gconv_bwd_L2lp<false, 0, true> : gconv_bwd_L2lp<false, 0, false>);
-        auto fg = want_dx ? gconv_bwd_L2<true> : gconv_bwd_L2<false>;
+        auto pick_lp = [&](auto f_p, auto f_n) { return preloc ? f_p : f_n; };
+        auto flp = (C == 128) ? (want_dx ? pick_lp(gconv_bwd_L2lp<true, 128, true>, gconv_bwd_L2lp<true, 128, false>)
+                                         : pick_lp(gconv_bwd_L2lp<false, 128, true>, gconv_bwd_L2lp<false, 128, false>))
+                 : (C == 224) ? (want_dx ? pick_lp(gconv_bwd_L2lp<true, 224, true>, gconv_bwd_L2lp<true, 224, false>)
+                                         : pick_lp(gconv_bwd_L2lp<false, 224, true>, gconv_bwd_L2lp<false, 224, false>))
+                              : (want_dx ? pick_lp(gconv_bwd_L2lp<true, 0, true>, gconv_bwd_L2lp<true, 0, false>)
+                                         : pick_lp(gconv_bwd_L2lp<false, 0, true>, gconv_bwd_L2lp<false, 0, false>));
+        auto fg = (C == 128) ? (want_dx ? pick_lp(gconv_bwd_L2<true, 128, true>, gconv_bwd_L2<true, 128, false>)
+                                        : pick_lp(gconv_bwd_L2<false, 128, true>, gconv_bwd_L2<false, 128, false>))
+                : (C == 224) ? (want_dx ? pick_lp(gconv_bwd_L2<true, 224, true>, gconv_bwd_L2<true, 224, false>)
+                                        : pick_lp(gconv_bwd_L2<false, 224, true>, gconv_bwd_L2<false, 224, false>))
+                             : (want_dx ? pick_lp(gconv_bwd_L2<true, 0, true>, gconv_bwd_L2<true, 0, false>)
+                                        : pick_lp(gconv_bwd_L2<false, 0, true>, gconv_bwd_L2<false, 0, false>));
         if (smem > 48000) check_cuda(cudaFuncSetAttribute((const void*)flp, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)smem));
         if (smem_g > 48000) check_cuda(cudaFuncSetAttribute((const void*)fg, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)smem_g));
         flp<<<N, 256, smem, st>>>(N, C, S, I, sg, perm, psym, rp, snd, vl, act_slab, act_t_sx, sp, packed, dens,
                                   bias_shift, x[0], x[1], dmid[0], dmid[1], dmid[2], dmid[3], dD, dx[0], dx[1],
                                   edge_dvec);
-        fg<<<N, 128, smem_g, st>>>(N, C, S, I, sg, perm, psym, rp, snd, vl, sp, packed, dens,
+        fg<<<N, 128, smem_g, st>>>(N, C, S, I, sg, perm, psym, rp, snd, vl, act_slab, act_t_sx, sp, packed, dens,
                                    bias_shift, x[0], x[1], x[2], dmid[0], dmid[1], dmid[2], dmid[3],
                                    nullptr, dx[0], dx[1], dx[2], edge_dvec);
     }
