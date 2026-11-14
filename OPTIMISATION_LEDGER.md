@@ -214,6 +214,8 @@ Conventions:
 | [gen-conv-fwd-l1-pair-c256](#gen-conv-fwd-l1-c256) | `PAIR = true`, `C_FIX = 256` for `gconv_fwd_L1` at `C = 256` | – | gen | REJECTED | S29 | 104 registers; L1 convs tie (`4952 / 4953` vs `4928 / 4975 us`) | this file |
 | [gen-conv-bwd-512thr](#gen-conv-bwd-512thr) | 512-thread blocks for the shared-memory-limited lx 1 / 2 backward convs (`gconv_bwd_L1` at `C = 256`, `gconv_bwd_L2lp` at `C = 224`): one 39-45 KB `s_q` per block shared by 16 warps instead of 8 | `launch_conv_bwd` | gen (`MPtrj`, `OFF23-L`) | DEFAULT (5060 Ti only) | S31 | `bwd_L1` (`MPtrj`) `-12.7%`, `bwd_L2lp` (`OFF23-L` water216) `~-10%`; ABBA `MPtrj` `0.9695 / 0.9685`, `OFF23-L` water216 `0.9825 / 0.9847`, water `0.9825 / 0.9839` | this file |
 | [gen-conv-fwd-l2-minb3](#gen-conv-fwd-l2-minb3) | `__launch_bounds__(224, 3)` for `gconv_fwd_L2a/L2b` at `C = 224` (register-limited to 2 blocks, 29% occupancy) | – | gen (`OFF23-L`) | REJECTED | S31 | 104 / 125 -> 80 registers with 56-72 B stack; both kernels `759 -> 1018 us` (`+34%`) | this file |
+| [gen-conv-bwd-l0-red](#gen-conv-bwd-l0-red) | `gconv_bwd_L0`: per-edge `edge_dvec` update as a fire-and-forget atomic add (RED) instead of read-add-store | `EDGE_DVEC_RED` in `python/gen_generic.py` | gen (lx 0: OMAT-0-S, OFF23-S, ...; `sm_120`) | DEFAULT (5060 Ti only) | S40 | kernel `-8%` (`OMAT-0-S`) / `-16%` (`OFF23-S`); ABBA `OMAT-0-S` `0.9813` / `0.9768`, `OFF23-S` water `0.9718` / `0.9763` (new / old, both orders) | this file |
+| [gen-conv-bwd-edge-prefetch](#gen-conv-bwd-l0-red) | Next-edge metadata (`vec_len`, sender, slab, `t`) loaded one iteration ahead in the late pull-back backward convs; and RED on lx 1 / 2 | – | gen | REJECTED (5060 Ti only) | S40 | prefetch over RED: `-1%` to `-3%` on L0, `+1%` on L1 (8 B spill); RED on L1 / L2: `-1%` / `-2%` (below the 10% stop rule) | this file |
 
 ### MACE-POLAR-1 long range (`src/polar.cu`)
 
@@ -1370,6 +1372,16 @@ POLAR-1 NaCl 3x3x3 (216) and POLAR-1-M `NbCl5` 3x3x3 (1,944).
 - What: `ncu` (`OFF23-L` water216) on `gconv_fwd_L2a` / `L2b` (`C = 224`, 224 threads): 410 / 392 us, 104 / 125 registers, register-limited to 2 blocks (14 warps, 29% occupancy), L2 throughput 73% / 64%, long scoreboard 3.11 / 1.59. A third block per SM needs <= 97 registers.
 - Status: REJECTED.
 - Measured (5060 Ti): the compiler went to 80 registers with 56-72 B of stack; `nsys` kernel time for the pair, two runs: 761 / 757 -> 1013 / 1023 us (`+34%`).
+- Sources: this file.
+
+<a id="gen-conv-bwd-l0-red"></a>
+#### gen-conv-bwd-l0-red: atomic per-edge update in `gconv_bwd_L0`
+- Switch: `python/gen_generic.py` `EDGE_DVEC_RED` (used by `emit_conv_bwd_lp(0)` only), `#if __CUDA_ARCH__ == 1200`: `atomicAdd` into `edge_dvec`; other architectures and the lx 1 / 2 kernels keep `EDGE_DVEC_RMW` (`sm_89` / `sm_90`: all 91 kernels of `generated_generic.cu` SASS-identical to S39; `sm_120`: only the 12 `gconv_bwd_L0` instantiations differ).
+- Stage: S40 (14 November 2026).
+- What: `ncu` source counters on `gconv_bwd_L0<true, 128, true>` (`OMAT-0-S` `SrTiO3`): long scoreboard is 38.7% of all warp stall samples. By consumer instruction: the per-edge metadata at the top of the edge loop (`FMNMX` on `vec_len.w`, `FADD` on `act_t_sx.t`) ~14%, the packed-table decode `LOP3`s ~12%, the sender `x0` ~6%, and lane 0's `edge_dvec[e] += f` read-modify-write ~4%. Each edge has one writer (lane 0 of its warp) in this kernel, so an atomic add rounds like the read-add-store (except for subnormals, which per-edge forces do not reach) and, as a RED, has no load to wait on.
+- Status: DEFAULT (5060 Ti only).
+- Measured (5060 Ti): `nsys` kernel time per step, two runs each: `OMAT-0-S` `SrTiO3` `1264 / 1256 -> 1174 / 1138 us` (`-8%`), `OFF23-S` water `616 / 620 -> 524 / 519 us` (`-16%`). Final binary, fresh-plan ABBA: `OMAT-0-S` `SrTiO3` `4.689 -> 4.601 ms/step` (`0.9813`), reversed `4.705 -> 4.596` (`0.9768`); `OFF23-S` water `3.052 -> 2.966` (`0.9718`), reversed `3.043 -> 2.971` (`0.9763`). `cmp_libs` at float32 noise (`OMAT-0-S` `dF 1.2e-6`, `OFF23-S` `5.6e-6`, `MPA-0` `2.4e-6`); gates `OFF23-S` organic 8 / 8, `OMAT-0-S` oxide 6 / 6, `MPA-0` oxide 32 / 32; `pytest` 67 passed.
+- Rejected on the way (one variable each, same `ktime` protocol): RED in the lx 1 / 2 backward convs: `OFF23-M` `gconv_bwd_L1` `2281 -> 2255 us` (`-1%`), `OFF23-L` water216 `L2lp + L2` `1329 -> 1305` (`-2%`), below the stop rule, so they keep the read-add-store. Next-edge metadata prefetch (registers, one iteration ahead, `sm_120` only) on top of RED: `gconv_bwd_L0` `-3%` (`OMAT-0-S`), `-1%` to `-10%` within noise (`OFF23-S`), and `gconv_bwd_L1` `+1%` with an 8-byte spill at its 64-register limit: rejected.
 - Sources: this file.
 
 <a id="s33-mptrj-l1-after"></a>

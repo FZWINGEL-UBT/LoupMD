@@ -442,9 +442,15 @@ __global__ void __launch_bounds__(512) gconv_bwd_L0(
       float fy = fmaf(ny, rad - fn * inv_d, pull_Gy * inv_d);
       float fz = fmaf(nz, rad - fn * inv_d, pull_Gz * inv_d);
       if (sh_perm) { const float tx = fx, ty = fy, tz = fz; fx = tz; fy = tx; fz = ty; }
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ == 1200
+      atomicAdd(edge_dvec + (int64_t)e * 3 + 0, fx);
+      atomicAdd(edge_dvec + (int64_t)e * 3 + 1, fy);
+      atomicAdd(edge_dvec + (int64_t)e * 3 + 2, fz);
+#else
       edge_dvec[(int64_t)e * 3 + 0] += fx;
       edge_dvec[(int64_t)e * 3 + 1] += fy;
       edge_dvec[(int64_t)e * 3 + 2] += fz;
+#endif
     }
   }
 }

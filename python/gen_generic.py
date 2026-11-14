@@ -366,6 +366,24 @@ __global__ void __launch_bounds__(MAX_T) {name}(
 }}
 """
 
+# Per-edge force-vector update at the end of the backward convs (one lane per edge, so each element has one writer in
+# the kernel). EDGE_DVEC_RED: on sm_120 a fire-and-forget atomic add, which rounds like the read-add-store (except
+# that it flushes subnormals, ~1e-38, which these per-edge forces never reach) without a load to wait on: the
+# read-modify-write's load was ~4% of gconv_bwd_L0's stall samples and the atomics made it 8-16% faster (S40). Used
+# only for lx 0, where that was measured; lx 1 / 2 (1-2%) and other GPUs keep the read-add-store.
+EDGE_DVEC_RMW = """\
+      edge_dvec[(int64_t)e * 3 + 0] += fx;
+      edge_dvec[(int64_t)e * 3 + 1] += fy;
+      edge_dvec[(int64_t)e * 3 + 2] += fz;"""
+EDGE_DVEC_RED = """\
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ == 1200
+      atomicAdd(edge_dvec + (int64_t)e * 3 + 0, fx);
+      atomicAdd(edge_dvec + (int64_t)e * 3 + 1, fy);
+      atomicAdd(edge_dvec + (int64_t)e * 3 + 2, fz);
+#else
+""" + EDGE_DVEC_RMW + """
+#endif"""
+
 def emit_conv_bwd_lp(lx):
     """Late pull-back backward over layout(lx)'s paths with x degree <= 1: every path for lx 0 / 1; for lx 2 the ten
     paths of lx 1 indexed into the 17-path table (gconv_bwd_L2lp, which also owns the density term); the x degree 2
@@ -581,9 +599,7 @@ __global__ void __launch_bounds__(512) {name}(
       float fy = fmaf(ny, rad - fn * inv_d, pull_Gy * inv_d);
       float fz = fmaf(nz, rad - fn * inv_d, pull_Gz * inv_d);
       if (sh_perm) {{ const float tx = fx, ty = fy, tz = fz; fx = tz; fy = tx; fz = ty; }}
-      edge_dvec[(int64_t)e * 3 + 0] += fx;
-      edge_dvec[(int64_t)e * 3 + 1] += fy;
-      edge_dvec[(int64_t)e * 3 + 2] += fz;
+{EDGE_DVEC_RED if lx == 0 else EDGE_DVEC_RMW}
     }}
   }}
 }}
@@ -751,9 +767,7 @@ __global__ void __launch_bounds__(128) gconv_bwd_L2(
       float fy = fmaf(ny, rad - dot * inv_d, gy * inv_d);
       float fz = fmaf(nz, rad - dot * inv_d, gz * inv_d);
       if (sh_perm) {{ const float tx = fx, ty = fy, tz = fz; fx = tz; fy = tx; fz = ty; }}
-      edge_dvec[(int64_t)e * 3 + 0] += fx;
-      edge_dvec[(int64_t)e * 3 + 1] += fy;
-      edge_dvec[(int64_t)e * 3 + 2] += fz;
+{EDGE_DVEC_RMW}
     }}
   }}
 }}
