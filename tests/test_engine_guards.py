@@ -17,9 +17,9 @@ def test_run_needs_positions_and_starts_from_rest_after_a_new_system():
     z, m = at.get_atomic_numbers(), at.get_masses()
 
     eng.set_system(z, m)
-    with pytest.raises(RuntimeError):
+    with pytest.raises(RuntimeError, match="loup_run_nve: no positions or neighbour list"):
         eng.run_nve(1)  # no positions, no neighbour list
-    with pytest.raises(RuntimeError):
+    with pytest.raises(RuntimeError, match="loup_profile_force: no positions or neighbour list"):
         eng.profile_force(1, 1)
 
     hot = np.random.default_rng(0).normal(scale=0.5, size=(len(at), 3))  # ~thousands of K
@@ -40,12 +40,13 @@ def test_langevin_rejects_bad_temperature_or_friction(temp_k, friction):
     eng = LoupEngine(ensure_loup_bundle(path, [8, 22, 38]))
     eng.set_system(at.get_atomic_numbers(), at.get_masses())
     eng.set_state(at.positions, np.zeros((len(at), 3)), at.cell.array)
-    with pytest.raises(RuntimeError):
+    reason = "temp_k" if temp_k != 300.0 else "friction_per_fs"
+    with pytest.raises(RuntimeError, match=reason + " must be finite and not negative"):
         eng.run_langevin(1, temp_k=temp_k, friction_per_fs=friction)
     assert np.isfinite(eng.run_langevin(1).final_temperature_k)  # the state was not touched
 
 
-def test_a_packed_table_far_beyond_the_gated_error_is_refused(tmp_path, capfd):
+def test_a_packed_table_far_beyond_the_gated_error_is_refused(tmp_path):
     path = find_model("mace-omat-0-small.model")
     good = ensure_loup_bundle(path, [8, 22, 38])
     meta, T = read_bundle(good)
@@ -58,9 +59,8 @@ def test_a_packed_table_far_beyond_the_gated_error_is_refused(tmp_path, capfd):
     T = dict(T, **{key: sp})
     bad = tmp_path / "degraded.loup"
     write_bundle(bad, meta, T)
-    with pytest.raises(RuntimeError):
+    with pytest.raises(RuntimeError, match="8-byte table error"):  # the packing check, not an earlier one
         LoupEngine(bad)
-    assert "8-byte table error" in capfd.readouterr().err  # refused by the packing check, not an earlier one
 
 
 def test_charge_and_spin_are_refused_for_a_model_without_their_embedding(tmp_path):

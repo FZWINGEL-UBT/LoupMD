@@ -308,6 +308,7 @@ static uint64_t library_build_hash() {
 }
 
 struct LoupHandle {
+    std::string last_error;  // text of the last failed call on this handle (loup_last_error); empty after a success
     int device_id = 0;
     int l2_bytes = 0;
     bool is_sm120 = false;
@@ -1116,7 +1117,7 @@ static int rebuild_neighbors(LoupHandle* h) {
         CUDA_CHECK(cudaMemcpyAsync(&order_err, h->d_order_err, sizeof(int), cudaMemcpyDeviceToHost, h->stream));
         CUDA_CHECK(cudaStreamSynchronize(h->stream));
         if (order_err) {
-            fprintf(stderr, "LoupMD: neighbour rows are not grouped by ascending sender species\n");
+            loup::set_error("internal error: neighbour rows are not grouped by ascending sender species");
             return -1;
         }
     } else if (h->E_graph != 0) {
@@ -1513,18 +1514,41 @@ static int ensure_force_graph(LoupHandle* h, int compute_stress) {
     return 0;
 }
 
+// The error channel (loup_last_error). A failing call leaves "<entry point>: <reason>" in its handle, or in this
+// thread-local string when there is no handle (loup_create, a NULL handle). The reason is the message a refusal or
+// a CUDA_CHECK recorded with loup::set_error, or the text of the exception. Nothing goes to stderr unless
+// LOUP_DEBUG_ERRORS is set.
+static thread_local std::string tl_null_error;
+
+static void store_error(LoupHandle* h, const char* name) {
+    std::string& pending = loup::pending_error();
+    std::string msg = std::string(name) + ": " + (pending.empty() ? "failed without a message" : pending);
+    pending.clear();
+    if (std::getenv("LOUP_DEBUG_ERRORS")) fprintf(stderr, "%s\n", msg.c_str());
+    (h ? h->last_error : tl_null_error) = std::move(msg);
+}
+
 // Every exported entry point runs through this: a C++ exception (CUDA/cuBLAS failure inside record_force_pass,
 // sgemm_rm or HybCubin::launch) must not unwind into the C caller, and a throw during capture must not leave the
 // stream in capture mode.
 template <class F>
 static int guarded(LoupHandle* h, const char* name, F&& f) {
+    loup::pending_error().clear();
     try {
-        return f();
+        if (!h) loup::set_error("the handle is NULL");
+        const int rc = h ? f() : -1;
+        if (rc == 0) {
+            h->last_error.clear();
+            return 0;
+        }
+        store_error(h, name);
+        return rc;
     } catch (const std::exception& e) {
-        fprintf(stderr, "%s failed: %s\n", name, e.what());
+        loup::pending_error() = e.what();
     } catch (...) {
-        fprintf(stderr, "%s failed: unknown exception\n", name);
+        loup::pending_error() = "unknown exception";
     }
+    store_error(h, name);
     if (h && h->stream) {
         cudaStreamCaptureStatus st = cudaStreamCaptureStatusNone;
         if (cudaStreamIsCapturing(h->stream, &st) == cudaSuccess && st != cudaStreamCaptureStatusNone) {
@@ -1590,7 +1614,10 @@ extern "C" {
 
 LoupHandle* loup_create(const char* loup_path, int device_id) {
     LoupHandle* h = nullptr;
+    loup::pending_error().clear();
+    tl_null_error.clear();
     try {
+        if (!loup_path) throw std::runtime_error("loup_path is NULL");
         CUDA_CHECK_THROW(cudaSetDevice(device_id));
         h = new LoupHandle();
         h->device_id = device_id;
@@ -1635,10 +1662,13 @@ LoupHandle* loup_create(const char* loup_path, int device_id) {
         h->apply_overrides();
         return h;
     } catch (const std::exception& e) {
-        fprintf(stderr, "loup_create failed: %s\n", e.what());
-        if (h) loup_destroy(h);
-        return nullptr;
+        loup::pending_error() = e.what();
+    } catch (...) {
+        loup::pending_error() = "unknown exception";
     }
+    store_error(nullptr, "loup_create");
+    if (h) loup_destroy(h);
+    return nullptr;
 }
 
 void loup_destroy(LoupHandle* h) {
@@ -1665,7 +1695,13 @@ void loup_destroy(LoupHandle* h) {
 }
 
 static int set_system_impl(LoupHandle* h, int n_atoms, const int* atomic_numbers, const double* masses_amu, double skin) {
-    if (!h || n_atoms <= 0 || !atomic_numbers || !(skin >= 0.0) || !std::isfinite(skin)) return -1;
+    if (!h) return -1;
+    if (n_atoms <= 0) { loup::set_error("n_atoms must be positive, got %d", n_atoms); return -1; }
+    if (!atomic_numbers) { loup::set_error("atomic_numbers is NULL"); return -1; }
+    if (!(skin >= 0.0) || !std::isfinite(skin)) {
+        loup::set_error("skin must be finite and not negative, got %g A", skin);
+        return -1;
+    }
     CUDA_CHECK(cudaSetDevice(h->device_id));
     const int S = h->n_species();
 
@@ -1680,11 +1716,14 @@ static int set_system_impl(LoupHandle* h, int n_atoms, const int* atomic_numbers
             if (h->species_z(s) == z) { found = s; break; }
         }
         if (found < 0) {
-            fprintf(stderr, "loup_set_system: Z=%d not in exported .loup model\n", z);
+            std::string elements;
+            for (int s = 0; s < S; ++s) elements += (s ? ", " : "") + std::to_string(h->species_z(s));
+            loup::set_error("atomic number %d (atom %d) is not in the bundle, which was exported for %s", z, i,
+                            elements.c_str());
             return -1;
         }
         if (masses_amu && !(masses_amu[i] > 0.0 && std::isfinite(masses_amu[i]))) {
-            fprintf(stderr, "loup_set_system: atom %d has mass %g\n", i, masses_amu[i]);
+            loup::set_error("atom %d has mass %g amu; masses must be finite and positive", i, masses_amu[i]);
             return -1;
         }
         sp_orig[i] = found;
@@ -1863,20 +1902,31 @@ static int set_system_impl(LoupHandle* h, int n_atoms, const int* atomic_numbers
 // The engine is always fully periodic: the cell must be finite and non-degenerate (ASE's zero cell for a molecule
 // is rejected; put molecules in a box larger than 2 (r_max + skin)), and positions finite.
 static bool valid_input(int n, const double* positions, const double* cell, const double* velocities) {
-    if (!positions || !cell) return false;
-    for (int i = 0; i < 9; ++i)
-        if (!std::isfinite(cell[i])) return false;
+    if (!positions || !cell) {
+        loup::set_error("%s is NULL", positions ? "cell" : "positions");
+        return false;
+    }
+    for (int i = 0; i < 9; ++i) {
+        if (!std::isfinite(cell[i])) {
+            loup::set_error("non-finite cell entry [%d, %d]", i / 3, i % 3);
+            return false;
+        }
+    }
     const double det = cell[0] * (cell[4] * cell[8] - cell[5] * cell[7]) - cell[1] * (cell[3] * cell[8] - cell[5] * cell[6]) +
                        cell[2] * (cell[3] * cell[7] - cell[4] * cell[6]);
     double scale = 0.0;
     for (int i = 0; i < 9; ++i) scale = std::max(scale, std::fabs(cell[i]));
     if (!(std::fabs(det) > 1e-9 * scale * scale * scale) || scale == 0.0) {
-        fprintf(stderr, "loupmd: singular or zero cell (det = %g); the engine is fully periodic\n", det);
+        loup::set_error("singular or zero cell (det = %g A^3); the engine is fully periodic", det);
         return false;
     }
     for (size_t i = 0; i < (size_t)n * 3; ++i) {
-        if (!std::isfinite(positions[i]) || (velocities && !std::isfinite(velocities[i]))) {
-            fprintf(stderr, "loupmd: non-finite position or velocity (atom %zu)\n", i / 3);
+        if (!std::isfinite(positions[i])) {
+            loup::set_error("non-finite position (atom %zu)", i / 3);
+            return false;
+        }
+        if (velocities && !std::isfinite(velocities[i])) {
+            loup::set_error("non-finite velocity (atom %zu)", i / 3);
             return false;
         }
     }
@@ -1901,8 +1951,15 @@ static int upload_positions(LoupHandle* h, const double* positions, const double
     return cell_changed;
 }
 
+// The refusal shared by every call that needs a system.
+static bool has_system(const LoupHandle* h) {
+    if (h && h->N > 0) return true;
+    loup::set_error("no system is set (call loup_set_system first)");
+    return false;
+}
+
 static int set_state_impl(LoupHandle* h, const double* positions, const double* velocities, const double* cell) {
-    if (!h || h->N <= 0) return -1;
+    if (!has_system(h)) return -1;
     CUDA_CHECK(cudaSetDevice(h->device_id));
     if (!valid_input(h->N, positions, cell, velocities)) return -1;
     if (upload_positions(h, positions, cell) < 0) return -1;
@@ -1926,7 +1983,7 @@ static int evaluate_impl(
     LoupHandle* h, const double* positions, const double* cell, int compute_stress,
     double* out_energy_ev, double* out_forces, double* out_stress
 ) {
-    if (!h || h->N <= 0) return -1;
+    if (!has_system(h)) return -1;
     CUDA_CHECK(cudaSetDevice(h->device_id));
     // Positions only: MD velocities are kept. The neighbour list is rebuilt only when the cell changed or an atom
     // moved more than skin/2 since the last build; the force graph is reused unless the rebuild outgrew it.
@@ -1980,7 +2037,16 @@ static int run_md_loop(
     double temp_k, double friction_per_fs, unsigned long long seed, LoupMDStats* out_stats
 ) {
     // nl_valid: positions and a neighbour list exist (set_state or evaluate ran and its rebuild completed).
-    if (!h || h->N <= 0 || !h->nl_valid || n_steps <= 0 || !std::isfinite(dt_fs) || !(dt_fs > 0.0)) return -1;
+    if (!has_system(h)) return -1;
+    if (!h->nl_valid) {
+        loup::set_error("no positions or neighbour list (call loup_set_state or loup_evaluate first)");
+        return -1;
+    }
+    if (n_steps <= 0) { loup::set_error("n_steps must be positive, got %d", n_steps); return -1; }
+    if (!std::isfinite(dt_fs) || !(dt_fs > 0.0)) {
+        loup::set_error("dt_fs must be finite and positive, got %g fs", dt_fs);
+        return -1;
+    }
     CUDA_CHECK(cudaSetDevice(h->device_id));
     const int N = h->N;
     const int gridN = (N + 255) / 256;
@@ -2198,12 +2264,19 @@ static int run_langevin_impl(
     LoupHandle* h, int n_steps, double dt_fs, double temp_k,
     double friction_per_fs, unsigned long long seed, LoupMDStats* out_stats
 ) {
-    if (!std::isfinite(temp_k) || temp_k < 0.0 || !std::isfinite(friction_per_fs) || friction_per_fs < 0.0) return -1;
+    if (!std::isfinite(temp_k) || temp_k < 0.0) {
+        loup::set_error("temp_k must be finite and not negative, got %g K", temp_k);
+        return -1;
+    }
+    if (!std::isfinite(friction_per_fs) || friction_per_fs < 0.0) {
+        loup::set_error("friction_per_fs must be finite and not negative, got %g /fs", friction_per_fs);
+        return -1;
+    }
     return run_md_loop(h, 1, n_steps, dt_fs, temp_k, friction_per_fs, seed, out_stats);
 }
 
 static int get_state_impl(LoupHandle* h, double* out_positions, double* out_velocities, double* out_forces, double* out_energy_ev) {
-    if (!h || h->N <= 0) return -1;
+    if (!has_system(h)) return -1;
     CUDA_CHECK(cudaSetDevice(h->device_id));
     std::vector<double> tmp((size_t)h->N * 3);
     if (out_positions) {
@@ -2246,7 +2319,15 @@ static int get_state_impl(LoupHandle* h, double* out_positions, double* out_velo
 }
 
 static int profile_force_impl(LoupHandle* h, int warmup, int n_calls, double* out_total_us) {
-    if (!h || h->N <= 0 || !h->nl_valid || warmup < 0 || n_calls <= 0) return -1;
+    if (!has_system(h)) return -1;
+    if (!h->nl_valid) {
+        loup::set_error("no positions or neighbour list (call loup_set_state or loup_evaluate first)");
+        return -1;
+    }
+    if (warmup < 0 || n_calls <= 0) {
+        loup::set_error("warmup must not be negative and n_calls must be positive, got %d and %d", warmup, n_calls);
+        return -1;
+    }
     CUDA_CHECK(cudaSetDevice(h->device_id));
     if (ensure_force_graph(h, 0) != 0) return -1;
     for (int i = 0; i < warmup; ++i) {
@@ -2305,6 +2386,10 @@ int loup_get_state(LoupHandle* h, double* out_positions, double* out_velocities,
 
 int loup_profile_force(LoupHandle* h, int warmup, int n_calls, double* out_total_us) {
     return guarded(h, "loup_profile_force", [&] { return profile_force_impl(h, warmup, n_calls, out_total_us); });
+}
+
+const char* loup_last_error(const LoupHandle* h) {
+    return h ? h->last_error.c_str() : tl_null_error.c_str();
 }
 
 }  // extern "C"

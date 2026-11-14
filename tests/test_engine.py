@@ -107,7 +107,7 @@ def test_unknown_species_rejected_and_previous_system_kept(sto_engine):
     eng.set_system(at.get_atomic_numbers(), at.get_masses())
     z = at.get_atomic_numbers().copy()
     z[0] = 11  # Na is not in the bundle
-    with pytest.raises(RuntimeError):
+    with pytest.raises(RuntimeError, match=r"atomic number 11 \(atom 0\) is not in the bundle"):
         eng.set_system(z, at.get_masses())
     _assert_still_usable(eng, at)
 
@@ -120,7 +120,7 @@ def test_rejected_set_system_of_other_size_keeps_previous_system_usable(sto_engi
     small = srtio3(1)  # 5 atoms
     z = small.get_atomic_numbers().copy()
     z[0] = 11  # Na is not in the bundle
-    with pytest.raises(RuntimeError):
+    with pytest.raises(RuntimeError, match="is not in the bundle, which was exported for 8, 22, 38"):
         eng.set_system(z, small.get_masses())
     e, f, _ = eng.evaluate(at.positions, at.cell.array)
     assert f.shape == (len(at), 3)
@@ -134,7 +134,7 @@ def test_wrong_shaped_arrays_rejected_before_the_library_reads_them(sto_engine, 
     at = srtio3(2)
     eng = sto_engine
     eng.set_system(at.get_atomic_numbers(), at.get_masses())
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="has shape"):
         if bad == "short_positions":
             eng.evaluate(at.positions[:-1], at.cell.array)
         elif bad == "flat_cell":
@@ -193,7 +193,7 @@ def test_bad_masses_rejected(sto_engine, bad):
     eng.set_system(at.get_atomic_numbers(), at.get_masses())
     m = at.get_masses().copy()
     m[3] = {"zero": 0.0, "nan": np.nan, "negative": -1.0}[bad]
-    with pytest.raises(RuntimeError):
+    with pytest.raises(RuntimeError, match="atom 3 has mass .* amu; masses must be finite and positive"):
         eng.set_system(at.get_atomic_numbers(), m)
     _assert_still_usable(eng, at)
 
@@ -202,7 +202,7 @@ def test_bad_masses_rejected(sto_engine, bad):
 def test_bad_skin_rejected(sto_engine, bad):
     at = srtio3(2)
     eng = sto_engine
-    with pytest.raises(RuntimeError):
+    with pytest.raises(RuntimeError, match="skin must be finite and not negative"):
         eng.set_system(at.get_atomic_numbers(), at.get_masses(), skin={"skin_nan": np.nan, "skin_negative": -0.1}[bad])
 
 
@@ -222,9 +222,12 @@ def test_bad_geometry_rejected(sto_engine, bad):
         pos[5, 2] = np.nan
     else:
         pos[0, 0] = np.inf
-    with pytest.raises(RuntimeError):
+    reason = {"singular_cell": "singular or zero cell", "zero_cell": "singular or zero cell",
+              "nan_cell": "non-finite cell entry", "nan_position": r"non-finite position \(atom 5\)",
+              "inf_position": r"non-finite position \(atom 0\)"}[bad]
+    with pytest.raises(RuntimeError, match="loup_evaluate: " + reason):
         eng.evaluate(pos, cell)
-    with pytest.raises(RuntimeError):
+    with pytest.raises(RuntimeError, match="loup_set_state: " + reason):
         eng.set_state(pos, None, cell)
     _assert_still_usable(eng, at)
 
@@ -235,12 +238,12 @@ def test_nan_velocity_rejected(sto_engine):
     eng.set_system(at.get_atomic_numbers(), at.get_masses())
     v = np.zeros((len(at), 3))
     v[2, 1] = np.nan
-    with pytest.raises(RuntimeError):
+    with pytest.raises(RuntimeError, match=r"non-finite velocity \(atom 2\)"):
         eng.set_state(at.positions, v, at.cell.array)
 
 
 def test_md_without_system_fails(sto_engine):
-    with pytest.raises(RuntimeError):
+    with pytest.raises(RuntimeError, match="no system is set"):
         sto_engine.run_nve(1, 1.0)
 
 
@@ -249,17 +252,17 @@ def test_truncated_bundle_rejected(sto_bundle, tmp_path, frac):
     data = sto_bundle.read_bytes()
     bad = tmp_path / "truncated.loup"
     bad.write_bytes(data[: int(len(data) * frac)])
-    with pytest.raises(RuntimeError):
+    with pytest.raises(RuntimeError, match="truncated .loup bundle"):
         LoupEngine(bad)
 
 
 def test_bundle_with_trailing_bytes_rejected(sto_bundle, tmp_path):
     bad = tmp_path / "trailing.loup"
     bad.write_bytes(sto_bundle.read_bytes() + b"\0" * 16)
-    with pytest.raises(RuntimeError):
+    with pytest.raises(RuntimeError, match="trailing bytes after the end marker"):
         LoupEngine(bad)
 
 
 def test_missing_bundle_rejected(tmp_path):
-    with pytest.raises(RuntimeError):
+    with pytest.raises(RuntimeError, match="loup_create: Cannot open .loup file"):
         LoupEngine(tmp_path / "does_not_exist.loup")

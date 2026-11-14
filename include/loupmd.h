@@ -18,8 +18,15 @@ typedef struct {
     int pipelined_steps;               // steps of this call run in the pipelined loop (the rest: one host sync each)
 } LoupMDStats;
 
-// All int-returning calls return 0 on success and -1 on failure (message on stderr; no C++ exception escapes).
-// After a failure caused by a CUDA error the device context may be unusable: destroy the handle.
+// All int-returning calls return 0 on success and -1 on failure (no C++ exception escapes); loup_last_error gives
+// the reason. After a failure caused by a CUDA error the device context may be unusable: destroy the handle.
+
+// The reason of the last failure, as "<entry point>: <message>".
+//   h != NULL: the last call on `h`; "" if that call succeeded. Valid until the next call on `h`.
+//   h == NULL: this thread's last loup_create, or call with a NULL handle; "" if the last loup_create on this
+//              thread succeeded. Valid until this thread's next loup_create or failing call without a handle.
+// The library prints nothing on a failure. LOUP_DEBUG_ERRORS (set to anything) also prints each message to stderr.
+const char* loup_last_error(const LoupHandle* h);
 
 // Create engine from a .loup bundle (python/export.py; python/loupmd.py's ensure_loup_bundle caches them) on CUDA
 // device `device_id`. Two architectures: MACE-OMAT-0 medium on its specialised kernels, and the generic path for
@@ -87,6 +94,7 @@ int loup_profile_force(LoupHandle* h, int warmup, int n_calls, double* out_total
 //   LOUP_CHAIN_FOLD=0  generic models (OMOL-0) without the load-time skip-chain fold (testing the path other GPUs take).
 //   LOUP_SPECIES_TABLES=0  generic models (OMOL-0, MH-1) with layer 0's species-only GEMMs instead of per-species tables.
 //   LOUP_DEBUG_SPLINE, LOUP_DEBUG_GEMM  print the variant / GEMM tuning decisions to stderr.
+//   LOUP_DEBUG_ERRORS  print every failure's message (loup_last_error) to stderr as well.
 
 #ifdef __cplusplus
 }
