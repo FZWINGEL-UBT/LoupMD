@@ -1254,10 +1254,11 @@ POLAR-1 NaCl 3x3x3 (216) and POLAR-1-M `NbCl5` 3x3x3 (1,944).
 - Sources: this file.
 
 <a id="s24-l0-conv"></a>
-#### s24-l0-conv: generic lx 0 convs on `OMAT-0-S` (no change adopted)
-- Stage: S24 (14 November 2026), 5060 Ti, `ncu`, `SrTiO3` (5,000 atoms).
-- `gconv_bwd_L0<true, 128, true>`: 1.16 ms, issue 67% (`No Eligible` 32%), L2 throughput 53% (hit 94%), L1 hit 32%, 280.7M warp instructions (177.6M FMA-pipe), ~109 lane instructions per edge-channel; stalls per issue: long scoreboard 4.76, not selected 2.10, wait 1.22, dispatch 0.76. `gconv_fwd_L0<1, true, 256, true, 128>`: 591 us, L1 / L2 throughput 72% / 71%, issue 67%, long scoreboard 4.73.
-- Unlike the lx 1 convs (`s21-limiters`, L2-bound at 83%), the backward is issue- / latency-limited, with the `CUBIC_PACKED8` decode (already shift-free and bias-folded: `wp-shift-free-decode`, `wp-decode-bias-fold`) about a third of its instructions. An unpacked `float4` table would remove the decode but double the table bytes; with the table most of the 38.2M L2 read sectors, L2 throughput would rise from 53% to roughly 95%, trading the issue limit for an L2 limit at about the same time, and it would need a second table format in the loader and kernels. Not prototyped.
+#### s24-l0-conv: generic lx 0 convs on `OMAT-0-S` and `OFF23-S` (no change adopted)
+- Stage: S24 (14 November 2026), 5060 Ti, `ncu`: `OMAT-0-S` `SrTiO3` (5,000 atoms), `OFF23-S` water (5,184 atoms).
+- `OMAT-0-S` `gconv_bwd_L0<true, 128, true>`: 1.16 ms, issue 67% (`No Eligible` 32%), L2 throughput 53% (hit 94%), L1 hit 32%, 280.7M warp instructions (177.6M FMA-pipe), ~109 lane instructions per edge-channel; stalls per issue: long scoreboard 4.76, not selected 2.10, wait 1.22, dispatch 0.76. `gconv_fwd_L0<1, true, 256, true, 128>`: 591 us, L1 / L2 throughput 72% / 71%, issue 67%, long scoreboard 4.73.
+- `OFF23-S` (`C = 96`): `gconv_bwd_L0`: 627 us, L2 56.5%, compute 59.5% (`No Eligible` 38%), long scoreboard 6.07, 129.8M warp instructions (80.5M FMA-pipe). `gconv_fwd_L0`: 378 us, L2 87.5% (L2-bound), long scoreboard 9.73.
+- Untested hypothesis (not a rejection): the backward kernels are issue- / latency-limited rather than L2-bound, and the `CUBIC_PACKED8` decode (already shift-free and bias-folded: `wp-shift-free-decode`, `wp-decode-bias-fold`) is roughly a third of their instructions. An unpacked `float4` table for the backward only would remove the decode but double its table bytes; with the table most of the backward's L2 read sectors (38.2M on `OMAT-0-S`, 22.1M on `OFF23-S`), L2 throughput would rise from 53-57% towards saturation. The estimate (roughly the same time, now L2-bound) was not measured; a scratch benchmark of the `bwd_L0` loop with both table formats on real slabs would settle it. The forward should keep the packed table: it is already L2-bound on `OFF23-S`. A second table format would also need loader and kernel support.
 - Sources: this file.
 
 <a id="rv8-fixes"></a>
