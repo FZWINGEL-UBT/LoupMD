@@ -50,13 +50,17 @@ struct GenericLayer {
     // S57 skip-chain fold (GenericModel::setup_chain_fold): this layer's hout is never formed; per degree l, y[l]
     // feeds every linear consumer of hout downstream through one composed weight per consumer. dest_layer >= 0: that
     // layer's x[l] (its linear_up input, through the skips in between); -1: the last layer's readout hidden (hid).
-    // Wh (layer 0 only): the same consumers of the layer-0 skip h_in[0] W_sc[0].
+    // Wh (layer 0 only): the same consumers of the layer-0 skip h_in[0] W_sc[0]; Th instead with the S59 species
+    // tables: [S, cols] = embedding W_sc[0] M, gathered per atom (always the destination's first write).
     struct FoldTarget {
         int dest_layer = 0, cols = 0;
         float* Wy = nullptr;  // [C_out, cols]
         float* Wh = nullptr;  // [C_in, cols] or nullptr
+        float* Th = nullptr;  // [S, cols] or nullptr
     };
     std::vector<FoldTarget> fold[3];
+    // S59 (layer 0): [S, lin_cols[0]] species table of the residual (embedding W_up[0] W_res[0]), or nullptr
+    float* res0_table = nullptr;
 
     ~GenericLayer() {
         for (void* p : weights) cudaFree(p);
@@ -785,7 +789,7 @@ __global__ void zero_edge_kernel(const int* __restrict__ E_dev, float* __restric
     if (i < 3 * *E_dev) p[i] = 0.0f;
 }
 
-// C[M, N] = A[M, K] B[K, N] in double, one thread per output: load-time weight composition (S57 skip-chain fold).
+// C[M, N] = A[M, K] B[K, N] in double, one thread per output: load-time weight composition (S57 / S59).
 __global__ void dmm_kernel(int M, int N, int K, const double* __restrict__ A, const double* __restrict__ B,
                            double* __restrict__ C) {
     const int n = blockIdx.x * blockDim.x + threadIdx.x, m = blockIdx.y;
@@ -798,6 +802,49 @@ __global__ void dmm_kernel(int M, int N, int K, const double* __restrict__ A, co
 __global__ void d2f_kernel(int64_t n, const double* __restrict__ in, float* __restrict__ out) {
     const int64_t i = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
     if (i < n) out[i] = (float)in[i];
+}
+
+// Load-time weight composition in double on the device (S57 skip-chain fold, S59 species tables). Temporaries live
+// until the object goes; float results belong to `owner` (a layer's weight list).
+struct DevCompose {
+    std::vector<void*> tmp;
+    ~DevCompose() {
+        cudaDeviceSynchronize();  // the kernels reading the temporaries
+        for (void* q : tmp) cudaFree(q);
+    }
+    const double* dup(const std::vector<float>& h) {
+        std::vector<double> d(h.begin(), h.end());
+        double* q = nullptr;
+        CUDA_CHECK_THROW(cudaMalloc(&q, std::max<size_t>(d.size(), 1) * sizeof(double)));
+        tmp.push_back(q);
+        CUDA_CHECK_THROW(cudaMemcpy(q, d.data(), d.size() * sizeof(double), cudaMemcpyHostToDevice));
+        return q;
+    }
+    const double* mm(const double* A, int M, int K, const double* B, int N) {
+        double* C = nullptr;
+        CUDA_CHECK_THROW(cudaMalloc(&C, (size_t)M * N * sizeof(double)));
+        tmp.push_back(C);
+        dmm_kernel<<<dim3((unsigned)((N + 127) / 128), (unsigned)M), 128>>>(M, N, K, A, B, C);
+        CUDA_CHECK_THROW(cudaGetLastError());
+        return C;
+    }
+    float* to_f32(const double* D, int64_t n, std::vector<void*>& owner) {
+        float* f = nullptr;
+        CUDA_CHECK_THROW(cudaMalloc(&f, std::max<int64_t>(n, 1) * sizeof(float)));
+        owner.push_back(f);
+        d2f_kernel<<<(unsigned)((n + 255) / 256), 256>>>(n, D, f);
+        CUDA_CHECK_THROW(cudaGetLastError());
+        return f;
+    }
+};
+
+// The load-time folds (S57, S59) were measured on compute capability 12.0 only; other GPUs keep the plain path.
+bool device_is_cc120() {
+    int dev = 0, major = 0, minor = 0;
+    CUDA_CHECK_THROW(cudaGetDevice(&dev));
+    CUDA_CHECK_THROW(cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor, dev));
+    CUDA_CHECK_THROW(cudaDeviceGetAttribute(&minor, cudaDevAttrComputeCapabilityMinor, dev));
+    return major == 12 && minor == 0;
 }
 
 }  // namespace
@@ -1188,7 +1235,29 @@ void GenericModel::load(const Bundle& b) {
         d_zbl_inv_a_ = upload(own, b.f32("zbl_inv_a", {P}));
         d_zbl_pref_ = upload(own, b.f32("zbl_pref", {P}));
     }
+    setup_species_tables(b);
     setup_chain_fold(b);
+}
+
+// S59 species tables. Layer 0's input h_in[0] is the species embedding row, so every product of it alone is a
+// per-species constant: the gated block's residual res[0] = (h_in[0] W_up[0]) W_res[0] (with x[0] used for nothing
+// else in the hidden-table layer) and, under the S57 fold, the skip terms h_in[0] Wh. They become [S, cols] tables
+// composed in double at load and gathered per atom: no x / res GEMMs in layer 0 and no Wh GEMMs. Layer 0 takes no
+// gradient into h_in, so the backward is unchanged. Not with the long-range block: POLAR-1-L measured no win in the
+// tables-first order (three ABBA pairs), so the POLAR models keep the GEMMs. sm_120 only; LOUP_SPECIES_TABLES=0 keeps
+// the GEMMs for testing.
+void GenericModel::setup_species_tables(const Bundle& b) {
+    species_tables_ = false;
+    GenericLayer* L = layers_.empty() ? nullptr : layers_[0];
+    if (lr_ || !L || !L->first_hidden || L->kind != 4 || L->skip_folded || L->lmax_x != 0 || !device_is_cc120()) return;
+    if (const char* e = std::getenv("LOUP_SPECIES_TABLES"); e && e[0] == '0') return;
+    DevCompose dc;
+    const double* E = dc.dup(b.f32("embedding", {S_, C0_}));
+    const double* Wup = dc.dup(b.f32("L0.W_up_0", {L->C_in, L->C_x}));
+    const double* Wres = dc.dup(b.f32("L0.W_res_0", {L->C_x, L->lin_cols[0]}));
+    L->res0_table = dc.to_f32(dc.mm(dc.mm(E, S_, C0_, Wup, L->C_x), S_, L->C_x, Wres, L->lin_cols[0]),
+                              (int64_t)S_ * L->lin_cols[0], L->weights);
+    species_tables_ = true;
 }
 
 // S57 skip-chain fold. A non-last layer's output hout_t = y_t W_p_t + h_in_t W_sc_t is read only through linear maps:
@@ -1199,19 +1268,13 @@ void GenericModel::load(const Bundle& b) {
 // consumers' gradients through the same weights. Removes the full-width W_p / W_sc products of every non-last layer in
 // both directions (and their hout / dhout buffers). Applies when the model has no long range, every layer is a gated
 // (nonlinear) block, no non-last layer has a readout, no skip is per species, and the last layer's readout is folded.
+// With the S59 species tables, layer 0's skip terms are [S, cols] tables (E W_sc_0 M) instead of Wh GEMMs.
 // sm_120 only (where it was measured); LOUP_CHAIN_FOLD=0 keeps the plain path for testing.
 void GenericModel::setup_chain_fold(const Bundle& b) {
     chain_fold_ = false;
     const int nL = n_layers_;
-    if (lr_ || nL < 2) return;
-    {
-        int dev = 0, major = 0, minor = 0;
-        CUDA_CHECK_THROW(cudaGetDevice(&dev));
-        CUDA_CHECK_THROW(cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor, dev));
-        CUDA_CHECK_THROW(cudaDeviceGetAttribute(&minor, cudaDevAttrComputeCapabilityMinor, dev));
-        if (!(major == 12 && minor == 0)) return;
-        if (const char* e = std::getenv("LOUP_CHAIN_FOLD"); e && e[0] == '0') return;
-    }
+    if (lr_ || nL < 2 || !device_is_cc120()) return;
+    if (const char* e = std::getenv("LOUP_CHAIN_FOLD"); e && e[0] == '0') return;
     const GenericLayer* last = layers_.back();
     if (!last->ro_folded || last->readout < 1) return;
     for (int t = 0; t < nL; ++t) {
@@ -1223,27 +1286,7 @@ void GenericModel::setup_chain_fold(const Bundle& b) {
                 if (l > layers_[t + 1]->lmax_x) return;  // every degree of y_t reaches the next linear_up
         }
     }
-    // composition on the device, in double (temporaries freed on every exit)
-    struct DevTmp {
-        std::vector<void*> p;
-        ~DevTmp() { for (void* q : p) cudaFree(q); }
-    } tmp;
-    auto dup = [&](const std::vector<float>& h) {
-        std::vector<double> d(h.begin(), h.end());
-        double* q = nullptr;
-        CUDA_CHECK_THROW(cudaMalloc(&q, std::max<size_t>(d.size(), 1) * sizeof(double)));
-        tmp.p.push_back(q);
-        CUDA_CHECK_THROW(cudaMemcpy(q, d.data(), d.size() * sizeof(double), cudaMemcpyHostToDevice));
-        return q;
-    };
-    auto dmm = [&](const double* A, int M, int K, const double* B, int N) {
-        double* C = nullptr;
-        CUDA_CHECK_THROW(cudaMalloc(&C, (size_t)M * N * sizeof(double)));
-        tmp.p.push_back(C);
-        dmm_kernel<<<dim3((unsigned)((N + 127) / 128), (unsigned)M), 128>>>(M, N, K, A, B, C);
-        CUDA_CHECK_THROW(cudaGetLastError());
-        return C;
-    };
+    DevCompose dc;
     struct Target {
         int dest, cols;
         const double* M;  // [rows, cols]: hout_t's (or h_in's) consumer map
@@ -1256,45 +1299,41 @@ void GenericModel::setup_chain_fold(const Bundle& b) {
         const std::string pn = "L" + std::to_string(t + 1) + ".";
         std::vector<Target> cur[3];
         for (int l = 0; l <= L->lmax_out; ++l) {
-            cur[l].push_back({t + 1, Ln->C_x, dup(b.f32(pn + "W_up_" + std::to_string(l), {Ln->C_in, Ln->C_x}))});
+            cur[l].push_back({t + 1, Ln->C_x, dc.dup(b.f32(pn + "W_up_" + std::to_string(l), {Ln->C_in, Ln->C_x}))});
             if (l <= 2 && Ln->sc_has[l]) {
-                const double* Wsc = dup(b.f32(pn + "W_sc_" + std::to_string(l), {1, Ln->C_in, Ln->C_out}));
+                const double* Wsc = dc.dup(b.f32(pn + "W_sc_" + std::to_string(l), {1, Ln->C_in, Ln->C_out}));
                 if (t + 1 == nL - 1) {
                     if (l == 0) {  // the last layer's skip, into its readout hidden
-                        const double* W1 = dup(b.f32(pn + "ro_W1", {Ln->C_out, Ln->ro_H}));
-                        cur[0].push_back({-1, Ln->ro_H, dmm(Wsc, Ln->C_in, Ln->C_out, W1, Ln->ro_H)});
+                        const double* W1 = dc.dup(b.f32(pn + "ro_W1", {Ln->C_out, Ln->ro_H}));
+                        cur[0].push_back({-1, Ln->ro_H, dc.mm(Wsc, Ln->C_in, Ln->C_out, W1, Ln->ro_H)});
                     }
                 } else {
-                    for (const Target& d : next[l]) cur[l].push_back({d.dest, d.cols, dmm(Wsc, Ln->C_in, Ln->C_out, d.M, d.cols)});
+                    for (const Target& d : next[l])
+                        cur[l].push_back({d.dest, d.cols, dc.mm(Wsc, Ln->C_in, Ln->C_out, d.M, d.cols)});
                 }
             }
         }
         const std::string p = "L" + std::to_string(t) + ".";
+        const double* E = (t == 0 && species_tables_) ? dc.dup(b.f32("embedding", {S_, C0_})) : nullptr;
         for (int l = 0; l <= L->lmax_out; ++l) {
-            const double* Wp = dup(b.f32(p + "W_p_" + std::to_string(l), {L->C_out, L->C_out}));
+            const double* Wp = dc.dup(b.f32(p + "W_p_" + std::to_string(l), {L->C_out, L->C_out}));
             const double* Wsc0 = (t == 0 && l == 0 && L->sc_has[0])
-                                     ? dup(b.f32(p + "W_sc_0", {1, L->C_in, L->C_out})) : nullptr;
+                                     ? dc.dup(b.f32(p + "W_sc_0", {1, L->C_in, L->C_out})) : nullptr;
             for (const Target& d : cur[l]) {
                 GenericLayer::FoldTarget ft;
                 ft.dest_layer = d.dest;
                 ft.cols = d.cols;
-                auto to_f32 = [&](const double* D, int rows) {
-                    float* f = nullptr;
-                    CUDA_CHECK_THROW(cudaMalloc(&f, (size_t)rows * d.cols * sizeof(float)));
-                    L->weights.push_back(f);
-                    const int64_t n = (int64_t)rows * d.cols;
-                    d2f_kernel<<<(unsigned)((n + 255) / 256), 256>>>(n, D, f);
-                    CUDA_CHECK_THROW(cudaGetLastError());
-                    return f;
-                };
-                ft.Wy = to_f32(dmm(Wp, L->C_out, L->C_out, d.M, d.cols), L->C_out);
-                if (Wsc0) ft.Wh = to_f32(dmm(Wsc0, L->C_in, L->C_out, d.M, d.cols), L->C_in);
+                ft.Wy = dc.to_f32(dc.mm(Wp, L->C_out, L->C_out, d.M, d.cols), (int64_t)L->C_out * d.cols, L->weights);
+                if (Wsc0) {
+                    const double* Wh = dc.mm(Wsc0, L->C_in, L->C_out, d.M, d.cols);
+                    if (E) ft.Th = dc.to_f32(dc.mm(E, S_, C0_, Wh, d.cols), (int64_t)S_ * d.cols, L->weights);
+                    else ft.Wh = dc.to_f32(Wh, (int64_t)L->C_in * d.cols, L->weights);
+                }
                 out[t][l].push_back(ft);
             }
         }
         for (int l = 0; l < 3; ++l) next[l] = cur[l];
     }
-    CUDA_CHECK_THROW(cudaDeviceSynchronize());  // before the temporaries are freed
     for (int t = 0; t < nL - 1; ++t)
         for (int l = 0; l < 3; ++l) layers_[t]->fold[l] = std::move(out[t][l]);
     chain_fold_ = true;
@@ -1485,9 +1524,9 @@ void GenericModel::record(const GenericPassInputs& in) {
     for (int t = 0; t < n_layers_; ++t) {
         GenericLayer* L = layers_[t];
         const int Cx = L->C_x, Cm = L->C_msg, Co = L->C_out;
-        // the hidden-table layer 0 needs x only for the nonlinear residual; with the S57 fold, later layers' x comes
-        // from the earlier layers' folded consumers instead
-        if ((!L->first_hidden || L->kind == 4) && !(chain_fold_ && t > 0)) {
+        // the hidden-table layer 0 needs x only for the nonlinear residual (none with the S59 residual table); with
+        // the S57 fold, later layers' x comes from the earlier layers' folded consumers instead
+        if ((!L->first_hidden || L->kind == 4) && !(chain_fold_ && t > 0) && !L->res0_table) {
             if (L->lmax_x > 0) fork();
             for (int l = 0; l <= L->lmax_x; ++l) {
                 if (L->lmax_x > 0) lane(l);
@@ -1506,13 +1545,16 @@ void GenericModel::record(const GenericPassInputs& in) {
                     species_gemm(false, l, Kh, Cm, L->S0[l], L->C0[l], (int64_t)Kh * Cm, 0.0f, L->msgf[l], 4 * l);
                 join();
             } else {
+                if (L->res0_table)  // S59: the residual per species (lmax_x 0), before the lanes fork
+                    gather_rows_kernel<<<(unsigned)(((int64_t)N * L->lin_cols[0] + 255) / 256), 256, 0, st>>>(
+                        N, L->lin_cols[0], in.species, L->res0_table, L->res[0]);
                 fork();
                 for (int l = 0; l < 4; ++l) {
                     lane(l);
                     in.gemm(false, N * dimL(l), L->lin_cols[l], Kh, 1.0f, L->S0[l], Kh, L->C0[l], L->lin_cols[l],
                             0.0f, L->lin[l], L->lin_cols[l]);
                 }
-                if (L->kind == 4) {
+                if (L->kind == 4 && !L->res0_table) {
                     for (int l = 0; l <= L->lmax_x; ++l) {
                         lane(4 + l);
                         in.gemm(false, N * dimL(l), L->lin_cols[l], Cx, 1.0f, L->x[l], Cx, L->W_res[l],
@@ -1588,7 +1630,18 @@ void GenericModel::record(const GenericPassInputs& in) {
                     L->prod_species ? (int64_t)L->prod_segw * Cm : 0, in.species, L->y, nullptr, nullptr);
         if (chain_fold_ && t < n_layers_ - 1) {
             // S57: y_t (and layer 0's species-only skip input) into every downstream consumer of hout_t; the first
-            // write of a destination in this pass assigns it, later ones accumulate (program order: race-free)
+            // write of a destination in this pass assigns it, later ones accumulate (program order: race-free).
+            // S59: the species-table skip terms (layer 0, l 0; each its destination's first write) are gathered on
+            // the main stream before the lanes fork, so the lane GEMMs accumulate onto them.
+            for (const auto& ft : L->fold[0]) {
+                if (!ft.Th) continue;
+                float* dst = ft.dest_layer >= 0 ? layers_[ft.dest_layer]->x[0] : layers_.back()->hid;
+                if (std::find(written.begin(), written.end(), dst) != written.end())
+                    throw std::logic_error("generic: species-table fold term is not a first write");
+                gather_rows_kernel<<<(unsigned)(((int64_t)N * ft.cols + 255) / 256), 256, 0, st>>>(
+                    N, ft.cols, in.species, ft.Th, dst);
+                written.push_back(dst);
+            }
             fork();
             int lane_i = 0;
             for (int l = 0; l <= L->lmax_out; ++l)

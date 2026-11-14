@@ -80,6 +80,9 @@ private:
     // S57 skip-chain fold (sm_120; LOUP_CHAIN_FOLD=0 disables): see setup_chain_fold in generic.cu.
     void setup_chain_fold(const Bundle& b);
     bool chain_fold_ = false;
+    // S59 layer-0 species tables (sm_120; LOUP_SPECIES_TABLES=0 disables): see setup_species_tables in generic.cu.
+    void setup_species_tables(const Bundle& b);
+    bool species_tables_ = false;
     int S_ = 0, n_layers_ = 0, sh_perm_ = 0, has_zbl_ = 0;
     float r_max_ = 0.0f;
     std::vector<int> Z_;
