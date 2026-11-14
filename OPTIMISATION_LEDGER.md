@@ -1253,6 +1253,13 @@ POLAR-1 NaCl 3x3x3 (216) and POLAR-1-M `NbCl5` 3x3x3 (1,944).
 - Grouped / stacked per-degree GEMM, corrected: a stacked `M = 3456` launch (216 + 648 + 1080 + 1512 rows) looked 24% faster than the serial `sgemm64` picks with random data (125-129 vs 161-163 us), but the grouped kernel on the real split stayed at 167-169 us. The grouped kernel itself is not the problem (one group of 3456 rows: 125-132 us). The cause is tile count, not partial tiles: plain `sgemm128` at `N = K = 512` takes 121-123 us for `M = 3456` (108 full tiles = 72 + 36, a full wave plus one block per SM) and 154-160 us for `M = 3464` (112 tiles, one partial), `3584` (112 full), `3712` (116 full) and `4096` (128 full) alike. The real four groups (116 tiles, either order) and two groups of 1728 (112) therefore take 166-169 us; groups padded to 128-row multiples (256 / 640 / 1024 / 1536, 108 tiles) are fast again. The stacked number was a quantisation coincidence; the S22 rejection stands.
 - Sources: this file.
 
+<a id="s24-l0-conv"></a>
+#### s24-l0-conv: generic lx 0 convs on `OMAT-0-S` (no change adopted)
+- Stage: S24 (14 November 2026), 5060 Ti, `ncu`, `SrTiO3` (5,000 atoms).
+- `gconv_bwd_L0<true, 128, true>`: 1.16 ms, issue 67% (`No Eligible` 32%), L2 throughput 53% (hit 94%), L1 hit 32%, 280.7M warp instructions (177.6M FMA-pipe), ~109 lane instructions per edge-channel; stalls per issue: long scoreboard 4.76, not selected 2.10, wait 1.22, dispatch 0.76. `gconv_fwd_L0<1, true, 256, true, 128>`: 591 us, L1 / L2 throughput 72% / 71%, issue 67%, long scoreboard 4.73.
+- Unlike the lx 1 convs (`s21-limiters`, L2-bound at 83%), the backward is issue- / latency-limited, with the `CUBIC_PACKED8` decode (already shift-free and bias-folded: `wp-shift-free-decode`, `wp-decode-bias-fold`) about a third of its instructions. An unpacked `float4` table would remove the decode but double the table bytes; with the table most of the 38.2M L2 read sectors, L2 throughput would rise from 53% to roughly 95%, trading the issue limit for an L2 limit at about the same time, and it would need a second table format in the loader and kernels. Not prototyped.
+- Sources: this file.
+
 <a id="rv8-fixes"></a>
 #### rv8-fixes: eighth review pass (`loupmd-review-20261112.md`, U1-U9)
 - Stage: S9.
