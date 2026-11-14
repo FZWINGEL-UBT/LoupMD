@@ -79,18 +79,24 @@ Every task inherits these. They come from `AGENTS.md`, the status file and the o
 
 ## 3. Where we start
 
-Read at `0336751`.
+Read at `0336751`; every reference below was re-checked on 15 November 2026 at `da42ec3`, the merge of
+`round6-hardening` `11778cd` (38 commits) into `release/v1`. Line numbers are those of `da42ec3`.
 
 **Engine.** `src/engine.cu` (handle, GEMM autotune, plan cache, `record_force_pass` at line 1253, `run_md_loop` at
-1978, the C entry points from 1589), `src/generic.cu` (`GenericModel::record`: forward over the layers, long range,
-backward), `src/interaction0.cu` and `src/generated_kernels.cuh` (specialised OMAT-0 medium path), `src/polar.cu`,
-`src/neighbors.cu`, `src/integrator.cu` (NVE and Langevin halves, kinetic energy), `src/sgemm.cu`,
-`src/model_loader.cu`, `src/bundle.cu`. Nine C functions in `include/loupmd.h`. Families: OMAT-0 small and medium,
-OFF23 small / medium / large, OFF23b medium, OFF24 medium, MH-1 (one head per bundle), POLAR-1 S / M / L.
+1978, the C entry points from 1589; unchanged by the merge), `src/generic.cu` (`GenericModel::record`: forward over
+the layers, long range, backward), `src/interaction0.cu` and `src/generated_kernels.cuh` (specialised path),
+`src/polar.cu`, `src/neighbors.cu`, `src/integrator.cu` (NVE and Langevin halves, kinetic energy), `src/sgemm.cu`,
+`src/model_loader.cu`, `src/bundle.cu`. Nine C functions in `include/loupmd.h`. Families (status §5): every label
+of FastMACE's table. On the specialised kernels: OMAT-0 medium, MP-0b3 medium, MPA-0 medium, MatPES PBE and
+r2SCAN (one density architecture). On the generic path: MP-0 medium and large, OMAT-0 small, OFF23 small / medium /
+large, OFF23b medium, OFF24 medium, MH-1 (any head, one per bundle), POLAR-1 S / M / L, and OMOL-0 extra large
+(three layers, 1024 hidden channels; total charge and spin multiplicity are export arguments, one bundle per
+setting).
 
 **Python.** `python/loupmd.py` (ctypes wrapper, `ensure_loup_bundle`, `LoupEngine`), `export.py` and the three
 exporters, `bundle.py`, the two kernel generators, `ref_generic.py`, `test_gate.py`, `bench_md.py`,
-`bench_family.py`. 36 GPU tests in six files.
+`bench_family.py`. 38 test functions in six files (36 at `0336751`); the status file records 71 passed cases
+at S59.
 
 **What blocks a release.**
 
@@ -98,12 +104,27 @@ exporters, `bundle.py`, the two kernel generators, `ref_generic.py`, `test_gate.
 | --- | --- |
 | No `README`, licence, `pyproject.toml`; one library per GPU architecture, found by relative path | `Makefile`, `python/loupmd.py:54` |
 | Exporters import FastMACE from hard-coded checkouts; about 4,400 lines of it are used at export | `export_omat0.py:20-36`, `export_generic.py:27-31` |
-| Models, structures and FastMACE paths of two machines in scripts and tests | `bench_family.py:28`, `test_gate.py:109-122,252`, `tests/conftest.py:21-26` |
-| Product kernels compiled only for models found in one folder; others refused at load | `gen_generic.py:1208`, `generic.cu:1096` |
-| Errors go to stderr; Python raises "loup_evaluate failed" | `engine.cu:1520`, `loupmd.py:239` |
+| Models, structures and FastMACE paths of two machines in scripts and tests | `bench_family.py:28`, `test_gate.py:111-124,264`, `tests/conftest.py:21-26`, `tests/test_gate_wrapper.py:16-17` |
+| Product kernels compiled only for models found in one folder; others refused at load | `gen_generic.py:1237`, `generic.cu:1173` |
+| Errors go to stderr; Python raises "loup_evaluate failed" | `engine.cu:1520`, `loupmd.py:257` |
 | NVE and Langevin only; no output, restart, calculator, CLI | `include/loupmd.h` |
 | MD graphs re-captured on every run call; the displacement maximum never decays | status §4.2, items S4 and S2 |
 | No capacity mode: about 80 KB per atom for OMAT-0 medium by buffer arithmetic, so roughly 150-200k atoms on 16 GB (estimate; largest recorded run 40,000 atoms) | `engine.cu:1789-1809`, status §1 |
+
+**Found at the merge of 15 November; put to the owner, later sections not yet changed.**
+
+- S6-T06 is ahead of the plan: all six labels are supported and gated on `round6-hardening` (`7c8ca4e`). Four of
+  them (MP-0b3, MPA-0, both MatPES) run the specialised kernels, not the generic path the task names. What is left
+  for the task is the gate under the release layout.
+- S6-T07 is ahead of the plan and built differently: OMOL-0 extra large runs (`4af8b06`), with charge and spin
+  folded into the bundle at export. `loup_set_charge_spin` of §4.3 assumes a run-time setting and has no
+  counterpart in the code.
+- §4.4 says every supported family has two interactions. OMOL-0 extra large has three, so by the rule stated
+  there it is refused for tiled execution, like POLAR-1.
+- Decision A2 now concerns five labels on the specialised kernels, not OMAT-0 medium alone.
+- The risk row "models not yet tested on the generic path" (§10) and the open point on the six untested labels
+  (§11) are settled by the same commits.
+- New test switches in `include/loupmd.h`: `LOUP_POLAR_FOLD`, `LOUP_CHAIN_FOLD`, `LOUP_SPECIES_TABLES`.
 
 **What FastMACE offers** (two read-only inventories of `D:\Margraf\FastMACE` on 14 Nov; only the rename plan and
 the tiled documents were re-read directly): 19 model labels with hash-checked download; NVE, Langevin, CSVR,
