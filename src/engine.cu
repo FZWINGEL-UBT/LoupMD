@@ -606,7 +606,8 @@ struct LoupHandle {
 
 namespace loup {
 void sgemm128_init();
-void sgemm128(int M, int N, int K, const float* A, const float* B, float* C, float beta, cudaStream_t stream);
+void sgemm128(int M, int N, int K, const float* A, const float* B, float* C, float beta, bool n_fastest,
+              cudaStream_t stream);
 void sgemm64(int M, int N, int K, const float* A, const float* B, float* C, float beta, cudaStream_t stream);
 void sgemm32(int M, int N, int K, const float* A, const float* B, float* C, float* ws, float beta, int split_k,
              cudaStream_t stream);
@@ -814,7 +815,7 @@ static inline void sgemm_rm(
                 }
                 if (own_ok && (((uintptr_t)d_tmpC & 15) == 0)) {
                     const float* Bkn = own_b();
-                    const float ms128 = time_min([&] { loup::sgemm128(M, N, K, A, Bkn, d_tmpC, beta, strm); });
+                    const float ms128 = time_min([&] { loup::sgemm128(M, N, K, A, Bkn, d_tmpC, beta, h->is_sm120, strm); });
                     if (consider(ms128)) { plan.own_mode = 1; plan.use_hyb = false; }
                     if (h->is_sm120) {
                         if (M <= 1600 || N <= 64 || (M <= 2500 && N <= 160)) {
@@ -866,7 +867,7 @@ static inline void sgemm_rm(
         } else if (plan.own_mode == 2) {
             loup::sgemm64(M, N, K, A, own_b(), C, beta, strm);
         } else {
-            loup::sgemm128(M, N, K, A, own_b(), C, beta, strm);
+            loup::sgemm128(M, N, K, A, own_b(), C, beta, h->is_sm120, strm);
         }
         return;
     }

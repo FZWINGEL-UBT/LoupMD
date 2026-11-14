@@ -26,7 +26,7 @@ __device__ __forceinline__ void cp_async_wait_one_pending() { asm volatile("cp.a
 
 // TN: 8 (128 x 128 tiles) or 4 (128 x 64 tiles, for N = 192 without padding). FULL_N: N % (16 TN) == 0, no
 // column guards.
-template <int TN, bool FULL_N>
+template <int TN, bool FULL_N, bool N_FASTEST>
 __global__ void __launch_bounds__(256, 2) sgemm128_kernel(int M, int N, int K, const float* __restrict__ A,
                                                           const float* __restrict__ B, float* __restrict__ C,
                                                           float beta) {
@@ -35,7 +35,9 @@ __global__ void __launch_bounds__(256, 2) sgemm128_kernel(int M, int N, int K, c
     constexpr int BN = 16 * TN;
     float(*Bs)[kBK][BN] = reinterpret_cast<float(*)[kBK][BN]>(smem + kStages * 128 * kBK);
     const int tid = threadIdx.x, tx = tid & 15, ty = tid >> 4;
-    const int m0 = blockIdx.y * 128, n0 = blockIdx.x * BN;  // N tiles fastest: the tiles of one A row block run together, A streams once
+    // N_FASTEST (sm_120 only): the N tiles of one A row block run together, so a cold A streams from DRAM once.
+    // Otherwise the original M-tile-fastest order: other GPUs run the kernel they were tuned with.
+    const int m0 = (N_FASTEST ? blockIdx.y : blockIdx.x) * 128, n0 = (N_FASTEST ? blockIdx.x : blockIdx.y) * BN;
     // Copy roles: A rows ar and ar + 64 (one 16-byte k chunk each); B rows bk (and bk + 8 for BN = 128), one 16-byte
     // n chunk each.
     const int ar = tid >> 2, ac = (tid & 3) * 4;
@@ -320,27 +322,44 @@ __global__ void splitk_reduce_kernel(int mn4, int split_k, const float4* __restr
 }  // namespace
 // Prefer the maximum shared-memory carveout so two blocks (48 / 36 KB) fit per SM.
 void sgemm128_init() {
-    cudaFuncSetAttribute(sgemm128_kernel<8, true>, cudaFuncAttributePreferredSharedMemoryCarveout, 100);
-    cudaFuncSetAttribute(sgemm128_kernel<8, false>, cudaFuncAttributePreferredSharedMemoryCarveout, 100);
-    cudaFuncSetAttribute(sgemm128_kernel<4, true>, cudaFuncAttributePreferredSharedMemoryCarveout, 100);
-    cudaFuncSetAttribute(sgemm128_kernel<4, false>, cudaFuncAttributePreferredSharedMemoryCarveout, 100);
+    cudaFuncSetAttribute(sgemm128_kernel<8, true, false>, cudaFuncAttributePreferredSharedMemoryCarveout, 100);
+    cudaFuncSetAttribute(sgemm128_kernel<8, false, false>, cudaFuncAttributePreferredSharedMemoryCarveout, 100);
+    cudaFuncSetAttribute(sgemm128_kernel<4, true, false>, cudaFuncAttributePreferredSharedMemoryCarveout, 100);
+    cudaFuncSetAttribute(sgemm128_kernel<4, false, false>, cudaFuncAttributePreferredSharedMemoryCarveout, 100);
+    cudaFuncSetAttribute(sgemm128_kernel<8, true, true>, cudaFuncAttributePreferredSharedMemoryCarveout, 100);
+    cudaFuncSetAttribute(sgemm128_kernel<8, false, true>, cudaFuncAttributePreferredSharedMemoryCarveout, 100);
+    cudaFuncSetAttribute(sgemm128_kernel<4, true, true>, cudaFuncAttributePreferredSharedMemoryCarveout, 100);
+    cudaFuncSetAttribute(sgemm128_kernel<4, false, true>, cudaFuncAttributePreferredSharedMemoryCarveout, 100);
     cudaFuncSetAttribute(sgemm64_kernel<true>, cudaFuncAttributePreferredSharedMemoryCarveout, 100);
     cudaFuncSetAttribute(sgemm64_kernel<false>, cudaFuncAttributePreferredSharedMemoryCarveout, 100);
     cudaFuncSetAttribute(sgemm32_kernel<true>, cudaFuncAttributePreferredSharedMemoryCarveout, 100);
     cudaFuncSetAttribute(sgemm32_kernel<false>, cudaFuncAttributePreferredSharedMemoryCarveout, 100);
 }
 
-// Requirements (checked by the caller): K % 16 == 0, N % 4 == 0, lda = K, ldb = ldc = N, A / B / C 16-byte aligned.
-void sgemm128(int M, int N, int K, const float* A, const float* B, float* C, float beta, cudaStream_t stream) {
+namespace {
+template <bool NF>
+void sgemm128_launch(int M, int N, int K, const float* A, const float* B, float* C, float beta, cudaStream_t stream) {
+    auto grid_of = [&](int bn) {
+        const unsigned mt = (M + 127) / 128, nt = (N + bn - 1) / bn;
+        return NF ? dim3(nt, mt) : dim3(mt, nt);
+    };
     if ((N % 128) != 0 && (N % 128) <= 64) {  // e.g. N = 144, 192: 128 x 64 tiles instead of a mostly-empty 128 x 128 tile
-        const dim3 grid((N + 63) / 64, (M + 127) / 128);
-        if ((N % 64) == 0) sgemm128_kernel<4, true><<<grid, 256, smem_bytes<64>(), stream>>>(M, N, K, A, B, C, beta);
-        else               sgemm128_kernel<4, false><<<grid, 256, smem_bytes<64>(), stream>>>(M, N, K, A, B, C, beta);
+        const dim3 grid = grid_of(64);
+        if ((N % 64) == 0) sgemm128_kernel<4, true, NF><<<grid, 256, smem_bytes<64>(), stream>>>(M, N, K, A, B, C, beta);
+        else               sgemm128_kernel<4, false, NF><<<grid, 256, smem_bytes<64>(), stream>>>(M, N, K, A, B, C, beta);
         return;
     }
-    const dim3 grid((N + 127) / 128, (M + 127) / 128);
-    if ((N % 128) == 0) sgemm128_kernel<8, true><<<grid, 256, smem_bytes<128>(), stream>>>(M, N, K, A, B, C, beta);
-    else                sgemm128_kernel<8, false><<<grid, 256, smem_bytes<128>(), stream>>>(M, N, K, A, B, C, beta);
+    const dim3 grid = grid_of(128);
+    if ((N % 128) == 0) sgemm128_kernel<8, true, NF><<<grid, 256, smem_bytes<128>(), stream>>>(M, N, K, A, B, C, beta);
+    else                sgemm128_kernel<8, false, NF><<<grid, 256, smem_bytes<128>(), stream>>>(M, N, K, A, B, C, beta);
+}
+}  // namespace
+
+// Requirements (checked by the caller): K % 16 == 0, N % 4 == 0, lda = K, ldb = ldc = N, A / B / C 16-byte aligned.
+void sgemm128(int M, int N, int K, const float* A, const float* B, float* C, float beta, bool n_fastest,
+              cudaStream_t stream) {
+    if (n_fastest) sgemm128_launch<true>(M, N, K, A, B, C, beta, stream);
+    else           sgemm128_launch<false>(M, N, K, A, B, C, beta, stream);
 }
 
 void sgemm64(int M, int N, int K, const float* A, const float* B, float* C, float beta, cudaStream_t stream) {
