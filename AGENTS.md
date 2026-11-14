@@ -62,7 +62,8 @@ Practical rules, commands, invariants, and hard-won lessons for working on LoupM
 - **Packed-table error guard (`loup::PackErrTracker`):**
   - Both loaders enforce `kPackedTableMaxRelErr = 5e-4` across physical intervals (`r >= 1 A`). Check with `LOUP_DEBUG_PACK=1`.
 - **Variant / path test overrides (`src/engine.cu`):**
-  - `LOUP_SPLINE_VARIANT=R1|R1p|R4|R4p|R5`, `LOUP_WPRIME_THREADS=256|512`, `LOUP_WPRIME_RCV=0|1`, `LOUP_REORDER=0|1`, `LOUP_GENERIC=1`, `LOUP_NO_PRELOC=1`, `LOUP_LIB=/path/to/lib.so`.
+  - `LOUP_SPLINE_VARIANT=R1|R1p|R4|R4p|R5`, `LOUP_WPRIME_THREADS=256|512`, `LOUP_WPRIME_RCV=0|1`, `LOUP_REORDER=0|1`, `LOUP_GENERIC=1`, `LOUP_NO_PRELOC=1`, `LOUP_LIB=/path/to/lib.so`; `LOUP_POLAR_FOLD=0` (`src/polar.cu`: the unfolded SCF / electron-energy GEMMs that non-`sm_120` GPUs run).
+  - When editing the POLAR SCF or electron-energy GEMMs, gate both paths (default and `LOUP_POLAR_FOLD=0`).
   - When editing `spline_forward_inter1` or `wprime_backward_inter1`, gate every forced variant (`R1`, `R1p`, `R4`, `R4p`, `R5`), not just the auto-selected one.
 - **Test suite:** run `pytest -q` (full suite, including `tests/test_engine_guards.py` and `tests/test_gate_cache.py`) against the installed `./libloupmd.so` before finishing.
 - **Bundle / signature compatibility:** `LOUP_KERNEL_SIGNATURE` in `src/generated_kernels_signature.h` must match `export_omat0.kernel_signature()`.
