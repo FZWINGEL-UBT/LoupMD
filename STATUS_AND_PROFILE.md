@@ -404,7 +404,7 @@ S16 (`gemm-own-n144`, `gemm-own-sgemm64`, 14 November, 5060 Ti only):
 S17 (`gemm-own-sgemm32`, 14 November, `sm_120` only):
 - `sgemm32_kernel` (`32 x 32 x 16` `cp.async`, `64` threads) + deterministic `split_k` (`1, 2, 4` into per-stream `4 MB` workspace, autotuned for `sm_120` and `M <= 1600`): fresh-plan ABBA `POLAR-1-S` `NaCl216` 1.65 -> **1.50 ms/step** (`0.909`), `POLAR-1-M` `NaCl216` 3.70 -> **3.46** (`0.936`), `POLAR-1-L` `NaCl216` 7.28 -> **6.89** (`0.947`), `MH-1` `NaCl216` 1.61 -> **1.53** (`0.948`), `OFF23-M` `water216` tie (`1.34 -> 1.35`, `1.006`), `MH-1` `NbCl5` tie (`12.55 -> 12.59`, `1.003`). Gates pass across `POLAR-1-S/M`, `MH-1`, `OMAT-0-S/M`, `OFF23-M`; `67 passed`.
 S18 (`gemm-own-narrow-n`, 14 November, `sm_120` only):
-- Narrow-`N` `sgemm64` / `sgemm32` above `M = 1600` (`N <= 64` / `N <= 32`, or `M <= 2500 && N <= 160`): fresh-plan ABBA `POLAR-1-M` `NbCl5` 24.66 -> **24.48 ms/step** (`0.9925`), `MH-1` `NbCl5` 12.62 -> **12.51** (`0.9907`), `OFF23-M` `water` tie (`7.41 -> 7.42`), `OMAT-0-S` `SrTiO3` tie (`4.71 -> 4.71`).
+- Narrow-`N` `sgemm64` / `sgemm32` above `M = 1600` (`N <= 64` / `N <= 32`, or `M <= 2500 && N <= 160`): fresh-plan ABBA `POLAR-1-M` `NbCl5` 24.66 -> **24.48 ms/step** (`0.9925`), `MH-1` `NbCl5` 12.62 -> **12.51** (`0.9907`), `OFF23-M` `water` tie (`7.41 -> 7.42`), `OMAT-0-S` `SrTiO3` tie (`4.71 -> 4.71`). Cached 3x gates + `1,944`-atom `NbCl5` 3x gate (`MH-1` `dF 0.31x`/`dS 1.14x`, `POLAR-1-M` `dF 0.47x`) + `67 passed` pass.
 
 ### 5.4 Fixes Found by the Family Work
 - **POLAR LayerNorm-MLP reverse wrote its GEMM output over its own input** (`mlp_bwd`: after the first hidden layer
