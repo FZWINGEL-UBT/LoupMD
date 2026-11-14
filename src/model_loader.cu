@@ -63,10 +63,8 @@ void LoupModelGPU::load(const loup::Bundle& b, const char* path) {
 
     grid1.n_bands = b.meta_int("n_bands1");
     grid1.total_intervals = b.meta_int("intervals1");
-    packed8_bias = (uint32_t)b.meta_int("packed8_bias");
-    if (grid1.n_bands < 1 || grid1.n_bands > 8 || grid1.total_intervals < 1 || packed8_bias > 255)
+    if (grid1.n_bands < 1 || grid1.n_bands > 8 || grid1.total_intervals < 1)
         throw std::runtime_error(std::string(path) + ": bad interaction-1 spline grid header");
-    bias_shift = (128u - packed8_bias) << 23;
     {
         const std::vector<float> st = b.f32("starts1", {8}), en = b.f32("ends1", {8}), ih = b.f32("inv_h1", {8});
         const std::vector<int32_t> of = b.i32("offsets1", {8}), co = b.i32("counts1", {8});
@@ -173,12 +171,6 @@ void LoupModelGPU::load(const loup::Bundle& b, const char* path) {
         d_cubic_packed8_1 = upload(host_cubic);
     }
     {
-        const std::vector<int32_t> packed = b.i32("packed8_table_1", {PI, 1280, 2});
-        std::vector<uint2> host(sp1_n);
-        memcpy(host.data(), packed.data(), sp1_n * sizeof(uint2));
-        d_packed8_table_1 = upload(host);
-    }
-    {
         const std::vector<float> dens = b.f32("density_table_1", {P_sym, grid1.total_intervals, 4});
         std::vector<float4> host((size_t)PI);
         memcpy(host.data(), dens.data(), host.size() * sizeof(float4));
@@ -224,7 +216,6 @@ void LoupModelGPU::free_gpu() {
     freep(d_W_up_1);
     freep(d_W_skip1_16);
     freep(d_cubic_packed8_1);
-    freep(d_packed8_table_1);
     freep(d_density_table_1);
     for (int l = 0; l < 4; ++l) freep(d_W_lin1[l]);
     freep(d_w1_factored);

@@ -29,7 +29,6 @@ from mace.cli.convert_e3nn_cueq import run as convert_e3nn_cueq
 
 from fastmace.kernels.cuda.sc_factored import factor, fold_weights
 from fastmace.kernels.cuda.sc_generated import merged_terms, shape_of
-from fastmace.kernels.oeq_streaming.spline_forward import encode_packed8
 from fastmace.kernels.triton import compose_skip
 from fastmace.rewrites import radial as rad
 from fastmace.rewrites.generic.modules import fc_last_weight, fc_split
@@ -256,8 +255,6 @@ def export_model(model_path: str, atomic_nums: list[int], out_path: Path):
     intervals1 = int(coef1_raw.shape[1])
     # q-major [P_sym * intervals1, 1280, 4]
     spline_table_1 = coef1_raw.permute(0, 1, 3, 2).reshape(P_sym * intervals1, 1280, 4).to(torch.float32).contiguous()
-    packed8_table_1, packed8_bias = encode_packed8(spline_table_1)
-    assert packed8_table_1 is not None, "PACKED8 encoding failed"
 
     # Fit density_1 on the exact same grid1
     knots1 = rspline.grid_knots(grid1)
@@ -308,7 +305,7 @@ def export_model(model_path: str, atomic_nums: list[int], out_path: Path):
         kernel_signature=kernel_signature([product_signature(prog0, feats0, sh0), product_signature(prog1, feats1, sh1)]),
         model_sha256=file_sha256(model_path), S=S, P_sym=P_sym, Z=atomic_nums,
         pieces0=pieces0, n_bins0=n_bins0, n_bands1=n_bands, intervals1=intervals1,
-        packed8_bias=int(packed8_bias), has_zbl=has_zbl,
+        has_zbl=has_zbl,
     )
     tensors = {
         "r_max": np.array([r_max], np.float64), "scale": np.array([scale], np.float64), "e0": e0,
@@ -319,7 +316,7 @@ def export_model(model_path: str, atomic_nums: list[int], out_path: Path):
         "w0_factored": f32(w0_factored).reshape(S, -1, 128), "w_ro0": f32(w_ro0), "W_up_0": f32(W_up_0), "W_up_1": f32(W_up_1),
         "W_skip1_16": f32(W_skip1_16),
         "starts1": starts1, "ends1": ends1, "inv_h1": inv_h1, "offsets1": offsets1, "counts1": counts1,
-        "spline_table_1": f32(spline_table_1), "packed8_table_1": packed8_table_1.numpy().astype(np.int32),
+        "spline_table_1": f32(spline_table_1),
         "density_table_1": f32(density_table_1),
         **{f"W_lin1_{l}": f32(w) for l, w in enumerate(W_lin1)},
         "w1_factored": f32(w1_factored).reshape(S, -1, 128), "W_p1_ro1": f32(W_p1_ro1), "W_ro1_2": f32(W_ro1_2),
@@ -331,7 +328,7 @@ def export_model(model_path: str, atomic_nums: list[int], out_path: Path):
     print(
         f"Exported {out_path} ({out_path.stat().st_size / 1e6:.2f} MB): "
         f"Z={atomic_nums}, P_sym={P_sym}, pieces0={pieces0}, intervals1={intervals1}, "
-        f"table0_cert={cert0['worst']:.3f}, spline1_cert={cert1['worst']:.3f}, packed8_bias={packed8_bias}"
+        f"table0_cert={cert0['worst']:.3f}, spline1_cert={cert1['worst']:.3f}"
     )
 
 

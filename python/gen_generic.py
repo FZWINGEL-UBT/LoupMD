@@ -203,7 +203,7 @@ def emit_conv_fwd(lx, groups=(0, 1, 2), name=None):
                 cg_use[(I, m1)] = ("-" if norm[0][0] < 0 else "", norm[0][1])
                 continue
             sign = -1.0 if norm[0][0] < 0 else 1.0
-            key = tuple(sorted((ec, round(sign * c, 7)) for c, ec in norm))
+            key = tuple(sorted((ec, lit(sign * c)) for c, ec in norm))
             if key not in extras:
                 extras[key] = 16 + len(extras)
             cg_use[(I, m1)] = ("-" if sign < 0 else "", extras[key])
@@ -214,7 +214,7 @@ def emit_conv_fwd(lx, groups=(0, 1, 2), name=None):
             return ""
         ls = [f"{pad}{{ float* p = s_sh + ({idx_expr}) * ED;"]
         for key, eslot in extras.items():
-            expr = " + ".join(f"{lit(c)} * p[{ec}]" for ec, c in key)
+            expr = " + ".join(f"{c_lit} * p[{ec}]" for ec, c_lit in key)
             ls.append(f"{pad}  p[{eslot}] = {expr};")
         ls.append(f"{pad}}}")
         return "\n" + "\n".join(ls)

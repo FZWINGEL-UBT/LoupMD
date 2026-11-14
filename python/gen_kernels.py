@@ -402,7 +402,7 @@ def _emit_spline_forward1(schedule, blocks, C=128):
                 cg_use[(k_acc, ic)] = ("-" if norm[0][0] < 0 else "", norm[0][1])
                 continue
             sign = -1.0 if norm[0][0] < 0 else 1.0
-            key = tuple(sorted((ec, round(sign * c, 7)) for c, ec in norm))
+            key = tuple(sorted((ec, _lit(_f32(sign * c))) for c, ec in norm))
             if key not in extras:
                 extras[key] = 16 + len(extras)
             cg_use[(k_acc, ic)] = ("-" if sign < 0 else "", extras[key])
@@ -412,7 +412,7 @@ def _emit_spline_forward1(schedule, blocks, C=128):
     if extras:
         extra_lines.append("            { float* p = s_sh + (ch - 32) * ED;  // per-edge CG linear forms shared by all channels")
         for key, eslot in extras.items():
-            expr = " + ".join(f"{_lit(c)} * p[{ec}]" for ec, c in key)
+            expr = " + ".join(f"{c_lit} * p[{ec}]" for ec, c_lit in key)
             extra_lines.append(f"              p[{eslot}] = {expr};")
         extra_lines.append("            }")
     extra_block = ("\n" + "\n".join(extra_lines)) if extra_lines else ""

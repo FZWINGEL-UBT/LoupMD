@@ -164,11 +164,8 @@ struct LoupModelGPU {
 
     // Interaction 1 spline tables
     SplineGridHost grid1{};
-    uint32_t packed8_bias = 0;
-    unsigned bias_shift = 0;
     unsigned cubic_bias_shift = 0;
     uint2* d_cubic_packed8_1 = nullptr;   // [P_sym * intervals1, 1280] (8-byte cubic packed)
-    uint2* d_packed8_table_1 = nullptr;   // [P_sym * intervals1, 1280]
     float4* d_density_table_1 = nullptr;  // [P_sym * intervals1]
 
     // Interaction 1 linear block weights
