@@ -203,6 +203,8 @@ Conventions:
 | [gen-first-bwd-lpe](#gen-first-bwd-edge-minb) | Lane-per-edge `first_bwd_edge` (no cross-lane SH folds, staged table rows, uniform `dS0` loads) | – | gen | REJECTED | S21 | instructions `-43%` but `168` registers: `505 -> 570 us`; capped `128 / 96 / 80` regs `1024 / 681 / 714 us` (spills) | this file |
 | [gen-conv-fwd-l1-r4](#gen-conv-fwd-l1-r4) | `gconv_fwd_L1<4, true, 512, ..., 128, 16>` (`4` receivers/block, `TILE = 16`) | – | gen | REJECTED | S16 | `OMAT-0-M` generic `SrTiO3` `8.79 -> 8.66 ms` (`0.985`), `OFF23-M` water `7.44 -> 7.54` (`1.013`, `REG:124`) | this file |
 | [gen-conv-l2-cfix-preloc](#gen-conv-l2-cfix-preloc) | `C_FIX` (`128/224`) on `gconv_fwd_L2a/L2b`, `gconv_bwd_L2lp/L2`; `PRELOC` on `gconv_bwd_L2`; prelocated slabs for `pair_sym = 0` models (`preloc_grid()` / `preloc_pair_sym()` pick the same layer) | `C_FIX`, `PRELOC`, `pick_preloc_layer` | gen (lx 2: OFF23-L, POLAR-1-L; preloc: also POLAR-1-M/L, MH-1) | DEFAULT (5060 Ti only) | S19 | `gconv_bwd_L2lp` `REG:128 -> 62`; ABBA `OFF23-L` water `27.81 -> 27.16 ms` (`0.977`), water216 `0.985`, `POLAR-1-L` `NaCl216` `0.991`; `POLAR-1-M` / `MH-1` `NbCl5` tie | this file |
+| [gen-conv-bwd-l1-c256](#gen-conv-bwd-l1-c256) | `C_FIX = 256` dispatch for `gconv_bwd_L1` (`MACE_MPtrj_2022.9`, `C = 256`, ran runtime `C` at 128 registers) | `launch_conv_bwd` | gen (`C = 256`, lx 1) | DEFAULT (5060 Ti only) | S29 | `REG:128 -> 62`; L1 convs `4928 / 4975 -> 4837 / 4848 us`; ABBA `MPtrj` `SrTiO3` `0.9935` / `0.9896` (both orders) | this file |
+| [gen-conv-fwd-l1-pair-c256](#gen-conv-bwd-l1-c256) | `PAIR = true`, `C_FIX = 256` for `gconv_fwd_L1` at `C = 256` | – | gen | REJECTED | S29 | kernel tie (`4952 / 4953` vs `4928 / 4975 us`) | this file |
 
 ### MACE-POLAR-1 long range (`src/polar.cu`)
 
@@ -1281,6 +1283,15 @@ POLAR-1 NaCl 3x3x3 (216) and POLAR-1-M `NbCl5` 3x3x3 (1,944).
 - What: a scratch `LOUP_FORCE_OWN` switch overrode, at dispatch, every GEMM whose tuned plan was an own kernel with one family (`sgemm128`, `sgemm64`, or `sgemm32` without split-K), on fresh plans. MD step time ratio against the tuned plan (two interleaved runs each): `POLAR-1-M` `NaCl216` 1.272 / 1.065 / 1.138, `MH-1` `NaCl216` 1.202 / 1.040 / 1.178, `POLAR-1-L` `NaCl216` 1.189 / 1.038 / 1.162, `MH-1` `NbCl5` 1.010 / 1.023 / 1.162 (own128 / own64 / own32).
 - Targeted follow-up (scratch `LOUP_FORCE_BUCKET=M:N:mode`, matching `M` and `N` only, so each bucket covers every `K`, `transB` and `beta` with that `M x N` (for `216 x 512` that is `K = 512, 128, 64, 8`); everything else tuned; `POLAR-1-M` `NaCl216`, two interleaved runs): the two dominant small-system buckets, `M = 216, N = 512` (tuned `sgemm64`, 32 blocks) -> `sgemm128` 1.143, `sgemm32` 1.022; `M = 648, N = 512` (tuned `sgemm64`, 88 blocks) -> `sgemm128` 1.089, `sgemm32` 1.065.
 - Conclusion: the standalone autotuner's picks beat every uniform family in the pass (by 1-27%) and every tested alternative for the two dominant small-system `M x N` buckets as a whole (by 2-14%); single plan keys `(M, N, K, transB, beta)` were not isolated. Plans routed to cuBLASLt / hybrid and combinations of buckets were not perturbed, so this is not a proof that no in-pass choice can win, but there is no measured sign that the standalone picks are wrong; pass-aware tile selection is not pursued without such evidence.
+- Sources: this file.
+
+<a id="gen-conv-bwd-l1-c256"></a>
+#### gen-conv-bwd-l1-c256: `C_FIX = 256` on `gconv_bwd_L1`
+- Switch: `python/gen_generic.py` `launch_conv_bwd` (`C == 256` branch, `gconv_bwd_L1<WANT_DX, 256, PRELOC>`), regenerated into `src/generated_generic.cu`.
+- Stage: S29 (14 November 2026).
+- What: a sweep over every installed model found `MACE_MPtrj_2022.9` (`C = 256`) running `gconv_bwd_L1<true, 0, true>` (runtime `C`, 128 registers) and `gconv_fwd_L1<1, false, 256, true, 0>`, the two at 39% of its kernel time (`SrTiO3`, 5,000 atoms, 12.8 ms / step). The `C_FIX` dispatch covered only `C = 128 / 224`. `C_FIX = 256` cuts the backward to 62 registers, as at 128; the backward is otherwise L2-limited, so the gain is small. The forward with `PAIR = true, C_FIX = 256` (104 registers) was a tie and is not adopted.
+- Status: DEFAULT (5060 Ti only). Same arithmetic order as the runtime-`C` kernel.
+- Measured (5060 Ti, `nsys` kernel time per step for both L1 convs, two runs): base 4928 / 4975 us, `C_FIX` backward 4837 / 4848, `PAIR` forward 4952 / 4953. Fresh-plan ABBA on `MPtrj` `SrTiO3`: `a` = base `12.0336`, `b` = new `11.9549` (`0.9935`); reversed `a` = new `11.9591`, `b` = base `12.0846` (new / base `0.9896`). `cmp_libs` base vs new `dE 8.4e-7`, `dF 6.8e-7` against base-vs-base `dE 2.2e-7`, `dF 8.2e-7`. 3x gate (`MPtrj`, oxide set, new float64 / float32 references cached) passes on all six configurations (`dF` ratio <= 1.28, `dS` ratio <= 0.93); `pytest` 67 passed.
 - Sources: this file.
 
 <a id="rv8-fixes"></a>

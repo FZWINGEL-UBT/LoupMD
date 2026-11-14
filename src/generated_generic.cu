@@ -8643,6 +8643,8 @@ void launch_conv_bwd(int lx, cudaStream_t st, int N, int C, int S, int I, const 
                                         : pick(gconv_bwd_L1<false, 128, true>, gconv_bwd_L1<false, 128, false>))
                 : (C == 224) ? (want_dx ? pick(gconv_bwd_L1<true, 224, true>, gconv_bwd_L1<true, 224, false>)
                                         : pick(gconv_bwd_L1<false, 224, true>, gconv_bwd_L1<false, 224, false>))
+                : (C == 256) ? (want_dx ? pick(gconv_bwd_L1<true, 256, true>, gconv_bwd_L1<true, 256, false>)
+                                        : pick(gconv_bwd_L1<false, 256, true>, gconv_bwd_L1<false, 256, false>))
                              : (want_dx ? pick(gconv_bwd_L1<true, 0, true>, gconv_bwd_L1<true, 0, false>)
                                         : pick(gconv_bwd_L1<false, 0, true>, gconv_bwd_L1<false, 0, false>));
         if (smem > 48000) check_cuda(cudaFuncSetAttribute((const void*)fn, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)smem));
