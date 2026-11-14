@@ -84,6 +84,7 @@ int loup_profile_force(LoupHandle* h, int warmup, int n_calls, double* out_total
 //   LOUP_RETUNE     if set, ignore the plan cache and re-time every GEMM shape (results are still saved).
 //   LOUP_SPLINE_VARIANT, LOUP_WPRIME_THREADS, LOUP_REORDER  force kernel variants (testing; see python/test_gate.py).
 //   LOUP_POLAR_FOLD=0  POLAR long range without the load-time dot^T weight fold (testing the path other GPUs take).
+//   LOUP_CHAIN_FOLD=0  generic models (OMOL-0) without the load-time skip-chain fold (testing the path other GPUs take).
 //   LOUP_DEBUG_SPLINE, LOUP_DEBUG_GEMM  print the variant / GEMM tuning decisions to stderr.
 
 #ifdef __cplusplus
