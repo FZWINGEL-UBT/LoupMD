@@ -64,6 +64,23 @@ __global__ void fill_neighbors_kernel(int N, int S, CellMat64 cell, int nx, int 
                                       int* __restrict__ tmp_snd, int* __restrict__ tmp_rcv,
                                       int* __restrict__ tmp_shifts, int* __restrict__ tmp_pairs,
                                      uint32_t* __restrict__ sort_keys, int* __restrict__ sort_vals);
+__global__ void count_neighbors_scalar_kernel(int N, CellMat64 cell, int nx, int ny, int nz,
+                                              int rx, int ry, int rz, double r_list2, float r_lo2_f32, float r_hi2_f32,
+                                              const double* __restrict__ pos_wrapped, const int* __restrict__ atom_bin,
+                                              const int* __restrict__ bin_offsets, const int* __restrict__ bin_atom_id,
+                                              const double* __restrict__ bin_pos, const float4* __restrict__ bin_pos_f32,
+                                              int* __restrict__ deg);
+__global__ void fill_neighbors_scalar_kernel(int N, int S, CellMat64 cell, int nx, int ny, int nz,
+                                             int rx, int ry, int rz, double r_list2, float r_lo2_f32, float r_hi2_f32,
+                                             const double* __restrict__ pos_wrapped, const int* __restrict__ atom_wrap,
+                                             const int* __restrict__ species, const int* __restrict__ atom_bin,
+                                             const int* __restrict__ bin_offsets, const int* __restrict__ bin_atom_id,
+                                             const double* __restrict__ bin_pos, const float4* __restrict__ bin_pos_f32,
+                                             const int* __restrict__ bin_wrap,
+                                             const int* __restrict__ bin_sp, const int* __restrict__ row_ptr,
+                                             int* __restrict__ tmp_snd, int* __restrict__ tmp_rcv,
+                                             int* __restrict__ tmp_shifts, int* __restrict__ tmp_pairs,
+                                             uint32_t* __restrict__ sort_keys, int* __restrict__ sort_vals);
 __global__ void gather_sorted_edges_kernel(int E, CellMat64 cell, const int* __restrict__ sort_vals,
                                            const int* __restrict__ tmp_snd, const int* __restrict__ tmp_rcv,
                                            const int* __restrict__ tmp_shifts, const int* __restrict__ tmp_pairs,
@@ -1019,15 +1036,26 @@ static int rebuild_neighbors(LoupHandle* h) {
     const float r_hi_f = (float)r_list + margin;
     const float r_lo2_f32 = r_lo_f * r_lo_f;
     const float r_hi2_f32 = r_hi_f * r_hi_f;
-    const int blkN = 32;
-    const int gridN32 = (N + blkN - 1) / blkN;
+    // count / fill: on sm_120 kNeighborLanes lanes per atom (128-thread blocks hold whole lane groups; fill keeps one
+    // nscan-int bin-offset table per atom in shared memory); elsewhere, or when that table would exceed 48 KB, the
+    // one-thread-per-atom kernels (32-thread blocks), which the lane-group kernels were not measured against.
+    const int nscan = (2 * rx + 1) * (2 * ry + 1) * (2 * rz + 1);
+    const size_t nb_smem = (size_t)(128 / loup::kNeighborLanes) * nscan * sizeof(int);
+    const bool nb_groups = h->is_sm120 && nb_smem <= 48 * 1024;
+    const int blkN = nb_groups ? 128 : 32;
+    const int gridNb = (int)(((int64_t)N * (nb_groups ? loup::kNeighborLanes : 1) + blkN - 1) / blkN);
     loup::scatter_bins_kernel<<<gridN, blk, 0, h->stream>>>(
         N, h->d_pos_wrapped, h->d_atom_wrap, h->d_species, h->d_atom_bin, h->d_bin_cursor,
         h->d_bin_atom_id, h->d_bin_pos, h->d_bin_pos_f32, h->d_bin_wrap, h->d_bin_sp);
 
-    loup::count_neighbors_kernel<<<gridN32, blkN, 0, h->stream>>>(
-        N, h->cell, nx, ny, nz, rx, ry, rz, r_list2, r_lo2_f32, r_hi2_f32, h->d_pos_wrapped, h->d_atom_bin,
-        h->d_bin_offsets, h->d_bin_atom_id, h->d_bin_pos, h->d_bin_pos_f32, h->d_deg);
+    if (nb_groups)
+        loup::count_neighbors_kernel<<<gridNb, blkN, 0, h->stream>>>(
+            N, h->cell, nx, ny, nz, rx, ry, rz, r_list2, r_lo2_f32, r_hi2_f32, h->d_pos_wrapped, h->d_atom_bin,
+            h->d_bin_offsets, h->d_bin_atom_id, h->d_bin_pos, h->d_bin_pos_f32, h->d_deg);
+    else
+        loup::count_neighbors_scalar_kernel<<<gridNb, blkN, 0, h->stream>>>(
+            N, h->cell, nx, ny, nz, rx, ry, rz, r_list2, r_lo2_f32, r_hi2_f32, h->d_pos_wrapped, h->d_atom_bin,
+            h->d_bin_offsets, h->d_bin_atom_id, h->d_bin_pos, h->d_bin_pos_f32, h->d_deg);
 
     CUDA_CHECK(cudaMemsetAsync(h->d_deg + N, 0, sizeof(int), h->stream));
     size_t scanN_bytes = 0;
@@ -1047,12 +1075,20 @@ static int rebuild_neighbors(LoupHandle* h) {
             if (h->E_graph < E_new) h->E_graph = E_new;
             h->invalidate_graphs();
         }
-        loup::fill_neighbors_kernel<<<gridN32, blkN, 0, h->stream>>>(
-            N, S, h->cell, nx, ny, nz, rx, ry, rz, r_list2, r_lo2_f32, r_hi2_f32,
-            h->d_pos_wrapped, h->d_atom_wrap, h->d_species, h->d_atom_bin,
-            h->d_bin_offsets, h->d_bin_atom_id, h->d_bin_pos, h->d_bin_pos_f32, h->d_bin_wrap, h->d_bin_sp,
-            h->d_row_ptr, h->d_tmp_snd, h->d_tmp_rcv, h->d_tmp_shifts, h->d_tmp_pairs,
-            h->d_sort_keys, h->d_sort_vals);
+        if (nb_groups)
+            loup::fill_neighbors_kernel<<<gridNb, blkN, nb_smem, h->stream>>>(
+                N, S, h->cell, nx, ny, nz, rx, ry, rz, r_list2, r_lo2_f32, r_hi2_f32,
+                h->d_pos_wrapped, h->d_atom_wrap, h->d_species, h->d_atom_bin,
+                h->d_bin_offsets, h->d_bin_atom_id, h->d_bin_pos, h->d_bin_pos_f32, h->d_bin_wrap, h->d_bin_sp,
+                h->d_row_ptr, h->d_tmp_snd, h->d_tmp_rcv, h->d_tmp_shifts, h->d_tmp_pairs,
+                h->d_sort_keys, h->d_sort_vals);
+        else
+            loup::fill_neighbors_scalar_kernel<<<gridNb, blkN, 0, h->stream>>>(
+                N, S, h->cell, nx, ny, nz, rx, ry, rz, r_list2, r_lo2_f32, r_hi2_f32,
+                h->d_pos_wrapped, h->d_atom_wrap, h->d_species, h->d_atom_bin,
+                h->d_bin_offsets, h->d_bin_atom_id, h->d_bin_pos, h->d_bin_pos_f32, h->d_bin_wrap, h->d_bin_sp,
+                h->d_row_ptr, h->d_tmp_snd, h->d_tmp_rcv, h->d_tmp_shifts, h->d_tmp_pairs,
+                h->d_sort_keys, h->d_sort_vals);
 
         // Sort each receiver's row by key (sym_pair << 19 | length bits). Contract: for a fixed receiver sym_pair grows
         // with the sender species, so every row ends up grouped by ascending sender species, which the receiver-owned

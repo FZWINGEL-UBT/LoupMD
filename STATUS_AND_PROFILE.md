@@ -88,13 +88,15 @@ GPU idle inside a step is now ~20 us (5060 Ti `SrTiO3`); the 120 us/step of idle
 
 ### 2.3 Neighbour Rebuild (kernel medians per rebuild)
 
-Cadence at skin 0.5 A, 300 K, 1 fs: ~1 rebuild every 15 steps on `SrTiO3`, every ~22 on `NbCl5`.
+Cadence at skin 0.5 A, 300 K, 1 fs: ~1 rebuild every 15 steps on `SrTiO3`, every ~22 on `NbCl5`, every ~4 on water (5,184 atoms; never pipelined at this skin, measured S34).
 
-| Kernel | 5060 Ti `SrTiO3` | Ada `SrTiO3` | 5060 Ti `NbCl5` | Ada `NbCl5` |
-|---|---:|---:|---:|---:|
-| `fill_neighbors_kernel` | 287 | 401 | 163 | 186 |
-| `count_neighbors_kernel` | 150 | 209 | 116 | 150 |
-| `gather_sorted_edges_kernel` | 36 | 46 | 7 | 9 |
+| Kernel | 5060 Ti `SrTiO3` | Ada `SrTiO3` | 5060 Ti `NbCl5` | Ada `NbCl5` | 5060 Ti water |
+|---|---:|---:|---:|---:|---:|
+| `fill_neighbors_kernel` (S34 lane groups on `sm_120`; was 283 / 169 / 273) | 215 | 401 | 76 | 186 | 226 |
+| `count_neighbors_kernel` (S34; was 150 / 115 / 166) | 77 | 209 | 34 | 150 | 76 |
+| `gather_sorted_edges_kernel` | 37 | 46 | 7 | 9 | 21 |
+
+Ada columns are the one-thread-per-atom kernels (`*_scalar_kernel` since S34), measured before S34.
 
 ### 2.4 Kernel Resource Usage (`cuobjdump -res-usage`; shared includes the 1 KB `sm_120` driver reserve)
 
@@ -113,7 +115,8 @@ Cadence at skin 0.5 A, 300 K, 1 fs: ~1 rebuild every 15 steps on `SrTiO3`, every
 | `sc0_backward` (`128, 4`) | 128 / 0 / 1,040 B | 128 / 32 / 16 B |
 | `scatter_active_edges_kernel` (`128`) | 40 / 0 / 0 B | 40 / 0 / 0 B |
 | `compute_and_count_active_kernel` (`128`) | 40 / 0 / 0 B | 40 / 0 / 0 B |
-| `fill_neighbors_kernel` / `count_neighbors_kernel` (`32`) | 64 / 48 | 64 / 52 |
+| `fill_neighbors_kernel` / `count_neighbors_kernel` (`128`, 8 lanes per atom, `sm_120`) | 62 / 44, fill `16 x nscan` ints dynamic | – |
+| `fill_neighbors_scalar_kernel` / `count_neighbors_scalar_kernel` (`32`, other GPUs) | 64 / 48 | 64 / 52 |
 
 The `sm_89` stacks are frames without spills (`ptxas -v`: 0 bytes spill stores/loads).
 
@@ -417,6 +420,8 @@ S30 (`gen-conv-fwd-l1-c256`, 14 November, 5060 Ti only):
 - `C_FIX = 256` (`PAIR = false`, 80 registers) on `gconv_fwd_L1` for `MPtrj`: kernel 1960 -> 1860 us, ABBA `SrTiO3` `12.04 -> 11.94 ms/step` (`0.9921`; reversed `0.9910`). 3x gate (oxide) passes; `pytest` 67 passed. S29's `PAIR + C_FIX` forward (104 registers) was a tie.
 S31 (`gen-conv-bwd-512thr`, 14 November, 5060 Ti only):
 - 512-thread blocks for `gconv_bwd_L1` at `C = 256` and `gconv_bwd_L2lp` at `C = 224` (their 39-45 KB `s_q` allows 2 blocks per SM: 16 warps at 256 threads, 32 at 512; measured achieved occupancy 29% -> 59% on `MPtrj`): final binary vs S30, fresh-plan ABBA `MPtrj` `SrTiO3` `11.93 -> 11.58 ms/step` (`0.9703`; reversed `0.9707`), `OFF23-L` water216 `3.83 -> 3.76` (`0.9838`; reversed `0.9786`); scratch build `OFF23-L` water (5,184 atoms) `26.95 -> 26.48` (`0.9825` / `0.9839`). 3x gates (`MPtrj` oxide, `OFF23-L` organic) pass; `pytest` 67 passed.
+S34 (`nl-lane-groups`, 14 November, 5060 Ti only):
+- Neighbour count / fill with 8 lanes per atom (bins split round-robin) instead of one thread per atom (162 warps for 5,184 atoms, 8% occupancy); fill reproduces the exact row order via per-bin offsets in shared memory, so edges and results are unchanged. Per rebuild: `SrTiO3` 433 -> 292 us, `NbCl5` 284 -> 110, water 439 -> 302. Water rebuilds every ~4 steps: ABBA `OFF23-S` water `0.9945` / `0.9856`, `OFF23-M` `0.9961` / `0.9943`, `OMAT-0-S` `0.9961` / `0.9972`. Other GPUs keep the one-thread kernels (SASS identical to S33). Gates (`OFF23-S` organic, `OMAT-0-S` oxide, `MH-1` / `POLAR-1-S` crystals) pass; `pytest` 67 passed.
 
 ### 5.4 Fixes Found by the Family Work
 - **POLAR LayerNorm-MLP reverse wrote its GEMM output over its own input** (`mlp_bwd`: after the first hidden layer

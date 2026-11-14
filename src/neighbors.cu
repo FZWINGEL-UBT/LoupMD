@@ -134,7 +134,173 @@ __global__ void scatter_bins_kernel(
     bin_sp[slot] = species[i];
 }
 
+// count / fill: kNeighborLanes consecutive lanes share one atom and split its neighbouring bins round-robin (lane g
+// scans scan-order bins g, g + G, ...), so each lane does a 1/G share of the per-atom work without duplicating the
+// per-bin bookkeeping (one thread per atom left the grid at N / 32 warps, ~8% occupancy for 5,000 atoms).
+// fill_neighbors_kernel keeps the exact row order of the one-thread kernels (bins in scan order, slots in bin order):
+// it counts each bin's candidates into shared memory, turns the counts into running offsets from row_ptr[i], and
+// then writes every bin's edges from its offset. The candidate tests are repeated, but in parallel.
+__device__ __forceinline__ unsigned neighbor_group_mask() {
+    constexpr unsigned G = kNeighborLanes;
+    constexpr unsigned ones = G == 32 ? 0xffffffffu : ((1u << G) - 1u);
+    return ones << ((threadIdx.x & 31u) & ~(G - 1u));
+}
+
+// Walks the scan-order bins b = first, first + step, ... of atom i's (2rx+1)(2ry+1)(2rz+1) neighbourhood and calls
+// visit(b, slot, j, r, ix, iy, iz) for every candidate within the list radius (same float pre-test / double band as the
+// one-thread kernels).
+template <class Visit>
+__device__ __forceinline__ void scan_neighbor_bins(
+    int i, int first, int step, const CellMat64& cell, int nx, int ny, int nz, int rx, int ry, int rz, double r_list2,
+    float r_lo2_f32, float r_hi2_f32, double xi, double yi, double zi, int bid, const int* __restrict__ bin_offsets,
+    const int* __restrict__ bin_atom_id, const double* __restrict__ bin_pos, const float4* __restrict__ bin_pos_f32,
+    Visit&& visit) {
+    const float fxi = (float)xi, fyi = (float)yi, fzi = (float)zi;
+    const int bxi = bid / (ny * nz);
+    const int rem = bid - bxi * (ny * nz);
+    const int byi = rem / nz;
+    const int bzi = rem - byi * nz;
+    const int wy = 2 * ry + 1, wz = 2 * rz + 1, nscan = (2 * rx + 1) * wy * wz;
+    for (int b = first; b < nscan; b += step) {
+        const int qx = b / (wy * wz), qr = b - qx * (wy * wz), qy = qr / wz, qz = qr - qy * wz;
+        const int raw_x = bxi + qx - rx, raw_y = byi + qy - ry, raw_z = bzi + qz - rz;
+        const int ix = floor_div(raw_x, nx), iy = floor_div(raw_y, ny), iz = floor_div(raw_z, nz);
+        const int bxj = raw_x - ix * nx, byj = raw_y - iy * ny, bzj = raw_z - iz * nz;
+        // Same evaluation order as the one-thread kernels (product, then the hierarchical sums), so the float shift and
+        // every distance, and therefore the sort keys, are bit-identical.
+        const double sx_x = (double)ix * cell.c[0], sx_y = (double)ix * cell.c[1], sx_z = (double)ix * cell.c[2];
+        const double sxy_x = sx_x + (double)iy * cell.c[3];
+        const double sxy_y = sx_y + (double)iy * cell.c[4];
+        const double sxy_z = sx_z + (double)iy * cell.c[5];
+        const double s_x = sxy_x + (double)iz * cell.c[6];
+        const double s_y = sxy_y + (double)iz * cell.c[7];
+        const double s_z = sxy_z + (double)iz * cell.c[8];
+        const float fs_x = (float)s_x, fs_y = (float)s_y, fs_z = (float)s_z;
+        const int nbid = (bxj * ny + byj) * nz + bzj;
+        const int b0 = bin_offsets[nbid], b1 = bin_offsets[nbid + 1];
+        const bool zero_img = (ix == 0 && iy == 0 && iz == 0);
+        for (int slot = b0; slot < b1; ++slot) {
+            const float4 pj = __ldg(bin_pos_f32 + slot);
+            const float fx = fxi - (pj.x + fs_x);
+            const float fy = fyi - (pj.y + fs_y);
+            const float fz = fzi - (pj.z + fs_z);
+            const float fr2 = fx * fx + fy * fy + fz * fz;
+            if (fr2 >= r_hi2_f32) continue;
+            const int j = bin_atom_id[slot];
+            if (zero_img && j == i) continue;
+            float r;
+            if (fr2 < r_lo2_f32) {
+                r = sqrtf(fr2);
+            } else {
+                const double vx = xi - (bin_pos[slot * 3 + 0] + s_x);
+                const double vy = yi - (bin_pos[slot * 3 + 1] + s_y);
+                const double vz = zi - (bin_pos[slot * 3 + 2] + s_z);
+                const double r2 = vx * vx + vy * vy + vz * vz;
+                if (!(r2 < r_list2)) continue;
+                r = (float)sqrt(r2);
+            }
+            visit(b, slot, j, r, ix, iy, iz);
+        }
+    }
+}
+
 __global__ void count_neighbors_kernel(
+    int N, CellMat64 cell, int nx, int ny, int nz,
+    int rx, int ry, int rz, double r_list2, float r_lo2_f32, float r_hi2_f32,
+    const double* __restrict__ pos_wrapped,
+    const int* __restrict__ atom_bin,
+    const int* __restrict__ bin_offsets,
+    const int* __restrict__ bin_atom_id,
+    const double* __restrict__ bin_pos,
+    const float4* __restrict__ bin_pos_f32,
+    int* __restrict__ deg
+) {
+    constexpr int G = kNeighborLanes;
+    const int t = blockIdx.x * blockDim.x + threadIdx.x;
+    const int i = t / G, g = t % G;
+    if (i >= N) return;  // N * G threads cover whole groups, so a group exits together
+    int count = 0;
+    scan_neighbor_bins(i, g, G, cell, nx, ny, nz, rx, ry, rz, r_list2, r_lo2_f32, r_hi2_f32,
+                       pos_wrapped[i * 3 + 0], pos_wrapped[i * 3 + 1], pos_wrapped[i * 3 + 2], atom_bin[i],
+                       bin_offsets, bin_atom_id, bin_pos, bin_pos_f32,
+                       [&](int, int, int, float, int, int, int) { ++count; });
+    #pragma unroll
+    for (int off = G / 2; off > 0; off >>= 1) count += __shfl_xor_sync(neighbor_group_mask(), count, off);
+    if (g == 0) deg[i] = count;
+}
+
+// Dynamic shared memory: (blockDim.x / kNeighborLanes) * nscan ints (one bin-offset table per atom of the block).
+__global__ void fill_neighbors_kernel(
+    int N, int S, CellMat64 cell, int nx, int ny, int nz,
+    int rx, int ry, int rz, double r_list2, float r_lo2_f32, float r_hi2_f32,
+    const double* __restrict__ pos_wrapped,
+    const int* __restrict__ atom_wrap,
+    const int* __restrict__ species,
+    const int* __restrict__ atom_bin,
+    const int* __restrict__ bin_offsets,
+    const int* __restrict__ bin_atom_id,
+    const double* __restrict__ bin_pos,
+    const float4* __restrict__ bin_pos_f32,
+    const int* __restrict__ bin_wrap,
+    const int* __restrict__ bin_sp,
+    const int* __restrict__ row_ptr,
+    int* __restrict__ tmp_snd,
+    int* __restrict__ tmp_rcv,
+    int* __restrict__ tmp_shifts,
+    int* __restrict__ tmp_pairs,
+    uint32_t* __restrict__ sort_keys,
+    int* __restrict__ sort_vals
+) {
+    extern __shared__ int s_bin_off[];
+    constexpr int G = kNeighborLanes;
+    const int t = blockIdx.x * blockDim.x + threadIdx.x;
+    const int i = t / G, g = t % G;
+    if (i >= N) return;  // whole groups exit together; no block-wide barrier below
+    const unsigned gmask = neighbor_group_mask();
+    const int nscan = (2 * rx + 1) * (2 * ry + 1) * (2 * rz + 1);
+    int* off = s_bin_off + (threadIdx.x / G) * nscan;
+    const double xi = pos_wrapped[i * 3 + 0], yi = pos_wrapped[i * 3 + 1], zi = pos_wrapped[i * 3 + 2];
+    const int bid = atom_bin[i];
+    // Pass 1: per-bin candidate counts (lane g owns bins g, g + G, ...).
+    for (int b = g; b < nscan; b += G) off[b] = 0;
+    scan_neighbor_bins(i, g, G, cell, nx, ny, nz, rx, ry, rz, r_list2, r_lo2_f32, r_hi2_f32, xi, yi, zi, bid,
+                       bin_offsets, bin_atom_id, bin_pos, bin_pos_f32,
+                       [&](int b, int, int, float, int, int, int) { ++off[b]; });
+    __syncwarp(gmask);
+    // Running offsets in scan order (as the one-thread kernels' cursor walk).
+    if (g == 0) {
+        int run = row_ptr[i];
+        for (int b = 0; b < nscan; ++b) {
+            const int c = off[b];
+            off[b] = run;
+            run += c;
+        }
+    }
+    __syncwarp(gmask);
+    // Pass 2: each bin's edges from its offset, in slot order.
+    const int row_end = row_ptr[i + 1];
+    const int wi_x = atom_wrap[i * 3 + 0], wi_y = atom_wrap[i * 3 + 1], wi_z = atom_wrap[i * 3 + 2];
+    const int sp_i = species[i];
+    scan_neighbor_bins(i, g, G, cell, nx, ny, nz, rx, ry, rz, r_list2, r_lo2_f32, r_hi2_f32, xi, yi, zi, bid,
+                       bin_offsets, bin_atom_id, bin_pos, bin_pos_f32,
+                       [&](int b, int slot, int j, float r, int ix, int iy, int iz) {
+                           const int pos = off[b]++;
+                           if (pos >= row_end) return;
+                           const int p = sym_pair(bin_sp[slot], sp_i, S);
+                           tmp_snd[pos] = j;
+                           tmp_rcv[pos] = i;
+                           tmp_shifts[pos * 3 + 0] = bin_wrap[slot * 3 + 0] - wi_x - ix;
+                           tmp_shifts[pos * 3 + 1] = bin_wrap[slot * 3 + 1] - wi_y - iy;
+                           tmp_shifts[pos * 3 + 2] = bin_wrap[slot * 3 + 2] - wi_z - iz;
+                           tmp_pairs[pos] = p;
+                           sort_keys[pos] = ((uint32_t)p << 19) | (__float_as_uint(r) >> 12);
+                           sort_vals[pos] = pos;
+                       });
+}
+
+// One thread per atom (32-thread blocks): the build used on GPUs other than sm_120, where the lane-group kernels
+// above have not been measured. Rows are written in sequential (bin, slot) order.
+__global__ void count_neighbors_scalar_kernel(
     int N, CellMat64 cell, int nx, int ny, int nz,
     int rx, int ry, int rz, double r_list2, float r_lo2_f32, float r_hi2_f32,
     const double* __restrict__ pos_wrapped,
@@ -207,7 +373,7 @@ __global__ void count_neighbors_kernel(
     deg[i] = count;
 }
 
-__global__ void fill_neighbors_kernel(
+__global__ void fill_neighbors_scalar_kernel(
     int N, int S, CellMat64 cell, int nx, int ny, int nz,
     int rx, int ry, int rz, double r_list2, float r_lo2_f32, float r_hi2_f32,
     const double* __restrict__ pos_wrapped,

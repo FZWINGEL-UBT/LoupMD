@@ -31,6 +31,8 @@ __device__ __forceinline__ void locate_spline(const SplineGrid& grid, float r, i
 namespace loup {
 
 constexpr float EPS_SH = 1e-12f;
+// Neighbour-list build: lanes per atom in count_neighbors_kernel / fill_neighbors_kernel (a power of two <= 32).
+constexpr int kNeighborLanes = 8;
 constexpr float SH_S3  = 1.7320508075688772935f;
 constexpr float SH_S5  = 2.2360679774997896964f;
 constexpr float SH_S56 = 0.91287092917527685576f;  // sqrt(5/6)
