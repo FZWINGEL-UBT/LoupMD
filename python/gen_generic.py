@@ -39,7 +39,7 @@ def _ensure_imports():
     np, sp, torch, o3, eg = _np, _sp, _torch, _o3, _eg
 LX = (0, 1, 2)
 # Discovers every supported *.model in MODELS_DIR (sorted, deduplicated by product_signature); models outside
-# GenericModel's channel/degree bounds (C in 32..512 multiple of 32, seg_in == 16) are skipped with a message.
+# GenericModel's channel/degree bounds (product C in 32..1024 multiple of 32, seg_in == 16) are skipped with a message.
 
 def lit(v):
     return float(np.float32(v)).hex() + "f"
@@ -659,16 +659,39 @@ def emit_conv_bwd_L2(groups=(0, 1, 2)):
                     if terms:
                         ch_body.append(f"          const float A{m1}_{m2} = {' + '.join(terms)};")
                         A[m1, m2] = f"A{m1}_{m2}"
+            # Old form (other GPUs): pull_R from the full sum over A x Y, then the dY and x-gradient contractions.
+            old = []
             tr = [f"{A[m1, m2]} * x{l1}_{m1} * Y{l2 * l2 + m2}" for (m1, m2) in A]
-            ch_body.append(f"          pull_R = fmaf({' + '.join(tr) if tr else '0.0f'}, dw, pull_R);")
+            old.append(f"          pull_R = fmaf({' + '.join(tr) if tr else '0.0f'}, dw, pull_R);")
             for m2 in range(2 * l2 + 1):
                 terms = [f"{A[m1, m2]} * x{l1}_{m1}" for m1 in range(2 * l1 + 1) if (m1, m2) in A]
                 if terms:
-                    ch_body.append(f"          dY[{l2 * l2 + m2}] = fmaf(R, {' + '.join(terms)}, dY[{l2 * l2 + m2}]);")
+                    old.append(f"          dY[{l2 * l2 + m2}] = fmaf(R, {' + '.join(terms)}, dY[{l2 * l2 + m2}]);")
             for m1 in range(2 * l1 + 1):
                 terms = [f"{A[m1, m2]} * Y{l2 * l2 + m2}" for m2 in range(2 * l2 + 1) if (m1, m2) in A]
                 if terms:
-                    ch_body.append(f"          gx{l1}_{m1} = fmaf(R, {' + '.join(terms)}, gx{l1}_{m1});")
+                    old.append(f"          gx{l1}_{m1} = fmaf(R, {' + '.join(terms)}, gx{l1}_{m1});")
+            # sm_120 (S48): the x gradient's Cg[m1] = sum_m2 A[m1, m2] Y[m2] also gives the radial pull,
+            # sum_m1 x[m1] Cg[m1] = sum_{m1, m2} A x Y: one term per m1 instead of one per A entry (-10% SASS).
+            new, cg_names = [], []
+            for m1 in range(2 * l1 + 1):
+                terms = [f"{A[m1, m2]} * Y{l2 * l2 + m2}" for m2 in range(2 * l2 + 1) if (m1, m2) in A]
+                if terms:
+                    new.append(f"          const float Cg{m1} = {' + '.join(terms)};")
+                    cg_names.append((m1, f"Cg{m1}"))
+            tr = [f"x{l1}_{m1} * {cgn}" for m1, cgn in cg_names]
+            new.append(f"          pull_R = fmaf({' + '.join(tr) if tr else '0.0f'}, dw, pull_R);")
+            for m2 in range(2 * l2 + 1):
+                terms = [f"{A[m1, m2]} * x{l1}_{m1}" for m1 in range(2 * l1 + 1) if (m1, m2) in A]
+                if terms:
+                    new.append(f"          dY[{l2 * l2 + m2}] = fmaf(R, {' + '.join(terms)}, dY[{l2 * l2 + m2}]);")
+            for m1, cgn in cg_names:
+                new.append(f"          gx{l1}_{m1} = fmaf(R, {cgn}, gx{l1}_{m1});")
+            ch_body.append("#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ == 1200")
+            ch_body += new
+            ch_body.append("#else")
+            ch_body += old
+            ch_body.append("#endif")
             ch_body.append("        }")
         ch_body.append("        if (WANT_DX) {")
         for m in range(2 * l1 + 1):
@@ -877,7 +900,8 @@ def emit_product(sig, prog, feats, sh):
           "}"]
     if lo == 0:
         # Fused product fwd + linear/bias/silu/linear readout fwd&bwd (ro_H = 16) + product bwd, one block per atom
-        # (blockDim = C, 32..512, multiple of 32): generalises sc1_fused across all model families.
+        # (blockDim = C, 32..512, multiple of 32; generic.cu uses it only for C <= 512): generalises sc1_fused across
+        # all model families.
         RF = [
             "template <int MAX_B, int MIN_BLK>",
             f"__global__ void __launch_bounds__(MAX_B, MIN_BLK) gprod_ro1_fused_{sig}(",
@@ -1171,13 +1195,18 @@ def _hash_files(paths):
     return h.hexdigest()[:16]
 
 
+# Products the generator emits kernels for (GenericModel's bounds: hidden width C in 32..1024, a multiple of 32, and
+# 16 input segments). Part of the IR cache key: the cached per-model items record which products were skipped.
+PRODUCT_C_MIN, PRODUCT_C_MAX = 32, 1024
+
+
 def _ir_hash():
     here = Path(__file__).resolve().parent
     return _hash_files((
         here / "export_generic.py",
         Path("/mnt/d/Margraf/FastMACE/fastmace/kernels/cuda/sc_factored.py"),
         Path("/mnt/d/Margraf/FastMACE/fastmace/kernels/cuda/sc_generated.py"),
-    ))
+    )) + f":C{PRODUCT_C_MIN}-{PRODUCT_C_MAX}"
 
 
 def _code_hash():
@@ -1289,7 +1318,8 @@ def main():
                 for idx, pr in enumerate(mc.products):
                     sc = pr.symmetric_contractions
                     sh = shape_of(sc)
-                    if sh is None or sh[0] != 16 or sh[3] < 32 or sh[3] > 512 or sh[3] % 32 != 0:
+                    if (sh is None or sh[0] != 16 or sh[3] < PRODUCT_C_MIN or sh[3] > PRODUCT_C_MAX
+                            or sh[3] % 32 != 0):
                         ir_items.append({"idx": idx, "skip": str(sh)})
                         continue
                     prog, feats, _ = factor(merged_terms(sc.etp.polynomial), sh[0], sh[1], sh[2])

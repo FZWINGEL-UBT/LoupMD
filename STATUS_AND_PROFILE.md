@@ -255,9 +255,14 @@ M1-M3, M6, M7 and F1-F7 are resolved, and S1, S3, S5-S8 of the sixth pass (secti
 
 ## 5. Model Families (Generic Path)
 
-Supported, as in FastMACE: MACE-OMAT-0 small, MACE-OFF23 small / medium / large, MACE-OFF23b medium, MACE-OFF24
-medium, MACE-MH-1 (any head, one per bundle; default `omat_pbe`) and MACE-POLAR-1 S / M / L. MACE-OMAT-0 medium
-keeps the specialised kernels of sections 1-4 (`LOUP_GENERIC=1` forces the generic path, used to cross-check it).
+Supported, as in FastMACE (every label of its model table; local files match its SHA-256): MACE-MP-0 medium and large
+(`2023-12-03-mace-128-L1_epoch-199`, `MACE_MPtrj_2022.9`), MACE-MP-0b3 medium, MACE-MPA-0 medium, MACE-OMAT-0
+small and medium, MACE-MatPES PBE and r2SCAN (`MACE-matpes-*-omat-ft`), MACE-OFF23 small / medium / large,
+MACE-OFF23b medium, MACE-OFF24 medium, MACE-MH-1 (any head, one per bundle; default `omat_pbe`), MACE-POLAR-1
+S / M / L and MACE-OMOL-0 extra large (`MACE-omol-0-extra-large-1024`: 1024 hidden channels; total charge and spin
+multiplicity per bundle, `ensure_loup_bundle(..., charge=Q, spin_multiplicity=M)`, default 0 and 1). MACE-OMAT-0
+medium, MP-0b3 medium, MPA-0 medium and both MatPES models (the same density architecture) run the specialised
+kernels of sections 1-4 (`LOUP_GENERIC=1` forces the generic path, used to cross-check it); the rest the generic path.
 
 ### 5.1 Pipeline
 - `python/export.py` picks the exporter: `export_omat0.py` (specialised, `arch=omat0_medium_spec`) when
@@ -272,9 +277,19 @@ keeps the specialised kernels of sections 1-4 (`LOUP_GENERIC=1` forces the gener
   transform + MLP, for the nonlinear blocks with the source / target species embeddings, and the edge density) are
   fitted per species pair (symmetric pairs unless the block embeds sender and receiver separately) with FastMACE's
   certified cubic-Hermite spline (`spline.fit`; the export refuses a certificate above 1, i.e. a spline error
-  above the float32 network's own rounding error on FastMACE's `radial.certify` points).
+  above the float32 network's own rounding error on FastMACE's `radial.certify` points). The conv layers' tables are
+  stored as 8-byte cubics (CUBIC_PACKED8); the export then refines every band whose packing error would exceed half
+  the loader's bound (`refine_for_packing`: 2.5e-4 of the column's largest value or r-slope, whole table and
+  r >= 1 A) and re-certifies the refined grid. The gated bundles of the other families already pack within it and
+  are unchanged; OMOL-0's steeper radial functions needed it (layer 1 2.1e-3 before: refused by the loader).
   Products: FastMACE's factored symmetric contraction (`sc_factored.factor` / `fold_weights`), kernels keyed by a
   signature of the factored program.
+- MACE-OMOL-0's joint embedding (total charge, spin multiplicity) is one per-system vector added to every atom's
+  layer-0 features, so the export folds it into each species' embedding row (everything downstream of layer 0 stays
+  species-only) and its embedding readout energy into E0; charge and spin are export arguments (`export.py
+  --charge Q --spin-multiplicity M`, part of the bundle cache key) and are refused for models without the embedding.
+  Hidden widths up to 1024 (gates with one thread per channel, products on 128-channel blocks); the conv width stays
+  at most 512, and the fused product + readout kernel runs only for widths up to 512.
 - `python/ref_generic.py`: a float64 PyTorch executor of the bundle (same algorithm as the CUDA path, autograd forces
   and stress), used to check exports against MACE float64 and to localise CUDA-vs-model differences.
 - `python/gen_generic.py` -> `src/generated_generic.cuh`: conv forward / backward for x irreps up to 0e+1o+2e
@@ -308,8 +323,12 @@ float64 reference does not fit the GPU (OFF23-L / 23b / 24 on the 16 GB 5060 Ti,
 | OMAT-0 small | oxide | PASS | PASS |
 | OFF23 small / medium | organic | PASS / PASS | PASS / PASS |
 | OFF23 large, OFF23b medium, OFF24 medium | organic | PASS (CPU refs) | PASS (worst 1.46 / 1.23 / 0.27; OFF23-L CPU refs) |
-| MH-1 `omat_pbe`, `matpes_r2scan` | crystals | PASS | PASS |
-| MH-1 `omol` | organic | PASS | PASS |
+| MH-1 `omat_pbe`, `matpes_r2scan`, `mp_pbe_refit_add`, `oc20_usemppbe` | crystals | PASS (S59 build: worst force 0.87 / 0.86 / 0.80 / 0.84, stress 0.27 / 0.32 / 0.25 / 0.26) | PASS (first two) |
+| MH-1 `omol`, `spice_wB97M` | organic | PASS (S59 build: worst force 0.32 / 0.28, stress 0.63 / 0.38) | PASS (`omol`) |
+| MP-0 medium, MP-0 large | oxide | PASS (S59 build: worst force 0.72 / 1.31, stress 2.97 / 0.94) | not run |
+| MP-0b3 medium, MPA-0 medium (specialised, every forced variant) | oxide | PASS (S59 build, 30 / 30 rows: worst force 1.06 / 1.68, stress 0.87 / 0.89) | not run |
+| MatPES PBE, r2SCAN (specialised, every forced variant) | crystals | PASS (S59 build, 18 / 18 rows: worst force 0.68 / 1.57, stress 1.10 / 1.04) | not run |
+| OMOL-0 extra large | organic: neutral singlet, +1 doublet, -1 doublet, neutral triplet | PASS (S57 path; worst force 0.86 / 0.31 / 0.82 / 0.79, stress 0.79 / 0.19 / 0.63 / 0.47) | not run |
 | POLAR-1-S | crystals | PASS (worst ratio 1.30) | PASS (worst 0.99) |
 | POLAR-1-M | crystals | PASS (worst 0.97) | PASS (worst 1.14) |
 | POLAR-1-L | crystals | PASS (worst 1.16) | PASS (CPU refs; worst 2.69, force NaNbO3_c0) |
@@ -426,6 +445,16 @@ S38 (`gemm-own-n96`, 14 November, 5060 Ti only):
 - `128 x 96` own-SGEMM tile for `N = 96` products (the `C = 96` models; `sgemm128_kernel<8>` spent a quarter of its FMAs on padding): standalone `0.79-0.84` per shape, bit-identical; final binary, fresh-plan ABBA `OFF23-S` water `3.088 -> 3.046 ms/step` (`0.9866`), reversed `3.101 -> 3.026` (`0.9758`). Other widths and other GPUs unchanged (SASS identical). Gates (`OFF23-S` organic, `OMAT-0-S` oxide) pass; `pytest` 67 passed.
 S40 (`gen-conv-bwd-l0-red`, 14 November, 5060 Ti only):
 - `gconv_bwd_L0`'s per-edge `edge_dvec` update as a fire-and-forget atomic add (one writer per edge; `ncu` attributed ~4% of its stall samples to the read-modify-write's load): kernel `-8%` (`OMAT-0-S`) / `-16%` (`OFF23-S`); final binary, fresh-plan ABBA `OMAT-0-S` `SrTiO3` `4.689 -> 4.601 ms/step` (`0.9813`), reversed `0.9768`; `OFF23-S` water `3.052 -> 2.966` (`0.9718`), reversed `0.9763`. lx 1 / 2 kernels and other GPUs unchanged (SASS identical). Gates (`OFF23-S` organic, `OMAT-0-S` / `MPA-0` oxide) pass; `pytest` 67 passed.
+S48 (`gen-conv-bwd-l2-pullr`, 14 November, 5060 Ti only):
+- `gconv_bwd_L2` (x-degree-2 backward convs of the lx 2 models) takes its radial pull from the x-gradient contraction (`sum_m1 x[m1] Cg[m1]`) instead of the full sum over every `A x Y` term: SASS 1624 -> 1464, kernel `-16%` (`OFF23-L` water) / `-18%` (water216); fresh-plan ABBA `OFF23-L` water `26.47 -> 25.47 ms/step` (`0.9624`), reversed `0.9609`; water216 `0.9666` / `0.9639`; `POLAR-1-L` `NaCl216` tie (`1.0024` / `0.978`). Other GPUs and other kernels unchanged (SASS identical). Gates (`OFF23-L` organic, `POLAR-1-L` crystals; CPU references) pass; `pytest` 67 passed.
+S52 (`pol-dot-fold`, 14 November, 5060 Ti only):
+- POLAR SCF and electron-energy weights composed with `dot^T` at load (the two linear maps had nothing between them): one C x C GEMM per SCF step and l in each direction instead of two, none for the electron energy (`POLAR-1-M` `NaCl216` GEMM launches 165.6 -> 149.5 per step). Final binary, fresh-plan ABBA: `POLAR-1-S` `NaCl216` `1.511 -> 1.377 ms/step` (`0.911`), reversed `0.914`; `POLAR-1-M` `NaCl216` `3.461 -> 3.073` (`0.888`), reversed `0.922`; `POLAR-1-M` `NbCl5` `24.39 -> 22.11` (`0.906`), reversed `0.906`; `POLAR-1-L` `NaCl216` `6.908 -> 6.122` (`0.886`), reversed `0.895`. Only on `sm_120` (other GPUs run the unfolded GEMMs; existing kernels SASS-identical on `sm_89` / `sm_90` / `sm_120`); `LOUP_POLAR_FOLD=0` selects the unfolded path for testing. Gates (crystals; `POLAR-1-L` CPU references) pass on both paths; `pytest` 67 passed.
+S57 (`gen-chain-fold`, 14 November, 5060 Ti only):
+- OMOL-0 XL: the non-last layers' outputs are never formed. Each layer's product output (and layer 0's species-only skip input) goes straight into every later consumer (the next layers' `linear_up` and the last readout) through weights composed in double at load (`W_p W_sc ... W_up`), and the backward follows the same weights; the 1024 x 1024 `W_p` / `W_sc` products of layers 0 and 1 and the 1024-wide `linear_up` of layers 1 and 2 go in both directions. Fold against `LOUP_CHAIN_FOLD=0` on one build: water216 `29.02 -> 23.83 ms/step` (`0.821`), reversed `0.821`; water `217.9 -> 179.8` (`0.825`), reversed `0.825`. Exact to float32 rounding against the plain path (water216 `dF` 1.8e-6 eV/A); organic gates pass on the fold path (neutral worst 0.86 / 0.79, +1 doublet 0.31 / 0.19). Only OMOL-0 qualifies among the supported families (all layers gated, no readout before the last, no per-species skip, no long range); other GPUs keep the plain path (`generic.cu` kernels SASS identical for `sm_89` / `sm_90` / `sm_120`).
+- OMOL-0 XL after S57, `nsys` water216 (installed library, default plan cache): kernel sum 29.2 ms/step (35.8 before), GEMM-like 73% (21.3 ms): `sgemm128<8>` 12.6 ms (41.4 launches, mean 305 us), `sgemm64` 3.5, CUTLASS SIMT 2.4, `magma` 0.8, `sgemm32` 1.1; `gate_bwd` 1.6, `gate_fwd` 0.9; all `gconv` kernels together 3.6 ms; products 1.1 ms. The 1024-wide message (`W_2`) and linear GEMMs are the limiter.
+- OMOL-0 XL against FastMACE (same 5060 Ti, 14 November; FastMACE `fastmace` 1.0.0 at the current FastMACE checkout, float32, graph tier, `radial_tables=off`: its default plan here falls back, and the fallback's float64 reference does not fit 16 GB; FastMACE's own OMOL-0 5060 Ti number was measured that way too). MD under `bench_family`'s protocol on both sides (`.tmp_o/fm_md.py` for FastMACE): water216 LoupMD **23.86 ms/step**, FastMACE 74.15 (3.1x); `NbCl5` 3x3x3 (1,944 atoms) **60.37**, FastMACE 137.58 (2.3x; FastMACE documented 141.5). Accuracy against MACE float64 on the gate's organic configurations (`.tmp_o/acc_om.py`). FastMACE through its one-off `ForceField.evaluate` with `radial_tables=off` and its rule-13 re-plan applied (`reassociate_first` / `segmented_first_sum` off: their setup self-check fails on urea, and the one-off path raises instead of re-planning); the timed MD plans above kept those two rewrites on, so these FastMACE errors are of that variant plan, not of the timed graph path: neutral worst force error LoupMD 6.6e-5 eV/A (RMS 2.4-7.6e-6), FastMACE 1.23e-4 (RMS 1.0-2.0e-5), MACE float32 up to 1.0e-4; charge +1 doublet LoupMD 1.85e-4 (RMS up to 2.7e-5), FastMACE 1.04e-3 (RMS up to 2.4e-4), MACE float32 up to 9.8e-4. Worst ratios to MACE float32's error (force / stress): LoupMD 0.88 / 0.79 and 0.31 / 0.22, FastMACE 1.21 / 1.52 and 1.33 / 2.49; both within the 3x rule.
+S59 (`gen-species-tables`, 14 November, 5060 Ti only):
+- Layer 0's species-only products (its input is the embedding row) become per-species tables composed in double at load and gathered per atom: the gated block's residual and, under S57, the skip terms. OMOL-0 XL water216 `23.78 -> 23.26 ms/step` (`0.978`), reversed `0.977`; MH-1 NaCl216 `0.988` / `0.991`, NbCl5 `0.997` / `0.996`. POLAR-1-L showed no win in the tables-first order, so the long-range models keep the GEMMs. Gates pass (OMOL-0 at four charge / spin settings, MH-1 crystals both heads and `omol` organic); kernels SASS-identical; `pytest` 71 passed; `LOUP_SPECIES_TABLES=0` disables.
 
 ### 5.4 Fixes Found by the Family Work
 - **POLAR LayerNorm-MLP reverse wrote its GEMM output over its own input** (`mlp_bwd`: after the first hidden layer

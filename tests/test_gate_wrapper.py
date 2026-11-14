@@ -24,6 +24,9 @@ FAMILIES = [
     ("mace-mh-1.model", ["--set", "organic", "--head", "omol"]),
     ("MACE-POLAR-1-S.model", ["--set", "crystals"]),
     ("MACE-POLAR-1-M.model", ["--set", "crystals"]),
+    # 1024 hidden channels and the charge / spin embedding folded into the bundle (neutral singlet and a cation)
+    ("MACE-omol-0-extra-large-1024.model", ["--set", "organic"]),
+    ("MACE-omol-0-extra-large-1024.model", ["--set", "organic", "--charge", "1", "--spin-multiplicity", "2"]),
 ]
 
 

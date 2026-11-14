@@ -1011,6 +1011,25 @@ inline int k_chunk(int N, int K) {
     return ((K + ks - 1) / ks + 63) / 64 * 64;
 }
 
+// out[j][col0 + s C + n] = sum_c W[j][col0 + s C + c] D[n][c] in double, for every C-wide segment s of the column range
+// [col0, col0 + ncols): a linear map W followed by the C x C map D^T, composed once at load (PolarLR::load).
+__global__ void fold_dotT_kernel(int rows, int ld, int col0, int ncols, int C, const float* __restrict__ W,
+                                 const float* __restrict__ D, float* __restrict__ out) {
+    const int64_t idx = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= (int64_t)rows * ncols) return;
+    const int j = (int)(idx / ncols), q = (int)(idx % ncols), s = q / C, n = q % C;
+    const float* w = W + (size_t)j * ld + col0 + (size_t)s * C;
+    const float* d = D + (size_t)n * C;
+    double acc = 0.0;
+    for (int c = 0; c < C; ++c) acc = fma((double)w[c], (double)d[c], acc);
+    out[(size_t)j * ld + col0 + q] = (float)acc;
+}
+
+struct DevTmp {  // load-time scratch, freed on scope exit (also when a check throws)
+    void* p = nullptr;
+    ~DevTmp() { if (p) cudaFree(p); }
+};
+
 }  // namespace
 
 // ------------------------------------------------------------------------------------------------------------ impl
@@ -1020,8 +1039,15 @@ struct PolarLR::Impl {
         std::vector<int> in, out;
         std::vector<float*> W, b, g, be;
     };
+    // The SCF's Z = (pot Wpot + q Wq + fm Wnf) dot^T and the electron energy's Zq = (q Wq + bq) dotq^T (Zv alike) are
+    // linear in their inputs. With `fold` (sm_120, the GPU it was measured on; LOUP_POLAR_FOLD=0 disables it) the
+    // weights are stored composed with dot^T (`_dot`, fold_dotT_kernel): one C x C product per SCF step and l in
+    // each direction instead of two, and none for the electron energy. Otherwise the unfolded weights and products.
+    bool fold = false;
     struct Update {
-        float *Wpot = nullptr, *Wq = nullptr, *Wnf[3] = {}, *dot[3] = {}, *tpo[3] = {}, *emb = nullptr;
+        float *Wpot = nullptr, *Wq = nullptr, *Wnf[3] = {}, *dot[3] = {};              // unfolded
+        float *Wpot_dot = nullptr, *Wq_dot = nullptr, *Wnf_dot[3] = {};                // folded
+        float *tpo[3] = {}, *emb = nullptr;
         Mlp mlp;
         float *ro_W1[2] = {}, *ro_Wm0 = nullptr, *ro_bm = nullptr, *ro_Wm1 = nullptr, *ro_W2 = nullptr,
               *ro_b2 = nullptr;
@@ -1045,6 +1071,7 @@ struct PolarLR::Impl {
     float fk_act = 1.0f;
     std::vector<Update> upd;
     float *le_Wq = nullptr, *le_bq = nullptr, *le_Wv = nullptr, *le_bv = nullptr, *le_dotq[3] = {}, *le_dotv[3] = {};
+    float *le_Wq_dot = nullptr, *le_bq_dot = nullptr, *le_Wv_dot = nullptr, *le_bv_dot = nullptr;
     Mlp le_mlp;
     FeatConsts fc{};
     double sigma_d = 0, sigma_f[2] = {}, kcut = 0, FC = 0, cl_d[2] = {}, cl_f[2][2] = {}, p0d = 0, p1d = 0,
@@ -1091,6 +1118,32 @@ struct PolarLR::Impl {
         s_.push_back(d);
         return d;
     }
+    // W [rows, ld] uploaded with each block's columns [col0, col0 + ncols) composed with its D^T (fold_dotT_kernel).
+    struct FoldBlock {
+        int col0, ncols;
+        const std::vector<float>* D;
+    };
+    float* up_fold(const std::vector<float>& W, int rows, int ld, const std::vector<FoldBlock>& blocks) {
+        float* out = up(W);  // every column is overwritten: the blocks cover [0, ld)
+        DevTmp dW, dD;
+        CUDA_CHECK_THROW(cudaMalloc(&dW.p, W.size() * sizeof(float)));
+        CUDA_CHECK_THROW(cudaMemcpy(dW.p, W.data(), W.size() * sizeof(float), cudaMemcpyHostToDevice));
+        CUDA_CHECK_THROW(cudaMalloc(&dD.p, (size_t)C * C * sizeof(float)));
+        int covered = 0;
+        for (const FoldBlock& fb : blocks) {
+            if (fb.D->size() != (size_t)C * C) throw std::runtime_error("polar bundle: dot shape");
+            CUDA_CHECK_THROW(cudaMemcpy(dD.p, fb.D->data(), (size_t)C * C * sizeof(float), cudaMemcpyHostToDevice));
+            const int64_t n = (int64_t)rows * fb.ncols;
+            fold_dotT_kernel<<<(unsigned)((n + 255) / 256), 256>>>(rows, ld, fb.col0, fb.ncols, C,
+                                                                   static_cast<const float*>(dW.p),
+                                                                   static_cast<const float*>(dD.p), out);
+            CUDA_CHECK_THROW(cudaGetLastError());
+            CUDA_CHECK_THROW(cudaDeviceSynchronize());  // dD is reused by the next block
+            covered += fb.ncols;
+        }
+        if (covered != ld) throw std::runtime_error("polar: fold blocks do not cover the weight");
+        return out;
+    }
     void load_mlp(const Bundle& b, const std::string& p, int n, Mlp& m) {
         m.n = n;
         for (int k = 0; k < n; ++k) {
@@ -1136,6 +1189,14 @@ void PolarLR::load(const Bundle& b, int S, int n_layers) {
         P.rows += (2 * l + 1) * P.C;
     }
     const int C = P.C, R = P.rows;
+    {
+        int dev = 0, major = 0, minor = 0;
+        CUDA_CHECK_THROW(cudaGetDevice(&dev));
+        CUDA_CHECK_THROW(cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor, dev));
+        CUDA_CHECK_THROW(cudaDeviceGetAttribute(&minor, cudaDevAttrComputeCapabilityMinor, dev));
+        P.fold = major == 12 && minor == 0;
+        if (const char* e = std::getenv("LOUP_POLAR_FOLD"); e && e[0] == '0') P.fold = false;  // test the unfolded path
+    }
     for (int t = 0; t < n_layers; ++t) {
         P.src.push_back(P.up(b.f32("LR.src_" + std::to_string(t), {R, 8})));
         P.mix.emplace_back();
@@ -1190,14 +1251,31 @@ void PolarLR::load(const Bundle& b, int S, int n_layers) {
             P.bc.sf2[s] = (float)(P.sigma_f[s] * P.sigma_f[s]);
         }
     }
+    // dot_l^T applied to each l's column block of a [rows, R] weight (block l: columns off[l] .. off[l] + (2l + 1) C)
+    auto blocks_of = [&](const std::vector<std::vector<float>>& dots) {
+        std::vector<Impl::FoldBlock> blk;
+        for (int l = 0; l <= P.lmax; ++l) blk.push_back({P.off[l], (2 * l + 1) * C, &dots[l]});
+        return blk;
+    };
     for (int i = 0; i < P.n_rec; ++i) {
         Impl::Update U;
         const std::string p = "LR.u" + std::to_string(i) + ".";
-        U.Wpot = P.up(b.f32(p + "Wpot", {16, R}));
-        U.Wq = P.up(b.f32(p + "Wq", {8, R}));
+        std::vector<std::vector<float>> dot(P.lmax + 1);
+        for (int l = 0; l <= P.lmax; ++l) dot[l] = b.f32(p + "dot_" + std::to_string(l), {C, C});
+        if (P.fold) {
+            U.Wpot_dot = P.up_fold(b.f32(p + "Wpot", {16, R}), 16, R, blocks_of(dot));
+            U.Wq_dot = P.up_fold(b.f32(p + "Wq", {8, R}), 8, R, blocks_of(dot));
+        } else {
+            U.Wpot = P.up(b.f32(p + "Wpot", {16, R}));
+            U.Wq = P.up(b.f32(p + "Wq", {8, R}));
+        }
         for (int l = 0; l <= P.lmax; ++l) {
-            U.Wnf[l] = P.up(b.f32(p + "Wnf_" + std::to_string(l), {C, C}));
-            U.dot[l] = P.up(b.f32(p + "dot_" + std::to_string(l), {C, C}));
+            if (P.fold) {
+                U.Wnf_dot[l] = P.up_fold(b.f32(p + "Wnf_" + std::to_string(l), {C, C}), C, C, {{0, C, &dot[l]}});
+            } else {
+                U.Wnf[l] = P.up(b.f32(p + "Wnf_" + std::to_string(l), {C, C}));
+                U.dot[l] = P.up(dot[l]);
+            }
             U.tpo[l] = P.up(b.f32(p + "tpo_" + std::to_string(l), {C, C}));
         }
         U.emb = P.up(b.f32(p + "src_emb", {S, C}));
@@ -1216,13 +1294,27 @@ void PolarLR::load(const Bundle& b, int S, int n_layers) {
         U.ro_b2 = P.up(b.f32(p + "ro_b2", {10}));
         P.upd.push_back(U);
     }
-    P.le_Wq = P.up(b.f32("LR.le_Wq", {8, R}));
-    P.le_bq = P.up(b.f32("LR.le_bq", {C}));
-    P.le_Wv = P.up(b.f32("LR.le_Wv", {16, R}));
-    P.le_bv = P.up(b.f32("LR.le_bv", {C}));
-    for (int l = 0; l <= P.lmax; ++l) {
-        P.le_dotq[l] = P.up(b.f32("LR.le_dotq_" + std::to_string(l), {C, C}));
-        P.le_dotv[l] = P.up(b.f32("LR.le_dotv_" + std::to_string(l), {C, C}));
+    {
+        std::vector<std::vector<float>> dotq(P.lmax + 1), dotv(P.lmax + 1);
+        for (int l = 0; l <= P.lmax; ++l) {
+            dotq[l] = b.f32("LR.le_dotq_" + std::to_string(l), {C, C});
+            dotv[l] = b.f32("LR.le_dotv_" + std::to_string(l), {C, C});
+        }
+        if (P.fold) {
+            P.le_Wq_dot = P.up_fold(b.f32("LR.le_Wq", {8, R}), 8, R, blocks_of(dotq));
+            P.le_bq_dot = P.up_fold(b.f32("LR.le_bq", {C}), 1, C, {{0, C, &dotq[0]}});
+            P.le_Wv_dot = P.up_fold(b.f32("LR.le_Wv", {16, R}), 16, R, blocks_of(dotv));
+            P.le_bv_dot = P.up_fold(b.f32("LR.le_bv", {C}), 1, C, {{0, C, &dotv[0]}});
+        } else {
+            P.le_Wq = P.up(b.f32("LR.le_Wq", {8, R}));
+            P.le_bq = P.up(b.f32("LR.le_bq", {C}));
+            P.le_Wv = P.up(b.f32("LR.le_Wv", {16, R}));
+            P.le_bv = P.up(b.f32("LR.le_bv", {C}));
+            for (int l = 0; l <= P.lmax; ++l) {
+                P.le_dotq[l] = P.up(dotq[l]);
+                P.le_dotv[l] = P.up(dotv[l]);
+            }
+        }
     }
     P.load_mlp(b, "LR.le_mlp_", b.meta_int("LR.le_mlp_n"), P.le_mlp);
     if (P.le_mlp.in[0] != 2 * C || P.le_mlp.out.back() != 1) throw std::runtime_error("polar bundle: electron MLP shape");
@@ -1397,13 +1489,15 @@ void PolarLR::alloc_system(int N) {
     for (int l = 0; l <= P.lmax; ++l) {
         P.fm[l] = P.sys(n * (2 * l + 1) * C);
         P.dfm[l] = zalloc(n * (2 * l + 1) * C);
-        P.dmix[l] = P.sys(n * (2 * l + 1) * C);
         P.dZ[l] = P.sys(n * (2 * l + 1) * C);
         P.dnw[l] = (l <= 1) ? P.sys(n * (2 * l + 1) * C) : nullptr;
-        P.qu[l] = P.sys(n * (2 * l + 1) * C);
-        P.vu[l] = P.sys(n * (2 * l + 1) * C);
         P.Zq[l] = P.sys(n * (2 * l + 1) * C);
         P.Zv[l] = P.sys(n * (2 * l + 1) * C);
+        if (!P.fold) {
+            P.dmix[l] = P.sys(n * (2 * l + 1) * C);
+            P.qu[l] = P.sys(n * (2 * l + 1) * C);
+            P.vu[l] = P.sys(n * (2 * l + 1) * C);
+        }
     }
     P.dP = P.sys(n * C);
     P.dnl = P.sys(n * C);
@@ -1441,8 +1535,8 @@ void PolarLR::alloc_system(int N) {
             CUDA_CHECK_THROW(cudaMalloc(&s.SFq, (size_t)P.K_cap * 16 * sizeof(double)));
         }
         for (int l = 0; l <= P.lmax; ++l) {
-            s.mixed[l] = P.sys(n * (2 * l + 1) * C);
             s.Z[l] = P.sys(n * (2 * l + 1) * C);
+            if (!P.fold) s.mixed[l] = P.sys(n * (2 * l + 1) * C);
             s.P[l] = P.sys(n * C);
             s.nw[l] = P.sys(n * (2 * l + 1) * C);
         }
@@ -1560,10 +1654,16 @@ void PolarLR::record(cudaStream_t st, int N, const GemmFn& gemm,
         if (lm > 0) fork();
         for (int l = 0; l <= lm; ++l) {
             if (lm > 0) lane(l);
-            gemm(false, N, dimL(l) * C, 16, 1.0f, s.pot, 16, U.Wpot + P.off[l], R, 0.0f, s.mixed[l], dimL(l) * C);
-            gemm(false, N, dimL(l) * C, 8, 1.0f, s.qin, 8, U.Wq + P.off[l], R, 1.0f, s.mixed[l], dimL(l) * C);
-            gemm(false, N * dimL(l), C, C, 1.0f, P.fm[l], C, U.Wnf[l], C, 1.0f, s.mixed[l], C);
-            gemm(true, N * dimL(l), C, C, 1.0f, s.mixed[l], C, U.dot[l], C, 0.0f, s.Z[l], C);
+            if (P.fold) {
+                gemm(false, N, dimL(l) * C, 16, 1.0f, s.pot, 16, U.Wpot_dot + P.off[l], R, 0.0f, s.Z[l], dimL(l) * C);
+                gemm(false, N, dimL(l) * C, 8, 1.0f, s.qin, 8, U.Wq_dot + P.off[l], R, 1.0f, s.Z[l], dimL(l) * C);
+                gemm(false, N * dimL(l), C, C, 1.0f, P.fm[l], C, U.Wnf_dot[l], C, 1.0f, s.Z[l], C);
+            } else {
+                gemm(false, N, dimL(l) * C, 16, 1.0f, s.pot, 16, U.Wpot + P.off[l], R, 0.0f, s.mixed[l], dimL(l) * C);
+                gemm(false, N, dimL(l) * C, 8, 1.0f, s.qin, 8, U.Wq + P.off[l], R, 1.0f, s.mixed[l], dimL(l) * C);
+                gemm(false, N * dimL(l), C, C, 1.0f, P.fm[l], C, U.Wnf[l], C, 1.0f, s.mixed[l], C);
+                gemm(true, N * dimL(l), C, C, 1.0f, s.mixed[l], C, U.dot[l], C, 0.0f, s.Z[l], C);
+            }
         }
         if (lm > 0) join();
         inv_kernel<<<blocks_for((int64_t)N * C), 256, 0, st>>>(N, C, lm, P.fm[0], P.fm[1], P.fm[2], s.Z[0], s.Z[1],
@@ -1602,24 +1702,40 @@ void PolarLR::record(cudaStream_t st, int N, const GemmFn& gemm,
     if (P.add_le) {
         CUDA_CHECK_THROW(cudaMemcpyAsync(P.qin_le, P.qfin, (size_t)N * 8 * sizeof(float), cudaMemcpyDeviceToDevice, st));
         axpy_kernel<<<blocks_for((int64_t)N * 8), 256, 0, st>>>((int64_t)N * 8, 1.0f, P.q0, P.qin_le);
-        fork();
-        for (int l = 0; l <= lm; ++l) {
-            lane(2 * l);
-            gemm(false, N, dimL(l) * C, 8, 1.0f, P.qin_le, 8, P.le_Wq + P.off[l], R, 0.0f, P.qu[l], dimL(l) * C);
-            lane(2 * l + 1);
-            gemm(false, N, dimL(l) * C, 16, 1.0f, pot_last, 16, P.le_Wv + P.off[l], R, 0.0f, P.vu[l], dimL(l) * C);
+        if (P.fold) {
+            fork();
+            for (int l = 0; l <= lm; ++l) {
+                lane(2 * l);
+                gemm(false, N, dimL(l) * C, 8, 1.0f, P.qin_le, 8, P.le_Wq_dot + P.off[l], R, 0.0f, P.Zq[l],
+                     dimL(l) * C);
+                lane(2 * l + 1);
+                gemm(false, N, dimL(l) * C, 16, 1.0f, pot_last, 16, P.le_Wv_dot + P.off[l], R, 0.0f, P.Zv[l],
+                     dimL(l) * C);
+            }
+            join();
+            add_bias_kernel<<<blocks_for((int64_t)N * C), 256, 0, st>>>(N, C, P.le_bq_dot, P.Zq[0], C);
+            add_bias_kernel<<<blocks_for((int64_t)N * C), 256, 0, st>>>(N, C, P.le_bv_dot, P.Zv[0], C);
+        } else {
+            fork();
+            for (int l = 0; l <= lm; ++l) {
+                lane(2 * l);
+                gemm(false, N, dimL(l) * C, 8, 1.0f, P.qin_le, 8, P.le_Wq + P.off[l], R, 0.0f, P.qu[l], dimL(l) * C);
+                lane(2 * l + 1);
+                gemm(false, N, dimL(l) * C, 16, 1.0f, pot_last, 16, P.le_Wv + P.off[l], R, 0.0f, P.vu[l],
+                     dimL(l) * C);
+            }
+            join();
+            add_bias_kernel<<<blocks_for((int64_t)N * C), 256, 0, st>>>(N, C, P.le_bq, P.qu[0], C);
+            add_bias_kernel<<<blocks_for((int64_t)N * C), 256, 0, st>>>(N, C, P.le_bv, P.vu[0], C);
+            fork();
+            for (int l = 0; l <= lm; ++l) {
+                lane(2 * l);
+                gemm(true, N * dimL(l), C, C, 1.0f, P.qu[l], C, P.le_dotq[l], C, 0.0f, P.Zq[l], C);
+                lane(2 * l + 1);
+                gemm(true, N * dimL(l), C, C, 1.0f, P.vu[l], C, P.le_dotv[l], C, 0.0f, P.Zv[l], C);
+            }
+            join();
         }
-        join();
-        add_bias_kernel<<<blocks_for((int64_t)N * C), 256, 0, st>>>(N, C, P.le_bq, P.qu[0], C);
-        add_bias_kernel<<<blocks_for((int64_t)N * C), 256, 0, st>>>(N, C, P.le_bv, P.vu[0], C);
-        fork();
-        for (int l = 0; l <= lm; ++l) {
-            lane(2 * l);
-            gemm(true, N * dimL(l), C, C, 1.0f, P.qu[l], C, P.le_dotq[l], C, 0.0f, P.Zq[l], C);
-            lane(2 * l + 1);
-            gemm(true, N * dimL(l), C, C, 1.0f, P.vu[l], C, P.le_dotv[l], C, 0.0f, P.Zv[l], C);
-        }
-        join();
         inv_kernel<<<blocks_for((int64_t)N * C), 256, 0, st>>>(N, C, lm, hL[0], lm >= 1 ? hL[1] : nullptr,
                                                                 lm >= 2 ? hL[2] : nullptr, P.Zq[0], P.Zq[1], P.Zq[2],
                                                                 nullptr, species, P.lex0);
@@ -1656,12 +1772,21 @@ void PolarLR::record(cudaStream_t st, int N, const GemmFn& gemm,
             // lex0 = [sum_m hL . Zq, sum_m hL . Zv]: dhL += dZ-weighted, dZq = dlex . hL
             inv_bwd_kernel<<<blocks_for((int64_t)N * dimL(l) * C), 256, 0, st>>>(
                 (int64_t)N * dimL(l) * C, C, dimL(l), P.dx0, 2 * C, hL[l], P.Zq[l], dh[P.L - 1][l], P.dZ[l]);
-            gemm(false, N * dimL(l), C, C, 1.0f, P.dZ[l], C, P.le_dotq[l], C, 0.0f, P.dmix[l], C);
-            gemm(true, N, 8, dimL(l) * C, 1.0f, P.dmix[l], dimL(l) * C, P.le_Wq + P.off[l], R, 1.0f, P.dq0, 8);
+            if (P.fold) {
+                gemm(true, N, 8, dimL(l) * C, 1.0f, P.dZ[l], dimL(l) * C, P.le_Wq_dot + P.off[l], R, 1.0f, P.dq0, 8);
+            } else {
+                gemm(false, N * dimL(l), C, C, 1.0f, P.dZ[l], C, P.le_dotq[l], C, 0.0f, P.dmix[l], C);
+                gemm(true, N, 8, dimL(l) * C, 1.0f, P.dmix[l], dimL(l) * C, P.le_Wq + P.off[l], R, 1.0f, P.dq0, 8);
+            }
             inv_bwd_kernel<<<blocks_for((int64_t)N * dimL(l) * C), 256, 0, st>>>(
                 (int64_t)N * dimL(l) * C, C, dimL(l), P.dx0 + C, 2 * C, hL[l], P.Zv[l], dh[P.L - 1][l], P.dZ[l]);
-            gemm(false, N * dimL(l), C, C, 1.0f, P.dZ[l], C, P.le_dotv[l], C, 0.0f, P.dmix[l], C);
-            gemm(true, N, 16, dimL(l) * C, 1.0f, P.dmix[l], dimL(l) * C, P.le_Wv + P.off[l], R, 1.0f, P.dpot, 16);
+            if (P.fold) {
+                gemm(true, N, 16, dimL(l) * C, 1.0f, P.dZ[l], dimL(l) * C, P.le_Wv_dot + P.off[l], R, 1.0f, P.dpot,
+                     16);
+            } else {
+                gemm(false, N * dimL(l), C, C, 1.0f, P.dZ[l], C, P.le_dotv[l], C, 0.0f, P.dmix[l], C);
+                gemm(true, N, 16, dimL(l) * C, 1.0f, P.dmix[l], dimL(l) * C, P.le_Wv + P.off[l], R, 1.0f, P.dpot, 16);
+            }
         }
         // q_in(le) = qfin + q0
         axpy_kernel<<<blocks_for((int64_t)N * 8), 256, 0, st>>>((int64_t)N * 8, 1.0f, P.dq0, P.dq);
@@ -1698,21 +1823,38 @@ void PolarLR::record(cudaStream_t st, int N, const GemmFn& gemm,
         for (int l = 0; l <= lm; ++l)
             inv_bwd_kernel<<<blocks_for((int64_t)N * dimL(l) * C), 256, 0, st>>>(
                 (int64_t)N * dimL(l) * C, C, dimL(l), P.dx0, 2 * C, P.fm[l], s.Z[l], P.dfm[l], P.dZ[l]);
-        if (lm > 0) fork();
-        for (int l = 0; l <= lm; ++l) {
-            if (lm > 0) lane(l);
-            gemm(false, N * dimL(l), C, C, 1.0f, P.dZ[l], C, U.dot[l], C, 0.0f, P.dmix[l], C);
-            gemm(true, N * dimL(l), C, C, 1.0f, P.dmix[l], C, U.Wnf[l], C, 1.0f, P.dfm[l], C);
+        if (P.fold) {
+            // dfm += dZ Wnf_dot^T per l; dpot / dq2 from every l on one lane each (they accumulate across l)
+            fork();
+            for (int l = 0; l <= lm; ++l) {
+                lane(l);
+                gemm(true, N * dimL(l), C, C, 1.0f, P.dZ[l], C, U.Wnf_dot[l], C, 1.0f, P.dfm[l], C);
+            }
+            lane(lm + 1);
+            for (int l = 0; l <= lm; ++l)
+                gemm(true, N, 16, dimL(l) * C, 1.0f, P.dZ[l], dimL(l) * C, U.Wpot_dot + P.off[l], R, 1.0f, P.dpot,
+                     16);
+            lane(lm + 2);
+            for (int l = 0; l <= lm; ++l)
+                gemm(true, N, 8, dimL(l) * C, 1.0f, P.dZ[l], dimL(l) * C, U.Wq_dot + P.off[l], R, 1.0f, P.dq2, 8);
+            join();
+        } else {
+            if (lm > 0) fork();
+            for (int l = 0; l <= lm; ++l) {
+                if (lm > 0) lane(l);
+                gemm(false, N * dimL(l), C, C, 1.0f, P.dZ[l], C, U.dot[l], C, 0.0f, P.dmix[l], C);
+                gemm(true, N * dimL(l), C, C, 1.0f, P.dmix[l], C, U.Wnf[l], C, 1.0f, P.dfm[l], C);
+            }
+            if (lm > 0) join();
+            fork();
+            for (int l = 0; l <= lm; ++l) {
+                lane(0);
+                gemm(true, N, 16, dimL(l) * C, 1.0f, P.dmix[l], dimL(l) * C, U.Wpot + P.off[l], R, 1.0f, P.dpot, 16);
+                lane(1);
+                gemm(true, N, 8, dimL(l) * C, 1.0f, P.dmix[l], dimL(l) * C, U.Wq + P.off[l], R, 1.0f, P.dq2, 8);
+            }
+            join();
         }
-        if (lm > 0) join();
-        fork();
-        for (int l = 0; l <= lm; ++l) {
-            lane(0);
-            gemm(true, N, 16, dimL(l) * C, 1.0f, P.dmix[l], dimL(l) * C, U.Wpot + P.off[l], R, 1.0f, P.dpot, 16);
-            lane(1);
-            gemm(true, N, 8, dimL(l) * C, 1.0f, P.dmix[l], dimL(l) * C, U.Wq + P.off[l], R, 1.0f, P.dq2, 8);
-        }
-        join();
         // pot = (features(q_in) - si(q_in)) / norms
         pot_bwd_kernel<<<blocks_for((int64_t)N * 2), 256, 0, st>>>(N, P.fc, P.dpot, P.g16, P.dq2);
         launch_sf<16>(st, N, K, P.kinfo, P.fracu, P.g16, P.SC, P.SS);
