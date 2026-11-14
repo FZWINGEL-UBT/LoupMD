@@ -322,6 +322,13 @@ Effort is in working weeks of one focused lane and is a rough estimate.
 | S0-T03 | Agree the layout move with the session on `round6-hardening`: merge its tip into `release/v1`, then one commit that moves `python/*.py` to `loupmd/`, `loupmd/export/` and `codegen/` with `git mv` and fixes imports | as §4.2 | `pytest` passes from the new layout; `git log --follow` reaches each file's history |
 | S0-T04 | Merge rule: `release/v1` merges `round6-hardening` at least at every stage exit; speed work stays on that branch | `PLAN.md` §9 | recorded in the stage exit notes |
 
+**Progress (15 November 2026).** Step-level plan: `plans/stage-0-ground-rules.md` (`d78b8de`).
+- S0-T01: open. The library of the merged tree is built (sha256 `df58a9bd2623a502...`); tests, gate and benchmark
+  are queued behind the other session's GPU jobs. The baseline is the merged code (`bac354c`), not `0336751`.
+- S0-T02: waits for the owner's answer on A6. The inventory is made (three cubins, four generated files).
+- S0-T03: waits for the owner's moment. New Python code goes to `loupmd/`; `python/` is untouched.
+- S0-T04: merges so far: `da42ec3` merged `round6-hardening` `11778cd` on 15 November 2026, before Stage 0.
+
 ### Stage 1: core API v1 (3 weeks)
 
 The base of everything else. Each task keeps the standard benchmarks within noise and the gate passing.
@@ -341,6 +348,15 @@ The base of everything else. Each task keeps the standard benchmarks within nois
 | S1-T11 | Decaying displacement maximum (review item S2), so light-atom systems reach the pipelined loop | `src/engine.cu`, `src/integrator.cu` | none | water 2x2x2 at 300 K reports `pipelined_steps > 0` with `dangerous_builds == 0` over 5,000 steps; the existing pipeline tests pass |
 
 **Exit:** all of the above, the default gate and `pytest`; tag `v1.0.0a1`.
+
+**Progress (15 November 2026).** Step-level plan: `plans/stage-1-core-api.md` (`d78b8de`). No task is marked done:
+the three below are written and committed, and their GPU tests have not been run (the card was in use).
+- S1-T01: `22b5f57`. Run without the GPU: `tests/test_errors.py` (7 passed) and the NULL-handle test, which fails
+  on the baseline library and passes on this one.
+- S1-T02: `d1eba02`. Run without the GPU: version tests and the refusal of two stub libraries (4 passed).
+  `loup_version` reports `1.0.0a1+<hash>` while the stages run, not the `1.0.0+<hash>` of §4.3.
+- S1-T03: `dd5268d`. Builds; nothing run. Besides the kept graphs it removes the force pass each run call made
+  before its first step, which the 2% criterion needs.
 
 ### Stage 2: installable runtime, benchmark and validation (2.5 weeks)
 
