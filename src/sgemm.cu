@@ -35,7 +35,7 @@ __global__ void __launch_bounds__(256, 2) sgemm128_kernel(int M, int N, int K, c
     constexpr int BN = 16 * TN;
     float(*Bs)[kBK][BN] = reinterpret_cast<float(*)[kBK][BN]>(smem + kStages * 128 * kBK);
     const int tid = threadIdx.x, tx = tid & 15, ty = tid >> 4;
-    const int m0 = blockIdx.x * 128, n0 = blockIdx.y * BN;
+    const int m0 = blockIdx.y * 128, n0 = blockIdx.x * BN;  // N tiles fastest: the tiles of one A row block run together, A streams once
     // Copy roles: A rows ar and ar + 64 (one 16-byte k chunk each); B rows bk (and bk + 8 for BN = 128), one 16-byte
     // n chunk each.
     const int ar = tid >> 2, ac = (tid & 3) * 4;
@@ -133,7 +133,7 @@ __global__ void __launch_bounds__(128, 4) sgemm64_kernel(int M, int N, int K, co
     __shared__ __align__(16) float As[kStages][64][kBK];
     __shared__ __align__(16) float Bs[kStages][kBK][64];
     const int tid = threadIdx.x, tx = tid & 15, ty = tid >> 4;
-    const int m0 = blockIdx.x * 64, n0 = blockIdx.y * 64;
+    const int m0 = blockIdx.y * 64, n0 = blockIdx.x * 64;
     const int ar = tid >> 2, ac = (tid & 3) * 4;
     const int bk = tid >> 4, bc = (tid & 15) * 4;
     const bool a_ok0 = m0 + ar < M, a_ok1 = m0 + ar + 32 < M;
@@ -216,7 +216,7 @@ __global__ void __launch_bounds__(64) sgemm32_kernel(int M, int N, int K, const 
     __shared__ __align__(16) float As[kStages][32][kBK];
     __shared__ __align__(16) float Bs[kStages][kBK][32];
     const int tid = threadIdx.x, tx = tid & 7, ty = tid >> 3;
-    const int m0 = blockIdx.x * 32, n0 = blockIdx.y * 32;
+    const int m0 = blockIdx.y * 32, n0 = blockIdx.x * 32;
     const int ar = tid >> 2, ac = (tid & 3) * 4;
     const int bk = tid >> 3, bc = (tid & 7) * 4;
     const bool a_ok0 = m0 + ar < M, a_ok1 = m0 + ar + 16 < M;
@@ -333,18 +333,18 @@ void sgemm128_init() {
 // Requirements (checked by the caller): K % 16 == 0, N % 4 == 0, lda = K, ldb = ldc = N, A / B / C 16-byte aligned.
 void sgemm128(int M, int N, int K, const float* A, const float* B, float* C, float beta, cudaStream_t stream) {
     if ((N % 128) != 0 && (N % 128) <= 64) {  // e.g. N = 144, 192: 128 x 64 tiles instead of a mostly-empty 128 x 128 tile
-        const dim3 grid((M + 127) / 128, (N + 63) / 64);
+        const dim3 grid((N + 63) / 64, (M + 127) / 128);
         if ((N % 64) == 0) sgemm128_kernel<4, true><<<grid, 256, smem_bytes<64>(), stream>>>(M, N, K, A, B, C, beta);
         else               sgemm128_kernel<4, false><<<grid, 256, smem_bytes<64>(), stream>>>(M, N, K, A, B, C, beta);
         return;
     }
-    const dim3 grid((M + 127) / 128, (N + 127) / 128);
+    const dim3 grid((N + 127) / 128, (M + 127) / 128);
     if ((N % 128) == 0) sgemm128_kernel<8, true><<<grid, 256, smem_bytes<128>(), stream>>>(M, N, K, A, B, C, beta);
     else                sgemm128_kernel<8, false><<<grid, 256, smem_bytes<128>(), stream>>>(M, N, K, A, B, C, beta);
 }
 
 void sgemm64(int M, int N, int K, const float* A, const float* B, float* C, float beta, cudaStream_t stream) {
-    const dim3 grid((M + 63) / 64, (N + 63) / 64);
+    const dim3 grid((N + 63) / 64, (M + 63) / 64);
     if ((N % 64) == 0) sgemm64_kernel<true><<<grid, 128, 0, stream>>>(M, N, K, A, B, C, beta);
     else               sgemm64_kernel<false><<<grid, 128, 0, stream>>>(M, N, K, A, B, C, beta);
 }
@@ -352,7 +352,7 @@ void sgemm64(int M, int N, int K, const float* A, const float* B, float* C, floa
 void sgemm32(int M, int N, int K, const float* A, const float* B, float* C, float* ws, float beta, int split_k,
              cudaStream_t stream) {
     if (M <= 0 || N <= 0 || K <= 0) return;
-    const dim3 grid((M + 31) / 32, (N + 31) / 32, split_k);
+    const dim3 grid((N + 31) / 32, (M + 31) / 32, split_k);
     if ((N % 32) == 0) sgemm32_kernel<true><<<grid, 64, 0, stream>>>(M, N, K, A, B, C, ws, beta, split_k);
     else               sgemm32_kernel<false><<<grid, 64, 0, stream>>>(M, N, K, A, B, C, ws, beta, split_k);
     if (split_k > 1) {
