@@ -1407,6 +1407,15 @@ POLAR-1 NaCl 3x3x3 (216) and POLAR-1-M `NbCl5` 3x3x3 (1,944).
 - S49, the same search in the other issue-limited per-edge-channel kernels (a source-level survey of the generated code, path by path; no SASS or timing check): `gconv_bwd_L1` and the specialised `wprime_backward_inter1_rcv` (same late pull-back structure) contract each path's own `Q` block with `n` / `x`, and their repeated `x . n` terms are identical pure expressions (left to the compiler's common-subexpression elimination; not verified in SASS); `gconv_bwd_L2lp` has no `A` forms (S48 count); the forward convs (`gconv_fwd_L2b` and the others) use one `w * x` product per sender component and one FMA per folded Clebsch-Gordan form. No sum of the S48 kind (a full contraction recomputed beside a partial one that contains it) remains. The one rewrite left, spherical-harmonic `h` with the pull gradient deferred to the edge end for the scalar paths of `gconv_bwd_L0` / `L1` (`0,2,2` and `0,3,3`), would save ~22 FMA per edge-channel in the source but add ~12 values to each edge's cross-lane reduction: a single-digit net estimate from source counts, not built.
 - Sources: this file.
 
+<a id="gen-conv-bwd-lp-defer-sh"></a>
+#### gen-conv-bwd-lp-defer-sh: deferred pull-back of the scalar l >= 2 paths in the late pull-back convs
+- Switch (reverted): `python/gen_generic.py` `emit_conv_bwd_lp`, `sm_120` branch, paths `(0, 2, 2)` / `(0, 3, 3)` of `gconv_bwd_L0` / `L1` / `L2lp`.
+- Stage: S50 (14 November 2026; owner chose to build the S49 estimate as a falsifier).
+- What: `h = sum_i q_i c_i(n)` with per-edge polynomial coefficients `c_i` (expanded with sympy from the same Cartesian contraction), and each lane summing `T_i = sum_ch w x0 q_i` over its channels, adding `l v(T)` to `pull_G` once per edge before the existing four-value shuffle reduction (v is linear in q, so no extra shuffles). Per channel iteration the source drops 16 -> 10 operations for `(0, 2, 2)` and 33 -> 14 for `(0, 3, 3)`.
+- Status: REJECTED.
+- Measured (5060 Ti): registers `gconv_bwd_L0` 64 -> 64, `gconv_bwd_L1<true, 128, true>` and `gconv_bwd_L2lp<true, 224, true>` 101 (the 12 `c` and 12 `T` values live across the channel loop; `L1` was register-limited at 64 before); static SASS `L0<128>` 600 -> 656, `L0<96>` 656 -> 712, `L1<128>` 944 -> 992. `nsys` sum of `gconv_bwd*` per step, two A/B pairs each: `OMAT-0-S` `SrTiO3` 1156 / 1164 -> 1181 / 1219 us (+2 / +5%), `OFF23-S` water 515 / 516 -> 528 / 535 (+3 / +4%), `OFF23-M` water 2310 / 2288 -> 2580 / 2591 (+12 / +13%). `cmp_libs` at float32 noise (`OFF23-M` water `dF 3.0e-5` of `|F|max 40`). Slower even in `L0`, where registers did not change: the per-edge polynomial and `v(T)` work, done by every lane, costs more than the ~3-4 channel iterations per lane save. Reverted; the rebuilt library is SASS-identical to S48, and the installed binary is the S48 one.
+- Sources: this file.
+
 <a id="s33-mptrj-l1-after"></a>
 #### s33-mptrj-l1-after: `MPtrj` L1 conv limiters after S29-S31 (no change)
 - Stage: S33 (14 November 2026), 5060 Ti, `ncu`, `MPtrj` `SrTiO3`.
