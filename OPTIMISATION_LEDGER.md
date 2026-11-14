@@ -1268,6 +1268,13 @@ POLAR-1 NaCl 3x3x3 (216) and POLAR-1-M `NbCl5` 3x3x3 (1,944).
 - Measured (`nsys` kernel time per step, two runs): `OFF23-S` water `gconv_fwd_L0` 341.0 / 340.3 -> 329.8 / 338.2 us (about `-2%`, ~0.2% of the step); the pair hit rate was not measured, so the cause of the small gain is not established. No current model runs the lx 0 / 1 forward at `C = 224` (`OFF23-L` layer 0 is the first-hidden path, later layers are lx 2, which already pair). Below the stop rule: reverted.
 - Sources: this file.
 
+<a id="s27-elementwise-products"></a>
+#### s27-elementwise-products: `inv_bwd` (POLAR) and `gprod` (MH-1) limiters (no change adopted)
+- Stage: S27 (14 November 2026), 5060 Ti, `ncu`.
+- `inv_bwd_kernel` (`POLAR-1-M` `NbCl5`, 796 us / step traced over ~8 launches): one sampled launch 40.8 us at 92.8% DRAM throughput, L2 hit 16%, 20 registers; a pure streaming update (`dfm += g Z`, `dZ = g fm`). Only the electron-energy pair (`polar.cu` `Zq` / `Zv` calls, same `hL` and `dh`) could be fused, saving 3 of its 10 array passes (estimated 0.3-0.5% of the step, below the bar); the SCF-loop calls are single. The S-earlier index cleanup (`inv2` fusion) already left the rest DRAM-bound.
+- `gprod_bwd` (`MH-1` `NbCl5`): 377 us at 84% DRAM, L2 hit 3%, 153 registers (25% occupancy), long scoreboard 5.31. `gprod_ro1_fused`: 353 us at 80% DRAM, 110 registers, barrier 4.57 / long scoreboard 4.88. Both stream per-atom features from DRAM near the bandwidth floor; only traffic removal (fusion with the neighbouring GEMMs) would help.
+- Sources: this file.
+
 <a id="rv8-fixes"></a>
 #### rv8-fixes: eighth review pass (`loupmd-review-20261112.md`, U1-U9)
 - Stage: S9.
