@@ -322,7 +322,7 @@ float64 reference does not fit the GPU (OFF23-L / 23b / 24 on the 16 GB 5060 Ti,
 | OFF23 large, OFF23b medium, OFF24 medium | organic | PASS (CPU refs) | PASS (worst 1.46 / 1.23 / 0.27; OFF23-L CPU refs) |
 | MH-1 `omat_pbe`, `matpes_r2scan` | crystals | PASS | PASS |
 | MH-1 `omol` | organic | PASS | PASS |
-| OMOL-0 extra large | organic, neutral singlet / charge +1 doublet | PASS (worst 0.87 / 0.30; stress 1.12 / 0.18) | not run |
+| OMOL-0 extra large | organic: neutral singlet, +1 doublet, -1 doublet, neutral triplet | PASS (S57 path; worst force 0.86 / 0.31 / 0.82 / 0.79, stress 0.79 / 0.19 / 0.63 / 0.47) | not run |
 | POLAR-1-S | crystals | PASS (worst ratio 1.30) | PASS (worst 0.99) |
 | POLAR-1-M | crystals | PASS (worst 0.97) | PASS (worst 1.14) |
 | POLAR-1-L | crystals | PASS (worst 1.16) | PASS (CPU refs; worst 2.69, force NaNbO3_c0) |
