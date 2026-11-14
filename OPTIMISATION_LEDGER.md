@@ -1326,6 +1326,13 @@ POLAR-1 NaCl 3x3x3 (216) and POLAR-1-M `NbCl5` 3x3x3 (1,944).
 - Measured (5060 Ti): the compiler went to 80 registers with 56-72 B of stack; `nsys` kernel time for the pair, two runs: 761 / 757 -> 1013 / 1023 us (`+34%`).
 - Sources: this file.
 
+<a id="s32-specialised-occupancy"></a>
+#### s32-specialised-occupancy: occupancy check of the specialised `w'` / spline kernels (no change)
+- Stage: S32 (14 November 2026), 5060 Ti, `ncu`, `OMAT-0-M` `SrTiO3` (the path also serves `MPA-0`, `MP-0b3` and both `matpes` fine-tunes, where it is ~55% of kernel time).
+- `wprime_backward_inter1_rcv`: 2.82 ms, 256 threads, 64 registers, 22.5 KB static shared memory, 4 blocks per SM (registers and shared memory both), theoretical 66.7%, achieved 64.0% (30.7 warps); SM compute 74.9%, stalls per issue not selected 4.12, long scoreboard 1.16, L2 52% (hit 93%). `spline_forward_inter1<1, 1>` (this sample): 1.37 ms, 128 threads, 96 registers, register-limited to 5 blocks (41.7%), achieved 41.2%; SM compute 73.9%, not selected 1.84, L2 57%.
+- Conclusion: unlike `gen-conv-bwd-512thr`, neither kernel is occupancy-starved: both are issue-limited (high `not selected`, ~74% SM compute), consistent with `meas-ncu` and the `w'` history (instruction-count tuning exhausted). No launch-shape change was tried.
+- Sources: this file.
+
 <a id="rv8-fixes"></a>
 #### rv8-fixes: eighth review pass (`loupmd-review-20261112.md`, U1-U9)
 - Stage: S9.
