@@ -1,0 +1,870 @@
+{
+ "NbCl5 (R2SCAN cell)": {
+  "atoms": 72,
+  "density_per_A3": 0.03477019837966636,
+  "pair_cutoff": [
+   {
+    "cutoff_bohr": 12.0,
+    "cutoff_A": 6.3501265308359995,
+    "dE_meV_per_atom": 25.993955036969812,
+    "max_dF_meV_per_A": 7.686928289841698,
+    "dP_GPa": 0.29878128488830524,
+    "neighbours_per_atom": 37.294339058832094,
+    "seconds": 0.003077499000937678
+   },
+   {
+    "cutoff_bohr": 20.0,
+    "cutoff_A": 10.583544218059998,
+    "dE_meV_per_atom": 5.184218212530765,
+    "max_dF_meV_per_A": 0.2900124272417412,
+    "dP_GPa": 0.059049706606222295,
+    "neighbours_per_atom": 172.6589771242226,
+    "seconds": 0.003921183000784367
+   },
+   {
+    "cutoff_bohr": 30.0,
+    "cutoff_A": 15.87531632709,
+    "dE_meV_per_atom": 1.4013316862255574,
+    "max_dF_meV_per_A": 0.016689126871423376,
+    "dP_GPa": 0.01577634300656456,
+    "neighbours_per_atom": 582.7240477942514,
+    "seconds": 0.003576604009140283
+   },
+   {
+    "cutoff_bohr": 40.0,
+    "cutoff_A": 21.167088436119997,
+    "dE_meV_per_atom": 0.5827739852068229,
+    "max_dF_meV_per_A": 0.004773207485955951,
+    "dP_GPa": 0.006532262410929979,
+    "neighbours_per_atom": 1381.2718169937807,
+    "seconds": 0.004128728993237019
+   },
+   {
+    "cutoff_bohr": 60.0,
+    "cutoff_A": 31.75063265418,
+    "dE_meV_per_atom": 0.16383029662556423,
+    "max_dF_meV_per_A": 0.00038565232861938886,
+    "dP_GPa": 0.00183035631519979,
+    "neighbours_per_atom": 4661.792382354011,
+    "seconds": 0.005945454991888255
+   },
+   {
+    "cutoff_bohr": 95.0,
+    "cutoff_A": 50.271835035784996,
+    "dE_meV_per_atom": 0.03287835348535988,
+    "max_dF_meV_per_A": 1.9744618662709962e-05,
+    "dP_GPa": 0.00036674910734366497,
+    "neighbours_per_atom": 18504.18631398505,
+    "seconds": 0.01274375400680583
+   }
+  ],
+  "bj_two_body_meV_per_atom": -191.79752485607753,
+  "atm": [
+   {
+    "cutoff3_bohr": 10.0,
+    "E_atm_meV_per_atom": 0.535755909507755,
+    "max_F_atm_meV_per_A": 0.2588787771518851,
+    "P_atm_GPa": -0.005126227436934921,
+    "seconds": 0.006464124002377503
+   },
+   {
+    "cutoff3_bohr": 15.0,
+    "E_atm_meV_per_atom": 5.861376817454713,
+    "max_F_atm_meV_per_A": 1.344033231058042,
+    "P_atm_GPa": 0.05224508338444381,
+    "seconds": 0.011999134003417566
+   },
+   {
+    "cutoff3_bohr": 20.0,
+    "E_atm_meV_per_atom": 7.058100903389036,
+    "max_F_atm_meV_per_A": 0.6692236834854965,
+    "P_atm_GPa": 0.08024967108583601,
+    "seconds": 0.025421223996090703
+   },
+   {
+    "cutoff3_bohr": 30.0,
+    "E_atm_meV_per_atom": 7.478510510248443,
+    "max_F_atm_meV_per_A": 0.824749530238764,
+    "P_atm_GPa": 0.0875604491133499,
+    "seconds": 0.16918740699475165
+   },
+   {
+    "cutoff3_bohr": 40.0,
+    "E_atm_meV_per_atom": 7.565531443208867,
+    "max_F_atm_meV_per_A": 0.8128196888167148,
+    "P_atm_GPa": 0.08901503554217226,
+    "seconds": 1.0413163869961863
+   }
+  ],
+  "dampings": {
+   "bj": {
+    "E_meV_per_atom": -191.63369455945198,
+    "rms_F_meV_per_A": 7.624033936289764,
+    "P_GPa": -1.1984353789574627
+   },
+   "zero": {
+    "E_meV_per_atom": -137.28498798885445,
+    "rms_F_meV_per_A": 32.29735896156406,
+    "P_GPa": -0.8083005587401996
+   },
+   "bjm": {
+    "E_meV_per_atom": -351.00624599309094,
+    "rms_F_meV_per_A": 64.70469688041763,
+    "P_GPa": -2.0448581947561335
+   },
+   "zerom": {
+    "E_meV_per_atom": -450.42286111487124,
+    "rms_F_meV_per_A": 298.19008170430914,
+    "P_GPa": -3.677541895997717
+   }
+  },
+  "cn_cutoff": [
+   {
+    "cn_cutoff_bohr": 8.0,
+    "dE_meV_per_atom": -0.0018424735013233828,
+    "max_dF_meV_per_A": 0.009902661847307863
+   },
+   {
+    "cn_cutoff_bohr": 11.34,
+    "dE_meV_per_atom": -0.0005439191286754013,
+    "max_dF_meV_per_A": 0.0028805850313205067
+   },
+   {
+    "cn_cutoff_bohr": 15.0,
+    "dE_meV_per_atom": -0.0002723440849382462,
+    "max_dF_meV_per_A": 0.0014633958120976662
+   },
+   {
+    "cn_cutoff_bohr": 20.0,
+    "dE_meV_per_atom": -0.00017252377536457352,
+    "max_dF_meV_per_A": 0.0009199558097137614
+   },
+   {
+    "cn_cutoff_bohr": 30.0,
+    "dE_meV_per_atom": -7.09916678776068e-05,
+    "max_dF_meV_per_A": 0.00038274478653555627
+   }
+  ]
+ },
+ "naphthalene crystal": {
+  "atoms": 36,
+  "density_per_A3": 0.10521200135996049,
+  "pair_cutoff": [
+   {
+    "cutoff_bohr": 12.0,
+    "cutoff_A": 6.3501265308359995,
+    "dE_meV_per_atom": 6.959517037644623,
+    "max_dF_meV_per_A": 3.730838455601862,
+    "dP_GPa": 0.21931210258235076,
+    "neighbours_per_atom": 112.84986093353203,
+    "seconds": 0.0036275019956519827
+   },
+   {
+    "cutoff_bohr": 20.0,
+    "cutoff_A": 10.583544218059998,
+    "dE_meV_per_atom": 1.424260018629991,
+    "max_dF_meV_per_A": 0.6669051371335708,
+    "dP_GPa": 0.04453894424907773,
+    "neighbours_per_atom": 522.4530598774629,
+    "seconds": 0.0047142919938778505
+   },
+   {
+    "cutoff_bohr": 30.0,
+    "cutoff_A": 15.87531632709,
+    "dE_meV_per_atom": 0.4186463237654752,
+    "max_dF_meV_per_A": 0.20541349004141174,
+    "dP_GPa": 0.013014869334353342,
+    "neighbours_per_atom": 1763.279077086438,
+    "seconds": 0.003951808001147583
+   },
+   {
+    "cutoff_bohr": 40.0,
+    "cutoff_A": 21.167088436119997,
+    "dE_meV_per_atom": 0.17408287324854269,
+    "max_dF_meV_per_A": 0.08475878991510977,
+    "dP_GPa": 0.005400618315758928,
+    "neighbours_per_atom": 4179.624479019703,
+    "seconds": 0.004333987002610229
+   },
+   {
+    "cutoff_bohr": 60.0,
+    "cutoff_A": 31.75063265418,
+    "dE_meV_per_atom": 0.04894644514093679,
+    "max_dF_meV_per_A": 0.023823035022511874,
+    "dP_GPa": 0.0015166665978768841,
+    "neighbours_per_atom": 14106.232616691505,
+    "seconds": 0.007522732004872523
+   },
+   {
+    "cutoff_bohr": 95.0,
+    "cutoff_A": 50.271835035784996,
+    "dE_meV_per_atom": 0.009816156269295799,
+    "max_dF_meV_per_A": 0.004781881925881859,
+    "dP_GPa": 0.00030393826538151805,
+    "neighbours_per_atom": 55992.27402655499,
+    "seconds": 0.023979265009984374
+   }
+  ],
+  "bj_two_body_meV_per_atom": -80.38465331162452,
+  "atm": [
+   {
+    "cutoff3_bohr": 10.0,
+    "E_atm_meV_per_atom": 1.6177102870593336,
+    "max_F_atm_meV_per_A": 1.2080004190293467,
+    "P_atm_GPa": 0.009877172858354802,
+    "seconds": 0.009612105000996962
+   },
+   {
+    "cutoff3_bohr": 15.0,
+    "E_atm_meV_per_atom": 3.5377930871960515,
+    "max_F_atm_meV_per_A": 2.5105575608808453,
+    "P_atm_GPa": 0.0951047410447424,
+    "seconds": 0.02592498499143403
+   },
+   {
+    "cutoff3_bohr": 20.0,
+    "E_atm_meV_per_atom": 3.8465018870888303,
+    "max_F_atm_meV_per_A": 2.6670621914280033,
+    "P_atm_GPa": 0.11285543450459995,
+    "seconds": 0.08065736199205276
+   },
+   {
+    "cutoff3_bohr": 30.0,
+    "E_atm_meV_per_atom": 3.9320059128708196,
+    "max_F_atm_meV_per_A": 2.7157315831307858,
+    "P_atm_GPa": 0.11701338030795426,
+    "seconds": 0.7374888259946601
+   },
+   {
+    "cutoff3_bohr": 40.0,
+    "E_atm_meV_per_atom": 3.951112209115062,
+    "max_F_atm_meV_per_A": 2.7564117746234698,
+    "P_atm_GPa": 0.11790312228193069,
+    "seconds": 3.590860561002046
+   }
+  ],
+  "dampings": {
+   "bj": {
+    "E_meV_per_atom": -80.33570686648358,
+    "rms_F_meV_per_A": 15.604963675828067,
+    "P_GPa": -1.2417845255112827
+   },
+   "zero": {
+    "E_meV_per_atom": -58.98156826109933,
+    "rms_F_meV_per_A": 14.783551693035097,
+    "P_GPa": -0.9929528896279273
+   },
+   "bjm": {
+    "E_meV_per_atom": -90.70140543995322,
+    "rms_F_meV_per_A": 14.69437610720305,
+    "P_GPa": -1.3355761076480241
+   },
+   "zerom": {
+    "E_meV_per_atom": -144.50153886944142,
+    "rms_F_meV_per_A": 70.5058260948132,
+    "P_GPa": -2.3901511552327155
+   }
+  },
+  "cn_cutoff": [
+   {
+    "cn_cutoff_bohr": 8.0,
+    "dE_meV_per_atom": -0.09273812094016491,
+    "max_dF_meV_per_A": 1.4968357043938298
+   },
+   {
+    "cn_cutoff_bohr": 11.34,
+    "dE_meV_per_atom": -0.06019020542200357,
+    "max_dF_meV_per_A": 0.9459532132692559
+   },
+   {
+    "cn_cutoff_bohr": 15.0,
+    "dE_meV_per_atom": -0.04747288150248114,
+    "max_dF_meV_per_A": 0.7348176992717781
+   },
+   {
+    "cn_cutoff_bohr": 20.0,
+    "dE_meV_per_atom": -0.03608708657062051,
+    "max_dF_meV_per_A": 0.5524683146821002
+   },
+   {
+    "cn_cutoff_bohr": 30.0,
+    "dE_meV_per_atom": -0.018681924961325456,
+    "max_dF_meV_per_A": 0.2841731789499438
+   }
+  ]
+ },
+ "urea crystal": {
+  "atoms": 128,
+  "density_per_A3": 0.1099753829409204,
+  "pair_cutoff": [
+   {
+    "cutoff_bohr": 12.0,
+    "cutoff_A": 6.3501265308359995,
+    "dE_meV_per_atom": 4.799673586728802,
+    "max_dF_meV_per_A": 1.4303274605284022,
+    "dP_GPa": 0.1700445319536299,
+    "neighbours_per_atom": 117.95903994387677,
+    "seconds": 0.01357489799556788
+   },
+   {
+    "cutoff_bohr": 20.0,
+    "cutoff_A": 10.583544218059998,
+    "dE_meV_per_atom": 1.0084753539443547,
+    "max_dF_meV_per_A": 0.29142817063092585,
+    "dP_GPa": 0.035515494339166634,
+    "neighbours_per_atom": 546.1066664068368,
+    "seconds": 0.01391334600339178
+   },
+   {
+    "cutoff_bohr": 30.0,
+    "cutoff_A": 15.87531632709,
+    "dE_meV_per_atom": 0.29815469747889595,
+    "max_dF_meV_per_A": 0.0841343495171197,
+    "dP_GPa": 0.01045951097006688,
+    "neighbours_per_atom": 1843.1099991230747,
+    "seconds": 0.015547079005045816
+   },
+   {
+    "cutoff_bohr": 40.0,
+    "cutoff_A": 21.167088436119997,
+    "dE_meV_per_atom": 0.12310023023012762,
+    "max_dF_meV_per_A": 0.03489141587992295,
+    "dP_GPa": 0.004312124572569092,
+    "neighbours_per_atom": 4368.853331254694,
+    "seconds": 0.01757706499483902
+   },
+   {
+    "cutoff_bohr": 60.0,
+    "cutoff_A": 31.75063265418,
+    "dE_meV_per_atom": 0.0347503354475448,
+    "max_dF_meV_per_A": 0.009846759419313011,
+    "dP_GPa": 0.0012159917703347437,
+    "neighbours_per_atom": 14744.879992984597,
+    "seconds": 0.026447191994520836
+   },
+   {
+    "cutoff_bohr": 95.0,
+    "cutoff_A": 50.271835035784996,
+    "dE_meV_per_atom": 0.006956649553815919,
+    "max_dF_meV_per_A": 0.0019748600614682976,
+    "dP_GPa": 0.00024330782890648824,
+    "neighbours_per_atom": 58527.27538882023,
+    "seconds": 0.06679237700882368
+   }
+  ],
+  "bj_two_body_meV_per_atom": -59.80135980050741,
+  "atm": [
+   {
+    "cutoff3_bohr": 10.0,
+    "E_atm_meV_per_atom": 1.7474974584005682,
+    "max_F_atm_meV_per_A": 1.282802818916037,
+    "P_atm_GPa": 0.03265953576848345,
+    "seconds": 0.037978563996148296
+   },
+   {
+    "cutoff3_bohr": 15.0,
+    "E_atm_meV_per_atom": 2.936737902621431,
+    "max_F_atm_meV_per_A": 1.2944535464683784,
+    "P_atm_GPa": 0.1017125339513791,
+    "seconds": 0.08967776900681201
+   },
+   {
+    "cutoff3_bohr": 20.0,
+    "E_atm_meV_per_atom": 3.146856496012783,
+    "max_F_atm_meV_per_A": 1.6272905553731676,
+    "P_atm_GPa": 0.11400419515097349,
+    "seconds": 0.3252769030077616
+   },
+   {
+    "cutoff3_bohr": 30.0,
+    "E_atm_meV_per_atom": 3.1926534767908534,
+    "max_F_atm_meV_per_A": 1.5829560710510295,
+    "P_atm_GPa": 0.11644728090058536,
+    "seconds": 3.0319423859909875
+   },
+   {
+    "cutoff3_bohr": 40.0,
+    "E_atm_meV_per_atom": 3.2067661362769337,
+    "max_F_atm_meV_per_A": 1.5835318310904405,
+    "P_atm_GPa": 0.1171873942819832,
+    "seconds": 14.389204109000275
+   }
+  ],
+  "dampings": {
+   "bj": {
+    "E_meV_per_atom": -59.76660946505987,
+    "rms_F_meV_per_A": 4.660411933402,
+    "P_GPa": -1.129601112986523
+   },
+   "zero": {
+    "E_meV_per_atom": -52.65303714750777,
+    "rms_F_meV_per_A": 9.339510311946285,
+    "P_GPa": -1.0110572007029446
+   },
+   "bjm": {
+    "E_meV_per_atom": -61.05145434490587,
+    "rms_F_meV_per_A": 5.268954794107335,
+    "P_GPa": -1.1422219532288915
+   },
+   "zerom": {
+    "E_meV_per_atom": -74.24487759171515,
+    "rms_F_meV_per_A": 29.649367571648284,
+    "P_GPa": -1.4567174296050776
+   }
+  },
+  "cn_cutoff": [
+   {
+    "cn_cutoff_bohr": 8.0,
+    "dE_meV_per_atom": -0.017708183731646177,
+    "max_dF_meV_per_A": 0.3916608940572122
+   },
+   {
+    "cn_cutoff_bohr": 11.34,
+    "dE_meV_per_atom": -0.012285949312254574,
+    "max_dF_meV_per_A": 0.2936667556339614
+   },
+   {
+    "cn_cutoff_bohr": 15.0,
+    "dE_meV_per_atom": -0.010459687480778024,
+    "max_dF_meV_per_A": 0.25488918160935203
+   },
+   {
+    "cn_cutoff_bohr": 20.0,
+    "dE_meV_per_atom": -0.008275429554956137,
+    "max_dF_meV_per_A": 0.2056350525929968
+   },
+   {
+    "cn_cutoff_bohr": 30.0,
+    "dE_meV_per_atom": -0.0045095292085517436,
+    "max_dF_meV_per_A": 0.11428082883894672
+   }
+  ]
+ },
+ "water 216": {
+  "atoms": 648,
+  "density_per_A3": 0.09998458514104921,
+  "pair_cutoff": [
+   {
+    "cutoff_bohr": 12.0,
+    "cutoff_A": 6.3501265308359995,
+    "dE_meV_per_atom": 2.62856264375582,
+    "max_dF_meV_per_A": 4.036266315505646,
+    "dP_GPa": 0.08434864670178385,
+    "neighbours_per_atom": 107.24296071567984,
+    "seconds": 0.11272263900900725
+   },
+   {
+    "cutoff_bohr": 20.0,
+    "cutoff_A": 10.583544218059998,
+    "dE_meV_per_atom": 0.5250355071771043,
+    "max_dF_meV_per_A": 0.8391178460069384,
+    "dP_GPa": 0.016761339796918056,
+    "neighbours_per_atom": 496.4951884985176,
+    "seconds": 0.11812164500588551
+   },
+   {
+    "cutoff_bohr": 30.0,
+    "cutoff_A": 15.87531632709,
+    "dE_meV_per_atom": 0.15605069493530152,
+    "max_dF_meV_per_A": 0.2486619152559308,
+    "dP_GPa": 0.004966824392242091,
+    "neighbours_per_atom": 1675.6712611824976,
+    "seconds": 0.11858876599580981
+   },
+   {
+    "cutoff_bohr": 40.0,
+    "cutoff_A": 21.167088436119997,
+    "dE_meV_per_atom": 0.06411257121061747,
+    "max_dF_meV_per_A": 0.10309145837598954,
+    "dP_GPa": 0.002038110173736142,
+    "neighbours_per_atom": 3971.961507988141,
+    "seconds": 0.15218128000560682
+   },
+   {
+    "cutoff_bohr": 60.0,
+    "cutoff_A": 31.75063265418,
+    "dE_meV_per_atom": 0.018180483096993834,
+    "max_dF_meV_per_A": 0.029206302764206438,
+    "dP_GPa": 0.0005774807971680978,
+    "neighbours_per_atom": 13405.37008945998,
+    "seconds": 0.18890165000630077
+   },
+   {
+    "cutoff_bohr": 95.0,
+    "cutoff_A": 50.271835035784996,
+    "dE_meV_per_atom": 0.0036438053554054975,
+    "max_dF_meV_per_A": 0.0058580711662648,
+    "dP_GPa": 0.00011569429713755932,
+    "neighbours_per_atom": 53210.32027986459,
+    "seconds": 0.363412941005663
+   }
+  ],
+  "bj_two_body_meV_per_atom": -33.39546866188337,
+  "atm": [
+   {
+    "cutoff3_bohr": 10.0,
+    "E_atm_meV_per_atom": 1.1591347610475864,
+    "max_F_atm_meV_per_A": 2.681217077356621,
+    "P_atm_GPa": 0.025956928209661403,
+    "seconds": 0.4046368980052648
+   },
+   {
+    "cutoff3_bohr": 15.0,
+    "E_atm_meV_per_atom": 1.5116643386195827,
+    "max_F_atm_meV_per_A": 3.402005459769139,
+    "P_atm_GPa": 0.04604584293195731,
+    "seconds": 0.9991738300013822
+   },
+   {
+    "cutoff3_bohr": 20.0,
+    "E_atm_meV_per_atom": 1.5415313503353396,
+    "max_F_atm_meV_per_A": 3.466132058569091,
+    "P_atm_GPa": 0.04772411412479695,
+    "seconds": 2.338847180013545
+   }
+  ],
+  "dampings": {
+   "bj": {
+    "E_meV_per_atom": -33.37728817878638,
+    "rms_F_meV_per_A": 4.077443384243847,
+    "P_GPa": -0.5931783845713975
+   },
+   "zero": {
+    "E_meV_per_atom": -36.356754666658716,
+    "rms_F_meV_per_A": 5.932649525051645,
+    "P_GPa": -0.688055380128615
+   },
+   "bjm": {
+    "E_meV_per_atom": -31.52995443383509,
+    "rms_F_meV_per_A": 3.813712098040989,
+    "P_GPa": -0.567748961981378
+   },
+   "zerom": {
+    "E_meV_per_atom": -32.07734386068865,
+    "rms_F_meV_per_A": 11.40160011848981,
+    "P_GPa": -0.5858405280484466
+   }
+  },
+  "cn_cutoff": [
+   {
+    "cn_cutoff_bohr": 8.0,
+    "dE_meV_per_atom": -0.006722185574891688,
+    "max_dF_meV_per_A": 0.7371084627407765
+   },
+   {
+    "cn_cutoff_bohr": 11.34,
+    "dE_meV_per_atom": -0.005616718372800671,
+    "max_dF_meV_per_A": 0.5826691640322332
+   },
+   {
+    "cn_cutoff_bohr": 15.0,
+    "dE_meV_per_atom": -0.00486402184847656,
+    "max_dF_meV_per_A": 0.4978798871216328
+   },
+   {
+    "cn_cutoff_bohr": 20.0,
+    "dE_meV_per_atom": -0.004100401363886594,
+    "max_dF_meV_per_A": 0.417156364771791
+   },
+   {
+    "cn_cutoff_bohr": 30.0,
+    "dE_meV_per_atom": -0.0023469308535432015,
+    "max_dF_meV_per_A": 0.235746168835968
+   }
+  ]
+ },
+ "graphite 4x4x2": {
+  "atoms": 128,
+  "density_per_A3": 0.1136875947325109,
+  "pair_cutoff": [
+   {
+    "cutoff_bohr": 12.0,
+    "cutoff_A": 6.3501265308359995,
+    "dE_meV_per_atom": 14.446706564219342,
+    "max_dF_meV_per_A": 16.740909399363595,
+    "dP_GPa": 0.3464995973742506,
+    "neighbours_per_atom": 121.94073955059324,
+    "seconds": 0.015818475993000902
+   },
+   {
+    "cutoff_bohr": 20.0,
+    "cutoff_A": 10.583544218059998,
+    "dE_meV_per_atom": 2.9760344586207967,
+    "max_dF_meV_per_A": 3.4798611703584226,
+    "dP_GPa": 0.070419872267987,
+    "neighbours_per_atom": 564.5404608823759,
+    "seconds": 0.021184151992201805
+   },
+   {
+    "cutoff_bohr": 30.0,
+    "cutoff_A": 15.87531632709,
+    "dE_meV_per_atom": 0.8569173992206691,
+    "max_dF_meV_per_A": 0.9948287528489808,
+    "dP_GPa": 0.0201040512177465,
+    "neighbours_per_atom": 1905.3240554780195,
+    "seconds": 0.019711194006958976
+   },
+   {
+    "cutoff_bohr": 40.0,
+    "cutoff_A": 21.167088436119997,
+    "dE_meV_per_atom": 0.35076708665543466,
+    "max_dF_meV_per_A": 0.41102177280652463,
+    "dP_GPa": 0.008201932247850634,
+    "neighbours_per_atom": 4516.323687059007,
+    "seconds": 0.021976183008519
+   },
+   {
+    "cutoff_bohr": 60.0,
+    "cutoff_A": 31.75063265418,
+    "dE_meV_per_atom": 0.09924189818982798,
+    "max_dF_meV_per_A": 0.11562090056532748,
+    "dP_GPa": 0.0023149709597409334,
+    "neighbours_per_atom": 15242.592443824156,
+    "seconds": 0.030963858007453382
+   },
+   {
+    "cutoff_bohr": 95.0,
+    "cutoff_A": 50.271835035784996,
+    "dE_meV_per_atom": 0.019889216217455763,
+    "max_dF_meV_per_A": 0.023222765418551283,
+    "dP_GPa": 0.0004634179961264366,
+    "neighbours_per_atom": 60502.8597061284,
+    "seconds": 0.0671951190015534
+   }
+  ],
+  "bj_two_body_meV_per_atom": -155.19133358267425,
+  "atm": [
+   {
+    "cutoff3_bohr": 10.0,
+    "E_atm_meV_per_atom": 2.8987565482242186,
+    "max_F_atm_meV_per_A": 5.738242393902443,
+    "P_atm_GPa": -0.06318622910551226,
+    "seconds": 0.04450467199785635
+   },
+   {
+    "cutoff3_bohr": 15.0,
+    "E_atm_meV_per_atom": 7.843549776709896,
+    "max_F_atm_meV_per_A": 13.934295559862504,
+    "P_atm_GPa": 0.08350529674253371,
+    "seconds": 0.08895045200188179
+   },
+   {
+    "cutoff3_bohr": 20.0,
+    "E_atm_meV_per_atom": 8.727750127916266,
+    "max_F_atm_meV_per_A": 15.357477548133824,
+    "P_atm_GPa": 0.12897480309415155,
+    "seconds": 0.39876373900915496
+   },
+   {
+    "cutoff3_bohr": 30.0,
+    "E_atm_meV_per_atom": 9.11152809344659,
+    "max_F_atm_meV_per_A": 15.981676316236564,
+    "P_atm_GPa": 0.14278600989615645,
+    "seconds": 3.195645717001753
+   },
+   {
+    "cutoff3_bohr": 40.0,
+    "E_atm_meV_per_atom": 9.174633412419919,
+    "max_F_atm_meV_per_A": 16.0994813493166,
+    "P_atm_GPa": 0.14499157934659315,
+    "seconds": 16.59829625498969
+   }
+  ],
+  "dampings": {
+   "bj": {
+    "E_meV_per_atom": -155.09209168448442,
+    "rms_F_meV_per_A": 34.07243063252455,
+    "P_GPa": -1.0334571757904838
+   },
+   "zero": {
+    "E_meV_per_atom": -95.18071371811958,
+    "rms_F_meV_per_A": 19.38207973961338,
+    "P_GPa": -0.739584855206425
+   },
+   "bjm": {
+    "E_meV_per_atom": -188.289818936292,
+    "rms_F_meV_per_A": 41.983741009003104,
+    "P_GPa": -1.2034546303492175
+   },
+   "zerom": {
+    "E_meV_per_atom": -299.90991846650354,
+    "rms_F_meV_per_A": 59.61601662021523,
+    "P_GPa": -2.7273359661333494
+   }
+  },
+  "cn_cutoff": [
+   {
+    "cn_cutoff_bohr": 8.0,
+    "dE_meV_per_atom": -0.8251341239617627,
+    "max_dF_meV_per_A": 2.9997846784754616
+   },
+   {
+    "cn_cutoff_bohr": 11.34,
+    "dE_meV_per_atom": -0.4691464361233355,
+    "max_dF_meV_per_A": 1.7103949743802334
+   },
+   {
+    "cn_cutoff_bohr": 15.0,
+    "dE_meV_per_atom": -0.3412953289421983,
+    "max_dF_meV_per_A": 1.25984235475525
+   },
+   {
+    "cn_cutoff_bohr": 20.0,
+    "dE_meV_per_atom": -0.25447334731606985,
+    "max_dF_meV_per_A": 0.9349843392806728
+   },
+   {
+    "cn_cutoff_bohr": 30.0,
+    "dE_meV_per_atom": -0.12646900891347124,
+    "max_dF_meV_per_A": 0.4574019483992303
+   }
+  ]
+ },
+ "SrTiO3 3x3x3": {
+  "atoms": 135,
+  "density_per_A3": 0.08396666220390855,
+  "pair_cutoff": [
+   {
+    "cutoff_bohr": 12.0,
+    "cutoff_A": 6.3501265308359995,
+    "dE_meV_per_atom": 61.471724951820285,
+    "max_dF_meV_per_A": 10.623327190301216,
+    "dP_GPa": 1.6572013366712846,
+    "neighbours_per_atom": 90.06221752540473,
+    "seconds": 0.011820696003269404
+   },
+   {
+    "cutoff_bohr": 20.0,
+    "cutoff_A": 10.583544218059998,
+    "dE_meV_per_atom": 9.468072787724468,
+    "max_dF_meV_per_A": 0.2937631728480162,
+    "dP_GPa": 0.2652927916052329,
+    "neighbours_per_atom": 416.9547107657625,
+    "seconds": 0.012087235998478718
+   },
+   {
+    "cutoff_bohr": 30.0,
+    "cutoff_A": 15.87531632709,
+    "dE_meV_per_atom": 2.720843935218574,
+    "max_dF_meV_per_A": 0.023514185905705847,
+    "dP_GPa": 0.07485383097061317,
+    "neighbours_per_atom": 1407.222148834449,
+    "seconds": 0.014650673008873127
+   },
+   {
+    "cutoff_bohr": 40.0,
+    "cutoff_A": 21.167088436119997,
+    "dE_meV_per_atom": 1.0600623692340605,
+    "max_dF_meV_per_A": 0.005352197111089846,
+    "dP_GPa": 0.028884923086891123,
+    "neighbours_per_atom": 3335.6376861261,
+    "seconds": 0.01567855299799703
+   },
+   {
+    "cutoff_bohr": 60.0,
+    "cutoff_A": 31.75063265418,
+    "dE_meV_per_atom": 0.2968170174634532,
+    "max_dF_meV_per_A": 0.0005152750810429366,
+    "dP_GPa": 0.008034707605544365,
+    "neighbours_per_atom": 11257.777190675592,
+    "seconds": 0.023271366997505538
+   },
+   {
+    "cutoff_bohr": 95.0,
+    "cutoff_A": 50.271835035784996,
+    "dE_meV_per_atom": 0.058966032626141515,
+    "max_dF_meV_per_A": 2.685357671340996e-05,
+    "dP_GPa": 0.001590979233724157,
+    "neighbours_per_atom": 44685.81814284947,
+    "seconds": 0.05604100599884987
+   }
+  ],
+  "bj_two_body_meV_per_atom": -265.60692730128056,
+  "atm": [
+   {
+    "cutoff3_bohr": 10.0,
+    "E_atm_meV_per_atom": 0.9701082070785527,
+    "max_F_atm_meV_per_A": 0.08199194882611209,
+    "P_atm_GPa": -0.006364298425936298,
+    "seconds": 0.031230243999743834
+   },
+   {
+    "cutoff3_bohr": 15.0,
+    "E_atm_meV_per_atom": 9.49107877945818,
+    "max_F_atm_meV_per_A": 0.39325485761044143,
+    "P_atm_GPa": 0.10331749703361766,
+    "seconds": 0.06258223799522966
+   },
+   {
+    "cutoff3_bohr": 20.0,
+    "E_atm_meV_per_atom": 16.84510635014994,
+    "max_F_atm_meV_per_A": 0.3498789117829834,
+    "P_atm_GPa": 0.4168399577232137,
+    "seconds": 0.18827862000034656
+   },
+   {
+    "cutoff3_bohr": 30.0,
+    "E_atm_meV_per_atom": 18.55255439486517,
+    "max_F_atm_meV_per_A": 0.24817194390318928,
+    "P_atm_GPa": 0.4978945082401647,
+    "seconds": 2.069083629990928
+   },
+   {
+    "cutoff3_bohr": 40.0,
+    "E_atm_meV_per_atom": 18.909063467169187,
+    "max_F_atm_meV_per_A": 0.2565474692778,
+    "P_atm_GPa": 0.5123297615636,
+    "seconds": 8.945501977999811
+   }
+  ],
+  "dampings": {
+   "bj": {
+    "E_meV_per_atom": -265.31011028381715,
+    "rms_F_meV_per_A": 1.2165100635695436,
+    "P_GPa": -3.651221674206617
+   },
+   "zero": {
+    "E_meV_per_atom": -181.9557943536474,
+    "rms_F_meV_per_A": 5.0116223683669565,
+    "P_GPa": -2.726403000114704
+   },
+   "bjm": {
+    "E_meV_per_atom": -814.6034608947209,
+    "rms_F_meV_per_A": 24.1026234296982,
+    "P_GPa": -15.494096871675659
+   },
+   "zerom": {
+    "E_meV_per_atom": -728.6939733380958,
+    "rms_F_meV_per_A": 75.63969100571421,
+    "P_GPa": -16.193592076370212
+   }
+  },
+  "cn_cutoff": [
+   {
+    "cn_cutoff_bohr": 8.0,
+    "dE_meV_per_atom": -3.157967714489334e-13,
+    "max_dF_meV_per_A": 5.005002488844834e-11
+   },
+   {
+    "cn_cutoff_bohr": 11.34,
+    "dE_meV_per_atom": -5.26327952414889e-14,
+    "max_dF_meV_per_A": 1.3525422101756668e-11
+   },
+   {
+    "cn_cutoff_bohr": 15.0,
+    "dE_meV_per_atom": -5.26327952414889e-14,
+    "max_dF_meV_per_A": 6.576553537862573e-12
+   },
+   {
+    "cn_cutoff_bohr": 20.0,
+    "dE_meV_per_atom": 0.0,
+    "max_dF_meV_per_A": 7.576187940894208e-12
+   },
+   {
+    "cn_cutoff_bohr": 30.0,
+    "dE_meV_per_atom": 0.0,
+    "max_dF_meV_per_A": 4.1815509388420935e-12
+   }
+  ]
+ }
+}

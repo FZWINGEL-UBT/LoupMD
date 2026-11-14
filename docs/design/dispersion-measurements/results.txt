@@ -1,0 +1,97 @@
+atm keyword works: E(atm=False) = -13.797626 eV, E(atm=True) = -13.252908 eV
+
+== NbCl5 (R2SCAN cell): 72 atoms, 0.0348 atoms/A^3
+A  D3(BJ,PBE) two-body at 150 bohr: -191.798 meV/atom, pressure -1.2003 GPa (ASE sign: negative stress trace = compression)
+   cutoff    12 bohr (  6.4 A): dE  +25.994 meV/atom, max dF  7.6869 meV/A, dP +0.2988 GPa,       37 neighbours/atom,  0.00 s
+   cutoff    20 bohr ( 10.6 A): dE   +5.184 meV/atom, max dF  0.2900 meV/A, dP +0.0590 GPa,      173 neighbours/atom,  0.00 s
+   cutoff    30 bohr ( 15.9 A): dE   +1.401 meV/atom, max dF  0.0167 meV/A, dP +0.0158 GPa,      583 neighbours/atom,  0.00 s
+   cutoff    40 bohr ( 21.2 A): dE   +0.583 meV/atom, max dF  0.0048 meV/A, dP +0.0065 GPa,     1381 neighbours/atom,  0.00 s
+   cutoff    60 bohr ( 31.8 A): dE   +0.164 meV/atom, max dF  0.0004 meV/A, dP +0.0018 GPa,     4662 neighbours/atom,  0.01 s
+   cutoff    95 bohr ( 50.3 A): dE   +0.033 meV/atom, max dF  0.0000 meV/A, dP +0.0004 GPa,    18504 neighbours/atom,  0.01 s
+B  ATM cutoff   10 bohr: E_atm  +0.536 meV/atom (-0.28% of two-body), max F_atm 0.259 meV/A, P_atm -0.0051 GPa,   0.01 s
+B  ATM cutoff   15 bohr: E_atm  +5.861 meV/atom (-3.06% of two-body), max F_atm 1.344 meV/A, P_atm +0.0522 GPa,   0.01 s
+B  ATM cutoff   20 bohr: E_atm  +7.058 meV/atom (-3.68% of two-body), max F_atm 0.669 meV/A, P_atm +0.0802 GPa,   0.03 s
+B  ATM cutoff   30 bohr: E_atm  +7.479 meV/atom (-3.90% of two-body), max F_atm 0.825 meV/A, P_atm +0.0876 GPa,   0.17 s
+B  ATM cutoff   40 bohr: E_atm  +7.566 meV/atom (-3.95% of two-body), max F_atm 0.813 meV/A, P_atm +0.0890 GPa,   1.04 s
+C  dampings (PBE, two-body, 60 bohr): bj: -191.63 meV/atom, rms F 7.62 meV/A, P -1.198 GPa; zero: -137.28 meV/atom, rms F 32.30 meV/A, P -0.808 GPa; bjm: -351.01 meV/atom, rms F 64.70 meV/A, P -2.045 GPa; zerom: -450.42 meV/atom, rms F 298.19 meV/A, P -3.678 GPa
+D  CN cutoff (reference 40 bohr): 8.0 bohr: dE -0.0018 meV/atom, max dF 0.0099 meV/A; 11.3 bohr: dE -0.0005 meV/atom, max dF 0.0029 meV/A; 15.0 bohr: dE -0.0003 meV/atom, max dF 0.0015 meV/A; 20.0 bohr: dE -0.0002 meV/atom, max dF 0.0009 meV/A; 30.0 bohr: dE -0.0001 meV/atom, max dF 0.0004 meV/A
+
+== naphthalene crystal: 36 atoms, 0.1052 atoms/A^3
+A  D3(BJ,PBE) two-body at 150 bohr: -80.385 meV/atom, pressure -1.2433 GPa (ASE sign: negative stress trace = compression)
+   cutoff    12 bohr (  6.4 A): dE   +6.960 meV/atom, max dF  3.7308 meV/A, dP +0.2193 GPa,      113 neighbours/atom,  0.00 s
+   cutoff    20 bohr ( 10.6 A): dE   +1.424 meV/atom, max dF  0.6669 meV/A, dP +0.0445 GPa,      522 neighbours/atom,  0.00 s
+   cutoff    30 bohr ( 15.9 A): dE   +0.419 meV/atom, max dF  0.2054 meV/A, dP +0.0130 GPa,     1763 neighbours/atom,  0.00 s
+   cutoff    40 bohr ( 21.2 A): dE   +0.174 meV/atom, max dF  0.0848 meV/A, dP +0.0054 GPa,     4180 neighbours/atom,  0.00 s
+   cutoff    60 bohr ( 31.8 A): dE   +0.049 meV/atom, max dF  0.0238 meV/A, dP +0.0015 GPa,    14106 neighbours/atom,  0.01 s
+   cutoff    95 bohr ( 50.3 A): dE   +0.010 meV/atom, max dF  0.0048 meV/A, dP +0.0003 GPa,    55992 neighbours/atom,  0.02 s
+B  ATM cutoff   10 bohr: E_atm  +1.618 meV/atom (-2.01% of two-body), max F_atm 1.208 meV/A, P_atm +0.0099 GPa,   0.01 s
+B  ATM cutoff   15 bohr: E_atm  +3.538 meV/atom (-4.40% of two-body), max F_atm 2.511 meV/A, P_atm +0.0951 GPa,   0.03 s
+B  ATM cutoff   20 bohr: E_atm  +3.847 meV/atom (-4.79% of two-body), max F_atm 2.667 meV/A, P_atm +0.1129 GPa,   0.08 s
+B  ATM cutoff   30 bohr: E_atm  +3.932 meV/atom (-4.89% of two-body), max F_atm 2.716 meV/A, P_atm +0.1170 GPa,   0.74 s
+B  ATM cutoff   40 bohr: E_atm  +3.951 meV/atom (-4.92% of two-body), max F_atm 2.756 meV/A, P_atm +0.1179 GPa,   3.59 s
+C  dampings (PBE, two-body, 60 bohr): bj: -80.34 meV/atom, rms F 15.60 meV/A, P -1.242 GPa; zero: -58.98 meV/atom, rms F 14.78 meV/A, P -0.993 GPa; bjm: -90.70 meV/atom, rms F 14.69 meV/A, P -1.336 GPa; zerom: -144.50 meV/atom, rms F 70.51 meV/A, P -2.390 GPa
+D  CN cutoff (reference 40 bohr): 8.0 bohr: dE -0.0927 meV/atom, max dF 1.4968 meV/A; 11.3 bohr: dE -0.0602 meV/atom, max dF 0.9460 meV/A; 15.0 bohr: dE -0.0475 meV/atom, max dF 0.7348 meV/A; 20.0 bohr: dE -0.0361 meV/atom, max dF 0.5525 meV/A; 30.0 bohr: dE -0.0187 meV/atom, max dF 0.2842 meV/A
+
+== urea crystal: 128 atoms, 0.1100 atoms/A^3
+A  D3(BJ,PBE) two-body at 150 bohr: -59.801 meV/atom, pressure -1.1308 GPa (ASE sign: negative stress trace = compression)
+   cutoff    12 bohr (  6.4 A): dE   +4.800 meV/atom, max dF  1.4303 meV/A, dP +0.1700 GPa,      118 neighbours/atom,  0.01 s
+   cutoff    20 bohr ( 10.6 A): dE   +1.008 meV/atom, max dF  0.2914 meV/A, dP +0.0355 GPa,      546 neighbours/atom,  0.01 s
+   cutoff    30 bohr ( 15.9 A): dE   +0.298 meV/atom, max dF  0.0841 meV/A, dP +0.0105 GPa,     1843 neighbours/atom,  0.02 s
+   cutoff    40 bohr ( 21.2 A): dE   +0.123 meV/atom, max dF  0.0349 meV/A, dP +0.0043 GPa,     4369 neighbours/atom,  0.02 s
+   cutoff    60 bohr ( 31.8 A): dE   +0.035 meV/atom, max dF  0.0098 meV/A, dP +0.0012 GPa,    14745 neighbours/atom,  0.03 s
+   cutoff    95 bohr ( 50.3 A): dE   +0.007 meV/atom, max dF  0.0020 meV/A, dP +0.0002 GPa,    58527 neighbours/atom,  0.07 s
+B  ATM cutoff   10 bohr: E_atm  +1.747 meV/atom (-2.92% of two-body), max F_atm 1.283 meV/A, P_atm +0.0327 GPa,   0.04 s
+B  ATM cutoff   15 bohr: E_atm  +2.937 meV/atom (-4.91% of two-body), max F_atm 1.294 meV/A, P_atm +0.1017 GPa,   0.09 s
+B  ATM cutoff   20 bohr: E_atm  +3.147 meV/atom (-5.27% of two-body), max F_atm 1.627 meV/A, P_atm +0.1140 GPa,   0.33 s
+B  ATM cutoff   30 bohr: E_atm  +3.193 meV/atom (-5.34% of two-body), max F_atm 1.583 meV/A, P_atm +0.1164 GPa,   3.03 s
+B  ATM cutoff   40 bohr: E_atm  +3.207 meV/atom (-5.37% of two-body), max F_atm 1.584 meV/A, P_atm +0.1172 GPa,  14.39 s
+C  dampings (PBE, two-body, 60 bohr): bj: -59.77 meV/atom, rms F 4.66 meV/A, P -1.130 GPa; zero: -52.65 meV/atom, rms F 9.34 meV/A, P -1.011 GPa; bjm: -61.05 meV/atom, rms F 5.27 meV/A, P -1.142 GPa; zerom: -74.24 meV/atom, rms F 29.65 meV/A, P -1.457 GPa
+D  CN cutoff (reference 40 bohr): 8.0 bohr: dE -0.0177 meV/atom, max dF 0.3917 meV/A; 11.3 bohr: dE -0.0123 meV/atom, max dF 0.2937 meV/A; 15.0 bohr: dE -0.0105 meV/atom, max dF 0.2549 meV/A; 20.0 bohr: dE -0.0083 meV/atom, max dF 0.2056 meV/A; 30.0 bohr: dE -0.0045 meV/atom, max dF 0.1143 meV/A
+
+== water 216: 648 atoms, 0.1000 atoms/A^3
+A  D3(BJ,PBE) two-body at 150 bohr: -33.395 meV/atom, pressure -0.5938 GPa (ASE sign: negative stress trace = compression)
+   cutoff    12 bohr (  6.4 A): dE   +2.629 meV/atom, max dF  4.0363 meV/A, dP +0.0843 GPa,      107 neighbours/atom,  0.11 s
+   cutoff    20 bohr ( 10.6 A): dE   +0.525 meV/atom, max dF  0.8391 meV/A, dP +0.0168 GPa,      496 neighbours/atom,  0.12 s
+   cutoff    30 bohr ( 15.9 A): dE   +0.156 meV/atom, max dF  0.2487 meV/A, dP +0.0050 GPa,     1676 neighbours/atom,  0.12 s
+   cutoff    40 bohr ( 21.2 A): dE   +0.064 meV/atom, max dF  0.1031 meV/A, dP +0.0020 GPa,     3972 neighbours/atom,  0.15 s
+   cutoff    60 bohr ( 31.8 A): dE   +0.018 meV/atom, max dF  0.0292 meV/A, dP +0.0006 GPa,    13405 neighbours/atom,  0.19 s
+   cutoff    95 bohr ( 50.3 A): dE   +0.004 meV/atom, max dF  0.0059 meV/A, dP +0.0001 GPa,    53210 neighbours/atom,  0.36 s
+B  ATM cutoff   10 bohr: E_atm  +1.159 meV/atom (-3.47% of two-body), max F_atm 2.681 meV/A, P_atm +0.0260 GPa,   0.40 s
+B  ATM cutoff   15 bohr: E_atm  +1.512 meV/atom (-4.53% of two-body), max F_atm 3.402 meV/A, P_atm +0.0460 GPa,   1.00 s
+B  ATM cutoff   20 bohr: E_atm  +1.542 meV/atom (-4.62% of two-body), max F_atm 3.466 meV/A, P_atm +0.0477 GPa,   2.34 s
+C  dampings (PBE, two-body, 60 bohr): bj: -33.38 meV/atom, rms F 4.08 meV/A, P -0.593 GPa; zero: -36.36 meV/atom, rms F 5.93 meV/A, P -0.688 GPa; bjm: -31.53 meV/atom, rms F 3.81 meV/A, P -0.568 GPa; zerom: -32.08 meV/atom, rms F 11.40 meV/A, P -0.586 GPa
+D  CN cutoff (reference 40 bohr): 8.0 bohr: dE -0.0067 meV/atom, max dF 0.7371 meV/A; 11.3 bohr: dE -0.0056 meV/atom, max dF 0.5827 meV/A; 15.0 bohr: dE -0.0049 meV/atom, max dF 0.4979 meV/A; 20.0 bohr: dE -0.0041 meV/atom, max dF 0.4172 meV/A; 30.0 bohr: dE -0.0023 meV/atom, max dF 0.2357 meV/A
+
+== graphite 4x4x2: 128 atoms, 0.1137 atoms/A^3
+A  D3(BJ,PBE) two-body at 150 bohr: -155.191 meV/atom, pressure -1.0358 GPa (ASE sign: negative stress trace = compression)
+   cutoff    12 bohr (  6.4 A): dE  +14.447 meV/atom, max dF 16.7409 meV/A, dP +0.3465 GPa,      122 neighbours/atom,  0.02 s
+   cutoff    20 bohr ( 10.6 A): dE   +2.976 meV/atom, max dF  3.4799 meV/A, dP +0.0704 GPa,      565 neighbours/atom,  0.02 s
+   cutoff    30 bohr ( 15.9 A): dE   +0.857 meV/atom, max dF  0.9948 meV/A, dP +0.0201 GPa,     1905 neighbours/atom,  0.02 s
+   cutoff    40 bohr ( 21.2 A): dE   +0.351 meV/atom, max dF  0.4110 meV/A, dP +0.0082 GPa,     4516 neighbours/atom,  0.02 s
+   cutoff    60 bohr ( 31.8 A): dE   +0.099 meV/atom, max dF  0.1156 meV/A, dP +0.0023 GPa,    15243 neighbours/atom,  0.03 s
+   cutoff    95 bohr ( 50.3 A): dE   +0.020 meV/atom, max dF  0.0232 meV/A, dP +0.0005 GPa,    60503 neighbours/atom,  0.07 s
+B  ATM cutoff   10 bohr: E_atm  +2.899 meV/atom (-1.87% of two-body), max F_atm 5.738 meV/A, P_atm -0.0632 GPa,   0.04 s
+B  ATM cutoff   15 bohr: E_atm  +7.844 meV/atom (-5.06% of two-body), max F_atm 13.934 meV/A, P_atm +0.0835 GPa,   0.09 s
+B  ATM cutoff   20 bohr: E_atm  +8.728 meV/atom (-5.63% of two-body), max F_atm 15.357 meV/A, P_atm +0.1290 GPa,   0.40 s
+B  ATM cutoff   30 bohr: E_atm  +9.112 meV/atom (-5.87% of two-body), max F_atm 15.982 meV/A, P_atm +0.1428 GPa,   3.20 s
+B  ATM cutoff   40 bohr: E_atm  +9.175 meV/atom (-5.92% of two-body), max F_atm 16.099 meV/A, P_atm +0.1450 GPa,  16.60 s
+C  dampings (PBE, two-body, 60 bohr): bj: -155.09 meV/atom, rms F 34.07 meV/A, P -1.033 GPa; zero: -95.18 meV/atom, rms F 19.38 meV/A, P -0.740 GPa; bjm: -188.29 meV/atom, rms F 41.98 meV/A, P -1.203 GPa; zerom: -299.91 meV/atom, rms F 59.62 meV/A, P -2.727 GPa
+D  CN cutoff (reference 40 bohr): 8.0 bohr: dE -0.8251 meV/atom, max dF 2.9998 meV/A; 11.3 bohr: dE -0.4691 meV/atom, max dF 1.7104 meV/A; 15.0 bohr: dE -0.3413 meV/atom, max dF 1.2598 meV/A; 20.0 bohr: dE -0.2545 meV/atom, max dF 0.9350 meV/A; 30.0 bohr: dE -0.1265 meV/atom, max dF 0.4574 meV/A
+
+== SrTiO3 3x3x3: 135 atoms, 0.0840 atoms/A^3
+A  D3(BJ,PBE) two-body at 150 bohr: -265.607 meV/atom, pressure -3.6593 GPa (ASE sign: negative stress trace = compression)
+   cutoff    12 bohr (  6.4 A): dE  +61.472 meV/atom, max dF 10.6233 meV/A, dP +1.6572 GPa,       90 neighbours/atom,  0.01 s
+   cutoff    20 bohr ( 10.6 A): dE   +9.468 meV/atom, max dF  0.2938 meV/A, dP +0.2653 GPa,      417 neighbours/atom,  0.01 s
+   cutoff    30 bohr ( 15.9 A): dE   +2.721 meV/atom, max dF  0.0235 meV/A, dP +0.0749 GPa,     1407 neighbours/atom,  0.01 s
+   cutoff    40 bohr ( 21.2 A): dE   +1.060 meV/atom, max dF  0.0054 meV/A, dP +0.0289 GPa,     3336 neighbours/atom,  0.02 s
+   cutoff    60 bohr ( 31.8 A): dE   +0.297 meV/atom, max dF  0.0005 meV/A, dP +0.0080 GPa,    11258 neighbours/atom,  0.02 s
+   cutoff    95 bohr ( 50.3 A): dE   +0.059 meV/atom, max dF  0.0000 meV/A, dP +0.0016 GPa,    44686 neighbours/atom,  0.06 s
+B  ATM cutoff   10 bohr: E_atm  +0.970 meV/atom (-0.37% of two-body), max F_atm 0.082 meV/A, P_atm -0.0064 GPa,   0.03 s
+B  ATM cutoff   15 bohr: E_atm  +9.491 meV/atom (-3.58% of two-body), max F_atm 0.393 meV/A, P_atm +0.1033 GPa,   0.06 s
+B  ATM cutoff   20 bohr: E_atm +16.845 meV/atom (-6.35% of two-body), max F_atm 0.350 meV/A, P_atm +0.4168 GPa,   0.19 s
+B  ATM cutoff   30 bohr: E_atm +18.553 meV/atom (-6.99% of two-body), max F_atm 0.248 meV/A, P_atm +0.4979 GPa,   2.07 s
+B  ATM cutoff   40 bohr: E_atm +18.909 meV/atom (-7.13% of two-body), max F_atm 0.257 meV/A, P_atm +0.5123 GPa,   8.95 s
+C  dampings (PBE, two-body, 60 bohr): bj: -265.31 meV/atom, rms F 1.22 meV/A, P -3.651 GPa; zero: -181.96 meV/atom, rms F 5.01 meV/A, P -2.726 GPa; bjm: -814.60 meV/atom, rms F 24.10 meV/A, P -15.494 GPa; zerom: -728.69 meV/atom, rms F 75.64 meV/A, P -16.194 GPa
+D  CN cutoff (reference 40 bohr): 8.0 bohr: dE -0.0000 meV/atom, max dF 0.0000 meV/A; 11.3 bohr: dE -0.0000 meV/atom, max dF 0.0000 meV/A; 15.0 bohr: dE -0.0000 meV/atom, max dF 0.0000 meV/A; 20.0 bohr: dE +0.0000 meV/atom, max dF 0.0000 meV/A; 30.0 bohr: dE +0.0000 meV/atom, max dF 0.0000 meV/A
+
+
