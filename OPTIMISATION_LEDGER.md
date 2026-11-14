@@ -1389,6 +1389,7 @@ POLAR-1 NaCl 3x3x3 (216) and POLAR-1-M `NbCl5` 3x3x3 (1,944).
   - `first_bwd_edge_kernel` (`OMAT-0-S`): short scoreboard (shared memory) 24%, not selected 18%, long scoreboard 16% spread over two `LDG.128` loads (6% / 4%); no single dominant load.
   - `gconv_bwd_L1` (`OFF23-M` water): not selected 34%, long scoreboard 21% (largest single load ~5%), dispatch 12%: issue-limited, as recorded in `s33-mptrj-l1-after`.
   - OMAT-0 medium (specialised, `SrTiO3`; fresh `nsys`: `w'` 34%, spline 21%, `sgemm128` 21%, i0 backward 6.4% of 8.8 ms of kernels): `wprime_backward_inter1_rcv` not selected 40%, dispatch 15%, long scoreboard 11% with no load above 3%: issue-limited, as `meas-ncu` / S32 found. `tabled_outer_sum0_backward_kernel`: wait 24%, short scoreboard 21%, long scoreboard 17%, no instruction above 4%. No single latency target in either.
+- S42 (`ncu`, `OMAT-0-S` `SrTiO3` unless noted): `gprod_ro1_fused` 82% and `gprod_bwd` 87% of DRAM peak (at the roofline, as S28 found); `POLAR-1-S` `NaCl216` `sgemm64` (17 us launches): `selected` 50%, i.e. issue at the small-grid limit (`s23-small-m-gemm`). `first_fwd_kernel` (226 us, DRAM 59%): barrier 23%, long scoreboard 21% (its per-edge table `LDG.128` ~10%). `#pragma unroll 4` on its edge loop (`sm_120` only, 60 registers, no spill) to keep four rows in flight was slower: `nsys` `268 -> 304 us` (`OMAT-0-S`, `+13%`), `154 -> 179` (`OFF23-S`, `+17%`), `188 -> 237` (`OFF23-M`, `+26%`). Reverted.
 
 <a id="s33-mptrj-l1-after"></a>
 #### s33-mptrj-l1-after: `MPtrj` L1 conv limiters after S29-S31 (no change)
