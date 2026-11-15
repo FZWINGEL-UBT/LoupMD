@@ -135,6 +135,51 @@ __global__ void __launch_bounds__(128) tabled_outer_sum0_forward_kernel(
     if (lane == 0) D0[rcv] = d0_acc;
 }
 
+// The ZBL pair energy alone, with the arithmetic of tabled_outer_sum0_backward_kernel below (which adds it in the
+// full pass), for the energy-only pass. Grid: ceil(E / 256), 256 threads.
+__global__ void zbl_energy0_kernel(
+    const int* __restrict__ E_ptr, float zbl_r_max_max, float zbl_p,
+    float zbl_c0, float zbl_c1, float zbl_c2, float zbl_c3,
+    const float4* __restrict__ vec_len, const int* __restrict__ pairs,
+    const float* __restrict__ zbl_r_cut, const float* __restrict__ zbl_inv_a, const float* __restrict__ zbl_pref,
+    double* __restrict__ energy_f64
+) {
+    const int E = *E_ptr;
+    const int e = blockIdx.x * blockDim.x + threadIdx.x;
+    double en = 0.0;
+    if (e < E) {
+        const float n = vec_len[e].w;
+        if (zbl_r_max_max > 0.0f && n < zbl_r_max_max) {
+            const int p = pairs[e];
+            const float rc = zbl_r_cut[p];
+            if (n > 0.0f && n < rc) {
+                const double r = (double)n;
+                const double inv_a = (double)zbl_inv_a[p];
+                const double pref = (double)zbl_pref[p];
+                const double u = r * inv_a;
+                const double e0 = exp(-3.2 * u);
+                const double e1 = exp(-0.9423 * u);
+                const double e2 = exp(-0.4028 * u);
+                const double e3 = exp(-0.2016 * u);
+                const double phi = (double)zbl_c0 * e0 + (double)zbl_c1 * e1 + (double)zbl_c2 * e2 + (double)zbl_c3 * e3;
+                const double inv_r = 1.0 / r;
+                const double v = pref * inv_r * phi;
+                const double zp = (double)zbl_p;
+                const double s = r / (double)rc;
+                const double sp1 = (zbl_p == 5.0f) ? (s * s * s * s) : pow(s, zp - 1.0);
+                const double sp = sp1 * s;
+                const double env = 1.0 - ((zp + 1.0) * (zp + 2.0) * 0.5) * sp
+                                       + (zp * (zp + 2.0)) * (sp * s)
+                                       - (zp * (zp + 1.0) * 0.5) * (sp * s * s);
+                en = v * env;
+            }
+        }
+    }
+    #pragma unroll
+    for (int off = 16; off > 0; off >>= 1) en += __shfl_xor_sync(0xffffffffu, en, off);
+    if ((threadIdx.x & 31) == 0 && en != 0.0) atomicAdd(energy_f64, en);
+}
+
 // Interaction 0 tabled outer sum backward + fused SH pullback, ZBL, and force/virial assembly:
 // Grid: ceil(E / 128), Block: 128 threads (4 warps x 32 edges/warp, 2 channels/lane).
 // Stages each warp's 32 edges' SH (computed from vec_len), then their (dr0, dsh0[1..15]) results, in 10 KB SMEM; all

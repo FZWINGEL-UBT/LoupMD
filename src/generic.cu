@@ -262,6 +262,24 @@ __device__ __forceinline__ bool zbl_pair(const ZblParams& z, int p, float r, flo
     return true;
 }
 
+// The ZBL pair energy alone, per edge as assemble_forces_kernel and first_bwd_edge_kernel add it in the full pass,
+// for the energy-only pass.
+__global__ void zbl_energy_kernel(const int* __restrict__ E_dev, int S, const float4* __restrict__ vec_len,
+                                  const int* __restrict__ senders, const int* __restrict__ receivers,
+                                  const int* __restrict__ species, ZblParams z, double* __restrict__ energy) {
+    const int E = *E_dev;
+    const int e = blockIdx.x * blockDim.x + threadIdx.x;
+    double en = 0.0;
+    if (e < E) {
+        const float4 vl = vec_len[e];
+        float zen, g;
+        if (vl.w < z.r_max && zbl_pair(z, species[senders[e]] * S + species[receivers[e]], vl.w, zen, g)) en = zen;
+    }
+    #pragma unroll
+    for (int off = 16; off > 0; off >>= 1) en += __shfl_xor_sync(0xffffffffu, en, off);
+    if ((threadIdx.x & 31) == 0 && en != 0.0) atomicAdd(energy, en);
+}
+
 // Per edge, the last pass of the backward: ZBL, then forces and virial from the total dE/dvec
 // (vec = pos[rcv] - pos[snd] + shift). ZBL used to be a separate pass over all edges before the backward.
 template <bool ZBL, bool STRESS>
@@ -1927,6 +1945,25 @@ void GenericModel::record(const GenericPassInputs& in) {
     };
 
     // ---------------- the pass
+    if (in.energy_only) {
+        // The readouts of every layer, the long range and ZBL. Nothing is differentiated, except inside the two
+        // calls that fuse their backward with the forward (the last layer's product + readout kernel, the long
+        // range): their gradients are not used.
+        for (int t = 0; t < n_layers_; ++t) forward_layer(t, in.energy);
+        if (lr_) {
+            std::vector<std::vector<float*>> hs, dhs;
+            for (auto* L : layers_) {
+                hs.emplace_back(L->hout, L->hout + L->lmax_out + 1);
+                dhs.emplace_back(L->dhout, L->dhout + L->lmax_out + 1);
+            }
+            lr_->record(st, N, in.gemm, in.gemm_fork, in.gemm_lane, in.gemm_join, in.species, in.pos64, hs, dhs,
+                        in.energy, in.forces, 0, in.virial);
+        }
+        if (has_edges && has_zbl_)
+            zbl_energy_kernel<<<(in.E_cap + 255) / 256, 256, 0, st>>>(in.E_dev, S, in.act_vec_len, in.act_senders,
+                                                                      in.act_receivers, in.species, zbl_p, in.energy);
+        return;
+    }
     if (!sweep_replay_) {
         // Whole system: every layer forward, the long range, every layer backward, all activations kept.
         for (int t = 0; t < n_layers_; ++t) forward_layer(t, in.energy);

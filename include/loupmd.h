@@ -82,6 +82,27 @@ int loup_evaluate(
     double* out_stress
 );
 
+// loup_evaluate with flags.
+//   LOUP_EVAL_STRESS       also the stress (out_stress [3, 3]); without it out_stress is not written.
+//   LOUP_EVAL_ENERGY_ONLY  the energy alone, from a pass without gradients: for Monte Carlo move energies. Forces
+//                          and stress are not computed and out_forces is not written; the forces loup_get_state
+//                          returns are then not those of these positions, and a run that follows starts with a
+//                          force pass of its own. Excludes LOUP_EVAL_STRESS.
+//   LOUP_EVAL_PER_ATOM     per-atom energies into out_atom_energies [n_atoms]: refused until built.
+#define LOUP_EVAL_STRESS 1
+#define LOUP_EVAL_ENERGY_ONLY 2
+#define LOUP_EVAL_PER_ATOM 4
+int loup_evaluate2(
+    LoupHandle* h,
+    const double* positions,
+    const double* cell,
+    int flags,
+    double* out_energy_ev,
+    double* out_forces,
+    double* out_stress,
+    double* out_atom_energies
+);
+
 // Initialize MD state (positions [n_atoms, 3] in A, velocities [n_atoms, 3] in ASE units, i.e. A per ASE time unit
 // as returned by ase.Atoms.get_velocities(); cell [3, 3] in A). Velocities are zero after loup_set_system until
 // this call sets them (a run after only loup_evaluate starts from rest).

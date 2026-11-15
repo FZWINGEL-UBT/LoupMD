@@ -74,6 +74,7 @@ class LoupIntegrator(ctypes.Structure):
 
 
 LOUP_EXEC_AUTO, LOUP_EXEC_WHOLE, LOUP_EXEC_TILED, LOUP_EXEC_WAVEFRONT = 0, 1, 2, 3
+LOUP_EVAL_STRESS, LOUP_EVAL_ENERGY_ONLY, LOUP_EVAL_PER_ATOM = 1, 2, 4
 
 
 class LoupThermoRow(ctypes.Structure):
@@ -224,6 +225,8 @@ def _load_lib():
     lib.loup_evaluate.argtypes = [ctypes.c_void_p, _c_double_p, _c_double_p, ctypes.c_int, _c_double_p, _c_double_p,
                                   _c_double_p]
     lib.loup_set_state.argtypes = [ctypes.c_void_p, _c_double_p, _c_double_p, _c_double_p]
+    lib.loup_evaluate2.argtypes = [ctypes.c_void_p, _c_double_p, _c_double_p, ctypes.c_int, _c_double_p, _c_double_p,
+                                   _c_double_p, _c_double_p]
     lib.loup_run_nve.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_double, ctypes.POINTER(LoupMDStats)]
     lib.loup_run_langevin.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_double, ctypes.c_double,
                                       ctypes.c_double, ctypes.c_ulonglong, ctypes.POINTER(LoupMDStats)]
@@ -231,7 +234,7 @@ def _load_lib():
     lib.loup_profile_force.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_int, _c_double_p]
     for name in ("loup_set_system", "loup_evaluate", "loup_set_state", "loup_run_nve", "loup_run_langevin",
                  "loup_get_state", "loup_profile_force", "loup_get_info", "loup_run", "loup_export_state",
-                 "loup_import_state", "loup_plan_memory", "loup_read_thermo"):
+                 "loup_import_state", "loup_plan_memory", "loup_read_thermo", "loup_evaluate2"):
         getattr(lib, name).restype = ctypes.c_int
     _LIB = lib
     return lib
@@ -316,6 +319,16 @@ class LoupEngine:
         self._check(self._lib.loup_evaluate(self._h, _ptr(pos), _ptr(cel), 1 if compute_stress else 0,
                                             ctypes.byref(energy), _ptr(forces), _ptr(stress)), "loup_evaluate")
         return float(energy.value), forces, stress
+
+    def evaluate_energy(self, positions, cell) -> float:
+        """The energy alone, from a pass without gradients (``LOUP_EVAL_ENERGY_ONLY``). The forces on the device
+        are not those of these positions afterwards."""
+        pos = _array(positions, (self._n, 3), "positions")
+        cel = _array(cell, (3, 3), "cell")
+        energy = ctypes.c_double()
+        self._check(self._lib.loup_evaluate2(self._h, _ptr(pos), _ptr(cel), LOUP_EVAL_ENERGY_ONLY,
+                                             ctypes.byref(energy), None, None, None), "loup_evaluate2")
+        return float(energy.value)
 
     def set_state(self, positions, velocities, cell):
         pos = _array(positions, (self._n, 3), "positions")

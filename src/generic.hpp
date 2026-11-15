@@ -40,6 +40,7 @@ struct GenericPassInputs {
     double* virial;            // [6] (zeroed here)
     const double* pos64;       // [N, 3] positions (device order; the long-range k-space terms read them)
     int compute_stress;
+    int energy_only = 0;       // forward of every layer and the ZBL energy only: no forces, no stress
     GemmFn gemm;
     std::function<void()> gemm_fork;
     std::function<void(int)> gemm_lane;

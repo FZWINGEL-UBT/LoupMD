@@ -131,6 +131,12 @@ __global__ void tabled_outer_sum0_backward_kernel(
     const float* __restrict__ zbl_r_cut, const float* __restrict__ zbl_inv_a, const float* __restrict__ zbl_pref,
     const float* __restrict__ edge_force_1,
     double* __restrict__ energy_f64, double* __restrict__ forces_f64, double* __restrict__ virial_grad_f64);
+__global__ void zbl_energy0_kernel(
+    const int* __restrict__ E_ptr, float zbl_r_max_max, float zbl_p,
+    float zbl_c0, float zbl_c1, float zbl_c2, float zbl_c3,
+    const float4* __restrict__ vec_len, const int* __restrict__ pairs,
+    const float* __restrict__ zbl_r_cut, const float* __restrict__ zbl_inv_a, const float* __restrict__ zbl_pref,
+    double* __restrict__ energy_f64);
 constexpr double ASE_FS = 0.09822694788464063;
 constexpr double ASE_KB = 8.617330337217213e-5;
 
@@ -554,6 +560,10 @@ struct LoupHandle {
     cudaGraph_t force_graph = nullptr;
     cudaGraphExec_t force_graph_exec = nullptr;
     int force_graph_stress = -1;
+    // The energy-only pass (loup_evaluate2 with LOUP_EVAL_ENERGY_ONLY), kept beside the force graph so that
+    // alternating the two (Monte Carlo between MD steps) captures neither again.
+    cudaGraph_t energy_graph = nullptr;
+    cudaGraphExec_t energy_graph_exec = nullptr;
 
     cudaGraph_t md_graph = nullptr;  // pipelined loop: move + check + forces + second half
     cudaGraphExec_t md_graph_exec = nullptr;
@@ -578,6 +588,8 @@ struct LoupHandle {
         if (force_graph_exec) { cudaGraphExecDestroy(force_graph_exec); force_graph_exec = nullptr; }
         if (force_graph) { cudaGraphDestroy(force_graph); force_graph = nullptr; }
         force_graph_stress = -1;
+        if (energy_graph_exec) { cudaGraphExecDestroy(energy_graph_exec); energy_graph_exec = nullptr; }
+        if (energy_graph) { cudaGraphDestroy(energy_graph); energy_graph = nullptr; }
         invalidate_md_graphs();
     }
     void invalidate_md_graphs() {
@@ -1292,7 +1304,7 @@ static void tune_rebuild_variants(LoupHandle* h) {
                 (int)h->spline_pair, wp[0] * 1e3, wp[1] * 1e3, h->wp_threads);
 }
 
-static void record_force_pass(LoupHandle* h, int compute_stress) {
+static void record_force_pass(LoupHandle* h, int compute_stress, bool energy_only = false) {
     const int N = h->N;
     const int E = h->E_graph;
     const int S = h->n_species();
@@ -1367,6 +1379,7 @@ static void record_force_pass(LoupHandle* h, int compute_stress) {
         in.forces = h->d_forces_f64;
         in.virial = h->d_virial_grad_f64;
         in.compute_stress = compute_stress;
+        in.energy_only = energy_only ? 1 : 0;
         in.pos64 = h->d_pos64;
         in.gemm = [h](bool transB, int M, int Nc, int K, float alpha, const float* A, int lda, const float* B, int ldb,
                       float beta, float* C, int ldc) {
@@ -1449,6 +1462,16 @@ static void record_force_pass(LoupHandle* h, int compute_stress) {
         h->d_y1, h->d_hidden16, h->d_energy_f64,
         h->d_db0, h->d_db1, h->d_db2, h->d_db3, h->d_dD1);
 
+    if (energy_only) {
+        // Both readouts have added their energy (sc1_fused also ran its part of the backward: not used). What is
+        // left of the energy is ZBL, which the full pass takes in its last edge kernel.
+        if (h->model.has_zbl)
+            loup::zbl_energy0_kernel<<<(E + 255) / 256, 256, 0, h->stream>>>(
+                d_E_act, h->model.zbl_r_max_max, h->model.zbl_p, h->model.zbl_c[0], h->model.zbl_c[1],
+                h->model.zbl_c[2], h->model.zbl_c[3], h->d_act_vec_len, h->d_act_pairs, h->model.d_zbl_r_cut,
+                h->model.d_zbl_inv_a, h->model.d_zbl_pref, h->d_energy_f64);
+        return;
+    }
     // 7. Backward: Interaction 1
     gemm_fork(h);
     gemm_lane(h, 0);
@@ -1552,6 +1575,19 @@ static int ensure_force_graph(LoupHandle* h, int compute_stress) {
     CUDA_CHECK(cudaStreamEndCapture(h->stream, &h->force_graph));
     CUDA_CHECK(cudaGraphInstantiate(&h->force_graph_exec, h->force_graph, nullptr, nullptr, 0));
     h->force_graph_stress = compute_stress;
+    return 0;
+}
+
+// The energy-only graph. The uncaptured tuning pass is the full one of ensure_force_graph (the energy-only pass has
+// a subset of its GEMM shapes).
+static int ensure_energy_graph(LoupHandle* h) {
+    if (h->energy_graph_exec) return 0;
+    if (h->lt_cache.empty() && ensure_force_graph(h, 0) != 0) return -1;
+    if (h->energy_graph) { cudaGraphDestroy(h->energy_graph); h->energy_graph = nullptr; }
+    CUDA_CHECK(cudaStreamBeginCapture(h->stream, cudaStreamCaptureModeGlobal));
+    record_force_pass(h, 0, true);
+    CUDA_CHECK(cudaStreamEndCapture(h->stream, &h->energy_graph));
+    CUDA_CHECK(cudaGraphInstantiate(&h->energy_graph_exec, h->energy_graph, nullptr, nullptr, 0));
     return 0;
 }
 
@@ -2038,10 +2074,9 @@ static int set_state_impl(LoupHandle* h, const double* positions, const double* 
     return rebuild_neighbors(h);
 }
 
-static int evaluate_impl(
-    LoupHandle* h, const double* positions, const double* cell, int compute_stress,
-    double* out_energy_ev, double* out_forces, double* out_stress
-) {
+// What every evaluation starts with: the new positions and cell on the device and a neighbour list that is complete
+// for them.
+static int prepare_evaluate(LoupHandle* h, const double* positions, const double* cell) {
     if (!has_system(h)) return -1;
     CUDA_CHECK(cudaSetDevice(h->device_id));
     // Positions only: MD velocities are kept. The neighbour list is rebuilt only when the cell changed or an atom
@@ -2060,6 +2095,14 @@ static int evaluate_impl(
         rebuild = flag != 0;
     }
     if (rebuild && rebuild_neighbors(h) != 0) return -1;
+    return 0;
+}
+
+static int evaluate_impl(
+    LoupHandle* h, const double* positions, const double* cell, int compute_stress,
+    double* out_energy_ev, double* out_forces, double* out_stress
+) {
+    if (prepare_evaluate(h, positions, cell) != 0) return -1;
     if (ensure_force_graph(h, compute_stress) != 0) return -1;
 
     CUDA_CHECK(cudaGraphLaunch(h->force_graph_exec, h->stream));
@@ -2089,6 +2132,38 @@ static int evaluate_impl(
         out_stress[3] = v_grad[1] * inv_v; out_stress[4] = v_grad[3] * inv_v; out_stress[5] = v_grad[4] * inv_v;
         out_stress[6] = v_grad[2] * inv_v; out_stress[7] = v_grad[4] * inv_v; out_stress[8] = v_grad[5] * inv_v;
     }
+    return 0;
+}
+
+static int evaluate2_impl(
+    LoupHandle* h, const double* positions, const double* cell, int flags, double* out_energy_ev,
+    double* out_forces, double* out_stress, double* out_atom_energies
+) {
+    const int known = LOUP_EVAL_STRESS | LOUP_EVAL_ENERGY_ONLY | LOUP_EVAL_PER_ATOM;
+    if (flags & ~known) { loup::set_error("unknown evaluation flags 0x%x", flags & ~known); return -1; }
+    if (flags & LOUP_EVAL_PER_ATOM) {
+        loup::set_error("LOUP_EVAL_PER_ATOM is not built in this version of the library (per-atom energies need "
+                        "variants of the generated readout kernels)");
+        return -1;
+    }
+    (void)out_atom_energies;
+    if (!(flags & LOUP_EVAL_ENERGY_ONLY)) {
+        return evaluate_impl(h, positions, cell, (flags & LOUP_EVAL_STRESS) ? 1 : 0, out_energy_ev, out_forces,
+                             (flags & LOUP_EVAL_STRESS) ? out_stress : nullptr);
+    }
+    if (flags & LOUP_EVAL_STRESS) {
+        loup::set_error("LOUP_EVAL_ENERGY_ONLY excludes LOUP_EVAL_STRESS: the energy-only pass has no gradients");
+        return -1;
+    }
+    // prepare_evaluate has marked the forces on the device as stale; they stay so (a run that follows starts with
+    // a force pass).
+    if (prepare_evaluate(h, positions, cell) != 0) return -1;
+    if (ensure_energy_graph(h) != 0) return -1;
+    CUDA_CHECK(cudaGraphLaunch(h->energy_graph_exec, h->stream));
+    double inter_e = 0.0;
+    CUDA_CHECK(cudaMemcpyAsync(&inter_e, h->d_energy_f64, sizeof(double), cudaMemcpyDeviceToHost, h->stream));
+    CUDA_CHECK(cudaStreamSynchronize(h->stream));
+    if (out_energy_ev) *out_energy_ev = h->e0_total + inter_e;
     return 0;
 }
 
@@ -2723,6 +2798,15 @@ int loup_evaluate(
 ) {
     return guarded(h, "loup_evaluate", [&] {
         return evaluate_impl(h, positions, cell, compute_stress, out_energy_ev, out_forces, out_stress);
+    });
+}
+
+int loup_evaluate2(
+    LoupHandle* h, const double* positions, const double* cell, int flags, double* out_energy_ev,
+    double* out_forces, double* out_stress, double* out_atom_energies
+) {
+    return guarded(h, "loup_evaluate2", [&] {
+        return evaluate2_impl(h, positions, cell, flags, out_energy_ev, out_forces, out_stress, out_atom_energies);
     });
 }
 
