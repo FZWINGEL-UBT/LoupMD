@@ -448,6 +448,10 @@ struct LoupHandle {
 
     // System topology (atoms grouped by species 0..S-1)
     int N = 0;
+    // An open domain (loup_debug_set_domain): the device rows N .. N + n_ghost - 1 are ghost atoms. They take part
+    // in the neighbour build as senders and have rows in what senders provide; they receive nothing. 0 for a
+    // periodic system, which is all the public calls accept.
+    int n_ghost = 0;
     double skin = 0.5;
     double e0_total = 0.0;
     std::vector<int> perm;          // device (species-grouped, spatially ordered) index -> caller index
@@ -626,6 +630,7 @@ struct LoupHandle {
         nl_valid = false;
         forces_current = false;
         disp_window_steps = 0;
+        n_ghost = 0;
         sys_atom_bytes = 0;
         sys_edge_bytes = 0;
         sys_fixed_bytes = 0;
@@ -1022,12 +1027,15 @@ static int rebuild_neighbors(LoupHandle* h) {
     const int ry = (int)std::ceil(r_list * ny / h->cell_heights[1]);
     const int rz = (int)std::ceil(r_list * nz / h->cell_heights[2]);
 
+    // An open domain's ghosts (rows N .. NT - 1) are binned and found as senders like every atom; only the first N
+    // rows are receivers (the count, fill and sort below).
+    const int NT = N + h->n_ghost;
     const int blk = 128;
-    const int gridN = (N + blk - 1) / blk;
+    const int gridN = (NT + blk - 1) / blk;
 
     CUDA_CHECK(cudaMemsetAsync(h->d_bin_counts, 0, n_bins * sizeof(int), h->stream));
     loup::wrap_and_bin_kernel<<<gridN, blk, 0, h->stream>>>(
-        N, h->cell, nx, ny, nz, h->d_pos64, h->d_pos_wrapped, h->d_atom_wrap, h->d_atom_bin, h->d_bin_counts);
+        NT, h->cell, nx, ny, nz, h->d_pos64, h->d_pos_wrapped, h->d_atom_wrap, h->d_atom_bin, h->d_bin_counts);
 
     // Reorder atoms inside each species group by the Morton code of their bin, once the per-atom sender working set
     // (x0/x1 rows and their gradients, ~4 KB per atom) outgrows L2: then sender rows and sender-gradient atomics stay
@@ -1036,7 +1044,8 @@ static int rebuild_neighbors(LoupHandle* h) {
     // Atoms near a bin boundary flip bins thermally, so the order is refreshed only on every 16th rebuild (diffusion
     // is slow on that scale). Per-atom state (positions, velocities, forces, masses) is gathered in place, so every
     // buffer address and every captured graph stays valid; only the host permutation changes.
-    const bool reorder = h->ovr.reorder >= 0 ? h->ovr.reorder == 1 : (int64_t)N * 4096 > (int64_t)h->l2_bytes;
+    const bool reorder = h->n_ghost == 0 &&
+                         (h->ovr.reorder >= 0 ? h->ovr.reorder == 1 : (int64_t)N * 4096 > (int64_t)h->l2_bytes);
     if (reorder && (h->n_rebuilds++ % 16) == 0) {
         unsigned long long* keys_in = h->d_ro_keys;
         unsigned long long* keys_out = h->d_ro_keys + N;
@@ -1099,7 +1108,7 @@ static int rebuild_neighbors(LoupHandle* h) {
     const int blkN = nb_groups ? 128 : 32;
     const int gridNb = (int)(((int64_t)N * (nb_groups ? loup::kNeighborLanes : 1) + blkN - 1) / blkN);
     loup::scatter_bins_kernel<<<gridN, blk, 0, h->stream>>>(
-        N, h->d_pos_wrapped, h->d_atom_wrap, h->d_species, h->d_atom_bin, h->d_bin_cursor,
+        NT, h->d_pos_wrapped, h->d_atom_wrap, h->d_species, h->d_atom_bin, h->d_bin_cursor,
         h->d_bin_atom_id, h->d_bin_pos, h->d_bin_pos_f32, h->d_bin_wrap, h->d_bin_sp);
 
     if (nb_groups)
@@ -1177,7 +1186,7 @@ static int rebuild_neighbors(LoupHandle* h) {
         h->E_graph = 0;
         h->invalidate_graphs();
     }
-    CUDA_CHECK(cudaMemcpyAsync(h->d_ref_pos64, h->d_pos64, (size_t)N * 3 * sizeof(double), cudaMemcpyDeviceToDevice, h->stream));
+    CUDA_CHECK(cudaMemcpyAsync(h->d_ref_pos64, h->d_pos64, (size_t)NT * 3 * sizeof(double), cudaMemcpyDeviceToDevice, h->stream));
     CUDA_CHECK(cudaMemsetAsync(h->d_need_rebuild, 0, sizeof(int), h->stream));
     CUDA_CHECK(cudaGetLastError());
     h->nl_valid = true;
@@ -1304,15 +1313,24 @@ static void tune_rebuild_variants(LoupHandle* h) {
                 (int)h->spline_pair, wp[0] * 1e3, wp[1] * 1e3, h->wp_threads);
 }
 
-static void record_force_pass(LoupHandle* h, int compute_stress, bool energy_only = false) {
+// One sweep of the generic pass (GenericPassInputs::Sweep), for a driver that runs a domain sweep by sweep.
+struct DomainSweep {
+    int kind = 0, layer = 0;
+    const float* adjoint[4] = {nullptr, nullptr, nullptr, nullptr};
+};
+
+static void record_force_pass(LoupHandle* h, int compute_stress, bool energy_only = false,
+                              const DomainSweep* sweep = nullptr) {
     const int N = h->N;
     const int E = h->E_graph;
     const int S = h->n_species();
     const float r_max = h->cutoff();
 
-    // S0 and D0 are fully written by the interaction-0 forward; only the accumulators after them need zeroing.
-    CUDA_CHECK_THROW(cudaMemsetAsync(static_cast<char*>(h->d_zero_slab) + h->zero_tail_off, 0,
-                                     h->zero_slab_bytes - h->zero_tail_off, h->stream));
+    // S0 and D0 are fully written by the interaction-0 forward; only the accumulators after them need zeroing. A
+    // sweep adds to energy, forces and virial: its driver zeroes them once.
+    if (!sweep)
+        CUDA_CHECK_THROW(cudaMemsetAsync(static_cast<char*>(h->d_zero_slab) + h->zero_tail_off, 0,
+                                         h->zero_slab_bytes - h->zero_tail_off, h->stream));
     // No pair within r_max + skin. The specialised model then has no interaction energy at all. A generic model can
     // still have one per atom (residual first block, readout biases, the long-range term: MACE-MH-1 0.56 eV and
     // MACE-POLAR-1-S 0.64 eV per isolated atom), so its pass runs on the empty edge list.
@@ -1364,6 +1382,12 @@ static void record_force_pass(LoupHandle* h, int compute_stress, bool energy_onl
         loup::GenericPassInputs in{};
         in.stream = h->stream;
         in.N = N;
+        in.n_ghost = h->n_ghost;
+        if (sweep) {
+            in.sweep = sweep->kind;
+            in.sweep_layer = sweep->layer;
+            for (int l = 0; l < 4; ++l) in.adjoint_in[l] = sweep->adjoint[l];
+        }
         in.E_dev = d_E_act;
         in.E_cap = h->E_cap;
         in.act_row_ptr = h->d_act_row_ptr;
@@ -1779,7 +1803,10 @@ static cudaError_t counted_malloc(size_t& counter, void** p, size_t bytes) {
     return err;
 }
 #define cudaMalloc(p, bytes) counted_malloc(h->sys_atom_bytes, (void**)(p), (bytes))
-static int set_system_impl(LoupHandle* h, int n_atoms, const int* atomic_numbers, const double* masses_amu, double skin) {
+// n_ghost > 0 makes the last n_ghost atoms ghosts of an open domain (see LoupHandle::n_ghost): the locals are grouped
+// by species as always, the ghosts keep their order behind them, and every per-atom buffer has a row for each.
+static int set_system_impl(LoupHandle* h, int n_atoms, const int* atomic_numbers, const double* masses_amu, double skin,
+                           int n_ghost = 0) {
     if (!h) return -1;
     if (n_atoms <= 0) { loup::set_error("n_atoms must be positive, got %d", n_atoms); return -1; }
     if (!atomic_numbers) { loup::set_error("atomic_numbers is NULL"); return -1; }
@@ -1787,6 +1814,16 @@ static int set_system_impl(LoupHandle* h, int n_atoms, const int* atomic_numbers
         loup::set_error("skin must be finite and not negative, got %g A", skin);
         return -1;
     }
+    if (n_ghost < 0 || n_ghost >= n_atoms) {
+        loup::set_error("n_ghost must be between 0 and the atom count less one, got %d of %d", n_ghost, n_atoms);
+        return -1;
+    }
+    if (n_ghost > 0 && !(h->gen && h->gen->sweeps_available())) {
+        loup::set_error("an open domain needs a bundle of the generic path without long range, and "
+                        "LOUP_CHAIN_FOLD=0 where the skip-chain fold applies");
+        return -1;
+    }
+    const int n_local = n_atoms - n_ghost;
     CUDA_CHECK(cudaSetDevice(h->device_id));
     const int S = h->n_species();
 
@@ -1812,7 +1849,7 @@ static int set_system_impl(LoupHandle* h, int n_atoms, const int* atomic_numbers
             return -1;
         }
         sp_orig[i] = found;
-        e0_total += h->species_e0(found);
+        if (i < n_local) e0_total += h->species_e0(found);
     }
     h->free_system();  // sets N = 0
     h->skin = skin;
@@ -1824,13 +1861,13 @@ static int set_system_impl(LoupHandle* h, int n_atoms, const int* atomic_numbers
     h->h_order.resize(n_atoms);
     h->species_start.assign(S + 1, 0);
     h->species_count.assign(S, 0);
-    for (int i = 0; i < n_atoms; ++i) h->species_count[sp_orig[i]]++;
+    for (int i = 0; i < n_local; ++i) h->species_count[sp_orig[i]]++;
     for (int s = 0; s < S; ++s) h->species_start[s + 1] = h->species_start[s] + h->species_count[s];
     std::vector<int> cursor = h->species_start;
     std::vector<int> sp_sorted(n_atoms);
     std::vector<double> m_sorted(n_atoms), inv_m_sorted(n_atoms), sim_sorted(n_atoms);
     for (int i = 0; i < n_atoms; ++i) {
-        int dst = cursor[sp_orig[i]]++;
+        int dst = i < n_local ? cursor[sp_orig[i]]++ : i;
         h->perm[dst] = i;
         sp_sorted[dst] = sp_orig[i];
         double m = masses_amu ? masses_amu[i] : 1.0;
@@ -1906,7 +1943,8 @@ static int set_system_impl(LoupHandle* h, int n_atoms, const int* atomic_numbers
         h->d_virial_grad_f64 = reinterpret_cast<double*>(base + off_v64);
         h->gen->alloc_system(n_atoms);
         if (h->E_cap > 0) h->gen->ensure_edges(h->E_cap);
-        h->N = n_atoms;
+        h->N = n_local;
+        h->n_ghost = n_ghost;
         return 0;
     }
 
@@ -2024,7 +2062,8 @@ static bool valid_input(int n, const double* positions, const double* cell, cons
 }
 
 static int upload_positions(LoupHandle* h, const double* positions, const double* cell) {
-    if (!valid_input(h->N, positions, cell, nullptr)) return -1;
+    const int NT = h->N + h->n_ghost;
+    if (!valid_input(NT, positions, cell, nullptr)) return -1;
     h->forces_current = false;
     memcpy(h->cell_in, cell, sizeof(h->cell_in));
     loup::CellMat64 old_cell = h->cell;
@@ -2032,21 +2071,25 @@ static int upload_positions(LoupHandle* h, const double* positions, const double
     const int cell_changed = memcmp(&old_cell, &h->cell, sizeof(old_cell)) != 0 ? 1 : 0;
     if (h->gen && h->gen->set_cell(cell)) h->invalidate_graphs();
 
-    std::vector<double> p_sorted((size_t)h->N * 3);
-    for (int dst = 0; dst < h->N; ++dst) {
+    std::vector<double> p_sorted((size_t)NT * 3);
+    for (int dst = 0; dst < NT; ++dst) {
         int src = h->perm[dst];
         p_sorted[dst * 3 + 0] = positions[src * 3 + 0];
         p_sorted[dst * 3 + 1] = positions[src * 3 + 1];
         p_sorted[dst * 3 + 2] = positions[src * 3 + 2];
     }
-    CUDA_CHECK(cudaMemcpyAsync(h->d_pos64, p_sorted.data(), (size_t)h->N * 3 * sizeof(double), cudaMemcpyHostToDevice, h->stream));
+    CUDA_CHECK(cudaMemcpyAsync(h->d_pos64, p_sorted.data(), (size_t)NT * 3 * sizeof(double), cudaMemcpyHostToDevice, h->stream));
     return cell_changed;
 }
 
 // The refusal shared by every call that needs a system.
 static bool has_system(const LoupHandle* h) {
-    if (h && h->N > 0) return true;
-    loup::set_error("no system is set (call loup_set_system first)");
+    if (h && h->N > 0 && h->n_ghost == 0) return true;
+    if (h && h->n_ghost > 0)
+        loup::set_error("the handle holds an open domain (loup_debug_set_domain): only loup_debug_evaluate_domain "
+                        "runs on it");
+    else
+        loup::set_error("no system is set (call loup_set_system first)");
     return false;
 }
 
@@ -2715,6 +2758,149 @@ static int import_state_impl(LoupHandle* h, const void* buffer, size_t size) {
     return 0;
 }
 
+// ---- Open domains (plan task S1-T09), testing only ----
+// A domain whose ghosts are images of its own local atoms needs no other domain to supply its ghost rows: after a
+// sweep the ghosts' rows are copied from the locals they are images of, and what a sweep adds to ghost rows (the
+// gradient of a layer's output, forces) is folded back onto those locals. With the periodic images of a cell as
+// ghosts this must reproduce the periodic call.
+extern "C++" {  // kernels, one of them a template: not inside this file's C linkage block
+__global__ void ghost_copy_rows_kernel(int n_local, int n_ghost, int width, const int* __restrict__ ghost_of,
+                                       float* rows) {
+    const int64_t k = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
+    if (k >= (int64_t)n_ghost * width) return;
+    const int g = (int)(k / width), c = (int)(k % width);
+    rows[(int64_t)(n_local + g) * width + c] = rows[(int64_t)ghost_of[g] * width + c];
+}
+
+template <typename T>
+__global__ void ghost_fold_rows_kernel(int n_local, int n_ghost, int width, const int* __restrict__ ghost_of, T* rows) {
+    const int64_t k = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
+    if (k >= (int64_t)n_ghost * width) return;
+    const int g = (int)(k / width), c = (int)(k % width);
+    atomicAdd(&rows[(int64_t)ghost_of[g] * width + c], rows[(int64_t)(n_local + g) * width + c]);
+}
+}  // extern "C++"
+
+static int set_domain_impl(LoupHandle* h, int n_local, int n_ghost, const int* atomic_numbers, double skin) {
+    if (n_local <= 0 || n_ghost < 0) {
+        loup::set_error("n_local must be positive and n_ghost not negative, got %d and %d", n_local, n_ghost);
+        return -1;
+    }
+    if (!(h->gen && h->gen->sweeps_available())) {
+        loup::set_error("an open domain needs a bundle of the generic path without long range, and "
+                        "LOUP_CHAIN_FOLD=0 where the skip-chain fold applies");
+        return -1;
+    }
+    return set_system_impl(h, n_local + n_ghost, atomic_numbers, nullptr, skin, n_ghost);
+}
+
+static int evaluate_domain_impl(LoupHandle* h, const double* positions, const double* cell, const int* ghost_of,
+                                double* out_energy_ev, double* out_forces, double* out_stress) {
+    if (!h || h->N <= 0) { loup::set_error("no domain is set (call loup_debug_set_domain first)"); return -1; }
+    if (!(h->gen && h->gen->sweeps_available())) {
+        loup::set_error("the handle's model has no sweeps (generic path without long range and chain fold)");
+        return -1;
+    }
+    const int N = h->N, G = h->n_ghost;
+    if (G > 0 && !ghost_of) { loup::set_error("ghost_of is NULL"); return -1; }
+    CUDA_CHECK(cudaSetDevice(h->device_id));
+    if (upload_positions(h, positions, cell) < 0) return -1;
+    if (rebuild_neighbors(h) != 0) return -1;
+    h->invalidate_graphs();  // nothing below is captured, and no graph of another call may outlive this state
+
+    // ghost_of names locals in the caller's order; the device rows of the locals are grouped by species
+    std::vector<int> row_of(N);
+    for (int dst = 0; dst < N; ++dst) row_of[h->perm[dst]] = dst;
+    std::vector<int> map((size_t)std::max(G, 1), 0);
+    for (int g = 0; g < G; ++g) {
+        if (ghost_of[g] < 0 || ghost_of[g] >= N) {
+            loup::set_error("ghost_of[%d] = %d is not a local atom (0 .. %d)", g, ghost_of[g], N - 1);
+            return -1;
+        }
+        map[g] = row_of[ghost_of[g]];
+    }
+    DeviceBufferGuard d_map;
+    CUDA_CHECK(cudaMalloc(&d_map.p, map.size() * sizeof(int)));
+    CUDA_CHECK(cudaMemcpy(d_map.p, map.data(), map.size() * sizeof(int), cudaMemcpyHostToDevice));
+    const int* dmap = static_cast<const int*>(d_map.p);
+
+    const int L = h->gen->n_layers();
+    DeviceBufferGuard adj[4];  // the locals' rows of a layer output's gradient, per degree, between two sweeps
+    for (int l = 0; l < 4; ++l) {
+        size_t floats = 0;
+        for (int t = 0; t + 1 < L; ++t)
+            if (l <= h->gen->out_lmax(t)) floats = std::max(floats, (size_t)N * (2 * l + 1) * h->gen->out_width(t));
+        if (floats) CUDA_CHECK(cudaMalloc(&adj[l].p, floats * sizeof(float)));
+    }
+    struct NoFork {  // the GEMMs are tuned on first use here, and their timings must not overlap
+        LoupHandle* h;
+        bool saved;
+        explicit NoFork(LoupHandle* h_) : h(h_), saved(h_->fork_ok) { h->fork_ok = false; }
+        ~NoFork() { h->fork_ok = saved; }
+    } no_fork(h);
+    const int stress = out_stress ? 1 : 0;
+    auto grid = [](int64_t n) { return (unsigned)((n + 255) / 256); };
+
+    CUDA_CHECK(cudaMemsetAsync(static_cast<char*>(h->d_zero_slab) + h->zero_tail_off, 0,
+                               h->zero_slab_bytes - h->zero_tail_off, h->stream));
+    for (int t = 0; t + 1 < L; ++t) {  // forward sweeps: each leaves its layer's output; the ghosts copy theirs
+        DomainSweep sw;
+        sw.kind = loup::GenericPassInputs::SweepForward;
+        sw.layer = t;
+        record_force_pass(h, stress, false, &sw);
+        for (int l = 0; G > 0 && l <= h->gen->out_lmax(t); ++l) {
+            const int width = (2 * l + 1) * h->gen->out_width(t);
+            ghost_copy_rows_kernel<<<grid((int64_t)G * width), 256, 0, h->stream>>>(N, G, width, dmap,
+                                                                                    h->gen->layer_out(t, l));
+        }
+    }
+    {
+        DomainSweep sw;
+        sw.kind = loup::GenericPassInputs::SweepLast;
+        record_force_pass(h, stress, false, &sw);
+    }
+    for (int b = L - 2; b >= 0; --b) {  // backward sweeps: fold the ghosts' gradient rows, hand the locals' on
+        DomainSweep sw;
+        sw.kind = loup::GenericPassInputs::SweepBackward;
+        sw.layer = b;
+        for (int l = 0; l <= h->gen->out_lmax(b); ++l) {
+            const int width = (2 * l + 1) * h->gen->out_width(b);
+            float* grad = h->gen->layer_out_grad(b, l);
+            if (G > 0)
+                ghost_fold_rows_kernel<float><<<grid((int64_t)G * width), 256, 0, h->stream>>>(N, G, width, dmap, grad);
+            CUDA_CHECK(cudaMemcpyAsync(adj[l].p, grad, (size_t)N * width * sizeof(float), cudaMemcpyDeviceToDevice,
+                                       h->stream));
+            sw.adjoint[l] = static_cast<const float*>(adj[l].p);
+        }
+        record_force_pass(h, stress, false, &sw);
+    }
+    if (G > 0)
+        ghost_fold_rows_kernel<double><<<grid((int64_t)G * 3), 256, 0, h->stream>>>(N, G, 3, dmap, h->d_forces_f64);
+
+    double inter_e = 0.0, v_grad[6] = {0, 0, 0, 0, 0, 0};
+    std::vector<double> f_sorted((size_t)N * 3);
+    CUDA_CHECK(cudaMemcpyAsync(&inter_e, h->d_energy_f64, sizeof(double), cudaMemcpyDeviceToHost, h->stream));
+    CUDA_CHECK(cudaMemcpyAsync(f_sorted.data(), h->d_forces_f64, (size_t)N * 3 * sizeof(double), cudaMemcpyDeviceToHost, h->stream));
+    CUDA_CHECK(cudaMemcpyAsync(v_grad, h->d_virial_grad_f64, 6 * sizeof(double), cudaMemcpyDeviceToHost, h->stream));
+    CUDA_CHECK(cudaStreamSynchronize(h->stream));
+    CUDA_CHECK(cudaGetLastError());
+    h->save_disk_plans();
+    if (out_energy_ev) *out_energy_ev = h->e0_total + inter_e;
+    if (out_forces) {
+        for (int dst = 0; dst < N; ++dst) {
+            const int orig = h->perm[dst];
+            for (int k = 0; k < 3; ++k) out_forces[orig * 3 + k] = f_sorted[(size_t)dst * 3 + k];
+        }
+    }
+    if (out_stress) {  // per volume of the cell given, which for an open domain is only its box
+        const double inv_v = 1.0 / h->cell_vol;
+        out_stress[0] = v_grad[0] * inv_v; out_stress[1] = v_grad[1] * inv_v; out_stress[2] = v_grad[2] * inv_v;
+        out_stress[3] = v_grad[1] * inv_v; out_stress[4] = v_grad[3] * inv_v; out_stress[5] = v_grad[4] * inv_v;
+        out_stress[6] = v_grad[2] * inv_v; out_stress[7] = v_grad[4] * inv_v; out_stress[8] = v_grad[5] * inv_v;
+    }
+    return 0;
+}
+
 // loup_plan_memory: the device memory a system of n_atoms would take, scaled from the buffers the handle's current
 // system has. Every per-system buffer is proportional to the atom count or to the edge capacity, so the scaling is
 // exact up to alignment; what it leaves out is small and does not scale (captured graphs, cuBLAS internals).
@@ -2843,6 +3029,17 @@ int loup_export_state(LoupHandle* h, void* buffer, size_t capacity, size_t* writ
 
 int loup_import_state(LoupHandle* h, const void* buffer, size_t size) {
     return guarded(h, "loup_import_state", [&] { return import_state_impl(h, buffer, size); });
+}
+
+int loup_debug_set_domain(LoupHandle* h, int n_local, int n_ghost, const int* atomic_numbers, double skin) {
+    return guarded(h, "loup_debug_set_domain", [&] { return set_domain_impl(h, n_local, n_ghost, atomic_numbers, skin); });
+}
+
+int loup_debug_evaluate_domain(LoupHandle* h, const double* positions, const double* cell, const int* ghost_of,
+                               double* out_energy_ev, double* out_forces, double* out_stress) {
+    return guarded(h, "loup_debug_evaluate_domain", [&] {
+        return evaluate_domain_impl(h, positions, cell, ghost_of, out_energy_ev, out_forces, out_stress);
+    });
 }
 
 int loup_read_thermo(LoupHandle* h, LoupThermoRow* rows, int max_rows, int* n_rows) {

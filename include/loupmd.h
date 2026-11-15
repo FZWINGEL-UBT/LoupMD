@@ -214,6 +214,17 @@ typedef struct {
 // Not counted: MACE-POLAR-1's long-range buffers, captured graphs and cuBLAS's own allocations.
 int loup_plan_memory(LoupHandle* h, int n_atoms, double edges_per_atom, LoupMemoryPlan* out);
 
+// Testing only; not part of the interface a caller may rely on. A handle as an open domain (the unit a tiled run
+// evaluates): the first n_local atoms are local and receive, the n_ghost atoms after them only send. Bundles of the
+// generic path without long range. loup_debug_evaluate_domain runs the per-layer sweeps on it for a domain whose
+// ghosts are images of its own locals: ghost_of[g] names the local atom ghost g is an image of, positions holds
+// locals then ghosts, and cell is a box around them all with room for cutoff plus skin on every side. Energy and
+// forces [n_local, 3] are those of the locals with the ghosts' share folded back; stress is the virial over the
+// box's volume. With n_ghost = 0 the cell is periodic as usual and the sweeps run on the whole system.
+int loup_debug_set_domain(LoupHandle* h, int n_local, int n_ghost, const int* atomic_numbers, double skin);
+int loup_debug_evaluate_domain(LoupHandle* h, const double* positions, const double* cell, const int* ghost_of,
+                               double* out_energy_ev, double* out_forces, double* out_stress);
+
 // Timing breakdown across components for diagnostics (averages over `n_calls` force evaluations).
 int loup_profile_force(LoupHandle* h, int warmup, int n_calls, double* out_total_us);
 

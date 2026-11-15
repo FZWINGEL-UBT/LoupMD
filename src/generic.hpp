@@ -43,6 +43,25 @@ struct GenericPassInputs {
     const double* pos64;       // [N, 3] positions (device order; the long-range k-space terms read them)
     int compute_stress;
     int energy_only = 0;       // forward of every layer and the ZBL energy only: no forces, no stress
+    // Which part of the pass record() runs (PLAN.md 4.4). SweepAll is the whole pass. The others are one sweep of a
+    // domain with ghost atoms; the caller carries the layer outputs and their gradients from sweep to sweep:
+    //   SweepForward t (t < L - 1): needs layer t - 1's output rows (receivers and ghosts) in layer_out(t - 1, l);
+    //                               leaves layer t's output for the receivers in layer_out(t, l); adds the
+    //                               readout's energy.
+    //   SweepLast:                  layer L - 1 forward and backward; needs layer L - 2's output as above; leaves
+    //                               the gradient of it (receivers and ghosts) in layer_out_grad(L - 2, l), and
+    //                               this sweep's forces.
+    //   SweepBackward t:            replays layer t forward and runs its backward; needs layer t - 1's output and,
+    //                               in adjoint_in[l], the receivers' rows of the gradient of layer t's output that
+    //                               the later sweeps left (summed over every domain that holds the atom); leaves
+    //                               the gradient of layer t - 1's output and this sweep's forces. ZBL comes with
+    //                               t = 0.
+    // A sweep writes the forces of its own edges only (receiver and sender rows), zeroing nothing of `forces`,
+    // `virial` and `energy`: the caller zeroes them once.
+    enum Sweep { SweepAll = 0, SweepForward = 1, SweepLast = 2, SweepBackward = 3 };
+    int sweep = SweepAll;
+    int sweep_layer = 0;
+    const float* adjoint_in[4] = {nullptr, nullptr, nullptr, nullptr};
     GemmFn gemm;
     std::function<void()> gemm_fork;
     std::function<void(int)> gemm_lane;
@@ -70,6 +89,14 @@ public:
     // The long-range part's buffers (polar.cu) are not counted.
     size_t system_bytes() const { return sys_bytes_; }
     size_t edge_bytes() const { return edge_bytes_; }
+    // For a sweep driver: layer t's output rows of degree l ([rows, 2l + 1, out_width(t)]; nullptr when the model
+    // does not form them) and the buffer the next layer's sweep leaves their gradient in.
+    float* layer_out(int t, int l) const;
+    float* layer_out_grad(int t, int l) const;
+    int out_width(int t) const;
+    int out_lmax(int t) const;
+    // Sweeps need every layer's output to exist: not with the long range, nor with the skip-chain fold.
+    bool sweeps_available() const { return lr_ == nullptr && !chain_fold_; }
     // The compiled product kernels this bundle uses, one signature per layer, joined by ';' (loup_get_info).
     std::string kernel_signature() const;
 

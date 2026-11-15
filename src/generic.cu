@@ -1364,6 +1364,11 @@ void GenericModel::setup_chain_fold(const Bundle& b) {
         for (int l = 0; l < 3; ++l) layers_[t]->fold[l] = std::move(out[t][l]);
     chain_fold_ = true;
 }
+float* GenericModel::layer_out(int t, int l) const { return layers_[t]->hout[l]; }
+float* GenericModel::layer_out_grad(int t, int l) const { return layers_[t]->dhout[l]; }
+int GenericModel::out_width(int t) const { return layers_[t]->C_out; }
+int GenericModel::out_lmax(int t) const { return layers_[t]->lmax_out; }
+
 std::string GenericModel::kernel_signature() const {
     std::string out;
     for (const GenericLayer* L : layers_) {
@@ -1559,7 +1564,17 @@ void GenericModel::record(const GenericPassInputs& in) {
     if (has_edges) zero_edge_kernel<<<(3 * in.E_cap + 255) / 256, 256, 0, st>>>(in.E_dev, d_edge_dvec_);
     if (zero_slab_bytes_) CUDA_CHECK_THROW(cudaMemsetAsync(d_zero_slab_, 0, zero_slab_bytes_, st));
 
-    gather_rows_kernel<<<(unsigned)(((int64_t)Nx * C0_ + 255) / 256), 256, 0, st>>>(Nx, C0_, in.species, d_embedding_, d_h0_);
+    const int sweep = in.sweep, sweep_t = in.sweep_layer;
+    if (sweep != GenericPassInputs::SweepAll) {
+        if (!sweeps_available() || in.energy_only)
+            throw std::logic_error("generic: a sweep was asked of a model or a pass that has none");
+        const bool layer_ok = sweep == GenericPassInputs::SweepLast || (sweep_t >= 0 && sweep_t < n_layers_ - 1);
+        if (!layer_ok) throw std::logic_error("generic: sweep layer out of range");
+    }
+    const bool runs_layer0 = sweep == GenericPassInputs::SweepAll ||
+                             (sweep == GenericPassInputs::SweepLast ? n_layers_ == 1 : sweep_t == 0);
+    if (runs_layer0)
+        gather_rows_kernel<<<(unsigned)(((int64_t)Nx * C0_ + 255) / 256), 256, 0, st>>>(Nx, C0_, in.species, d_embedding_, d_h0_);
 
     // ---------------- forward of layer t: everything from its linear_up to its readout. `energy` takes the
     // readout's energy (a sink when a backward sweep replays the layer).
@@ -1955,6 +1970,36 @@ void GenericModel::record(const GenericPassInputs& in) {
                                                     in.species, zbl_p, d_edge_dvec_, in.forces, in.virial, in.energy);
     };
 
+    // ---------------- one sweep of a domain (GenericPassInputs::Sweep)
+    if (sweep == GenericPassInputs::SweepForward) {
+        forward_layer(sweep_t, in.energy);
+        return;
+    }
+    if (sweep == GenericPassInputs::SweepLast) {
+        forward_layer(n_layers_ - 1, in.energy);
+        backward_layer(n_layers_ - 1);
+        if (n_layers_ > 1) {
+            assemble_edges(false);
+            return;
+        }
+        // a single layer: its sweep is the whole pass, and the final assembly below applies
+    } else if (sweep == GenericPassInputs::SweepBackward) {
+        const GenericLayer* L = layers_[sweep_t];
+        for (int l = 0; l <= L->lmax_out; ++l) {
+            if (!in.adjoint_in[l]) throw std::logic_error("generic: a backward sweep needs adjoint_in");
+            CUDA_CHECK_THROW(cudaMemcpyAsync(L->dhout[l], in.adjoint_in[l],
+                                             (size_t)N * dimL(l) * L->C_out * sizeof(float),
+                                             cudaMemcpyDeviceToDevice, st));
+        }
+        forward_layer(sweep_t, d_energy_sink_);  // adds the readout's seed onto the adjoint; energy already counted
+        backward_layer(sweep_t);
+        if (sweep_t > 0) {
+            assemble_edges(false);
+            return;
+        }
+        // layer 0: the final assembly below applies (ZBL included)
+    }
+
     // ---------------- the pass
     if (in.energy_only) {
         // The readouts of every layer, the long range and ZBL. Nothing is differentiated, except inside the two
@@ -1975,7 +2020,10 @@ void GenericModel::record(const GenericPassInputs& in) {
                                                                       in.act_receivers, in.species, zbl_p, in.energy);
         return;
     }
-    if (!sweep_replay_) {
+    if (sweep != GenericPassInputs::SweepAll) {
+        // A sweep that reaches this point (the only layer's, or layer 0's backward) has run above; what is left is
+        // the final edge assembly at the end of this function.
+    } else if (!sweep_replay_) {
         // Whole system: every layer forward, the long range, every layer backward, all activations kept.
         for (int t = 0; t < n_layers_; ++t) forward_layer(t, in.energy);
         // long range: energy, k-space forces and its gradient seeds into every layer's dhout
