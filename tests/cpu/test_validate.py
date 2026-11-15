@@ -13,7 +13,7 @@ from ase.io import write
 
 from loupmd import config, validate
 from loupmd.cli import main
-from loupmd.errors import GateUnavailable, InputError
+from loupmd.errors import GateUnavailable, InputError, PlanRefused
 from loupmd.validate import gate, references, sets
 
 F32 = dict(de=0.004, df=4e-5, ds=4e-8)        # MACE's own float32 deviation in the fake references (above floor / 3)
@@ -159,6 +159,8 @@ class GateEngine:
     def __init__(self, bundle, device_id=0):
         self.bundle, self.device_id = bundle, device_id
         self.variant = {k: v for k, v in os.environ.items() if k in gate.VARIANT_KEYS}
+        self.chain_fold = os.environ.get("LOUP_CHAIN_FOLD")
+        self.tiled = []
         self.evaluated = 0
         GateEngine.made.append(self)
 
@@ -172,6 +174,11 @@ class GateEngine:
         self.evaluated += 1
         energy, forces, stress = GateEngine.truth[np.ascontiguousarray(positions, dtype=float).tobytes()]
         return energy, forces + GateEngine.error, stress
+
+    def evaluate_tiled(self, numbers, positions, cell, receivers, skin=0.5):
+        self.tiled.append((len(numbers), receivers, skin))
+        energy, forces, stress = self.evaluate(positions, cell)
+        return energy, forces, stress, -(-len(numbers) // receivers)
 
 
 @pytest.fixture
@@ -252,7 +259,32 @@ def test_generic_models_gate_their_conv_variants_or_only_the_default(setup):
     assert tuned["reorder"] == []
 
 
-def test_a_deviation_above_the_rule_fails_the_gate_and_names_the_quantity(setup):
+def test_the_tiled_gate_runs_every_configuration_tile_by_tile(setup, monkeypatch):
+    """S5-T04: --capacity tiled evaluates through the tiled call, about four tiles per cell, with the skip-chain
+    fold off (the sweeps need every layer's output), and records the mode."""
+    GateEngine.specialised = False
+    monkeypatch.setenv("LOUP_CHAIN_FOLD", "1")
+    record = setup(capacity="tiled")
+    assert record["passed"] is True and record["capacity"] == "tiled"
+    assert {row["variant"] for row in record["rows"]} == {"default"} and len(record["rows"]) == 6
+    calls = [call for engine in GateEngine.made for call in engine.tiled]
+    assert len(calls) == 6 and all(receivers == -(-n // 4) and skin == 0.5 for n, receivers, skin in calls)
+    assert all(engine.chain_fold == "0" for engine in GateEngine.made)
+    assert os.environ["LOUP_CHAIN_FOLD"] == "1"                 # the caller's setting is back
+    assert setup()["capacity"] == "whole"
+    assert "capacity: tiled" in validate.format_gate(record)
+
+
+def test_the_tiled_gate_refuses_the_specialised_kernels(setup):
+    with pytest.raises(PlanRefused, match="the tiled mode runs the generic kernels"):
+        setup(capacity="tiled", generic=False)
+    with pytest.raises(PlanRefused, match="capacity must be 'whole' or 'tiled'"):
+        setup(capacity="auto")
+
+
+        self.variant = {k: v for k, v in os.environ.items() if k in gate.VARIANT_KEYS}
+        self.chain_fold = os.environ.get("LOUP_CHAIN_FOLD")
+        self.tiled = []
     GateEngine.error = 3.5 * F32["df"]
     record = setup()
     assert record["passed"] is False and all(row["failed"] == ["force"] for row in record["rows"])

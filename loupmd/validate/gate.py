@@ -13,7 +13,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from .. import config, models
-from ..errors import GateUnavailable
+from ..errors import GateUnavailable, PlanRefused
 from . import references, sets
 
 SCHEMA = "loupmd.gate/1"
@@ -24,6 +24,7 @@ SMALL_VARIANTS = [{"LOUP_WPRIME_RCV": "1"}, {"LOUP_WPRIME_RCV": "1", "LOUP_WPRIM
 GENERIC_VARIANTS = [{"LOUP_CONV_FWD_VARIANT": v} for v in ("1", "2")]
 VARIANT_KEYS = ("LOUP_SPLINE_VARIANT", "LOUP_WPRIME_THREADS", "LOUP_WPRIME_RCV", "LOUP_REORDER",
                 "LOUP_CONV_FWD_VARIANT")
+TILES_PER_CELL = 4      # --capacity tiled: receivers per tile = atoms / 4, rounded up
 LARGE_ATOMS = 512        # the specialised model's switch to the receiver-owned w' kernel
 # Configurations where the model itself is not float32-reproducible, left out unless asked for: POLAR-1-S on
 # NaNbO3_c0 has forces near 236,000 eV/A and MACE float32 is 27 to 90 eV/A off float64 there. (model stem, config).
@@ -80,14 +81,15 @@ def has_conv_variants(meta) -> bool:
 
 
 def make_record(rows, reorder, passed, set_name, model, reference, library, left_out, gpu=None, charge=None,
-                spin_multiplicity=None, package_version=None) -> dict:
+                spin_multiplicity=None, package_version=None, capacity="whole") -> dict:
     rows = [dict(asdict(row), failed=list(row.failed)) for row in rows]
     worst = {key: max((row[key] for row in rows), default=0.0)
              for key in ("energy_ratio", "force_ratio", "stress_ratio")}
     return {"schema": SCHEMA,
             "created": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
             "loupmd": package_version, "library": library, "gpu": gpu, "model": dict(model), "set": set_name,
-            "charge": charge, "spin_multiplicity": spin_multiplicity, "reference": dict(reference),
+            "charge": charge, "spin_multiplicity": spin_multiplicity, "capacity": capacity,
+            "reference": dict(reference),
             "rule": {"factor": config.GATE_FACTOR, "energy_floor_meV_per_atom": config.GATE_ENERGY_FLOOR_MEV_PER_ATOM,
                      "force_floor_eV_per_A": config.GATE_FORCE_FLOOR_EV_PER_A,
                      "stress_floor_eV_per_A3": config.GATE_STRESS_FLOOR_EV_PER_A3},
@@ -98,18 +100,26 @@ def make_record(rows, reorder, passed, set_name, model, reference, library, left
 def run_gate(model, *, head=None, checkpoint=None, sha256=None, trusted=False, download=False, set_name="oxide",
              structures=None, gate_config=None, generic=None, charge=None, spin_multiplicity=None, device=0,
              use_ref_cache=True, include_unstable=False, engine_factory=None, ensure_bundle=None, bundle_meta=None,
-             reference=None, environ=None, progress=None) -> dict:
+             reference=None, environ=None, progress=None, capacity="whole") -> dict:
     """Gate ``model`` on a set (``oxide``, ``organic``, ``crystals``) or on rattled copies of ``structures`` and
     return the ``loupmd.gate/1`` record; ``record["passed"]`` is the verdict.
 
     Refusals come first and in this order: checkpoint trust, the export extra (``GateUnavailable``), the
-    structures. ``reference(model_path, configs, head, device, charge, spin)``, ``engine_factory``,
+    structures. ``capacity="tiled"`` evaluates every configuration tile by tile, about four tiles per cell (plan
+    task S5-T04), on the generic kernels. ``reference(model_path, configs, head, device, charge, spin)``,
+    ``engine_factory``,
     ``ensure_bundle`` and ``bundle_meta`` replace MACE, the engine, the exporter and the bundle reader (tests).
     """
     import numpy as np
 
     from .. import __version__
 
+    if capacity not in ("whole", "tiled"):
+        raise PlanRefused(f"capacity must be 'whole' or 'tiled', got {capacity!r}")
+    tiled = capacity == "tiled"
+    if tiled and generic is False:
+        raise PlanRefused("the tiled mode runs the generic kernels; the specialised ones have no per-layer sweeps",
+                          next_step="Leave out --specialised, or gate the specialised kernels without --capacity.")
     gate_config = gate_config or config.GateConfig()
     say = progress or (lambda text: None)
     resolved, digest, _ = models.trusted_checkpoint(model, head, checkpoint=checkpoint, sha256=sha256,
@@ -182,8 +192,10 @@ def run_gate(model, *, head=None, checkpoint=None, sha256=None, trusted=False, d
         elements = tuple(sorted(set(at.get_atomic_numbers().tolist())))
         key = (elements, tuple(sorted(variant.items())))
         if key not in engines:
-            saved = {k: os.environ.pop(k) for k in VARIANT_KEYS if k in os.environ}
+            saved = {k: os.environ.pop(k) for k in VARIANT_KEYS + ("LOUP_CHAIN_FOLD",) if k in os.environ}
             os.environ.update(variant)                      # read by the library when the engine is created
+            if tiled:                                       # the sweeps need every layer's output, which the
+                os.environ["LOUP_CHAIN_FOLD"] = "0"         # skip-chain fold never forms
             try:
                 bundle = ensure_bundle(resolved.path, list(elements), head=use_head, generic=generic, charge=charge,
                                        spin_multiplicity=spin_multiplicity, environ=environ)
@@ -193,12 +205,17 @@ def run_gate(model, *, head=None, checkpoint=None, sha256=None, trusted=False, d
                     kinds[elements] = ("specialised" if specialised
                                        else "conv" if has_conv_variants(bundle_meta(bundle)) else "plain")
             finally:
-                for k in VARIANT_KEYS:
+                for k in VARIANT_KEYS + ("LOUP_CHAIN_FOLD",):
                     os.environ.pop(k, None)
                 os.environ.update(saved)
         engine = engines[key]
-        engine.set_system(at.get_atomic_numbers(), at.get_masses(), skin=0.5)
-        result = engine.evaluate(at.positions, at.cell.array, compute_stress=True)
+        if tiled:
+            receivers = -(-len(at) // TILES_PER_CELL)
+            result = engine.evaluate_tiled(at.get_atomic_numbers(), at.positions, at.cell.array, receivers,
+                                           skin=0.5)[:3]
+        else:
+            engine.set_system(at.get_atomic_numbers(), at.get_masses(), skin=0.5)
+            result = engine.evaluate(at.positions, at.cell.array, compute_stress=True)
         if "LOUP_REORDER" in variant:
             reorder_results.setdefault(name, []).append(result)
         rows.append(compare(name, variant, len(at), result, *refs))
@@ -235,7 +252,7 @@ def run_gate(model, *, head=None, checkpoint=None, sha256=None, trusted=False, d
                        {"device": references.device_tag(ref_device), "file": str(ref_file), "cached": cached,
                         "mace": references.versions()[0], "torch": references.versions()[1]},
                        library, left_out, gpu=gpu, charge=charge, spin_multiplicity=spin_multiplicity,
-                       package_version=__version__)
+                       package_version=__version__, capacity=capacity)
 
 
 # ---------------------------------------------------------------------------------------------------- text
@@ -264,6 +281,8 @@ def format_gate(record) -> str:
                  f"{row['config']} ({row['atoms']})" for row in record["rows"])),
              f"MACE references ({reference['device']}, mace {reference['mace']}, torch {reference['torch']}): "
              f"{reference['file']}" + (" (cached)" if reference["cached"] else " (computed now)")]
+    if record.get("capacity", "whole") != "whole":
+        lines.append(f"capacity: {record['capacity']} (about {TILES_PER_CELL} tiles per cell)")
     if record["left_out"]:
         lines.append("left out (the model is not float32-reproducible there): " + ", ".join(record["left_out"]))
     lines += ["", "LoupMD against MACE float64, judged by MACE float32 (the 3x rule)", HEADER, "-" * len(HEADER)]

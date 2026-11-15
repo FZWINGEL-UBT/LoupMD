@@ -925,3 +925,36 @@ the whole-system call of the same build (energy per atom, largest force and stre
 - `pytest tests/gpu -m "not acceptance"`: 270 passed, 1 failed in 653 s. The failure, `test_the_calculator_equals_evaluate` (two engines of one bundle 3.0e-7 eV/atom apart against its bound of 2e-7), passed five runs in a row on this build and three on the build before; its bound is now 1e-6 eV/atom (PLAN.md D61).
 - A/B against the build of §6.12 (the tiled code is not on the step path): four rounds alternating, a fresh plan directory per run: `NbCl5` 1.898 ms/step before and 1.894 after, `SrTiO3` 8.230 and 8.233 (ratios 0.998 and 1.0004), a tie. Both sides ran about 2% slower than the runs of §6.11 earlier that evening; only the alternating comparison counts.
 - Not measured: the tiled call's time (every tile sweep sets its domain up again; S5-T06, S5-T10).
+
+### 6.14 The gate in tiled mode and the tiled call's time (16 November 2026, 00:05)
+
+RTX 5060 Ti only; library `d7ad0d9be7f8ce99...` (the build of `330e155`). `loupmd validate --model LABEL
+--capacity tiled` (about four tiles per cell), references from the shared cache (`LOUP_GATE_CACHE`).
+
+| Labels | Set | Worst ratio (energy, force, stress) | Result |
+|---|---|---|---|
+| omat0-medium | oxide | 0.59, 1.93, 1.32 | PASS |
+| omat0-small | oxide | 0.35, 1.31, 1.44 | PASS |
+| mp0-medium, mp0-large, mp0b3-medium | oxide | at most 0.13, 1.34, 0.95 | PASS |
+| mpa0-medium | oxide | 0.32, 2.08, 2.19 | PASS |
+| matpes-pbe, matpes-r2scan | crystals | at most 0.19, 1.38, 0.93 | PASS |
+| mh1-omat, mh1-mp, mh1-r2scan | crystals | at most 0.10, 0.88, 0.36 | PASS |
+| off23-small, off23-medium, off23-large, off23b-medium, off24-medium | organic | at most 0.01, 1.05, 1.74 | PASS |
+| omol0-xl (charge 0, multiplicity 1) | organic | 0.00, 0.79, 0.88 | PASS (611 s, references on the CPU) |
+| polar1-s | crystals | | refused: no sweeps with long range |
+
+The tiled call's time (S5-T03's driver as committed; one warm-up call, then one timed call; the whole-system call
+the mean of five after a warm-up):
+
+| Model | Atoms | Whole system, us/atom | Tiled (tiles), us/atom | Tiled / whole |
+|---|---|---|---|---|
+| OMAT-0 small | 24,565 | 0.91 | 41.4 (2); 55.5 (3) | 46; 61 |
+| OMAT-0 small | 40,000 | 0.90 | 30.1 (2); 75.0 (8) | 34; 83 |
+| OMAT-0 medium | 24,565 | 1.65 | 45.1 (2); 44.4 (3) | 27; 27 |
+| OMAT-0 medium | 40,000 | 1.66 | 25.9 (2); 67.1 (8) | 16; 40 |
+
+- The time grows with the tiles, not the atoms: about 0.3 to 0.5 s per tile per call. Every tile sweep sets the
+  handle up again (allocations, a list build with host syncs, GEMM tuning for new row counts), 24 set-ups and 8
+  builds at 8 tiles. This is the eager stage of FastMACE's tiled design; FastMACE's steady tiled call is 1.05 to
+  1.2 times its whole-system cost per atom (`FastMACE/docs/validation/tiled/tiled-1m-speed.md`), with a fixed
+  workspace, bodies per padded slot size and kept lists (S5-T05, S5-T06, S5-T10).

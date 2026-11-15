@@ -40,6 +40,9 @@ def add_parser(sub):
     parser.add_argument("--specialised", action="store_true",
                         help="the kernels specialised to MACE-OMAT-0 medium instead of the generic ones every model "
                              "runs by default")
+    parser.add_argument("--capacity", choices=("whole", "tiled"), default="whole",
+                        help="whole: one call per structure (default); tiled: tile by tile, about four tiles per "
+                             "structure, as large cells run (generic kernels)")
     parser.add_argument("--charge", type=int, help="total charge (models with a charge embedding)")
     parser.add_argument("--spin-multiplicity", type=int, help="2S + 1 (models with a spin embedding)")
     parser.add_argument("--device", type=int, default=0, metavar="N", help="the GPU index (default 0)")
@@ -54,7 +57,8 @@ def run(args) -> int:
         download=args.download, set_name=args.set, structures=args.structure,
         gate_config=GateConfig(rattle_A=args.rattle, copies=args.copies, reference_device=args.ref_device),
         generic=False if args.specialised else None, charge=args.charge, spin_multiplicity=args.spin_multiplicity,
-        device=args.device, use_ref_cache=not args.no_ref_cache, include_unstable=args.include_unstable)
+        device=args.device, use_ref_cache=not args.no_ref_cache, include_unstable=args.include_unstable,
+        capacity=args.capacity)
     print(_validate.format_gate(record), file=out)
     print("gate PASSED" if record["passed"] else "gate FAILED", file=out)
     if args.json:
