@@ -265,6 +265,11 @@ int loup_get_step_displacement(LoupHandle* h, double* out_max_a);
 // where a variable-cell run has taken it.
 int loup_get_cell(LoupHandle* h, double* out_cell);
 
+// The volume V0 the cell limits of a variable-cell run refer to (it stops outside [V0 / 20, 20 V0]).
+// loup_set_state sets it to the volume it is given; a run that goes on in another process from a state block
+// passes the first run's here.
+int loup_set_reference_volume(LoupHandle* h, double volume_a3);
+
 // A new cell for the positions on the handle. scale_atoms != 0: the atoms keep their fractional coordinates
 // (ASE's set_cell(scale_atoms=True)); 0: they stay where they are. Velocities are kept, the neighbour list is
 // rebuilt, and forces are those of the old cell until the next evaluation or run.

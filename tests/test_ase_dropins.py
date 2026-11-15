@@ -82,7 +82,7 @@ def test_what_is_refused(ff):
         ase_md.VelocityVerlet(atoms, units.fs, model=ff, rng=np.random.default_rng(1))
     with pytest.raises(TypeError, match="temperature .in eV. or temperature_K, not both"):
         ase_md.Langevin(atoms, units.fs, 0.025, 0.01 / units.fs, temperature_K=300, model=ff)
-    for name in ("LangevinBAOAB", "MTKNPT", "NPTBerendsen", "Inhomogeneous_NPTBerendsen"):
+    for name in ("LangevinBAOAB", "MTKNPT", "IsotropicMTKNPT"):
         with pytest.raises(PlanRefused, match=f"loupmd.ase.md.{name} is not in this version"):
             getattr(ase_md, name)
     with pytest.raises(AttributeError):
@@ -268,7 +268,7 @@ def test_the_berendsen_thermostat_takes_ase_s_arguments(ff):
     assert old.simulation.config.temperature_K == pytest.approx(300.0) and old.simulation.config.fixcm is False
     with pytest.raises(InputError, match="NVTBerendsen needs temperature_K and taut"):
         ase_md.NVTBerendsen(atoms, units.fs, temperature_K=300, model=ff)
-    with pytest.raises(PlanRefused, match="Berendsen with pressure_GPa, taup_fs: the Berendsen barostat is not in"):
+    with pytest.raises(InputError, match="the Berendsen barostat needs compressibility_per_GPa"):
         integrators.Berendsen(timestep_fs=1.0, temperature_K=300, taut_fs=100, pressure_GPa=0.0, taup_fs=1000.0)
     assert integrators.from_data({"type": "Berendsen", "taut_fs": 100.0}, timestep_fs=1.0, temperature_K=300) == \
         integrators.Berendsen(timestep_fs=1.0, temperature_K=300, taut_fs=100.0)

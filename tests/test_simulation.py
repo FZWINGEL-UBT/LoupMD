@@ -232,7 +232,9 @@ def test_langevin_reaches_the_engine_with_its_settings(setup):
     record = json.loads((setup.tmp_path / "run" / "simulation.json").read_text())
     assert record["integrator"] == {"ensemble": "nvt", "scheme": "langevin", "timestep_fs": 2.0,
                                     "temperature_K": 350.0, "friction_per_fs": 0.02, "tau_fs": None, "tchain": None,
-                                    "tloop": None, "mass_temperature_K": None, "seed": 7, "fixcm": True}
+                                    "tloop": None, "mass_temperature_K": None, "pressure_GPa": None,
+                                    "taup_fs": None, "compressibility_per_GPa": None, "mask": None, "seed": 7,
+                                    "fixcm": True}
     assert record["seed"] == 7 and record["model"]["sha256"] == sim.force_field.sha256
 
 

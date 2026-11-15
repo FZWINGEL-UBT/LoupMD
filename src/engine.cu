@@ -7,6 +7,7 @@
 #include "bundle.hpp"
 #include "thermo.hpp"
 #include "cell.hpp"
+#include <cstddef>
 
 #include <cub/cub.cuh>
 #ifndef _GNU_SOURCE
@@ -3403,6 +3404,23 @@ static int set_cell_impl(LoupHandle* h, const double* cell, int scale_atoms) {
     return rebuild_neighbors(h);
 }
 
+// loup_set_reference_volume: the V0 of the cell limits, for a run that goes on in another process.
+static int set_reference_volume_impl(LoupHandle* h, double volume_a3) {
+    if (!has_system(h)) return -1;
+    if (!std::isfinite(volume_a3) || !(volume_a3 > 0.0)) {
+        loup::set_error("the reference volume must be finite and positive, got %g A^3", volume_a3);
+        return -1;
+    }
+    h->cell_v0 = volume_a3;
+    if (h->var_cell && h->d_celldev) {  // only this field: the device's cell may be ahead of the list's reference
+        CUDA_CHECK(cudaSetDevice(h->device_id));
+        CUDA_CHECK(cudaStreamSynchronize(h->stream));
+        CUDA_CHECK(cudaMemcpy(reinterpret_cast<char*>(h->d_celldev) + offsetof(loup::CellDev, v0), &volume_a3,
+                              sizeof(double), cudaMemcpyHostToDevice));
+    }
+    return 0;
+}
+
 static int get_cell_impl(LoupHandle* h, double* out_cell) {
     if (!has_system(h)) return -1;
     if (!h->nl_valid) {
@@ -3785,6 +3803,7 @@ static int import_state_impl(LoupHandle* h, const void* buffer, size_t size) {
     CUDA_CHECK(cudaSetDevice(h->device_id));
     if (!valid_input(h->N, positions, hd.cell, velocities)) return -1;
     if (upload_positions(h, positions, hd.cell) < 0) return -1;
+    if (!(h->cell_v0 > 0.0)) h->cell_v0 = h->cell_vol;  // a handle's first state (loup_set_reference_volume: a resumed run's)
     std::vector<double> v_sorted(n3);
     for (int dst = 0; dst < h->N; ++dst) {
         const size_t src = (size_t)h->perm[dst];
@@ -4109,6 +4128,10 @@ int loup_set_cell(LoupHandle* h, const double* cell, int scale_atoms) {
 
 int loup_get_cell(LoupHandle* h, double* out_cell) {
     return guarded(h, "loup_get_cell", [&] { return get_cell_impl(h, out_cell); });
+}
+
+int loup_set_reference_volume(LoupHandle* h, double volume_a3) {
+    return guarded(h, "loup_set_reference_volume", [&] { return set_reference_volume_impl(h, volume_a3); });
 }
 
 int loup_debug_csvr_noise(LoupHandle* h, unsigned long long seed, unsigned long long first_step, int n_steps,

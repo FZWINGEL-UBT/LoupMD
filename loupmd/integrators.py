@@ -137,11 +137,18 @@ class NoseHooverChain:
 @dataclass(frozen=True, kw_only=True)
 class Berendsen:
     """Berendsen thermostat, as ASE's ``NVTBerendsen``:
-    ``lm.integrators.Berendsen(timestep_fs=1.0, temperature_K=300, taut_fs=100)``.
+    ``lm.integrators.Berendsen(timestep_fs=1.0, temperature_K=300, taut_fs=100)``; with ``pressure_GPa``,
+    ``taup_fs`` and ``compressibility_per_GPa`` also Berendsen's barostat, as ASE's ``NPTBerendsen``
+    (experimental):
+    ``lm.integrators.Berendsen(timestep_fs=1.0, temperature_K=300, taut_fs=100, pressure_GPa=0.0,
+    taup_fs=1000, compressibility_per_GPa=0.006)``.
 
-    Not canonical: for equilibration only. ``taut_fs`` is ASE's ``taut``. FastMACE's record also takes
-    ``pressure_GPa``, ``taup_fs``, ``compressibility_per_GPa`` and ``mask`` for the Berendsen barostat; that
-    is not in this version, and giving one of them is refused."""
+    Not canonical: for equilibration only. ``taut_fs`` and ``taup_fs`` are ASE's ``taut`` and ``taup``,
+    ``compressibility_per_GPa`` the material's compressibility (ASE's ``compressibility_au`` times
+    ``units.GPa``). Without ``mask`` the cell keeps its shape; ``mask=(1, 1, 0)`` lets the first two cell
+    vectors follow their own stress and leaves the third alone (ASE's ``Inhomogeneous_NPTBerendsen``). The
+    barostat makes one force call per step: the first kick of a step uses the forces of the cell before its
+    scaling, where ASE's classes evaluate again. Not with fixed atoms."""
 
     timestep_fs: float
     temperature_K: float
@@ -153,20 +160,31 @@ class Berendsen:
     fixcm: bool | Literal["auto"] = "auto"
 
     def __post_init__(self):
-        barostat = [name for name in ("pressure_GPa", "taup_fs", "compressibility_per_GPa", "mask")
-                    if getattr(self, name) is not None]
-        if barostat:
-            raise PlanRefused(f"Berendsen with {', '.join(barostat)}: the Berendsen barostat is not in this version",
-                              next_step="Leave these out for the thermostat alone (PLAN.md Stage 4 builds NPT).")
-        IntegratorConfig(scheme="berendsen", timestep_fs=self.timestep_fs, temperature_K=self.temperature_K,
-                         tau_fs=self.taut_fs)                                # checks the values
+        self._config(seed=0, fixcm=False)                                    # checks the values
         if not isinstance(self.fixcm, bool) and self.fixcm != "auto":
             raise InputError(f"Berendsen.fixcm must be True, False or 'auto', got {self.fixcm!r}")
 
+    @property
+    def barostat(self) -> bool:
+        return any(getattr(self, name) is not None
+                   for name in ("pressure_GPa", "taup_fs", "compressibility_per_GPa", "mask"))
+
+    def _config(self, *, seed, fixcm) -> IntegratorConfig:
+        if not self.barostat:
+            return IntegratorConfig(ensemble="nvt", scheme="berendsen", timestep_fs=self.timestep_fs,
+                                    temperature_K=self.temperature_K, tau_fs=self.taut_fs, seed=seed, fixcm=fixcm)
+        return IntegratorConfig(ensemble="npt", scheme="berendsen", timestep_fs=self.timestep_fs,
+                                temperature_K=self.temperature_K, tau_fs=self.taut_fs,
+                                pressure_GPa=self.pressure_GPa, taup_fs=self.taup_fs,
+                                compressibility_per_GPa=self.compressibility_per_GPa, mask=self.mask, seed=seed,
+                                fixcm=fixcm)
+
     def to_config(self, *, seed: int, fixed_atoms: bool = False) -> IntegratorConfig:
-        return IntegratorConfig(ensemble="nvt", scheme="berendsen", timestep_fs=float(self.timestep_fs),
-                                temperature_K=float(self.temperature_K), tau_fs=float(self.taut_fs), seed=seed,
-                                fixcm=resolve_fixcm(self.fixcm, fixed_atoms))
+        if self.barostat and fixed_atoms:
+            raise PlanRefused("Berendsen's barostat with fixed atoms",
+                              why="the cell's scaling would move the fixed atoms",
+                              next_step="Leave the barostat's fields out, or free the atoms.")
+        return self._config(seed=seed, fixcm=resolve_fixcm(self.fixcm, fixed_atoms))
 
 
 RECORDS = {"NVE": NVE, "Langevin": Langevin, "CSVR": CSVR, "NoseHooverChain": NoseHooverChain,

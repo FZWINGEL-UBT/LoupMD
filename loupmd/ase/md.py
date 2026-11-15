@@ -33,7 +33,7 @@ from math import gcd
 from ..errors import InputError, PlanRefused
 from ..forcefield import ForceField, load
 
-_NOT_BUILT = ("LangevinBAOAB", "IsotropicMTKNPT", "MTKNPT", "NPTBerendsen", "Inhomogeneous_NPTBerendsen")
+_NOT_BUILT = ("LangevinBAOAB", "IsotropicMTKNPT", "MTKNPT")
 _LOAD_OPTIONS = ("checkpoint", "sha256", "trusted", "download", "charge", "spin_multiplicity", "device")
 # ASE's arguments that have no meaning here: accepted at None, refused otherwise.
 _ASE_REFUSED = {"rng": "the noise is drawn on the GPU: pass seed=", "comm": "LoupMD runs in one process",
@@ -44,8 +44,8 @@ def __getattr__(name):
     if name in _NOT_BUILT:
         raise PlanRefused(f"loupmd.ase.md.{name} is not in this version",
                           why="its integrator is not built in the engine yet (PLAN.md Stage 4)",
-                          next_step="Use Langevin, Bussi, NoseHooverChainNVT or VelocityVerlet, or ASE's class "
-                                    "with lm.calc as the calculator.")
+                          next_step="Use Langevin, Bussi, NoseHooverChainNVT, NVTBerendsen, NPTBerendsen or "
+                                    "VelocityVerlet, or ASE's class with lm.calc as the calculator.")
     raise AttributeError(f"module 'loupmd.ase.md' has no attribute {name!r}")
 
 
@@ -137,6 +137,8 @@ class _Dynamics:
 
     def _sync(self):
         current = self.simulation.atoms
+        if self.simulation.config.ensemble == "npt":             # the barostat's cell
+            self.atoms.set_cell(current.cell, scale_atoms=False, apply_constraint=False)
         self.atoms.set_positions(current.positions, apply_constraint=False)
         self.atoms.set_momenta(current.get_momenta(), apply_constraint=False)
         self.atoms.calc = current.calc
@@ -275,3 +277,55 @@ class NVTBerendsen(_Dynamics):
         record = integrators.Berendsen(timestep_fs=timestep / units.fs, temperature_K=temperature_K,
                                        taut_fs=taut / units.fs, fixcm=fixcm)
         super().__init__(atoms, timestep, record, model, head, seed, output, check, options)
+
+
+class NPTBerendsen(_Dynamics):
+    """``ase.md.nptberendsen.NPTBerendsen`` on LoupMD's engine (experimental): ``timestep``, ``taut`` and
+    ``taup`` in ASE units, ``temperature_K`` in K, ``pressure_au`` in eV/A^3 and ``compressibility_au`` in
+    A^3/eV, as ASE's class. ``fixcm=True`` (ASE's default) keeps the centre of mass at rest; the temperature
+    then counts three degrees of freedom fewer than ASE's.
+
+    One difference from ASE's class: the engine makes one force call per step, so the first kick of a step uses
+    the forces of the cell before the barostat scaled it, where ASE evaluates again. The two agree to the order
+    of ``dt * compressibility * |pressure - P| / taup`` per step."""
+
+    _mask = None
+
+    def __init__(self, atoms, timestep, temperature=None, *, temperature_K=None, pressure=None, pressure_au=None,
+                 taut=None, taup=None, compressibility=None, compressibility_au=None, fixcm=True, model=None,
+                 head=None, seed=None, output=None, check="skip", **options):
+        from ase import units
+
+        from .. import integrators
+
+        name = type(self).__name__
+        if temperature is not None and temperature_K is not None:
+            raise TypeError(f"{name} takes temperature (in eV) or temperature_K, not both")
+        if temperature is not None:
+            temperature_K = temperature / units.kB
+        if pressure is not None or compressibility is not None:
+            raise InputError(f"{name}: pressure= (bar) and compressibility= (1/bar) are ASE's deprecated units",
+                             next_step="Pass pressure_au (eV/A^3, for example 1.01325 * units.bar) and "
+                                       "compressibility_au (A^3/eV, for example 4.57e-5 / units.bar).")
+        missing = [label for label, value in (("temperature_K", temperature_K), ("pressure_au", pressure_au),
+                                              ("compressibility_au", compressibility_au)) if value is None]
+        if missing:
+            raise InputError(f"{name} needs {', '.join(missing)}")
+        taut = 0.5e3 * units.fs if taut is None else taut             # ASE's defaults
+        taup = 1e3 * units.fs if taup is None else taup
+        record = integrators.Berendsen(timestep_fs=timestep / units.fs, temperature_K=temperature_K,
+                                       taut_fs=taut / units.fs, pressure_GPa=pressure_au / units.GPa,
+                                       taup_fs=taup / units.fs,
+                                       compressibility_per_GPa=compressibility_au * units.GPa, mask=self._mask,
+                                       fixcm=fixcm)
+        super().__init__(atoms, timestep, record, model, head, seed, output, check, options)
+
+
+class Inhomogeneous_NPTBerendsen(NPTBerendsen):
+    """``ase.md.nptberendsen.Inhomogeneous_NPTBerendsen`` on LoupMD's engine (experimental): as ``NPTBerendsen``,
+    with each cell vector scaled by its own stress and ``mask`` (three 0 / 1 entries, ASE's default (1, 1, 1))
+    naming the vectors the barostat may scale. The angles stay."""
+
+    def __init__(self, *args, mask=(1, 1, 1), **kwargs):
+        self._mask = tuple(int(m) for m in mask)
+        super().__init__(*args, **kwargs)

@@ -5,7 +5,8 @@ to a ``Simulation``, which gates (if asked), runs and writes. Every argument err
 loaded. What ``md`` decides itself:
 
 - the integrator: ``ensemble="NVT"`` is ``lm.integrators.Langevin``, ``"NVE"`` is ``NVE``; ``"NPT"`` is refused
-  until its integrators are built. An explicit ``integrator=`` (any ``lm.integrators`` record, for example
+  until its default integrator is built (a barostat's record passed as ``integrator=`` runs). An explicit
+  ``integrator=`` (any ``lm.integrators`` record, for example
   ``CSVR``) wins; a conflicting argument is an error;
 - NVE has no target: the momenta are the structure's, and ``temperature_K=`` and ``schedule=`` are errors;
 - the defaults: friction 0.02 per ASE time unit (about 0.001965/fs, FastMACE's), a drawn and recorded seed, the
@@ -206,7 +207,8 @@ def md(structure, *, model, head=None, charge=None, spin_multiplicity=None, sha2
     if integrator is not None:
         if not isinstance(integrator, tuple(integrators.RECORDS.values())):
             raise InputError(f"integrator must be an lm.integrators record, got {type(integrator).__name__}")
-        record_ensemble = "NVE" if isinstance(integrator, integrators.NVE) else "NVT"
+        record_ensemble = ("NVE" if isinstance(integrator, integrators.NVE) else
+                           "NPT" if getattr(integrator, "barostat", False) else "NVT")
         if ensemble != "NVT" and ensemble != record_ensemble:
             raise InputError(f"ensemble={ensemble!r} conflicts with integrator={type(integrator).__name__}; the "
                              "explicit integrator decides, so drop ensemble=")
@@ -220,9 +222,11 @@ def md(structure, *, model, head=None, charge=None, spin_multiplicity=None, sha2
             raise InputError(f"{', '.join(conflicts)} conflicts with the explicit integrator's fields; set them in "
                              "the integrator record only")
         timestep_fs = integrator.timestep_fs
-    if ensemble == "NPT" or pressure_GPa != 0.0 or cell_mode != "hydrostatic":
+    if (ensemble == "NPT" and integrator is None) or pressure_GPa != 0.0 or cell_mode != "hydrostatic":
         raise PlanRefused("ensemble='NPT', pressure_GPa= and cell_mode=: constant-pressure MD is not in this version",
-                          next_step="Use ensemble='NVT' or 'NVE' (PLAN.md Stage 4 builds the NPT integrators).")
+                          next_step="Use ensemble='NVT' or 'NVE', or pass a barostat's record: "
+                                    "integrator=lm.integrators.Berendsen(..., pressure_GPa=..., taup_fs=..., "
+                                    "compressibility_per_GPa=...) (experimental).")
     nve = ensemble == "NVE"
     if nve:
         named = [name for name, value in (("temperature_K", temperature_K), ("schedule", schedule))

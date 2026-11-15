@@ -36,7 +36,14 @@ def _physics_lines(metadata) -> list:
         if integrator.get("fixcm"):
             first += ", total momentum removed"
     else:
-        if integrator["scheme"] == "berendsen":
+        if integrator["scheme"] == "berendsen" and integrator.get("ensemble") == "npt":
+            mask = integrator.get("mask")
+            cell = "the cell keeps its shape" if mask is None else f"cell vectors scaled singly, mask {tuple(mask)}"
+            first = (f"NPT, Berendsen thermostat and barostat (experimental; not canonical: for equilibration), "
+                     f"timestep {timestep:g} fs, time constants {integrator['tau_fs']:g} fs and "
+                     f"{integrator['taup_fs']:g} fs, pressure {integrator['pressure_GPa']:g} GPa, compressibility "
+                     f"{integrator['compressibility_per_GPa']:g}/GPa, {cell}")
+        elif integrator["scheme"] == "berendsen":
             first = (f"NVT, Berendsen thermostat (not canonical: for equilibration), timestep {timestep:g} fs, "
                      f"time constant {integrator['tau_fs']:g} fs")
         elif integrator["scheme"] == "nose_hoover":

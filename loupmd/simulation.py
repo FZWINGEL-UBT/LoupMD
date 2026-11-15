@@ -22,8 +22,8 @@ from pathlib import Path
 from . import output as _output
 from . import skin as _skin
 from .config import GateConfig, IntegratorConfig, Output
-from .errors import (BackendError, GateFailed, GateUnavailable, InputError, LoupError, NonFiniteError, PlanRefused,
-                     RestartMismatch)
+from .errors import (BackendError, CellDivergedError, GateFailed, GateUnavailable, InputError, LoupError,
+                     NonFiniteError, PlanRefused, RestartMismatch)
 from .forcefield import ForceField, load
 from .protocols import Schedule, ScheduleState
 
@@ -153,6 +153,10 @@ class Simulation:
                      - (3 if self.config.fixcm else 0))
         self._engine = self._bundle = None
         self._chunks = self._writer = None
+        self._npt = self.config.ensemble == "npt"   # the cell is the engine's: rows carry volume and pressure
+        if self._npt and fixed is not None:
+            raise PlanRefused("a barostat with fixed atoms", why="the cell's scaling would move the fixed atoms")
+        self._reference_volume = float(atoms.get_volume()) if self._npt else None   # V0 of the cell limits
         self._base = 0                     # the step at which the engine's own count was zero
         self._resume = None                # (state block, step, output indices) of a resumed run
         self._schedule = None              # the ScheduleState of the schedule attached last
@@ -166,7 +170,8 @@ class Simulation:
 
         atoms = self._atoms
         if self.output is not None:        # first: a directory that holds a run is refused before any export
-            self._chunks = _output.ChunkedOutput(self.output.directory, atoms,
+            header = _output.THERMO_HEADER + (_output.NPT_COLUMNS if self._npt else ())
+            self._chunks = _output.ChunkedOutput(self.output.directory, atoms, header,
                                                  resume_from=self._resume[2] if self._resume else None)
             self._writer = _output.AsyncWriter()
         if self._resume is None and self.check != "skip":
@@ -182,6 +187,9 @@ class Simulation:
             self._skin_probe = {"from": self._resume[1] if self._resume else 0, "hottest_K": hottest}
         engine = self.force_field.new_engine(atoms, self.skin)
         self._bundle = self.force_field.last_bundle
+        if self._npt and getattr(getattr(engine, "info", lambda: None)(), "has_long_range", False):
+            raise PlanRefused("a barostat with a long-range model (MACE-POLAR-1)",
+                              why="the model's k-space terms are set up for one cell in this version")
         if self._fixed is not None:
             engine.set_fixed_atoms(self._fixed)
         self._masses = np.asarray(atoms.get_masses(), dtype=float)
@@ -195,14 +203,16 @@ class Simulation:
                                       next_step="Use the restart file as it was written, or start a new run.") from None
             self._base = self.step
             self._engine = engine
+            if self._npt:
+                engine.set_reference_volume(self._reference_volume)
         else:
             positions, velocities = atoms.positions, atoms.get_velocities()
             engine.set_state(positions, velocities, atoms.cell.array)
-            energy, forces, _ = engine.evaluate(positions, atoms.cell.array, compute_stress=False)
+            energy, forces, stress = engine.evaluate(positions, atoms.cell.array, compute_stress=self._npt)
             self._engine = engine
             if self.output is not None:
                 self._write_record()
-                self._submit_row(self._host_row(0, energy, velocities))
+                self._submit_row(self._host_row(0, energy, velocities, stress))
                 if self.output.trajectory_every is not None:
                     self._submit_frame(positions.copy(), velocities, forces, energy)
         self.status = "idle"
@@ -276,19 +286,36 @@ class Simulation:
         temperature = self.config.temperature_K
         return _output.CONSTANT_PHASE, float("nan") if temperature is None else float(temperature)
 
-    def _row(self, step, e_pot, e_kin, temperature):
+    def _row(self, step, e_pot, e_kin, temperature, volume=None, pressure=None):
         n = len(self._atoms)
         phase, target = self._phase_target(step)
-        return (int(step), step * self.config.timestep_fs / 1000.0, phase, target, float(temperature), e_pot / n,
-                e_kin / n, (e_pot + e_kin) / n)
+        row = (int(step), step * self.config.timestep_fs / 1000.0, phase, target, float(temperature), e_pot / n,
+               e_kin / n, (e_pot + e_kin) / n)
+        if self._npt:                      # _output.NPT_COLUMNS
+            row += (float(volume) / n, float(pressure))
+        return row
 
-    def _host_row(self, step, e_pot, velocities):
+    def _host_row(self, step, e_pot, velocities, stress=None):
         """A row made from the state on the host, as the device makes its rows: used at step 0 and where the
-        engine's count starts anew."""
+        engine's count starts anew. A variable-cell run passes the stress of that state (eV/A^3); the pressure
+        is minus a third of its trace plus the ideal-gas part 2 E_kin / (3 V), as the engine's rows."""
+        import numpy as np
         from ase import units
 
         e_kin = 0.5 * float((self._masses[:, None] * velocities ** 2).sum())
-        return self._row(step, e_pot, e_kin, 2 * e_kin / (self._dof * units.kB))
+        if not self._npt:
+            return self._row(step, e_pot, e_kin, 2 * e_kin / (self._dof * units.kB))
+        volume = abs(float(np.linalg.det(self._engine.get_cell())))
+        pressure = (-float(np.trace(stress)) / 3.0 + 2.0 * e_kin / (3.0 * volume)) / units.GPa
+        return self._row(step, e_pot, e_kin, 2 * e_kin / (self._dof * units.kB), volume, pressure)
+
+    def _state_row(self, step, state):
+        """The host row of an engine state (``get_state``). A variable-cell run evaluates once more for the
+        stress of that state: the engine's own rows carry it, a state read back does not."""
+        stress = None
+        if self._npt:
+            _, _, stress = self._engine.evaluate(state[0], self._engine.get_cell(), compute_stress=True)
+        return self._host_row(step, state[3], state[1], stress)
 
     def _check_finite(self, row):
         for name, value in zip(_output.THERMO_HEADER, row):
@@ -301,7 +328,8 @@ class Simulation:
         self._writer.submit(self._chunks.write_row, row)
 
     def _submit_frame(self, positions, velocities, forces, energy):
-        self._writer.submit(self._chunks.write_frame, positions, velocities, forces, energy)
+        cell = self._engine.get_cell() if self._npt else None   # a variable-cell run's frames carry their cell
+        self._writer.submit(self._chunks.write_frame, positions, velocities, forces, energy, cell)
 
     # ---------------------------------------------------------------------------------------------- run
 
@@ -401,6 +429,10 @@ class Simulation:
                     raise NonFiniteError(f"non-finite energy between steps {self.step} and {self.step + n}",
                                          why=str(error).splitlines()[0],
                                          next_step=NonFiniteError.default_next_step) from None
+                if "the cell diverged" in str(error):
+                    raise CellDivergedError(f"the cell left its limits between steps {self.step} and "
+                                            f"{self.step + n}", why=str(error).splitlines()[0],
+                                            step=self.step + n) from None
                 raise
             self.step += n
             segment_end = False
@@ -421,16 +453,17 @@ class Simulation:
             if buffered:
                 for row in engine.read_thermo():
                     self._submit_row(self._row(self._base + int(row["step"]), float(row["e_pot"]),
-                                               float(row["e_kin"]), float(row["temp_k"])))
+                                               float(row["e_kin"]), float(row["temp_k"]),
+                                               float(row["volume_a3"]), float(row["pressure_gpa"])))
             state = None
             if thermo is not None and not buffered and self.step % thermo == 0:
                 state = engine.get_state()
-                self._submit_row(self._host_row(self.step, state[3], state[1]))
+                self._submit_row(self._state_row(self.step, state))
                 engine.import_state(engine.export_state())      # the engine's count starts anew on a thermo step
                 self._base = self.step
             elif thermo is not None and segment_end and self.step % thermo != 0:
                 state = engine.get_state()                       # the end of a segment between two thermo steps
-                self._submit_row(self._host_row(self.step, state[3], state[1]))
+                self._submit_row(self._state_row(self.step, state))
             if frames is not None and (self.step % frames == 0 or segment_end):
                 positions, velocities, forces, energy = state or engine.get_state()
                 self._submit_frame(positions, velocities, forces, energy)
@@ -482,6 +515,8 @@ class Simulation:
         from ase.calculators.singlepoint import SinglePointCalculator
 
         positions, velocities, forces, energy = self._engine.get_state()
+        if self._npt:
+            atoms.set_cell(self._engine.get_cell(), scale_atoms=False)
         atoms.set_positions(positions)
         atoms.set_velocities(velocities)
         atoms.calc = SinglePointCalculator(atoms, energy=energy, forces=forces)
@@ -507,11 +542,13 @@ class Simulation:
             indices = self._chunks.restart_point()
         positions, velocities, _, energy = self._engine.get_state()
         atoms = self._atoms
+        cell = self._engine.get_cell() if self._npt else np.asarray(atoms.cell.array, dtype=float)
+        extra = {"reference_volume_A3": np.array(self._reference_volume)} if self._npt else {}
         arrays = dict(format=np.array(RESTART_FORMAT), step=np.array(self.step, dtype=np.int64),
                       blob=np.frombuffer(self._engine.export_state(), dtype=np.uint8),
                       model_sha256=np.array(self.force_field.sha256), seed=np.array(self.seed, dtype=np.int64),
                       numbers=np.asarray(atoms.numbers, dtype=np.int64), masses=self._masses,
-                      pbc=np.asarray(atoms.pbc, dtype=bool), cell=np.asarray(atoms.cell.array, dtype=float),
+                      pbc=np.asarray(atoms.pbc, dtype=bool), cell=cell, **extra,
                       fixed=(self._fixed if self._fixed is not None else np.zeros(len(atoms), dtype=bool)),
                       positions=positions, velocities=velocities, potential_energy=np.array(energy),
                       schedule=np.array(json.dumps(None if self._schedule is None else dict(
@@ -596,6 +633,8 @@ class Simulation:
             sim._schedule = ScheduleState.from_restart(stored)
         if sim.config.temperature_K is not None:                 # a finished schedule left the thermostat there
             sim.config = dataclasses.replace(sim.config, temperature_K=float(data["temperature_K"]))
+        if sim._npt and "reference_volume_A3" in data:
+            sim._reference_volume = float(data["reference_volume_A3"])
         indices = {key: int(data[key]) for key in _output.OUTPUT_KEYS}
         sim._resume = (data["blob"].tobytes(), int(data["step"]), indices if out is not None else None)
         sim._start()

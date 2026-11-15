@@ -32,6 +32,7 @@ THERMO_PATTERN = "thermo.{}.csv"
 TRAJECTORY_PATTERN = "trajectory.{}.traj"
 THERMO_HEADER = ("step", "time_ps", "phase", "target_K", "temperature_K", "potential_eV_atom", "kinetic_eV_atom",
                  "total_eV_atom")
+NPT_COLUMNS = ("volume_A3_atom", "pressure_GPa")    # after THERMO_HEADER in a variable-cell run (as FastMACE)
 CONSTANT_PHASE = "constant"          # the phase column of a run without a schedule
 OUTPUT_KEYS = ("output_chunk", "output_rows", "output_frames")
 _CHUNK = re.compile(r"^(?:thermo\.(\d+)\.csv|trajectory\.(\d+)\.traj)$")

@@ -290,6 +290,8 @@ def _bind(lib):
     lib.loup_set_cell.restype = ctypes.c_int
     lib.loup_get_cell.argtypes = [ctypes.c_void_p, _c_double_p]
     lib.loup_get_cell.restype = ctypes.c_int
+    lib.loup_set_reference_volume.argtypes = [ctypes.c_void_p, ctypes.c_double]
+    lib.loup_set_reference_volume.restype = ctypes.c_int
     lib.loup_debug_csvr_noise.argtypes = [ctypes.c_void_p, ctypes.c_ulonglong, ctypes.c_ulonglong, ctypes.c_int,
                                           ctypes.c_int, _c_double_p, _c_double_p]
     lib.loup_debug_csvr_noise.restype = ctypes.c_int
@@ -470,6 +472,11 @@ class LoupEngine:
         out = np.empty((3, 3), dtype=np.float64)
         self._check(self._lib.loup_get_cell(self._h, _ptr(out)), "loup_get_cell")
         return out
+
+    def set_reference_volume(self, volume_A3: float):
+        """The volume the cell limits of a variable-cell run refer to (``set_state`` sets it to the volume it is
+        given; a resumed run passes the first run's)."""
+        self._check(self._lib.loup_set_reference_volume(self._h, float(volume_A3)), "loup_set_reference_volume")
 
     def step_displacement(self) -> float:
         """The largest distance in A an atom moved in one MD step lately (the displacement tracker's two windows):

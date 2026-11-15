@@ -167,3 +167,53 @@ def test_refusals(sto_bundle):
         eng.run(10, _npt())
     eng.set_fixed_atoms(None)
     assert eng.run(10, _npt()).final_temperature_k > 100.0
+
+
+def test_a_simulation_with_the_barostat_writes_resumes_and_matches_the_engine(sto_bundle, model_path, tmp_path):
+    """``lm.Simulation`` with ``lm.integrators.Berendsen(pressure_GPa=...)``: the rows carry volume and pressure,
+    the frames their cell, a resumed run goes on from the restart's cell, and the ASE drop-in ends where the
+    engine's own call does."""
+    from loupmd import integrators, output
+    from loupmd.ase import md as ase_md
+
+    at = _strained()
+    record = integrators.Berendsen(timestep_fs=1.0, temperature_K=300.0, taut_fs=50.0, pressure_GPa=0.0,
+                                   taup_fs=100.0, compressibility_per_GPa=KAPPA, fixcm=False)
+    ff = loupmd.load(model_path, trusted=True)
+    sim = loupmd.Simulation(at, ff, integrator=record, seed=3,
+                            output=loupmd.Output(str(tmp_path / "npt"), thermo_every=20, trajectory_every=100,
+                                                 restart_every=200))
+    sim.run(steps=200)
+    volume_200 = sim.atoms.get_volume()
+    sim.close()
+    again = loupmd.Simulation.resume(tmp_path / "npt", force_field=ff)
+    again.run(steps=100)
+    final = again.atoms
+    again.close()
+    header, rows = output.read_thermo(tmp_path / "npt")
+    volumes = np.array([float(row[8]) for row in rows]) * len(at)
+    pressures = np.array([float(row[9]) for row in rows])
+    frames = output.read_frames(tmp_path / "npt")
+
+    eng = LoupEngine(sto_bundle)                                  # the same 200 steps as one engine call
+    _start(eng, at)
+    eng.run(200, _npt())
+    direct = abs(np.linalg.det(eng.get_cell()))
+
+    atoms = at.copy()
+    dyn = ase_md.NPTBerendsen(atoms, 1.0 * units.fs, temperature_K=300.0, pressure_au=0.0, taut=50.0 * units.fs,
+                              taup=100.0 * units.fs, compressibility_au=KAPPA * GPA, fixcm=False, model=ff)
+    dyn.run(200)
+    print(f"lm.Simulation with Berendsen NPT: volume {volumes[0]:.2f} -> {volume_200:.3f} A^3 after 200 steps (one "
+          f"engine call: relative {abs(volume_200 / direct - 1):.1e}; the ASE drop-in: "
+          f"{abs(atoms.get_volume() / direct - 1):.1e}), {final.get_volume():.3f} after 100 more from the restart; "
+          f"pressure {pressures[0]:.2f} GPa at step 0, {pressures[10]:.2f} at step 200, {pressures[-1]:.2f} at 300")
+    assert header == list(output.THERMO_HEADER + output.NPT_COLUMNS)
+    assert [int(row[0]) for row in rows] == list(range(0, 301, 20))
+    assert volumes[0] == pytest.approx(at.get_volume(), rel=1e-12) and volumes[10] == pytest.approx(volume_200, rel=1e-12)
+    assert volumes[-1] == pytest.approx(final.get_volume(), rel=1e-12)
+    assert abs(volume_200 / direct - 1) < 1e-6 and abs(atoms.get_volume() / direct - 1) < 1e-6
+    assert pressures[0] > 5.0 and abs(pressures[-1]) < abs(pressures[0]) / 3
+    assert [frame.get_volume() for frame in frames] == pytest.approx([volumes[0], volumes[5], volumes[10], volumes[15]],
+                                                                    rel=1e-9)
+    assert final.get_volume() > volume_200 > at.get_volume()

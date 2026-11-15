@@ -27,7 +27,8 @@ GATE_STRESS_FLOOR_EV_PER_A3 = 1e-7
 # Integrator schemes of each ensemble, the first being its default. BUILT are those the engine has.
 SCHEMES = {"nve": ("nve",), "nvt": ("langevin", "csvr", "nose_hoover", "berendsen"),
            "npt": ("baoab", "mtk", "berendsen")}
-BUILT = {"nve": ("nve",), "nvt": ("langevin", "csvr", "nose_hoover", "berendsen"), "npt": ()}
+BUILT = {"nve": ("nve",), "nvt": ("langevin", "csvr", "nose_hoover", "berendsen"), "npt": ("berendsen",)}
+BAROSTAT_FIELDS = ("pressure_GPa", "taup_fs", "compressibility_per_GPa", "mask")
 
 
 def _name(record, field):
@@ -79,7 +80,12 @@ class IntegratorConfig:
     ``tau_fs`` is the time constant of the thermostats that have one (``csvr``: ASE's ``taut``; ``nose_hoover``:
     ASE's ``tdamp``). The Nose-Hoover chain has ``tchain`` thermostats and ``tloop`` sub-steps per half step
     (ASE's defaults 3 and 1); its thermostat masses are made for ``mass_temperature_K``, by default the
-    ``temperature_K`` the record is made with, and stay when a schedule moves the target."""
+    ``temperature_K`` the record is made with, and stay when a schedule moves the target.
+
+    Ensemble ``npt`` (scheme ``berendsen``: ASE's ``NPTBerendsen``) takes the barostat's ``pressure_GPa``,
+    ``taup_fs`` and the material's ``compressibility_per_GPa``; none has a default. ``mask`` (three 0 / 1
+    entries) lets each cell vector follow its own stress and leaves the masked ones alone (ASE's
+    ``Inhomogeneous_NPTBerendsen``); without it the cell keeps its shape."""
 
     ensemble: Literal["nve", "nvt", "npt"] = "nvt"
     scheme: str | None = None
@@ -90,6 +96,10 @@ class IntegratorConfig:
     tchain: int | None = None                  # Nose-Hoover chain: thermostats in the chain
     tloop: int | None = None                   # Nose-Hoover chain: sub-steps per half step
     mass_temperature_K: float | None = None    # Nose-Hoover chain: the temperature of the thermostat masses
+    pressure_GPa: float | None = None          # NPT: the barostat's target
+    taup_fs: float | None = None               # NPT: the barostat's time constant
+    compressibility_per_GPa: float | None = None   # Berendsen NPT: the material's compressibility
+    mask: tuple | None = None                  # Berendsen NPT: the cell vectors the barostat scales, each by its own
     seed: int = 20261001
     fixcm: bool = False                        # keep the centre of mass at rest (three degrees of freedom fewer)
 
@@ -100,7 +110,7 @@ class IntegratorConfig:
             raise InputError(f"{_name(self, 'scheme')}: scheme {scheme!r} is not a scheme of ensemble "
                              f"{self.ensemble!r}", next_step=f"Its schemes: {', '.join(SCHEMES[self.ensemble])}.")
         if scheme not in BUILT[self.ensemble]:
-            built = ", ".join(name for names in BUILT.values() for name in names)
+            built = ", ".join(dict.fromkeys(name for names in BUILT.values() for name in names))
             raise InputError(f"{_name(self, 'scheme')}: {self.ensemble} with scheme {scheme!r} is not in this version",
                              next_step=f"Built schemes: {built}.")
         object.__setattr__(self, "scheme", scheme)
@@ -147,6 +157,22 @@ class IntegratorConfig:
             if self.tau_fs < self.timestep_fs:
                 raise InputError(f"{_name(self, 'tau_fs')} must be at least the timestep for the Berendsen "
                                  f"thermostat, got {self.tau_fs!r} fs with timestep_fs = {self.timestep_fs!r}")
+            if self.ensemble == "npt":
+                missing = [name for name in BAROSTAT_FIELDS[:3] if getattr(self, name) is None]
+                if missing:
+                    raise InputError(f"IntegratorConfig: the Berendsen barostat needs {', '.join(missing)}",
+                                     why="pressure, time constant and compressibility have no defaults")
+                if not _is_number(self.pressure_GPa):
+                    raise InputError(f"{_name(self, 'pressure_GPa')} must be finite, got {self.pressure_GPa!r}")
+                _positive(self, "taup_fs", "compressibility_per_GPa")
+                if self.mask is not None:
+                    mask = tuple(self.mask) if isinstance(self.mask, (tuple, list)) else None
+                    if mask is None or len(mask) != 3 or any(isinstance(m, bool) or m not in (0, 1) for m in mask):
+                        raise InputError(f"{_name(self, 'mask')} must be three entries of 0 or 1, got {self.mask!r}")
+                    if not any(mask):
+                        raise InputError(f"{_name(self, 'mask')} frees no axis: (0, 0, 0) is a run at fixed cell",
+                                         next_step="Use ensemble 'nvt' for that.")
+                    object.__setattr__(self, "mask", tuple(int(m) for m in mask))
         elif scheme == "nose_hoover":
             if self.temperature_K is None or self.tau_fs is None:
                 raise InputError("IntegratorConfig: the Nose-Hoover chain needs temperature_K and tau_fs (ASE's "
@@ -165,6 +191,12 @@ class IntegratorConfig:
             if self.mass_temperature_K is None:
                 object.__setattr__(self, "mass_temperature_K", self.temperature_K)
             _positive(self, "mass_temperature_K")
+        if self.ensemble != "npt":
+            given = [name for name in BAROSTAT_FIELDS if getattr(self, name) is not None]
+            if given:
+                raise InputError(f"IntegratorConfig: {', '.join(given)} belong{'s' if len(given) == 1 else ''} to a "
+                                 f"barostat, and the ensemble is {self.ensemble!r}",
+                                 next_step="ensemble='npt' with scheme 'berendsen'.")
 
     def to_struct(self, thermo_every: int = 0, temperature_K=None, rate_K_per_step: float = 0.0):
         """The ``LoupIntegrator`` of this record for ``loup_run``; ``thermo_every`` is the output's cadence. A
@@ -176,6 +208,14 @@ class IntegratorConfig:
             return _core.integrator(_core.LOUP_NVE, self.timestep_fs, thermo_every=int(thermo_every),
                                     fix_com=int(self.fixcm))
         temperature = self.temperature_K if temperature_K is None else temperature_K
+        if self.scheme == "berendsen" and self.ensemble == "npt":
+            cell = ({} if self.mask is None else
+                    dict(cell_mode=_core.LOUP_CELL_FULL, cell_mask=tuple(int(m) for m in self.mask)))
+            return _core.integrator(_core.LOUP_BERENDSEN_NPT, self.timestep_fs, temp_k=float(temperature),
+                                    temp_rate_k_per_step=float(rate_K_per_step), tau_t_fs=float(self.tau_fs),
+                                    pressure_gpa=float(self.pressure_GPa), tau_p_fs=float(self.taup_fs),
+                                    compressibility_per_gpa=float(self.compressibility_per_GPa),
+                                    thermo_every=int(thermo_every), fix_com=int(self.fixcm), **cell)
         if self.scheme == "berendsen":
             return _core.integrator(_core.LOUP_BERENDSEN_NVT, self.timestep_fs, temp_k=float(temperature),
                                     temp_rate_k_per_step=float(rate_K_per_step), tau_t_fs=float(self.tau_fs),
