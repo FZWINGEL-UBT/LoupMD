@@ -272,3 +272,32 @@ def test_the_berendsen_thermostat_takes_ase_s_arguments(ff):
         integrators.Berendsen(timestep_fs=1.0, temperature_K=300, taut_fs=100, pressure_GPa=0.0, taup_fs=1000.0)
     assert integrators.from_data({"type": "Berendsen", "taut_fs": 100.0}, timestep_fs=1.0, temperature_K=300) == \
         integrators.Berendsen(timestep_fs=1.0, temperature_K=300, taut_fs=100.0)
+
+
+def test_fastmace_s_ase_example_runs_with_its_import_line_changed(ff, tmp_path):
+    """docs/guide/ase.md of FastMACE, "Level 1: change the import": ``from fastmace.ase import Langevin`` becomes
+    ``from loupmd.ase import Langevin``; ``model=`` here is the loaded fake."""
+    from ase.io import read
+
+    from loupmd.ase import Langevin
+
+    atoms = bulk("NaCl", "rocksalt", a=5.64, cubic=True)
+    atoms.set_velocities(np.random.default_rng(2).normal(0.0, 0.02, atoms.positions.shape))
+    energies = []
+
+    def print_energy():
+        energies.append(atoms.get_potential_energy())
+
+    dyn = Langevin(atoms, 0.5 * units.fs, temperature_K=300, friction=0.02 / units.fs, model=ff,
+                   trajectory=str(tmp_path / "run.traj"), logfile=str(tmp_path / "run.log"), loginterval=20)
+    dyn.attach(print_energy, interval=100)
+    dyn.run(200)
+    summary = dyn.summary
+    assert "NVT, Langevin, timestep 0.5 fs" in summary and "200 steps" in summary
+    assert len(energies) == 3 and len(read(tmp_path / "run.traj", index=":")) == 11
+    assert len((tmp_path / "run.log").read_text().splitlines()) == 12            # ASE's header and 11 rows
+    import loupmd.ase
+
+    assert set(loupmd.ase.__all__) >= {"Langevin", "LangevinBAOAB", "MTKNPT", "NPTBerendsen", "LBFGS", "FIRE"}
+    assert loupmd.ase.LBFGS is ase_optimize.LBFGS and loupmd.ase.MTKNPT is ase_md.MTKNPT
+

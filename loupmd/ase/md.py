@@ -120,6 +120,13 @@ class _Dynamics:
             self.attach(logger, interval=interval)
             self._closables.append(logger)
 
+    @property
+    def summary(self) -> str:
+        """The run report of what has run so far, as ``lm.md``'s ``RunResult.summary``."""
+        from .. import provenance, report
+
+        return report.text(provenance.collect(self.simulation))
+
     def attach(self, function, interval=1, *args, **kwargs):
         """Call ``function(*args, **kwargs)`` every ``interval`` steps (and at step 0), with ``atoms`` up to date."""
         if isinstance(interval, bool) or not isinstance(interval, int) or interval < 1:
