@@ -10,7 +10,7 @@ Plan tasks S0-T01 to S0-T04 of `PLAN.md`. Written 15 November 2026 on `release/v
 - **GPU.** One job at a time. Before each GPU job:
   1. `nvidia-smi --query-compute-apps=pid --format=csv,noheader` must be empty and no `mem_cmp`, `bench_md`,
      `bench_family`, `test_gate`, `pytest`, `nsys` or `ncu` process of the other session may run
-     (`.tmp_o/gpu_state.sh` prints both; `.tmp_o/wait_gpu.sh` waits for two idle minutes).
+     (`.tmp_o/gpu_state.sh` prints both; `.tmp_o/wait_gpu.sh` waits for an idle minute).
   2. The job runs under FastMACE's reservation, so FastMACE lanes see it:
      `python3 /mnt/d/Margraf/FastMACE/tools/ci/local_gpu.py run --quiet --purpose "loupmd release: <what>" -- <command>`.
 - **Plan cache.** GPU runs of this worktree set `LOUP_CACHE_DIR=$HOME/.cache/loupmd-release`, so the GEMM plan
