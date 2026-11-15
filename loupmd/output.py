@@ -111,6 +111,8 @@ def _thermo_rows(path):
 def _frame_count(path) -> int:
     from ase.io.trajectory import Trajectory
 
+    if Path(path).stat().st_size == 0:          # the chunk a run is writing, before its first frame
+        return 0
     with Trajectory(str(path)) as trajectory:
         return len(trajectory)
 

@@ -118,15 +118,40 @@ class ForceField:
                 f"the structure has {', '.join(_symbols(missing))}, which {self.name} has no embedding for",
                 why=f"its elements are {_element_text(self.elements)}")
 
-    def engine_for(self, atoms, skin=0.5):
-        """The engine with ``atoms``' system set: exports the bundle and creates the engine when the elements are
-        not in the loaded bundle, and sets the system when the atomic numbers or the skin changed."""
+    def _check_periodic(self, atoms):
         if not all(atoms.pbc):
             raise PlanRefused(
                 f"the structure has pbc={tuple(bool(p) for p in atoms.pbc)}; LoupMD needs a cell periodic in all "
                 "three directions",
                 next_step="Put a molecule or a slab in a box with vacuum (at least the model's cutoff on each open "
                           "side) and set pbc=True.")
+
+    def new_engine(self, atoms, skin=0.5):
+        """An engine of its own for ``atoms`` with the system set: what a ``Simulation`` runs on, so that
+        evaluating other structures with this force field does not disturb the run."""
+        self._check_periodic(atoms)
+        numbers = sorted({int(z) for z in atoms.numbers})
+        self.check_elements(numbers)
+        ensure_bundle = self._ensure_bundle
+        if ensure_bundle is None:
+            from . import bundles
+
+            ensure_bundle = bundles.ensure_bundle
+        factory = self._engine_factory
+        if factory is None:
+            from . import _core
+
+            factory = _core.LoupEngine
+        bundle = ensure_bundle(self.path, numbers, head=self.head, charge=self.charge,
+                               spin_multiplicity=self.spin_multiplicity, environ=self._environ)
+        engine = factory(bundle, device_id=self.device)
+        engine.set_system(atoms.numbers, atoms.get_masses(), skin=float(skin))
+        return engine
+
+    def engine_for(self, atoms, skin=0.5):
+        """The engine with ``atoms``' system set: exports the bundle and creates the engine when the elements are
+        not in the loaded bundle, and sets the system when the atomic numbers or the skin changed."""
+        self._check_periodic(atoms)
         numbers = tuple(int(z) for z in atoms.numbers)
         system = (numbers, float(skin))
         if system == self._system:

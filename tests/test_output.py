@@ -66,6 +66,15 @@ def test_a_restart_point_ends_the_chunk_and_the_readers_join_the_chunks(tmp_path
     assert [row[0] for row in rows] == ["0", "20", "40"] and len(output.read_frames(tmp_path)) == 2
 
 
+def test_the_readers_work_while_the_run_is_writing(tmp_path, atoms):
+    out = output.ChunkedOutput(tmp_path, atoms)
+    out.write_row(_row(0))
+    assert output.read_frames(tmp_path) == [] and len(output.read_thermo(tmp_path)[1]) == 1    # no frame yet
+    out.write_frame(**_frame(atoms, 0))
+    assert len(output.read_frames(tmp_path)) == 1
+    out.close()
+
+
 def test_a_cell_and_stress_go_into_the_frame(tmp_path, atoms):
     cell = atoms.cell.array * 1.01
     stress = np.array([[1.0, 0.4, 0.5], [0.4, 2.0, 0.6], [0.5, 0.6, 3.0]]) * 1e-3
