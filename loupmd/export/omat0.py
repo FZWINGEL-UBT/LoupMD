@@ -17,26 +17,18 @@ from types import SimpleNamespace
 os.environ.setdefault("TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD", "1")
 os.environ.setdefault("CUDA_VISIBLE_DEVICES", "")
 
-FASTMACE_ROOT = next(
-    (p for p in (Path("/mnt/d/Margraf/FastMACE"), Path("/mnt/homes/zwingel/FastMACE")) if p.exists()),
-    Path("/mnt/d/Margraf/FastMACE"),
-)
-sys.path.insert(0, str(FASTMACE_ROOT))
-
 import numpy as np
 import torch
 from mace.cli.convert_e3nn_cueq import run as convert_e3nn_cueq
 
-from fastmace.kernels.cuda.sc_factored import factor, fold_weights
-from fastmace.kernels.cuda.sc_generated import merged_terms, shape_of
-from fastmace.kernels.triton import compose_skip
-from fastmace.rewrites import radial as rad
-from fastmace.rewrites.generic.modules import fc_last_weight, fc_split
-from fastmace.rewrites.linear.modules import block_linear, raw_blocks
-from fastmace.rewrites.radial import _GenericChain, power_basis, spline as rspline
+from ._fastmace import compose_skip, generic_modules, linear_modules, rad, rspline, sc_factored, sc_generated
+from .bundle import write_bundle
 
-
-from .bundle import write_bundle  # noqa: E402
+factor, fold_weights = sc_factored.factor, sc_factored.fold_weights
+merged_terms, shape_of = sc_generated.merged_terms, sc_generated.shape_of
+fc_last_weight, fc_split = generic_modules.fc_last_weight, generic_modules.fc_split
+block_linear, raw_blocks = linear_modules.block_linear, linear_modules.raw_blocks
+_GenericChain, power_basis = rad._GenericChain, rad.power_basis
 
 EXPORTER_VERSION = 4
 ARCH = "omat0_medium_spec"
@@ -84,8 +76,7 @@ def check_architecture(m):
 
 def _extract_skip_blocks(skip_tp, cols, dtype=torch.float64):
     """Extract [S, mul_in, mul_out] weight per (i, j) block via SpeciesSkip."""
-    from fastmace.rewrites.generic.modules import species_skip
-    rep = species_skip(skip_tp, torch.as_tensor(cols, dtype=torch.long))
+    rep = generic_modules.species_skip(skip_tp, torch.as_tensor(cols, dtype=torch.long))
     return [(i, j, getattr(rep, f"ws{idx}").detach().to(dtype)) for idx, (i, j) in enumerate(rep.pairs)]
 def file_sha256(path) -> str:
     h = hashlib.sha256()
@@ -333,7 +324,7 @@ def export_model(model_path: str, atomic_nums: list[int], out_path: Path):
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument("--model", default="/home/fzwin/models/mace-omat-0-medium.model")
+    p.add_argument("--model", required=True)
     p.add_argument("--elements", required=True, help="Comma-separated atomic numbers, e.g. 8,22,38")
     p.add_argument("--output", required=True)
     args = p.parse_args()

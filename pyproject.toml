@@ -60,4 +60,4 @@ include = ["loupmd*"]
 
 [tool.setuptools.package-data]
 # _lib/ is filled by the wheel build (PLAN.md S2-T02) and is not tracked.
-loupmd = ["_lib/*.so", "_lib/cubins/*", "bench/reference.json", "bench/structures/*"]
+loupmd = ["_lib/*.so", "_lib/cubins/*", "bench/reference.json", "bench/structures/*", "export/_vendor/VERSION"]

@@ -52,8 +52,10 @@ class Reference:
         self.L = int(self.meta["n_layers"])
         self.r_max = float(self.T["r_max"][0])
         _, m32, _, mc32 = eg.load_models(model_path)
-        from fastmace.kernels.cuda.sc_factored import factor
-        from fastmace.kernels.cuda.sc_generated import merged_terms, shape_of
+        from ._fastmace import sc_factored, sc_generated
+
+        factor = sc_factored.factor
+        merged_terms, shape_of = sc_generated.merged_terms, sc_generated.shape_of
 
         self.progs = []
         for t in range(self.L):

@@ -804,13 +804,15 @@ def emit_conv_bwd(lx):
 
 # ----------------------------------------------------------------------------------------------- products
 def _ssa(lines, i, op):
-    from fastmace.kernels.cuda.sc_factored import _emit_node
+    from loupmd.export._fastmace import sc_factored
 
-    _emit_node(lines, i, op)
+    sc_factored._emit_node(lines, i, op)
 
 
 def emit_product(sig, prog, feats, sh):
-    from fastmace.kernels.cuda.sc_factored import _expr, _literal
+    from loupmd.export._fastmace import sc_factored
+
+    _expr, _literal = sc_factored._expr, sc_factored._literal
 
     seg_in, seg_w, seg_out, _ = sh
     assert seg_in == 16, seg_in
@@ -1212,11 +1214,13 @@ PRODUCT_C_MIN, PRODUCT_C_MAX = 32, 1024
 
 
 def _ir_hash():
+    from loupmd.export._fastmace import sc_factored, sc_generated
+
     here = Path(__file__).resolve().parent
     return _hash_files((
         here.parent / "loupmd" / "export" / "generic.py",
-        Path("/mnt/d/Margraf/FastMACE/fastmace/kernels/cuda/sc_factored.py"),
-        Path("/mnt/d/Margraf/FastMACE/fastmace/kernels/cuda/sc_generated.py"),
+        Path(sc_factored.__file__),
+        Path(sc_generated.__file__),
     )) + f":C{PRODUCT_C_MIN}-{PRODUCT_C_MAX}"
 
 
@@ -1245,10 +1249,13 @@ def _write_if_changed(path: Path, text: str):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("models_dir", nargs="?", default="/home/fzwin/models")
+    ap.add_argument("models_dir", nargs="?", default=os.environ.get("LOUPMD_MODELS"),
+                    help="the folder with the model files (default: $LOUPMD_MODELS)")
     ap.add_argument("out_cuh", nargs="?", default=str(Path(__file__).resolve().parent.parent / "src" / "generated_generic.cuh"))
     ap.add_argument("--no-cache", action="store_true")
     args = ap.parse_args()
+    if not args.models_dir:
+        ap.error("name the folder with the model files, or set LOUPMD_MODELS")
     models_dir = Path(args.models_dir)
     out_cuh = Path(args.out_cuh)
     out_cu = out_cuh.with_suffix(".cu")
@@ -1320,8 +1327,10 @@ def main():
                 ir_items = ir_entry["items"]
             else:
                 _ensure_imports()
-                from fastmace.kernels.cuda.sc_factored import factor
-                from fastmace.kernels.cuda.sc_generated import merged_terms, shape_of
+                from loupmd.export._fastmace import sc_factored, sc_generated
+
+                factor = sc_factored.factor
+                merged_terms, shape_of = sc_generated.merged_terms, sc_generated.shape_of
                 from mace.cli.convert_e3nn_cueq import run as convert_e3nn_cueq
                 m = torch.load(mpath, map_location="cpu", weights_only=False).float()
                 mc = convert_e3nn_cueq(m)
@@ -1342,7 +1351,9 @@ def main():
                 mc_ir[mpath.name] = {"size": st.st_size, "mtime_ns": st.st_mtime_ns, "items": ir_items}
                 dirty_ir = True
             _ensure_imports()
-            from fastmace.kernels.cuda.sc_factored import Program
+            from loupmd.export._fastmace import sc_factored
+
+            Program = sc_factored.Program
             items = []
             for it in ir_items:
                 if "skip" in it:

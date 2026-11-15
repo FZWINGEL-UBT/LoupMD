@@ -22,7 +22,11 @@ from pathlib import Path
 os.environ.setdefault("TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD", "1")
 os.environ.setdefault("CUDA_VISIBLE_DEVICES", "")
 
-FASTMACE_ROOT = Path("/mnt/d/Margraf/FastMACE")
+# The generator of the kernels specialised to MACE-OMAT-0 medium uses FastMACE's streaming-kernel sources, which are
+# not vendored: it needs a FastMACE checkout, named by LOUPMD_EXPORT_FASTMACE.
+if not os.environ.get("LOUPMD_EXPORT_FASTMACE"):
+    sys.exit("gen_kernels.py needs a FastMACE checkout: set LOUPMD_EXPORT_FASTMACE=/path/to/FastMACE")
+FASTMACE_ROOT = Path(os.environ["LOUPMD_EXPORT_FASTMACE"])
 sys.path.insert(0, str(FASTMACE_ROOT))
 
 import numpy as np
@@ -986,8 +990,13 @@ extern "C" __global__ void __launch_bounds__(512, 2) wprime_backward_inter1_rcv(
 
 
 def main():
-    model_path = sys.argv[1] if len(sys.argv) > 1 else "/home/fzwin/models/mace-omat-0-medium.model"
-    out_path = Path(sys.argv[2] if len(sys.argv) > 2 else "/mnt/d/Margraf/LoupMD/src/generated_kernels.cuh")
+    if len(sys.argv) < 2 and not os.environ.get("LOUPMD_MODELS"):
+        sys.exit("usage: gen_kernels.py MODEL [OUT.cuh]   (or set LOUPMD_MODELS to the folder with "
+                 "mace-omat-0-medium.model)")
+    model_path = sys.argv[1] if len(sys.argv) > 1 else os.path.join(os.environ["LOUPMD_MODELS"],
+                                                                    "mace-omat-0-medium.model")
+    out_path = Path(sys.argv[2] if len(sys.argv) > 2
+                    else Path(__file__).resolve().parent.parent / "src" / "generated_kernels.cuh")
     check_architecture(torch.load(model_path, map_location="cpu", weights_only=False))
     mc = _load_model(model_path)
 

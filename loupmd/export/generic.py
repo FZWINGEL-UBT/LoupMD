@@ -24,11 +24,6 @@ from pathlib import Path
 os.environ.setdefault("TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD", "1")
 os.environ.setdefault("CUDA_VISIBLE_DEVICES", "")
 
-FASTMACE_ROOT = next(
-    (p for p in (Path("/mnt/d/Margraf/FastMACE"), Path("/mnt/homes/zwingel/FastMACE")) if p.exists()),
-    Path("/mnt/d/Margraf/FastMACE"),
-)
-sys.path.insert(0, str(FASTMACE_ROOT))
 
 import numpy as np  # noqa: E402
 import torch  # noqa: E402
@@ -290,8 +285,10 @@ class RadialChain:
 # ----------------------------------------------------------------------------------------------- products
 def product_tensors(mc64, mc32, t, cols):
     """(factored weights [S' , segments_w, C], features signature, segments) of products[t] (cuEq SC)."""
-    from fastmace.kernels.cuda.sc_factored import factor, fold_weights
-    from fastmace.kernels.cuda.sc_generated import merged_terms, shape_of
+    from ._fastmace import sc_factored, sc_generated
+
+    factor, fold_weights = sc_factored.factor, sc_factored.fold_weights
+    merged_terms, shape_of = sc_generated.merged_terms, sc_generated.shape_of
 
     sc = mc64.products[t].symmetric_contractions
     sc32 = mc32.products[t].symmetric_contractions
@@ -512,8 +509,7 @@ def joint_embedding_vector(m64, charge, spin_multiplicity):
 
 
 def export_model(model_path, atomic_nums, out_path, head=None, charge=None, spin_multiplicity=None):
-    from fastmace.rewrites import radial as rad
-    from fastmace.rewrites.radial import spline as rspline
+    from ._fastmace import rad, rspline
 
     atomic_nums = sorted({int(z) for z in atomic_nums})
     S = len(atomic_nums)

@@ -1,0 +1,11 @@
+FastMACE 9b8012295267d3e162d22010ac7612618a0ca14f
+MIT License, Copyright (c) 2026 Fabian Zwingel (FastMACE's LICENSE).
+Vendored by tools/release/vendor_fastmace.py; the modules and the names kept of each:
+  fastmace.kernels.cuda.sc_factored: CONVENTIONS, Program, TOLERANCE, _Builder, _basis_values, _candidates, _cg, _convention, _emit_node, _expr, _factor, _literal, defaultdict, factor, fold_weights, irreps_of, np
+  fastmace.kernels.cuda.sc_generated: defaultdict, merged_terms, shape_of, torch
+  fastmace.kernels.triton.compose_skip: composed, torch
+  fastmace.kernels.triton.radial_table: evaluate, torch
+  fastmace.rewrites.generic.modules: GENERIC_INTERACTIONS, Mapping, MappingProxyType, SPECIES_GEMM, SPECIES_GEMM_GPUS, SpeciesSkip, fc_last_weight, fc_split, irrep_segments, scalar_second_input, species_skip, torch
+  fastmace.rewrites.linear.modules: BlockLinear, ConstantMatmul, _group, _identity, block_linear, block_products, is_cueq_linear, join_rows, raw_blocks, segments, torch
+  fastmace.rewrites.radial: CERTIFY_BOUND_64, CERTIFY_POINTS, DEGREE, DEGREE_64, FLOOR, FLOOR_64, INITIAL_PIECES, MAX_DEPTH, R_LO, R_LO_64, R_PHYSICAL, TOLERANCE, TOLERANCE_64, _GenericChain, _coefficients, _nodes, _radial_net, _series, _table_values, _truth, certify, copy, fit, power_basis
+  fastmace.rewrites.radial.spline: BAND_EDGES, BASE_INTERVALS, ROUNDS, TARGET, _Scorer, coefficients, evaluate, fit, grid_knots, locate

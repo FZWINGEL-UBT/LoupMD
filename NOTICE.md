@@ -47,6 +47,17 @@ those are read from a `.loup` bundle at run time.
 | `src/generated_generic.cu` | `codegen/gen_generic.py`, from the architectures of the model files found at generation time | FastMACE's factored symmetric contraction (as above); e3nn's Wigner 3j coefficients; sympy for the spherical-harmonic gradient |
 | `src/generated_generic.cuh` | `codegen/gen_generic.py` | as above |
 
+## Vendored from FastMACE (`loupmd/export/_vendor/`)
+
+The exporters (`loupmd/export/`) and `codegen/gen_generic.py` use parts of seven FastMACE modules (MIT, © 2026
+Fabian Zwingel): the factored symmetric contraction (`kernels/cuda/sc_factored.py`, `sc_generated.py`), the skip
+composition (`kernels/triton/compose_skip.py`), the certified radial tables and splines (`rewrites/radial/`), and
+the weight extraction of the generic and linear rewrites (`rewrites/generic/modules.py`,
+`rewrites/linear/modules.py`). `tools/release/vendor_fastmace.py` writes the tree from the FastMACE commit named
+in `loupmd/export/_vendor/VERSION`, keeping of each module the definitions the exporters use with their original
+text; it is not edited by hand. `tools/release/export_identity.sh` exports the same bundles with the vendored tree
+and with a FastMACE checkout and compares them byte for byte.
+
 ## Code and data ported from FastMACE
 
 FastMACE is MIT, © 2026 Fabian Zwingel, the same owner as LoupMD.
@@ -91,7 +102,6 @@ of the gate's `crystals` set are not in the package (PLAN.md, decision O11).
 
 ## Not yet in this file
 
-Later stages add files that need an entry here when they land: the FastMACE modules vendored for export
-(S2-T03), further modules ported from ASE (Stage 4: the remaining integrators), the D3
+Later stages add files that need an entry here when they land: further modules ported from ASE (Stage 4: the remaining integrators), the D3
 reference parameters (Stage 6D) and the Materials Project structures, if their terms allow it. S7-T03 is the
 audit.
