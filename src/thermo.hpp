@@ -1,0 +1,32 @@
+#pragma once
+// The thermo buffer (include/loupmd.h: loup_read_thermo): one row of energies every `every` steps, written on the
+// device inside the captured MD step, so a run of any length needs no host round trip for its thermodynamic output.
+#include <cuda_runtime.h>
+
+#include "loupmd.h"
+
+namespace loup {
+
+constexpr int kThermoCapacity = 4096;  // rows the device buffer holds between two loup_read_thermo calls
+
+// Device-side control block. The host writes it at the start of every run call (it knows the step count and the
+// number of unread rows exactly); the two kernels below advance it inside the step.
+struct ThermoCtrl {
+    unsigned long long step;  // MD steps completed since the last loup_set_state
+    double ke;                // kinetic-energy accumulator of a row step, zero otherwise
+    int every;                // a row every so many steps; 0: none
+    int count;                // rows in the buffer
+    int capacity;
+    int pad;
+};
+
+// Sums the kinetic energy into ctrl->ke, on steps that write a row only (every thread returns at once otherwise).
+// Runs after the integrator's last velocity update of the step.
+__global__ void thermo_kinetic_kernel(int N, const double* __restrict__ masses, const double* __restrict__ vel64,
+                                      ThermoCtrl* __restrict__ ctrl);
+
+// Closes the step: counts it and, on a row step, appends the row. One thread.
+__global__ void thermo_row_kernel(int N, double e0_total, double kb, const double* __restrict__ energy,
+                                  ThermoCtrl* __restrict__ ctrl, LoupThermoRow* __restrict__ rows);
+
+}  // namespace loup

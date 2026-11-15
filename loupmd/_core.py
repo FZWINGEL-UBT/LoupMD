@@ -76,6 +76,22 @@ class LoupIntegrator(ctypes.Structure):
 LOUP_EXEC_AUTO, LOUP_EXEC_WHOLE, LOUP_EXEC_TILED, LOUP_EXEC_WAVEFRONT = 0, 1, 2, 3
 
 
+class LoupThermoRow(ctypes.Structure):
+    _fields_ = [
+        ("step", ctypes.c_longlong),
+        ("e_pot", ctypes.c_double),
+        ("e_kin", ctypes.c_double),
+        ("temp_k", ctypes.c_double),
+        ("pressure_gpa", ctypes.c_double),
+        ("volume_a3", ctypes.c_double),
+        ("conserved", ctypes.c_double),
+    ]
+
+
+THERMO_DTYPE = np.dtype([("step", "<i8"), ("e_pot", "<f8"), ("e_kin", "<f8"), ("temp_k", "<f8"),
+                         ("pressure_gpa", "<f8"), ("volume_a3", "<f8"), ("conserved", "<f8")])
+
+
 class LoupMemoryPlan(ctypes.Structure):
     _fields_ = [
         ("whole_bytes", ctypes.c_size_t),
@@ -199,6 +215,7 @@ def _load_lib():
                                       ctypes.POINTER(ctypes.c_size_t)]
     lib.loup_import_state.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_size_t]
     lib.loup_plan_memory.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_double, ctypes.POINTER(LoupMemoryPlan)]
+    lib.loup_read_thermo.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_int, ctypes.POINTER(ctypes.c_int)]
     lib.loup_create.argtypes = [ctypes.c_char_p, ctypes.c_int]
     lib.loup_create.restype = ctypes.c_void_p
     lib.loup_destroy.argtypes = [ctypes.c_void_p]
@@ -214,7 +231,7 @@ def _load_lib():
     lib.loup_profile_force.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_int, _c_double_p]
     for name in ("loup_set_system", "loup_evaluate", "loup_set_state", "loup_run_nve", "loup_run_langevin",
                  "loup_get_state", "loup_profile_force", "loup_get_info", "loup_run", "loup_export_state",
-                 "loup_import_state", "loup_plan_memory"):
+                 "loup_import_state", "loup_plan_memory", "loup_read_thermo"):
         getattr(lib, name).restype = ctypes.c_int
     _LIB = lib
     return lib
@@ -333,6 +350,22 @@ class LoupEngine:
         self._check(self._lib.loup_get_state(self._h, _ptr(pos), _ptr(vel), _ptr(frc), ctypes.byref(en)),
                     "loup_get_state")
         return pos, vel, frc, float(en.value)
+
+    def thermo_pending(self) -> int:
+        """Unread rows in the device's thermo buffer."""
+        n = ctypes.c_int()
+        self._check(self._lib.loup_read_thermo(self._h, None, 0, ctypes.byref(n)), "loup_read_thermo")
+        return n.value
+
+    def read_thermo(self, max_rows: int | None = None) -> np.ndarray:
+        """The oldest unread thermo rows (all of them by default) as a structured array (``THERMO_DTYPE``); they
+        leave the device's buffer."""
+        want = self.thermo_pending() if max_rows is None else int(max_rows)
+        out = np.zeros(max(want, 0), dtype=THERMO_DTYPE)
+        n = ctypes.c_int()
+        self._check(self._lib.loup_read_thermo(self._h, out.ctypes.data if want > 0 else None, want, ctypes.byref(n)),
+                    "loup_read_thermo")
+        return out[: n.value]
 
     def plan_memory(self, n_atoms: int, edges_per_atom: float = 0.0) -> MemoryPlan:
         """Device memory for ``n_atoms`` of the current material, scaled from the current system's buffers.

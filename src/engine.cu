@@ -5,6 +5,7 @@
 #include "generated_kernels_signature.h"
 #include "generic.hpp"
 #include "bundle.hpp"
+#include "thermo.hpp"
 
 #include <cub/cub.cuh>
 #ifndef _GNU_SOURCE
@@ -564,6 +565,14 @@ struct LoupHandle {
     double md_graph_temp = 0.0;
     double md_graph_fr = 0.0;
     unsigned long long md_graph_seed = 0;
+    bool md_graph_thermo = false;  // the graphs carry the two thermo kernels
+
+    // Thermo buffer (thermo.hpp), allocated by the first run that asks for rows. The host knows the step count and
+    // the number of unread rows exactly and writes the device's control block at the start of every such run.
+    loup::ThermoCtrl* d_thermo_ctrl = nullptr;
+    LoupThermoRow* d_thermo_rows = nullptr;
+    long long md_steps = 0;       // MD steps completed since the last set_state / import_state
+    int thermo_pending = 0;       // unread rows on the device
 
     void invalidate_graphs() {
         if (force_graph_exec) { cudaGraphExecDestroy(force_graph_exec); force_graph_exec = nullptr; }
@@ -614,6 +623,9 @@ struct LoupHandle {
         freep(d_species); freep(d_pos64); freep(d_ref_pos64); freep(d_vel64);
         freep(d_masses); freep(d_inv_masses); freep(d_sqrt_inv_masses); freep(d_rnd_vel);
         freep(d_need_rebuild); freep(d_max_step_disp2); freep(d_step_counter); freep(d_ke_f64);
+        freep(d_thermo_ctrl); freep(d_thermo_rows);
+        md_steps = 0;
+        thermo_pending = 0;
         freep(d_pos_wrapped); freep(d_atom_wrap); freep(d_atom_bin);
         freep(d_ro_keys); freep(d_ro_vals); freep(d_ro_tmp); freep(d_order_err);
         freep(d_bin_counts); freep(d_bin_offsets); freep(d_bin_cursor);
@@ -2004,6 +2016,8 @@ static int set_state_impl(LoupHandle* h, const double* positions, const double* 
     if (upload_positions(h, positions, cell) < 0) return -1;
     CUDA_CHECK(cudaMemsetAsync(h->d_max_step_disp2, 0, 2 * sizeof(unsigned int), h->stream));
     h->disp_window_steps = 0;
+    h->md_steps = 0;
+    h->thermo_pending = 0;
     if (velocities) {
         std::vector<double> v_sorted((size_t)h->N * 3);
         for (int dst = 0; dst < h->N; ++dst) {
@@ -2075,7 +2089,7 @@ static int evaluate_impl(
 
 static int run_md_loop(
     LoupHandle* h, int kind, int n_steps, double dt_fs,
-    double temp_k, double friction_per_fs, unsigned long long seed, LoupMDStats* out_stats
+    double temp_k, double friction_per_fs, unsigned long long seed, int thermo_every, LoupMDStats* out_stats
 ) {
     // nl_valid: positions and a neighbour list exist (set_state or evaluate ran and its rebuild completed).
     if (!has_system(h)) return -1;
@@ -2088,11 +2102,33 @@ static int run_md_loop(
         loup::set_error("dt_fs must be finite and positive, got %g fs", dt_fs);
         return -1;
     }
+    if (thermo_every < 0) { loup::set_error("thermo_every must not be negative, got %d", thermo_every); return -1; }
     CUDA_CHECK(cudaSetDevice(h->device_id));
     const int N = h->N;
     const int gridN = (N + 255) / 256;
     const double dt_ase = dt_fs * loup::ASE_FS;
     const double half_skin = 0.5 * h->skin;
+    // Thermo rows of this call: counted on the host, so a run that would overflow the buffer is refused here.
+    int thermo_rows = 0;
+    if (thermo_every > 0) {
+        thermo_rows = (int)((h->md_steps + n_steps) / thermo_every - h->md_steps / thermo_every);
+        if (h->thermo_pending + thermo_rows > loup::kThermoCapacity) {
+            loup::set_error("this call would write %d thermo rows and the buffer has room for %d of %d: read the "
+                            "rows first (loup_read_thermo) or run fewer steps per call", thermo_rows,
+                            loup::kThermoCapacity - h->thermo_pending, loup::kThermoCapacity);
+            return -1;
+        }
+        if (!h->d_thermo_ctrl) CUDA_CHECK(cudaMalloc(&h->d_thermo_ctrl, sizeof(loup::ThermoCtrl)));
+        if (!h->d_thermo_rows) {
+            CUDA_CHECK(cudaMalloc(&h->d_thermo_rows, (size_t)loup::kThermoCapacity * sizeof(LoupThermoRow)));
+        }
+        loup::ThermoCtrl ctrl{};
+        ctrl.step = (unsigned long long)h->md_steps;
+        ctrl.every = thermo_every;
+        ctrl.count = h->thermo_pending;
+        ctrl.capacity = loup::kThermoCapacity;
+        CUDA_CHECK(cudaMemcpy(h->d_thermo_ctrl, &ctrl, sizeof(ctrl), cudaMemcpyHostToDevice));
+    }
     // Two loop modes. Unpipelined: each step's skin check is read before its force pass, so the force always uses a
     // list built within skin/2 of the current positions (exact for any skin, including 0), at one host sync per step.
     // Pipelined: step k + 1 is launched before step k's check is read, so two force calls follow each check; the
@@ -2171,6 +2207,11 @@ static int run_md_loop(
             loup::langevin_second_half_kernel<<<gridN, 256, 0, h->stream>>>(
                 N, c1, c2, h->d_forces_f64, h->d_inv_masses, h->d_rnd_vel, h->d_vel64, h->d_step_counter);
         }
+        if (thermo_every > 0) {  // the row cadence lives on the device: only on / off is baked into the graph
+            loup::thermo_kinetic_kernel<<<gridN, 256, 0, h->stream>>>(N, h->d_masses, h->d_vel64, h->d_thermo_ctrl);
+            loup::thermo_row_kernel<<<1, 1, 0, h->stream>>>(N, h->e0_total, loup::ASE_KB, h->d_energy_f64,
+                                                            h->d_thermo_ctrl, h->d_thermo_rows);
+        }
     };
     auto capture = [&](cudaGraph_t& g, cudaGraphExec_t& ge, auto&& body) -> int {
         if (ge) { cudaGraphExecDestroy(ge); ge = nullptr; }
@@ -2188,6 +2229,7 @@ static int run_md_loop(
         h->md_graph_temp = temp_k;
         h->md_graph_fr = friction_per_fs;
         h->md_graph_seed = seed;
+        h->md_graph_thermo = thermo_every > 0;
     };
     auto ensure_piped = [&]() -> int {
         if (h->md_graph_exec) return 0;
@@ -2206,7 +2248,7 @@ static int run_md_loop(
     // (review item S4) and dropped otherwise. Everything else a graph bakes in (edge bucket, scan workspace, kernel
     // variants, the long-range part's cell) drops the graphs where it changes: invalidate_graphs.
     if (h->md_graph_kind != kind || h->md_graph_dt != dt_fs || h->md_graph_temp != temp_k ||
-        h->md_graph_fr != friction_per_fs || h->md_graph_seed != seed) {
+        h->md_graph_fr != friction_per_fs || h->md_graph_seed != seed || h->md_graph_thermo != (thermo_every > 0)) {
         h->invalidate_md_graphs();
     }
 
@@ -2327,6 +2369,32 @@ static int run_md_loop(
         out_stats->pipelined_steps = pipelined_steps;
     }
     h->forces_current = true;
+    h->md_steps += n_steps;
+    h->thermo_pending += thermo_rows;
+    return 0;
+}
+
+static int read_thermo_impl(LoupHandle* h, LoupThermoRow* rows, int max_rows, int* n_rows) {
+    if (!has_system(h)) return -1;
+    if (!n_rows) { loup::set_error("n_rows is NULL"); return -1; }
+    if (max_rows < 0 || (!rows && max_rows > 0)) {
+        loup::set_error("rows is NULL or max_rows is negative (max_rows = %d)", max_rows);
+        return -1;
+    }
+    const int have = h->thermo_pending;
+    if (!rows) { *n_rows = have; return 0; }
+    const int take = std::min(have, max_rows);
+    *n_rows = take;
+    if (take == 0) return 0;
+    CUDA_CHECK(cudaSetDevice(h->device_id));
+    CUDA_CHECK(cudaStreamSynchronize(h->stream));
+    CUDA_CHECK(cudaMemcpy(rows, h->d_thermo_rows, (size_t)take * sizeof(LoupThermoRow), cudaMemcpyDeviceToHost));
+    if (take < have) {  // keep the unread rest at the front
+        std::vector<LoupThermoRow> rest((size_t)(have - take));
+        CUDA_CHECK(cudaMemcpy(rest.data(), h->d_thermo_rows + take, rest.size() * sizeof(LoupThermoRow), cudaMemcpyDeviceToHost));
+        CUDA_CHECK(cudaMemcpy(h->d_thermo_rows, rest.data(), rest.size() * sizeof(LoupThermoRow), cudaMemcpyHostToDevice));
+    }
+    h->thermo_pending = have - take;  // the device's count is written from this at the start of the next run
     return 0;
 }
 
@@ -2364,11 +2432,7 @@ static int run_impl(LoupHandle* h, const LoupIntegrator* caller, int n_steps, Lo
         return -1;
     }
     if (it.fix_com != 0) { loup::set_error("fix_com is not built in this version of the library"); return -1; }
-    if (it.thermo_every != 0) {
-        loup::set_error("thermo_every is not built in this version of the library");
-        return -1;
-    }
-    if (it.kind == LOUP_NVE) return run_md_loop(h, 0, n_steps, it.dt_fs, 0.0, 0.0, 0, out_stats);
+    if (it.kind == LOUP_NVE) return run_md_loop(h, 0, n_steps, it.dt_fs, 0.0, 0.0, 0, it.thermo_every, out_stats);
     if (!std::isfinite(it.temp_k) || it.temp_k < 0.0) {
         loup::set_error("temp_k must be finite and not negative, got %g K", it.temp_k);
         return -1;
@@ -2377,7 +2441,7 @@ static int run_impl(LoupHandle* h, const LoupIntegrator* caller, int n_steps, Lo
         loup::set_error("friction_per_fs must be finite and not negative, got %g /fs", it.friction_per_fs);
         return -1;
     }
-    return run_md_loop(h, 1, n_steps, it.dt_fs, it.temp_k, it.friction_per_fs, it.seed, out_stats);
+    return run_md_loop(h, 1, n_steps, it.dt_fs, it.temp_k, it.friction_per_fs, it.seed, it.thermo_every, out_stats);
 }
 
 static int run_nve_impl(LoupHandle* h, int n_steps, double dt_fs, LoupMDStats* out_stats) {
@@ -2565,6 +2629,8 @@ static int import_state_impl(LoupHandle* h, const void* buffer, size_t size) {
     CUDA_CHECK(cudaMemcpyAsync(h->d_step_counter, &hd.step_counter, sizeof(hd.step_counter), cudaMemcpyHostToDevice, h->stream));
     CUDA_CHECK(cudaMemcpyAsync(h->d_max_step_disp2, hd.max_step_disp2, sizeof(hd.max_step_disp2), cudaMemcpyHostToDevice, h->stream));
     h->disp_window_steps = 0;
+    h->md_steps = 0;
+    h->thermo_pending = 0;
     CUDA_CHECK(cudaStreamSynchronize(h->stream));
     return 0;
 }
@@ -2684,6 +2750,10 @@ int loup_export_state(LoupHandle* h, void* buffer, size_t capacity, size_t* writ
 
 int loup_import_state(LoupHandle* h, const void* buffer, size_t size) {
     return guarded(h, "loup_import_state", [&] { return import_state_impl(h, buffer, size); });
+}
+
+int loup_read_thermo(LoupHandle* h, LoupThermoRow* rows, int max_rows, int* n_rows) {
+    return guarded(h, "loup_read_thermo", [&] { return read_thermo_impl(h, rows, max_rows, n_rows); });
 }
 
 int loup_plan_memory(LoupHandle* h, int n_atoms, double edges_per_atom, LoupMemoryPlan* out) {

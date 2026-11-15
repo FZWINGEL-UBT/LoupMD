@@ -35,6 +35,9 @@ int main(void) {
     printf("LoupMemoryPlan %zu\n", sizeof(LoupMemoryPlan));
     F(LoupMemoryPlan, whole_bytes); F(LoupMemoryPlan, tiled_global_bytes); F(LoupMemoryPlan, tile_workspace_bytes);
     F(LoupMemoryPlan, free_bytes); F(LoupMemoryPlan, receivers); F(LoupMemoryPlan, mode);
+    printf("LoupThermoRow %zu\n", sizeof(LoupThermoRow));
+    F(LoupThermoRow, step); F(LoupThermoRow, e_pot); F(LoupThermoRow, e_kin); F(LoupThermoRow, temp_k);
+    F(LoupThermoRow, pressure_gpa); F(LoupThermoRow, volume_a3); F(LoupThermoRow, conserved);
     printf("LoupMDStats %zu\n", sizeof(LoupMDStats));
     F(LoupMDStats, step_ms); F(LoupMDStats, rebuilds); F(LoupMDStats, final_potential_energy_ev);
     F(LoupMDStats, final_kinetic_energy_ev); F(LoupMDStats, final_temperature_k); F(LoupMDStats, dangerous_builds);
@@ -57,7 +60,8 @@ def test_ctypes_structs_have_the_headers_layout(tmp_path):
     subprocess.run([cc, "-I", str(ROOT / "include"), str(src), "-o", str(exe)], check=True)
     lines = subprocess.run([str(exe)], capture_output=True, text=True, check=True).stdout.split("\n")
     seen = dict(line.rsplit(" ", 1) for line in lines if line and not line.startswith("kinds"))
-    for struct in (_core.LoupIntegrator, _core.LoupInfo, _core.LoupMemoryPlan, _core.LoupMDStats):
+    assert _core.THERMO_DTYPE.itemsize == ctypes.sizeof(_core.LoupThermoRow)
+    for struct in (_core.LoupIntegrator, _core.LoupInfo, _core.LoupMemoryPlan, _core.LoupThermoRow, _core.LoupMDStats):
         name = struct.__name__
         assert int(seen.pop(name)) == ctypes.sizeof(struct), name
         for field, _ in struct._fields_:
@@ -126,7 +130,7 @@ REFUSED = [
     ("size_large", dict(size=4096), "loup_run: LoupIntegrator.size is 4096"),
     ("unknown_kind", dict(kind=99), "loup_run: unknown integrator kind 99"),
     ("fix_com", dict(fix_com=1), "loup_run: fix_com is not built in this version"),
-    ("thermo_every", dict(thermo_every=20), "loup_run: thermo_every is not built in this version"),
+    ("thermo_every", dict(thermo_every=-1), "loup_run: thermo_every must not be negative, got -1"),
     ("timestep", dict(dt_fs=0.0), "loup_run: dt_fs must be finite and positive, got 0 fs"),
     ("temperature", dict(kind=_core.LOUP_LANGEVIN, temp_k=-5.0),
      "loup_run: temp_k must be finite and not negative, got -5 K"),

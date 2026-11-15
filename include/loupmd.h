@@ -135,13 +135,30 @@ typedef struct {
     int cell_mode;                 // LOUP_CELL_HYDROSTATIC or LOUP_CELL_FULL
     int cell_mask[3];              // per-axis mask of the barostat
     int fix_com;                   // remove the centre-of-mass motion (refused until built)
-    int thermo_every;              // write a thermo row every so many steps; 0 = none (refused until built)
+    int thermo_every;              // write a thermo row every so many steps (loup_read_thermo); 0 = none
     unsigned long long seed;       // noise stream of the stochastic integrators
 } LoupIntegrator;
 
 // Runs `n_steps` steps of `it`. NVE reads dt_fs; Langevin reads dt_fs, temp_k, friction_per_fs and seed. The rules
 // of loup_run_nve and loup_run_langevin apply: those two calls are this one with the struct filled in.
 int loup_run(LoupHandle* h, const LoupIntegrator* it, int n_steps, LoupMDStats* out_stats);
+
+// Thermodynamic output without a host round trip per row: with LoupIntegrator.thermo_every = k, every k-th step
+// appends a row to a buffer on the device, inside the captured step.
+typedef struct {
+    long long step;       // MD steps completed since the last loup_set_state or loup_import_state on this handle
+    double e_pot;         // eV, as loup_get_state's energy at that step
+    double e_kin;         // eV
+    double temp_k;        // 2 e_kin / (3 N k_B)
+    double pressure_gpa;  // 0 until a step carries stress
+    double volume_a3;     // 0 until a step carries stress
+    double conserved;     // e_pot + e_kin: NVE's conserved quantity (thermostats add their terms with their task)
+} LoupThermoRow;
+// Copies up to `max_rows` of the oldest unread rows to `rows`, removes them from the buffer and sets *n_rows to
+// their number. loup_read_thermo(h, NULL, 0, &n) only counts the unread rows. The buffer holds 4096 rows: a run
+// call that would write more than its free part is refused before its first step. loup_set_state and
+// loup_import_state discard unread rows.
+int loup_read_thermo(LoupHandle* h, LoupThermoRow* rows, int max_rows, int* n_rows);
 
 // Read back state in caller's original atom order (velocities in ASE units, as for loup_set_state).
 int loup_get_state(LoupHandle* h, double* out_positions, double* out_velocities, double* out_forces, double* out_energy_ev);
