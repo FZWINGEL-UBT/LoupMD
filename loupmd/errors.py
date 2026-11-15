@@ -48,3 +48,14 @@ class BackendError(LoupError, RuntimeError):
 
 class InputError(LoupError, ValueError):
     """An argument is refused before the library reads it (a wrong array shape, for example)."""
+
+
+class CheckpointTrustError(LoupError):
+    """A checkpoint would be unpickled without a matching SHA-256 or ``trusted=True``."""
+
+    default_next_step = ("Pass sha256= with the file's published hash, or trusted=True for a file you trust; "
+                         "a checkpoint is a pickle and runs code when loaded.")
+
+
+class CacheLocationError(LoupError):
+    """The cache root is somewhere it must not be (inside the Python installation)."""

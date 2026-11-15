@@ -37,9 +37,21 @@ those are read from a `.loup` bundle at run time.
 | `src/generated_generic.cu` | `python/gen_generic.py`, from the architectures of the model files found at generation time | FastMACE's factored symmetric contraction (as above); e3nn's Wigner 3j coefficients; sympy for the spherical-harmonic gradient |
 | `src/generated_generic.cuh` | `python/gen_generic.py` | as above |
 
+## Code and data ported from FastMACE
+
+FastMACE is MIT, © 2026 Fabian Zwingel, the same owner as LoupMD.
+
+| File | Ported from (FastMACE commit `9b801229`) | Changes |
+| --- | --- | --- |
+| `loupmd/models.py` | `fastmace/model/labels.py` (the label table: release URLs, SHA-256, licences, heads and training functionals with their sources) and the checkpoint lookup, download and trust functions of `fastmace/model/loading.py` | errors are LoupMD's; the model folder variable is `LOUPMD_MODELS`; nothing is unpickled in this module |
+| `loupmd/errors.py` | the message shape of `fastmace/errors.py` (`what`, `Why:`, `Next:`) | LoupMD's own classes |
+
+The model files themselves are not part of LoupMD. Each label's licence (MIT or the Academic Software License) is
+in the table and is shown by `loupmd models`.
+
 ## Not yet in this file
 
 Later stages add files that need an entry here when they land: the FastMACE modules vendored for export
-(S2-T03), the model label table (S2-T04), the modules ported from ASE (Stage 4; LGPL-2.1-or-later under default
+(S2-T03), the modules ported from ASE (Stage 4; LGPL-2.1-or-later under default
 A6), the D3 reference parameters (Stage 6D) and the benchmark structures (S2-T08, if the owner allows them in the
 wheel). S7-T03 is the audit.
