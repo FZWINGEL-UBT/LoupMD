@@ -9,9 +9,10 @@ import argparse
 import sys
 
 from ..errors import LoupError
+from . import cache as _cache
 from . import models as _models
 
-COMMANDS = (_models,)
+COMMANDS = (_models, _cache)
 
 
 def build_parser() -> argparse.ArgumentParser:
