@@ -170,6 +170,7 @@ Conventions:
 | [md-thermo-buffer](#md-thermo-buffer) | Thermo rows written on the device inside the captured step (release task S1-T05) | `LoupIntegrator.thermo_every` | both | DEFAULT on `release/v1`, off unless asked (5060 Ti only) | release S1-T05 | `thermo_every = 20` against off: `NbCl5` 1.0005 / 1.0041, `SrTiO3` 1.0003 / 1.0007 | [§6][s6] |
 | [rel-stage1-api](#rel-stage1-api) | Release branch, Stage 1 as a whole against its baseline (error channel, `loup_run`, state blob, memory plan, `loup_evaluate2`, per-layer sweeps, open domains) | – | both | DEFAULT on `release/v1` (5060 Ti only) | release Stage 1 | A/B 0.9994 / 1.0006 (baseline first), 0.9986 / 0.9975 (head first): tie | [§6][s6] |
 | [rel-merge-r6tip](#rel-merge-r6tip) | Release branch after merging `round6-hardening` `e21faa2` (S64 to S67), against that tip's own build | – | both | DEFAULT on `release/v1` (5060 Ti only) | release Stage 1 | seven A/B: `NbCl5` 1.0030 (0.9946 to 1.0080), `SrTiO3` 0.9997 (0.9965 to 1.0044): tie; generic families 0.9944 to 1.0066 | [§6.1][s61] |
+| [md-langevin-target](#md-langevin-target) | Langevin's target temperature as a device scalar that the step advances (release task S3-T06): ramps move it every step, a changed temperature captures no graph | `LoupIntegrator.temp_rate_k_per_step` | both | DEFAULT on `release/v1` (5060 Ti only) | release Stage 3 | A/B 1.0085 / 0.9989 (old first), 0.9943 / 0.9938 (new first): tie | [§6.2][s62] |
 | [md-small-systems](#md-small-systems) | Small-system latency (< ~1,000 atoms) | – | spec | NOT BUILT (open) | – | 135 atoms: GEMM groups 32% of 358 us | [§4.1 #3][s41] |
 | [comp-active-edge-tighten](#comp-active-edge-tighten) | Tighten active-edge compaction (`compute_and_count_active` + `scatter_active_edges`) | – | both | NOT BUILT | – | untried (101 us/step on `SrTiO3` 5060 Ti, `tmp_vec_len` round-trip) | `OMAT0_SPEEDUP_BRIEF.md` |
 | [nl-lane-groups](#nl-lane-groups) | Neighbour count / fill with 8 lanes per atom (neighbouring bins split round-robin; fill keeps the exact row order via per-bin offsets in shared memory) | `kNeighborLanes`, `count/fill_neighbors_kernel`; other GPUs `*_scalar_kernel` | both (`sm_120`) | DEFAULT (5060 Ti only) | S34 | per rebuild `SrTiO3` 433 -> 292 us, `NbCl5` 284 -> 110, water 439 -> 302; ABBA `OFF23-S` water `0.9945` / `0.9856`, `OFF23-M` `0.9961` / `0.9943`, `OMAT-0-S` `0.9961` / `0.9972` | this file |
@@ -1113,6 +1114,16 @@ Each entry has the same fields. Unless stated, the system is OMAT-0 medium on th
 - Not measured: the tip's own gate and suite; the gates of the generic families at head; anything on the RTX 4000 Ada.
 - Sources: [§6.1][s61].
 
+<a id="md-langevin-target"></a>
+#### md-langevin-target: the thermostat's target on the device
+- Switch: `LoupIntegrator.temp_rate_k_per_step` (0 = constant temperature). `src/integrator.cu` (`langevin_first_half_kernel`, `langevin_second_half_kernel`), `src/engine.cu` (`run_md_loop`, `d_langevin_target`).
+- Status: DEFAULT on `release/v1`. 5060 Ti only.
+- What: the noise amplitude sigma = sqrt(2 gamma kB T) was folded into three coefficients baked into the captured step, so every change of temperature captured the MD graphs again. Now the first half-kick reads the target from two doubles on the device and forms sigma itself; the second half-kick, which already advances the step counter, adds the call's rate to the target. The host writes the first step's target and the rate at the start of a call. A temperature schedule's calls reuse the graphs, and a ramp's target moves every step at the step's end point, as FastMACE's does. Constant-temperature results change at rounding level (sigma is formed in another order).
+- Measured (15 November 2026, `python/bench_md.py`, library `6bd216e368ca63f0` against `9f89f02c26e7792a`): old first 1.817 / 8.015 against 1.802 / 8.024 ms (1.0085 / 0.9989); new first 1.792 / 8.009 against 1.803 / 8.059 ms (0.9943 / 0.9938). A tie.
+- Measured, ramp (5,000 atoms `SrTiO3`, friction 0.02/fs, 200 to 400 K at 100 K/ps through `lm.Simulation`): mean kinetic temperature 296.6 K for a mean target of 301.0 K; 7.985 ms/step on the ramp against 7.839 on the hold before it.
+- Gate: `python/test_gate.py` PASS, worst force ratio 1.56, stress 1.73 (the force path is unchanged). `tests/test_md_graph_reuse.py`: a run whose temperature changes with every call captures as many graphs as one at constant temperature.
+- Sources: [§6.2][s62]; `tests/test_schedule_gpu.py`.
+
 <a id="md-small-systems"></a>
 #### md-small-systems: small-system latency
 - Status: NOT BUILT (open).
@@ -1809,4 +1820,5 @@ POLAR-1 NaCl 3x3x3 (216) and POLAR-1-M `NbCl5` 3x3x3 (1,944).
 [s54]: STATUS_AND_PROFILE.md#54-fixes-found-by-the-family-work
 [s6]: STATUS_AND_PROFILE.md#6-release-branch-releasev1-stage-1-of-the-release-plan
 [s61]: STATUS_AND_PROFILE.md#61-after-the-merge-of-round6-hardening-e21faa2-15-november-2026-0430-to-0515
+[s62]: STATUS_AND_PROFILE.md#62-stage-3-front-end-and-the-thermostat-target-on-the-device-15-november-2026-0520-to-0610
 [s55]: STATUS_AND_PROFILE.md#55-known-limitations

@@ -567,3 +567,32 @@ RTX 5060 Ti only, same conditions as above. Head: `release/v1` at `11edd3c` (lib
 - Not measured: anything on the RTX 4000 Ada; `nsys` kernel lists; the gates of the generic families on the merged
   code (`--set organic`, `--set crystals`); `loupmd bench` for models other than OMAT-0 medium and small.
 
+### 6.2 Stage 3 front end and the thermostat target on the device (15 November 2026, 05:20 to 06:10)
+
+RTX 5060 Ti only. Engine build of `e11370e` (library sha256 `6bd216e368ca63f0...`, `loup_version()`
+`1.0.0a1+a4baf9f088519beb`) against the build of §6.1 (`9f89f02c26e7792a...`). The change: the Langevin target is
+a device scalar that the first half-kick reads and the second advances (ledger `md-langevin-target`).
+
+| Check | Result |
+|---|---|
+| `bench_md.py`, old build first (`NbCl5` / `SrTiO3`, new / old) | 1.817 / 8.015 against 1.802 / 8.024 ms: 1.0085 / 0.9989 |
+| `bench_md.py`, new build first | 1.792 / 8.009 against 1.803 / 8.059 ms: 0.9943 / 0.9938 |
+| `python/test_gate.py` | PASS, 30 rows and 2 reorder checks, worst force 1.56, stress 1.73 |
+| `pytest -q` (tests of `cb8b020`) | 450 tests, 449 passed and 1 failed (`tests/test_sweeps.py`, the replay schedule on OFF23 medium; it then passed in 12 isolated repeats and had passed in the four full runs since the merge; its message was not kept) |
+| ramp 200 to 400 K at 100 K/ps, 5,000 atoms, friction 0.02/fs (`tests/test_schedule_gpu.py`) | mean kinetic temperature 296.6 K, mean target 301.0 K (0.9855); last ten rows 387.4 K for 391.0 K; 7.985 ms/step against 7.839 on the 200 K hold before it |
+| `Simulation`, rows and frames every 20 steps against none, 5,000 atoms, wall time of `run()` | 8.078, 8.123 against 7.977, 8.013 ms/step: 1.0132 (1.0132 on the build before, too) |
+| resume after 500 of 1,000 NVE steps, 135 atoms | 7.3e-7 A from the uninterrupted run; two uninterrupted runs differ by 9.4e-7 A (7.0e-7 and 7.5e-7 on the build before) |
+| `lm.calc`, ASE `VelocityVerlet`, 1 ps, 135 atoms | drift -0.0005 meV/atom/ps |
+| `check="gate"` on `SrTiO3` 3x3x3 | passed, worst ratios energy 0.91, force 1.80, stress 1.44 |
+| the same with `spline_table_1` of the bundle scaled by 1.02 | `GateFailed`, worst ratios 6,172 / 6,637 / 19,809; no step ran |
+| `loupmd md NbCl5_R2SCAN.cif --model omat0-medium --temperature 300 --steps 2000 --timestep 1 --repeat 3 3 3` | 1.883 ms/step with output every 20 steps on `/mnt/d` (1.785 in the engine), 45.9 ns/day, 88 rebuilds, 0 dangerous |
+| `loupmd init md ... --profile ultrafast --repeat 2 2 2`, then `loupmd run` (576 atoms, 9,000 steps) | 0.636 ms/step (0.619 in the engine), 135.8 ns/day |
+| `lm.md`, `SrTiO3` 4x4x4 (320 atoms), 200 steps | 0.776 ms/step with output (0.675 in the engine) |
+
+- The A/B is a tie: the two orders give 1.0085 and 0.9943 for `NbCl5`, 0.9989 and 0.9938 for `SrTiO3`. The kernel
+  now does one FP64 square root and three multiplications more per atom and reads one more value.
+- `loupmd md`'s Langevin friction is FastMACE's default, 0.001965/fs; `bench_md.py` uses 0.01/fs, so its 1.80 ms
+  and the 1.785 ms here are not the same run.
+- Not measured: anything on the RTX 4000 Ada; a schedule on a model of the generic path; the gate inside a run for
+  a structure whose float64 reference does not fit the GPU; `loupmd run --resume` on the GPU.
+

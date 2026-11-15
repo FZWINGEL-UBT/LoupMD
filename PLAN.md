@@ -82,6 +82,11 @@ row; "Undo" says what a different answer costs.
 | D22 | §4.4 said every family has two interaction layers except OMOL-0. The released files say: POLAR-1-S one, POLAR-1-L three, OMOL-0 extra large three, all others two (`loupmd/models.py`, read with `loupmd/_probe.py`) | §4.4 corrected; no consequence for the sweeps, which take any layer count, and POLAR is refused for tiled execution | the plan was wrong | none |
 | D23 | A built wheel cannot run yet: `loupmd/__init__.py` loads the bundle cache from `python/loupmd.py` and the exporters live in `python/`, neither of which is in the wheel; `_lib/` is empty until S2-T02 | S2-T01 is checked with an editable install; S2-T03, S2-T11, S2-T12 and the tag `v1.0.0a2` wait for the layout move (D2) | a wheel needs the move | none |
 | D24 | `IntegratorConfig` (S3-T01) has no `fixcm`: the engine's NVE and Langevin do not remove the centre-of-mass momentum, and FastMACE's records default to removing it | the field arrives with S4-T01 (degrees of freedom, `fix_com`) and then takes FastMACE's default; until then a LoupMD run keeps whatever total momentum it starts with | a field that does nothing would be a silent difference from FastMACE | none |
+| D25 | S3-T06 said the engine sees a schedule's temperature at chunk boundaries | built more exactly: the thermostat's target is a device scalar that the step advances, so every step of a ramp runs at its end-point target, as in FastMACE, and a changed temperature captures no graph. `LoupIntegrator` gained `temp_rate_k_per_step` (the layout of ABI v1 changed before its first release) | a target constant over 20 steps would differ from FastMACE's runs and each change would capture the step again | none |
+| D26 | When a restart is written | `Simulation.run` writes one every `Output.restart_every` steps and when `save_restart()` is called; `lm.md` and `loupmd md` save one at the end of the run. What FastMACE's `fm.md` does at its end was not compared | a finished run should be resumable without the user thinking of it | drop the call at the end of `md` |
+| D27 | The run file (`loupmd.run/1`, `loupmd init md`, `loupmd run`) and the `--schedule ramp:0:400:3,hold:400:1` syntax are LoupMD's own | keys are `lm.md`'s argument names plus `[output]` and `[[schedule]]`; they were not compared with FastMACE's `init` / `run` files | S3-T08 fixes behaviour, not the file's spelling | rename keys before the documentation stage if FastMACE's files should run unchanged |
+| D28 | The gate's MACE float64 reference may not fit the GPU for a large structure | with `reference_device="auto"` an out-of-memory error moves the reference to the CPU without a time estimate (`cpu_float64_time_limit_s` only switches the CPU off at 0); with an explicit `"cuda"` the gate is unavailable. FastMACE's reduced-cell reference is not built | a gate that silently takes an hour is better than none, and `check="allow_unavailable"` exists; untested on a real large cell | build the time estimate and the reduced cell when a large-cell gate is needed |
+| D29 | Output on a Windows-mounted directory under WSL | measured: rows and frames every 20 steps cost 1.3% on the Linux file system (5,000 atoms) and 5.5% on `/mnt/d` (1,944 atoms) | the documentation should say to write runs to the Linux file system | none |
 
 ---
 
@@ -240,7 +245,10 @@ typedef struct {                  /* size-versioned: first field is sizeof(LoupI
     unsigned size;
     int kind;                     /* LOUP_NVE, LOUP_LANGEVIN, LOUP_CSVR, LOUP_NHC, LOUP_BERENDSEN_NVT,
                                      LOUP_BERENDSEN_NPT, LOUP_BAOAB_NPT, LOUP_MTK_NPT */
-    double dt_fs, temp_k, friction_per_fs, tau_t_fs;
+    double dt_fs, temp_k;
+    double temp_rate_k_per_step;  /* Langevin: step i of the call runs at temp_k + i * this; the target is a
+                                     device scalar, so a schedule's calls reuse the captured step (S3-T06) */
+    double friction_per_fs, tau_t_fs;
     double pressure_gpa, tau_p_fs, compressibility_per_gpa;
     int chain_length, cell_mode;  /* LOUP_CELL_HYDROSTATIC, LOUP_CELL_FULL; per-axis mask in cell_mask[3] */
     int cell_mask[3];
@@ -436,7 +444,10 @@ and commands: `STATUS_AND_PROFILE.md` §6.1, ledger `rel-merge-r6tip`.
 
 Not done for the exit of Stage 1: the rest of S1-T07 (D14), the family gates of S1-T08 on the merged code (the
 default gate ran; `--set organic` and `--set crystals` for the generic families did not), and the owner's word on
-D13, D14, D16 and D21. The tag `v1.0.0a1` is not set. One observation is open:
+D13, D14, D16 and D21. The tag `v1.0.0a1` is not set. Two observations are open. The replay schedule of
+S1-T08 on OFF23 medium failed once inside a full run of 450 tests (15 November, 06:05) and passed in 12 isolated
+repeats, with and without the per-system conv variant timing; its message was not kept, so the size is unknown.
+And:
 `test_polar_energy_follows_a_small_cell_change_on_the_same_engine` failed once inside a full run (stress difference
 3.97e-8 against its 3e-8 eV/A^3 bound) and passed in 12 isolated repeats and in the next full run.
 
@@ -494,9 +505,25 @@ Stage 1's exit; GPU checks on the RTX 5060 Ti only, on the merged engine build (
 
 **Exit:** `lm.md`, `Simulation`, output, resume and the CLI run NVE and Langevin end to end. Tag `v1.0.0a3`.
 
-**Progress (15 November 2026, 05:15).** S3-T01 **done** (`43aff6c` the error family, `459e07a` the records;
-`IntegratorConfig` without `fixcm`, D24). S3-T02 **done** (`4358fcc`): `lm.load`, `ForceField.evaluate`; a missing
-element and a multi-head model without `head=` are refused before any export (CPU tests). The others are not started.
+**Progress (15 November 2026, 06:10).** Every task of the stage is built for what the engine has today (NVE and
+Langevin). GPU checks on the RTX 5060 Ti only; numbers and commands in `STATUS_AND_PROFILE.md` §6.2. Full suite on
+the last engine build: 450 tests, 449 passed and 1 failed (`tests/test_sweeps.py`, the replay schedule on OFF23 medium; it then passed in 12 isolated repeats and had passed in the four full runs since the merge; its message was not kept).
+
+| Task | Commits | State |
+| --- | --- | --- |
+| S3-T01 | `43aff6c`, `459e07a` | **done**: the error family and the records; `IntegratorConfig` without `fixcm` (D24) |
+| S3-T02 | `4358fcc` | **done**: `lm.load`, `ForceField.evaluate`; a missing element and a multi-head model without `head=` are refused before any export (CPU tests) |
+| S3-T03 | `824b6cd`, `0147e7f` | **done**: 1,000 NVE steps on 135 atoms write 51 rows and 51 frames (step 0 and every 20); the last frame equals the engine's state bitwise; a row's and its frame's energy agree to 1e-12 relative |
+| S3-T04 | `0147e7f` | **done**: resumed after 500 of 1,000 NVE steps, the run ends 7.0e-7 A from the uninterrupted one (two uninterrupted runs differ by 7.5e-7 A; criterion 1e-3 A); the restored state equals the saved one bitwise; another model's force field and a state of another atom count are refused |
+| S3-T05 | `0147e7f` | **done**: rows and frames every 20 steps cost 1.0132 of the run without output on 5,000 atoms (criterion 1.03), on the Linux file system (D29) |
+| S3-T06 | `a436947`, `e11370e` | **done**, per step instead of per chunk (D25): 200 to 400 K at 100 K/ps on 5,000 atoms, mean kinetic temperature 296.6 K for a mean target of 301.0 K (0.9855; criterion 5%); the ramp's steps cost 7.985 ms against 7.839 on the hold before it. Profiles `slow`, `fast`, `ultrafast`, `anneal`; pressure schedules and NPT are refused |
+| S3-T07 | `cb8b020` | **done**: `lm.md`, `RunResult`, the report. 21 argument errors are raised before the model is looked for (CPU); a real run of 320 atoms with its report (GPU) |
+| S3-T08 | `cb8b020` | **done**: `loupmd md`, `loupmd init md`, `loupmd run`, `--resume`. `init` then `run` equals `md` and unknown keys are refused by name (CPU, fake engine); both commands ran once on the GPU. The file's spelling is LoupMD's own (D27) |
+| S3-T09 | `cb8b020` | **done**: `metadata.json` validates against `loupmd.metadata/1`, and `loupmd run metadata.json` repeats the run (CPU). Deviations from the task's list: the driver number comes from nvidia-smi, not NVML, and the GEMM plan file is not recorded (the engine does not report which file it read) |
+| S3-T10 | `e11370e`, `cb8b020`, `1b06826` | **done for NVE and NVT**: `check="gate"` passes on `SrTiO3` 3x3x3 (worst ratios 0.91 / 1.80 / 1.44); a bundle with one table scaled by 2% fails with ratios 6,172 / 6,637 / 19,809 and no step runs. Strained copies wait for NPT; the CPU fallback of the reference is untested on a real large cell (D28) |
+
+Not done for the exit of Stage 3: the tag `v1.0.0a3` (not set; Stage 1's and 2's exits are open, see above),
+and a comparison of the front end's spelling with FastMACE's on a real FastMACE run (D26, D27).
 
 ### Stage 4: dynamics, relaxation and ASE drop-ins (4.5 weeks)
 
