@@ -56,15 +56,34 @@ FastMACE is MIT, © 2026 Fabian Zwingel, the same owner as LoupMD.
 | `loupmd/models.py` | `fastmace/model/labels.py` (the label table: release URLs, SHA-256, licences, heads and training functionals with their sources) and the checkpoint lookup, download and trust functions of `fastmace/model/loading.py` | errors are LoupMD's; the model folder variable is `LOUPMD_MODELS`; nothing is unpickled in this module |
 | `loupmd/errors.py` | the message shape of `fastmace/errors.py` (`what`, `Why:`, `Next:`) | LoupMD's own classes |
 | `loupmd/protocols.py` | `fastmace/protocols/schedule.py` and `profiles.py`: segments, `Schedule`, whole-step resolution (half up), the end-point target, `ScheduleState`, the profiles `slow`, `fast`, `ultrafast`, `anneal` | errors are `InputError`; profile files are TOML only; NPT, `pressure_GPa` and dispersion in a profile are refused; optimiser names are kept as data |
+| `loupmd/quench.py` | `fastmace/protocols/quench.py`: the frame selection per target-temperature bin, the quench's settings, files and CSV columns | each frame is relaxed with `lm.optimize` on the host; the run's schedule and cadence are read from `metadata.json` |
 | `loupmd/output.py` | the chunk scheme, file names and thermo header of `fastmace/io/output.py` and `io/trajectory.py`, and the durable-write helpers of `io/durable.py` | rows and frames come from the engine (device thermo buffer, `get_state`), not from torch tensors; a background thread writes them |
 | `loupmd/quick.py`, `loupmd/integrators.py`, `loupmd/config.py` (`Output`) | the signature, argument rules and defaults of `fastmace/quick.py` (`md`, `RunResult`, initial velocities, default friction and output directory), the record names of `fastmace/integrators/__init__.py`, the `Output` record of `fastmace/io/output.py` | only what LoupMD's engine has (NVE, Langevin); FastMACE's planner arguments are refused by name |
 
 The model files themselves are not part of LoupMD. Each label's licence (MIT or the Academic Software License) is
 in the table and is shown by `loupmd models`.
 
+## Modules ported from ASE (LGPL-2.1-or-later)
+
+By owner decision O6 (15 November 2026) the modules below, which port classes of ASE 3.27 (LGPL-2.1-or-later,
+© the ASE developers, <https://gitlab.com/ase/ase>) so that they agree with ASE to rounding, are distributed
+under **LGPL-2.1-or-later**, not MIT. Each starts with `# SPDX-License-Identifier: LGPL-2.1-or-later` and a
+provenance line. The licence text is `LICENSES/LGPL-2.1-or-later.txt`. They are plain Python source.
+
+| LGPL file | Ported from (ASE 3.27) |
+| --- | --- |
+| `loupmd/optimize/lbfgs.py` | `ase/optimize/lbfgs.py` (`LBFGS` without line search) |
+| `loupmd/optimize/fire.py` | `ase/optimize/fire.py` (`FIRE` without the downhill check) |
+| `loupmd/optimize/cell.py` | `ase/filters.py` (`UnitCellFilter`'s cell mapping and `FrechetCellFilter`) |
+
+The records of `loupmd/optimize/__init__.py` and `loupmd/integrators.py` take ASE's argument names and defaults
+(an interface, not ported code) and are MIT. The Langevin and velocity-Verlet steps of `src/integrator.cu`
+implement the published algorithms with ASE's coefficient conventions; they were written for the engine and are
+MIT.
+
 ## Not yet in this file
 
 Later stages add files that need an entry here when they land: the FastMACE modules vendored for export
-(S2-T03), the modules ported from ASE (Stage 4; LGPL-2.1-or-later under default
-A6), the D3 reference parameters (Stage 6D) and the benchmark structures (S2-T08, if the owner allows them in the
+(S2-T03), further modules ported from ASE (Stage 4: the remaining integrators), the D3
+reference parameters (Stage 6D) and the benchmark structures (S2-T08, if the owner allows them in the
 wheel). S7-T03 is the audit.

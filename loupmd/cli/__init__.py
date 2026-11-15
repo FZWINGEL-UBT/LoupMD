@@ -14,9 +14,11 @@ from . import cache as _cache
 from . import doctor as _doctor
 from . import md as _md
 from . import models as _models
+from . import quench as _quench
+from . import relax as _relax
 from . import validate as _validate
 
-COMMANDS = (_doctor, _models, _cache, _bench, _validate, _md)
+COMMANDS = (_doctor, _models, _cache, _bench, _validate, _md, _relax, _quench)
 
 
 def build_parser() -> argparse.ArgumentParser:

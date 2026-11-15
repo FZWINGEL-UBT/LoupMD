@@ -24,7 +24,7 @@ def load(model, head=None, **options):
 # The front end, resolved at first use so that `import loupmd` stays light: name -> (module, attribute).
 _LAZY = {"ForceField": ("forcefield", "ForceField"), "Simulation": ("simulation", "Simulation"),
          "Output": ("config", "Output"), "integrators": ("integrators", None), "protocols": ("protocols", None),
-         "md": ("quick", "md"), "RunResult": ("quick", "RunResult")}
+         "md": ("quick", "md"), "RunResult": ("quick", "RunResult"), "optimize": ("optimize", None)}
 
 
 def __getattr__(name):
@@ -51,5 +51,5 @@ __all__ = [
     "ModelElementError", "NonFiniteError", "Output", "PlanRefused", "RestartMismatch", "RunResult", "RuntimeInfo",
     "Simulation", "UnsupportedModel",
     "__version__", "calc", "ensure_loup_bundle", "exporter_fingerprint", "last_error", "library_path",
-    "integrators", "library_version", "load", "md", "protocols", "runtime_info",
+    "integrators", "library_version", "load", "md", "optimize", "protocols", "runtime_info",
 ]

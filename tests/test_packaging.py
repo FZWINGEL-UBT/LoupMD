@@ -47,10 +47,20 @@ def test_the_extras(project):
 
 def test_licence_and_the_files_that_ship(project):
     meta = project["project"]
-    assert meta["license"] == "MIT AND BSD-3-Clause"
+    assert meta["license"] == "MIT AND BSD-3-Clause AND LGPL-2.1-or-later"
     for name in meta["license-files"]:
         assert (ROOT / name).is_file(), name
-    assert {"LICENSE", "NOTICE.md", "cubins/LICENSE.cutlass"} <= set(meta["license-files"])
+    assert {"LICENSE", "NOTICE.md", "cubins/LICENSE.cutlass", "LICENSES/LGPL-2.1-or-later.txt"} <= set(
+        meta["license-files"])
+    # Every file that says it is LGPL is listed in NOTICE.md, and NOTICE.md lists no other.
+    import re
+
+    lgpl = sorted(str(p.relative_to(ROOT)).replace("\\", "/") for p in (ROOT / "loupmd").rglob("*.py")
+                  if p.read_text().startswith("# SPDX-License-Identifier: LGPL-2.1-or-later"))
+    notice = (ROOT / "NOTICE.md").read_text()
+    section = notice[notice.index("## Modules ported from ASE"):]
+    section = section[:section.index("\n## ", 5)] if "\n## " in section[5:] else section
+    assert lgpl == sorted(re.findall(r"^\| `(loupmd/[^`]+)` \|", section, flags=re.M)) and lgpl
     data = project["tool"]["setuptools"]["package-data"]["loupmd"]
     assert {"_lib/*.so", "_lib/cubins/*", "bench/reference.json", "bench/structures/*"} <= set(data)
     assert (ROOT / "loupmd" / "bench" / "reference.json").is_file()
@@ -138,3 +148,37 @@ def test_the_cuda_runtime_of_the_nvidia_wheels_is_preloaded_when_the_loader_does
     _core._preload_nvidia_libs()
     assert loaded == [("libcudart.so.13", ctypes.RTLD_GLOBAL), ("libcublasLt.so.13", ctypes.RTLD_GLOBAL),
                       ("libcublas.so.13", ctypes.RTLD_GLOBAL)]
+
+
+def test_a_library_that_lacks_a_call_of_the_binding_is_reported_by_name(monkeypatch):
+    """An older build of the same interface version (the stages add calls before the first release)."""
+    import ctypes
+
+    from loupmd import _core
+    from loupmd.errors import BackendError
+
+    class OldLibrary:
+        """Has the version calls and nothing else."""
+
+        def __init__(self):
+            self.loup_abi_version = lambda: _core.ABI_VERSION
+            self.loup_version = lambda: b"1.0.0a1+old"
+
+        def __getattr__(self, name):
+            raise AttributeError(f"undefined symbol: {name}")
+
+    class Call:
+        argtypes = restype = None
+
+        def __call__(self):
+            return _core.ABI_VERSION
+
+    old = OldLibrary()
+    old.loup_abi_version = Call()
+    old.loup_version = Call()
+    monkeypatch.setattr(_core, "_LIB", None)
+    monkeypatch.setattr(ctypes, "CDLL", lambda path, mode=0: old)
+    with pytest.raises(BackendError) as caught:
+        _core._load_lib()
+    assert "lacks a call this loupmd package uses (undefined symbol: loup_last_error)" in str(caught.value)
+    assert "older source tree" in str(caught.value) and _core._LIB is None

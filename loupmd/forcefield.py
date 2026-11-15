@@ -71,6 +71,8 @@ class ForceField:
         self.r_max_A = known.r_max_A if known is not None else None
         self.heads = known.heads if known is not None else None
         self.licence = known.licence if known is not None else None
+        # MACE-POLAR-1: k-space electrostatics (no cell relaxation, no tiled execution).
+        self.long_range = known is not None and known.model_type == "PolarMACE"
         self.functional = entry.functional if entry is not None else None
         self.engine = None                 # the LoupEngine of the last structure
         self.last_bundle = None
