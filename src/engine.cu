@@ -219,6 +219,20 @@ __global__ void baoab_cell_second_kernel(
     int full, int kick, int advance, double dt, int ndof, double ext, const double* __restrict__ virial,
     const CellDev* __restrict__ cell, double* __restrict__ work, double* __restrict__ state,
     unsigned long long* __restrict__ step_counter);
+__global__ void mtk_first_kernel(
+    int full, double dt, int tchain, int tloop, int pchain, int ploop, int ndof, double q_t, double r_p, double w,
+    double kb, double pressure, const double* __restrict__ target, double* __restrict__ state,
+    double* __restrict__ work, const double* __restrict__ virial, CellDev* __restrict__ cell);
+__global__ void mtk_first_atoms_kernel(
+    int N, double dt, const double* __restrict__ work, const double* __restrict__ forces,
+    const double* __restrict__ inv_masses, double* __restrict__ pos64, double* __restrict__ vel64,
+    unsigned int* __restrict__ max_step_disp2);
+__global__ void mtk_kick_kernel(int N, double dt, const double* __restrict__ work, const double* __restrict__ forces,
+                                const double* __restrict__ inv_masses, double* __restrict__ vel64);
+__global__ void mtk_second_kernel(
+    int full, double dt, int tchain, int tloop, int pchain, int ploop, int ndof, double q_t, double r_p, double w,
+    double kb, double pressure, double* __restrict__ target, double* __restrict__ state, double* __restrict__ work,
+    const double* __restrict__ virial, const CellDev* __restrict__ cell);
 __global__ void berendsen_scale_kernel(int ndof, double dt_over_tau, double kb, double* __restrict__ target,
                                        double* __restrict__ work);
 __global__ void csvr_first_half_kernel(
@@ -2571,6 +2585,7 @@ struct NptParams {
     double pressure = 0.0, tau_p_fs = 0.0, compressibility = 0.0;
     int full = 0;
     int mask[3] = {1, 1, 1};
+    int pchain = 0, ploop = 0;  // MTK: the barostat's chain
 };
 
 static int run_md_loop(
@@ -2739,6 +2754,25 @@ static int run_md_loop(
         }
         CUDA_CHECK(cudaMemsetAsync(h->d_int_work, 0, kIntWorkSlots * sizeof(double), h->stream));
     }
+    // Martyna-Tobias-Klein NPT (kind 7): ASE's masses from the temperature the masses are made for: the
+    // thermostat's unit kT tdamp^2, the barostat chain's kT pdamp^2, the cell's W = (N_f + 3) kT pdamp^2
+    // (isotropic) or (N_f / 3 + 1) kT pdamp^2 (full cell). Chains and cell momentum carry on from the last such
+    // call on this trajectory.
+    double mtk_q = 0.0, mtk_r = 0.0, mtk_w = 0.0;
+    if (kind == 7) {
+        const double tdamp = tau_fs * loup::ASE_FS, pdamp = npt->tau_p_fs * loup::ASE_FS;
+        const double kt_mass = loup::ASE_KB * mass_temp_k;
+        mtk_q = kt_mass * tdamp * tdamp;
+        mtk_r = kt_mass * pdamp * pdamp;
+        mtk_w = (npt->full ? (double)h->kinetic_dof() / 3.0 + 1.0 : (double)h->kinetic_dof() + 3.0) * mtk_r;
+        const double target[5] = {temp_k + temp_rate, temp_rate, 0.0, 0.0, 0.0};
+        CUDA_CHECK(cudaMemcpy(h->d_langevin_target, target, sizeof(target), cudaMemcpyHostToDevice));
+        if (h->int_state_kind != LOUP_MTK_NPT) {
+            CUDA_CHECK(cudaMemsetAsync(h->d_int_state, 0, kIntStateSlots * sizeof(double), h->stream));
+            h->int_state_kind = LOUP_MTK_NPT;
+        }
+        CUDA_CHECK(cudaMemsetAsync(h->d_int_work, 0, kIntWorkSlots * sizeof(double), h->stream));
+    }
     // Nose-Hoover chain (kind 3): the thermostat masses' unit kT_mass tdamp^2 (Q_0 = N_f q, the others q), and the
     // target as for CSVR. The chain's variables carry on from the last Nose-Hoover call on this trajectory.
     double nhc_q = 0.0;
@@ -2788,6 +2822,18 @@ static int run_md_loop(
             loup::berendsen_scale_kernel<<<1, 1, 0, h->stream>>>(h->kinetic_dof(), dt_fs / tau_fs, loup::ASE_KB,
                                                                  h->d_langevin_target, h->d_int_work);
             loup::csvr_first_half_kernel<<<gridN, 256, 0, h->stream>>>(
+                N, dt_ase, h->d_int_work, h->d_forces_f64, h->d_inv_masses, h->d_pos64, h->d_vel64,
+                h->d_max_step_disp2);
+        } else if (kind == 7) {
+            // MTK NPT: the kinetic tensor, one thread for both chains, the cell kick and the step's matrices,
+            // then every atom's scaling, kick and drift (integrator.cu).
+            loup::kinetic_tensor_kernel<<<gridN, 256, 0, h->stream>>>(N, h->d_masses, h->d_vel64,
+                                                                      h->d_int_work + 44);
+            loup::mtk_first_kernel<<<1, 1, 0, h->stream>>>(
+                npt->full, dt_ase, tchain, tloop, npt->pchain, npt->ploop, h->kinetic_dof(), mtk_q, mtk_r, mtk_w,
+                loup::ASE_KB, npt->pressure, h->d_langevin_target, h->d_int_state, h->d_int_work,
+                h->d_virial_grad_f64, h->d_celldev);
+            loup::mtk_first_atoms_kernel<<<gridN, 256, 0, h->stream>>>(
                 N, dt_ase, h->d_int_work, h->d_forces_f64, h->d_inv_masses, h->d_pos64, h->d_vel64,
                 h->d_max_step_disp2);
         } else if (kind == 6) {
@@ -2873,7 +2919,17 @@ static int run_md_loop(
                 npt->full, 1, 1, dt_ase, bao_ndof, -npt->pressure, h->d_virial_grad_f64, h->d_celldev, h->d_int_work,
                 h->d_int_state, h->d_step_counter);
         }
-        if (kind != 1) {
+        if (kind == 7) {  // the atom kick, the cell kick with the new stress, both chains
+            loup::mtk_kick_kernel<<<gridN, 256, 0, h->stream>>>(N, dt_ase, h->d_int_work, h->d_forces_f64,
+                                                                h->d_inv_masses, h->d_vel64);
+            loup::kinetic_tensor_kernel<<<gridN, 256, 0, h->stream>>>(N, h->d_masses, h->d_vel64,
+                                                                      h->d_int_work + 44);
+            loup::mtk_second_kernel<<<1, 1, 0, h->stream>>>(
+                npt->full, dt_ase, tchain, tloop, npt->pchain, npt->ploop, h->kinetic_dof(), mtk_q, mtk_r, mtk_w,
+                loup::ASE_KB, npt->pressure, h->d_langevin_target, h->d_int_state, h->d_int_work,
+                h->d_virial_grad_f64, h->d_celldev);
+            loup::scale_velocities_kernel<<<gridN, 256, 0, h->stream>>>(N, h->d_int_work, h->d_vel64);
+        } else if (kind != 1) {
             loup::nve_second_half_kernel<<<gridN, 256, 0, h->stream>>>(
                 N, dt_ase, h->d_forces_f64, h->d_inv_masses, h->d_vel64);
         } else {
@@ -2899,8 +2955,9 @@ static int run_md_loop(
         }
     };
     const double npt_key[7] = {npt ? npt->pressure : 0.0, npt ? npt->tau_p_fs : 0.0, npt ? npt->compressibility : 0.0,
-                               npt ? (double)npt->full : 0.0, npt ? (double)npt->mask[0] : 0.0,
-                               npt ? (double)npt->mask[1] : 0.0, npt ? (double)npt->mask[2] : 0.0};
+                               npt ? (double)npt->full : 0.0,
+                               npt ? (double)(npt->mask[0] + 2 * npt->mask[1] + 4 * npt->mask[2]) : 0.0,
+                               npt ? (double)npt->pchain : 0.0, npt ? (double)npt->ploop : 0.0};
     auto capture = [&](cudaGraph_t& g, cudaGraphExec_t& ge, auto&& body) -> int {
         if (ge) { cudaGraphExecDestroy(ge); ge = nullptr; }
         if (g) { cudaGraphDestroy(g); g = nullptr; }
@@ -3534,11 +3591,7 @@ static int run_impl(LoupHandle* h, const LoupIntegrator* caller, int n_steps, Lo
     const LoupIntegrator it = *caller;
     const char* name = integrator_name(it.kind);
     if (!name) { loup::set_error("unknown integrator kind %d", it.kind); return -1; }
-    if (it.kind == LOUP_MTK_NPT) {
-        loup::set_error("integrator %s is not built in this version of the library (LOUP_NVE, LOUP_LANGEVIN, "
-                        "LOUP_CSVR, LOUP_NHC, LOUP_BERENDSEN_NVT, LOUP_BERENDSEN_NPT and LOUP_BAOAB_NPT are)", name);
-        return -1;
-    }
+    (void)name;  // every kind of the enum is built
     if (it.fix_com != 0 && h && h->n_fixed > 0) {
         loup::set_error("fix_com with fixed atoms: %d fixed atoms pin the frame already", h->n_fixed);
         return -1;
@@ -3627,7 +3680,7 @@ static int run_impl(LoupHandle* h, const LoupIntegrator* caller, int n_steps, Lo
                            it.thermo_every, false, out_stats, 0.0, 0, 1, 0.0, &npt);
     }
     if ((it.kind == LOUP_CSVR || it.kind == LOUP_NHC || it.kind == LOUP_BERENDSEN_NVT ||
-         it.kind == LOUP_BERENDSEN_NPT) &&
+         it.kind == LOUP_BERENDSEN_NPT || it.kind == LOUP_MTK_NPT) &&
         (!std::isfinite(it.tau_t_fs) || !(it.tau_t_fs > 0.0))) {
         loup::set_error("tau_t_fs must be finite and positive, got %g fs", it.tau_t_fs);
         return -1;
@@ -3640,6 +3693,64 @@ static int run_impl(LoupHandle* h, const LoupIntegrator* caller, int n_steps, Lo
     if (it.kind == LOUP_CSVR) {
         return run_md_loop(h, 2, n_steps, it.dt_fs, it.temp_k, it.temp_rate_k_per_step, 0.0, it.seed,
                            it.thermo_every, it.fix_com != 0, out_stats, it.tau_t_fs);
+    }
+    if (it.kind == LOUP_MTK_NPT) {
+        // ASE's IsotropicMTKNPT (LOUP_CELL_HYDROSTATIC) and MTKNPT (LOUP_CELL_FULL): tdamp = tau_t_fs, pdamp =
+        // tau_p_fs, tchain / tloop = chain_length / chain_loops, pchain / ploop = p_chain_length / p_chain_loops
+        // (0: ASE's 3 and 1).
+        if (!std::isfinite(it.tau_p_fs) || !(it.tau_p_fs > 0.0)) {
+            loup::set_error("tau_p_fs must be finite and positive, got %g fs", it.tau_p_fs);
+            return -1;
+        }
+        if (!std::isfinite(it.pressure_gpa)) {
+            loup::set_error("pressure_gpa must be finite, got %g GPa", it.pressure_gpa);
+            return -1;
+        }
+        const int tchain = it.chain_length == 0 ? 3 : it.chain_length;
+        const int pchain = it.p_chain_length == 0 ? 3 : it.p_chain_length;
+        if (tchain < 1 || tchain > 8) {
+            loup::set_error("chain_length must be from 1 to 8 thermostats for LOUP_MTK_NPT, got %d", it.chain_length);
+            return -1;
+        }
+        if (pchain < 1 || pchain > 8) {
+            loup::set_error("p_chain_length must be from 1 to 8 barostat links, got %d", it.p_chain_length);
+            return -1;
+        }
+        if (it.chain_loops < 0 || it.chain_loops > 100 || it.p_chain_loops < 0 || it.p_chain_loops > 100) {
+            loup::set_error("%s must be from 0 to 100 (0 is 1), got %d",
+                            it.chain_loops < 0 || it.chain_loops > 100 ? "chain_loops" : "p_chain_loops",
+                            it.chain_loops < 0 || it.chain_loops > 100 ? it.chain_loops : it.p_chain_loops);
+            return -1;
+        }
+        if (it.cell_mode != LOUP_CELL_HYDROSTATIC && it.cell_mode != LOUP_CELL_FULL) {
+            loup::set_error("unknown cell_mode %d (LOUP_CELL_HYDROSTATIC or LOUP_CELL_FULL)", it.cell_mode);
+            return -1;
+        }
+        const double mass_temp = it.mass_temp_k == 0.0 ? it.temp_k : it.mass_temp_k;
+        if (!std::isfinite(mass_temp) || !(mass_temp > 0.0) || !(it.temp_k > 0.0)) {
+            loup::set_error("temp_k must be positive for LOUP_MTK_NPT (the thermostat's and the barostat's masses "
+                            "are made for it), got %g K with mass_temp_k = %g K", it.temp_k, it.mass_temp_k);
+            return -1;
+        }
+        if (h && h->n_fixed > 0) {
+            loup::set_error("a barostat with fixed atoms: the cell's scaling would move the %d fixed atoms", h->n_fixed);
+            return -1;
+        }
+        if (h && h->gen && h->gen->has_lr()) {
+            loup::set_error("the variable cell is not built for long-range models (MACE-POLAR-1): their k-space "
+                            "terms are set up for one cell");
+            return -1;
+        }
+        NptParams npt;
+        npt.pressure = it.pressure_gpa / loup::GPA_PER_EV_A3;
+        npt.tau_p_fs = it.tau_p_fs;
+        npt.full = it.cell_mode == LOUP_CELL_FULL ? 1 : 0;
+        npt.pchain = pchain;
+        npt.ploop = it.p_chain_loops == 0 ? 1 : it.p_chain_loops;
+        if (h) h->req_var_cell = true;
+        return run_md_loop(h, 7, n_steps, it.dt_fs, it.temp_k, it.temp_rate_k_per_step, 0.0, 0, it.thermo_every,
+                           it.fix_com != 0, out_stats, it.tau_t_fs, tchain, it.chain_loops == 0 ? 1 : it.chain_loops,
+                           mass_temp, &npt);
     }
     if (it.kind == LOUP_BERENDSEN_NVT || it.kind == LOUP_BERENDSEN_NPT) {
         if (it.tau_t_fs < it.dt_fs) {  // sqrt(1 + (T0 / T - 1) dt / taut) needs dt / taut <= 1

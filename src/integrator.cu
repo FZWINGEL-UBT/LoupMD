@@ -710,4 +710,267 @@ __global__ void baoab_cell_second_kernel(
     if (advance) step_counter[0] += 1ULL;
 }
 
+// ---- Martyna-Tobias-Klein NPT (Martyna, Tobias, Klein 1994), as ASE 3.27's IsotropicMTKNPT (the cell keeps its
+// shape) and MTKNPT (the full cell): Nose-Hoover chains on the atoms and on the cell. ASE's step is
+//   barostat chain, thermostat chain, cell kick, atom kick (dt/2 each); atom drift, cell drift (dt);
+//   [forces and stress at the new positions and cell]
+//   atom kick, cell kick, thermostat chain, barostat chain (dt/2 each).
+// The first cell kick reads the stress of the last force pass plus the ideal-gas part of the momenta of then.
+// State slots: [0] minus what the conserved quantity holds beside E_pot + E_kin (both chains' energies, the cell's
+// kinetic energy and P V), [1..9] the cell momentum (the isotropic mode uses the first), then eta and p_eta of
+// the thermostat (tchain each) and xi and p_xi of the barostat (pchain each). Work slots: [1] and [6] velocity
+// scalings (the second half's is where scale_velocities_kernel reads it), [8..16] and [17..25] the atom kick's
+// matrices (v <- v KD + dt/2 f/m KR), [26..34] and [35..43] the drift's (x <- x DG + dt v DR), [44..49] sum m v v.
+// Counts: `ndof` stands where ASE has 3 N (and ndof / 3 where it has N), as in nhc_half_kernel; the barostat
+// chain's own counts are ASE's (first mass 9 kT pdamp^2 in both modes; force and energy 1 kT isotropic, 9 kT full).
+constexpr int kMtkMaxChain = 8;
+constexpr int kMtkP = 1, kMtkChains = 10;
+constexpr int kMtkKd = 8, kMtkKr = 17, kMtkDg = 26, kMtkDr = 35, kMtkScale = 6, kMtkK = 44;
+
+// One Nose-Hoover chain for `delta`, as nhc_half_kernel's loop: k2 is twice the kinetic energy the chain is
+// coupled to (carried along through its scalings), dof_force its count in the first link's force. Returns the
+// product of the scalings.
+__device__ double nhc_chain(int n, int loops, double delta, double kT, double dof_force, const double* Q,
+                            double* eta, double* p, double k2) {
+    double scale = 1.0;
+    const double cbrt2 = cbrt(2.0);
+    const double coeffs[3] = {1.0 / (2.0 - cbrt2), -cbrt2 / (2.0 - cbrt2), 1.0 / (2.0 - cbrt2)};
+    for (int loop = 0; loop < loops; ++loop) {
+        for (int c = 0; c < 3; ++c) {
+            const double d = coeffs[c] * delta / (double)loops;
+            const double d2 = 0.5 * d, d4 = 0.25 * d;
+            for (int pass = 0; pass < 2; ++pass) {
+                for (int i = 0; i < n; ++i) {
+                    const int j = pass == 0 ? n - 1 - i : i;
+                    if (j < n - 1) p[j] *= exp(-d4 * p[j + 1] / Q[j + 1]);
+                    const double g = j == 0 ? k2 - dof_force * kT : p[j - 1] * p[j - 1] / Q[j - 1] - kT;
+                    p[j] += d2 * g;
+                    if (j < n - 1) p[j] *= exp(-d4 * p[j + 1] / Q[j + 1]);
+                }
+                if (pass == 0) {
+                    for (int j = 0; j < n; ++j) eta[j] += d * p[j] / Q[j];
+                    const double s = exp(-d * p[0] / Q[0]);
+                    scale *= s;
+                    k2 *= s * s;
+                }
+            }
+        }
+    }
+    return scale;
+}
+
+// scipy.special.exprel: (exp(x) - 1) / x, 1 at 0.
+__device__ double exprel_d(double x) { return fabs(x) < 1e-16 ? 1.0 : expm1(x) / x; }
+
+// exp(a) and exprel(a) = sum_k a^k / (k + 1)! of a 3 x 3 matrix, as FastMACE's exp_and_exprel: b = a / 2^s,
+// exprel(b) by Horner, exp(b) = 1 + b exprel(b), then s times exprel(2b) = exprel(b) (exp(b) + 1) / 2 and
+// exp(2b) = exp(b)^2. For a symmetric a these are ASE's U f(L) U^T to rounding.
+__device__ void mat3_exp_and_exprel(const double* a, double* e, double* r) {
+    const int scaling = 4, degree = 14;
+    double b[9], t[9];
+    for (int i = 0; i < 9; ++i) {
+        b[i] = a[i] / (double)(1 << scaling);
+        r[i] = (i % 4 == 0) ? 1.0 : 0.0;
+    }
+    for (int k = degree - 1; k >= 1; --k) {
+        mat3_mul_d(b, r, t);
+        for (int i = 0; i < 9; ++i) r[i] = ((i % 4 == 0) ? 1.0 : 0.0) + t[i] / (double)(k + 1);
+    }
+    mat3_mul_d(b, r, t);
+    for (int i = 0; i < 9; ++i) e[i] = ((i % 4 == 0) ? 1.0 : 0.0) + t[i];
+    for (int s = 0; s < scaling; ++s) {
+        double ep[9];
+        for (int i = 0; i < 9; ++i) ep[i] = e[i] + ((i % 4 == 0) ? 1.0 : 0.0);
+        mat3_mul_d(r, ep, t);
+        for (int i = 0; i < 9; ++i) r[i] = 0.5 * t[i];
+        mat3_mul_d(e, e, t);
+        for (int i = 0; i < 9; ++i) e[i] = t[i];
+    }
+}
+
+// exp(i L_(eps,2) delta): the cell momentum from the stress with the ideal-gas part. k: sum m v v of the momenta
+// of now (xx, xy, xz, yy, yz, zz), virial: dE / d strain of the last force pass (the stress times the volume).
+__device__ void mtk_kick_cell(int full, double delta, int ndof, double pressure, double volume, const double* k,
+                              const double* virial, double* p) {
+    const double ke2 = k[0] + k[3] + k[5];
+    if (!full) {
+        // pressure = -Tr(stress - K / V) / 3; G = 3 V (pressure - P) + sum(p^2 / m) / N
+        const double internal = -((virial[0] + virial[3] + virial[5]) / volume - ke2 / volume) / 3.0;
+        p[0] += delta * (3.0 * volume * (internal - pressure) + ke2 / ((double)ndof / 3.0));
+        return;
+    }
+    const int map[9] = {0, 1, 2, 1, 3, 4, 2, 4, 5};
+    for (int i = 0; i < 9; ++i) {
+        const double unit = (i % 4 == 0) ? 1.0 : 0.0;
+        const double minus_stress = -(virial[map[i]] / volume - k[map[i]] / volume);
+        p[i] += delta * (volume * (minus_stress - pressure * unit) + ke2 / (double)ndof * unit);
+    }
+}
+
+// The masses of both chains and the pointers into the state block.
+struct MtkChains {
+    double Q[kMtkMaxChain], R[kMtkMaxChain];
+    double *eta, *p_eta, *xi, *p_xi;
+};
+__device__ void mtk_chains(int tchain, int pchain, int ndof, double q_t, double r_p, double* state, MtkChains* c) {
+    for (int j = 0; j < tchain; ++j) c->Q[j] = j == 0 ? (double)ndof * q_t : q_t;
+    for (int j = 0; j < pchain; ++j) c->R[j] = j == 0 ? 9.0 * r_p : r_p;
+    c->eta = state + kMtkChains;
+    c->p_eta = c->eta + tchain;
+    c->xi = c->p_eta + tchain;
+    c->p_xi = c->xi + pchain;
+}
+
+__device__ double mtk_cell_k2(int full, const double* p, double w) {
+    if (!full) return p[0] * p[0] / w;
+    double sum = 0.0;
+    for (int i = 0; i < 9; ++i) sum += p[i] * p[i];
+    return sum / w;
+}
+
+// The first half up to the drifts, by one thread, after kinetic_tensor_kernel: both chains, the cell kick, and the
+// matrices of the atoms' kick and drift for mtk_first_atoms_kernel. q_t = kT_mass tdamp^2, r_p = kT_mass pdamp^2,
+// w the cell's mass; pressure in eV/A^3.
+__global__ void mtk_first_kernel(
+    int full, double dt, int tchain, int tloop, int pchain, int ploop, int ndof, double q_t, double r_p, double w,
+    double kb, double pressure, const double* __restrict__ target, double* __restrict__ state,
+    double* __restrict__ work, const double* __restrict__ virial, CellDev* __restrict__ cell
+) {
+    const double kT = kb * fmax(target[0], 0.0);
+    const double dt2 = 0.5 * dt;
+    double* p = state + kMtkP;
+    const int np = full ? 9 : 1;
+    MtkChains c;
+    mtk_chains(tchain, pchain, ndof, q_t, r_p, state, &c);
+    const double sb = nhc_chain(pchain, ploop, dt2, kT, full ? 9.0 : 1.0, c.R, c.xi, c.p_xi, mtk_cell_k2(full, p, w));
+    for (int i = 0; i < np; ++i) p[i] *= sb;
+    double* tensor = work + kMtkK;
+    const double st = nhc_chain(tchain, tloop, dt2, kT, (double)ndof, c.Q, c.eta, c.p_eta,
+                                tensor[0] + tensor[3] + tensor[5]);
+    double k[6];
+    for (int i = 0; i < 6; ++i) {
+        k[i] = st * st * tensor[i];  // of the velocities the thermostat has scaled
+        tensor[i] = 0.0;
+    }
+    mtk_kick_cell(full, dt2, ndof, pressure, cell->volume, k, virial, p);
+    work[kMtkScale] = st;
+    if (!full) {
+        const double x = (1.0 + 3.0 / (double)ndof) * p[0] * dt2 / w;
+        const double rate = dt * p[0] / w;
+        for (int i = 0; i < 9; ++i) {
+            const double unit = (i % 4 == 0) ? 1.0 : 0.0;
+            work[kMtkKd + i] = unit * exp(-x);
+            work[kMtkKr + i] = unit * exprel_d(-x);
+            work[kMtkDg + i] = unit * exp(rate);
+            work[kMtkDr + i] = unit * exprel_d(rate);
+        }
+    } else {
+        const double trace = (p[0] + p[4] + p[8]) / (double)ndof;
+        double a[9];
+        for (int i = 0; i < 9; ++i) a[i] = -(p[i] + ((i % 4 == 0) ? trace : 0.0)) * dt2 / w;
+        mat3_exp_and_exprel(a, work + kMtkKd, work + kMtkKr);
+        for (int i = 0; i < 9; ++i) a[i] = p[i] * dt / w;
+        mat3_exp_and_exprel(a, work + kMtkDg, work + kMtkDr);
+    }
+    for (int i = 0; i < 9; ++i) cell->move[i] = work[kMtkDg + i];   // the cell drifts with the atoms: h <- h DG
+    cell->has_move = 1;
+}
+
+// Every atom's first half: the thermostat's scaling, the kick with the cell momentum's drag, the drift.
+__global__ void mtk_first_atoms_kernel(
+    int N, double dt, const double* __restrict__ work, const double* __restrict__ forces,
+    const double* __restrict__ inv_masses, double* __restrict__ pos64, double* __restrict__ vel64,
+    unsigned int* __restrict__ max_step_disp2
+) {
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    double d2 = 0.0;
+    if (i < N) {
+        const double* kd = work + kMtkKd;
+        const double* kr = work + kMtkKr;
+        const double* dg = work + kMtkDg;
+        const double* dr = work + kMtkDr;
+        const double st = work[kMtkScale];
+        const double half_dt_im = 0.5 * dt * inv_masses[i];
+        double x[3], v[3], a[3], t[3];
+        #pragma unroll
+        for (int c = 0; c < 3; ++c) {
+            x[c] = pos64[i * 3 + c];
+            v[c] = st * vel64[i * 3 + c];
+            a[c] = half_dt_im * forces[i * 3 + c];
+        }
+        #pragma unroll
+        for (int c = 0; c < 3; ++c)
+            t[c] = v[0] * kd[c] + v[1] * kd[3 + c] + v[2] * kd[6 + c] + a[0] * kr[c] + a[1] * kr[3 + c] + a[2] * kr[6 + c];
+        #pragma unroll
+        for (int c = 0; c < 3; ++c) {
+            v[c] = t[c];
+            vel64[i * 3 + c] = v[c];
+        }
+        #pragma unroll
+        for (int c = 0; c < 3; ++c) {
+            const double xn = x[0] * dg[c] + x[1] * dg[3 + c] + x[2] * dg[6 + c] +
+                              dt * (v[0] * dr[c] + v[1] * dr[3 + c] + v[2] * dr[6 + c]);
+            pos64[i * 3 + c] = xn;
+            d2 += (xn - x[c]) * (xn - x[c]);
+        }
+    }
+    record_step_disp2(d2, max_step_disp2);
+}
+
+// The second half's atom kick, with the matrices of the first half (the cell momentum has not changed since).
+__global__ void mtk_kick_kernel(int N, double dt, const double* __restrict__ work, const double* __restrict__ forces,
+                                const double* __restrict__ inv_masses, double* __restrict__ vel64) {
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= N) return;
+    const double* kd = work + kMtkKd;
+    const double* kr = work + kMtkKr;
+    const double half_dt_im = 0.5 * dt * inv_masses[i];
+    double v[3], a[3];
+    #pragma unroll
+    for (int c = 0; c < 3; ++c) {
+        v[c] = vel64[i * 3 + c];
+        a[c] = half_dt_im * forces[i * 3 + c];
+    }
+    #pragma unroll
+    for (int c = 0; c < 3; ++c)
+        vel64[i * 3 + c] = v[0] * kd[c] + v[1] * kd[3 + c] + v[2] * kd[6 + c] + a[0] * kr[c] + a[1] * kr[3 + c] + a[2] * kr[6 + c];
+}
+
+// The rest of the second half, by one thread, after the atom kick and kinetic_tensor_kernel: the cell kick with
+// the new stress, the thermostat chain (its scaling into work[1] for scale_velocities_kernel), the barostat
+// chain, and what the conserved quantity holds beside E_pot + E_kin. The target moves on by target[1].
+__global__ void mtk_second_kernel(
+    int full, double dt, int tchain, int tloop, int pchain, int ploop, int ndof, double q_t, double r_p, double w,
+    double kb, double pressure, double* __restrict__ target, double* __restrict__ state, double* __restrict__ work,
+    const double* __restrict__ virial, const CellDev* __restrict__ cell
+) {
+    const double kT = kb * fmax(target[0], 0.0);
+    target[0] += target[1];
+    const double dt2 = 0.5 * dt;
+    double* p = state + kMtkP;
+    const int np = full ? 9 : 1;
+    MtkChains c;
+    mtk_chains(tchain, pchain, ndof, q_t, r_p, state, &c);
+    double* tensor = work + kMtkK;
+    mtk_kick_cell(full, dt2, ndof, pressure, cell->volume, tensor, virial, p);
+    work[1] = nhc_chain(tchain, tloop, dt2, kT, (double)ndof, c.Q, c.eta, c.p_eta,
+                        tensor[0] + tensor[3] + tensor[5]);
+    for (int i = 0; i < 6; ++i) tensor[i] = 0.0;
+    const double sb = nhc_chain(pchain, ploop, dt2, kT, full ? 9.0 : 1.0, c.R, c.xi, c.p_xi, mtk_cell_k2(full, p, w));
+    for (int i = 0; i < np; ++i) p[i] *= sb;
+    // ASE's get_conserved_energy beside the atoms' total energy
+    double energy = (double)ndof * kT * c.eta[0];
+    for (int j = 0; j < tchain; ++j) {
+        if (j > 0) energy += kT * c.eta[j];
+        energy += 0.5 * c.p_eta[j] * c.p_eta[j] / c.Q[j];
+    }
+    energy += (full ? 9.0 : 1.0) * kT * c.xi[0];
+    for (int j = 0; j < pchain; ++j) {
+        if (j > 0) energy += kT * c.xi[j];
+        energy += 0.5 * c.p_xi[j] * c.p_xi[j] / c.R[j];
+    }
+    energy += 0.5 * mtk_cell_k2(full, p, w) + pressure * cell->volume;
+    state[0] = -energy;
+}
+
 }  // namespace loup

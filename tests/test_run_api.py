@@ -28,7 +28,7 @@ int main(void) {
     F(LoupIntegrator, friction_per_fs); F(LoupIntegrator, tau_t_fs); F(LoupIntegrator, mass_temp_k);
     F(LoupIntegrator, pressure_gpa);
     F(LoupIntegrator, tau_p_fs); F(LoupIntegrator, compressibility_per_gpa); F(LoupIntegrator, chain_length);
-    F(LoupIntegrator, chain_loops);
+    F(LoupIntegrator, chain_loops); F(LoupIntegrator, p_chain_length); F(LoupIntegrator, p_chain_loops);
     F(LoupIntegrator, cell_mode); F(LoupIntegrator, cell_mask); F(LoupIntegrator, fix_com);
     F(LoupIntegrator, thermo_every); F(LoupIntegrator, seed);
     printf("LoupInfo %zu\n", sizeof(LoupInfo));
@@ -149,11 +149,7 @@ REFUSED = [
      "loup_run: temp_k must be finite and not negative, got -5 K"),
     ("friction", dict(kind=_core.LOUP_LANGEVIN, friction_per_fs=float("nan")),
      "loup_run: friction_per_fs must be finite and not negative, got nan /fs"),
-] + [
-    (name.lower(), dict(kind=getattr(_core, name)),
-     f"loup_run: integrator {name} is not built in this version of the library")
-    for name in ("LOUP_MTK_NPT",)
-]
+]   # every kind of the enum is built: none is refused as "not built"
 
 
 @pytest.mark.parametrize("fields,reason", [r[1:] for r in REFUSED], ids=[r[0] for r in REFUSED])

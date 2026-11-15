@@ -152,8 +152,10 @@ enum {
                              // LOUP_CELL_HYDROSTATIC or LOUP_CELL_FULL. In the full-cell mode the barostat's drag
                              // on the velocities is Quigley and Probert's (p + Tr(p) / Ndof 1) / W; ASE 3.27
                              // adds the trace to all nine elements. Experimental. Not with fixed atoms or fix_com
-                             // the kinds from here on are refused by name until their task builds them
-    LOUP_MTK_NPT = 7
+    LOUP_MTK_NPT = 7         // Martyna-Tobias-Klein: Nose-Hoover chains on the atoms and on the cell, as ASE's
+                             // IsotropicMTKNPT (LOUP_CELL_HYDROSTATIC) and MTKNPT (LOUP_CELL_FULL): tdamp =
+                             // tau_t_fs, pdamp = tau_p_fs, chain_length and p_chain_length (0: 3, at most 8),
+                             // the masses made for mass_temp_k (0: temp_k). Experimental. Not with fixed atoms
 };
 enum { LOUP_CELL_HYDROSTATIC = 0, LOUP_CELL_FULL = 1 };
 
@@ -175,6 +177,8 @@ typedef struct {
     double compressibility_per_gpa;// Berendsen NPT: the material's compressibility in 1/GPa
     int chain_length;              // Nose-Hoover chain: thermostats in the chain (ASE's tchain), 1 to 16
     int chain_loops;               // Nose-Hoover chain: sub-steps of the chain per half step (ASE's tloop); 0 is 1
+    int p_chain_length;            // MTK NPT: links of the barostat's chain (ASE's pchain), 1 to 8; 0 is 3
+    int p_chain_loops;             // MTK NPT: sub-steps of the barostat's chain per half step (ASE's ploop); 0 is 1
     int cell_mode;                 // LOUP_CELL_HYDROSTATIC (the shape is kept) or LOUP_CELL_FULL
     int cell_mask[3];              // LOUP_CELL_FULL, Berendsen: 1 for a cell vector the barostat may scale, 0 for
                                    // one it leaves alone (ASE's mask); the angles stay

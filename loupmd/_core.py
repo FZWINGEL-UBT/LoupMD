@@ -49,7 +49,7 @@ class LoupInfo(ctypes.Structure):
 
 # Integrator kinds and cell modes of include/loupmd.h.
 LOUP_NVE, LOUP_LANGEVIN, LOUP_CSVR, LOUP_NHC = 0, 1, 2, 3
-LOUP_BERENDSEN_NVT, LOUP_BERENDSEN_NPT, LOUP_BAOAB_NPT, LOUP_MTK_NPT = 4, 5, 6, 7  # 6 and 7: not built
+LOUP_BERENDSEN_NVT, LOUP_BERENDSEN_NPT, LOUP_BAOAB_NPT, LOUP_MTK_NPT = 4, 5, 6, 7
 LOUP_CELL_HYDROSTATIC, LOUP_CELL_FULL = 0, 1
 
 
@@ -68,6 +68,8 @@ class LoupIntegrator(ctypes.Structure):
         ("compressibility_per_gpa", ctypes.c_double),
         ("chain_length", ctypes.c_int),
         ("chain_loops", ctypes.c_int),
+        ("p_chain_length", ctypes.c_int),
+        ("p_chain_loops", ctypes.c_int),
         ("cell_mode", ctypes.c_int),
         ("cell_mask", ctypes.c_int * 3),
         ("fix_com", ctypes.c_int),
