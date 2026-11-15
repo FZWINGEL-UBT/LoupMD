@@ -830,3 +830,33 @@ Kernel plugins (`8b858e0`, PLAN.md S2-T06 and D57):
 - Not run: `loupmd validate --set organic | crystals` (the same library code as `test_gate.py`, through the
   command); the gate wrapper tests on these builds; a model whose kernels the library really lacks; a plugin built
   for another architecture than `sm_120`; anything on the RTX 4000 Ada or an A100 (O12).
+
+### 6.10 The re-homed tests, NPT profiles and the pinned CUDA runtime (15 November 2026, 21:00 to 21:25)
+
+RTX 5060 Ti only; the library is the build of `8b858e0` (sha256 `9d39c8e75f8571b1...`), unchanged since §6.9.
+
+| Check | Result |
+|---|---|
+| `pytest -q tests/cpu` in the development environment, GPU hidden (after `fba7376`) | 327 passed, 1 skipped, 56 s |
+| `pytest -q tests/cpu` in a venv with numpy, scipy, ase and pytest only (no torch, mace, e3nn, cuequivariance), no `nvidia-smi` on the PATH, no library in the tree, `LOUPMD_MODELS` unset (at `a80f166`) | 319 passed, 7 skipped, 23 s |
+| `pytest tests/gpu -m "not acceptance" --durations=0` (at `a80f166`, before the full tier was marked) | 262 passed, 10 deselected, 612 s |
+| the tiers by collection (at `7875527`) | 242 fast, 20 full, 10 acceptance |
+| NPT profiles (`fba7376`, O23) on the fake engine: `loupmd md --profile` with a profile at 0.5 GPa | Langevin BAOAB at 0.5 GPa; `--friction` and `--pressure` keep or replace the profile's pressure |
+
+The pinned CUDA runtime (PLAN.md D58). `tools/dev/bench_md.py`, generic path, a fresh plan directory per run, four
+rounds alternating; "system" is `/usr/local/cuda-13.3` (cudart 13.3.29, cuBLAS 13.5.1.27, what every figure of
+this file so far ran on), "wheels" the NVIDIA wheels the package pins (cuda-toolkit 13.0.3: cudart 13.0.96, cuBLAS
+13.1.1.3), put first with `LD_LIBRARY_PATH`; the loaded libraries were read from `/proc/self/maps` on each side.
+
+| Runtime | `NbCl5` 3x3x3, ms/step (mean; range) | `SrTiO3` 10x10x10, ms/step (mean; range) |
+|---|---|---|
+| system 13.3 | 1.862; 1.847 to 1.868 | 8.042; 8.013 to 8.061 |
+| wheels 13.0.3 | 1.864; 1.859 to 1.866 | 8.047; 8.043 to 8.050 |
+| wheels / system | 1.0012 | 1.0007 |
+
+- A tie: the difference is inside the spread of either side.
+- All 69 CUDA symbols `libloupmd.so` imports (`nm -D`) are defined in the wheels' `libcudart.so.13`,
+  `libcublas.so.13` and `libcublasLt.so.13`. The local build needs GLIBC 2.38 and GLIBCXX 3.4.32, so the wheel's
+  library has to come from the container build.
+- Not run: the fast tier on its own (about 320 s of the 612 s run, by subtraction); the acceptance tier after the
+  move; an NPT profile on the GPU; the wheel build (its scripts are written, the image is not built).
