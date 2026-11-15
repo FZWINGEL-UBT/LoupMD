@@ -1,0 +1,23 @@
+RTX 5060 Ti / sm120; M=2048, N=128. Inputs quantized to TF32 before GEMM: all split residuals zero. Error denominator sum(abs(a*b)); exact host-double sum. Nearest count compares output with float32(exact double dot). Positive K8 isolates the remaining downward bias from split precision or omitted low-low products.
+
+positive U[0.5,1.5) data, M 2048 N 128 K 8 (error / sum|a b|)
+  cuBLAS FP32 (pedantic)                       mean -1.646e-11  rms 3.081e-08  max 1.150e-07
+    TF32-exact operands: nearest-rounded 253335/262144, below exact 66085, above exact 66049
+  .tmp_o/cub/3x_rnacc_sm120.cubin              mean -2.310e-08  rms 3.483e-08  max 8.941e-08
+    TF32-exact operands: nearest-rounded 196703/262144, below exact 130681, above exact 0
+symmetric normal data, M 2048 N 128 K 8 (error / sum|a b|)
+  cuBLAS FP32 (pedantic)                       mean -1.946e-11  rms 1.998e-08  max 1.412e-07
+    TF32-exact operands: nearest-rounded 185781/262144, below exact 99123, above exact 98724
+  .tmp_o/cub/3x_rnacc_sm120.cubin              mean -3.381e-11  rms 2.197e-08  max 1.171e-07
+    TF32-exact operands: nearest-rounded 180146/262144, below exact 87381, above exact 87090
+
+positive U[0.5,1.5) data, M 2048 N 128 K 128 (error / sum|a b|)
+  cuBLAS FP32 (pedantic)                       mean +3.937e-10  rms 1.534e-07  max 7.395e-07
+    TF32-exact operands: nearest-rounded 58552/262144, below exact 130051, above exact 130858
+  .tmp_o/cub/3x_rnacc_sm120.cubin              mean -2.381e-08  rms 5.533e-08  max 2.179e-07
+    TF32-exact operands: nearest-rounded 144782/262144, below exact 176318, above exact 82309
+symmetric normal data, M 2048 N 128 K 128 (error / sum|a b|)
+  cuBLAS FP32 (pedantic)                       mean +5.630e-11  rms 2.637e-08  max 3.245e-07
+    TF32-exact operands: nearest-rounded 42374/262144, below exact 130952, above exact 131087
+  .tmp_o/cub/3x_rnacc_sm120.cubin              mean -1.868e-11  rms 1.085e-08  max 1.141e-07
+    TF32-exact operands: nearest-rounded 83881/262144, below exact 131265, above exact 130688

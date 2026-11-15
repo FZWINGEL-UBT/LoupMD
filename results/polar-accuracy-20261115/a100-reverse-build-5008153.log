@@ -1,0 +1,76 @@
+### Starting TaskPrologue of job 5008153 on a0902 at Sun Nov 15 03:58:33 PM CET 2026
+Running on cores 96-111 with governor schedutil
+Sun Nov 15 15:58:33 2026       
++-----------------------------------------------------------------------------------------+
+| NVIDIA-SMI 615.71.10              KMD Version: 615.71.10     CUDA UMD Version: 13.4     |
++-----------------------------------------+------------------------+----------------------+
+| GPU  Name                 Persistence-M | Bus-Id          Disp.A | Volatile Uncorr. ECC |
+| Fan  Temp   Perf          Pwr:Usage/Cap |           Memory-Usage | GPU-Util  Compute M. |
+|                                         |                        |               MIG M. |
+|=========================================+========================+======================|
+|   0  NVIDIA A100-SXM4-40GB          On  |   00000000:CC:00.0 Off |                    0 |
+| N/A   30C    P0             52W /  400W |       0MiB /  40960MiB |      0%      Default |
+|                                         |                        |             Disabled |
++-----------------------------------------+------------------------+----------------------+
+
++-----------------------------------------------------------------------------------------+
+| Processes:                                                                              |
+|  GPU   GI   CI              PID   Type   Process name                        GPU Memory |
+|        ID   ID                                                               Usage      |
+|=========================================================================================|
+|  No running processes found                                                             |
++-----------------------------------------------------------------------------------------+
+### Finished TaskPrologue
+
+NVIDIA A100-SXM4-40GB, 615.71.10
+009006b6c3b80151b6e959ba9a220c2d94b84402d758674ef6e53e3720b52ea5  /home/atuin/v130cb/v130cb18/loup-s64/src/libloupmd_s70.so
+de1240d99d0e35fb3e010b6e10a23deb2978c599de1ac8e7b8902d938e7af2cb  /home/atuin/v130cb/v130cb18/loup-s64/polar-arithmetic/cub80/3x_rnacc_sm80.cubin
+f5f57897928dff87668cae08ad281dc36be6457bd20a0aa92059edfd68d60286  /home/atuin/v130cb/v130cb18/loup-s64/alex64/ab_sides.py
+REVERSE_BUILD S nacl216: candidate side 0; baseline side 1; invert printed baseline/candidate ratios
+MACE-POLAR-1-S.model nacl216 (216 atoms) side 1 [-] vs 0: dE/atom 1.49e-04 meV, dF 8.77e-07 eV/A (|F|max 0.00), dS 6.00e-08
+MACE-POLAR-1-S.model nacl216 (216 atoms) side 0 [LOUP_LR_HYBRID=1,LOUP_HYBRID_CUBIN=/home/atuin/v130cb/v130cb18/loup-s64/polar-arithmetic/cub80/3x_rnacc_sm80.cubin]: 1.6015 ms/step  ratio to side 0: 1.0000 (forward order 1.0000, reverse 1.0000)
+MACE-POLAR-1-S.model nacl216 (216 atoms) side 1 [-]: 1.7831 ms/step  ratio to side 0: 1.1134 (forward order 1.1144, reverse 1.1124)
+MACE-POLAR-1-S.model nacl216 (216 atoms) setup + run 7 s
+REVERSE_BUILD M nacl216: candidate side 0; baseline side 1; invert printed baseline/candidate ratios
+MACE-POLAR-1-M.model nacl216 (216 atoms) side 1 [-] vs 0: dE/atom 1.40e-04 meV, dF 4.21e-07 eV/A (|F|max 0.00), dS 1.58e-08
+MACE-POLAR-1-M.model nacl216 (216 atoms) side 0 [LOUP_LR_HYBRID=1,LOUP_HYBRID_CUBIN=/home/atuin/v130cb/v130cb18/loup-s64/polar-arithmetic/cub80/3x_rnacc_sm80.cubin]: 3.2296 ms/step  ratio to side 0: 1.0000 (forward order 1.0000, reverse 1.0000)
+MACE-POLAR-1-M.model nacl216 (216 atoms) side 1 [-]: 3.7198 ms/step  ratio to side 0: 1.1518 (forward order 1.1505, reverse 1.1526)
+MACE-POLAR-1-M.model nacl216 (216 atoms) setup + run 15 s
+REVERSE_BUILD M nbcl5: candidate side 0; baseline side 1; invert printed baseline/candidate ratios
+MACE-POLAR-1-M.model nbcl5 (1944 atoms) side 1 [-] vs 0: dE/atom 2.39e-05 meV, dF 1.22e-04 eV/A (|F|max 0.44), dS 1.39e-08
+MACE-POLAR-1-M.model nbcl5 (1944 atoms) side 0 [LOUP_LR_HYBRID=1,LOUP_HYBRID_CUBIN=/home/atuin/v130cb/v130cb18/loup-s64/polar-arithmetic/cub80/3x_rnacc_sm80.cubin]: 13.7798 ms/step  ratio to side 0: 1.0000 (forward order 1.0000, reverse 1.0000)
+MACE-POLAR-1-M.model nbcl5 (1944 atoms) side 1 [-]: 17.2114 ms/step  ratio to side 0: 1.2490 (forward order 1.2491, reverse 1.2490)
+MACE-POLAR-1-M.model nbcl5 (1944 atoms) setup + run 56 s
+REVERSE_BUILD L nacl216: candidate side 0; baseline side 1; invert printed baseline/candidate ratios
+MACE-POLAR-1-L.model nacl216 (216 atoms) side 1 [-] vs 0: dE/atom 7.02e-05 meV, dF 5.02e-07 eV/A (|F|max 0.00), dS 9.08e-09
+MACE-POLAR-1-L.model nacl216 (216 atoms) side 0 [LOUP_LR_HYBRID=1,LOUP_HYBRID_CUBIN=/home/atuin/v130cb/v130cb18/loup-s64/polar-arithmetic/cub80/3x_rnacc_sm80.cubin]: 5.7350 ms/step  ratio to side 0: 1.0000 (forward order 1.0000, reverse 1.0000)
+MACE-POLAR-1-L.model nacl216 (216 atoms) side 1 [-]: 6.8272 ms/step  ratio to side 0: 1.1905 (forward order 1.1914, reverse 1.1902)
+MACE-POLAR-1-L.model nacl216 (216 atoms) setup + run 31 s
+=== JOB_STATISTICS ===
+=== current date     : Sun Nov 15 16:01:00 CET 2026
+= Job-ID             : 5008153 on alex
+= Job-Name           : loup-polar-reverse
+= Job-Command        : /home/atuin/v130cb/v130cb18/loup-s64/polar-arithmetic/polar_reverse.sh
+= Initial workdir    : /home/hpc/v130cb/v130cb18
+= Queue/Partition    : a100
+= Slurm account      : v130cb with QOS=normal
+= Features           : a100_40
+= Requested resources:  for 00:20:00
+= Elapsed runtime    : 00:02:44
+= Total RAM usage    : 10.3 GiB of assigned  GiB (%)
+= Node list          : a0902
+= Subm/Elig/Start/End: 2026-11-15T15:55:49 / 2026-11-15T15:57:45 / 2026-11-15T15:58:16 / 2026-11-15T16:01:00
+======================
+=== Quota infos ======
+    Path                 Used     SoftQ    HardQ    Gracetime  Filec    FileQ    FiHaQ    FileGrace    
+    /home/hpc              16.0G   104.9G   209.7G        N/A   2,620      300K     400K        N/A    
+    /home/vault             0.0K  1048.6G  2097.2G        N/A       1      200K     400K        N/A    
+    /home/atuin            30.4G     0.0K     0.0K        N/A     100K                          N/A    
+    /lustre                 4.0K     0.0K     0.0K        N/A       1       80K     250K        N/A    
+======================
+=== GPU utilization ==
+gpu_name, gpu_bus_id, pid, gpu_utilization [%], mem_utilization [%], max_memory_usage [MiB], time [ms]
+NVIDIA A100-SXM4-40GB, 00000000:CC:00.0, 301884, 68 %, 5 %, 816 MiB, 7560 ms
+NVIDIA A100-SXM4-40GB, 00000000:CC:00.0, 301960, 75 %, 6 %, 1198 MiB, 15627 ms
+NVIDIA A100-SXM4-40GB, 00000000:CC:00.0, 302078, 94 %, 23 %, 3752 MiB, 56506 ms
+NVIDIA A100-SXM4-40GB, 00000000:CC:00.0, 302283, 67 %, 7 %, 1950 MiB, 31743 ms

@@ -469,8 +469,10 @@ S64 (`gen-conv-fwd-variants`, 15 November, 5060 Ti only):
   perfect lattice: residual force 3.0e-4 -> 8.7e-5 eV/A).
 - **Long-range models use float32 SIMT GEMMs only**: with the 3xTF32 hybrid GEMMs the RTX 4000 Ada failed the
   POLAR-1-S / -L stress gates (NaCl stress ratios 3.4-5.2, POLAR-1-L NaNbO3 up to 6.3) and POLAR-1-S NaNbO3_c0
-  returned NaN; with SIMT GEMMs every POLAR configuration passes on both GPUs (5.2). Other families keep the
-  hybrid GEMMs (their gates pass on both GPUs).
+  returned NaN; with SIMT GEMMs every checked configuration in the **original crystal gate** passes on both GPUs (5.2). This does not claim that every structure passes: the expanded S71 screen has a separate FP32 failure on S NaTaO3_c0. Other families keep the hybrid GEMMs (their original gates pass on both GPUs).
+  POLAR's production default remains FP32; the rounded-split experiment is not adopted.
+- **POLAR finite-difference stress crossed reciprocal cutoffs**: expanded-screen NaTaCl6_c2 and TaCl3O_c1 change reciprocal-vector membership between the strained reference evaluations. The resulting discrete energy jump is not a stress derivative. `python/polar_reference.py` now holds the integer index set fixed while recomputing vectors/norms; a new cache namespace prevents reuse of live-set stress references. No gate limit or absolute floor was relaxed. [Measurements and reference protocol](OPTIMISATION_LEDGER.md#gate-polar-fixed-kset).
+- **Tensor-core arithmetic has a separate error source**: truncating the TF32 high part makes the omitted residual product coherently signed. Rounded splitting plus isolated big/cross accumulation passes 90/90 expanded S/M configurations locally and all 58 original-crystal A100 rows; M NbCl5 is about 20% faster on A100 in both engine-construction orders. Nevertheless, exact-TF32-input probes isolate a remaining downward MMA accumulation bias. A warmed deterministic corrected reference gives Na2O stress ratio **4.675**, exceeding the unchanged limit 3 by **55.8%**; repeated nondeterministic reference evaluations can conceal that miss. **No POLAR TC default is enabled.** [Arithmetic, reference repeatability, full measurements and scope](OPTIMISATION_LEDGER.md#gemm-tc-rounded-polar).
 - **Pipelined MD margin** (section 3.2, M1): 1 of ~1,600 steps of three 300 K benchmarks had run on an
   incomplete list with a two-step margin; three steps: 0 in every run.
 

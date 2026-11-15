@@ -23,6 +23,9 @@
 #if LOUP_TC_MATH == 1
 #include "hybrid_f16.h"
 #define LOUP_TC_OP cutlass::arch::OpMultiplyAddHybridF16
+#elif LOUP_TC_MATH == 0 && defined(LOUP_TC_SPLIT_RN) && LOUP_TC_SPLIT_RN
+#include "fastf32_rn.h"
+#define LOUP_TC_OP cutlass::arch::OpMultiplyAddFastF32RN
 #elif LOUP_TC_MATH == 0
 #define LOUP_TC_OP cutlass::arch::OpMultiplyAddFastF32
 #else

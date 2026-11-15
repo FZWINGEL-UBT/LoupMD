@@ -1,0 +1,53 @@
+{
+  "scope": "FastMACE stress correction applied to the same e3nn MACE references; not a full FastMACE gate or engine comparison",
+  "summary": {
+    "model_sha256": "e4495612037b3b3312633182882a38a694ecac9ea0be2b9889ac0b2a84a99510",
+    "rows": [
+      {
+        "config": "Na2O_c0",
+        "original_stress_yardstick": 8.004563258889874e-07,
+        "corrected_stress_yardstick": 4.1886758361808774e-07,
+        "yardstick_ratio": 0.5232859933399777,
+        "corrected64_minus_frozen_fd_max": 1.6286301196544173e-09
+      },
+      {
+        "config": "NaTaO3_c0",
+        "original_stress_yardstick": 7.221282524216832e-05,
+        "corrected_stress_yardstick": 0.00012204684140115774,
+        "yardstick_ratio": 1.6900992447237626,
+        "corrected64_minus_frozen_fd_max": 2.00388388904571e-06
+      }
+    ]
+  },
+  "probe_log": "Failed to get GPU information from pynvml: Not Supported. Using default values for NVIDIA GeForce RTX 5060 Ti.\nGPU information: NVIDIA RTX A6000, 8, 6, 45, 84, 300, 2100\n/home/fzwin/environments/mace_cueq_latest/lib/python3.10/site-packages/torch/jit/_script.py:1491: FutureWarning: `torch.jit.script` is deprecated. Please switch to `torch.compile` or `torch.export`.\n  warnings.warn(\n/home/fzwin/environments/mace_cueq_latest/lib/python3.10/site-packages/mace/calculators/mace.py:226: UserWarning: Environment variable TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD detected, since the`weights_only` argument was not explicitly passed to `torch.load`, forcing weights_only=False.\n  torch.load(f=model_path, map_location=device)\n/home/fzwin/environments/mace_cueq_latest/lib/python3.10/site-packages/torch/jit/_serialization.py:176: FutureWarning: `torch.jit.load` is deprecated. Please switch to `torch.export`.\n  warnings.warn(\n/home/fzwin/environments/mace_cueq_latest/lib/python3.10/site-packages/torch/jit/_serialization.py:176: FutureWarning: `torch.jit.load` is deprecated. Please switch to `torch.export`.\n  warnings.warn(\nWARNING:root:Default dtype float64 does not match model dtype float32, converting models to float64.\n{\"config\": \"Na2O_c0\", \"dtype\": \"float64\", \"corrected_minus_original_energy\": 0.0, \"corrected_minus_original_force_max\": 5.53862511409875e-14, \"energy_only_minus_original\": 0.0, \"corrected_minus_original_stress_max\": 0.0005023068452008062, \"corrected_minus_frozen_fd64_max\": 1.6286301196544173e-09, \"polar_state\": {\"bounds\": [6, 6, 6], \"k_vectors\": 346, \"k_superset\": 786, \"headroom\": 0.1}}\n{\"config\": \"NaTaO3_c0\", \"dtype\": \"float64\", \"corrected_minus_original_energy\": 0.0, \"corrected_minus_original_force_max\": 2.6716406864579767e-12, \"energy_only_minus_original\": 0.0, \"corrected_minus_original_stress_max\": 0.009438748594924995, \"corrected_minus_frozen_fd64_max\": 2.00388388904571e-06, \"polar_state\": {\"bounds\": [6, 6, 6], \"k_vectors\": 318, \"k_superset\": 786, \"headroom\": 0.1}}\nDTYPE_SECONDS float64 4.695\n/home/fzwin/environments/mace_cueq_latest/lib/python3.10/site-packages/mace/calculators/mace.py:226: UserWarning: Environment variable TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD detected, since the`weights_only` argument was not explicitly passed to `torch.load`, forcing weights_only=False.\n  torch.load(f=model_path, map_location=device)\n/home/fzwin/environments/mace_cueq_latest/lib/python3.10/site-packages/torch/jit/_serialization.py:176: FutureWarning: `torch.jit.load` is deprecated. Please switch to `torch.export`.\n  warnings.warn(\n/home/fzwin/environments/mace_cueq_latest/lib/python3.10/site-packages/torch/jit/_serialization.py:176: FutureWarning: `torch.jit.load` is deprecated. Please switch to `torch.export`.\n  warnings.warn(\n{\"config\": \"Na2O_c0\", \"dtype\": \"float32\", \"corrected_minus_original_energy\": 0.25, \"corrected_minus_original_force_max\": 2.993643283843994e-05, \"energy_only_minus_original\": 0.0, \"corrected_minus_original_stress_max\": 0.0005023181438446045, \"corrected_minus_frozen_fd64_max\": 4.1874440426248327e-07, \"polar_state\": {\"bounds\": [6, 6, 6], \"k_vectors\": 346, \"k_superset\": 786, \"headroom\": 0.1}}\n{\"config\": \"NaTaO3_c0\", \"dtype\": \"float32\", \"corrected_minus_original_energy\": 0.0, \"corrected_minus_original_force_max\": 0.00118255615234375, \"energy_only_minus_original\": 0.0, \"corrected_minus_original_stress_max\": 0.009488582611083984, \"corrected_minus_frozen_fd64_max\": 0.00012405072529020345, \"polar_state\": {\"bounds\": [6, 6, 6], \"k_vectors\": 318, \"k_superset\": 786, \"headroom\": 0.1}}\nDTYPE_SECONDS float32 2.523\n{\"config\": \"Na2O_c0\", \"original_stress_yardstick\": 8.004563258889874e-07, \"corrected_stress_yardstick\": 4.1886758361808774e-07, \"yardstick_ratio\": 0.5232859933399777, \"corrected64_minus_frozen_fd_max\": 1.6286301196544173e-09}\n{\"config\": \"NaTaO3_c0\", \"original_stress_yardstick\": 7.221282524216832e-05, \"corrected_stress_yardstick\": 0.00012204684140115774, \"yardstick_ratio\": 1.6900992447237626, \"corrected64_minus_frozen_fd_max\": 2.00388388904571e-06}\n",
+  "rescore": [
+    {
+      "config": "Na2O_c0",
+      "path": "simt",
+      "corrected_stress_error": 2.9333492679306516e-07,
+      "corrected_stress_yardstick": 4.1886758361808774e-07,
+      "ratio": 0.7003046744732582
+    },
+    {
+      "config": "Na2O_c0",
+      "path": "3x_rnacc",
+      "corrected_stress_error": 1.4650688832107406e-06,
+      "corrected_stress_yardstick": 4.1886758361808774e-07,
+      "ratio": 3.4976898201474365
+    },
+    {
+      "config": "NaTaO3_c0",
+      "path": "simt",
+      "corrected_stress_error": 0.0005799557470922423,
+      "corrected_stress_yardstick": 0.00012204684140115774,
+      "ratio": 4.7519111550455975
+    },
+    {
+      "config": "NaTaO3_c0",
+      "path": "3x_rnacc",
+      "corrected_stress_error": 1.574815806559826e-05,
+      "corrected_stress_yardstick": 0.00012204684140115774,
+      "ratio": 0.12903372086324943
+    }
+  ]
+}

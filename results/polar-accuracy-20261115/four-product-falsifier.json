@@ -1,0 +1,201 @@
+{
+  "scope": "Local targeted four-product diagnostic; no A100 runtime qualification",
+  "decision": "Not a cure for the corrected-reference Na2O miss; no adoption",
+  "implementation": "LOUP_TC_LOW_LOW=1 added mma(cross, A_low, B_low, cross) before the two high-low cross products in the isolated-accumulation operator",
+  "build_flags": "LOUP_TC_MATH=0 LOUP_TC_TILESET=3 LOUP_TC_BETA=0 LOUP_TC_SPLIT_RN=1 LOUP_TC_ACC_RN=1 LOUP_TC_LOW_LOW=1",
+  "rows": [
+    {
+      "config": "Na2O_c0",
+      "path": "4x_rnacc",
+      "atoms": 324,
+      "error": [
+        0.0007475013442245531,
+        2.1414854776025116e-05,
+        1.3805366483876647e-06
+      ],
+      "yardstick": [
+        4.740197065625524,
+        7.001803765416259e-05,
+        8.004563258889874e-07
+      ],
+      "ratio": [
+        0.00015769414939416904,
+        0.30584768573204935,
+        1.724687036303248
+      ],
+      "finite": true,
+      "fallback": false,
+      "tc_seen": true,
+      "passed": true
+    },
+    {
+      "config": "NaNbCl6_c1",
+      "path": "4x_rnacc",
+      "atoms": 192,
+      "error": [
+        0.0001281708440122505,
+        6.584135520792955e-06,
+        1.465114575082034e-08
+      ],
+      "yardstick": [
+        4.101731261471286,
+        2.652797052027367e-05,
+        1.8689099004080877e-08
+      ],
+      "ratio": [
+        3.124798672604304e-05,
+        0.24819597548033734,
+        0.4395343725246102
+      ],
+      "finite": true,
+      "fallback": false,
+      "tc_seen": true,
+      "passed": true
+    },
+    {
+      "config": "NaNbOCl4_Pbca_c2",
+      "path": "4x_rnacc",
+      "atoms": 224,
+      "error": [
+        6.881600711494684e-05,
+        1.7672534560198017e-05,
+        3.442442039758298e-08
+      ],
+      "yardstick": [
+        2.2844857313819893,
+        6.885248780275077e-05,
+        8.720372295101253e-08
+      ],
+      "ratio": [
+        3.0123194104310254e-05,
+        0.256672418443709,
+        0.3947586092960871
+      ],
+      "finite": true,
+      "fallback": false,
+      "tc_seen": true,
+      "passed": true
+    },
+    {
+      "config": "NaTaO3_c0",
+      "path": "4x_rnacc",
+      "atoms": 360,
+      "error": [
+        0.0008711371467345291,
+        0.00044482791458477777,
+        2.7115115344145124e-06
+      ],
+      "yardstick": [
+        8.39497601458182,
+        0.0028529207402527845,
+        7.221282524216832e-05
+      ],
+      "ratio": [
+        0.00010376886666756286,
+        0.15592017973319636,
+        0.03754889142366831
+      ],
+      "finite": true,
+      "fallback": false,
+      "tc_seen": true,
+      "passed": true
+    },
+    {
+      "config": "NbCl2O_c0",
+      "path": "4x_rnacc",
+      "atoms": 128,
+      "error": [
+        0.00013713906810153276,
+        6.313959258597013e-06,
+        5.7609547757242474e-08
+      ],
+      "yardstick": [
+        5.6093964294632315,
+        2.071392138525141e-05,
+        2.0100908144915497e-07
+      ],
+      "ratio": [
+        2.444809701471852e-05,
+        0.30481718749268966,
+        0.2866017164095879
+      ],
+      "finite": true,
+      "fallback": false,
+      "tc_seen": true,
+      "passed": true
+    },
+    {
+      "config": "NbCl2O_c1",
+      "path": "4x_rnacc",
+      "atoms": 128,
+      "error": [
+        0.0001919052010634914,
+        9.637328732825523e-06,
+        4.017315565364027e-08
+      ],
+      "yardstick": [
+        5.583175812716945,
+        2.3742069142462796e-05,
+        2.26174962932469e-07
+      ],
+      "ratio": [
+        3.437205051404327e-05,
+        0.40591781091181806,
+        0.17761981756413558
+      ],
+      "finite": true,
+      "fallback": false,
+      "tc_seen": true,
+      "passed": true
+    }
+  ],
+  "corrected_stress_rescore": [
+    {
+      "config": "Na2O_c0",
+      "error": 1.3789080182680102e-06,
+      "yardstick": 4.1886758361808774e-07,
+      "ratio": 3.2919902904810647
+    },
+    {
+      "config": "NaTaO3_c0",
+      "error": 4.413380512602316e-06,
+      "yardstick": 0.00012204684140115774,
+      "ratio": 0.0361613660946448
+    }
+  ],
+  "metadata": {
+    "argv": [
+      ".tmp_o/polar_arithmetic.py",
+      "/home/fzwin/models/MACE-POLAR-1-S.model",
+      "--configs",
+      "Na2O_c0",
+      "NaNbCl6_c1",
+      "NaNbOCl4_Pbca_c2",
+      "NbCl2O_c0",
+      "NbCl2O_c1",
+      "NaTaO3_c0",
+      "--chunks",
+      "0",
+      "1",
+      "--fixed-reference",
+      "--require-fixed-cache",
+      "--paths",
+      "4x_rnacc",
+      "--output",
+      ".tmp_o/polar_four_product_S"
+    ],
+    "model_sha256": "e4495612037b3b3312633182882a38a694ecac9ea0be2b9889ac0b2a84a99510",
+    "library_sha256": "70b7ee01479d6520b277e878f8d41cb945a931578fcad58ca29b23a098fa7409",
+    "cubins_sha256": {
+      "4x_rnacc": "7dbe38cf1109c4dac20f1324a02941e5f8d3cd5d14c713b1231a6ccca3b144ee"
+    },
+    "references": {
+      "/home/fzwin/.cache/loupmd/gate_refs/MACE-POLAR-1-S_widecrystals0_5262b5e3c7e0ac4ce94c_fixed_kset1.npz": "a3c29da881281dc12916425367b3096e8d450581578d3731ec74146287de7687",
+      "/home/fzwin/.cache/loupmd/gate_refs/MACE-POLAR-1-S_widecrystals1_3b55b8d7e41ff9e4fe57_fixed_kset1.npz": "a3c1d6ec863933db708622abc96a77516088b5c3ea84da329db14e383d84a3db"
+    },
+    "script_sha256": "b05c059a41de8f6c10431d87ddc8decfa1a90641c806bfb985fb9d5e03189781",
+    "stress_protocol": "frozen-kset1",
+    "polar_reference_sha256": "c0ab4a4e4df4b5313bc1c7f5ba3a800b6ae8017d03300b23dab441ab214cfb82"
+  },
+  "microprobe": "positive U[0.5,1.5) data, M 2048 N 128 K 128 (error / sum|a b|)\n  cuBLAS FP32 (pedantic)                       mean +4.458e-10  rms 1.537e-07  max 7.149e-07\n  .tmp_o/cub/4x_rnacc_sm120.cubin              mean -2.368e-08  rms 5.575e-08  max 2.298e-07\nsymmetric normal data, M 2048 N 128 K 128 (error / sum|a b|)\n  cuBLAS FP32 (pedantic)                       mean +1.532e-11  rms 2.797e-08  max 3.026e-07\n  .tmp_o/cub/4x_rnacc_sm120.cubin              mean +1.650e-11  rms 1.431e-08  max 1.065e-07\n"
+}

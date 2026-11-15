@@ -1,0 +1,155 @@
+{
+  "scope": "Previously measured runs, not a same-board A/B and not a new FastMACE benchmark. FastMACE A100-SXM4-80GB versus LoupMD A100-SXM4-40GB; the 80GB model has about 30% more memory bandwidth. A time ratio >1 means LoupMD is faster. Preserve measurement dates and distinguish measured times from inferred combinations.",
+  "loupmd_source": "S70 session, Alex job 5005454, library s67; original STATUS_AND_PROFILE.md section 5.3 evidence",
+  "speed": [
+    {
+      "model": "MACE-OMAT-0 medium",
+      "cell": "SrTiO3 10x10x10",
+      "atoms": 5000,
+      "fastmace_ms": [
+        6.203,
+        6.22
+      ],
+      "loupmd_ms": [
+        4.8,
+        4.82
+      ],
+      "fastmace_source": "results/paper-exp1-20261112, Alex job 4988653",
+      "qualification": "Same protocol except FastMACE used 200 warm-up steps.",
+      "fastmace_time_divided_by_loupmd_time_range": [
+        1.286929460580913,
+        1.2958333333333334
+      ]
+    },
+    {
+      "model": "MACE-MH-1",
+      "cell": "NaCl 3x3x3",
+      "atoms": 216,
+      "fastmace_ms": [
+        2.6,
+        2.6
+      ],
+      "loupmd_ms": [
+        1.05,
+        1.05
+      ],
+      "fastmace_source": "results/mh1-catchup-20261112 section 6.1",
+      "qualification": "0.5 fs. Later switches were measured separately at ratios 0.962 and 0.984; 2.60*0.962*0.984=2.4612 ms is an inference, not a measured combined run.",
+      "fastmace_time_divided_by_loupmd_time_range": [
+        2.4761904761904763,
+        2.4761904761904763
+      ]
+    },
+    {
+      "model": "MACE-OFF23-M",
+      "cell": "water_216",
+      "atoms": 648,
+      "fastmace_ms": [
+        2.61,
+        2.61
+      ],
+      "loupmd_ms": [
+        0.85,
+        0.87
+      ],
+      "fastmace_source": "results/off-polar-alex-20261106",
+      "qualification": "Historical matched model and cell, not a fresh head-to-head run.",
+      "fastmace_time_divided_by_loupmd_time_range": [
+        3.0,
+        3.0705882352941174
+      ]
+    },
+    {
+      "model": "MACE-POLAR-1-M",
+      "cell": "NaCl 3x3x3",
+      "atoms": 216,
+      "fastmace_ms": [
+        4.1,
+        4.14
+      ],
+      "loupmd_ms": [
+        3.95,
+        3.95
+      ],
+      "fastmace_source": "results/off-polar-a100-r2-20261109",
+      "qualification": "LoupMD historical FP32 default, not the experimental rounded cubin.",
+      "fastmace_time_divided_by_loupmd_time_range": [
+        1.0379746835443036,
+        1.0481012658227846
+      ]
+    },
+    {
+      "model": "MACE-POLAR-1-M",
+      "cell": "NbCl5 3x3x3",
+      "atoms": 1944,
+      "fastmace_ms": [
+        16.1,
+        16.13
+      ],
+      "loupmd_ms": [
+        17.29,
+        17.31
+      ],
+      "fastmace_source": "results/off-polar-a100-r2-20261109",
+      "qualification": "FastMACE faster in these historical production-default runs.",
+      "fastmace_time_divided_by_loupmd_time_range": [
+        0.930098209127672,
+        0.9329091960670908
+      ]
+    }
+  ],
+  "original_polar_gate_failures": [
+    {
+      "model": "S",
+      "arithmetic": "original pure 3xTF32",
+      "configuration": "NaCl_c1",
+      "quantity": "stress",
+      "ratio": 4.95,
+      "factor_over_allowed_error": 1.6500000000000001
+    },
+    {
+      "model": "S",
+      "arithmetic": "original TF32+FP16 hybrid",
+      "configuration": "NaCl_c1",
+      "quantity": "stress",
+      "ratio": 5.2,
+      "factor_over_allowed_error": 1.7333333333333334
+    },
+    {
+      "model": "M",
+      "arithmetic": "original pure 3xTF32",
+      "configuration": "NaNbO3_c1",
+      "quantity": "force",
+      "ratio": 3.6,
+      "qualification": "Default rows pass, maximum 2.92; forced conv-forward variants reach 3.47/3.60.",
+      "factor_over_allowed_error": 1.2
+    },
+    {
+      "model": "M",
+      "arithmetic": "original TF32+FP16 hybrid",
+      "configuration": "NaNbO3_c1",
+      "quantity": "force",
+      "ratio": 3.46,
+      "qualification": "Default 3.14; forced conv-forward variants 3.46/3.45.",
+      "factor_over_allowed_error": 1.1533333333333333
+    },
+    {
+      "model": "L",
+      "arithmetic": "original pure 3xTF32",
+      "configuration": "NbCl5_c1",
+      "quantity": "stress",
+      "ratio": 5.08,
+      "factor_over_allowed_error": 1.6933333333333334
+    },
+    {
+      "model": "L",
+      "arithmetic": "original TF32+FP16 hybrid",
+      "configuration": "NaNbO3_c1",
+      "quantity": "stress",
+      "ratio": 8.89,
+      "qualification": "Also NaCl_c1 stress 3.21 and NaNbO3_c1 force 4.14.",
+      "factor_over_allowed_error": 2.9633333333333334
+    }
+  ],
+  "accuracy_scope": "Original arithmetic, original per-configuration yardsticks, limit 3 and unchanged floors. These are selected failure rows, not complete raw gates. New rounded-split and isolated-accumulation results are separately recorded in a100-full-range-5007932-raw.log."
+}

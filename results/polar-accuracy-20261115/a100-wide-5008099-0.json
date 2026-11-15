@@ -1,0 +1,758 @@
+{
+  "metadata": {
+    "argv": [
+      "/home/atuin/v130cb/v130cb18/loup-s64/polar-arithmetic/polar_arithmetic.py",
+      "/home/atuin/v130cb/v130cb18/loup-s64/models/MACE-POLAR-1-S.model",
+      "--configs",
+      "all",
+      "--chunks",
+      "0",
+      "--fixed-reference",
+      "--compute-refs",
+      "--paths",
+      "simt",
+      "3x_rnacc",
+      "--arch",
+      "80",
+      "--cubins",
+      "/home/atuin/v130cb/v130cb18/loup-s64/polar-arithmetic/cub80",
+      "--output",
+      "/home/atuin/v130cb/v130cb18/loup-s64/polar-arithmetic/results/5008099_0"
+    ],
+    "model_sha256": "e4495612037b3b3312633182882a38a694ecac9ea0be2b9889ac0b2a84a99510",
+    "library_sha256": "009006b6c3b80151b6e959ba9a220c2d94b84402d758674ef6e53e3720b52ea5",
+    "cubins_sha256": {
+      "3x_rnacc": "de1240d99d0e35fb3e010b6e10a23deb2978c599de1ac8e7b8902d938e7af2cb"
+    },
+    "references": {
+      "/home/atuin/v130cb/v130cb18/loup-s64/gate_refs/MACE-POLAR-1-S_widecrystals0_74a7f2aa0901fa1919cf.npz": "2cca5c5056cf3fb03ea100519fc6df70c708a0d6d45cc85f54a8006199e5bd35",
+      "/home/atuin/v130cb/v130cb18/loup-s64/gate_refs/MACE-POLAR-1-S_widecrystals0_74a7f2aa0901fa1919cf_fixed_kset1.npz": "30c5b20a616c0a4e443e79bafd19b254faf568fa9073f425822d8c68e80c5787"
+    },
+    "script_sha256": "6fd04639dfa7660e8efb8da43dc51151d901961ad47b63e238901231e13096d4",
+    "stress_protocol": "frozen-kset1",
+    "polar_reference_sha256": "c0ab4a4e4df4b5313bc1c7f5ba3a800b6ae8017d03300b23dab441ab214cfb82"
+  },
+  "rows": [
+    {
+      "config": "Na2O_c0",
+      "path": "simt",
+      "atoms": 324,
+      "error": [
+        2.6046131726032423e-05,
+        2.369990980666259e-05,
+        2.469041156527574e-07
+      ],
+      "yardstick": [
+        5.125999534761326,
+        6.37430648204318e-05,
+        1.5016791092836712e-06
+      ],
+      "ratio": [
+        5.081181055402724e-06,
+        0.3718037385467222,
+        0.1644186924665518
+      ],
+      "finite": true,
+      "fallback": false,
+      "tc_seen": false,
+      "passed": true
+    },
+    {
+      "config": "Na2O_c0",
+      "path": "3x_rnacc",
+      "atoms": 324,
+      "error": [
+        0.0005541390877355028,
+        1.7763247885049793e-05,
+        1.483677535440986e-06
+      ],
+      "yardstick": [
+        5.125999534761326,
+        6.37430648204318e-05,
+        1.5016791092836712e-06
+      ],
+      "ratio": [
+        0.00010810361647083223,
+        0.2786694981656432,
+        0.988012369798983
+      ],
+      "finite": true,
+      "fallback": false,
+      "tc_seen": true,
+      "passed": true
+    },
+    {
+      "config": "Na2O_c1",
+      "path": "simt",
+      "atoms": 324,
+      "error": [
+        0.0014872560392559311,
+        4.718493262212409e-05,
+        1.1577859702072146e-06
+      ],
+      "yardstick": [
+        5.861795847275421,
+        0.00014368205625792108,
+        8.519889065361497e-07
+      ],
+      "ratio": [
+        0.00025372020418404915,
+        0.32839822766332954,
+        1.3589214147333386
+      ],
+      "finite": true,
+      "fallback": false,
+      "tc_seen": false,
+      "passed": true
+    },
+    {
+      "config": "Na2O_c1",
+      "path": "3x_rnacc",
+      "atoms": 324,
+      "error": [
+        0.002395989729758398,
+        3.633380250134266e-05,
+        3.869613371954017e-07
+      ],
+      "yardstick": [
+        5.861795847275421,
+        0.00014368205625792108,
+        8.519889065361497e-07
+      ],
+      "ratio": [
+        0.0004087467036014331,
+        0.2528764095366265,
+        0.45418588696023476
+      ],
+      "finite": true,
+      "fallback": false,
+      "tc_seen": true,
+      "passed": true
+    },
+    {
+      "config": "Na2O_c2",
+      "path": "simt",
+      "atoms": 324,
+      "error": [
+        0.0012044631013715709,
+        3.117232735583286e-05,
+        1.4077410972479498e-06
+      ],
+      "yardstick": [
+        5.075427754580929,
+        8.20105548280381e-05,
+        3.1672607228028227e-06
+      ],
+      "ratio": [
+        0.00023731262853351792,
+        0.3801014079370128,
+        0.44446643975750416
+      ],
+      "finite": true,
+      "fallback": false,
+      "tc_seen": false,
+      "passed": true
+    },
+    {
+      "config": "Na2O_c2",
+      "path": "3x_rnacc",
+      "atoms": 324,
+      "error": [
+        0.0018224107205039924,
+        2.3161191920917368e-05,
+        8.020735469127516e-07
+      ],
+      "yardstick": [
+        5.075427754580929,
+        8.20105548280381e-05,
+        3.1672607228028227e-06
+      ],
+      "ratio": [
+        0.00035906544406215596,
+        0.2824172079981945,
+        0.25323887646450777
+      ],
+      "finite": true,
+      "fallback": false,
+      "tc_seen": true,
+      "passed": true
+    },
+    {
+      "config": "NaCl_c0",
+      "path": "simt",
+      "atoms": 216,
+      "error": [
+        0.00019409775699454326,
+        1.2325425668285872e-06,
+        2.016736073279235e-09
+      ],
+      "yardstick": [
+        2.3882150977711984,
+        3.5230770009664347e-06,
+        5.467663973315884e-08
+      ],
+      "ratio": [
+        8.127314711965642e-05,
+        0.34984831909449654,
+        0.0368847844915418
+      ],
+      "finite": true,
+      "fallback": false,
+      "tc_seen": false,
+      "passed": true
+    },
+    {
+      "config": "NaCl_c0",
+      "path": "3x_rnacc",
+      "atoms": 216,
+      "error": [
+        0.00017271722080530944,
+        1.1837980223305955e-06,
+        1.4192142216637449e-08
+      ],
+      "yardstick": [
+        2.3882150977711984,
+        3.5230770009664347e-06,
+        5.467663973315884e-08
+      ],
+      "ratio": [
+        7.232063015031509e-05,
+        0.3360125316607787,
+        0.25956500410230177
+      ],
+      "finite": true,
+      "fallback": false,
+      "tc_seen": true,
+      "passed": true
+    },
+    {
+      "config": "NaCl_c1",
+      "path": "simt",
+      "atoms": 216,
+      "error": [
+        0.00020555065323909125,
+        1.9890686202006513e-06,
+        3.1609768705309627e-08
+      ],
+      "yardstick": [
+        2.265444463032677,
+        5.415842918743419e-06,
+        6.769279782201099e-08
+      ],
+      "ratio": [
+        9.073303565514347e-05,
+        0.36726852127058257,
+        0.46695911119559896
+      ],
+      "finite": true,
+      "fallback": false,
+      "tc_seen": false,
+      "passed": true
+    },
+    {
+      "config": "NaCl_c1",
+      "path": "3x_rnacc",
+      "atoms": 216,
+      "error": [
+        0.00019520693631083877,
+        1.2595668152509676e-06,
+        1.3587233355788486e-08
+      ],
+      "yardstick": [
+        2.265444463032677,
+        5.415842918743419e-06,
+        6.769279782201099e-08
+      ],
+      "ratio": [
+        8.616716917859093e-05,
+        0.23257078060587688,
+        0.2007190394392365
+      ],
+      "finite": true,
+      "fallback": false,
+      "tc_seen": true,
+      "passed": true
+    },
+    {
+      "config": "NaCl_c2",
+      "path": "simt",
+      "atoms": 216,
+      "error": [
+        0.00017499163125952086,
+        1.8596075753718466e-06,
+        1.0355846661973256e-08
+      ],
+      "yardstick": [
+        2.1172969696905324,
+        3.9959398242528366e-06,
+        7.405834973051029e-09
+      ],
+      "ratio": [
+        8.264860043940738e-05,
+        0.46537426917322444,
+        0.3106753998591977
+      ],
+      "finite": true,
+      "fallback": false,
+      "tc_seen": false,
+      "passed": true
+    },
+    {
+      "config": "NaCl_c2",
+      "path": "3x_rnacc",
+      "atoms": 216,
+      "error": [
+        0.00021875193515033634,
+        1.6277606927350696e-06,
+        2.07840068862028e-08
+      ],
+      "yardstick": [
+        2.1172969696905324,
+        3.9959398242528366e-06,
+        7.405834973051029e-09
+      ],
+      "ratio": [
+        0.00010331660521967755,
+        0.4073536550414468,
+        0.623520206586084
+      ],
+      "finite": true,
+      "fallback": false,
+      "tc_seen": true,
+      "passed": true
+    },
+    {
+      "config": "NaNbCl6_c0",
+      "path": "simt",
+      "atoms": 192,
+      "error": [
+        3.2825482776388526e-05,
+        4.397426274976857e-06,
+        7.822297951737278e-09
+      ],
+      "yardstick": [
+        4.011539526497169,
+        1.8771652928489813e-05,
+        5.207998225384425e-08
+      ],
+      "ratio": [
+        8.182764387479778e-06,
+        0.23425887383112998,
+        0.15019778450788318
+      ],
+      "finite": true,
+      "fallback": false,
+      "tc_seen": false,
+      "passed": true
+    },
+    {
+      "config": "NaNbCl6_c0",
+      "path": "3x_rnacc",
+      "atoms": 192,
+      "error": [
+        0.0003150441140557329,
+        4.304648953290524e-06,
+        2.2226196649756565e-09
+      ],
+      "yardstick": [
+        4.011539526497169,
+        1.8771652928489813e-05,
+        5.207998225384425e-08
+      ],
+      "ratio": [
+        7.853446587645264e-05,
+        0.229316457623044,
+        0.042677043439499164
+      ],
+      "finite": true,
+      "fallback": false,
+      "tc_seen": true,
+      "passed": true
+    },
+    {
+      "config": "NaNbCl6_c1",
+      "path": "simt",
+      "atoms": 192,
+      "error": [
+        2.7112643389652174e-05,
+        4.916187967385355e-06,
+        7.466944623051898e-09
+      ],
+      "yardstick": [
+        4.101731261471286,
+        3.79720623282509e-05,
+        1.7160955908916697e-08
+      ],
+      "ratio": [
+        6.610048699272146e-06,
+        0.1294685530874564,
+        0.22400833869155692
+      ],
+      "finite": true,
+      "fallback": false,
+      "tc_seen": false,
+      "passed": true
+    },
+    {
+      "config": "NaNbCl6_c1",
+      "path": "3x_rnacc",
+      "atoms": 192,
+      "error": [
+        0.0003218701749574393,
+        5.145963442809709e-06,
+        1.0594094186112957e-08
+      ],
+      "yardstick": [
+        4.101731261471286,
+        3.79720623282509e-05,
+        1.7160955908916697e-08
+      ],
+      "ratio": [
+        7.847178531193797e-05,
+        0.135519724957924,
+        0.3178228255833887
+      ],
+      "finite": true,
+      "fallback": false,
+      "tc_seen": true,
+      "passed": true
+    },
+    {
+      "config": "NaNbCl6_c2",
+      "path": "simt",
+      "atoms": 192,
+      "error": [
+        2.8448994271457195e-05,
+        4.2784731797973485e-06,
+        1.0317352896506427e-08
+      ],
+      "yardstick": [
+        3.580983538995497,
+        4.519517391587957e-05,
+        3.042689563931972e-08
+      ],
+      "ratio": [
+        7.944463849570623e-06,
+        0.09466659399874737,
+        0.3095205868951928
+      ],
+      "finite": true,
+      "fallback": false,
+      "tc_seen": false,
+      "passed": true
+    },
+    {
+      "config": "NaNbCl6_c2",
+      "path": "3x_rnacc",
+      "atoms": 192,
+      "error": [
+        0.00033170120635380346,
+        4.226893286052302e-06,
+        6.096487174464538e-09
+      ],
+      "yardstick": [
+        3.580983538995497,
+        4.519517391587957e-05,
+        3.042689563931972e-08
+      ],
+      "ratio": [
+        9.262852027709938e-05,
+        0.09352532405162756,
+        0.18289461523393613
+      ],
+      "finite": true,
+      "fallback": false,
+      "tc_seen": true,
+      "passed": true
+    },
+    {
+      "config": "NaNbO3_c0",
+      "path": "simt",
+      "atoms": 360,
+      "error": [
+        22.69178146768051,
+        63.85559233115055,
+        1.354040891979821
+      ],
+      "yardstick": [
+        40.90341258367213,
+        309.5955336642219,
+        4.221676348126493
+      ],
+      "ratio": [
+        0.5547649947608195,
+        0.20625488867809838,
+        0.32073536205131425
+      ],
+      "finite": true,
+      "fallback": false,
+      "tc_seen": false,
+      "passed": true
+    },
+    {
+      "config": "NaNbO3_c0",
+      "path": "3x_rnacc",
+      "atoms": 360,
+      "error": [
+        4.845042950344375,
+        67.89356378617231,
+        0.39882531151670264
+      ],
+      "yardstick": [
+        40.90341258367213,
+        309.5955336642219,
+        4.221676348126493
+      ],
+      "ratio": [
+        0.1184508246208881,
+        0.21929762029386268,
+        0.09447084016606208
+      ],
+      "finite": true,
+      "fallback": false,
+      "tc_seen": true,
+      "passed": true
+    },
+    {
+      "config": "NaNbO3_c1",
+      "path": "simt",
+      "atoms": 360,
+      "error": [
+        0.004254230104076366,
+        0.00224306731655588,
+        1.08785263839839e-05
+      ],
+      "yardstick": [
+        7.603026022035111,
+        0.012596466749926094,
+        2.7926791053234368e-05
+      ],
+      "ratio": [
+        0.0005595443303425168,
+        0.1780711497189512,
+        0.3895372856568851
+      ],
+      "finite": true,
+      "fallback": false,
+      "tc_seen": false,
+      "passed": true
+    },
+    {
+      "config": "NaNbO3_c1",
+      "path": "3x_rnacc",
+      "atoms": 360,
+      "error": [
+        0.005836817177219523,
+        0.0019193309592537844,
+        5.636047878176953e-06
+      ],
+      "yardstick": [
+        7.603026022035111,
+        0.012596466749926094,
+        2.7926791053234368e-05
+      ],
+      "ratio": [
+        0.0007676965934751825,
+        0.15237058116039132,
+        0.20181509101541434
+      ],
+      "finite": true,
+      "fallback": false,
+      "tc_seen": true,
+      "passed": true
+    },
+    {
+      "config": "NaNbO3_c2",
+      "path": "simt",
+      "atoms": 360,
+      "error": [
+        0.007422168144128389,
+        0.0024352468106201286,
+        2.1936376719544626e-05
+      ],
+      "yardstick": [
+        7.788581539514578,
+        0.010338287749675601,
+        7.614713175874144e-05
+      ],
+      "ratio": [
+        0.0009529550543282846,
+        0.23555610654158304,
+        0.288078831242733
+      ],
+      "finite": true,
+      "fallback": false,
+      "tc_seen": false,
+      "passed": true
+    },
+    {
+      "config": "NaNbO3_c2",
+      "path": "3x_rnacc",
+      "atoms": 360,
+      "error": [
+        0.011172977327886555,
+        0.0027239717888676296,
+        2.3228075483494592e-05
+      ],
+      "yardstick": [
+        7.788581539514578,
+        0.010338287749675601,
+        7.614713175874144e-05
+      ],
+      "ratio": [
+        0.0014345330110754556,
+        0.26348384324600593,
+        0.3050420278085929
+      ],
+      "finite": true,
+      "fallback": false,
+      "tc_seen": true,
+      "passed": true
+    },
+    {
+      "config": "NaNbOCl4_Pbca_c0",
+      "path": "simt",
+      "atoms": 224,
+      "error": [
+        4.1856505309364623e-05,
+        1.581305948761269e-05,
+        1.0656948466053473e-08
+      ],
+      "yardstick": [
+        1.3136308324257178,
+        6.0655238947049384e-05,
+        5.201953979724894e-08
+      ],
+      "ratio": [
+        3.1863217790095145e-05,
+        0.26070393525969165,
+        0.2048643357397996
+      ],
+      "finite": true,
+      "fallback": false,
+      "tc_seen": false,
+      "passed": true
+    },
+    {
+      "config": "NaNbOCl4_Pbca_c0",
+      "path": "3x_rnacc",
+      "atoms": 224,
+      "error": [
+        0.00022421383099364384,
+        1.302319224194548e-05,
+        9.541358533121658e-09
+      ],
+      "yardstick": [
+        1.3136308324257178,
+        6.0655238947049384e-05,
+        5.201953979724894e-08
+      ],
+      "ratio": [
+        0.00017068252773849422,
+        0.21470844840483483,
+        0.18341874169417882
+      ],
+      "finite": true,
+      "fallback": false,
+      "tc_seen": true,
+      "passed": true
+    },
+    {
+      "config": "NaNbOCl4_Pbca_c1",
+      "path": "simt",
+      "atoms": 224,
+      "error": [
+        1.1472106312534639e-05,
+        1.752495666806908e-05,
+        2.5166861303271837e-08
+      ],
+      "yardstick": [
+        1.260595397200502,
+        5.204907334732667e-05,
+        1.30054919195155e-07
+      ],
+      "ratio": [
+        9.10054593092407e-06,
+        0.3367006469284086,
+        0.19350949167487846
+      ],
+      "finite": true,
+      "fallback": false,
+      "tc_seen": false,
+      "passed": true
+    },
+    {
+      "config": "NaNbOCl4_Pbca_c1",
+      "path": "3x_rnacc",
+      "atoms": 224,
+      "error": [
+        0.00021220330381765962,
+        1.4002486860675845e-05,
+        2.4184510935554293e-08
+      ],
+      "yardstick": [
+        1.260595397200502,
+        5.204907334732667e-05,
+        1.30054919195155e-07
+      ],
+      "ratio": [
+        0.00016833577553028933,
+        0.26902470995470734,
+        0.18595614133798372
+      ],
+      "finite": true,
+      "fallback": false,
+      "tc_seen": true,
+      "passed": true
+    },
+    {
+      "config": "NaNbOCl4_Pbca_c2",
+      "path": "simt",
+      "atoms": 224,
+      "error": [
+        8.71534991477217e-05,
+        2.405233143853991e-05,
+        9.352825000585874e-09
+      ],
+      "yardstick": [
+        1.168414302810561,
+        6.691612217757381e-05,
+        7.9753142465111e-08
+      ],
+      "ratio": [
+        7.459126350822513e-05,
+        0.35944000721848135,
+        0.1172721815278612
+      ],
+      "finite": true,
+      "fallback": false,
+      "tc_seen": false,
+      "passed": true
+    },
+    {
+      "config": "NaNbOCl4_Pbca_c2",
+      "path": "3x_rnacc",
+      "atoms": 224,
+      "error": [
+        0.0001964945113286376,
+        1.8813878807755202e-05,
+        1.79745436451606e-08
+      ],
+      "yardstick": [
+        1.168414302810561,
+        6.691612217757381e-05,
+        7.9753142465111e-08
+      ],
+      "ratio": [
+        0.0001681719496722867,
+        0.2811561428773358,
+        0.2253772464580162
+      ],
+      "finite": true,
+      "fallback": false,
+      "tc_seen": true,
+      "passed": true
+    }
+  ],
+  "log": "### Starting TaskPrologue of job 5008168 on a0902 at Sun Nov 15 03:58:33 PM CET 2026\nRunning on cores 64-79 with governor schedutil\nSun Nov 15 15:58:33 2026       \n+-----------------------------------------------------------------------------------------+\n| NVIDIA-SMI 615.71.10              KMD Version: 615.71.10     CUDA UMD Version: 13.4     |\n+-----------------------------------------+------------------------+----------------------+\n| GPU  Name                 Persistence-M | Bus-Id          Disp.A | Volatile Uncorr. ECC |\n| Fan  Temp   Perf          Pwr:Usage/Cap |           Memory-Usage | GPU-Util  Compute M. |\n|                                         |                        |               MIG M. |\n|=========================================+========================+======================|\n|   0  NVIDIA A100-SXM4-40GB          On  |   00000000:13:00.0 Off |                    0 |\n| N/A   31C    P0             52W /  400W |       0MiB /  40960MiB |      0%      Default |\n|                                         |                        |             Disabled |\n+-----------------------------------------+------------------------+----------------------+\n\n+-----------------------------------------------------------------------------------------+\n| Processes:                                                                              |\n|  GPU   GI   CI              PID   Type   Process name                        GPU Memory |\n|        ID   ID                                                               Usage      |\n|=========================================================================================|\n|  No running processes found                                                             |\n+-----------------------------------------------------------------------------------------+\n### Finished TaskPrologue\n\nNVIDIA A100-SXM4-40GB, 615.71.10\n/tmp/loupenv-5008168/env/lib/python3.10/site-packages/e3nn/o3/_wigner.py:10: UserWarning: Environment variable TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD detected, since the`weights_only` argument was not explicitly passed to `torch.load`, forcing weights_only=False.\n  _Jd, _W3j_flat, _W3j_indices = torch.load(os.path.join(os.path.dirname(__file__), 'constants.pt'))\n/tmp/loupenv-5008168/env/lib/python3.10/site-packages/torch/jit/_script.py:1491: FutureWarning: `torch.jit.script` is deprecated. Please switch to `torch.compile` or `torch.export`.\n  warnings.warn(\n/tmp/loupenv-5008168/env/lib/python3.10/site-packages/torch/jit/_script.py:1491: FutureWarning: `torch.jit.script` is deprecated. Please switch to `torch.compile` or `torch.export`.\n  warnings.warn(\n/tmp/loupenv-5008168/env/lib/python3.10/site-packages/torch/jit/_script.py:1491: FutureWarning: `torch.jit.script` is deprecated. Please switch to `torch.compile` or `torch.export`.\n  warnings.warn(\n/tmp/loupenv-5008168/env/lib/python3.10/site-packages/openequivariance/__init__.py:38: UserWarning: Precompiled extension shared object not found.\nFor these reasons, falling back to JIT compilation of OpenEquivariance extension. If another process holds the build lock, this waits up to 5 minutes, then raises an error naming the lock file to delete.\n\n  from openequivariance._torch.TensorProduct import TensorProduct\n/tmp/loupenv-5008168/env/lib/python3.10/site-packages/torch/jit/_script.py:1491: FutureWarning: `torch.jit.script` is deprecated. Please switch to `torch.compile` or `torch.export`.\n  warnings.warn(\nComputing fixed-set stress for chunk 0\n/tmp/loupenv-5008168/env/lib/python3.10/site-packages/mace/calculators/mace.py:226: UserWarning: Environment variable TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD detected, since the`weights_only` argument was not explicitly passed to `torch.load`, forcing weights_only=False.\n  torch.load(f=model_path, map_location=device)\n/tmp/loupenv-5008168/env/lib/python3.10/site-packages/torch/jit/_serialization.py:176: FutureWarning: `torch.jit.load` is deprecated. Please switch to `torch.export`.\n  warnings.warn(\n/tmp/loupenv-5008168/env/lib/python3.10/site-packages/torch/jit/_serialization.py:176: FutureWarning: `torch.jit.load` is deprecated. Please switch to `torch.export`.\n  warnings.warn(\nWARNING:root:Default dtype float64 does not match model dtype float32, converting models to float64.\nNa2O_c0                simt       E/F/S    0.0000    0.3718    0.1644 PASS fallback=False tc=False\nNa2O_c0                3x_rnacc   E/F/S    0.0001    0.2787    0.9880 PASS fallback=False tc=True\nNa2O_c1                simt       E/F/S    0.0003    0.3284    1.3589 PASS fallback=False tc=False\nNa2O_c1                3x_rnacc   E/F/S    0.0004    0.2529    0.4542 PASS fallback=False tc=True\nNa2O_c2                simt       E/F/S    0.0002    0.3801    0.4445 PASS fallback=False tc=False\nNa2O_c2                3x_rnacc   E/F/S    0.0004    0.2824    0.2532 PASS fallback=False tc=True\nNaCl_c0                simt       E/F/S    0.0001    0.3498    0.0369 PASS fallback=False tc=False\nNaCl_c0                3x_rnacc   E/F/S    0.0001    0.3360    0.2596 PASS fallback=False tc=True\nNaCl_c1                simt       E/F/S    0.0001    0.3673    0.4670 PASS fallback=False tc=False\nNaCl_c1                3x_rnacc   E/F/S    0.0001    0.2326    0.2007 PASS fallback=False tc=True\nNaCl_c2                simt       E/F/S    0.0001    0.4654    0.3107 PASS fallback=False tc=False\nNaCl_c2                3x_rnacc   E/F/S    0.0001    0.4074    0.6235 PASS fallback=False tc=True\nNaNbCl6_c0             simt       E/F/S    0.0000    0.2343    0.1502 PASS fallback=False tc=False\nNaNbCl6_c0             3x_rnacc   E/F/S    0.0001    0.2293    0.0427 PASS fallback=False tc=True\nNaNbCl6_c1             simt       E/F/S    0.0000    0.1295    0.2240 PASS fallback=False tc=False\nNaNbCl6_c1             3x_rnacc   E/F/S    0.0001    0.1355    0.3178 PASS fallback=False tc=True\nNaNbCl6_c2             simt       E/F/S    0.0000    0.0947    0.3095 PASS fallback=False tc=False\nNaNbCl6_c2             3x_rnacc   E/F/S    0.0001    0.0935    0.1829 PASS fallback=False tc=True\nNaNbO3_c0              simt       E/F/S    0.5548    0.2063    0.3207 PASS fallback=False tc=False\nNaNbO3_c0              3x_rnacc   E/F/S    0.1185    0.2193    0.0945 PASS fallback=False tc=True\nNaNbO3_c1              simt       E/F/S    0.0006    0.1781    0.3895 PASS fallback=False tc=False\nNaNbO3_c1              3x_rnacc   E/F/S    0.0008    0.1524    0.2018 PASS fallback=False tc=True\nNaNbO3_c2              simt       E/F/S    0.0010    0.2356    0.2881 PASS fallback=False tc=False\nNaNbO3_c2              3x_rnacc   E/F/S    0.0014    0.2635    0.3050 PASS fallback=False tc=True\nNaNbOCl4_Pbca_c0       simt       E/F/S    0.0000    0.2607    0.2049 PASS fallback=False tc=False\nNaNbOCl4_Pbca_c0       3x_rnacc   E/F/S    0.0002    0.2147    0.1834 PASS fallback=False tc=True\nNaNbOCl4_Pbca_c1       simt       E/F/S    0.0000    0.3367    0.1935 PASS fallback=False tc=False\nNaNbOCl4_Pbca_c1       3x_rnacc   E/F/S    0.0002    0.2690    0.1860 PASS fallback=False tc=True\nNaNbOCl4_Pbca_c2       simt       E/F/S    0.0001    0.3594    0.1173 PASS fallback=False tc=False\nNaNbOCl4_Pbca_c2       3x_rnacc   E/F/S    0.0002    0.2812    0.2254 PASS fallback=False tc=True\nWrote 30 rows to /home/atuin/v130cb/v130cb18/loup-s64/polar-arithmetic/results/5008099_0; failures are evidence, not a successful gate.\n=== JOB_STATISTICS ===\n=== current date     : Sun Nov 15 15:59:59 CET 2026\n= Job-ID             : 5008168 on alex as 5008099_0\n= Job-Name           : loup-polar-wide2\n= Job-Command        : /home/atuin/v130cb/v130cb18/loup-s64/polar-arithmetic/polar_wide_fixed_v2.sh\n= Initial workdir    : /home/hpc/v130cb/v130cb18\n= Queue/Partition    : a100\n= Slurm account      : v130cb with QOS=normal\n= Features           : a100_40\n= Requested resources:  for 01:00:00\n= Elapsed runtime    : 00:01:43\n= Total RAM usage    : 12.1 GiB of assigned  GiB (%)\n= Node list          : a0902\n= Subm/Elig/Start/End: 2026-11-15T15:39:11 / 2026-11-15T15:57:45 / 2026-11-15T15:58:16 / 2026-11-15T15:59:59\n======================\n=== Quota infos ======\n    Path                 Used     SoftQ    HardQ    Gracetime  Filec    FileQ    FiHaQ    FileGrace    \n    /home/hpc              16.0G   104.9G   209.7G        N/A   2,618      300K     400K        N/A    \n    /home/vault             0.0K  1048.6G  2097.2G        N/A       1      200K     400K        N/A    \n    /home/atuin            30.4G     0.0K     0.0K        N/A     100K                          N/A    \n    /lustre                 4.0K     0.0K     0.0K        N/A       1       80K     250K        N/A    \n======================\n=== GPU utilization ==\ngpu_name, gpu_bus_id, pid, gpu_utilization [%], mem_utilization [%], max_memory_usage [MiB], time [ms]\nNVIDIA A100-SXM4-40GB, 00000000:13:00.0, 301853, 35 %, 22 %, 11900 MiB, 45628 ms\n"
+}

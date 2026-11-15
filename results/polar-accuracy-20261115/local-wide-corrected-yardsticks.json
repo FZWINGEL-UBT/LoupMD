@@ -1,0 +1,4669 @@
+{
+  "scope": "Same saved engine outputs, newly evaluated corrected e3nn references; differs from the two-configuration warm-up probe and is not the full FastMACE policy",
+  "metadata": {
+    "S_0": {
+      "model_sha256": "e4495612037b3b3312633182882a38a694ecac9ea0be2b9889ac0b2a84a99510",
+      "script_sha256": "6da2876fb8c43ffcb4458863e8a38be41cff4615b4bf19455daf25246c7928ba",
+      "correction_sha256": "1159bb4947b3edb2c1173d34f1c4cb5d7c60a54163f4a947177ead46b0f35502",
+      "original_cache": "/home/fzwin/.cache/loupmd/gate_refs/MACE-POLAR-1-S_widecrystals0_5262b5e3c7e0ac4ce94c.npz",
+      "original_cache_sha256": "3fa4160990e18c1959158cf0e579db096ab37e8bc620646a512ef467e957648b",
+      "gpu": "NVIDIA GeForce RTX 5060 Ti",
+      "torch": "2.14.1+cu130",
+      "protocol": "FastMACE stress correction with stock e3nn core; not full FastMACE reference policy",
+      "rows": [
+        {
+          "config": "Na2O_c0",
+          "delta64_energy": 0.0,
+          "delta64_force_max": 5.993816554195064e-14,
+          "original_stress_yardstick": 8.004563258889874e-07,
+          "corrected_stress_yardstick": 8.200276668812734e-07,
+          "corrected_force_yardstick": 6.881361731247981e-05,
+          "corrected_energy_yardstick_meV_atom": 5.511802003897128
+        },
+        {
+          "config": "Na2O_c1",
+          "delta64_energy": 0.0,
+          "delta64_force_max": 1.6298074001497298e-13,
+          "original_stress_yardstick": 7.408499840044769e-06,
+          "corrected_stress_yardstick": 6.4867462703510625e-06,
+          "corrected_force_yardstick": 0.00017816162959061188,
+          "corrected_energy_yardstick_meV_atom": 5.475993378139618
+        },
+        {
+          "config": "Na2O_c2",
+          "delta64_energy": 0.0,
+          "delta64_force_max": 9.248157795127554e-14,
+          "original_stress_yardstick": 3.4146514855670773e-06,
+          "corrected_stress_yardstick": 2.5972596082723953e-06,
+          "corrected_force_yardstick": 8.916311220341644e-05,
+          "corrected_energy_yardstick_meV_atom": 5.075427754580929
+        },
+        {
+          "config": "NaCl_c0",
+          "delta64_energy": 0.0,
+          "delta64_force_max": 2.858824288409778e-15,
+          "original_stress_yardstick": 8.143134601519553e-08,
+          "corrected_stress_yardstick": 7.87213586175145e-08,
+          "corrected_force_yardstick": 3.4637995962316648e-06,
+          "corrected_energy_yardstick_meV_atom": 2.3882150977711984
+        },
+        {
+          "config": "NaCl_c1",
+          "delta64_energy": 0.0,
+          "delta64_force_max": 6.2727600891321345e-15,
+          "original_stress_yardstick": 1.8311897405018374e-07,
+          "corrected_stress_yardstick": 1.795101717133596e-07,
+          "corrected_force_yardstick": 6.065920584743395e-06,
+          "corrected_energy_yardstick_meV_atom": 2.265444463032677
+        },
+        {
+          "config": "NaCl_c2",
+          "delta64_energy": 0.0,
+          "delta64_force_max": 4.170275236248244e-15,
+          "original_stress_yardstick": 1.8901373759032392e-07,
+          "corrected_stress_yardstick": 2.0475393447232093e-07,
+          "corrected_force_yardstick": 4.232068723353244e-06,
+          "corrected_energy_yardstick_meV_atom": 2.1172969696905324
+        },
+        {
+          "config": "NaNbCl6_c0",
+          "delta64_energy": 0.0,
+          "delta64_force_max": 9.880984919163893e-15,
+          "original_stress_yardstick": 4.2766756424422736e-08,
+          "corrected_stress_yardstick": 5.4454833219030885e-08,
+          "corrected_force_yardstick": 1.6764971546068264e-05,
+          "corrected_energy_yardstick_meV_atom": 4.011539526497169
+        },
+        {
+          "config": "NaNbCl6_c1",
+          "delta64_energy": 0.0,
+          "delta64_force_max": 1.1546319456101628e-14,
+          "original_stress_yardstick": 1.8689099004080877e-08,
+          "corrected_stress_yardstick": 2.129515864644424e-08,
+          "corrected_force_yardstick": 2.7749461926185326e-05,
+          "corrected_energy_yardstick_meV_atom": 4.101731261471286
+        },
+        {
+          "config": "NaNbCl6_c2",
+          "delta64_energy": 0.0,
+          "delta64_force_max": 1.0658141036401503e-14,
+          "original_stress_yardstick": 4.463870462362903e-08,
+          "corrected_stress_yardstick": 4.164217517468524e-08,
+          "corrected_force_yardstick": 5.0619196587886606e-05,
+          "corrected_energy_yardstick_meV_atom": 3.580983538995497
+        },
+        {
+          "config": "NaNbO3_c0",
+          "delta64_energy": 1.932494342327118e-08,
+          "delta64_force_max": 2.4441396817564964e-07,
+          "original_stress_yardstick": 3.2275357201870065,
+          "corrected_stress_yardstick": 3.289842985541327,
+          "corrected_force_yardstick": 144.8964507218916,
+          "corrected_energy_yardstick_meV_atom": 35.65908773711676
+        },
+        {
+          "config": "NaNbO3_c1",
+          "delta64_energy": 0.0,
+          "delta64_force_max": 5.9969806898152456e-12,
+          "original_stress_yardstick": 2.3665058914934534e-05,
+          "corrected_stress_yardstick": 2.4150828791147383e-05,
+          "corrected_force_yardstick": 0.011879303650971451,
+          "corrected_energy_yardstick_meV_atom": 7.950248244257334
+        },
+        {
+          "config": "NaNbO3_c2",
+          "delta64_energy": 0.0,
+          "delta64_force_max": 4.490630090003833e-12,
+          "original_stress_yardstick": 5.421262232951918e-05,
+          "corrected_stress_yardstick": 5.1891551991811724e-05,
+          "corrected_force_yardstick": 0.009241703346845043,
+          "corrected_energy_yardstick_meV_atom": 8.483025983959022
+        },
+        {
+          "config": "NaNbOCl4_Pbca_c0",
+          "delta64_energy": 0.0,
+          "delta64_force_max": 2.1316282072803006e-14,
+          "original_stress_yardstick": 3.886420144039171e-08,
+          "corrected_stress_yardstick": 6.846622271558522e-08,
+          "corrected_force_yardstick": 6.0793424917715555e-05,
+          "corrected_energy_yardstick_meV_atom": 6.335952260997146
+        },
+        {
+          "config": "NaNbOCl4_Pbca_c1",
+          "delta64_energy": 0.0,
+          "delta64_force_max": 2.7533531010703882e-14,
+          "original_stress_yardstick": 7.563208116734277e-08,
+          "corrected_stress_yardstick": 7.300313566160899e-08,
+          "corrected_force_yardstick": 6.015530504299704e-05,
+          "corrected_energy_yardstick_meV_atom": 1.8186311114862161
+        },
+        {
+          "config": "NaNbOCl4_Pbca_c2",
+          "delta64_energy": 0.0,
+          "delta64_force_max": 3.064215547965432e-14,
+          "original_stress_yardstick": 8.720372295101253e-08,
+          "corrected_stress_yardstick": 1.010917436428116e-07,
+          "corrected_force_yardstick": 6.310142491550152e-05,
+          "corrected_energy_yardstick_meV_atom": 7.306807159953418
+        }
+      ]
+    },
+    "S_1": {
+      "model_sha256": "e4495612037b3b3312633182882a38a694ecac9ea0be2b9889ac0b2a84a99510",
+      "script_sha256": "6da2876fb8c43ffcb4458863e8a38be41cff4615b4bf19455daf25246c7928ba",
+      "correction_sha256": "1159bb4947b3edb2c1173d34f1c4cb5d7c60a54163f4a947177ead46b0f35502",
+      "original_cache": "/home/fzwin/.cache/loupmd/gate_refs/MACE-POLAR-1-S_widecrystals1_3b55b8d7e41ff9e4fe57.npz",
+      "original_cache_sha256": "1877f345f363c20cf36edff0dd2419c9e92796e1bf2487fa678edbfe7f2d3b74",
+      "gpu": "NVIDIA GeForce RTX 5060 Ti",
+      "torch": "2.14.1+cu130",
+      "protocol": "FastMACE stress correction with stock e3nn core; not full FastMACE reference policy",
+      "rows": [
+        {
+          "config": "NaTaCl6_c0",
+          "delta64_energy": 0.0,
+          "delta64_force_max": 1.199040866595169e-14,
+          "original_stress_yardstick": 3.1315117214603116e-08,
+          "corrected_stress_yardstick": 3.856171116450868e-08,
+          "corrected_force_yardstick": 2.3640092060905893e-05,
+          "corrected_energy_yardstick_meV_atom": 6.572932129832528
+        },
+        {
+          "config": "NaTaCl6_c1",
+          "delta64_energy": 0.0,
+          "delta64_force_max": 1.1102230246251565e-14,
+          "original_stress_yardstick": 7.657862168691798e-08,
+          "corrected_stress_yardstick": 6.725870188920013e-08,
+          "corrected_force_yardstick": 3.560131741719985e-05,
+          "corrected_energy_yardstick_meV_atom": 6.764201885137784
+        },
+        {
+          "config": "NaTaCl6_c2",
+          "delta64_energy": 0.0,
+          "delta64_force_max": 1.2212453270876722e-14,
+          "original_stress_yardstick": 8.68454000171881e-08,
+          "corrected_stress_yardstick": 8.796279778698624e-08,
+          "corrected_force_yardstick": 3.4753475177673465e-05,
+          "corrected_energy_yardstick_meV_atom": 6.572920528318112
+        },
+        {
+          "config": "NaTaO3_c0",
+          "delta64_energy": 0.0,
+          "delta64_force_max": 2.5366375666635577e-12,
+          "original_stress_yardstick": 7.221282524216832e-05,
+          "corrected_stress_yardstick": 9.009875180865379e-05,
+          "corrected_force_yardstick": 0.003168189294811441,
+          "corrected_energy_yardstick_meV_atom": 8.39497601458182
+        },
+        {
+          "config": "NaTaO3_c1",
+          "delta64_energy": 0.0,
+          "delta64_force_max": 6.579625733138528e-12,
+          "original_stress_yardstick": 0.000408542632094111,
+          "corrected_stress_yardstick": 0.00044247585959755753,
+          "corrected_force_yardstick": 0.019191134095848383,
+          "corrected_energy_yardstick_meV_atom": 7.975601939769048
+        },
+        {
+          "config": "NaTaO3_c2",
+          "delta64_energy": 0.0,
+          "delta64_force_max": 5.782041512247815e-13,
+          "original_stress_yardstick": 8.315952149784422e-06,
+          "corrected_stress_yardstick": 8.673796572100656e-06,
+          "corrected_force_yardstick": 0.0007979736957333117,
+          "corrected_energy_yardstick_meV_atom": 8.122757592354901
+        },
+        {
+          "config": "NaTaOCl4_Pbca_c0",
+          "delta64_energy": 0.0,
+          "delta64_force_max": 4.1744385725905886e-14,
+          "original_stress_yardstick": 6.73115570920535e-08,
+          "corrected_stress_yardstick": 8.652269747888575e-08,
+          "corrected_force_yardstick": 0.0001037093283852153,
+          "corrected_energy_yardstick_meV_atom": 4.25073522222062
+        },
+        {
+          "config": "NaTaOCl4_Pbca_c1",
+          "delta64_energy": 0.0,
+          "delta64_force_max": 4.5075054799781356e-14,
+          "original_stress_yardstick": 6.067535304743465e-08,
+          "corrected_stress_yardstick": 1.243806602713171e-07,
+          "corrected_force_yardstick": 6.461542320224112e-05,
+          "corrected_energy_yardstick_meV_atom": 4.312116287889824
+        },
+        {
+          "config": "NaTaOCl4_Pbca_c2",
+          "delta64_energy": 0.0,
+          "delta64_force_max": 4.796163466380676e-14,
+          "original_stress_yardstick": 2.134064433917393e-07,
+          "corrected_stress_yardstick": 1.8318230644853717e-07,
+          "corrected_force_yardstick": 6.354769520888759e-05,
+          "corrected_energy_yardstick_meV_atom": 6.451338845571237
+        },
+        {
+          "config": "Nb2O5_c0",
+          "delta64_energy": 0.0,
+          "delta64_force_max": 2.1600499167107046e-12,
+          "original_stress_yardstick": 0.00018283050804512868,
+          "corrected_stress_yardstick": 0.00016859775670496902,
+          "corrected_force_yardstick": 0.007794398026646832,
+          "corrected_energy_yardstick_meV_atom": 1.4943014643254824
+        },
+        {
+          "config": "Nb2O5_c1",
+          "delta64_energy": 0.0,
+          "delta64_force_max": 1.2425971362972632e-09,
+          "original_stress_yardstick": 0.07439462246238904,
+          "corrected_stress_yardstick": 0.06613959571967065,
+          "corrected_force_yardstick": 1.8842612542242136,
+          "corrected_energy_yardstick_meV_atom": 1.2052052560258224
+        },
+        {
+          "config": "Nb2O5_c2",
+          "delta64_energy": 0.0,
+          "delta64_force_max": 1.8462742445990443e-10,
+          "original_stress_yardstick": 0.09227974796024796,
+          "corrected_stress_yardstick": 0.08838258294042589,
+          "corrected_force_yardstick": 3.167268821110156,
+          "corrected_energy_yardstick_meV_atom": 0.7079623714422009
+        },
+        {
+          "config": "NbCl2O_c0",
+          "delta64_energy": 0.0,
+          "delta64_force_max": 1.2434497875801753e-14,
+          "original_stress_yardstick": 2.0100908144915497e-07,
+          "corrected_stress_yardstick": 2.1836639828298754e-07,
+          "corrected_force_yardstick": 2.3336525762474025e-05,
+          "corrected_energy_yardstick_meV_atom": 5.6093964294632315
+        },
+        {
+          "config": "NbCl2O_c1",
+          "delta64_energy": 0.0,
+          "delta64_force_max": 1.3988810110276972e-14,
+          "original_stress_yardstick": 2.26174962932469e-07,
+          "corrected_stress_yardstick": 2.1986170893172757e-07,
+          "corrected_force_yardstick": 2.5410999192843065e-05,
+          "corrected_energy_yardstick_meV_atom": 5.583175812716945
+        },
+        {
+          "config": "NbCl2O_c2",
+          "delta64_energy": 0.0,
+          "delta64_force_max": 1.7319479184152442e-14,
+          "original_stress_yardstick": 3.336377495284648e-07,
+          "corrected_stress_yardstick": 3.7608789542689647e-07,
+          "corrected_force_yardstick": 3.3566980873922514e-05,
+          "corrected_energy_yardstick_meV_atom": 5.498652476489951
+        }
+      ]
+    },
+    "S_2": {
+      "model_sha256": "e4495612037b3b3312633182882a38a694ecac9ea0be2b9889ac0b2a84a99510",
+      "script_sha256": "6da2876fb8c43ffcb4458863e8a38be41cff4615b4bf19455daf25246c7928ba",
+      "correction_sha256": "1159bb4947b3edb2c1173d34f1c4cb5d7c60a54163f4a947177ead46b0f35502",
+      "original_cache": "/home/fzwin/.cache/loupmd/gate_refs/MACE-POLAR-1-S_widecrystals2_96dc38536ad51282b94c.npz",
+      "original_cache_sha256": "3674d75d7733b13438bd235855d9475e082862ac3eed83e9f7ca487e8bb75c63",
+      "gpu": "NVIDIA GeForce RTX 5060 Ti",
+      "torch": "2.14.1+cu130",
+      "protocol": "FastMACE stress correction with stock e3nn core; not full FastMACE reference policy",
+      "rows": [
+        {
+          "config": "NbCl3O_c0",
+          "delta64_energy": 0.0,
+          "delta64_force_max": 2.0872192862952943e-14,
+          "original_stress_yardstick": 8.660228422580074e-08,
+          "corrected_stress_yardstick": 1.0479495143184137e-07,
+          "corrected_force_yardstick": 3.194567707609508e-05,
+          "corrected_energy_yardstick_meV_atom": 11.206881505495403
+        },
+        {
+          "config": "NbCl3O_c1",
+          "delta64_energy": 0.0,
+          "delta64_force_max": 2.5757174171303632e-14,
+          "original_stress_yardstick": 1.5202939862221654e-07,
+          "corrected_stress_yardstick": 1.5832985362368435e-07,
+          "corrected_force_yardstick": 5.226573454919503e-05,
+          "corrected_energy_yardstick_meV_atom": 14.418308081803843
+        },
+        {
+          "config": "NbCl3O_c2",
+          "delta64_energy": 0.0,
+          "delta64_force_max": 2.220446049250313e-14,
+          "original_stress_yardstick": 1.8591766631076423e-07,
+          "corrected_stress_yardstick": 1.8099289657291795e-07,
+          "corrected_force_yardstick": 4.4195370259902944e-05,
+          "corrected_energy_yardstick_meV_atom": 10.927376135077793
+        },
+        {
+          "config": "NbCl5_c0",
+          "delta64_energy": 0.0,
+          "delta64_force_max": 1.9539925233402755e-14,
+          "original_stress_yardstick": 5.3487401903418164e-08,
+          "corrected_stress_yardstick": 6.66457672660048e-08,
+          "corrected_force_yardstick": 2.42176062333066e-05,
+          "corrected_energy_yardstick_meV_atom": 6.214576579319934
+        },
+        {
+          "config": "NbCl5_c1",
+          "delta64_energy": 0.0,
+          "delta64_force_max": 1.8263168755083825e-14,
+          "original_stress_yardstick": 2.7546874786874703e-08,
+          "corrected_stress_yardstick": 2.8461173939430158e-08,
+          "corrected_force_yardstick": 2.5300635273062255e-05,
+          "corrected_energy_yardstick_meV_atom": 5.417546460025564
+        },
+        {
+          "config": "NbCl5_c2",
+          "delta64_energy": 0.0,
+          "delta64_force_max": 1.7541523789077473e-14,
+          "original_stress_yardstick": 4.4789104546721914e-08,
+          "corrected_stress_yardstick": 2.5163505532749264e-08,
+          "corrected_force_yardstick": 2.1625940047065306e-05,
+          "corrected_energy_yardstick_meV_atom": 5.072626919071707
+        },
+        {
+          "config": "Ta2O5_c0",
+          "delta64_energy": 5.366746336221695e-08,
+          "delta64_force_max": 1.074979081749916e-06,
+          "original_stress_yardstick": 126.08276926075632,
+          "corrected_stress_yardstick": 122.35690303368028,
+          "corrected_force_yardstick": 2311.3669656247366,
+          "corrected_energy_yardstick_meV_atom": 222.53506009915978
+        },
+        {
+          "config": "Ta2O5_c1",
+          "delta64_energy": 0.0,
+          "delta64_force_max": 3.296918293926865e-11,
+          "original_stress_yardstick": 6.10556091347747e-05,
+          "corrected_stress_yardstick": 8.912689179335631e-05,
+          "corrected_force_yardstick": 0.02004741122982523,
+          "corrected_energy_yardstick_meV_atom": 9.13438102505761
+        },
+        {
+          "config": "Ta2O5_c2",
+          "delta64_energy": 0.0,
+          "delta64_force_max": 1.318767317570746e-10,
+          "original_stress_yardstick": 0.007628405827375673,
+          "corrected_stress_yardstick": 0.006028303218968745,
+          "corrected_force_yardstick": 0.27119996203123264,
+          "corrected_energy_yardstick_meV_atom": 9.434140909376318
+        },
+        {
+          "config": "TaCl3O_c0",
+          "delta64_energy": 0.0,
+          "delta64_force_max": 2.3203661214665772e-14,
+          "original_stress_yardstick": 8.452098132494257e-08,
+          "corrected_stress_yardstick": 8.030939856532027e-08,
+          "corrected_force_yardstick": 4.411552255645379e-05,
+          "corrected_energy_yardstick_meV_atom": 14.332309004385024
+        },
+        {
+          "config": "TaCl3O_c1",
+          "delta64_energy": 0.0,
+          "delta64_force_max": 2.4868995751603507e-14,
+          "original_stress_yardstick": 1.934219229920986e-07,
+          "corrected_stress_yardstick": 1.574477795640572e-07,
+          "corrected_force_yardstick": 6.77524528871487e-05,
+          "corrected_energy_yardstick_meV_atom": 16.016111966746394
+        },
+        {
+          "config": "TaCl3O_c2",
+          "delta64_energy": 0.0,
+          "delta64_force_max": 1.7541523789077473e-14,
+          "original_stress_yardstick": 6.011748587136934e-08,
+          "corrected_stress_yardstick": 7.712041311808138e-08,
+          "corrected_force_yardstick": 6.552915844326712e-05,
+          "corrected_energy_yardstick_meV_atom": 15.987760813732166
+        },
+        {
+          "config": "TaCl5_c0",
+          "delta64_energy": 0.0,
+          "delta64_force_max": 1.2434497875801753e-14,
+          "original_stress_yardstick": 1.275160809019113e-08,
+          "corrected_stress_yardstick": 1.9579604552261154e-08,
+          "corrected_force_yardstick": 2.962748702850515e-05,
+          "corrected_energy_yardstick_meV_atom": 12.341392948723364
+        },
+        {
+          "config": "TaCl5_c1",
+          "delta64_energy": 0.0,
+          "delta64_force_max": 2.042810365310288e-14,
+          "original_stress_yardstick": 1.0457398236241033e-07,
+          "corrected_stress_yardstick": 7.932337888622021e-08,
+          "corrected_force_yardstick": 4.5552071589627374e-05,
+          "corrected_energy_yardstick_meV_atom": 14.015148404588992
+        },
+        {
+          "config": "TaCl5_c2",
+          "delta64_energy": 0.0,
+          "delta64_force_max": 1.4654943925052066e-14,
+          "original_stress_yardstick": 9.802359593122367e-08,
+          "corrected_stress_yardstick": 9.189023911096786e-08,
+          "corrected_force_yardstick": 2.8666134908927887e-05,
+          "corrected_energy_yardstick_meV_atom": 9.34141510192098
+        }
+      ]
+    },
+    "M_0": {
+      "model_sha256": "fab8b8713c832f31a2a853aaa22fd638be8a369cbf5095e6b3e982a18d10e93a",
+      "script_sha256": "6da2876fb8c43ffcb4458863e8a38be41cff4615b4bf19455daf25246c7928ba",
+      "correction_sha256": "1159bb4947b3edb2c1173d34f1c4cb5d7c60a54163f4a947177ead46b0f35502",
+      "original_cache": "/home/fzwin/.cache/loupmd/gate_refs/MACE-POLAR-1-M_widecrystals0_f1fd977f8392da4d4c58.npz",
+      "original_cache_sha256": "72d63346943124241577ee85ccd41c802b4a511167413666ab4171990844a324",
+      "gpu": "NVIDIA GeForce RTX 5060 Ti",
+      "torch": "2.14.1+cu130",
+      "protocol": "FastMACE stress correction with stock e3nn core; not full FastMACE reference policy",
+      "rows": [
+        {
+          "config": "Na2O_c0",
+          "delta64_energy": 0.0,
+          "delta64_force_max": 5.773159728050814e-15,
+          "original_stress_yardstick": 7.915859252111135e-08,
+          "corrected_stress_yardstick": 9.654773049094789e-08,
+          "corrected_force_yardstick": 8.511474602235225e-06,
+          "corrected_energy_yardstick_meV_atom": 5.916253077929817
+        },
+        {
+          "config": "Na2O_c1",
+          "delta64_energy": 0.0,
+          "delta64_force_max": 6.217248937900877e-15,
+          "original_stress_yardstick": 9.916547154611988e-08,
+          "corrected_stress_yardstick": 7.019549478140541e-08,
+          "corrected_force_yardstick": 1.1336279644669212e-05,
+          "corrected_energy_yardstick_meV_atom": 5.549261874640016
+        },
+        {
+          "config": "Na2O_c2",
+          "delta64_energy": 0.0,
+          "delta64_force_max": 7.549516567451064e-15,
+          "original_stress_yardstick": 1.0019563528732359e-07,
+          "corrected_stress_yardstick": 9.461045883275149e-08,
+          "corrected_force_yardstick": 9.451773466277735e-06,
+          "corrected_energy_yardstick_meV_atom": 4.915103680643909
+        },
+        {
+          "config": "NaCl_c0",
+          "delta64_energy": 0.0,
+          "delta64_force_max": 2.3314683517128287e-15,
+          "original_stress_yardstick": 3.358386470135588e-08,
+          "corrected_stress_yardstick": 3.6626061291483714e-08,
+          "corrected_force_yardstick": 3.3336061681546285e-06,
+          "corrected_energy_yardstick_meV_atom": 2.34299507832879
+        },
+        {
+          "config": "NaCl_c1",
+          "delta64_energy": 0.0,
+          "delta64_force_max": 2.0886070650760757e-15,
+          "original_stress_yardstick": 5.204595370650322e-08,
+          "corrected_stress_yardstick": 4.951009821042851e-08,
+          "corrected_force_yardstick": 5.423675360272107e-06,
+          "corrected_energy_yardstick_meV_atom": 2.1340759024800113
+        },
+        {
+          "config": "NaCl_c2",
+          "delta64_energy": 0.0,
+          "delta64_force_max": 2.0816681711721685e-15,
+          "original_stress_yardstick": 2.1714910867706716e-08,
+          "corrected_stress_yardstick": 1.774344605878081e-08,
+          "corrected_force_yardstick": 3.3006084342282645e-06,
+          "corrected_energy_yardstick_meV_atom": 1.8826195931372542
+        },
+        {
+          "config": "NaNbCl6_c0",
+          "delta64_energy": 0.0,
+          "delta64_force_max": 7.549516567451064e-15,
+          "original_stress_yardstick": 6.474883831875111e-08,
+          "corrected_stress_yardstick": 7.402864750372107e-08,
+          "corrected_force_yardstick": 1.915714970657234e-05,
+          "corrected_energy_yardstick_meV_atom": 3.313514555581302
+        },
+        {
+          "config": "NaNbCl6_c1",
+          "delta64_energy": 0.0,
+          "delta64_force_max": 8.881784197001252e-15,
+          "original_stress_yardstick": 4.537150026517889e-08,
+          "corrected_stress_yardstick": 4.9140591412005774e-08,
+          "corrected_force_yardstick": 3.5435210900658376e-05,
+          "corrected_energy_yardstick_meV_atom": 3.4523999529483262
+        },
+        {
+          "config": "NaNbCl6_c2",
+          "delta64_energy": 0.0,
+          "delta64_force_max": 7.105427357601002e-15,
+          "original_stress_yardstick": 3.042862988054257e-08,
+          "corrected_stress_yardstick": 3.939371364877764e-08,
+          "corrected_force_yardstick": 3.878026984549532e-05,
+          "corrected_energy_yardstick_meV_atom": 3.8449574252202487
+        },
+        {
+          "config": "NaNbO3_c0",
+          "delta64_energy": 0.0,
+          "delta64_force_max": 1.1546319456101628e-13,
+          "original_stress_yardstick": 1.8316956784669713e-07,
+          "corrected_stress_yardstick": 1.8415710177632771e-07,
+          "corrected_force_yardstick": 0.00011207060924611767,
+          "corrected_energy_yardstick_meV_atom": 8.73617646316739
+        },
+        {
+          "config": "NaNbO3_c1",
+          "delta64_energy": 0.0,
+          "delta64_force_max": 1.9806378759312793e-13,
+          "original_stress_yardstick": 1.35341275339651e-07,
+          "corrected_stress_yardstick": 1.5083318694042447e-07,
+          "corrected_force_yardstick": 0.00026356039031494305,
+          "corrected_energy_yardstick_meV_atom": 7.807164705849977
+        },
+        {
+          "config": "NaNbO3_c2",
+          "delta64_energy": 0.0,
+          "delta64_force_max": 3.863576125695545e-13,
+          "original_stress_yardstick": 2.92796683468155e-07,
+          "corrected_stress_yardstick": 5.197597272021959e-07,
+          "corrected_force_yardstick": 0.00022311059829505098,
+          "corrected_energy_yardstick_meV_atom": 7.994236839133212
+        },
+        {
+          "config": "NaNbOCl4_Pbca_c0",
+          "delta64_energy": 0.0,
+          "delta64_force_max": 1.2434497875801753e-14,
+          "original_stress_yardstick": 7.49708912693714e-08,
+          "corrected_stress_yardstick": 4.8777613299161304e-08,
+          "corrected_force_yardstick": 6.977638172322997e-05,
+          "corrected_energy_yardstick_meV_atom": 6.196820051367728
+        },
+        {
+          "config": "NaNbOCl4_Pbca_c1",
+          "delta64_energy": 0.0,
+          "delta64_force_max": 1.9539925233402755e-14,
+          "original_stress_yardstick": 2.6156813267208187e-08,
+          "corrected_stress_yardstick": 2.674558589876863e-08,
+          "corrected_force_yardstick": 5.053183259207117e-05,
+          "corrected_energy_yardstick_meV_atom": 5.799425355300108
+        },
+        {
+          "config": "NaNbOCl4_Pbca_c2",
+          "delta64_energy": 0.0,
+          "delta64_force_max": 1.9539925233402755e-14,
+          "original_stress_yardstick": 8.870719743481192e-08,
+          "corrected_stress_yardstick": 8.02402784216838e-08,
+          "corrected_force_yardstick": 5.24424792214262e-05,
+          "corrected_energy_yardstick_meV_atom": 0.9938473064851548
+        }
+      ]
+    },
+    "M_1": {
+      "model_sha256": "fab8b8713c832f31a2a853aaa22fd638be8a369cbf5095e6b3e982a18d10e93a",
+      "script_sha256": "6da2876fb8c43ffcb4458863e8a38be41cff4615b4bf19455daf25246c7928ba",
+      "correction_sha256": "1159bb4947b3edb2c1173d34f1c4cb5d7c60a54163f4a947177ead46b0f35502",
+      "original_cache": "/home/fzwin/.cache/loupmd/gate_refs/MACE-POLAR-1-M_widecrystals1_ffee96220639e6c9be69.npz",
+      "original_cache_sha256": "3f3c54504293719d358b38404236f0dca88fa4753bfc962577ffa795e2008342",
+      "gpu": "NVIDIA GeForce RTX 5060 Ti",
+      "torch": "2.14.1+cu130",
+      "protocol": "FastMACE stress correction with stock e3nn core; not full FastMACE reference policy",
+      "rows": [
+        {
+          "config": "NaTaCl6_c0",
+          "delta64_energy": 0.0,
+          "delta64_force_max": 7.549516567451064e-15,
+          "original_stress_yardstick": 4.5541817065772316e-08,
+          "corrected_stress_yardstick": 4.009599631135674e-08,
+          "corrected_force_yardstick": 2.484577673161903e-05,
+          "corrected_energy_yardstick_meV_atom": 6.719521650666138
+        },
+        {
+          "config": "NaTaCl6_c1",
+          "delta64_energy": 0.0,
+          "delta64_force_max": 9.825473767932635e-15,
+          "original_stress_yardstick": 2.326035678651417e-08,
+          "corrected_stress_yardstick": 3.394544744600436e-08,
+          "corrected_force_yardstick": 2.2269507798711174e-05,
+          "corrected_energy_yardstick_meV_atom": 6.7357065587809
+        },
+        {
+          "config": "NaTaCl6_c2",
+          "delta64_energy": 0.0,
+          "delta64_force_max": 6.217248937900877e-15,
+          "original_stress_yardstick": 4.40519391207983e-08,
+          "corrected_stress_yardstick": 3.56489377201924e-08,
+          "corrected_force_yardstick": 3.081630791257339e-05,
+          "corrected_energy_yardstick_meV_atom": 6.995647647272563
+        },
+        {
+          "config": "NaTaO3_c0",
+          "delta64_energy": 0.0,
+          "delta64_force_max": 4.547473508864641e-13,
+          "original_stress_yardstick": 3.870953573792413e-07,
+          "corrected_stress_yardstick": 8.978594133457474e-07,
+          "corrected_force_yardstick": 0.0005681428648536269,
+          "corrected_energy_yardstick_meV_atom": 8.02305818878166
+        },
+        {
+          "config": "NaTaO3_c1",
+          "delta64_energy": 0.0,
+          "delta64_force_max": 6.963318810448982e-13,
+          "original_stress_yardstick": 4.802332121411901e-07,
+          "corrected_stress_yardstick": 5.682486974301071e-07,
+          "corrected_force_yardstick": 0.0005114193055479888,
+          "corrected_energy_yardstick_meV_atom": 8.414711264776997
+        },
+        {
+          "config": "NaTaO3_c2",
+          "delta64_energy": 0.0,
+          "delta64_force_max": 8.475442569988445e-13,
+          "original_stress_yardstick": 1.5242958074229707e-06,
+          "corrected_stress_yardstick": 1.20368655057157e-06,
+          "corrected_force_yardstick": 0.0007824509712790473,
+          "corrected_energy_yardstick_meV_atom": 8.51498765760981
+        },
+        {
+          "config": "NaTaOCl4_Pbca_c0",
+          "delta64_energy": 0.0,
+          "delta64_force_max": 1.4210854715202004e-14,
+          "original_stress_yardstick": 5.4849630844178154e-08,
+          "corrected_stress_yardstick": 6.719289453310795e-08,
+          "corrected_force_yardstick": 7.986136427184931e-05,
+          "corrected_energy_yardstick_meV_atom": 6.744803565587582
+        },
+        {
+          "config": "NaTaOCl4_Pbca_c1",
+          "delta64_energy": 0.0,
+          "delta64_force_max": 1.7763568394002505e-14,
+          "original_stress_yardstick": 1.3230319118040512e-07,
+          "corrected_stress_yardstick": 1.2843029724429744e-07,
+          "corrected_force_yardstick": 7.540903054348291e-05,
+          "corrected_energy_yardstick_meV_atom": 6.4845742661938335
+        },
+        {
+          "config": "NaTaOCl4_Pbca_c2",
+          "delta64_energy": 0.0,
+          "delta64_force_max": 1.687538997430238e-14,
+          "original_stress_yardstick": 5.5902276280273e-08,
+          "corrected_stress_yardstick": 7.559353330799379e-08,
+          "corrected_force_yardstick": 7.870447088187404e-05,
+          "corrected_energy_yardstick_meV_atom": 4.262132893407917
+        },
+        {
+          "config": "Nb2O5_c0",
+          "delta64_energy": 0.0,
+          "delta64_force_max": 7.904787935331115e-14,
+          "original_stress_yardstick": 2.1312389601735315e-07,
+          "corrected_stress_yardstick": 1.641931823698206e-07,
+          "corrected_force_yardstick": 4.9333536440765435e-05,
+          "corrected_energy_yardstick_meV_atom": 1.4046266577289706
+        },
+        {
+          "config": "Nb2O5_c1",
+          "delta64_energy": 0.0,
+          "delta64_force_max": 4.773959005888173e-14,
+          "original_stress_yardstick": 2.199695161159143e-07,
+          "corrected_stress_yardstick": 1.4649303643754497e-07,
+          "corrected_force_yardstick": 0.00010654171725477113,
+          "corrected_energy_yardstick_meV_atom": 1.3932703680308935
+        },
+        {
+          "config": "Nb2O5_c2",
+          "delta64_energy": 0.0,
+          "delta64_force_max": 6.17284001691587e-14,
+          "original_stress_yardstick": 3.2202631742445087e-07,
+          "corrected_stress_yardstick": 3.657771524001596e-07,
+          "corrected_force_yardstick": 6.70864588006026e-05,
+          "corrected_energy_yardstick_meV_atom": 1.4196830034052255
+        },
+        {
+          "config": "NbCl2O_c0",
+          "delta64_energy": 0.0,
+          "delta64_force_max": 1.865174681370263e-14,
+          "original_stress_yardstick": 1.2861295044241938e-07,
+          "corrected_stress_yardstick": 8.0679233044334e-08,
+          "corrected_force_yardstick": 1.9636601994221792e-05,
+          "corrected_energy_yardstick_meV_atom": 5.650060374136956
+        },
+        {
+          "config": "NbCl2O_c1",
+          "delta64_energy": 0.0,
+          "delta64_force_max": 1.687538997430238e-14,
+          "original_stress_yardstick": 1.0188848113216326e-07,
+          "corrected_stress_yardstick": 1.1153986494844004e-07,
+          "corrected_force_yardstick": 2.3215510866592126e-05,
+          "corrected_energy_yardstick_meV_atom": 5.179115406463097
+        },
+        {
+          "config": "NbCl2O_c2",
+          "delta64_energy": 0.0,
+          "delta64_force_max": 1.6209256159527285e-14,
+          "original_stress_yardstick": 2.1309353048087898e-07,
+          "corrected_stress_yardstick": 1.8898999651524584e-07,
+          "corrected_force_yardstick": 2.2494935860928322e-05,
+          "corrected_energy_yardstick_meV_atom": 5.490044371981639
+        }
+      ]
+    },
+    "M_2": {
+      "model_sha256": "fab8b8713c832f31a2a853aaa22fd638be8a369cbf5095e6b3e982a18d10e93a",
+      "script_sha256": "6da2876fb8c43ffcb4458863e8a38be41cff4615b4bf19455daf25246c7928ba",
+      "correction_sha256": "1159bb4947b3edb2c1173d34f1c4cb5d7c60a54163f4a947177ead46b0f35502",
+      "original_cache": "/home/fzwin/.cache/loupmd/gate_refs/MACE-POLAR-1-M_widecrystals2_f4338ad02852eef3abfa.npz",
+      "original_cache_sha256": "e9f8ba426a8461a6ceeb1159e2a695fc7fd2cf827061c9ae96ed39780000a7af",
+      "gpu": "NVIDIA GeForce RTX 5060 Ti",
+      "torch": "2.14.1+cu130",
+      "protocol": "FastMACE stress correction with stock e3nn core; not full FastMACE reference policy",
+      "rows": [
+        {
+          "config": "NbCl3O_c0",
+          "delta64_energy": 0.0,
+          "delta64_force_max": 1.4210854715202004e-14,
+          "original_stress_yardstick": 5.8907730179913464e-08,
+          "corrected_stress_yardstick": 7.498255707311108e-08,
+          "corrected_force_yardstick": 2.8452925394883977e-05,
+          "corrected_energy_yardstick_meV_atom": 14.434260391863063
+        },
+        {
+          "config": "NbCl3O_c1",
+          "delta64_energy": 0.0,
+          "delta64_force_max": 2.1316282072803006e-14,
+          "original_stress_yardstick": 4.916958080969369e-08,
+          "corrected_stress_yardstick": 5.05217380743217e-08,
+          "corrected_force_yardstick": 6.005169866796223e-05,
+          "corrected_energy_yardstick_meV_atom": 13.479039617232047
+        },
+        {
+          "config": "NbCl3O_c2",
+          "delta64_energy": 0.0,
+          "delta64_force_max": 1.3766765505351941e-14,
+          "original_stress_yardstick": 8.180094464987908e-08,
+          "corrected_stress_yardstick": 6.31237867393386e-08,
+          "corrected_force_yardstick": 3.967409030236624e-05,
+          "corrected_energy_yardstick_meV_atom": 14.822828645992558
+        },
+        {
+          "config": "NbCl5_c0",
+          "delta64_energy": 0.0,
+          "delta64_force_max": 1.5765166949677223e-14,
+          "original_stress_yardstick": 2.572423758034903e-08,
+          "corrected_stress_yardstick": 1.9381827517928052e-08,
+          "corrected_force_yardstick": 2.151313736946381e-05,
+          "corrected_energy_yardstick_meV_atom": 11.80996720601494
+        },
+        {
+          "config": "NbCl5_c1",
+          "delta64_energy": 0.0,
+          "delta64_force_max": 1.3322676295501878e-14,
+          "original_stress_yardstick": 4.412413365413592e-08,
+          "corrected_stress_yardstick": 3.927865832586974e-08,
+          "corrected_force_yardstick": 2.9685908350840506e-05,
+          "corrected_energy_yardstick_meV_atom": 12.430632687432485
+        },
+        {
+          "config": "NbCl5_c2",
+          "delta64_energy": 0.0,
+          "delta64_force_max": 1.1546319456101628e-14,
+          "original_stress_yardstick": 4.8735963922722295e-08,
+          "corrected_stress_yardstick": 5.2086891733776897e-08,
+          "corrected_force_yardstick": 2.6164935082562124e-05,
+          "corrected_energy_yardstick_meV_atom": 4.149124265596685
+        },
+        {
+          "config": "Ta2O5_c0",
+          "delta64_energy": 0.0,
+          "delta64_force_max": 6.707523425575346e-12,
+          "original_stress_yardstick": 4.325302707774981e-06,
+          "corrected_stress_yardstick": 8.421014945358962e-06,
+          "corrected_force_yardstick": 0.007355220612680569,
+          "corrected_energy_yardstick_meV_atom": 9.359116817312685
+        },
+        {
+          "config": "Ta2O5_c1",
+          "delta64_energy": 0.0,
+          "delta64_force_max": 3.694822225952521e-12,
+          "original_stress_yardstick": 4.421131933246558e-06,
+          "corrected_stress_yardstick": 7.356067295294366e-06,
+          "corrected_force_yardstick": 0.0038220771618853178,
+          "corrected_energy_yardstick_meV_atom": 9.19107524705829
+        },
+        {
+          "config": "Ta2O5_c2",
+          "delta64_energy": 0.0,
+          "delta64_force_max": 6.707523425575346e-12,
+          "original_stress_yardstick": 1.0713207368284738e-05,
+          "corrected_stress_yardstick": 1.0796110846027218e-05,
+          "corrected_force_yardstick": 0.012442637391359312,
+          "corrected_energy_yardstick_meV_atom": 9.396846013722039
+        },
+        {
+          "config": "TaCl3O_c0",
+          "delta64_energy": 0.0,
+          "delta64_force_max": 1.637578961322106e-14,
+          "original_stress_yardstick": 5.746986848735591e-08,
+          "corrected_stress_yardstick": 6.752068224674668e-08,
+          "corrected_force_yardstick": 3.396577174186177e-05,
+          "corrected_energy_yardstick_meV_atom": 16.025796157191508
+        },
+        {
+          "config": "TaCl3O_c1",
+          "delta64_energy": 0.0,
+          "delta64_force_max": 2.042810365310288e-14,
+          "original_stress_yardstick": 9.213336961411134e-08,
+          "corrected_stress_yardstick": 7.538094152700903e-08,
+          "corrected_force_yardstick": 7.059910621176613e-05,
+          "corrected_energy_yardstick_meV_atom": 14.057610505551565
+        },
+        {
+          "config": "TaCl3O_c2",
+          "delta64_energy": 0.0,
+          "delta64_force_max": 1.4210854715202004e-14,
+          "original_stress_yardstick": 8.195538216126952e-08,
+          "corrected_stress_yardstick": 6.798977946614881e-08,
+          "corrected_force_yardstick": 5.026855333833957e-05,
+          "corrected_energy_yardstick_meV_atom": 14.306695252889767
+        },
+        {
+          "config": "TaCl5_c0",
+          "delta64_energy": 0.0,
+          "delta64_force_max": 1.0658141036401503e-14,
+          "original_stress_yardstick": 4.6830671479591857e-08,
+          "corrected_stress_yardstick": 4.181619100290801e-08,
+          "corrected_force_yardstick": 2.0908952626630395e-05,
+          "corrected_energy_yardstick_meV_atom": 12.8621184504246
+        },
+        {
+          "config": "TaCl5_c1",
+          "delta64_energy": 0.0,
+          "delta64_force_max": 1.1546319456101628e-14,
+          "original_stress_yardstick": 2.9421174120667498e-08,
+          "corrected_stress_yardstick": 2.8015156385268608e-08,
+          "corrected_force_yardstick": 3.0238061911269654e-05,
+          "corrected_energy_yardstick_meV_atom": 13.786919645671905
+        },
+        {
+          "config": "TaCl5_c2",
+          "delta64_energy": 0.0,
+          "delta64_force_max": 1.0880185641326534e-14,
+          "original_stress_yardstick": 1.680977191990951e-08,
+          "corrected_stress_yardstick": 2.4448693833334367e-08,
+          "corrected_force_yardstick": 2.845755753311252e-05,
+          "corrected_energy_yardstick_meV_atom": 13.263458176947164
+        }
+      ]
+    }
+  },
+  "rows": [
+    {
+      "model": "S",
+      "config": "Na2O_c0",
+      "path": "simt",
+      "error": [
+        0.0006267994952698549,
+        3.78054084783086e-05,
+        2.9333492534977523e-07
+      ],
+      "yardstick": [
+        5.511802003897128,
+        6.881361731247981e-05,
+        8.200276668812734e-07
+      ],
+      "ratio": [
+        0.0001137195230936589,
+        0.5493884779612122,
+        0.3577134494319999
+      ],
+      "passed": true
+    },
+    {
+      "model": "S",
+      "config": "Na2O_c0",
+      "path": "3x_rnacc",
+      "error": [
+        0.0007528607607071782,
+        1.8310928705078666e-05,
+        1.4650688853201643e-06
+      ],
+      "yardstick": [
+        5.511802003897128,
+        6.881361731247981e-05,
+        8.200276668812734e-07
+      ],
+      "ratio": [
+        0.00013659067582160367,
+        0.2660945525059305,
+        1.786609091973823
+      ],
+      "passed": true
+    },
+    {
+      "model": "S",
+      "config": "Na2O_c1",
+      "path": "simt",
+      "error": [
+        0.00028561133845352835,
+        8.450333002585353e-05,
+        2.0001392906365822e-06
+      ],
+      "yardstick": [
+        5.475993378139618,
+        0.00017816162959061188,
+        6.4867462703510625e-06
+      ],
+      "ratio": [
+        5.2156991203404314e-05,
+        0.47430712336898373,
+        0.30834245818718214
+      ],
+      "passed": true
+    },
+    {
+      "model": "S",
+      "config": "Na2O_c1",
+      "path": "3x_rnacc",
+      "error": [
+        0.0036939673907594914,
+        6.678691903250211e-05,
+        1.1047987327206243e-06
+      ],
+      "yardstick": [
+        5.475993378139618,
+        0.00017816162959061188,
+        6.4867462703510625e-06
+      ],
+      "ratio": [
+        0.0006745748461833345,
+        0.3748670192676628,
+        0.17031631679048742
+      ],
+      "passed": true
+    },
+    {
+      "model": "S",
+      "config": "Na2O_c2",
+      "path": "simt",
+      "error": [
+        0.0003459762758862825,
+        5.302819319863428e-05,
+        1.3638007887450954e-06
+      ],
+      "yardstick": [
+        5.075427754580929,
+        8.916311220341644e-05,
+        2.5972596082723953e-06
+      ],
+      "ratio": [
+        6.816691964022436e-05,
+        0.5947324166708754,
+        0.5250922104210627
+      ],
+      "passed": true
+    },
+    {
+      "model": "S",
+      "config": "Na2O_c2",
+      "path": "3x_rnacc",
+      "error": [
+        0.0024904564517423695,
+        3.095970549749083e-05,
+        1.6070434174508819e-06
+      ],
+      "yardstick": [
+        5.075427754580929,
+        8.916311220341644e-05,
+        2.5972596082723953e-06
+      ],
+      "ratio": [
+        0.0004906889768048729,
+        0.34722549193728747,
+        0.6187457781780351
+      ],
+      "passed": true
+    },
+    {
+      "model": "S",
+      "config": "NaCl_c0",
+      "path": "simt",
+      "error": [
+        0.00010469078983145732,
+        1.7370229544594329e-06,
+        3.8545499616779444e-08
+      ],
+      "yardstick": [
+        2.3882150977711984,
+        3.4637995962316648e-06,
+        7.87213586175145e-08
+      ],
+      "ratio": [
+        4.383641571027668e-05,
+        0.5014790567991214,
+        0.48964474564090615
+      ],
+      "passed": true
+    },
+    {
+      "model": "S",
+      "config": "NaCl_c0",
+      "path": "3x_rnacc",
+      "error": [
+        0.00020057066447205015,
+        1.105690047131791e-06,
+        1.6074322053971635e-08
+      ],
+      "yardstick": [
+        2.3882150977711984,
+        3.4637995962316648e-06,
+        7.87213586175145e-08
+      ],
+      "ratio": [
+        8.398350075721098e-05,
+        0.31921305387721993,
+        0.20419264017116825
+      ],
+      "passed": true
+    },
+    {
+      "model": "S",
+      "config": "NaCl_c1",
+      "path": "simt",
+      "error": [
+        0.00012845460635920367,
+        2.7083214977352554e-06,
+        1.0739043627971956e-07
+      ],
+      "yardstick": [
+        2.265444463032677,
+        6.065920584743395e-06,
+        1.795101717133596e-07
+      ],
+      "ratio": [
+        5.670172385830445e-05,
+        0.4464815290439258,
+        0.5982415105211962
+      ],
+      "passed": true
+    },
+    {
+      "model": "S",
+      "config": "NaCl_c1",
+      "path": "3x_rnacc",
+      "error": [
+        0.0001994873552272717,
+        1.274903917436454e-06,
+        1.9936440207035666e-09
+      ],
+      "yardstick": [
+        2.265444463032677,
+        6.065920584743395e-06,
+        1.795101717133596e-07
+      ],
+      "ratio": [
+        8.805660808838565e-05,
+        0.21017484479487064,
+        0.011106022581756546
+      ],
+      "passed": true
+    },
+    {
+      "model": "S",
+      "config": "NaCl_c2",
+      "path": "simt",
+      "error": [
+        2.1870989628412105e-06,
+        2.1780489247169577e-06,
+        5.0910106902737895e-08
+      ],
+      "yardstick": [
+        2.1172969696905324,
+        4.232068723353244e-06,
+        2.0475393447232093e-07
+      ],
+      "ratio": [
+        1.0329675025043276e-06,
+        0.5146534867683337,
+        0.24864043288809198
+      ],
+      "passed": true
+    },
+    {
+      "model": "S",
+      "config": "NaCl_c2",
+      "path": "3x_rnacc",
+      "error": [
+        0.0001972646849160945,
+        1.3165549317961656e-06,
+        1.6912531876703274e-08
+      ],
+      "yardstick": [
+        2.1172969696905324,
+        4.232068723353244e-06,
+        2.0475393447232093e-07
+      ],
+      "ratio": [
+        9.316817042671488e-05,
+        0.3110901589407566,
+        0.0825993010600221
+      ],
+      "passed": true
+    },
+    {
+      "model": "S",
+      "config": "NaNbCl6_c0",
+      "path": "simt",
+      "error": [
+        0.00011486554285511374,
+        9.060561360074715e-06,
+        1.5705109955577168e-09
+      ],
+      "yardstick": [
+        4.011539526497169,
+        1.6764971546068264e-05,
+        5.4454833219030885e-08
+      ],
+      "ratio": [
+        2.8633780646158317e-05,
+        0.5404459730323614,
+        0.02884061712650429
+      ],
+      "passed": true
+    },
+    {
+      "model": "S",
+      "config": "NaNbCl6_c0",
+      "path": "3x_rnacc",
+      "error": [
+        0.00013838628850256404,
+        5.242918801218188e-06,
+        1.3786853717695502e-08
+      ],
+      "yardstick": [
+        4.011539526497169,
+        1.6764971546068264e-05,
+        5.4454833219030885e-08
+      ],
+      "ratio": [
+        3.449705221361769e-05,
+        0.31273055172275327,
+        0.2531796151544776
+      ],
+      "passed": true
+    },
+    {
+      "model": "S",
+      "config": "NaNbCl6_c1",
+      "path": "simt",
+      "error": [
+        0.0001282581555036207,
+        6.485110539800054e-06,
+        8.826442211666563e-09
+      ],
+      "yardstick": [
+        4.101731261471286,
+        2.7749461926185326e-05,
+        2.129515864644424e-08
+      ],
+      "ratio": [
+        3.1269273223330254e-05,
+        0.23370220860680854,
+        0.2647932663499969
+      ],
+      "passed": true
+    },
+    {
+      "model": "S",
+      "config": "NaNbCl6_c1",
+      "path": "3x_rnacc",
+      "error": [
+        0.00017621763011751076,
+        5.313806623385986e-06,
+        1.5744323285209194e-08
+      ],
+      "yardstick": [
+        4.101731261471286,
+        2.7749461926185326e-05,
+        2.129515864644424e-08
+      ],
+      "ratio": [
+        4.296176879572108e-05,
+        0.19149224001247028,
+        0.4723296985562758
+      ],
+      "passed": true
+    },
+    {
+      "model": "S",
+      "config": "NaNbCl6_c2",
+      "path": "simt",
+      "error": [
+        0.00012127323619400461,
+        8.30656053651957e-06,
+        8.845826535673618e-09
+      ],
+      "yardstick": [
+        3.580983538995497,
+        5.0619196587886606e-05,
+        4.164217517468524e-08
+      ],
+      "ratio": [
+        3.386590160870245e-05,
+        0.16409901966929608,
+        0.21242469920377977
+      ],
+      "passed": true
+    },
+    {
+      "model": "S",
+      "config": "NaNbCl6_c2",
+      "path": "3x_rnacc",
+      "error": [
+        0.0001803552246807764,
+        5.991927470860858e-06,
+        2.1537567690670806e-08
+      ],
+      "yardstick": [
+        3.580983538995497,
+        5.0619196587886606e-05,
+        4.164217517468524e-08
+      ],
+      "ratio": [
+        5.036471760251875e-05,
+        0.11837263083497364,
+        0.5172056358805133
+      ],
+      "passed": true
+    },
+    {
+      "model": "S",
+      "config": "NaNbO3_c0",
+      "path": "simt",
+      "error": [
+        58.55780749859858,
+        77.9167967485264,
+        1.0347710804453527
+      ],
+      "yardstick": [
+        35.65908773711676,
+        144.8964507218916,
+        3.289842985541327
+      ],
+      "ratio": [
+        1.6421566342440963,
+        0.537741237693094,
+        0.3145350963535685
+      ],
+      "passed": true
+    },
+    {
+      "model": "S",
+      "config": "NaNbO3_c0",
+      "path": "3x_rnacc",
+      "error": [
+        0.7855026297167771,
+        40.61088526295498,
+        0.613898575953499
+      ],
+      "yardstick": [
+        35.65908773711676,
+        144.8964507218916,
+        3.289842985541327
+      ],
+      "ratio": [
+        0.02202811904520947,
+        0.2802752245526143,
+        0.18660421748136563
+      ],
+      "passed": true
+    },
+    {
+      "model": "S",
+      "config": "NaNbO3_c1",
+      "path": "simt",
+      "error": [
+        0.006781210282093121,
+        0.0032622772215518125,
+        1.6431072129841073e-05
+      ],
+      "yardstick": [
+        7.950248244257334,
+        0.011879303650971451,
+        2.4150828791147383e-05
+      ],
+      "ratio": [
+        0.0008529557912850534,
+        0.2746185565586611,
+        0.6803523088973233
+      ],
+      "passed": true
+    },
+    {
+      "model": "S",
+      "config": "NaNbO3_c1",
+      "path": "3x_rnacc",
+      "error": [
+        0.010122808291473322,
+        0.0033063700230968607,
+        8.508888989455787e-06
+      ],
+      "yardstick": [
+        7.950248244257334,
+        0.011879303650971451,
+        2.4150828791147383e-05
+      ],
+      "ratio": [
+        0.0012732694603322964,
+        0.2783302894043353,
+        0.3523228566207536
+      ],
+      "passed": true
+    },
+    {
+      "model": "S",
+      "config": "NaNbO3_c2",
+      "path": "simt",
+      "error": [
+        0.01716966604969154,
+        0.004837172511258814,
+        5.561836798761988e-05
+      ],
+      "yardstick": [
+        8.483025983959022,
+        0.009241703346845043,
+        5.1891551991811724e-05
+      ],
+      "ratio": [
+        0.002024002529540581,
+        0.5234070311194462,
+        1.0718193203471007
+      ],
+      "passed": true
+    },
+    {
+      "model": "S",
+      "config": "NaNbO3_c2",
+      "path": "3x_rnacc",
+      "error": [
+        0.011853292946600251,
+        0.0023033973531028096,
+        2.2948716831727722e-05
+      ],
+      "yardstick": [
+        8.483025983959022,
+        0.009241703346845043,
+        5.1891551991811724e-05
+      ],
+      "ratio": [
+        0.001397295371841868,
+        0.24923948179846625,
+        0.44224379404472114
+      ],
+      "passed": true
+    },
+    {
+      "model": "S",
+      "config": "NaNbOCl4_Pbca_c0",
+      "path": "simt",
+      "error": [
+        0.00010314397513866425,
+        2.18492166865758e-05,
+        1.365482253309902e-08
+      ],
+      "yardstick": [
+        6.335952260997146,
+        6.0793424917715555e-05,
+        6.846622271558522e-08
+      ],
+      "ratio": [
+        1.6279159136598597e-05,
+        0.3594009831844301,
+        0.19943881802596833
+      ],
+      "passed": true
+    },
+    {
+      "model": "S",
+      "config": "NaNbOCl4_Pbca_c0",
+      "path": "3x_rnacc",
+      "error": [
+        0.0001879920351452061,
+        1.515172998978187e-05,
+        9.589924458708321e-09
+      ],
+      "yardstick": [
+        6.335952260997146,
+        6.0793424917715555e-05,
+        6.846622271558522e-08
+      ],
+      "ratio": [
+        2.9670683648051996e-05,
+        0.24923303811703112,
+        0.14006796458665055
+      ],
+      "passed": true
+    },
+    {
+      "model": "S",
+      "config": "NaNbOCl4_Pbca_c1",
+      "path": "simt",
+      "error": [
+        0.00017226349362837418,
+        1.8196764411504418e-05,
+        1.9906427367599733e-08
+      ],
+      "yardstick": [
+        1.8186311114862161,
+        6.015530504299704e-05,
+        7.300313566160899e-08
+      ],
+      "ratio": [
+        9.472151473731115e-05,
+        0.30249641986684245,
+        0.27267907312737744
+      ],
+      "passed": true
+    },
+    {
+      "model": "S",
+      "config": "NaNbOCl4_Pbca_c1",
+      "path": "3x_rnacc",
+      "error": [
+        0.00019329205055588057,
+        1.647619188438476e-05,
+        8.04790395436683e-09
+      ],
+      "yardstick": [
+        1.8186311114862161,
+        6.015530504299704e-05,
+        7.300313566160899e-08
+      ],
+      "ratio": [
+        0.00010628436373659034,
+        0.27389424544698293,
+        0.11024052434776546
+      ],
+      "passed": true
+    },
+    {
+      "model": "S",
+      "config": "NaNbOCl4_Pbca_c2",
+      "path": "simt",
+      "error": [
+        0.00013540661062246988,
+        2.0710388067834984e-05,
+        1.7396997419039106e-08
+      ],
+      "yardstick": [
+        7.306807159953418,
+        6.310142491550152e-05,
+        1.010917436428116e-07
+      ],
+      "ratio": [
+        1.853157030947743e-05,
+        0.32820793025780404,
+        0.17209117967643411
+      ],
+      "passed": true
+    },
+    {
+      "model": "S",
+      "config": "NaNbOCl4_Pbca_c2",
+      "path": "3x_rnacc",
+      "error": [
+        0.00016203037895528332,
+        3.1044640582678085e-05,
+        2.1796136201457372e-08
+      ],
+      "yardstick": [
+        7.306807159953418,
+        6.310142491550152e-05,
+        1.010917436428116e-07
+      ],
+      "ratio": [
+        2.2175264162345336e-05,
+        0.49198002460720414,
+        0.21560748104681887
+      ],
+      "passed": true
+    },
+    {
+      "model": "S",
+      "config": "NaTaCl6_c0",
+      "path": "simt",
+      "error": [
+        0.00029604052542708814,
+        7.111486801103517e-06,
+        1.6981647355668317e-08
+      ],
+      "yardstick": [
+        6.572932129832528,
+        2.3640092060905893e-05,
+        3.856171116450868e-08
+      ],
+      "ratio": [
+        4.503934006612525e-05,
+        0.3008231432763297,
+        0.4403758765585547
+      ],
+      "passed": true
+    },
+    {
+      "model": "S",
+      "config": "NaTaCl6_c0",
+      "path": "3x_rnacc",
+      "error": [
+        2.620557400708397e-05,
+        4.177267397875717e-06,
+        9.556879471822599e-09
+      ],
+      "yardstick": [
+        6.572932129832528,
+        2.3640092060905893e-05,
+        3.856171116450868e-08
+      ],
+      "ratio": [
+        3.986892529765352e-06,
+        0.17670267049356167,
+        0.2478333866215598
+      ],
+      "passed": true
+    },
+    {
+      "model": "S",
+      "config": "NaTaCl6_c1",
+      "path": "simt",
+      "error": [
+        0.0002481647243257612,
+        9.04082866215461e-06,
+        1.584124495121464e-08
+      ],
+      "yardstick": [
+        6.764201885137784,
+        3.560131741719985e-05,
+        6.725870188920013e-08
+      ],
+      "ratio": [
+        3.668795351466748e-05,
+        0.25394646372796215,
+        0.23552706945357058
+      ],
+      "passed": true
+    },
+    {
+      "model": "S",
+      "config": "NaTaCl6_c1",
+      "path": "3x_rnacc",
+      "error": [
+        6.0776073951274157e-05,
+        9.482576079467009e-06,
+        9.033521368440045e-09
+      ],
+      "yardstick": [
+        6.764201885137784,
+        3.560131741719985e-05,
+        6.725870188920013e-08
+      ],
+      "ratio": [
+        8.98495860757949e-06,
+        0.26635463986750524,
+        0.13431007608980594
+      ],
+      "passed": true
+    },
+    {
+      "model": "S",
+      "config": "NaTaCl6_c2",
+      "path": "simt",
+      "error": [
+        0.0003181679251914223,
+        8.112199307630519e-06,
+        1.0736942621450418e-08
+      ],
+      "yardstick": [
+        6.572920528318112,
+        3.4753475177673465e-05,
+        8.796279778698624e-08
+      ],
+      "ratio": [
+        4.8405868262161314e-05,
+        0.23342124107467693,
+        0.1220623137459926
+      ],
+      "passed": true
+    },
+    {
+      "model": "S",
+      "config": "NaTaCl6_c2",
+      "path": "3x_rnacc",
+      "error": [
+        5.275796866044402e-05,
+        5.874713701503609e-06,
+        7.978953778936537e-09
+      ],
+      "yardstick": [
+        6.572920528318112,
+        3.4753475177673465e-05,
+        8.796279778698624e-08
+      ],
+      "ratio": [
+        8.026564208885057e-06,
+        0.1690396045710467,
+        0.0907082764495355
+      ],
+      "passed": true
+    },
+    {
+      "model": "S",
+      "config": "NaTaO3_c0",
+      "path": "simt",
+      "error": [
+        0.04054874233487579,
+        0.013167100083265382,
+        0.0005799557470993477
+      ],
+      "yardstick": [
+        8.39497601458182,
+        0.003168189294811441,
+        9.009875180865379e-05
+      ],
+      "ratio": [
+        0.004830120093785122,
+        4.156033260016756,
+        6.436889917532068
+      ],
+      "passed": false
+    },
+    {
+      "model": "S",
+      "config": "NaTaO3_c0",
+      "path": "3x_rnacc",
+      "error": [
+        0.0020594792052482567,
+        0.0006159445527060825,
+        1.574815807270369e-05
+      ],
+      "yardstick": [
+        8.39497601458182,
+        0.003168189294811441,
+        9.009875180865379e-05
+      ],
+      "ratio": [
+        0.00024532282184856795,
+        0.19441532540837062,
+        0.17478774962552937
+      ],
+      "passed": true
+    },
+    {
+      "model": "S",
+      "config": "NaTaO3_c1",
+      "path": "simt",
+      "error": [
+        0.02177601078680406,
+        0.01205609782792294,
+        0.0002568698672158476
+      ],
+      "yardstick": [
+        7.975601939769048,
+        0.019191134095848383,
+        0.00044247585959755753
+      ],
+      "ratio": [
+        0.002730328187295997,
+        0.6282118486437461,
+        0.5805285455560828
+      ],
+      "passed": true
+    },
+    {
+      "model": "S",
+      "config": "NaTaO3_c1",
+      "path": "3x_rnacc",
+      "error": [
+        0.008030772894724376,
+        0.0036867278403462933,
+        0.00010097000648467969
+      ],
+      "yardstick": [
+        7.975601939769048,
+        0.019191134095848383,
+        0.00044247585959755753
+      ],
+      "ratio": [
+        0.0010069174659633185,
+        0.19210578290648508,
+        0.22819325460266768
+      ],
+      "passed": true
+    },
+    {
+      "model": "S",
+      "config": "NaTaO3_c2",
+      "path": "simt",
+      "error": [
+        0.004819008366515239,
+        0.000502127989714829,
+        1.2273933271966797e-06
+      ],
+      "yardstick": [
+        8.122757592354901,
+        0.0007979736957333117,
+        8.673796572100656e-06
+      ],
+      "ratio": [
+        0.0005932724584876034,
+        0.6292538117480048,
+        0.14150589271883562
+      ],
+      "passed": true
+    },
+    {
+      "model": "S",
+      "config": "NaTaO3_c2",
+      "path": "3x_rnacc",
+      "error": [
+        0.0007683766954061058,
+        0.000193707355837347,
+        3.549844175498862e-06
+      ],
+      "yardstick": [
+        8.122757592354901,
+        0.0007979736957333117,
+        8.673796572100656e-06
+      ],
+      "ratio": [
+        9.459554673025059e-05,
+        0.24274904908906336,
+        0.409260713689893
+      ],
+      "passed": true
+    },
+    {
+      "model": "S",
+      "config": "NaTaOCl4_Pbca_c0",
+      "path": "simt",
+      "error": [
+        0.00015252693888864348,
+        2.88251606495038e-05,
+        1.2843778533777606e-08
+      ],
+      "yardstick": [
+        4.25073522222062,
+        0.0001037093283852153,
+        8.652269747888575e-08
+      ],
+      "ratio": [
+        3.588248406800603e-05,
+        0.2779418312539481,
+        0.14844403732225167
+      ],
+      "passed": true
+    },
+    {
+      "model": "S",
+      "config": "NaTaOCl4_Pbca_c0",
+      "path": "3x_rnacc",
+      "error": [
+        9.248053954382028e-05,
+        2.5209274872928233e-05,
+        2.8270935592544788e-08
+      ],
+      "yardstick": [
+        4.25073522222062,
+        0.0001037093283852153,
+        8.652269747888575e-08
+      ],
+      "ratio": [
+        2.1756363242852765e-05,
+        0.24307625230482202,
+        0.32674588768390844
+      ],
+      "passed": true
+    },
+    {
+      "model": "S",
+      "config": "NaTaOCl4_Pbca_c1",
+      "path": "simt",
+      "error": [
+        0.0002021094717617546,
+        2.646362358804666e-05,
+        3.2072097450042136e-08
+      ],
+      "yardstick": [
+        4.312116287889824,
+        6.461542320224112e-05,
+        1.243806602713171e-07
+      ],
+      "ratio": [
+        4.6870134817412087e-05,
+        0.409555834761271,
+        0.2578543752708969
+      ],
+      "passed": true
+    },
+    {
+      "model": "S",
+      "config": "NaTaOCl4_Pbca_c1",
+      "path": "3x_rnacc",
+      "error": [
+        7.922790246084332e-05,
+        1.7122018853399368e-05,
+        3.039177587371711e-08
+      ],
+      "yardstick": [
+        4.312116287889824,
+        6.461542320224112e-05,
+        1.243806602713171e-07
+      ],
+      "ratio": [
+        1.8373322325130123e-05,
+        0.2649834668699579,
+        0.24434486685809648
+      ],
+      "passed": true
+    },
+    {
+      "model": "S",
+      "config": "NaTaOCl4_Pbca_c2",
+      "path": "simt",
+      "error": [
+        0.0003042025907364275,
+        2.6365391494920232e-05,
+        2.071890992105807e-08
+      ],
+      "yardstick": [
+        6.451338845571237,
+        6.354769520888759e-05,
+        1.8318230644853717e-07
+      ],
+      "ratio": [
+        4.715340459062366e-05,
+        0.41489138840133494,
+        0.11310541024811692
+      ],
+      "passed": true
+    },
+    {
+      "model": "S",
+      "config": "NaTaOCl4_Pbca_c2",
+      "path": "3x_rnacc",
+      "error": [
+        0.00010515317886269518,
+        2.0154762541579885e-05,
+        3.6142762879776136e-08
+      ],
+      "yardstick": [
+        6.451338845571237,
+        6.354769520888759e-05,
+        1.8318230644853717e-07
+      ],
+      "ratio": [
+        1.6299435106385943e-05,
+        0.31715961492118916,
+        0.197304879387628
+      ],
+      "passed": true
+    },
+    {
+      "model": "S",
+      "config": "Nb2O5_c0",
+      "path": "simt",
+      "error": [
+        0.00666001090264347,
+        0.004743463070013831,
+        0.00010355472211909245
+      ],
+      "yardstick": [
+        1.4943014643254824,
+        0.007794398026646832,
+        0.00016859775670496902
+      ],
+      "ratio": [
+        0.004456939286778892,
+        0.6085733694632067,
+        0.6142117436372772
+      ],
+      "passed": true
+    },
+    {
+      "model": "S",
+      "config": "Nb2O5_c0",
+      "path": "3x_rnacc",
+      "error": [
+        0.008780479090221758,
+        0.005483471990913813,
+        0.000117566422130011
+      ],
+      "yardstick": [
+        1.4943014643254824,
+        0.007794398026646832,
+        0.00016859775670496902
+      ],
+      "ratio": [
+        0.00587597569824052,
+        0.7035144949189637,
+        0.6973190179258537
+      ],
+      "passed": true
+    },
+    {
+      "model": "S",
+      "config": "Nb2O5_c1",
+      "path": "simt",
+      "error": [
+        0.013715326921166187,
+        0.6934272356082261,
+        0.024163048912649643
+      ],
+      "yardstick": [
+        1.2052052560258224,
+        1.8842612542242136,
+        0.06613959571967065
+      ],
+      "ratio": [
+        0.011380075595083802,
+        0.36801013344284006,
+        0.36533408844927795
+      ],
+      "passed": true
+    },
+    {
+      "model": "S",
+      "config": "Nb2O5_c1",
+      "path": "3x_rnacc",
+      "error": [
+        0.001641343260416761,
+        0.16026152322257303,
+        0.005640162239380686
+      ],
+      "yardstick": [
+        1.2052052560258224,
+        1.8842612542242136,
+        0.06613959571967065
+      ],
+      "ratio": [
+        0.0013618786113073456,
+        0.08505270851549498,
+        0.08527663615130382
+      ],
+      "passed": true
+    },
+    {
+      "model": "S",
+      "config": "Nb2O5_c2",
+      "path": "simt",
+      "error": [
+        0.17544005796870416,
+        0.7516019123859223,
+        0.02199244675577461
+      ],
+      "yardstick": [
+        0.7079623714422009,
+        3.167268821110156,
+        0.08838258294042589
+      ],
+      "ratio": [
+        0.24780986256559448,
+        0.23730284823833778,
+        0.24883236067674752
+      ],
+      "passed": true
+    },
+    {
+      "model": "S",
+      "config": "Nb2O5_c2",
+      "path": "3x_rnacc",
+      "error": [
+        0.073936817768429,
+        0.30332394914967153,
+        0.008830274187857867
+      ],
+      "yardstick": [
+        0.7079623714422009,
+        3.167268821110156,
+        0.08838258294042589
+      ],
+      "ratio": [
+        0.10443608410685895,
+        0.09576829952923092,
+        0.09990966425828375
+      ],
+      "passed": true
+    },
+    {
+      "model": "S",
+      "config": "NbCl2O_c0",
+      "path": "simt",
+      "error": [
+        0.00026502402761252597,
+        8.97685124279235e-06,
+        5.6457097621920305e-08
+      ],
+      "yardstick": [
+        5.6093964294632315,
+        2.3336525762474025e-05,
+        2.1836639828298754e-07
+      ],
+      "ratio": [
+        4.724644281165316e-05,
+        0.3846695662482652,
+        0.25854297211403315
+      ],
+      "passed": true
+    },
+    {
+      "model": "S",
+      "config": "NbCl2O_c0",
+      "path": "3x_rnacc",
+      "error": [
+        0.0002644210326252505,
+        5.10905449324639e-06,
+        5.959484344897348e-08
+      ],
+      "yardstick": [
+        5.6093964294632315,
+        2.3336525762474025e-05,
+        2.1836639828298754e-07
+      ],
+      "ratio": [
+        4.713894550871549e-05,
+        0.2189295246965139,
+        0.27291215094248494
+      ],
+      "passed": true
+    },
+    {
+      "model": "S",
+      "config": "NbCl2O_c1",
+      "path": "simt",
+      "error": [
+        0.00036854362406302243,
+        1.1561862052644756e-05,
+        4.0719326696928015e-08
+      ],
+      "yardstick": [
+        5.583175812716945,
+        2.5410999192843065e-05,
+        2.1986170893172757e-07
+      ],
+      "ratio": [
+        6.600967557274142e-05,
+        0.4549943890400469,
+        0.18520426724042413
+      ],
+      "passed": true
+    },
+    {
+      "model": "S",
+      "config": "NbCl2O_c1",
+      "path": "3x_rnacc",
+      "error": [
+        0.00031605304684489965,
+        9.574895497799218e-06,
+        5.975463052230318e-08
+      ],
+      "yardstick": [
+        5.583175812716945,
+        2.5410999192843065e-05,
+        2.1986170893172757e-07
+      ],
+      "ratio": [
+        5.6608112917565195e-05,
+        0.376801220020343,
+        0.2717827984356223
+      ],
+      "passed": true
+    },
+    {
+      "model": "S",
+      "config": "NbCl2O_c2",
+      "path": "simt",
+      "error": [
+        0.0004057292244397104,
+        9.594615725028177e-06,
+        3.5789642223796325e-08
+      ],
+      "yardstick": [
+        5.498652476489951,
+        3.3566980873922514e-05,
+        3.7608789542689647e-07
+      ],
+      "ratio": [
+        7.378702803540449e-05,
+        0.28583493287839995,
+        0.09516297296186996
+      ],
+      "passed": true
+    },
+    {
+      "model": "S",
+      "config": "NbCl2O_c2",
+      "path": "3x_rnacc",
+      "error": [
+        0.0003153090801788494,
+        9.00398821723769e-06,
+        1.3076496250402636e-08
+      ],
+      "yardstick": [
+        5.498652476489951,
+        3.3566980873922514e-05,
+        3.7608789542689647e-07
+      ],
+      "ratio": [
+        5.734297294236824e-05,
+        0.26823944194018057,
+        0.03476978761988481
+      ],
+      "passed": true
+    },
+    {
+      "model": "S",
+      "config": "NbCl3O_c0",
+      "path": "simt",
+      "error": [
+        0.000178723712451756,
+        1.3414039502779307e-05,
+        2.181472613660418e-08
+      ],
+      "yardstick": [
+        11.206881505495403,
+        3.194567707609508e-05,
+        1.0479495143184137e-07
+      ],
+      "ratio": [
+        1.594767575298419e-05,
+        0.419901555719945,
+        0.20816581179287513
+      ],
+      "passed": true
+    },
+    {
+      "model": "S",
+      "config": "NbCl3O_c0",
+      "path": "3x_rnacc",
+      "error": [
+        0.00017503771232441068,
+        1.196230409217236e-05,
+        1.6844499656221146e-08
+      ],
+      "yardstick": [
+        11.206881505495403,
+        3.194567707609508e-05,
+        1.0479495143184137e-07
+      ],
+      "ratio": [
+        1.5618770684652928e-05,
+        0.37445767900545585,
+        0.16073770182695116
+      ],
+      "passed": true
+    },
+    {
+      "model": "S",
+      "config": "NbCl3O_c1",
+      "path": "simt",
+      "error": [
+        0.00021407322492450476,
+        1.3704273314374404e-05,
+        3.373796626446324e-08
+      ],
+      "yardstick": [
+        14.418308081803843,
+        5.226573454919503e-05,
+        1.5832985362368435e-07
+      ],
+      "ratio": [
+        1.4847319374085848e-05,
+        0.26220378289097385,
+        0.2130865752244744
+      ],
+      "passed": true
+    },
+    {
+      "model": "S",
+      "config": "NbCl3O_c1",
+      "path": "3x_rnacc",
+      "error": [
+        0.00021844316506758332,
+        1.256412454075928e-05,
+        2.3928651404075962e-08
+      ],
+      "yardstick": [
+        14.418308081803843,
+        5.226573454919503e-05,
+        1.5832985362368435e-07
+      ],
+      "ratio": [
+        1.5150402101843171e-05,
+        0.2403893229307496,
+        0.1511316460946725
+      ],
+      "passed": true
+    },
+    {
+      "model": "S",
+      "config": "NbCl3O_c2",
+      "path": "simt",
+      "error": [
+        0.00018948776414617896,
+        1.530286069506559e-05,
+        2.9717444983545088e-08
+      ],
+      "yardstick": [
+        10.927376135077793,
+        4.4195370259902944e-05,
+        1.8099289657291795e-07
+      ],
+      "ratio": [
+        1.7340646263461853e-05,
+        0.34625483631142673,
+        0.16419122267360697
+      ],
+      "passed": true
+    },
+    {
+      "model": "S",
+      "config": "NbCl3O_c2",
+      "path": "3x_rnacc",
+      "error": [
+        0.0002450149622745812,
+        8.813395655726808e-06,
+        1.6467153924303035e-08
+      ],
+      "yardstick": [
+        10.927376135077793,
+        4.4195370259902944e-05,
+        1.8099289657291795e-07
+      ],
+      "ratio": [
+        2.2422122131228067e-05,
+        0.19941897994964694,
+        0.09098232160547136
+      ],
+      "passed": true
+    },
+    {
+      "model": "S",
+      "config": "NbCl5_c0",
+      "path": "simt",
+      "error": [
+        0.00022406715692745315,
+        8.708036927540519e-06,
+        1.3278434095320701e-08
+      ],
+      "yardstick": [
+        6.214576579319934,
+        2.42176062333066e-05,
+        6.66457672660048e-08
+      ],
+      "ratio": [
+        3.60550962833212e-05,
+        0.3595746352322927,
+        0.19923897105606392
+      ],
+      "passed": true
+    },
+    {
+      "model": "S",
+      "config": "NbCl5_c0",
+      "path": "3x_rnacc",
+      "error": [
+        0.00020884693151822798,
+        6.638066234465612e-06,
+        1.1524219190039986e-08
+      ],
+      "yardstick": [
+        6.214576579319934,
+        2.42176062333066e-05,
+        6.66457672660048e-08
+      ],
+      "ratio": [
+        3.360597924132142e-05,
+        0.2741008409549679,
+        0.17291749593103345
+      ],
+      "passed": true
+    },
+    {
+      "model": "S",
+      "config": "NbCl5_c1",
+      "path": "simt",
+      "error": [
+        0.00019296486344602372,
+        1.0804851963364115e-05,
+        1.0062090374693107e-08
+      ],
+      "yardstick": [
+        5.417546460025564,
+        2.5300635273062255e-05,
+        2.8461173939430158e-08
+      ],
+      "ratio": [
+        3.561849720530374e-05,
+        0.42705852429200103,
+        0.3018627112407932
+      ],
+      "passed": true
+    },
+    {
+      "model": "S",
+      "config": "NbCl5_c1",
+      "path": "3x_rnacc",
+      "error": [
+        0.0002721574640384427,
+        7.403296264918424e-06,
+        6.421920513134628e-09
+      ],
+      "yardstick": [
+        5.417546460025564,
+        2.5300635273062255e-05,
+        2.8461173939430158e-08
+      ],
+      "ratio": [
+        5.023629535004642e-05,
+        0.2926130583290436,
+        0.19265761539403883
+      ],
+      "passed": true
+    },
+    {
+      "model": "S",
+      "config": "NbCl5_c2",
+      "path": "simt",
+      "error": [
+        0.00019482750859525468,
+        7.286836310349543e-06,
+        1.633649191097597e-08
+      ],
+      "yardstick": [
+        5.072626919071707,
+        2.1625940047065306e-05,
+        2.5163505532749264e-08
+      ],
+      "ratio": [
+        3.840761635017073e-05,
+        0.3369488815048474,
+        0.4900947573292791
+      ],
+      "passed": true
+    },
+    {
+      "model": "S",
+      "config": "NbCl5_c2",
+      "path": "3x_rnacc",
+      "error": [
+        0.00019563810416945704,
+        6.316477326406833e-06,
+        1.5187855266843298e-08
+      ],
+      "yardstick": [
+        5.072626919071707,
+        2.1625940047065306e-05,
+        2.5163505532749264e-08
+      ],
+      "ratio": [
+        3.856741433790658e-05,
+        0.2920787402841244,
+        0.4556356580052989
+      ],
+      "passed": true
+    },
+    {
+      "model": "S",
+      "config": "Ta2O5_c0",
+      "path": "simt",
+      "error": [
+        138.38584913219887,
+        1390.5190114348661,
+        73.67499143855821
+      ],
+      "yardstick": [
+        222.53506009915978,
+        2311.3669656247366,
+        122.35690303368028
+      ],
+      "ratio": [
+        0.6218608837211327,
+        0.6016002790188811,
+        0.6021318749648169
+      ],
+      "passed": true
+    },
+    {
+      "model": "S",
+      "config": "Ta2O5_c0",
+      "path": "3x_rnacc",
+      "error": [
+        42.796766128352225,
+        424.5558545321692,
+        22.357856960516074
+      ],
+      "yardstick": [
+        222.53506009915978,
+        2311.3669656247366,
+        122.35690303368028
+      ],
+      "ratio": [
+        0.19231471260880123,
+        0.18368171772214303,
+        0.18272656798416834
+      ],
+      "passed": true
+    },
+    {
+      "model": "S",
+      "config": "Ta2O5_c1",
+      "path": "simt",
+      "error": [
+        0.023081729609874032,
+        0.011528217814884556,
+        2.60431226142277e-05
+      ],
+      "yardstick": [
+        9.13438102505761,
+        0.02004741122982523,
+        8.912689179335631e-05
+      ],
+      "ratio": [
+        0.0025269068091812443,
+        0.5750477047995916,
+        0.29220274700714965
+      ],
+      "passed": true
+    },
+    {
+      "model": "S",
+      "config": "Ta2O5_c1",
+      "path": "3x_rnacc",
+      "error": [
+        0.00581952756167286,
+        0.009911836377341388,
+        9.340210240793567e-06
+      ],
+      "yardstick": [
+        9.13438102505761,
+        0.02004741122982523,
+        8.912689179335631e-05
+      ],
+      "ratio": [
+        0.0006371014681464042,
+        0.4944197664083034,
+        0.1047967684371756
+      ],
+      "passed": true
+    },
+    {
+      "model": "S",
+      "config": "Ta2O5_c2",
+      "path": "simt",
+      "error": [
+        0.08935695731206723,
+        0.1465526688095906,
+        0.0016373315634865548
+      ],
+      "yardstick": [
+        9.434140909376318,
+        0.27119996203123264,
+        0.006028303218968745
+      ],
+      "ratio": [
+        0.009471658116030254,
+        0.5403860225935907,
+        0.27160736678515174
+      ],
+      "passed": true
+    },
+    {
+      "model": "S",
+      "config": "Ta2O5_c2",
+      "path": "3x_rnacc",
+      "error": [
+        0.12536058114612444,
+        0.15191593310737517,
+        0.0034801788807072853
+      ],
+      "yardstick": [
+        9.434140909376318,
+        0.27119996203123264,
+        0.006028303218968745
+      ],
+      "ratio": [
+        0.013287969975255746,
+        0.5601620736579596,
+        0.5773065412098889
+      ],
+      "passed": true
+    },
+    {
+      "model": "S",
+      "config": "TaCl3O_c0",
+      "path": "simt",
+      "error": [
+        0.0001758162397891283,
+        1.1276337435361938e-05,
+        3.0868542482548333e-08
+      ],
+      "yardstick": [
+        14.332309004385024,
+        4.411552255645379e-05,
+        8.030939856532027e-08
+      ],
+      "ratio": [
+        1.2267125955443513e-05,
+        0.2556092908325369,
+        0.3843702360370831
+      ],
+      "passed": true
+    },
+    {
+      "model": "S",
+      "config": "TaCl3O_c0",
+      "path": "3x_rnacc",
+      "error": [
+        4.47165803052485e-05,
+        9.44974281269495e-06,
+        1.059247914728112e-08
+      ],
+      "yardstick": [
+        14.332309004385024,
+        4.411552255645379e-05,
+        8.030939856532027e-08
+      ],
+      "ratio": [
+        3.119984385737657e-06,
+        0.21420448552099308,
+        0.13189588437355368
+      ],
+      "passed": true
+    },
+    {
+      "model": "S",
+      "config": "TaCl3O_c1",
+      "path": "simt",
+      "error": [
+        0.0002141896402463317,
+        1.840097020355813e-05,
+        8.234089052955307e-09
+      ],
+      "yardstick": [
+        16.016111966746394,
+        6.77524528871487e-05,
+        1.574477795640572e-07
+      ],
+      "ratio": [
+        1.3373385543947557e-05,
+        0.2715912032617852,
+        0.05229727009014624
+      ],
+      "passed": true
+    },
+    {
+      "model": "S",
+      "config": "TaCl3O_c1",
+      "path": "3x_rnacc",
+      "error": [
+        2.3221946321427822e-05,
+        1.4439119306430825e-05,
+        3.697697721627424e-08
+      ],
+      "yardstick": [
+        16.016111966746394,
+        6.77524528871487e-05,
+        1.574477795640572e-07
+      ],
+      "ratio": [
+        1.449911587134419e-06,
+        0.21311581634514726,
+        0.2348523257594132
+      ],
+      "passed": true
+    },
+    {
+      "model": "S",
+      "config": "TaCl3O_c2",
+      "path": "simt",
+      "error": [
+        0.00025020563043653965,
+        1.286282028845065e-05,
+        2.3118842049085764e-08
+      ],
+      "yardstick": [
+        15.987760813732166,
+        6.552915844326712e-05,
+        7.712041311808138e-08
+      ],
+      "ratio": [
+        1.5649823221125103e-05,
+        0.19629155316540245,
+        0.2997759103505814
+      ],
+      "passed": true
+    },
+    {
+      "model": "S",
+      "config": "TaCl3O_c2",
+      "path": "3x_rnacc",
+      "error": [
+        1.126463757827878e-05,
+        1.0538807019067065e-05,
+        8.397783286470673e-09
+      ],
+      "yardstick": [
+        15.987760813732166,
+        6.552915844326712e-05,
+        7.712041311808138e-08
+      ],
+      "ratio": [
+        7.045788156027069e-07,
+        0.1608262225462761,
+        0.10889183481956424
+      ],
+      "passed": true
+    },
+    {
+      "model": "S",
+      "config": "TaCl5_c0",
+      "path": "simt",
+      "error": [
+        0.00026234623941558377,
+        7.161413348333312e-06,
+        8.17556199822489e-09
+      ],
+      "yardstick": [
+        12.341392948723364,
+        2.962748702850515e-05,
+        1.9579604552261154e-08
+      ],
+      "ratio": [
+        2.1257425357542137e-05,
+        0.24171517960477662,
+        0.24526685994674668
+      ],
+      "passed": true
+    },
+    {
+      "model": "S",
+      "config": "TaCl5_c0",
+      "path": "3x_rnacc",
+      "error": [
+        7.095945033210296e-05,
+        8.36067184528666e-06,
+        6.486535142347094e-09
+      ],
+      "yardstick": [
+        12.341392948723364,
+        2.962748702850515e-05,
+        1.9579604552261154e-08
+      ],
+      "ratio": [
+        5.74971161091206e-06,
+        0.2821930809468486,
+        0.19459605427041282
+      ],
+      "passed": true
+    },
+    {
+      "model": "S",
+      "config": "TaCl5_c1",
+      "path": "simt",
+      "error": [
+        0.0002416695847555443,
+        9.274623450572506e-06,
+        1.2577811663722072e-08
+      ],
+      "yardstick": [
+        14.015148404588992,
+        4.5552071589627374e-05,
+        7.932337888622021e-08
+      ],
+      "ratio": [
+        1.7243455279889453e-05,
+        0.20360486640709494,
+        0.15856374048013538
+      ],
+      "passed": true
+    },
+    {
+      "model": "S",
+      "config": "TaCl5_c1",
+      "path": "3x_rnacc",
+      "error": [
+        4.016328603029251e-06,
+        7.719205459943979e-06,
+        8.417744687871844e-09
+      ],
+      "yardstick": [
+        14.015148404588992,
+        4.5552071589627374e-05,
+        7.932337888622021e-08
+      ],
+      "ratio": [
+        2.865705368995009e-07,
+        0.16945893327278913,
+        0.10611934093158186
+      ],
+      "passed": true
+    },
+    {
+      "model": "S",
+      "config": "TaCl5_c2",
+      "path": "simt",
+      "error": [
+        0.00020897843771510653,
+        1.0788146865392534e-05,
+        1.586021860697749e-08
+      ],
+      "yardstick": [
+        9.34141510192098,
+        2.8666134908927887e-05,
+        9.189023911096786e-08
+      ],
+      "ratio": [
+        2.237117561258272e-05,
+        0.3763376855535775,
+        0.17259960100685431
+      ],
+      "passed": true
+    },
+    {
+      "model": "S",
+      "config": "TaCl5_c2",
+      "path": "3x_rnacc",
+      "error": [
+        2.416695847555443e-06,
+        6.625580275310128e-06,
+        4.742360349904717e-09
+      ],
+      "yardstick": [
+        9.34141510192098,
+        2.8666134908927887e-05,
+        9.189023911096786e-08
+      ],
+      "ratio": [
+        2.5870768199332784e-07,
+        0.23112918069909147,
+        0.05160896734829235
+      ],
+      "passed": true
+    },
+    {
+      "model": "M",
+      "config": "Na2O_c0",
+      "path": "simt",
+      "error": [
+        0.0003259104423592856,
+        5.188815052792339e-06,
+        7.409843250094639e-08
+      ],
+      "yardstick": [
+        5.916253077929817,
+        8.511474602235225e-06,
+        9.654773049094789e-08
+      ],
+      "ratio": [
+        5.508730577721101e-05,
+        0.6096258633527131,
+        0.767479795994725
+      ],
+      "passed": true
+    },
+    {
+      "model": "M",
+      "config": "Na2O_c0",
+      "path": "3x_rnacc",
+      "error": [
+        0.0003812034085484934,
+        6.531145966326424e-06,
+        2.8714382163674834e-08
+      ],
+      "yardstick": [
+        5.916253077929817,
+        8.511474602235225e-06,
+        9.654773049094789e-08
+      ],
+      "ratio": [
+        6.443324914049858e-05,
+        0.7673342483582409,
+        0.29741125987800443
+      ],
+      "passed": true
+    },
+    {
+      "model": "M",
+      "config": "Na2O_c1",
+      "path": "simt",
+      "error": [
+        0.00026831575841815384,
+        6.612808169936812e-06,
+        1.2113294787369222e-08
+      ],
+      "yardstick": [
+        5.549261874640016,
+        1.1336279644669212e-05,
+        7.019549478140541e-08
+      ],
+      "ratio": [
+        4.83516122467296e-05,
+        0.5833314259362355,
+        0.17256513149584637
+      ],
+      "passed": true
+    },
+    {
+      "model": "M",
+      "config": "Na2O_c1",
+      "path": "3x_rnacc",
+      "error": [
+        0.000423010881346317,
+        5.789041356611679e-06,
+        7.932301758148408e-09
+      ],
+      "yardstick": [
+        5.549261874640016,
+        1.1336279644669212e-05,
+        7.019549478140541e-08
+      ],
+      "ratio": [
+        7.622831484660434e-05,
+        0.5106650098680238,
+        0.1130030037233907
+      ],
+      "passed": true
+    },
+    {
+      "model": "M",
+      "config": "Na2O_c2",
+      "path": "simt",
+      "error": [
+        0.0003322902894406407,
+        6.0114232400543255e-06,
+        2.573828432328451e-08
+      ],
+      "yardstick": [
+        4.915103680643909,
+        9.451773466277735e-06,
+        9.461045883275149e-08
+      ],
+      "ratio": [
+        6.760595727598336e-05,
+        0.6360100844039508,
+        0.2720448102760351
+      ],
+      "passed": true
+    },
+    {
+      "model": "M",
+      "config": "Na2O_c2",
+      "path": "3x_rnacc",
+      "error": [
+        0.00044938038896631313,
+        5.85728904131666e-06,
+        2.1761492430966145e-08
+      ],
+      "yardstick": [
+        4.915103680643909,
+        9.451773466277735e-06,
+        9.461045883275149e-08
+      ],
+      "ratio": [
+        9.142846584010239e-05,
+        0.6197026475734355,
+        0.2300114881530722
+      ],
+      "passed": true
+    },
+    {
+      "model": "M",
+      "config": "NaCl_c0",
+      "path": "simt",
+      "error": [
+        5.5569991538370096e-05,
+        2.8216571278938396e-06,
+        1.8523957214487685e-08
+      ],
+      "yardstick": [
+        2.34299507832879,
+        3.3336061681546285e-06,
+        3.6626061291483714e-08
+      ],
+      "ratio": [
+        2.3717502461851958e-05,
+        0.8464278578701495,
+        0.5057589203236241
+      ],
+      "passed": true
+    },
+    {
+      "model": "M",
+      "config": "NaCl_c0",
+      "path": "3x_rnacc",
+      "error": [
+        0.0002774004651992409,
+        3.106643053696345e-06,
+        2.176019664717338e-08
+      ],
+      "yardstick": [
+        2.34299507832879,
+        3.3336061681546285e-06,
+        3.6626061291483714e-08
+      ],
+      "ratio": [
+        0.00011839566705240583,
+        0.9319166383160605,
+        0.594117846142333
+      ],
+      "passed": true
+    },
+    {
+      "model": "M",
+      "config": "NaCl_c1",
+      "path": "simt",
+      "error": [
+        9.093653514153427e-05,
+        2.9466886939388814e-06,
+        2.437884843650706e-08
+      ],
+      "yardstick": [
+        2.1340759024800113,
+        5.423675360272107e-06,
+        4.951009821042851e-08
+      ],
+      "ratio": [
+        4.2611668608345585e-05,
+        0.5433010824215418,
+        0.49240153660959707
+      ],
+      "passed": true
+    },
+    {
+      "model": "M",
+      "config": "NaCl_c1",
+      "path": "3x_rnacc",
+      "error": [
+        0.00034987115887580094,
+        3.17690542495086e-06,
+        2.662321085117325e-08
+      ],
+      "yardstick": [
+        2.1340759024800113,
+        5.423675360272107e-06,
+        4.951009821042851e-08
+      ],
+      "ratio": [
+        0.00016394503985037054,
+        0.5857477105324892,
+        0.5377329436515943
+      ],
+      "passed": true
+    },
+    {
+      "model": "M",
+      "config": "NaCl_c2",
+      "path": "simt",
+      "error": [
+        0.00032797861085445793,
+        2.882119265412708e-06,
+        3.070104713281865e-08
+      ],
+      "yardstick": [
+        1.8826195931372542,
+        3.3006084342282645e-06,
+        1.774344605878081e-08
+      ],
+      "ratio": [
+        0.00017421395806675125,
+        0.8646357796238123,
+        0.9210314139845593
+      ],
+      "passed": true
+    },
+    {
+      "model": "M",
+      "config": "NaCl_c2",
+      "path": "3x_rnacc",
+      "error": [
+        0.0004093895700794679,
+        3.0158481831299433e-06,
+        3.3046323985206835e-08
+      ],
+      "yardstick": [
+        1.8826195931372542,
+        3.3006084342282645e-06,
+        1.774344605878081e-08
+      ],
+      "ratio": [
+        0.00021745740433798882,
+        0.9047544549389829,
+        0.991389719556205
+      ],
+      "passed": true
+    },
+    {
+      "model": "M",
+      "config": "NaNbCl6_c0",
+      "path": "simt",
+      "error": [
+        0.00018955931106271842,
+        1.2418356835075528e-05,
+        2.7997481204938834e-08
+      ],
+      "yardstick": [
+        3.313514555581302,
+        1.915714970657234e-05,
+        7.402864750372107e-08
+      ],
+      "ratio": [
+        5.720793069806309e-05,
+        0.6482361429171846,
+        0.3781979294371349
+      ],
+      "passed": true
+    },
+    {
+      "model": "M",
+      "config": "NaNbCl6_c0",
+      "path": "3x_rnacc",
+      "error": [
+        4.907027080965539e-05,
+        1.2702391877672525e-05,
+        2.1825431920086125e-08
+      ],
+      "yardstick": [
+        3.313514555581302,
+        1.915714970657234e-05,
+        7.402864750372107e-08
+      ],
+      "ratio": [
+        1.4809130905129467e-05,
+        0.663062724477987,
+        0.29482413438647603
+      ],
+      "passed": true
+    },
+    {
+      "model": "M",
+      "config": "NaNbCl6_c1",
+      "path": "simt",
+      "error": [
+        0.00028532667784020305,
+        1.2041802715523353e-05,
+        2.6069448174834142e-08
+      ],
+      "yardstick": [
+        3.4523999529483262,
+        3.5435210900658376e-05,
+        4.9140591412005774e-08
+      ],
+      "ratio": [
+        8.264589321307805e-05,
+        0.3398259078881232,
+        0.5305074160842311
+      ],
+      "passed": true
+    },
+    {
+      "model": "M",
+      "config": "NaNbCl6_c1",
+      "path": "3x_rnacc",
+      "error": [
+        8.379356586374342e-05,
+        9.340782820665972e-06,
+        1.1389024379832025e-08
+      ],
+      "yardstick": [
+        3.4523999529483262,
+        3.5435210900658376e-05,
+        4.9140591412005774e-08
+      ],
+      "ratio": [
+        2.4271106188662842e-05,
+        0.26360172786476693,
+        0.23176408855855807
+      ],
+      "passed": true
+    },
+    {
+      "model": "M",
+      "config": "NaNbCl6_c2",
+      "path": "simt",
+      "error": [
+        0.00027260587861140567,
+        1.1398965670483818e-05,
+        2.522616034247513e-08
+      ],
+      "yardstick": [
+        3.8449574252202487,
+        3.878026984549532e-05,
+        3.939371364877764e-08
+      ],
+      "ratio": [
+        7.089958313278075e-05,
+        0.2939372447870657,
+        0.640360047478232
+      ],
+      "passed": true
+    },
+    {
+      "model": "M",
+      "config": "NaNbCl6_c2",
+      "path": "3x_rnacc",
+      "error": [
+        4.096606668705741e-05,
+        8.484051655432978e-06,
+        1.575233279406396e-08
+      ],
+      "yardstick": [
+        3.8449574252202487,
+        3.878026984549532e-05,
+        3.939371364877764e-08
+      ],
+      "ratio": [
+        1.0654491625407471e-05,
+        0.21877237289050164,
+        0.3998692008198812
+      ],
+      "passed": true
+    },
+    {
+      "model": "M",
+      "config": "NaNbO3_c0",
+      "path": "simt",
+      "error": [
+        0.0005160936982267433,
+        0.00018989794856949516,
+        3.2361256053353715e-07
+      ],
+      "yardstick": [
+        8.73617646316739,
+        0.00011207060924611767,
+        1.8415710177632771e-07
+      ],
+      "ratio": [
+        5.907546629840261e-05,
+        1.6944491499324437,
+        1.7572635397280976
+      ],
+      "passed": true
+    },
+    {
+      "model": "M",
+      "config": "NaNbO3_c0",
+      "path": "3x_rnacc",
+      "error": [
+        0.00040959146442926594,
+        0.00014901390707766637,
+        1.464656429889244e-07
+      ],
+      "yardstick": [
+        8.73617646316739,
+        0.00011207060924611767,
+        1.8415710177632771e-07
+      ],
+      "ratio": [
+        4.6884522783639424e-05,
+        1.3296430534290906,
+        0.7953298655124235
+      ],
+      "passed": true
+    },
+    {
+      "model": "M",
+      "config": "NaNbO3_c1",
+      "path": "simt",
+      "error": [
+        0.00037120900944703154,
+        0.000416020411441842,
+        2.5400028075273084e-07
+      ],
+      "yardstick": [
+        7.807164705849977,
+        0.00026356039031494305,
+        1.5083318694042447e-07
+      ],
+      "ratio": [
+        4.7547224047787976e-05,
+        1.5784633303385078,
+        1.6839813963027574
+      ],
+      "passed": true
+    },
+    {
+      "model": "M",
+      "config": "NaNbO3_c1",
+      "path": "3x_rnacc",
+      "error": [
+        0.0003381250684873925,
+        0.00022051175508064347,
+        3.606197897798591e-07
+      ],
+      "yardstick": [
+        7.807164705849977,
+        0.00026356039031494305,
+        1.5083318694042447e-07
+      ],
+      "ratio": [
+        4.3309585646890787e-05,
+        0.8366650042411216,
+        2.390851755471396
+      ],
+      "passed": true
+    },
+    {
+      "model": "M",
+      "config": "NaNbO3_c2",
+      "path": "simt",
+      "error": [
+        0.0004614418786433008,
+        0.00026030513989372395,
+        1.6586716702904347e-07
+      ],
+      "yardstick": [
+        7.994236839133212,
+        0.00022311059829505098,
+        5.197597272021959e-07
+      ],
+      "ratio": [
+        5.772181734527312e-05,
+        1.166708985959893,
+        0.319122776060174
+      ],
+      "passed": true
+    },
+    {
+      "model": "M",
+      "config": "NaNbO3_c2",
+      "path": "3x_rnacc",
+      "error": [
+        0.00047027780156996514,
+        0.00036406247694742433,
+        1.3252396835472524e-07
+      ],
+      "yardstick": [
+        7.994236839133212,
+        0.00022311059829505098,
+        5.197597272021959e-07
+      ],
+      "ratio": [
+        5.882710395417254e-05,
+        1.6317578803046038,
+        0.2549715982576908
+      ],
+      "passed": true
+    },
+    {
+      "model": "M",
+      "config": "NaNbOCl4_Pbca_c0",
+      "path": "simt",
+      "error": [
+        7.009241796497787e-05,
+        1.4384258527400107e-05,
+        2.4209316473386422e-08
+      ],
+      "yardstick": [
+        6.196820051367728,
+        6.977638172322997e-05,
+        4.8777613299161304e-08
+      ],
+      "ratio": [
+        1.1311030074127691e-05,
+        0.20614795683238035,
+        0.4963202345491284
+      ],
+      "passed": true
+    },
+    {
+      "model": "M",
+      "config": "NaNbOCl4_Pbca_c0",
+      "path": "3x_rnacc",
+      "error": [
+        9.709037840366364e-05,
+        1.4486557584625359e-05,
+        1.2199469599447066e-08
+      ],
+      "yardstick": [
+        6.196820051367728,
+        6.977638172322997e-05,
+        4.8777613299161304e-08
+      ],
+      "ratio": [
+        1.5667774374412305e-05,
+        0.20761405545628184,
+        0.2501038647509395
+      ],
+      "passed": true
+    },
+    {
+      "model": "M",
+      "config": "NaNbOCl4_Pbca_c1",
+      "path": "simt",
+      "error": [
+        0.00017392656965447323,
+        1.8113615604775646e-05,
+        1.9113025412353934e-08
+      ],
+      "yardstick": [
+        5.799425355300108,
+        5.053183259207117e-05,
+        2.674558589876863e-08
+      ],
+      "ratio": [
+        2.999031093581045e-05,
+        0.3584595031611383,
+        0.573390762370618
+      ],
+      "passed": true
+    },
+    {
+      "model": "M",
+      "config": "NaNbOCl4_Pbca_c1",
+      "path": "3x_rnacc",
+      "error": [
+        0.00012443134827273234,
+        1.6777672946499678e-05,
+        2.5322533070415432e-08
+      ],
+      "yardstick": [
+        5.799425355300108,
+        5.053183259207117e-05,
+        2.674558589876863e-08
+      ],
+      "ratio": [
+        2.1455806506590218e-05,
+        0.3320218580224661,
+        0.759675992112463
+      ],
+      "passed": true
+    },
+    {
+      "model": "M",
+      "config": "NaNbOCl4_Pbca_c2",
+      "path": "simt",
+      "error": [
+        0.00014466266813022749,
+        1.96262257405877e-05,
+        2.0362069155788198e-08
+      ],
+      "yardstick": [
+        0.9938473064851548,
+        5.24424792214262e-05,
+        8.02402784216838e-08
+      ],
+      "ratio": [
+        0.00014555824339036765,
+        0.37424290445385916,
+        0.25376369021029765
+      ],
+      "passed": true
+    },
+    {
+      "model": "M",
+      "config": "NaNbOCl4_Pbca_c2",
+      "path": "3x_rnacc",
+      "error": [
+        5.187342009906258e-05,
+        1.6021658812981343e-05,
+        1.7180514261250224e-08
+      ],
+      "yardstick": [
+        0.9938473064851548,
+        5.24424792214262e-05,
+        8.02402784216838e-08
+      ],
+      "ratio": [
+        5.21945572127356e-05,
+        0.3055091797878893,
+        0.21411334306396715
+      ],
+      "passed": true
+    },
+    {
+      "model": "M",
+      "config": "NaTaCl6_c0",
+      "path": "simt",
+      "error": [
+        0.00022672490255596736,
+        1.40064448050925e-05,
+        1.7307077652961578e-08
+      ],
+      "yardstick": [
+        6.719521650666138,
+        2.484577673161903e-05,
+        4.009599631135674e-08
+      ],
+      "ratio": [
+        3.3741226584706524e-05,
+        0.5637354370679719,
+        0.43164104262598263
+      ],
+      "passed": true
+    },
+    {
+      "model": "M",
+      "config": "NaTaCl6_c0",
+      "path": "3x_rnacc",
+      "error": [
+        9.915917568529646e-05,
+        1.2378882890518028e-05,
+        1.8770741325863094e-08
+      ],
+      "yardstick": [
+        6.719521650666138,
+        2.484577673161903e-05,
+        4.009599631135674e-08
+      ],
+      "ratio": [
+        1.4756880153138035e-05,
+        0.4982288549170015,
+        0.46814502824927917
+      ],
+      "passed": true
+    },
+    {
+      "model": "M",
+      "config": "NaTaCl6_c1",
+      "path": "simt",
+      "error": [
+        0.000328283931594342,
+        1.292667889973842e-05,
+        3.963462186576394e-08
+      ],
+      "yardstick": [
+        6.7357065587809,
+        2.2269507798711174e-05,
+        3.394544744600436e-08
+      ],
+      "ratio": [
+        4.873786123690019e-05,
+        0.5804654066259398,
+        1.1675975675032453
+      ],
+      "passed": true
+    },
+    {
+      "model": "M",
+      "config": "NaTaCl6_c1",
+      "path": "3x_rnacc",
+      "error": [
+        0.00025218469090759754,
+        1.3703841007295381e-05,
+        2.8200424738444863e-08
+      ],
+      "yardstick": [
+        6.7357065587809,
+        2.2269507798711174e-05,
+        3.394544744600436e-08
+      ],
+      "ratio": [
+        3.743997585210134e-05,
+        0.6153634436450579,
+        0.8307571960364384
+      ],
+      "passed": true
+    },
+    {
+      "model": "M",
+      "config": "NaTaCl6_c2",
+      "path": "simt",
+      "error": [
+        0.0003344927487584452,
+        9.1533548046141e-06,
+        2.824506632748136e-08
+      ],
+      "yardstick": [
+        6.995647647272563,
+        3.081630791257339e-05,
+        3.56489377201924e-08
+      ],
+      "ratio": [
+        4.781440770374649e-05,
+        0.29702957377575495,
+        0.7923115844061376
+      ],
+      "passed": true
+    },
+    {
+      "model": "M",
+      "config": "NaTaCl6_c2",
+      "path": "3x_rnacc",
+      "error": [
+        6.491730649334689e-05,
+        7.625392564325484e-06,
+        2.0316056566216378e-08
+      ],
+      "yardstick": [
+        6.995647647272563,
+        3.081630791257339e-05,
+        3.56489377201924e-08
+      ],
+      "ratio": [
+        9.279670699060523e-06,
+        0.24744666317454075,
+        0.5698923408511241
+      ],
+      "passed": true
+    },
+    {
+      "model": "M",
+      "config": "NaTaO3_c0",
+      "path": "simt",
+      "error": [
+        0.00012848791407628192,
+        0.0004538673454757003,
+        4.7495197107172427e-07
+      ],
+      "yardstick": [
+        8.02305818878166,
+        0.0005681428648536269,
+        8.978594133457474e-07
+      ],
+      "ratio": [
+        1.6014830137458275e-05,
+        0.7988612962562368,
+        0.5289825600890926
+      ],
+      "passed": true
+    },
+    {
+      "model": "M",
+      "config": "NaTaO3_c0",
+      "path": "3x_rnacc",
+      "error": [
+        0.0004917884426605371,
+        0.0002458891477774561,
+        8.124459541375417e-07
+      ],
+      "yardstick": [
+        8.02305818878166,
+        0.0005681428648536269,
+        8.978594133457474e-07
+      ],
+      "ratio": [
+        6.129688095098031e-05,
+        0.4327945715569368,
+        0.9048698961790417
+      ],
+      "passed": true
+    },
+    {
+      "model": "M",
+      "config": "NaTaO3_c1",
+      "path": "simt",
+      "error": [
+        0.00024599462954534427,
+        0.0007708318563617311,
+        7.18114031655892e-07
+      ],
+      "yardstick": [
+        8.414711264776997,
+        0.0005114193055479888,
+        5.682486974301071e-07
+      ],
+      "ratio": [
+        2.9233876458132222e-05,
+        1.5072404346092887,
+        1.2637319450155324
+      ],
+      "passed": true
+    },
+    {
+      "model": "M",
+      "config": "NaTaO3_c1",
+      "path": "3x_rnacc",
+      "error": [
+        0.0003704025099674861,
+        0.0005608635157203778,
+        6.690843789014522e-07
+      ],
+      "yardstick": [
+        8.414711264776997,
+        0.0005114193055479888,
+        5.682486974301071e-07
+      ],
+      "ratio": [
+        4.4018445590396894e-05,
+        1.096680374862676,
+        1.1774499122081097
+      ],
+      "passed": true
+    },
+    {
+      "model": "M",
+      "config": "NaTaO3_c2",
+      "path": "simt",
+      "error": [
+        0.00176308902963582,
+        0.0010509737417838672,
+        6.041370855386363e-07
+      ],
+      "yardstick": [
+        8.51498765760981,
+        0.0007824509712790473,
+        1.20368655057157e-06
+      ],
+      "ratio": [
+        0.00020705714447632283,
+        1.3431815926637223,
+        0.5019056541354243
+      ],
+      "passed": true
+    },
+    {
+      "model": "M",
+      "config": "NaTaO3_c2",
+      "path": "3x_rnacc",
+      "error": [
+        0.00032926553912046883,
+        0.0008047663873824717,
+        8.938389916141043e-07
+      ],
+      "yardstick": [
+        8.51498765760981,
+        0.0007824509712790473,
+        1.20368655057157e-06
+      ],
+      "ratio": [
+        3.866893909425759e-05,
+        1.028519890603428,
+        0.7425845135427204
+      ],
+      "passed": true
+    },
+    {
+      "model": "M",
+      "config": "NaTaOCl4_Pbca_c0",
+      "path": "simt",
+      "error": [
+        0.00014909788400733044,
+        1.5014470118757117e-05,
+        1.1271892710884579e-08
+      ],
+      "yardstick": [
+        6.744803565587582,
+        7.986136427184931e-05,
+        6.719289453310795e-08
+      ],
+      "ratio": [
+        2.2105593225581447e-05,
+        0.18800668202521098,
+        0.16775423635501488
+      ],
+      "passed": true
+    },
+    {
+      "model": "M",
+      "config": "NaTaOCl4_Pbca_c0",
+      "path": "3x_rnacc",
+      "error": [
+        8.001370588317513e-05,
+        1.8624293511848578e-05,
+        1.9035464211836217e-08
+      ],
+      "yardstick": [
+        6.744803565587582,
+        7.986136427184931e-05,
+        6.719289453310795e-08
+      ],
+      "ratio": [
+        1.1863015001861605e-05,
+        0.23320780557230647,
+        0.28329579108185127
+      ],
+      "passed": true
+    },
+    {
+      "model": "M",
+      "config": "NaTaOCl4_Pbca_c1",
+      "path": "simt",
+      "error": [
+        0.0003633062338589558,
+        2.9247372300034158e-05,
+        9.84235598577854e-09
+      ],
+      "yardstick": [
+        6.4845742661938335,
+        7.540903054348291e-05,
+        1.2843029724429744e-07
+      ],
+      "ratio": [
+        5.602622762036789e-05,
+        0.38784973217722674,
+        0.0766357798507358
+      ],
+      "passed": true
+    },
+    {
+      "model": "M",
+      "config": "NaTaOCl4_Pbca_c1",
+      "path": "3x_rnacc",
+      "error": [
+        0.00020907256319852813,
+        2.10356962675462e-05,
+        4.058265809514516e-08
+      ],
+      "yardstick": [
+        6.4845742661938335,
+        7.540903054348291e-05,
+        1.2843029724429744e-07
+      ],
+      "ratio": [
+        3.224152498159987e-05,
+        0.27895460418916856,
+        0.3159897544887689
+      ],
+      "passed": true
+    },
+    {
+      "model": "M",
+      "config": "NaTaOCl4_Pbca_c2",
+      "path": "simt",
+      "error": [
+        0.0002900674839371017,
+        2.415577440473271e-05,
+        1.5770260847203232e-08
+      ],
+      "yardstick": [
+        4.262132893407917,
+        7.870447088187404e-05,
+        7.559353330799379e-08
+      ],
+      "ratio": [
+        6.805688400418915e-05,
+        0.30691743599912674,
+        0.20861917887803738
+      ],
+      "passed": true
+    },
+    {
+      "model": "M",
+      "config": "NaTaOCl4_Pbca_c2",
+      "path": "3x_rnacc",
+      "error": [
+        0.00013124268402212432,
+        1.8379088906783636e-05,
+        2.8895133397099926e-08
+      ],
+      "yardstick": [
+        4.262132893407917,
+        7.870447088187404e-05,
+        7.559353330799379e-08
+      ],
+      "ratio": [
+        3.07927245124413e-05,
+        0.23352026512405427,
+        0.38224345565871776
+      ],
+      "passed": true
+    },
+    {
+      "model": "M",
+      "config": "Nb2O5_c0",
+      "path": "simt",
+      "error": [
+        3.5368170106916553e-05,
+        6.140428664647146e-05,
+        7.26781968357626e-08
+      ],
+      "yardstick": [
+        1.4046266577289706,
+        4.9333536440765435e-05,
+        1.641931823698206e-07
+      ],
+      "ratio": [
+        2.517976567816287e-05,
+        1.2446763616915915,
+        0.4426383348369838
+      ],
+      "passed": true
+    },
+    {
+      "model": "M",
+      "config": "Nb2O5_c0",
+      "path": "3x_rnacc",
+      "error": [
+        0.00028791665889522325,
+        2.8204560121647404e-05,
+        7.33220549276048e-08
+      ],
+      "yardstick": [
+        1.4046266577289706,
+        4.9333536440765435e-05,
+        1.641931823698206e-07
+      ],
+      "ratio": [
+        0.00020497735630386858,
+        0.5717117027584775,
+        0.4465596796976492
+      ],
+      "passed": true
+    },
+    {
+      "model": "M",
+      "config": "Nb2O5_c1",
+      "path": "simt",
+      "error": [
+        0.00010695111996028572,
+        4.730781263506678e-05,
+        8.511525548260401e-08
+      ],
+      "yardstick": [
+        1.3932703680308935,
+        0.00010654171725477113,
+        1.4649303643754497e-07
+      ],
+      "ratio": [
+        7.676264594031347e-05,
+        0.44403088155544307,
+        0.5810191224952292
+      ],
+      "passed": true
+    },
+    {
+      "model": "M",
+      "config": "Nb2O5_c1",
+      "path": "3x_rnacc",
+      "error": [
+        0.0004597391775210521,
+        6.010355872376749e-05,
+        1.2422366602038437e-07
+      ],
+      "yardstick": [
+        1.3932703680308935,
+        0.00010654171725477113,
+        1.4649303643754497e-07
+      ],
+      "ratio": [
+        0.00032997125903912004,
+        0.564131687309329,
+        0.8479834198354214
+      ],
+      "passed": true
+    },
+    {
+      "model": "M",
+      "config": "Nb2O5_c2",
+      "path": "simt",
+      "error": [
+        6.32111810513639e-05,
+        6.87556323812899e-05,
+        2.1488726268531488e-07
+      ],
+      "yardstick": [
+        1.4196830034052255,
+        6.70864588006026e-05,
+        3.657771524001596e-07
+      ],
+      "ratio": [
+        4.452485583031333e-05,
+        1.0248809314208773,
+        0.5874813702148038
+      ],
+      "passed": true
+    },
+    {
+      "model": "M",
+      "config": "Nb2O5_c2",
+      "path": "3x_rnacc",
+      "error": [
+        0.0006654897463574473,
+        4.237447571941999e-05,
+        1.2577124970658549e-07
+      ],
+      "yardstick": [
+        1.4196830034052255,
+        6.70864588006026e-05,
+        3.657771524001596e-07
+      ],
+      "ratio": [
+        0.0004687593954151849,
+        0.6316397746580621,
+        0.34384665330050995
+      ],
+      "passed": true
+    },
+    {
+      "model": "M",
+      "config": "NbCl2O_c0",
+      "path": "simt",
+      "error": [
+        3.0265255190897733e-05,
+        1.8676322278032842e-05,
+        4.0252212188396364e-08
+      ],
+      "yardstick": [
+        5.650060374136956,
+        1.9636601994221792e-05,
+        8.0679233044334e-08
+      ],
+      "ratio": [
+        5.356625095447894e-06,
+        0.9510974599133027,
+        0.49891664396806296
+      ],
+      "passed": true
+    },
+    {
+      "model": "M",
+      "config": "NbCl2O_c0",
+      "path": "3x_rnacc",
+      "error": [
+        0.0005040419637225568,
+        2.2443988751064126e-05,
+        3.598835850160409e-08
+      ],
+      "yardstick": [
+        5.650060374136956,
+        1.9636601994221792e-05,
+        8.0679233044334e-08
+      ],
+      "ratio": [
+        8.921001376017137e-05,
+        1.1429670346054999,
+        0.4460671866058537
+      ],
+      "passed": true
+    },
+    {
+      "model": "M",
+      "config": "NbCl2O_c1",
+      "path": "simt",
+      "error": [
+        1.620082912268117e-05,
+        1.887376945486352e-05,
+        5.736937443590745e-08
+      ],
+      "yardstick": [
+        5.179115406463097,
+        2.3215510866592126e-05,
+        1.1153986494844004e-07
+      ],
+      "ratio": [
+        3.128107379585307e-06,
+        0.8129810092623673,
+        0.514339644058443
+      ],
+      "passed": true
+    },
+    {
+      "model": "M",
+      "config": "NbCl2O_c1",
+      "path": "3x_rnacc",
+      "error": [
+        0.00019799426809186116,
+        1.5716179837532707e-05,
+        1.0277571052888512e-08
+      ],
+      "yardstick": [
+        5.179115406463097,
+        2.3215510866592126e-05,
+        1.1153986494844004e-07
+      ],
+      "ratio": [
+        3.822936014223222e-05,
+        0.6769689423526234,
+        0.09214258110891008
+      ],
+      "passed": true
+    },
+    {
+      "model": "M",
+      "config": "NbCl2O_c2",
+      "path": "simt",
+      "error": [
+        9.971608960768208e-05,
+        1.64362288233022e-05,
+        3.2014080848102866e-08
+      ],
+      "yardstick": [
+        5.490044371981639,
+        2.2494935860928322e-05,
+        1.8898999651524584e-07
+      ],
+      "ratio": [
+        1.8163075350826248e-05,
+        0.7306635113305857,
+        0.1693956370093921
+      ],
+      "passed": true
+    },
+    {
+      "model": "M",
+      "config": "NbCl2O_c2",
+      "path": "3x_rnacc",
+      "error": [
+        5.468882591230795e-05,
+        1.5282379238645838e-05,
+        1.611470555086536e-08
+      ],
+      "yardstick": [
+        5.490044371981639,
+        2.2494935860928322e-05,
+        1.8898999651524584e-07
+      ],
+      "ratio": [
+        9.961454262812804e-06,
+        0.6793697627380194,
+        0.08526750541299356
+      ],
+      "passed": true
+    },
+    {
+      "model": "M",
+      "config": "NbCl3O_c0",
+      "path": "simt",
+      "error": [
+        0.0001155698555521667,
+        1.2777426817489612e-05,
+        2.6282067563943023e-08
+      ],
+      "yardstick": [
+        14.434260391863063,
+        2.8452925394883977e-05,
+        7.498255707311108e-08
+      ],
+      "ratio": [
+        8.006635076177245e-06,
+        0.44907251680303767,
+        0.3505090862441104
+      ],
+      "passed": true
+    },
+    {
+      "model": "M",
+      "config": "NbCl3O_c0",
+      "path": "3x_rnacc",
+      "error": [
+        0.0002755303285084665,
+        1.6575724812062376e-05,
+        7.523772750650526e-09
+      ],
+      "yardstick": [
+        14.434260391863063,
+        2.8452925394883977e-05,
+        7.498255707311108e-08
+      ],
+      "ratio": [
+        1.9088635027243203e-05,
+        0.5825666282821942,
+        0.10034030639038541
+      ],
+      "passed": true
+    },
+    {
+      "model": "M",
+      "config": "NbCl3O_c1",
+      "path": "simt",
+      "error": [
+        0.00012666569091379642,
+        1.592766247338062e-05,
+        3.645167533788962e-08
+      ],
+      "yardstick": [
+        13.479039617232047,
+        6.005169866796223e-05,
+        5.05217380743217e-08
+      ],
+      "ratio": [
+        9.39723411390993e-06,
+        0.2652325051027754,
+        0.721504776503654
+      ],
+      "passed": true
+    },
+    {
+      "model": "M",
+      "config": "NbCl3O_c1",
+      "path": "3x_rnacc",
+      "error": [
+        0.00012650125427171588,
+        1.4195463509558692e-05,
+        1.6592150856378773e-08
+      ],
+      "yardstick": [
+        13.479039617232047,
+        6.005169866796223e-05,
+        5.05217380743217e-08
+      ],
+      "ratio": [
+        9.385034680808603e-06,
+        0.23638737661774117,
+        0.3284160737298929
+      ],
+      "passed": true
+    },
+    {
+      "model": "M",
+      "config": "NbCl3O_c2",
+      "path": "simt",
+      "error": [
+        0.0001883745426312089,
+        1.4563371645515133e-05,
+        3.5952732841196267e-08
+      ],
+      "yardstick": [
+        14.822828645992558,
+        3.967409030236624e-05,
+        6.31237867393386e-08
+      ],
+      "ratio": [
+        1.2708407223079995e-05,
+        0.36707512471045983,
+        0.5695591899398932
+      ],
+      "passed": true
+    },
+    {
+      "model": "M",
+      "config": "NbCl3O_c2",
+      "path": "3x_rnacc",
+      "error": [
+        0.00010492512956261635,
+        1.4866509526534344e-05,
+        2.2166303605131166e-08
+      ],
+      "yardstick": [
+        14.822828645992558,
+        3.967409030236624e-05,
+        6.31237867393386e-08
+      ],
+      "ratio": [
+        7.0786171835686366e-06,
+        0.374715826203775,
+        0.3511561132519506
+      ],
+      "passed": true
+    },
+    {
+      "model": "M",
+      "config": "NbCl5_c0",
+      "path": "simt",
+      "error": [
+        0.00013035282285677062,
+        1.4685394353231018e-05,
+        2.7306045743968888e-08
+      ],
+      "yardstick": [
+        11.80996720601494,
+        2.151313736946381e-05,
+        1.9381827517928052e-08
+      ],
+      "ratio": [
+        1.1037526233805337e-05,
+        0.6826244866578954,
+        0.8191813723190666
+      ],
+      "passed": true
+    },
+    {
+      "model": "M",
+      "config": "NbCl5_c0",
+      "path": "3x_rnacc",
+      "error": [
+        8.322617590979294e-05,
+        1.3713657798897216e-05,
+        1.868364293139413e-08
+      ],
+      "yardstick": [
+        11.80996720601494,
+        2.151313736946381e-05,
+        1.9381827517928052e-08
+      ],
+      "ratio": [
+        7.047113210221699e-06,
+        0.6374550379789172,
+        0.5605092879418239
+      ],
+      "passed": true
+    },
+    {
+      "model": "M",
+      "config": "NbCl5_c1",
+      "path": "simt",
+      "error": [
+        0.0004542676766437513,
+        1.2754121805791385e-05,
+        3.846460060446394e-08
+      ],
+      "yardstick": [
+        12.430632687432485,
+        2.9685908350840506e-05,
+        3.927865832586974e-08
+      ],
+      "ratio": [
+        3.6544212033794644e-05,
+        0.429635558227083,
+        0.979274808353888
+      ],
+      "passed": true
+    },
+    {
+      "model": "M",
+      "config": "NbCl5_c1",
+      "path": "3x_rnacc",
+      "error": [
+        0.00017937876422096183,
+        1.245801517235634e-05,
+        1.6234895847816455e-08
+      ],
+      "yardstick": [
+        12.430632687432485,
+        2.9685908350840506e-05,
+        3.927865832586974e-08
+      ],
+      "ratio": [
+        1.4430380876937652e-05,
+        0.41966090527270705,
+        0.41332613026458226
+      ],
+      "passed": true
+    },
+    {
+      "model": "M",
+      "config": "NbCl5_c2",
+      "path": "simt",
+      "error": [
+        0.00019869508428706063,
+        1.262053798248286e-05,
+        2.848504162926424e-08
+      ],
+      "yardstick": [
+        4.149124265596685,
+        2.6164935082562124e-05,
+        5.2086891733776897e-08
+      ],
+      "ratio": [
+        4.788843899773783e-05,
+        0.4823454727733661,
+        0.5468754360474247
+      ],
+      "passed": true
+    },
+    {
+      "model": "M",
+      "config": "NbCl5_c2",
+      "path": "3x_rnacc",
+      "error": [
+        8.637801295629254e-05,
+        1.2387836316546386e-05,
+        6.539103539898727e-09
+      ],
+      "yardstick": [
+        4.149124265596685,
+        2.6164935082562124e-05,
+        5.2086891733776897e-08
+      ],
+      "ratio": [
+        2.0818372125538286e-05,
+        0.4734518269377393,
+        0.12554221076045322
+      ],
+      "passed": true
+    },
+    {
+      "model": "M",
+      "config": "Ta2O5_c0",
+      "path": "simt",
+      "error": [
+        0.007969799168807055,
+        0.004908370187592936,
+        7.45937030240118e-06
+      ],
+      "yardstick": [
+        9.359116817312685,
+        0.007355220612680569,
+        8.421014945358962e-06
+      ],
+      "ratio": [
+        0.0008515546204172126,
+        0.6673314705381908,
+        0.8858041875952531
+      ],
+      "passed": true
+    },
+    {
+      "model": "M",
+      "config": "Ta2O5_c0",
+      "path": "3x_rnacc",
+      "error": [
+        0.014720784661005296,
+        0.012118877966145192,
+        4.961463847930059e-06
+      ],
+      "yardstick": [
+        9.359116817312685,
+        0.007355220612680569,
+        8.421014945358962e-06
+      ],
+      "ratio": [
+        0.0015728818165592813,
+        1.6476566243644641,
+        0.5891764686469829
+      ],
+      "passed": true
+    },
+    {
+      "model": "M",
+      "config": "Ta2O5_c1",
+      "path": "simt",
+      "error": [
+        0.003659971832622966,
+        0.005137601166211425,
+        3.987922895049012e-06
+      ],
+      "yardstick": [
+        9.19107524705829,
+        0.0038220771618853178,
+        7.356067295294366e-06
+      ],
+      "ratio": [
+        0.0003982093209164382,
+        1.3441908545031043,
+        0.5421270272500176
+      ],
+      "passed": true
+    },
+    {
+      "model": "M",
+      "config": "Ta2O5_c1",
+      "path": "3x_rnacc",
+      "error": [
+        0.004384729046640652,
+        0.0045399149466334165,
+        2.339390823030696e-06
+      ],
+      "yardstick": [
+        9.19107524705829,
+        0.0038220771618853178,
+        7.356067295294366e-06
+      ],
+      "ratio": [
+        0.00047706377423512394,
+        1.1878135250398794,
+        0.3180219442156532
+      ],
+      "passed": true
+    },
+    {
+      "model": "M",
+      "config": "Ta2O5_c2",
+      "path": "simt",
+      "error": [
+        0.008392381474434857,
+        0.013442043521706637,
+        9.310664641916377e-06
+      ],
+      "yardstick": [
+        9.396846013722039,
+        0.012442637391359312,
+        1.0796110846027218e-05
+      ],
+      "ratio": [
+        0.0008931062041646334,
+        1.0803210845830284,
+        0.8624091373925213
+      ],
+      "passed": true
+    },
+    {
+      "model": "M",
+      "config": "Ta2O5_c2",
+      "path": "3x_rnacc",
+      "error": [
+        0.0038635642138413256,
+        0.012241567438820766,
+        7.395319007175161e-06
+      ],
+      "yardstick": [
+        9.396846013722039,
+        0.012442637391359312,
+        1.0796110846027218e-05
+      ],
+      "ratio": [
+        0.0004111554247243634,
+        0.9838402465478759,
+        0.684998432550969
+      ],
+      "passed": true
+    },
+    {
+      "model": "M",
+      "config": "TaCl3O_c0",
+      "path": "simt",
+      "error": [
+        0.0001866414095275104,
+        1.844419042651424e-05,
+        2.3411350962010413e-08
+      ],
+      "yardstick": [
+        16.025796157191508,
+        3.396577174186177e-05,
+        6.752068224674668e-08
+      ],
+      "ratio": [
+        1.1646311215792911e-05,
+        0.5430228574427574,
+        0.34672859015932755
+      ],
+      "passed": true
+    },
+    {
+      "model": "M",
+      "config": "TaCl3O_c0",
+      "path": "3x_rnacc",
+      "error": [
+        2.9946386348456144e-05,
+        1.5398256309584468e-05,
+        4.14581099242306e-08
+      ],
+      "yardstick": [
+        16.025796157191508,
+        3.396577174186177e-05,
+        6.752068224674668e-08
+      ],
+      "ratio": [
+        1.8686364193530462e-06,
+        0.45334628126840376,
+        0.6140060873900332
+      ],
+      "passed": true
+    },
+    {
+      "model": "M",
+      "config": "TaCl3O_c1",
+      "path": "simt",
+      "error": [
+        0.00029407674446702003,
+        1.8501357666345086e-05,
+        1.4833924602553061e-08
+      ],
+      "yardstick": [
+        14.057610505551565,
+        7.059910621176613e-05,
+        7.538094152700903e-08
+      ],
+      "ratio": [
+        2.0919397670812164e-05,
+        0.2620622081368734,
+        0.19678614119243998
+      ],
+      "passed": true
+    },
+    {
+      "model": "M",
+      "config": "TaCl3O_c1",
+      "path": "3x_rnacc",
+      "error": [
+        0.00014061079127714038,
+        2.3665554525820198e-05,
+        2.2417435636967742e-08
+      ],
+      "yardstick": [
+        14.057610505551565,
+        7.059910621176613e-05,
+        7.538094152700903e-08
+      ],
+      "ratio": [
+        1.0002467433680214e-05,
+        0.3352103984834311,
+        0.2973886393941573
+      ],
+      "passed": true
+    },
+    {
+      "model": "M",
+      "config": "TaCl3O_c2",
+      "path": "simt",
+      "error": [
+        0.00023820903152227402,
+        2.6184359985137462e-05,
+        4.5836550052053004e-08
+      ],
+      "yardstick": [
+        14.306695252889767,
+        5.026855333833957e-05,
+        6.798977946614881e-08
+      ],
+      "ratio": [
+        1.665017862697249e-05,
+        0.5208894675941824,
+        0.6741682413438979
+      ],
+      "passed": true
+    },
+    {
+      "model": "M",
+      "config": "TaCl3O_c2",
+      "path": "3x_rnacc",
+      "error": [
+        4.291359800845385e-06,
+        1.9391533090384883e-05,
+        1.3099710663433406e-08
+      ],
+      "yardstick": [
+        14.306695252889767,
+        5.026855333833957e-05,
+        6.798977946614881e-08
+      ],
+      "ratio": [
+        2.99954652349122e-07,
+        0.3857587259348293,
+        0.19267176281922746
+      ],
+      "passed": true
+    },
+    {
+      "model": "M",
+      "config": "TaCl5_c0",
+      "path": "simt",
+      "error": [
+        1.6468456359925092e-05,
+        1.0365135569623263e-05,
+        1.3214250348461687e-08
+      ],
+      "yardstick": [
+        12.8621184504246,
+        2.0908952626630395e-05,
+        4.181619100290801e-08
+      ],
+      "ratio": [
+        1.280384442376321e-06,
+        0.4957271535649209,
+        0.31600798713452244
+      ],
+      "passed": true
+    },
+    {
+      "model": "M",
+      "config": "TaCl5_c0",
+      "path": "3x_rnacc",
+      "error": [
+        0.00011535249305544076,
+        1.0039832279540306e-05,
+        1.2803044497841642e-08
+      ],
+      "yardstick": [
+        12.8621184504246,
+        2.0908952626630395e-05,
+        4.181619100290801e-08
+      ],
+      "ratio": [
+        8.968389888497162e-06,
+        0.48016906723262714,
+        0.30617433560486856
+      ],
+      "passed": true
+    },
+    {
+      "model": "M",
+      "config": "TaCl5_c1",
+      "path": "simt",
+      "error": [
+        8.10832716524601e-05,
+        1.2160136399486099e-05,
+        3.193754021663109e-08
+      ],
+      "yardstick": [
+        13.786919645671905,
+        3.0238061911269654e-05,
+        2.8015156385268608e-08
+      ],
+      "ratio": [
+        5.88117387613225e-06,
+        0.40214668635737016,
+        0.9581262064989327
+      ],
+      "passed": true
+    },
+    {
+      "model": "M",
+      "config": "TaCl5_c1",
+      "path": "3x_rnacc",
+      "error": [
+        4.800407353926588e-05,
+        1.147103727505705e-05,
+        2.4108111302406643e-08
+      ],
+      "yardstick": [
+        13.786919645671905,
+        3.0238061911269654e-05,
+        2.8015156385268608e-08
+      ],
+      "ratio": [
+        3.4818563372374254e-06,
+        0.37935755633802115,
+        0.7232433390721993
+      ],
+      "passed": true
+    },
+    {
+      "model": "M",
+      "config": "TaCl5_c2",
+      "path": "simt",
+      "error": [
+        0.0002760854032304552,
+        9.524072330346911e-06,
+        2.87400721658837e-08
+      ],
+      "yardstick": [
+        13.263458176947164,
+        2.845755753311252e-05,
+        2.4448693833334367e-08
+      ],
+      "ratio": [
+        2.0815491672474323e-05,
+        0.3346763797021207,
+        0.862202164976511
+      ],
+      "passed": true
+    },
+    {
+      "model": "M",
+      "config": "TaCl5_c2",
+      "path": "3x_rnacc",
+      "error": [
+        0.000157986370915616,
+        1.2036331396014788e-05,
+        1.902784451876527e-08
+      ],
+      "yardstick": [
+        13.263458176947164,
+        2.845755753311252e-05,
+        2.4448693833334367e-08
+      ],
+      "ratio": [
+        1.1911401145005122e-05,
+        0.42295728936011484,
+        0.5708353355629581
+      ],
+      "passed": true
+    }
+  ]
+}

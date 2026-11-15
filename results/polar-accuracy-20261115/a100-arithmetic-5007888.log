@@ -1,0 +1,544 @@
+5007888
+### Starting TaskPrologue of job 5007888 on a0905 at Sun Nov 15 02:19:30 PM CET 2026
+Running on cores 48-63 with governor schedutil
+Sun Nov 15 14:19:30 2026       
++-----------------------------------------------------------------------------------------+
+| NVIDIA-SMI 615.71.10              KMD Version: 615.71.10     CUDA UMD Version: 13.4     |
++-----------------------------------------+------------------------+----------------------+
+| GPU  Name                 Persistence-M | Bus-Id          Disp.A | Volatile Uncorr. ECC |
+| Fan  Temp   Perf          Pwr:Usage/Cap |           Memory-Usage | GPU-Util  Compute M. |
+|                                         |                        |               MIG M. |
+|=========================================+========================+======================|
+|   0  NVIDIA A100-SXM4-40GB          On  |   00000000:13:00.0 Off |                    0 |
+| N/A   31C    P0             54W /  400W |       0MiB /  40960MiB |      0%      Default |
+|                                         |                        |             Disabled |
++-----------------------------------------+------------------------+----------------------+
+
++-----------------------------------------------------------------------------------------+
+| Processes:                                                                              |
+|  GPU   GI   CI              PID   Type   Process name                        GPU Memory |
+|        ID   ID                                                               Usage      |
+|=========================================================================================|
+|  No running processes found                                                             |
++-----------------------------------------------------------------------------------------+
+### Finished TaskPrologue
+
+NVIDIA A100-SXM4-40GB, 615.71.10
+009006b6c3b80151b6e959ba9a220c2d94b84402d758674ef6e53e3720b52ea5  /home/atuin/v130cb/v130cb18/loup-s64/src/libloupmd_s70.so
+791c5e1aad33c823e5bab32c5a0cf3dabd35224e07cfd25d832b95773859d45b  /home/atuin/v130cb/v130cb18/loup-s64/polar-arithmetic/cub80/3x_rn_sm80.cubin
+f27ddc47730c0f14911f3e4abef9f2a732b700dfa9007e3619c73c5248b7ba77  /home/atuin/v130cb/v130cb18/loup-s64/polar-arithmetic/cub80/3x_sm80.cubin
+a6c17fa70a5c32eb37ebde929bd6b6077f96afda522141828bbb38ef9a87710f  /home/atuin/v130cb/v130cb18/loup-s64/polar-arithmetic/cub80/hyb_acc_sm80.cubin
+e161b596e824223c475fff1a6fdf0580cae44c39e876fb77ab9766daf2542536  /home/atuin/v130cb/v130cb18/loup-s64/polar-arithmetic/cub80/hyb_rnacc_sm80.cubin
+7fa68d0a6e66f0aaba0c09dfbacb3b1b6eef5ce26b059aa9a830a4c30f4d07b3  /home/atuin/v130cb/v130cb18/loup-s64/polar-arithmetic/cub80/hyb_rn_sm80.cubin
+2cdd4217340a62e9497003a0581fb65c394a3d0964d6c9c45fd8e6a33d138b24  /home/atuin/v130cb/v130cb18/loup-s64/polar-arithmetic/cub80/hyb_sm80.cubin
+33586b3f3212890cb5f4bfa0b3fa2f32087f656d5aa4909cae47983e48c6f518  /home/atuin/v130cb/v130cb18/loup-s64/src/python/test_gate.py
+positive U[0.5,1.5) data, M 2048 N 128 K 128 (error / sum|a b|)
+  cuBLAS FP32 (pedantic)                       mean -2.335e-11  rms 5.472e-08  max 2.757e-07
+  /home/atuin/v130cb/v130cb18/loup-s64/polar-arithmetic/cub80/hyb_sm80.cubin mean -1.896e-07  rms 1.968e-07  max 4.314e-07
+  /home/atuin/v130cb/v130cb18/loup-s64/polar-arithmetic/cub80/hyb_rn_sm80.cubin mean -5.673e-08  rms 7.589e-08  max 2.707e-07
+  /home/atuin/v130cb/v130cb18/loup-s64/polar-arithmetic/cub80/hyb_acc_sm80.cubin mean -1.573e-07  rms 1.660e-07  max 3.881e-07
+  /home/atuin/v130cb/v130cb18/loup-s64/polar-arithmetic/cub80/hyb_rnacc_sm80.cubin mean -2.450e-08  rms 5.638e-08  max 2.298e-07
+  /home/atuin/v130cb/v130cb18/loup-s64/polar-arithmetic/cub80/3x_sm80.cubin mean -3.185e-07  rms 3.237e-07  max 5.700e-07
+  /home/atuin/v130cb/v130cb18/loup-s64/polar-arithmetic/cub80/3x_rn_sm80.cubin mean -1.064e-07  rms 1.190e-07  max 3.370e-07
+symmetric normal data, M 2048 N 128 K 128 (error / sum|a b|)
+  cuBLAS FP32 (pedantic)                       mean +3.493e-11  rms 1.513e-08  max 1.171e-07
+  /home/atuin/v130cb/v130cb18/loup-s64/polar-arithmetic/cub80/hyb_sm80.cubin mean -2.581e-11  rms 3.594e-08  max 1.858e-07
+  /home/atuin/v130cb/v130cb18/loup-s64/polar-arithmetic/cub80/hyb_rn_sm80.cubin mean -2.160e-11  rms 1.783e-08  max 1.247e-07
+  /home/atuin/v130cb/v130cb18/loup-s64/polar-arithmetic/cub80/hyb_acc_sm80.cubin mean -4.599e-12  rms 3.358e-08  max 1.809e-07
+  /home/atuin/v130cb/v130cb18/loup-s64/polar-arithmetic/cub80/hyb_rnacc_sm80.cubin mean -8.917e-12  rms 1.604e-08  max 9.729e-08
+  /home/atuin/v130cb/v130cb18/loup-s64/polar-arithmetic/cub80/3x_sm80.cubin mean +6.945e-12  rms 3.731e-08  max 2.130e-07
+  /home/atuin/v130cb/v130cb18/loup-s64/polar-arithmetic/cub80/3x_rn_sm80.cubin mean +4.855e-12  rms 2.371e-08  max 1.404e-07
+positive U[0.5,1.5) data, M 2048 N 128 K 512 (error / sum|a b|)
+  cuBLAS FP32 (pedantic)                       mean +8.789e-11  rms 6.021e-08  max 2.653e-07
+  /home/atuin/v130cb/v130cb18/loup-s64/polar-arithmetic/cub80/hyb_sm80.cubin mean -1.945e-07  rms 2.106e-07  max 5.553e-07
+  /home/atuin/v130cb/v130cb18/loup-s64/polar-arithmetic/cub80/hyb_rn_sm80.cubin mean -6.079e-08  rms 1.007e-07  max 4.413e-07
+  /home/atuin/v130cb/v130cb18/loup-s64/polar-arithmetic/cub80/hyb_acc_sm80.cubin mean -1.585e-07  rms 1.780e-07  max 4.820e-07
+  /home/atuin/v130cb/v130cb18/loup-s64/polar-arithmetic/cub80/hyb_rnacc_sm80.cubin mean -2.485e-08  rms 8.423e-08  max 4.116e-07
+  /home/atuin/v130cb/v130cb18/loup-s64/polar-arithmetic/cub80/3x_sm80.cubin mean -3.427e-07  rms 3.523e-07  max 6.837e-07
+  /home/atuin/v130cb/v130cb18/loup-s64/polar-arithmetic/cub80/3x_rn_sm80.cubin mean -1.138e-07  rms 1.396e-07  max 4.793e-07
+symmetric normal data, M 2048 N 128 K 512 (error / sum|a b|)
+  cuBLAS FP32 (pedantic)                       mean -6.018e-13  rms 1.073e-08  max 7.451e-08
+  /home/atuin/v130cb/v130cb18/loup-s64/polar-arithmetic/cub80/hyb_sm80.cubin mean +9.691e-12  rms 1.929e-08  max 1.234e-07
+  /home/atuin/v130cb/v130cb18/loup-s64/polar-arithmetic/cub80/hyb_rn_sm80.cubin mean +1.418e-11  rms 1.093e-08  max 8.960e-08
+  /home/atuin/v130cb/v130cb18/loup-s64/polar-arithmetic/cub80/hyb_acc_sm80.cubin mean +2.163e-11  rms 1.812e-08  max 1.110e-07
+  /home/atuin/v130cb/v130cb18/loup-s64/polar-arithmetic/cub80/hyb_rnacc_sm80.cubin mean -1.387e-11  rms 1.016e-08  max 8.923e-08
+  /home/atuin/v130cb/v130cb18/loup-s64/polar-arithmetic/cub80/3x_sm80.cubin mean +2.797e-11  rms 2.028e-08  max 1.241e-07
+  /home/atuin/v130cb/v130cb18/loup-s64/polar-arithmetic/cub80/3x_rn_sm80.cubin mean +1.469e-11  rms 1.382e-08  max 1.007e-07
+##### POLAR-S hyb forced TC crystal gate 2026-11-15T14:20:05+01:00
+/tmp/loupenv-5007888/env/lib/python3.10/site-packages/e3nn/o3/_wigner.py:10: UserWarning: Environment variable TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD detected, since the`weights_only` argument was not explicitly passed to `torch.load`, forcing weights_only=False.
+  _Jd, _W3j_flat, _W3j_indices = torch.load(os.path.join(os.path.dirname(__file__), 'constants.pt'))
+/tmp/loupenv-5007888/env/lib/python3.10/site-packages/torch/jit/_script.py:1491: FutureWarning: `torch.jit.script` is deprecated. Please switch to `torch.compile` or `torch.export`.
+  warnings.warn(
+/tmp/loupenv-5007888/env/lib/python3.10/site-packages/torch/jit/_script.py:1491: FutureWarning: `torch.jit.script` is deprecated. Please switch to `torch.compile` or `torch.export`.
+  warnings.warn(
+/tmp/loupenv-5007888/env/lib/python3.10/site-packages/torch/jit/_script.py:1491: FutureWarning: `torch.jit.script` is deprecated. Please switch to `torch.compile` or `torch.export`.
+  warnings.warn(
+/tmp/loupenv-5007888/env/lib/python3.10/site-packages/openequivariance/__init__.py:38: UserWarning: Precompiled extension shared object not found.
+For these reasons, falling back to JIT compilation of OpenEquivariance extension. If another process holds the build lock, this waits up to 5 minutes, then raises an error naming the lock file to delete.
+
+  from openequivariance._torch.TensorProduct import TensorProduct
+/tmp/loupenv-5007888/env/lib/python3.10/site-packages/torch/jit/_script.py:1491: FutureWarning: `torch.jit.script` is deprecated. Please switch to `torch.compile` or `torch.export`.
+  warnings.warn(
+/tmp/loupenv-5007888/env/lib/python3.10/site-packages/torch/jit/_serialization.py:176: FutureWarning: `torch.jit.load` is deprecated. Please switch to `torch.export`.
+  warnings.warn(
+/tmp/loupenv-5007888/env/lib/python3.10/site-packages/torch/jit/_serialization.py:176: FutureWarning: `torch.jit.load` is deprecated. Please switch to `torch.export`.
+  warnings.warn(
+left out (model not float32-reproducible there, --include-unstable): NaNbO3_c0
+crystals set: NaCl_c0 (216), NaCl_c1 (216), NaNbO3_c1 (360), NbCl5_c0 (216), NbCl5_c1 (216)
+MACE references from /home/atuin/v130cb/v130cb18/loup-s64/gate_refs/MACE-POLAR-1-S_crystals_04b4f714c5d4dd0b4f4b.npz
+
+=== LoupMD vs MACE float64 / float32 (3x gate) ===
+Config             Variant                  | dE/atom (meV) | dF_max (eV/A)  ratio | dS_max (eV/A3)  ratio | Pass
+-----------------------------------------------------------------------------------------------------------------
+NaCl_c0            default                  |       0.00110 |     8.066e-06   2.01 |      1.494e-07   2.41 | PASS
+NaCl_c1            default                  |       0.00083 |     6.583e-06   1.03 |      2.806e-07   6.51 | FAIL
+  ref32: dE/atom=2.26544 meV, dF=6.399e-06, dS=4.310e-08
+NaNbO3_c1          default                  |       0.00221 |     2.100e-03   0.12 |      1.023e-05   0.18 | PASS
+NbCl5_c0           default                  |       0.00125 |     3.073e-05   1.58 |      4.702e-08   1.41 | PASS
+NbCl5_c1           default                  |       0.00109 |     4.084e-05   1.09 |      6.237e-08   1.87 | PASS
+GATE_EXIT S hyb 1
+##### POLAR-S hyb_rn forced TC crystal gate 2026-11-15T14:25:18+01:00
+/tmp/loupenv-5007888/env/lib/python3.10/site-packages/e3nn/o3/_wigner.py:10: UserWarning: Environment variable TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD detected, since the`weights_only` argument was not explicitly passed to `torch.load`, forcing weights_only=False.
+  _Jd, _W3j_flat, _W3j_indices = torch.load(os.path.join(os.path.dirname(__file__), 'constants.pt'))
+/tmp/loupenv-5007888/env/lib/python3.10/site-packages/torch/jit/_script.py:1491: FutureWarning: `torch.jit.script` is deprecated. Please switch to `torch.compile` or `torch.export`.
+  warnings.warn(
+/tmp/loupenv-5007888/env/lib/python3.10/site-packages/torch/jit/_script.py:1491: FutureWarning: `torch.jit.script` is deprecated. Please switch to `torch.compile` or `torch.export`.
+  warnings.warn(
+/tmp/loupenv-5007888/env/lib/python3.10/site-packages/torch/jit/_script.py:1491: FutureWarning: `torch.jit.script` is deprecated. Please switch to `torch.compile` or `torch.export`.
+  warnings.warn(
+/tmp/loupenv-5007888/env/lib/python3.10/site-packages/openequivariance/__init__.py:38: UserWarning: Precompiled extension shared object not found.
+For these reasons, falling back to JIT compilation of OpenEquivariance extension. If another process holds the build lock, this waits up to 5 minutes, then raises an error naming the lock file to delete.
+
+  from openequivariance._torch.TensorProduct import TensorProduct
+/tmp/loupenv-5007888/env/lib/python3.10/site-packages/torch/jit/_script.py:1491: FutureWarning: `torch.jit.script` is deprecated. Please switch to `torch.compile` or `torch.export`.
+  warnings.warn(
+/tmp/loupenv-5007888/env/lib/python3.10/site-packages/torch/jit/_serialization.py:176: FutureWarning: `torch.jit.load` is deprecated. Please switch to `torch.export`.
+  warnings.warn(
+/tmp/loupenv-5007888/env/lib/python3.10/site-packages/torch/jit/_serialization.py:176: FutureWarning: `torch.jit.load` is deprecated. Please switch to `torch.export`.
+  warnings.warn(
+left out (model not float32-reproducible there, --include-unstable): NaNbO3_c0
+crystals set: NaCl_c0 (216), NaCl_c1 (216), NaNbO3_c1 (360), NbCl5_c0 (216), NbCl5_c1 (216)
+MACE references from /home/atuin/v130cb/v130cb18/loup-s64/gate_refs/MACE-POLAR-1-S_crystals_04b4f714c5d4dd0b4f4b.npz
+
+=== LoupMD vs MACE float64 / float32 (3x gate) ===
+Config             Variant                  | dE/atom (meV) | dF_max (eV/A)  ratio | dS_max (eV/A3)  ratio | Pass
+-----------------------------------------------------------------------------------------------------------------
+NaCl_c0            default                  |       0.00021 |     5.439e-06   1.35 |      3.756e-08   0.60 | PASS
+NaCl_c1            default                  |       0.00010 |     5.851e-06   0.91 |      1.401e-08   0.32 | PASS
+NaNbO3_c1          default                  |       0.01138 |     3.756e-03   0.21 |      9.397e-06   0.17 | PASS
+NbCl5_c0           default                  |       0.00042 |     2.265e-05   1.16 |      1.345e-08   0.40 | PASS
+NbCl5_c1           default                  |       0.00034 |     2.802e-05   0.75 |      4.718e-08   1.42 | PASS
+GATE_EXIT S hyb_rn 0
+##### POLAR-S hyb_rnacc forced TC crystal gate 2026-11-15T14:30:32+01:00
+/tmp/loupenv-5007888/env/lib/python3.10/site-packages/e3nn/o3/_wigner.py:10: UserWarning: Environment variable TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD detected, since the`weights_only` argument was not explicitly passed to `torch.load`, forcing weights_only=False.
+  _Jd, _W3j_flat, _W3j_indices = torch.load(os.path.join(os.path.dirname(__file__), 'constants.pt'))
+/tmp/loupenv-5007888/env/lib/python3.10/site-packages/torch/jit/_script.py:1491: FutureWarning: `torch.jit.script` is deprecated. Please switch to `torch.compile` or `torch.export`.
+  warnings.warn(
+/tmp/loupenv-5007888/env/lib/python3.10/site-packages/torch/jit/_script.py:1491: FutureWarning: `torch.jit.script` is deprecated. Please switch to `torch.compile` or `torch.export`.
+  warnings.warn(
+/tmp/loupenv-5007888/env/lib/python3.10/site-packages/torch/jit/_script.py:1491: FutureWarning: `torch.jit.script` is deprecated. Please switch to `torch.compile` or `torch.export`.
+  warnings.warn(
+/tmp/loupenv-5007888/env/lib/python3.10/site-packages/openequivariance/__init__.py:38: UserWarning: Precompiled extension shared object not found.
+For these reasons, falling back to JIT compilation of OpenEquivariance extension. If another process holds the build lock, this waits up to 5 minutes, then raises an error naming the lock file to delete.
+
+  from openequivariance._torch.TensorProduct import TensorProduct
+/tmp/loupenv-5007888/env/lib/python3.10/site-packages/torch/jit/_script.py:1491: FutureWarning: `torch.jit.script` is deprecated. Please switch to `torch.compile` or `torch.export`.
+  warnings.warn(
+/tmp/loupenv-5007888/env/lib/python3.10/site-packages/torch/jit/_serialization.py:176: FutureWarning: `torch.jit.load` is deprecated. Please switch to `torch.export`.
+  warnings.warn(
+/tmp/loupenv-5007888/env/lib/python3.10/site-packages/torch/jit/_serialization.py:176: FutureWarning: `torch.jit.load` is deprecated. Please switch to `torch.export`.
+  warnings.warn(
+left out (model not float32-reproducible there, --include-unstable): NaNbO3_c0
+crystals set: NaCl_c0 (216), NaCl_c1 (216), NaNbO3_c1 (360), NbCl5_c0 (216), NbCl5_c1 (216)
+MACE references from /home/atuin/v130cb/v130cb18/loup-s64/gate_refs/MACE-POLAR-1-S_crystals_04b4f714c5d4dd0b4f4b.npz
+
+=== LoupMD vs MACE float64 / float32 (3x gate) ===
+Config             Variant                  | dE/atom (meV) | dF_max (eV/A)  ratio | dS_max (eV/A3)  ratio | Pass
+-----------------------------------------------------------------------------------------------------------------
+NaCl_c0            default                  |       0.00005 |     5.870e-06   1.46 |      2.566e-08   0.41 | PASS
+NaCl_c1            default                  |       0.00003 |     4.861e-06   0.76 |      4.793e-09   0.11 | PASS
+NaNbO3_c1          default                  |       0.01183 |     4.289e-03   0.24 |      7.102e-06   0.13 | PASS
+NbCl5_c0           default                  |       0.00034 |     2.331e-05   1.20 |      1.282e-08   0.38 | PASS
+NbCl5_c1           default                  |       0.00023 |     3.010e-05   0.81 |      4.359e-08   1.31 | PASS
+GATE_EXIT S hyb_rnacc 0
+##### POLAR-S 3x forced TC crystal gate 2026-11-15T14:35:45+01:00
+/tmp/loupenv-5007888/env/lib/python3.10/site-packages/e3nn/o3/_wigner.py:10: UserWarning: Environment variable TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD detected, since the`weights_only` argument was not explicitly passed to `torch.load`, forcing weights_only=False.
+  _Jd, _W3j_flat, _W3j_indices = torch.load(os.path.join(os.path.dirname(__file__), 'constants.pt'))
+/tmp/loupenv-5007888/env/lib/python3.10/site-packages/torch/jit/_script.py:1491: FutureWarning: `torch.jit.script` is deprecated. Please switch to `torch.compile` or `torch.export`.
+  warnings.warn(
+/tmp/loupenv-5007888/env/lib/python3.10/site-packages/torch/jit/_script.py:1491: FutureWarning: `torch.jit.script` is deprecated. Please switch to `torch.compile` or `torch.export`.
+  warnings.warn(
+/tmp/loupenv-5007888/env/lib/python3.10/site-packages/torch/jit/_script.py:1491: FutureWarning: `torch.jit.script` is deprecated. Please switch to `torch.compile` or `torch.export`.
+  warnings.warn(
+/tmp/loupenv-5007888/env/lib/python3.10/site-packages/openequivariance/__init__.py:38: UserWarning: Precompiled extension shared object not found.
+For these reasons, falling back to JIT compilation of OpenEquivariance extension. If another process holds the build lock, this waits up to 5 minutes, then raises an error naming the lock file to delete.
+
+  from openequivariance._torch.TensorProduct import TensorProduct
+/tmp/loupenv-5007888/env/lib/python3.10/site-packages/torch/jit/_script.py:1491: FutureWarning: `torch.jit.script` is deprecated. Please switch to `torch.compile` or `torch.export`.
+  warnings.warn(
+/tmp/loupenv-5007888/env/lib/python3.10/site-packages/torch/jit/_serialization.py:176: FutureWarning: `torch.jit.load` is deprecated. Please switch to `torch.export`.
+  warnings.warn(
+/tmp/loupenv-5007888/env/lib/python3.10/site-packages/torch/jit/_serialization.py:176: FutureWarning: `torch.jit.load` is deprecated. Please switch to `torch.export`.
+  warnings.warn(
+left out (model not float32-reproducible there, --include-unstable): NaNbO3_c0
+crystals set: NaCl_c0 (216), NaCl_c1 (216), NaNbO3_c1 (360), NbCl5_c0 (216), NbCl5_c1 (216)
+MACE references from /home/atuin/v130cb/v130cb18/loup-s64/gate_refs/MACE-POLAR-1-S_crystals_04b4f714c5d4dd0b4f4b.npz
+
+=== LoupMD vs MACE float64 / float32 (3x gate) ===
+Config             Variant                  | dE/atom (meV) | dF_max (eV/A)  ratio | dS_max (eV/A3)  ratio | Pass
+-----------------------------------------------------------------------------------------------------------------
+NaCl_c0            default                  |       0.00111 |     1.308e-06   0.33 |      1.048e-07   1.69 | PASS
+NaCl_c1            default                  |       0.00074 |     2.473e-06   0.39 |      2.130e-07   4.94 | FAIL
+  ref32: dE/atom=2.26544 meV, dF=6.399e-06, dS=4.310e-08
+NaNbO3_c1          default                  |       0.00296 |     2.205e-03   0.12 |      2.123e-05   0.38 | PASS
+NbCl5_c0           default                  |       0.00122 |     1.221e-05   0.63 |      1.541e-08   0.46 | PASS
+NbCl5_c1           default                  |       0.00111 |     1.762e-05   0.47 |      2.353e-08   0.71 | PASS
+GATE_EXIT S 3x 1
+##### POLAR-S 3x_rn forced TC crystal gate 2026-11-15T14:40:57+01:00
+/tmp/loupenv-5007888/env/lib/python3.10/site-packages/e3nn/o3/_wigner.py:10: UserWarning: Environment variable TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD detected, since the`weights_only` argument was not explicitly passed to `torch.load`, forcing weights_only=False.
+  _Jd, _W3j_flat, _W3j_indices = torch.load(os.path.join(os.path.dirname(__file__), 'constants.pt'))
+/tmp/loupenv-5007888/env/lib/python3.10/site-packages/torch/jit/_script.py:1491: FutureWarning: `torch.jit.script` is deprecated. Please switch to `torch.compile` or `torch.export`.
+  warnings.warn(
+/tmp/loupenv-5007888/env/lib/python3.10/site-packages/torch/jit/_script.py:1491: FutureWarning: `torch.jit.script` is deprecated. Please switch to `torch.compile` or `torch.export`.
+  warnings.warn(
+/tmp/loupenv-5007888/env/lib/python3.10/site-packages/torch/jit/_script.py:1491: FutureWarning: `torch.jit.script` is deprecated. Please switch to `torch.compile` or `torch.export`.
+  warnings.warn(
+/tmp/loupenv-5007888/env/lib/python3.10/site-packages/openequivariance/__init__.py:38: UserWarning: Precompiled extension shared object not found.
+For these reasons, falling back to JIT compilation of OpenEquivariance extension. If another process holds the build lock, this waits up to 5 minutes, then raises an error naming the lock file to delete.
+
+  from openequivariance._torch.TensorProduct import TensorProduct
+/tmp/loupenv-5007888/env/lib/python3.10/site-packages/torch/jit/_script.py:1491: FutureWarning: `torch.jit.script` is deprecated. Please switch to `torch.compile` or `torch.export`.
+  warnings.warn(
+/tmp/loupenv-5007888/env/lib/python3.10/site-packages/torch/jit/_serialization.py:176: FutureWarning: `torch.jit.load` is deprecated. Please switch to `torch.export`.
+  warnings.warn(
+/tmp/loupenv-5007888/env/lib/python3.10/site-packages/torch/jit/_serialization.py:176: FutureWarning: `torch.jit.load` is deprecated. Please switch to `torch.export`.
+  warnings.warn(
+left out (model not float32-reproducible there, --include-unstable): NaNbO3_c0
+crystals set: NaCl_c0 (216), NaCl_c1 (216), NaNbO3_c1 (360), NbCl5_c0 (216), NbCl5_c1 (216)
+MACE references from /home/atuin/v130cb/v130cb18/loup-s64/gate_refs/MACE-POLAR-1-S_crystals_04b4f714c5d4dd0b4f4b.npz
+
+=== LoupMD vs MACE float64 / float32 (3x gate) ===
+Config             Variant                  | dE/atom (meV) | dF_max (eV/A)  ratio | dS_max (eV/A3)  ratio | Pass
+-----------------------------------------------------------------------------------------------------------------
+NaCl_c0            default                  |       0.00058 |     1.279e-06   0.32 |      3.327e-08   0.54 | PASS
+NaCl_c1            default                  |       0.00050 |     1.360e-06   0.21 |      5.473e-08   1.27 | PASS
+NaNbO3_c1          default                  |       0.02042 |     6.627e-03   0.37 |      2.401e-05   0.43 | PASS
+NbCl5_c0           default                  |       0.00064 |     8.590e-06   0.44 |      1.146e-08   0.34 | PASS
+NbCl5_c1           default                  |       0.00054 |     1.012e-05   0.27 |      1.145e-08   0.34 | PASS
+GATE_EXIT S 3x_rn 0
+##### POLAR-M hyb forced TC crystal gate 2026-11-15T14:46:09+01:00
+/tmp/loupenv-5007888/env/lib/python3.10/site-packages/e3nn/o3/_wigner.py:10: UserWarning: Environment variable TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD detected, since the`weights_only` argument was not explicitly passed to `torch.load`, forcing weights_only=False.
+  _Jd, _W3j_flat, _W3j_indices = torch.load(os.path.join(os.path.dirname(__file__), 'constants.pt'))
+/tmp/loupenv-5007888/env/lib/python3.10/site-packages/torch/jit/_script.py:1491: FutureWarning: `torch.jit.script` is deprecated. Please switch to `torch.compile` or `torch.export`.
+  warnings.warn(
+/tmp/loupenv-5007888/env/lib/python3.10/site-packages/torch/jit/_script.py:1491: FutureWarning: `torch.jit.script` is deprecated. Please switch to `torch.compile` or `torch.export`.
+  warnings.warn(
+/tmp/loupenv-5007888/env/lib/python3.10/site-packages/torch/jit/_script.py:1491: FutureWarning: `torch.jit.script` is deprecated. Please switch to `torch.compile` or `torch.export`.
+  warnings.warn(
+/tmp/loupenv-5007888/env/lib/python3.10/site-packages/openequivariance/__init__.py:38: UserWarning: Precompiled extension shared object not found.
+For these reasons, falling back to JIT compilation of OpenEquivariance extension. If another process holds the build lock, this waits up to 5 minutes, then raises an error naming the lock file to delete.
+
+  from openequivariance._torch.TensorProduct import TensorProduct
+/tmp/loupenv-5007888/env/lib/python3.10/site-packages/torch/jit/_script.py:1491: FutureWarning: `torch.jit.script` is deprecated. Please switch to `torch.compile` or `torch.export`.
+  warnings.warn(
+/tmp/loupenv-5007888/env/lib/python3.10/site-packages/torch/jit/_serialization.py:176: FutureWarning: `torch.jit.load` is deprecated. Please switch to `torch.export`.
+  warnings.warn(
+/tmp/loupenv-5007888/env/lib/python3.10/site-packages/torch/jit/_serialization.py:176: FutureWarning: `torch.jit.load` is deprecated. Please switch to `torch.export`.
+  warnings.warn(
+/tmp/loupenv-5007888/env/lib/python3.10/site-packages/torch/jit/_serialization.py:176: FutureWarning: `torch.jit.load` is deprecated. Please switch to `torch.export`.
+  warnings.warn(
+crystals set: NaCl_c0 (216), NaCl_c1 (216), NaNbO3_c0 (360), NaNbO3_c1 (360), NbCl5_c0 (216), NbCl5_c1 (216)
+MACE references from /home/atuin/v130cb/v130cb18/loup-s64/gate_refs/MACE-POLAR-1-M_crystals_affb55cd941b557aadf3.npz
+
+=== LoupMD vs MACE float64 / float32 (3x gate) ===
+Config             Variant                  | dE/atom (meV) | dF_max (eV/A)  ratio | dS_max (eV/A3)  ratio | Pass
+-----------------------------------------------------------------------------------------------------------------
+NaCl_c0            default                  |       0.00111 |     3.973e-06   1.19 |      9.417e-09   0.25 | PASS
+NaCl_c0            conv_fwd_variant=1       |       0.00112 |     3.738e-06   1.12 |      8.548e-09   0.22 | PASS
+NaCl_c0            conv_fwd_variant=2       |       0.00112 |     3.761e-06   1.13 |      9.035e-09   0.24 | PASS
+NaCl_c1            default                  |       0.00114 |     6.431e-06   1.38 |      1.409e-08   0.34 | PASS
+NaCl_c1            conv_fwd_variant=1       |       0.00117 |     6.062e-06   1.30 |      1.079e-08   0.26 | PASS
+NaCl_c1            conv_fwd_variant=2       |       0.00117 |     6.149e-06   1.32 |      1.056e-08   0.25 | PASS
+NaNbO3_c0          default                  |       0.00016 |     2.585e-04   1.69 |      2.382e-07   0.86 | PASS
+NaNbO3_c0          conv_fwd_variant=1       |       0.00015 |     2.535e-04   1.66 |      2.140e-07   0.77 | PASS
+NaNbO3_c0          conv_fwd_variant=2       |       0.00015 |     2.536e-04   1.66 |      2.191e-07   0.79 | PASS
+NaNbO3_c1          default                  |       0.00026 |     5.594e-04   3.40 |      6.263e-07   3.31 | FAIL
+  ref32: dE/atom=7.79457 meV, dF=1.645e-04, dS=1.893e-07
+NaNbO3_c1          conv_fwd_variant=1       |       0.00024 |     5.872e-04   3.57 |      7.326e-07   3.87 | FAIL
+  ref32: dE/atom=7.79457 meV, dF=1.645e-04, dS=1.893e-07
+NaNbO3_c1          conv_fwd_variant=2       |       0.00024 |     5.838e-04   3.55 |      7.193e-07   3.80 | FAIL
+  ref32: dE/atom=7.79457 meV, dF=1.645e-04, dS=1.893e-07
+NbCl5_c0           default                  |       0.00052 |     3.302e-05   1.74 |      5.176e-08   1.55 | PASS
+NbCl5_c0           conv_fwd_variant=1       |       0.00049 |     3.032e-05   1.60 |      4.931e-08   1.48 | PASS
+NbCl5_c0           conv_fwd_variant=2       |       0.00047 |     3.026e-05   1.59 |      4.894e-08   1.47 | PASS
+NbCl5_c1           default                  |       0.00016 |     4.283e-05   1.32 |      6.998e-08   2.10 | PASS
+NbCl5_c1           conv_fwd_variant=1       |       0.00018 |     3.705e-05   1.14 |      6.300e-08   1.89 | PASS
+NbCl5_c1           conv_fwd_variant=2       |       0.00017 |     3.692e-05   1.14 |      6.201e-08   1.86 | PASS
+GATE_EXIT M hyb 1
+##### POLAR-M hyb_rn forced TC crystal gate 2026-11-15T14:51:41+01:00
+/tmp/loupenv-5007888/env/lib/python3.10/site-packages/e3nn/o3/_wigner.py:10: UserWarning: Environment variable TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD detected, since the`weights_only` argument was not explicitly passed to `torch.load`, forcing weights_only=False.
+  _Jd, _W3j_flat, _W3j_indices = torch.load(os.path.join(os.path.dirname(__file__), 'constants.pt'))
+/tmp/loupenv-5007888/env/lib/python3.10/site-packages/torch/jit/_script.py:1491: FutureWarning: `torch.jit.script` is deprecated. Please switch to `torch.compile` or `torch.export`.
+  warnings.warn(
+/tmp/loupenv-5007888/env/lib/python3.10/site-packages/torch/jit/_script.py:1491: FutureWarning: `torch.jit.script` is deprecated. Please switch to `torch.compile` or `torch.export`.
+  warnings.warn(
+/tmp/loupenv-5007888/env/lib/python3.10/site-packages/torch/jit/_script.py:1491: FutureWarning: `torch.jit.script` is deprecated. Please switch to `torch.compile` or `torch.export`.
+  warnings.warn(
+/tmp/loupenv-5007888/env/lib/python3.10/site-packages/openequivariance/__init__.py:38: UserWarning: Precompiled extension shared object not found.
+For these reasons, falling back to JIT compilation of OpenEquivariance extension. If another process holds the build lock, this waits up to 5 minutes, then raises an error naming the lock file to delete.
+
+  from openequivariance._torch.TensorProduct import TensorProduct
+/tmp/loupenv-5007888/env/lib/python3.10/site-packages/torch/jit/_script.py:1491: FutureWarning: `torch.jit.script` is deprecated. Please switch to `torch.compile` or `torch.export`.
+  warnings.warn(
+/tmp/loupenv-5007888/env/lib/python3.10/site-packages/torch/jit/_serialization.py:176: FutureWarning: `torch.jit.load` is deprecated. Please switch to `torch.export`.
+  warnings.warn(
+/tmp/loupenv-5007888/env/lib/python3.10/site-packages/torch/jit/_serialization.py:176: FutureWarning: `torch.jit.load` is deprecated. Please switch to `torch.export`.
+  warnings.warn(
+/tmp/loupenv-5007888/env/lib/python3.10/site-packages/torch/jit/_serialization.py:176: FutureWarning: `torch.jit.load` is deprecated. Please switch to `torch.export`.
+  warnings.warn(
+crystals set: NaCl_c0 (216), NaCl_c1 (216), NaNbO3_c0 (360), NaNbO3_c1 (360), NbCl5_c0 (216), NbCl5_c1 (216)
+MACE references from /home/atuin/v130cb/v130cb18/loup-s64/gate_refs/MACE-POLAR-1-M_crystals_affb55cd941b557aadf3.npz
+
+=== LoupMD vs MACE float64 / float32 (3x gate) ===
+Config             Variant                  | dE/atom (meV) | dF_max (eV/A)  ratio | dS_max (eV/A3)  ratio | Pass
+-----------------------------------------------------------------------------------------------------------------
+NaCl_c0            default                  |       0.00046 |     3.759e-06   1.13 |      3.000e-08   0.78 | PASS
+NaCl_c0            conv_fwd_variant=1       |       0.00048 |     3.789e-06   1.14 |      3.203e-08   0.84 | PASS
+NaCl_c0            conv_fwd_variant=2       |       0.00048 |     3.795e-06   1.14 |      3.206e-08   0.84 | PASS
+NaCl_c1            default                  |       0.00061 |     4.474e-06   0.96 |      1.412e-08   0.34 | PASS
+NaCl_c1            conv_fwd_variant=1       |       0.00058 |     4.702e-06   1.01 |      1.730e-08   0.41 | PASS
+NaCl_c1            conv_fwd_variant=2       |       0.00058 |     4.714e-06   1.01 |      1.745e-08   0.42 | PASS
+NaNbO3_c0          default                  |       0.00023 |     1.972e-04   1.29 |      1.638e-07   0.59 | PASS
+NaNbO3_c0          conv_fwd_variant=1       |       0.00022 |     1.908e-04   1.25 |      1.745e-07   0.63 | PASS
+NaNbO3_c0          conv_fwd_variant=2       |       0.00022 |     1.907e-04   1.25 |      1.719e-07   0.62 | PASS
+NaNbO3_c1          default                  |       0.00052 |     4.215e-04   2.56 |      2.296e-07   1.21 | PASS
+NaNbO3_c1          conv_fwd_variant=1       |       0.00053 |     4.221e-04   2.57 |      2.070e-07   1.09 | PASS
+NaNbO3_c1          conv_fwd_variant=2       |       0.00053 |     4.210e-04   2.56 |      2.134e-07   1.13 | PASS
+NbCl5_c0           default                  |       0.00064 |     2.454e-05   1.29 |      2.455e-08   0.74 | PASS
+NbCl5_c0           conv_fwd_variant=1       |       0.00066 |     2.522e-05   1.33 |      2.440e-08   0.73 | PASS
+NbCl5_c0           conv_fwd_variant=2       |       0.00066 |     2.523e-05   1.33 |      2.473e-08   0.74 | PASS
+NbCl5_c1           default                  |       0.00028 |     2.409e-05   0.74 |      2.808e-08   0.84 | PASS
+NbCl5_c1           conv_fwd_variant=1       |       0.00029 |     2.263e-05   0.70 |      2.729e-08   0.82 | PASS
+NbCl5_c1           conv_fwd_variant=2       |       0.00029 |     2.247e-05   0.69 |      2.777e-08   0.83 | PASS
+GATE_EXIT M hyb_rn 0
+##### POLAR-M hyb_rnacc forced TC crystal gate 2026-11-15T14:57:12+01:00
+/tmp/loupenv-5007888/env/lib/python3.10/site-packages/e3nn/o3/_wigner.py:10: UserWarning: Environment variable TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD detected, since the`weights_only` argument was not explicitly passed to `torch.load`, forcing weights_only=False.
+  _Jd, _W3j_flat, _W3j_indices = torch.load(os.path.join(os.path.dirname(__file__), 'constants.pt'))
+/tmp/loupenv-5007888/env/lib/python3.10/site-packages/torch/jit/_script.py:1491: FutureWarning: `torch.jit.script` is deprecated. Please switch to `torch.compile` or `torch.export`.
+  warnings.warn(
+/tmp/loupenv-5007888/env/lib/python3.10/site-packages/torch/jit/_script.py:1491: FutureWarning: `torch.jit.script` is deprecated. Please switch to `torch.compile` or `torch.export`.
+  warnings.warn(
+/tmp/loupenv-5007888/env/lib/python3.10/site-packages/torch/jit/_script.py:1491: FutureWarning: `torch.jit.script` is deprecated. Please switch to `torch.compile` or `torch.export`.
+  warnings.warn(
+/tmp/loupenv-5007888/env/lib/python3.10/site-packages/openequivariance/__init__.py:38: UserWarning: Precompiled extension shared object not found.
+For these reasons, falling back to JIT compilation of OpenEquivariance extension. If another process holds the build lock, this waits up to 5 minutes, then raises an error naming the lock file to delete.
+
+  from openequivariance._torch.TensorProduct import TensorProduct
+/tmp/loupenv-5007888/env/lib/python3.10/site-packages/torch/jit/_script.py:1491: FutureWarning: `torch.jit.script` is deprecated. Please switch to `torch.compile` or `torch.export`.
+  warnings.warn(
+/tmp/loupenv-5007888/env/lib/python3.10/site-packages/torch/jit/_serialization.py:176: FutureWarning: `torch.jit.load` is deprecated. Please switch to `torch.export`.
+  warnings.warn(
+/tmp/loupenv-5007888/env/lib/python3.10/site-packages/torch/jit/_serialization.py:176: FutureWarning: `torch.jit.load` is deprecated. Please switch to `torch.export`.
+  warnings.warn(
+/tmp/loupenv-5007888/env/lib/python3.10/site-packages/torch/jit/_serialization.py:176: FutureWarning: `torch.jit.load` is deprecated. Please switch to `torch.export`.
+  warnings.warn(
+crystals set: NaCl_c0 (216), NaCl_c1 (216), NaNbO3_c0 (360), NaNbO3_c1 (360), NbCl5_c0 (216), NbCl5_c1 (216)
+MACE references from /home/atuin/v130cb/v130cb18/loup-s64/gate_refs/MACE-POLAR-1-M_crystals_affb55cd941b557aadf3.npz
+
+=== LoupMD vs MACE float64 / float32 (3x gate) ===
+Config             Variant                  | dE/atom (meV) | dF_max (eV/A)  ratio | dS_max (eV/A3)  ratio | Pass
+-----------------------------------------------------------------------------------------------------------------
+NaCl_c0            default                  |       0.00033 |     4.184e-06   1.26 |      3.129e-08   0.82 | PASS
+NaCl_c0            conv_fwd_variant=1       |       0.00031 |     3.881e-06   1.16 |      2.969e-08   0.78 | PASS
+NaCl_c0            conv_fwd_variant=2       |       0.00031 |     3.921e-06   1.18 |      2.955e-08   0.77 | PASS
+NaCl_c1            default                  |       0.00042 |     4.474e-06   0.96 |      1.539e-08   0.37 | PASS
+NaCl_c1            conv_fwd_variant=1       |       0.00044 |     4.667e-06   1.00 |      2.125e-08   0.51 | PASS
+NaCl_c1            conv_fwd_variant=2       |       0.00044 |     4.712e-06   1.01 |      2.143e-08   0.51 | PASS
+NaNbO3_c0          default                  |       0.00015 |     1.716e-04   1.12 |      7.801e-08   0.28 | PASS
+NaNbO3_c0          conv_fwd_variant=1       |       0.00011 |     1.668e-04   1.09 |      3.519e-08   0.13 | PASS
+NaNbO3_c0          conv_fwd_variant=2       |       0.00011 |     1.642e-04   1.07 |      3.809e-08   0.14 | PASS
+NaNbO3_c1          default                  |       0.00060 |     3.970e-04   2.41 |      1.603e-07   0.85 | PASS
+NaNbO3_c1          conv_fwd_variant=1       |       0.00059 |     4.206e-04   2.56 |      1.547e-07   0.82 | PASS
+NaNbO3_c1          conv_fwd_variant=2       |       0.00059 |     4.191e-04   2.55 |      1.553e-07   0.82 | PASS
+NbCl5_c0           default                  |       0.00063 |     2.577e-05   1.36 |      2.454e-08   0.74 | PASS
+NbCl5_c0           conv_fwd_variant=1       |       0.00063 |     2.529e-05   1.33 |      2.878e-08   0.86 | PASS
+NbCl5_c0           conv_fwd_variant=2       |       0.00061 |     2.537e-05   1.34 |      2.918e-08   0.88 | PASS
+NbCl5_c1           default                  |       0.00028 |     2.312e-05   0.71 |      2.256e-08   0.68 | PASS
+NbCl5_c1           conv_fwd_variant=1       |       0.00026 |     2.613e-05   0.80 |      1.928e-08   0.58 | PASS
+NbCl5_c1           conv_fwd_variant=2       |       0.00024 |     2.640e-05   0.81 |      1.979e-08   0.59 | PASS
+GATE_EXIT M hyb_rnacc 0
+##### POLAR-M 3x forced TC crystal gate 2026-11-15T15:02:42+01:00
+/tmp/loupenv-5007888/env/lib/python3.10/site-packages/e3nn/o3/_wigner.py:10: UserWarning: Environment variable TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD detected, since the`weights_only` argument was not explicitly passed to `torch.load`, forcing weights_only=False.
+  _Jd, _W3j_flat, _W3j_indices = torch.load(os.path.join(os.path.dirname(__file__), 'constants.pt'))
+/tmp/loupenv-5007888/env/lib/python3.10/site-packages/torch/jit/_script.py:1491: FutureWarning: `torch.jit.script` is deprecated. Please switch to `torch.compile` or `torch.export`.
+  warnings.warn(
+/tmp/loupenv-5007888/env/lib/python3.10/site-packages/torch/jit/_script.py:1491: FutureWarning: `torch.jit.script` is deprecated. Please switch to `torch.compile` or `torch.export`.
+  warnings.warn(
+/tmp/loupenv-5007888/env/lib/python3.10/site-packages/torch/jit/_script.py:1491: FutureWarning: `torch.jit.script` is deprecated. Please switch to `torch.compile` or `torch.export`.
+  warnings.warn(
+/tmp/loupenv-5007888/env/lib/python3.10/site-packages/openequivariance/__init__.py:38: UserWarning: Precompiled extension shared object not found.
+For these reasons, falling back to JIT compilation of OpenEquivariance extension. If another process holds the build lock, this waits up to 5 minutes, then raises an error naming the lock file to delete.
+
+  from openequivariance._torch.TensorProduct import TensorProduct
+/tmp/loupenv-5007888/env/lib/python3.10/site-packages/torch/jit/_script.py:1491: FutureWarning: `torch.jit.script` is deprecated. Please switch to `torch.compile` or `torch.export`.
+  warnings.warn(
+/tmp/loupenv-5007888/env/lib/python3.10/site-packages/torch/jit/_serialization.py:176: FutureWarning: `torch.jit.load` is deprecated. Please switch to `torch.export`.
+  warnings.warn(
+/tmp/loupenv-5007888/env/lib/python3.10/site-packages/torch/jit/_serialization.py:176: FutureWarning: `torch.jit.load` is deprecated. Please switch to `torch.export`.
+  warnings.warn(
+/tmp/loupenv-5007888/env/lib/python3.10/site-packages/torch/jit/_serialization.py:176: FutureWarning: `torch.jit.load` is deprecated. Please switch to `torch.export`.
+  warnings.warn(
+crystals set: NaCl_c0 (216), NaCl_c1 (216), NaNbO3_c0 (360), NaNbO3_c1 (360), NbCl5_c0 (216), NbCl5_c1 (216)
+MACE references from /home/atuin/v130cb/v130cb18/loup-s64/gate_refs/MACE-POLAR-1-M_crystals_affb55cd941b557aadf3.npz
+
+=== LoupMD vs MACE float64 / float32 (3x gate) ===
+Config             Variant                  | dE/atom (meV) | dF_max (eV/A)  ratio | dS_max (eV/A3)  ratio | Pass
+-----------------------------------------------------------------------------------------------------------------
+NaCl_c0            default                  |       0.00123 |     2.968e-06   0.89 |      1.773e-08   0.46 | PASS
+NaCl_c0            conv_fwd_variant=1       |       0.00124 |     3.027e-06   0.91 |      1.705e-08   0.45 | PASS
+NaCl_c0            conv_fwd_variant=2       |       0.00122 |     3.029e-06   0.91 |      1.731e-08   0.45 | PASS
+NaCl_c1            default                  |       0.00127 |     3.134e-06   0.67 |      2.314e-08   0.55 | PASS
+NaCl_c1            conv_fwd_variant=1       |       0.00126 |     2.885e-06   0.62 |      2.309e-08   0.55 | PASS
+NaCl_c1            conv_fwd_variant=2       |       0.00125 |     2.845e-06   0.61 |      2.304e-08   0.55 | PASS
+NaNbO3_c0          default                  |       0.00028 |     2.347e-04   1.54 |      7.842e-08   0.28 | PASS
+NaNbO3_c0          conv_fwd_variant=1       |       0.00025 |     2.202e-04   1.44 |      7.072e-08   0.26 | PASS
+NaNbO3_c0          conv_fwd_variant=2       |       0.00025 |     2.202e-04   1.44 |      6.728e-08   0.24 | PASS
+NaNbO3_c1          default                  |       0.00000 |     6.201e-04   3.77 |      4.933e-07   2.61 | FAIL
+  ref32: dE/atom=7.79457 meV, dF=1.645e-04, dS=1.893e-07
+NaNbO3_c1          conv_fwd_variant=1       |       0.00002 |     6.904e-04   4.20 |      5.092e-07   2.69 | FAIL
+  ref32: dE/atom=7.79457 meV, dF=1.645e-04, dS=1.893e-07
+NaNbO3_c1          conv_fwd_variant=2       |       0.00002 |     6.922e-04   4.21 |      5.103e-07   2.70 | FAIL
+  ref32: dE/atom=7.79457 meV, dF=1.645e-04, dS=1.893e-07
+NbCl5_c0           default                  |       0.00049 |     1.098e-05   0.58 |      5.572e-08   1.67 | PASS
+NbCl5_c0           conv_fwd_variant=1       |       0.00051 |     1.090e-05   0.57 |      5.736e-08   1.72 | PASS
+NbCl5_c0           conv_fwd_variant=2       |       0.00051 |     1.057e-05   0.56 |      5.738e-08   1.72 | PASS
+NbCl5_c1           default                  |       0.00018 |     1.886e-05   0.58 |      4.648e-09   0.14 | PASS
+NbCl5_c1           conv_fwd_variant=1       |       0.00019 |     1.846e-05   0.57 |      6.343e-09   0.19 | PASS
+NbCl5_c1           conv_fwd_variant=2       |       0.00019 |     1.905e-05   0.59 |      6.788e-09   0.20 | PASS
+GATE_EXIT M 3x 1
+##### POLAR-M 3x_rn forced TC crystal gate 2026-11-15T15:08:13+01:00
+/tmp/loupenv-5007888/env/lib/python3.10/site-packages/e3nn/o3/_wigner.py:10: UserWarning: Environment variable TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD detected, since the`weights_only` argument was not explicitly passed to `torch.load`, forcing weights_only=False.
+  _Jd, _W3j_flat, _W3j_indices = torch.load(os.path.join(os.path.dirname(__file__), 'constants.pt'))
+/tmp/loupenv-5007888/env/lib/python3.10/site-packages/torch/jit/_script.py:1491: FutureWarning: `torch.jit.script` is deprecated. Please switch to `torch.compile` or `torch.export`.
+  warnings.warn(
+/tmp/loupenv-5007888/env/lib/python3.10/site-packages/torch/jit/_script.py:1491: FutureWarning: `torch.jit.script` is deprecated. Please switch to `torch.compile` or `torch.export`.
+  warnings.warn(
+/tmp/loupenv-5007888/env/lib/python3.10/site-packages/torch/jit/_script.py:1491: FutureWarning: `torch.jit.script` is deprecated. Please switch to `torch.compile` or `torch.export`.
+  warnings.warn(
+/tmp/loupenv-5007888/env/lib/python3.10/site-packages/openequivariance/__init__.py:38: UserWarning: Precompiled extension shared object not found.
+For these reasons, falling back to JIT compilation of OpenEquivariance extension. If another process holds the build lock, this waits up to 5 minutes, then raises an error naming the lock file to delete.
+
+  from openequivariance._torch.TensorProduct import TensorProduct
+/tmp/loupenv-5007888/env/lib/python3.10/site-packages/torch/jit/_script.py:1491: FutureWarning: `torch.jit.script` is deprecated. Please switch to `torch.compile` or `torch.export`.
+  warnings.warn(
+/tmp/loupenv-5007888/env/lib/python3.10/site-packages/torch/jit/_serialization.py:176: FutureWarning: `torch.jit.load` is deprecated. Please switch to `torch.export`.
+  warnings.warn(
+/tmp/loupenv-5007888/env/lib/python3.10/site-packages/torch/jit/_serialization.py:176: FutureWarning: `torch.jit.load` is deprecated. Please switch to `torch.export`.
+  warnings.warn(
+/tmp/loupenv-5007888/env/lib/python3.10/site-packages/torch/jit/_serialization.py:176: FutureWarning: `torch.jit.load` is deprecated. Please switch to `torch.export`.
+  warnings.warn(
+crystals set: NaCl_c0 (216), NaCl_c1 (216), NaNbO3_c0 (360), NaNbO3_c1 (360), NbCl5_c0 (216), NbCl5_c1 (216)
+MACE references from /home/atuin/v130cb/v130cb18/loup-s64/gate_refs/MACE-POLAR-1-M_crystals_affb55cd941b557aadf3.npz
+
+=== LoupMD vs MACE float64 / float32 (3x gate) ===
+Config             Variant                  | dE/atom (meV) | dF_max (eV/A)  ratio | dS_max (eV/A3)  ratio | Pass
+-----------------------------------------------------------------------------------------------------------------
+NaCl_c0            default                  |       0.00067 |     2.917e-06   0.88 |      1.120e-08   0.29 | PASS
+NaCl_c0            conv_fwd_variant=1       |       0.00065 |     2.892e-06   0.87 |      1.045e-08   0.27 | PASS
+NaCl_c0            conv_fwd_variant=2       |       0.00065 |     2.928e-06   0.88 |      1.078e-08   0.28 | PASS
+NaCl_c1            default                  |       0.00068 |     3.636e-06   0.78 |      1.585e-08   0.38 | PASS
+NaCl_c1            conv_fwd_variant=1       |       0.00069 |     3.297e-06   0.71 |      1.527e-08   0.37 | PASS
+NaCl_c1            conv_fwd_variant=2       |       0.00069 |     3.250e-06   0.70 |      1.460e-08   0.35 | PASS
+NaNbO3_c0          default                  |       0.00032 |     1.761e-04   1.15 |      9.503e-08   0.34 | PASS
+NaNbO3_c0          conv_fwd_variant=1       |       0.00039 |     1.795e-04   1.17 |      1.307e-07   0.47 | PASS
+NaNbO3_c0          conv_fwd_variant=2       |       0.00039 |     1.782e-04   1.17 |      1.301e-07   0.47 | PASS
+NaNbO3_c1          default                  |       0.00066 |     6.242e-04   3.79 |      2.883e-07   1.52 | FAIL
+  ref32: dE/atom=7.79457 meV, dF=1.645e-04, dS=1.893e-07
+NaNbO3_c1          conv_fwd_variant=1       |       0.00070 |     5.185e-04   3.15 |      2.761e-07   1.46 | FAIL
+  ref32: dE/atom=7.79457 meV, dF=1.645e-04, dS=1.893e-07
+NaNbO3_c1          conv_fwd_variant=2       |       0.00070 |     5.175e-04   3.15 |      2.768e-07   1.46 | FAIL
+  ref32: dE/atom=7.79457 meV, dF=1.645e-04, dS=1.893e-07
+NbCl5_c0           default                  |       0.00059 |     1.160e-05   0.61 |      4.079e-08   1.22 | PASS
+NbCl5_c0           conv_fwd_variant=1       |       0.00063 |     1.034e-05   0.54 |      3.904e-08   1.17 | PASS
+NbCl5_c0           conv_fwd_variant=2       |       0.00061 |     1.048e-05   0.55 |      3.930e-08   1.18 | PASS
+NbCl5_c1           default                  |       0.00026 |     1.623e-05   0.50 |      1.040e-08   0.31 | PASS
+NbCl5_c1           conv_fwd_variant=1       |       0.00032 |     1.656e-05   0.51 |      9.853e-09   0.30 | PASS
+NbCl5_c1           conv_fwd_variant=2       |       0.00030 |     1.637e-05   0.50 |      9.234e-09   0.28 | PASS
+GATE_EXIT M 3x_rn 1
+##### POLAR-L hyb forced TC crystal gate 2026-11-15T15:13:44+01:00
+/tmp/loupenv-5007888/env/lib/python3.10/site-packages/e3nn/o3/_wigner.py:10: UserWarning: Environment variable TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD detected, since the`weights_only` argument was not explicitly passed to `torch.load`, forcing weights_only=False.
+  _Jd, _W3j_flat, _W3j_indices = torch.load(os.path.join(os.path.dirname(__file__), 'constants.pt'))
+/tmp/loupenv-5007888/env/lib/python3.10/site-packages/torch/jit/_script.py:1491: FutureWarning: `torch.jit.script` is deprecated. Please switch to `torch.compile` or `torch.export`.
+  warnings.warn(
+/tmp/loupenv-5007888/env/lib/python3.10/site-packages/torch/jit/_script.py:1491: FutureWarning: `torch.jit.script` is deprecated. Please switch to `torch.compile` or `torch.export`.
+  warnings.warn(
+/tmp/loupenv-5007888/env/lib/python3.10/site-packages/torch/jit/_script.py:1491: FutureWarning: `torch.jit.script` is deprecated. Please switch to `torch.compile` or `torch.export`.
+  warnings.warn(
+/tmp/loupenv-5007888/env/lib/python3.10/site-packages/openequivariance/__init__.py:38: UserWarning: Precompiled extension shared object not found.
+For these reasons, falling back to JIT compilation of OpenEquivariance extension. If another process holds the build lock, this waits up to 5 minutes, then raises an error naming the lock file to delete.
+
+  from openequivariance._torch.TensorProduct import TensorProduct
+/tmp/loupenv-5007888/env/lib/python3.10/site-packages/torch/jit/_script.py:1491: FutureWarning: `torch.jit.script` is deprecated. Please switch to `torch.compile` or `torch.export`.
+  warnings.warn(
+/tmp/loupenv-5007888/env/lib/python3.10/site-packages/torch/jit/_serialization.py:176: FutureWarning: `torch.jit.load` is deprecated. Please switch to `torch.export`.
+  warnings.warn(
+/tmp/loupenv-5007888/env/lib/python3.10/site-packages/torch/jit/_serialization.py:176: FutureWarning: `torch.jit.load` is deprecated. Please switch to `torch.export`.
+  warnings.warn(
+/tmp/loupenv-5007888/env/lib/python3.10/site-packages/torch/jit/_serialization.py:176: FutureWarning: `torch.jit.load` is deprecated. Please switch to `torch.export`.
+  warnings.warn(
+/tmp/loupenv-5007888/env/lib/python3.10/site-packages/torch/jit/_serialization.py:176: FutureWarning: `torch.jit.load` is deprecated. Please switch to `torch.export`.
+  warnings.warn(
+crystals set: NaCl_c0 (216), NaCl_c1 (216), NaNbO3_c0 (360), NaNbO3_c1 (360), NbCl5_c0 (216), NbCl5_c1 (216)
+MACE references from /home/atuin/v130cb/v130cb18/loup-s64/gate_refs/MACE-POLAR-1-L_crystals_ff07a086c788796252e8.npz
+
+=== LoupMD vs MACE float64 / float32 (3x gate) ===
+Config             Variant                  | dE/atom (meV) | dF_max (eV/A)  ratio | dS_max (eV/A3)  ratio | Pass
+-----------------------------------------------------------------------------------------------------------------
+NaCl_c0            default                  |       0.00186 |     3.431e-06   1.03 |      3.527e-08   1.06 | PASS
+NaCl_c1            default                  |       0.00205 |     4.302e-06   0.79 |      1.356e-07   4.05 | FAIL
+  ref32: dE/atom=2.53640 meV, dF=5.444e-06, dS=3.348e-08
+NaNbO3_c0          default                  |       0.01958 |     1.681e-02   0.38 |      1.467e-04   0.75 | PASS
+NaNbO3_c1          default                  |       0.00238 |     2.242e-04   3.80 |      8.338e-06   9.08 | FAIL
+  ref32: dE/atom=7.63129 meV, dF=5.899e-05, dS=9.179e-07
+NbCl5_c0           default                  |       0.00083 |     3.300e-05   1.19 |      4.839e-08   1.45 | PASS
+NbCl5_c1           default                  |       0.00049 |     1.672e-04   1.85 |      5.518e-08   1.66 | PASS
+GATE_EXIT L hyb 1
+##### POLAR-L hyb_rn forced TC crystal gate 2026-11-15T15:19:18+01:00
+[2026-11-15T15:19:35.098] error: *** JOB 5007888 ON a0905 CANCELLED AT 2026-11-15T15:19:35 DUE TO TIME LIMIT ***
+=== JOB_STATISTICS ===
+=== current date     : Sun Nov 15 15:19:40 CET 2026
+= Job-ID             : 5007888 on alex
+= Job-Name           : loup-polar-rn
+= Job-Command        : /home/atuin/v130cb/v130cb18/loup-s64/polar-arithmetic/polar_arithmetic.sh
+= Initial workdir    : /home/hpc/v130cb/v130cb18
+= Queue/Partition    : a100
+= Slurm account      : v130cb with QOS=normal
+= Features           : a100_40
+= Requested resources:  for 01:00:00
+= Elapsed runtime    : 01:00:17
+= Total RAM usage    : 13.9 GiB of assigned  GiB (%)
+= Node list          : a0905
+= Subm/Elig/Start/End: 2026-11-15T14:19:15 / 2026-11-15T14:19:15 / 2026-11-15T14:19:18 / 2026-11-15T15:19:35
+======================
+=== Quota infos ======
+    Path                 Used     SoftQ    HardQ    Gracetime  Filec    FileQ    FiHaQ    FileGrace    
+    /home/hpc              15.2G   104.9G   209.7G        N/A   2,316      300K     400K        N/A    
+    /home/vault             0.0K  1048.6G  2097.2G        N/A       1      200K     400K        N/A    
+    /home/atuin            30.4G     0.0K     0.0K        N/A     100K                          N/A    
+    /lustre                 4.0K     0.0K     0.0K        N/A       1       80K     250K        N/A    
+======================
+=== GPU utilization ==
+gpu_name, gpu_bus_id, pid, gpu_utilization [%], mem_utilization [%], max_memory_usage [MiB], time [ms]
+NVIDIA A100-SXM4-40GB, 00000000:13:00.0, 2203123, 0 %, 0 %, 430 MiB, 1142 ms
+NVIDIA A100-SXM4-40GB, 00000000:13:00.0, 2203131, 0 %, 0 %, 432 MiB, 1366 ms
+NVIDIA A100-SXM4-40GB, 00000000:13:00.0, 2203139, 0 %, 0 %, 1030 MiB, 304355 ms
+NVIDIA A100-SXM4-40GB, 00000000:13:00.0, 2204412, 0 %, 0 %, 1030 MiB, 304208 ms
+NVIDIA A100-SXM4-40GB, 00000000:13:00.0, 2208243, 0 %, 0 %, 1030 MiB, 303459 ms
+NVIDIA A100-SXM4-40GB, 00000000:13:00.0, 2209704, 0 %, 0 %, 1030 MiB, 303465 ms
+NVIDIA A100-SXM4-40GB, 00000000:13:00.0, 2210382, 0 %, 0 %, 1030 MiB, 303545 ms
+NVIDIA A100-SXM4-40GB, 00000000:13:00.0, 2211212, 0 %, 0 %, 4360 MiB, 323267 ms
+NVIDIA A100-SXM4-40GB, 00000000:13:00.0, 2213317, 0 %, 0 %, 4376 MiB, 321688 ms
+NVIDIA A100-SXM4-40GB, 00000000:13:00.0, 2214367, 0 %, 0 %, 4356 MiB, 321883 ms
+NVIDIA A100-SXM4-40GB, 00000000:13:00.0, 2215172, 0 %, 0 %, 4356 MiB, 322213 ms
+NVIDIA A100-SXM4-40GB, 00000000:13:00.0, 2215990, 0 %, 0 %, 4360 MiB, 322550 ms
+NVIDIA A100-SXM4-40GB, 00000000:13:00.0, 2216925, 0 %, 0 %, 2980 MiB, 325501 ms
