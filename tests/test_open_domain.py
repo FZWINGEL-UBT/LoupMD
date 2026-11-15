@@ -121,6 +121,11 @@ def test_a_cell_as_an_open_domain_with_its_images_as_ghosts(model, structure, ge
     bundle = ensure_loup_bundle(find_model(model), zs, generic=generic or None)
     e_a, f_a, s_a, r_max = _periodic(bundle, at)
     e_b, f_b, s_b, _ = _periodic(bundle, at)
+    # The same periodic call on other GEMM kernels (no tensor-core hybrids): what float32 rounding in another order
+    # of operations does to the result. A domain's GEMMs have other row counts, so it sees the same kind of change.
+    monkeypatch.setenv("LOUP_NO_HYBRID", "1")
+    e_c, f_c, s_c, _ = _periodic(bundle, at)
+    monkeypatch.delenv("LOUP_NO_HYBRID")
 
     reach = r_max + SKIN + 0.2
     ghosts, ghost_of = _images(at, reach)
@@ -135,10 +140,15 @@ def test_a_cell_as_an_open_domain_with_its_images_as_ghosts(model, structure, ge
     stress = s_box * np.linalg.det(box) / at.get_volume()   # the same virial, per volume of the cell
 
     spread = (abs(e_a - e_b) / n, np.abs(f_a - f_b).max(), np.abs(s_a - s_b).max())
+    other = (abs(e_c - e_a) / n, np.abs(f_c - f_a).max(), np.abs(s_c - s_a).max())
     diff = (abs(e - e_a) / n, np.abs(f - f_a).max(), np.abs(stress - s_a).max())
     print(f"open domain {model}: {n} locals, {len(ghost_of)} ghosts; dE {diff[0]:.2e} eV/atom, dF {diff[1]:.2e} "
-          f"eV/A, dS {diff[2]:.2e} eV/A^3 (two periodic engines: {spread[0]:.1e}, {spread[1]:.1e}, {spread[2]:.1e})")
-    bounds = (1e-7, 3e-6, 3e-8)   # the plan's energy and force bounds; stress on the scale of float32 rounding
+          f"eV/A, dS {diff[2]:.2e} eV/A^3 (two periodic engines: {spread[0]:.1e}, {spread[1]:.1e}, {spread[2]:.1e}; "
+          f"periodic on other GEMM kernels: {other[0]:.1e}, {other[1]:.1e}, {other[2]:.1e})")
+    # Forces: the plan's bound. Energy and stress: a tenth of the accuracy gate's floors (0.01 meV/atom,
+    # 1e-7 eV/A^3); the plan's 1e-7 eV/atom is below what another order of float32 operations already changes
+    # (PLAN.md 1.3 D16).
+    bounds = (1e-6, 3e-6, 1e-7)
     for name, d, sp, bound in zip(("energy", "forces", "stress"), diff, spread, bounds):
         assert d <= max(bound, 5.0 * sp), f"{name}: the open domain differs by {d:.3e} (two periodic engines: {sp:.3e})"
 
