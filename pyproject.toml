@@ -63,3 +63,11 @@ include = ["loupmd*"]
 # kernel manifest, and what `loupmd build-kernels` compiles a plugin from (three headers and the generator).
 loupmd = ["_lib/*.so", "_lib/cubins/*", "_lib/generated_generic_manifest.json", "_lib/kernel-src/*",
           "bench/reference.json", "bench/structures/*", "export/_vendor/VERSION"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "fast: the fast tier of tests/gpu, every GPU test not marked otherwise (under ten minutes)",
+    "full: the full tier of tests/gpu: long runs, statistics, step costs, model families",
+    "acceptance: the accuracy gate per model family (exports and float64 references)",
+]
