@@ -1,7 +1,7 @@
 # Third-party notices
 
-LoupMD is distributed under the MIT licence (`LICENSE`). This is the plan's default A6 and stays open until the
-owner confirms it before the first tag (`PLAN.md` §1.3). The files below are binaries or generated sources; each
+LoupMD is distributed under the MIT licence (`LICENSE`); files ported from ASE will carry LGPL-2.1-or-later
+(owner decision O6 of 15 November 2026, `PLAN.md` §1.1). The files below are binaries or generated sources; each
 is listed with what it was made from. `tests/test_notice.py` checks that every tracked binary and generated file
 appears here.
 
@@ -17,7 +17,7 @@ Tensor-core GEMM kernels that the engine loads at run time as autotune candidate
 | --- | --- | --- | --- |
 | `cubins/tf32x3_hyb_sm80.cubin` | `c5dd8728d23987ad8ae3883f5968956f665cd7a9ecabe7b8de27499a865e4d14` | byte-identical to FastMACE's `fastmace/kernels/cutlass/tf32x3_hyb_sm80.cubin` | FastMACE `tf32x3_sm80.build.txt`: CUTLASS v4.8.1, commit `2c85f497547eb441f0fe80bfb0fb2e6f9add1719`; nvcc 13.3 (V13.3.33); 11 November 2026 |
 | `cubins/tf32x3_hyb_sm90.cubin` | `c4f97a4002dc53a4e2f7fc6c3afa7ac42edc04ff5b9e5b471f1d2d6e4cac7cd7` | byte-identical to FastMACE's `tf32x3_hyb_sm90.cubin` | as above |
-| `cubins/tf32x3_hyb_sm120.cubin` | `9a949b7065906f5284e1190a0994576d1d186e3f723592488b54f81d59396f1f` | the same sources compiled for `sm_120`; not in FastMACE | **none in either repository.** To be rebuilt and recorded before 1.0 (`PLAN.md` §1.3, D6) |
+| `cubins/tf32x3_hyb_sm120.cubin` | `9a949b7065906f5284e1190a0994576d1d186e3f723592488b54f81d59396f1f` | the same sources compiled for `sm_120`; not in FastMACE | **none in either repository yet.** The developing session is producing it (`PLAN.md` §1.3, D6) |
 
 What the kernels compute: the product of two float32 matrices, each element split into an 11-bit high part and
 a low part. The high-by-high products run on TF32 tensor cores and the two cross products in one FP16

@@ -34,6 +34,10 @@ behaviour is an estimate and says so.
 | O3 | Dispersion covers the newer implementations, with the variant chosen by the user; research on what to implement for the best user experience comes before any dispersion code | 14 Nov 2026 |
 | O4 | Dispersion scope after the research: the default is as fast as possible at the same accuracy (not a fixed cutoff); the three-body term is offered, off by default, with a 20 bohr cutoff in its preset; the mesh sum is in 1.0; D4 is left out | 14 Nov 2026 |
 | O5 | An automatic mode may pick the dispersion method by speed, but every method stays selectable by name and an explicit choice is never replaced, because a method can be inaccurate for a specific system | 14 Nov 2026 |
+| O6 | Licences: MIT for LoupMD's own code, LGPL-2.1-or-later for files ported from ASE, third-party notices as FastMACE's (settles A6) | 15 Nov 2026 |
+| O7 | Total charge and spin multiplicity stay per bundle, folded at export; no run-time setter in ABI v1 | 15 Nov 2026 |
+| O8 | An FP16 tensor-core instruction is allowed on the force path where the result is accurate (the hybrid 3xTF32 GEMM); the 3x gate decides | 15 Nov 2026 |
+| O9 | A model is not refused for tiled execution because of its layer count; the owner asked why OMOL-0 extra large would be. The sweeps are per layer (§4.4) | 15 Nov 2026 |
 
 ### 1.2 Defaults this plan assumes (open; each can be changed before the stage that depends on it)
 
@@ -44,7 +48,7 @@ behaviour is an estimate and says so.
 | A3 | FastMACE features left out | no float64 force mode, no fallback to the MACE calculator, no bitwise-reproducible mode; each is refused with a message that names the alternative | float64 and bitwise would each be a stage of their own | Stage 3 |
 | A4 | CUDA 12 wheels | CUDA 13 only at 1.0 (as FastMACE) | a second build and test matrix | Stage 2 |
 | A5 | Platforms | Linux x86-64 and WSL2; GPUs of compute capability 8.0 and newer. The T4 (7.5) is not supported: the own SGEMM uses `cp.async` and the hybrid GEMMs use TF32 tensor cores | T4 support needs fallbacks for both | Stage 2 |
-| A6 | Licence | MIT for LoupMD's own code; LGPL-2.1-or-later for files ported from ASE; third-party notices as FastMACE's | none if settled before the first tag | S7-T03 |
+| A6 | Licence | settled by O6 (15 Nov 2026): MIT for LoupMD's own code; LGPL-2.1-or-later for files ported from ASE; third-party notices as FastMACE's | | |
 | A7 | Pre-releases | stages end in internal tags (`v1.0.0a1` ...); nothing is uploaded before 1.0.0 | none | Stage 7 |
 
 ### 1.3 Open points found while building (owner's instruction of 15 November 2026: document, recommend, keep working)
@@ -54,18 +58,18 @@ row; "Undo" says what a different answer costs.
 
 | Id | Question | Recommendation, in use | Why | Undo |
 | --- | --- | --- | --- | --- |
-| D1 | Licence (A6) | MIT for LoupMD's code, LGPL-2.1-or-later for files ported from ASE, as FastMACE. `LICENSE` and `NOTICE.md` are written on this default | same owner and the same third-party sources as FastMACE; nothing is published before a tag | replace `LICENSE` and one sentence of `NOTICE.md` |
+| D1 | Licence (A6) | **decided, O6:** MIT, and LGPL-2.1-or-later for files ported from ASE | | |
 | D2 | When to move `python/` into `loupmd/` and `codegen/` (S0-T03) | not moved. New Python goes to `loupmd/`; `loupmd/_legacy.py` loads the bundle cache from `python/loupmd.py` | the owner named this as waiting for his go | none; the move itself is `plans/stage-0-ground-rules.md` |
-| D3 | `loup_set_charge_spin` of §4.3 against the code, which folds charge and spin into the bundle at export | drop the call from ABI v1. Charge and spin are arguments of `lm.load` / `ensure_bundle` and select a bundle | the fold is what is gated (four settings) and it keeps layer 0 species-only, which the S57 and S59 speed-ups rely on; a run-time setter would need the unfolded path back | add the call later as an ABI addition |
-| D4 | OMOL-0 extra large has three layers; §4.4's sweeps assume two | refused for tiled execution at 1.0, like POLAR-1; `loup_get_info` reports the layer count | a three-layer wavefront needs five sweeps and two halo widths: a design of its own | a Stage 5 extension |
-| D5 | §2 forbids FP16 "anywhere on the force path"; the default hybrid GEMM cubins use one FP16 tensor-core instruction for the cross terms of the 3xTF32 split | keep the cubins; read §2 as "no reduced-precision arithmetic". The FP16 instruction multiplies parts that float16 holds exactly, so the product keeps 3xTF32's accuracy. State the exception in §2 when the owner agrees | in use since stage S1 of the optimisation work, passes the gate on every model set, off for long-range models | `LOUP_NO_HYBRID=1` as the default costs the hybrid GEMM's speed (not measured here) |
-| D6 | `cubins/tf32x3_hyb_sm120.cubin` has no build record in either repository | rebuild it with FastMACE's `tools/build_cutlass_tf32x3.sh` for `sm_120`, record compiler, CUTLASS commit and SHA-256 in `NOTICE.md`; swap the file only after the gate and an A/B if the bytes differ (S7-T03) | a shipped binary needs a recipe | none |
+| D3 | `loup_set_charge_spin` of §4.3 against the code, which folds charge and spin into the bundle at export | **decided, O7:** the call is dropped from ABI v1; charge and spin are arguments of `lm.load` / `ensure_bundle` and select a bundle | | |
+| D4 | OMOL-0 extra large has three layers; §4.4's sweeps assumed two | **changed after O9:** not refused. The sweeps are defined per layer: a model with L layers takes 2L - 1 sweeps and keeps L - 1 layer states, each sweep with a halo of one cutoff. S1-T08, S1-T09 and Stage 5 are written for any L; OMOL-0 extra large joins their acceptance lists | the refusal came only from the plan's two-layer wording | extra effort, an estimate: about one week across S1-T08 and Stage 5. If the five-sweep wavefront proves too costly, the fallback is plain tiled for L = 3 and the wavefront for L = 2, put to the owner with numbers |
+| D5 | §2 forbade FP16 "anywhere on the force path"; the default hybrid GEMM cubins use one FP16 tensor-core instruction for the cross terms of the 3xTF32 split | **decided, O8:** allowed where accurate. §2 now says so; the 3x gate is the test | | |
+| D6 | `cubins/tf32x3_hyb_sm120.cubin` has no build record in either repository | **with the developing session** (owner, 15 Nov 2026: it is working on this on the Alex cluster). The record reaches `release/v1` by merge; `NOTICE.md` takes it over then (S7-T03) | | |
 | D7 | The hybrid kernels overflow for matrix elements of 32752 and above (FastMACE `hybrid_f16.h`) | add a check to S2-T06: the loader refuses the hybrid plan for a weight matrix above the bound; activations are bounded by the gate's normalisation but this is not proven for every label | a silent `inf` would be worse than a slower GEMM | none |
 | D8 | Version string while the stages run | `LOUP_VERSION "1.0.0a1"`, so `loup_version()` gives `1.0.0a1+<hash>`; `1.0.0+<hash>` at the release | a library built today should not call itself 1.0.0 | one line in the header and one in `loupmd/__init__.py` |
 | D9 | `python/bench_md.py`, `bench_family.py`, `test_gate.py` still bind the library through `python/loupmd.py`, which cannot read `loup_last_error` | leave them until S0-T03; `LOUP_DEBUG_ERRORS=1` prints the reason | editing `python/` is what D2 holds back | a ten-line edit of `python/loupmd.py` |
 | D10 | Baseline commit of S0-T01 | the merged code (`bac354c`), not `0336751` | the owner's order put the merge first; Stage 1 is compared with what it starts from | none |
 | D11 | S1-T03's scope | besides keeping the graphs, a run call no longer makes a force pass before its first step when the forces on the device are current | the 2% criterion cannot be met otherwise: that pass is one force evaluation per call | one `if` in `run_md_loop` |
-| D12 | S6-T06 and S6-T07 are done on `round6-hardening`; A2 concerns five labels | the two tasks shrink to the gate under the release layout and the front-end arguments; S6-T10 measures all five labels | the code is ahead of the plan | none |
+| D12 | S6-T06 and S6-T07 are done on `round6-hardening`; A2 concerns five labels | **accepted by the owner (15 Nov 2026):** the two tasks shrink to the gate under the release layout and the front-end arguments; S6-T10 measures all five labels | | |
 
 ---
 
@@ -73,8 +77,10 @@ row; "Undo" says what a different answer costs.
 
 Every task inherits these. They come from `AGENTS.md`, the status file and the owner's instructions.
 
-- **Precision:** no FP16, BF16, FP8 or 1xTF32 anywhere on the force path, and no BF16x9 emulation. MACE-POLAR-1
-  uses float32 SIMT GEMMs only.
+- **Precision:** no reduced-precision arithmetic on the force path: no BF16, FP8 or 1xTF32, no BF16x9 emulation,
+  and no FP16 except where the result is as accurate as float32's (owner, O8). The one such use is the hybrid
+  3xTF32 GEMM, whose FP16 tensor-core instruction multiplies split parts that float16 holds exactly; the 3x gate
+  is the test for it and for anything like it. MACE-POLAR-1 uses float32 SIMT GEMMs only.
 - **Accuracy gate:** against MACE float64, `dE <= max(3 dE32, 0.01 meV/atom)`, `dF <= max(3 dF32, 1e-5 eV/A)`,
   `dS <= max(3 dS32, 1e-7 eV/A^3)`. Every stage exit runs it for every supported model set.
 - **No speed regression:** a stage may not slow the standard benchmarks. Check with the A/B harness in both build
@@ -131,7 +137,8 @@ at S59.
 | MD graphs re-captured on every run call; the displacement maximum never decays | status §4.2, items S4 and S2 |
 | No capacity mode: about 80 KB per atom for OMAT-0 medium by buffer arithmetic, so roughly 150-200k atoms on 16 GB (estimate; largest recorded run 40,000 atoms) | `engine.cu:1789-1809`, status §1 |
 
-**Found at the merge of 15 November; put to the owner, later sections not yet changed.**
+**Found at the merge of 15 November; answered by the owner the same day (§1.1 O7 to O9, §1.3) and worked into
+§2, §4.3, §4.4 and the task rows.**
 
 - S6-T06 is ahead of the plan: all six labels are supported and gated on `round6-hardening` (`7c8ca4e`). Four of
   them (MP-0b3, MPA-0, both MatPES) run the specialised kernels, not the generic path the task names. What is left
@@ -139,8 +146,8 @@ at S59.
 - S6-T07 is ahead of the plan and built differently: OMOL-0 extra large runs (`4af8b06`), with charge and spin
   folded into the bundle at export. `loup_set_charge_spin` of §4.3 assumes a run-time setting and has no
   counterpart in the code.
-- §4.4 says every supported family has two interactions. OMOL-0 extra large has three, so by the rule stated
-  there it is refused for tiled execution, like POLAR-1.
+- §4.4 said every supported family has two interactions and refused any other count for tiled execution. OMOL-0
+  extra large has three. §4.4 now defines the sweeps per layer and refuses no model for its layer count (O9).
 - Decision A2 now concerns five labels on the specialised kernels, not OMAT-0 medium alone.
 - The risk row "models not yet tested on the generic path" (§10) and the open point on the six untested labels
   (§11) are settled by the same commits.
@@ -246,7 +253,7 @@ int loup_set_fixed(LoupHandle* h, const unsigned char* fixed);            /* Fix
 int loup_set_masses(LoupHandle* h, const double* masses_amu);
 int loup_set_species(LoupHandle* h, const int* atomic_numbers);           /* same element set as the bundle */
 int loup_swap_atoms(LoupHandle* h, int i, int j);                         /* Monte Carlo swap, no re-capture */
-int loup_set_charge_spin(LoupHandle* h, double total_charge, int spin_multiplicity);
+/* no loup_set_charge_spin: total charge and spin multiplicity are export arguments, one bundle per setting (O7) */
 
 typedef struct { unsigned size; int mode;           /* LOUP_EXEC_AUTO, _WHOLE, _TILED, _WAVEFRONT */
                  int receivers; int state;          /* LOUP_STATE_DEVICE, LOUP_STATE_HOST */
@@ -259,7 +266,7 @@ int loup_plan_memory(LoupHandle* h, int n_atoms, double edges_per_atom, LoupMemo
 
 `loup_run_nve`, `loup_run_langevin`, `loup_evaluate` and the rest of today's header stay as wrappers.
 
-### 4.4 The force domain and the three sweeps (internal, `src/domain.hpp`)
+### 4.4 The force domain and the per-layer sweeps (internal, `src/domain.hpp`)
 
 ```cpp
 struct Domain {                     // one force-evaluation unit
@@ -267,19 +274,26 @@ struct Domain {                     // one force-evaluation unit
     bool periodic;                  // whole system: periodic with shifts, n_ghost == 0; tile: open, no shifts
     // device arrays over [n_local + n_ghost]: positions, species index; CSR edges over locals
 };
-struct LayerState {                 // rows over [n_local + n_ghost], width = layer-1 input width of the model
-    float* x;                       // written by sweep 1 for locals; gathered for ghosts by the driver
-    float* dx;                      // adjoint: added by sweep 2 for locals and ghosts; read by sweep 3 for locals
+struct LayerState {                 // one per layer boundary t = 0 .. L-2 of a model with L interaction layers;
+                                    // rows over [n_local + n_ghost], width = input width of layer t + 1
+    float* x;                       // output of layer t: written by its forward sweep for locals; gathered for
+                                    // ghosts by the driver
+    float* dx;                      // adjoint: added by the sweep of layer t + 1 for locals and ghosts; read by
+                                    // layer t's backward sweep for locals
 };
-void sweep1_layer0_forward(Domain&, LayerState&, bool keep_activations);
-void sweep2_layer1(Domain&, LayerState&, ForceAccumulators&);          // forward, backward, layer-1 edge forces
-void sweep3_layer0_backward(Domain&, LayerState&, ForceAccumulators&, bool replay_forward);
+// 2L - 1 sweeps for L layers. With L = 2 they are the three sweeps of FastMACE's tiled path.
+void sweep_forward(int t, Domain&, LayerState* states, bool keep_activations);         // t = 0 .. L-2
+void sweep_last(Domain&, LayerState* states, ForceAccumulators&);                       // layer L-1: forward,
+                                                                                        // readouts, backward
+void sweep_backward(int t, Domain&, LayerState* states, ForceAccumulators&, bool replay_forward);  // t = L-2 .. 0
 ```
 
-- The whole-system call is one periodic domain: sweep 1 keeps its activations, sweep 3 does not replay, and the
-  three run back to back inside one captured graph, as `record` does today.
-- A tile is an open domain. Sweep 3 replays layer 0's forward because sweep 1's activations were not kept.
-- All supported families have two interactions. The loader refuses a model with another count for tiled execution.
+- The whole-system call is one periodic domain: the forward sweeps keep their activations, the backward sweeps do
+  not replay, and all run back to back inside one captured graph, as `record` does today.
+- A tile is an open domain. A backward sweep replays its layer's forward because the activations were not kept.
+  Each sweep needs a halo of one cutoff: what reaches further travels through the stored layer states.
+- The families have two interaction layers, except MACE-OMOL-0 extra large with three (five sweeps, two layer
+  states). No model is refused for its layer count (owner, O9).
 - MACE-POLAR-1 is refused for tiled execution: its k-space part is global (as in FastMACE).
 
 ### 4.5 Python API (same names and arguments as FastMACE wherever the feature exists)
@@ -363,8 +377,8 @@ The base of everything else. Each task keeps the standard benchmarks within nois
 | S1-T05 | Thermo buffer on the device, written every `thermo_every` steps inside the graph | `src/thermo.cu`, engine, header | `loup_read_thermo`, `LoupThermoRow` | rows match `get_state` energies at the same steps to 1e-12 relative; no measurable step cost at `thermo_every = 20` |
 | S1-T06 | State blob: positions, velocities, cell, step counter (the Philox offset), integrator state, displacement tracker | engine, header | `loup_export_state`, `loup_import_state` | export, destroy, create, import: every restored array equals the exported one bitwise; 100 further Langevin steps end within the spread of two uninterrupted runs (at most 1e-4 A); a blob of another atom count or version is refused |
 | S1-T07 | `loup_evaluate2` with flags: energy only (no backward), per-atom energies (separate graph variant, off by default: the ledger's `frc-per-atom-energy` cost applies only when requested) | engine, `src/generic.cu`, header | `loup_evaluate2`, the three flags | energy-only equals the full call's energy to 1e-12 relative; per-atom energies sum to the total to 1e-9 relative; the default graph is unchanged (same kernel list in `nsys`) |
-| S1-T08 | Split the generic pass into the three sweeps of §4.4; the whole-system call composes them | `src/domain.hpp`, `src/generic.cu`, `src/generic.hpp` | `sweep1_layer0_forward`, `sweep2_layer1`, `sweep3_layer0_backward`, `LayerState` | energy, forces and stress differ from the unsplit pass by no more than two calls of the unsplit pass differ from each other, for every generic family; the gate passes; A/B within noise |
-| S1-T09 | Open domains with ghost atoms: neighbour build without periodic shifts where only locals receive; the sweeps accept `n_ghost > 0` | `src/neighbors.cu`, `src/generic.cu`, `src/domain.hpp` | `Domain` | a 135-atom periodic cell evaluated as an open domain whose ghosts are its explicit periodic images gives the periodic call's energy to 1e-7 eV/atom and forces to 3e-6 eV/A, for OMAT-0 small, OFF23 medium and MH-1 |
+| S1-T08 | Split the generic pass into the per-layer sweeps of §4.4 (three for two layers, five for OMOL-0's three); the whole-system call composes them | `src/domain.hpp`, `src/generic.cu`, `src/generic.hpp` | `sweep_forward`, `sweep_last`, `sweep_backward`, `LayerState` | energy, forces and stress differ from the unsplit pass by no more than two calls of the unsplit pass differ from each other, for every generic family; the gate passes; A/B within noise |
+| S1-T09 | Open domains with ghost atoms: neighbour build without periodic shifts where only locals receive; the sweeps accept `n_ghost > 0` | `src/neighbors.cu`, `src/generic.cu`, `src/domain.hpp` | `Domain` | a 135-atom periodic cell evaluated as an open domain whose ghosts are its explicit periodic images gives the periodic call's energy to 1e-7 eV/atom and forces to 3e-6 eV/A, for OMAT-0 small, OFF23 medium, MH-1 and (on a water cell) OMOL-0 extra large |
 | S1-T10 | Memory plan from buffer sizes and `cudaMemGetInfo` | engine, header | `loup_plan_memory`, `LoupMemoryPlan` | the predicted whole-system bytes are within 10% of the measured peak for 5,000, 20,480 and 40,000 `SrTiO3` atoms |
 | S1-T11 | Decaying displacement maximum (review item S2), so light-atom systems reach the pipelined loop | `src/engine.cu`, `src/integrator.cu` | none | water 2x2x2 at 300 K reports `pipelined_steps > 0` with `dangerous_builds == 0` over 5,000 steps; the existing pipeline tests pass |
 
@@ -454,7 +468,7 @@ with the generic path.
 | --- | --- | --- | --- |
 | S5-T01 | Tile planner on the host: bin atoms by fractional coordinates on a grid chosen from the cell lengths and the receiver cap, split blocks above the receiver or edge cap, list each tile's locals and its ghost candidates within cutoff plus skin with their image shifts (rules of `plan_tiles`, `tiled.py:895`) | `src/tiled.cu`, `src/tiled.hpp` | CPU test on 40,000 atoms: every atom is local in exactly one tile; every neighbour within the cutoff of a local is local or ghost in that tile; planning 1M atoms takes under 0.5 s |
 | S5-T02 | Per-tile neighbour list on the device through the open-domain build of S1-T09; unused ghost candidates dropped | `src/neighbors.cu`, `src/tiled.cu` | the union of all tiles' edges equals the whole-system list's edge set on 40,000 atoms |
-| S5-T03 | Tile driver, plain three sweeps, state on the device: sweep 1 writes `x` rows; sweep 2 gathers `x` for locals and ghosts and scatter-adds `dx`; sweep 3 replays and finishes; forces and stress accumulate through index lists; plain stream launches, GEMM plans reused across tiles by size bucket | `src/tiled.cu`, engine | energy within 1e-7 eV/atom and forces within 1e-5 eV/A of the whole-system call, and the 3x gate passes, on 40,000 `SrTiO3` atoms for OMAT-0 medium (generic path), OMAT-0 small, OFF23 medium and MH-1; POLAR-1 and models without exactly two interactions are refused |
+| S5-T03 | Tile driver, plain per-layer sweeps (three for two layers, five for three), state on the device: each forward sweep writes its layer's `x` rows; the next layer's sweep gathers them for locals and ghosts and scatter-adds `dx`; each backward sweep replays and finishes its layer; forces and stress accumulate through index lists; plain stream launches, GEMM plans reused across tiles by size bucket | `src/tiled.cu`, engine | energy within 1e-7 eV/atom and forces within 1e-5 eV/A of the whole-system call, and the 3x gate passes, on 40,000 `SrTiO3` atoms for OMAT-0 medium (generic path), OMAT-0 small, OFF23 medium and MH-1; OMOL-0 extra large (five sweeps) at a size its 1024 channels allow; POLAR-1 is refused |
 | S5-T04 | Gate in tiled mode for every non-POLAR model set (`loupmd validate --capacity tiled`) | `loupmd/validate/` | all sets pass |
 | S5-T05 | Receiver cap from the memory plan: the first call measures the workspace per receiver, later calls take the largest cap of 4,096 to 65,536 that fits with 10% headroom (FastMACE's budget rule); `loup_set_execution`; `capacity="auto"` chooses tiled when the whole-system plan does not fit | `src/tiled.cu`, `loupmd/capacity.py` | at 320,000 atoms on 16 GB the call runs without a user setting and reports its mode and cap in the plan; the device peak stays under 90% of free memory |
 | S5-T06 | MD in tiled mode: integrators on the whole-system arrays, tile lists kept across steps until an atom moves skin/2, then re-planned | `src/tiled.cu`, engine | NVE on 320,000 atoms for 1,000 steps drifts under 0.05 meV/atom/ps; time per step is reported next to the whole-system per-atom figure |
@@ -477,7 +491,7 @@ with the generic path.
 | S6-T04 | Displace moves and hybrid MD/MC through `run(mc=...)` | `loupmd/mc.py`, `loupmd/simulation.py` | detailed-balance test on a harmonic fake core (CPU); the MC counters appear in `metadata.json` and survive a resume |
 | S6-T05 | Dispersion: replaced by Stage 6D below (research first, then the build) | | |
 | S6-T06 | Model coverage: export and gate `mp0-medium`, `mp0-large`, `mp0b3-medium`, `mpa0-medium`, `matpes-pbe`, `matpes-r2scan` on the generic path | `loupmd/export/generic.py`, codegen | each label passes its gate set or is listed in the README as unsupported with the reason |
-| S6-T07 | OMOL-0 XL: total charge and spin multiplicity through the joint embedding | `loupmd/export/generic.py`, `src/generic.cu` (`loup_set_charge_spin`) | passes the `organic` gate set for neutral singlets and one charged case |
+| S6-T07 | OMOL-0 XL: total charge and spin multiplicity as arguments of `lm.load` and `ensure_bundle`, folded at export (O7; the engine side is done on `round6-hardening`, `4af8b06`) | `loupmd/export/generic.py`, `loupmd/forcefield.py` | passes the `organic` gate set for neutral singlets and one charged case under the release layout |
 | S6-T08 | Per-atom energies in the calculator for atom-resolved models without dispersion | `loupmd/ase/calculator.py` | `get_potential_energies().sum()` equals the total to 1e-9 relative |
 | S6-T09 | The refusals of decision A3 in code and docs: `precision="float64"`, `allow_reference=True`, `Workload(reproducible=True)` | `loupmd/quick.py`, docs | each raises `PlanRefused` with the alternative named |
 | S6-T10 | Checkpoint on A2: measure generic against specialised OMAT-0 medium on both GPUs and put the keep-or-retire question to the owner with the numbers | ledger | a recorded decision |

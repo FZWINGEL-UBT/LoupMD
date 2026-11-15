@@ -175,21 +175,29 @@ Files: `src/engine.cu`, `src/generic.cu`, `include/loupmd.h`, `loupmd/_core.py`,
 2. Implement: graph variants keyed by flags; the energy-only variant stops after the readouts.
 3. Funnel, ledger note (the default path must be untouched), commit `S1-T07: loup_evaluate2`.
 
-## S1-T08: the three sweeps
+## S1-T08: the per-layer sweeps
 
 Files: `src/domain.hpp` (new), `src/generic.cu`, `src/generic.hpp`, `tests/test_sweeps.py` (new).
 
-1. Tests first: for every generic family with two layers (OMAT-0 small, OFF23 medium, MH-1, MP-0 medium), energy,
-   forces and stress of the composed sweeps differ from the installed baseline library's by no more than two calls
-   of the baseline differ from each other (measured in the test). Models with another layer count (OMOL-0) and
-   the long-range models keep `record` unsplit and are listed as such by `loup_get_info`.
-2. Implement in three commits that each keep the tests green: (a) `Domain` and `LayerState` structs filled from
-   `GenericPassInputs` with `n_ghost == 0`; (b) `record` cut at the two layer boundaries into
-   `sweep1_layer0_forward`, `sweep2_layer1`, `sweep3_layer0_backward` with `keep_activations = true` and
-   `replay_forward = false`; (c) the replay path of sweep 3, tested by calling the sweeps with
-   `keep_activations = false` on the whole system.
-3. Gate for every generic family; full A/B in both orders on `NbCl5` and `SrTiO3` for OMAT-0 small and MH-1.
-4. Ledger row and status entry; commit `S1-T08: generic pass as three sweeps`.
+Owner, 15 November (O9): no model is refused for its layer count. The sweeps are per layer: L - 1 forward sweeps,
+one sweep of the last layer (forward, readouts, backward), L - 1 backward sweeps. Two layers give FastMACE's three
+sweeps; OMOL-0 extra large gives five.
+
+1. Tests first: for every generic family (two layers: OMAT-0 small, OFF23 medium, MH-1, MP-0 medium; three:
+   OMOL-0 extra large on water), energy, forces and stress of the composed sweeps differ from the unsplit pass by
+   no more than two calls of the unsplit pass differ from each other (measured in the test; the unsplit pass stays
+   selectable by `LOUP_UNSPLIT=1` until the task's last commit). The long-range models keep `record` unsplit.
+2. OMOL-0's S57 skip-chain fold never forms the non-last layers' outputs, so its layer states are not the plain
+   `x` rows. Decide at the task's start, from `setup_chain_fold`, whether the sweeps cut the folded path at the
+   product outputs or whether tiled runs use `LOUP_CHAIN_FOLD=0`'s plain path; record the choice and its
+   whole-system cost in the ledger.
+3. Implement in commits that each keep the tests green: (a) `Domain` and `LayerState` structs filled from
+   `GenericPassInputs` with `n_ghost == 0`; (b) `record` cut at the layer boundaries into `sweep_forward(t)`,
+   `sweep_last`, `sweep_backward(t)` with `keep_activations = true` and `replay_forward = false`; (c) the replay
+   path of the backward sweeps, tested by calling the sweeps with `keep_activations = false` on the whole system.
+4. Gate for every generic family; full A/B in both orders on `NbCl5` and `SrTiO3` for OMAT-0 small and MH-1, and
+   on water216 for OMOL-0 extra large.
+5. Ledger row and status entry; commit `S1-T08: generic pass as per-layer sweeps`.
 
 ## S1-T09: open domains with ghost atoms
 
@@ -197,7 +205,8 @@ Files: `src/neighbors.cu`, `src/generic.cu`, `src/domain.hpp`, `tests/test_open_
 
 1. Test first: a 135-atom periodic `SrTiO3` cell (and the organic and NaCl cells for OFF23 medium and MH-1)
    evaluated as an open domain whose ghosts are its explicit periodic images within cutoff: energy to 1e-7
-   eV/atom and forces to 3e-6 eV/A of the periodic call, for OMAT-0 small, OFF23 medium and MH-1. The test needs
+   eV/atom and forces to 3e-6 eV/A of the periodic call, for OMAT-0 small, OFF23 medium, MH-1 and OMOL-0 extra
+   large (three layers: the ghosts' two layer states are both gathered). The test needs
    an entry point: an internal `loup_debug_evaluate_domain` exported only in test builds, or a hidden symbol
    reached through `ctypes`; decide at the task's start.
 2. Implement: neighbour build without shifts where only locals receive; ghost rows of `x` gathered by the caller;
