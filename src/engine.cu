@@ -204,6 +204,21 @@ __global__ void csvr_alpha_kernel(int ndof, double exp_term, double kb, unsigned
 __global__ void nhc_half_kernel(int ndof, int tchain, int tloop, double delta, double q, double kb, int advance,
                                 double* __restrict__ target, double* __restrict__ work, double* __restrict__ state);
 __global__ void scale_velocities_kernel(int N, const double* __restrict__ work, double* __restrict__ vel64);
+__global__ void baoab_cell_first_kernel(
+    int full, double dt, double gamma, double ou_unit, double gamma_b, double ou_b_unit, double mass, int ndof,
+    double kb, unsigned long long seed, const unsigned long long* __restrict__ step_counter,
+    double* __restrict__ target, double* __restrict__ state, double* __restrict__ work, CellDev* __restrict__ cell);
+__global__ void baoab_first_kernel(
+    int N, double dt, const double* __restrict__ work, unsigned long long seed,
+    const unsigned long long* __restrict__ step_counter, const double* __restrict__ forces,
+    const double* __restrict__ inv_masses, const double* __restrict__ sqrt_inv_masses,
+    double* __restrict__ pos64, double* __restrict__ vel64, unsigned int* __restrict__ max_step_disp2);
+__global__ void kinetic_tensor_kernel(int N, const double* __restrict__ masses, const double* __restrict__ vel64,
+                                      double* __restrict__ out);
+__global__ void baoab_cell_second_kernel(
+    int full, int kick, int advance, double dt, int ndof, double ext, const double* __restrict__ virial,
+    const CellDev* __restrict__ cell, double* __restrict__ work, double* __restrict__ state,
+    unsigned long long* __restrict__ step_counter);
 __global__ void berendsen_scale_kernel(int ndof, double dt_over_tau, double kb, double* __restrict__ target,
                                        double* __restrict__ work);
 __global__ void csvr_first_half_kernel(
@@ -216,7 +231,7 @@ __global__ void csvr_first_half_kernel(
 // CSVR: [0] the energy the thermostat has transferred. Nose-Hoover chain: [0] minus the chain's energy, then eta
 // and p_eta of each thermostat (nhc_half_kernel). The other slots are for the integrators to come.
 constexpr int kIntStateSlots = 64;
-constexpr int kIntWorkSlots = 8;  // per-step scratch: CSVR's kinetic energy and alpha
+constexpr int kIntWorkSlots = 64;  // per-step scratch: CSVR's kinetic energy and alpha; BAOAB NPT's matrices
 
 // loup_minimize's LBFGS (src/minimize.cu). The history and the step's vectors are on the device in the handle's
 // atom order; the host keeps what the two triangular solves need. It is valid for the positions the last call
@@ -2700,6 +2715,30 @@ static int run_md_loop(
         }
         CUDA_CHECK(cudaMemsetAsync(h->d_int_work, 0, kIntWorkSlots * sizeof(double), h->stream));
     }
+    // Langevin BAOAB NPT (kind 6): ASE's constants. T_tau = 1 / friction; P_tau = tau_p (0: ASE's default of
+    // 20 T_tau); the barostat's mass from ASE's heuristic for a period of P_tau / 4; its thermostat's rate 1 / P_tau.
+    // The external stress is minus the target pressure. The barostat's momentum and the cell force carry on from
+    // the last such call on this trajectory; a first call forms the cell force from the state it finds.
+    double bao_gamma = 0.0, bao_ou = 0.0, bao_gamma_b = 0.0, bao_ou_b = 0.0, bao_mass = 0.0;
+    const int bao_ndof = 3 * N;
+    bool bao_start = false;
+    if (kind == 6) {
+        bao_gamma = friction_per_fs / loup::ASE_FS;
+        bao_ou = sqrt(1.0 - exp(-2.0 * bao_gamma * dt_ase));
+        const double p_tau = (npt->tau_p_fs > 0.0 ? npt->tau_p_fs : 20.0 / friction_per_fs) * loup::ASE_FS;
+        const double c = 1.66 * loup::ASE_FS;
+        bao_mass = pow((p_tau / 4.0) / c * pow((double)N, 1.0 / 6.0), 2.0);
+        bao_gamma_b = 1.0 / p_tau;
+        bao_ou_b = sqrt(1.0 - exp(-2.0 * bao_gamma_b * dt_ase)) * sqrt(bao_mass);
+        const double target[5] = {temp_k + temp_rate, temp_rate, 0.0, 0.0, 0.0};
+        CUDA_CHECK(cudaMemcpy(h->d_langevin_target, target, sizeof(target), cudaMemcpyHostToDevice));
+        if (h->int_state_kind != LOUP_BAOAB_NPT) {
+            CUDA_CHECK(cudaMemsetAsync(h->d_int_state, 0, kIntStateSlots * sizeof(double), h->stream));
+            h->int_state_kind = LOUP_BAOAB_NPT;
+            bao_start = true;
+        }
+        CUDA_CHECK(cudaMemsetAsync(h->d_int_work, 0, kIntWorkSlots * sizeof(double), h->stream));
+    }
     // Nose-Hoover chain (kind 3): the thermostat masses' unit kT_mass tdamp^2 (Q_0 = N_f q, the others q), and the
     // target as for CSVR. The chain's variables carry on from the last Nose-Hoover call on this trajectory.
     double nhc_q = 0.0;
@@ -2751,6 +2790,15 @@ static int run_md_loop(
             loup::csvr_first_half_kernel<<<gridN, 256, 0, h->stream>>>(
                 N, dt_ase, h->d_int_work, h->d_forces_f64, h->d_inv_masses, h->d_pos64, h->d_vel64,
                 h->d_max_step_disp2);
+        } else if (kind == 6) {
+            // Langevin BAOAB NPT: one thread for the barostat and the step's matrices, then every atom's B, A, O, A
+            // with the cell's two half steps around them (integrator.cu).
+            loup::baoab_cell_first_kernel<<<1, 1, 0, h->stream>>>(
+                npt->full, dt_ase, bao_gamma, bao_ou, bao_gamma_b, bao_ou_b, bao_mass, bao_ndof, loup::ASE_KB, seed,
+                h->d_step_counter, h->d_langevin_target, h->d_int_state, h->d_int_work, h->d_celldev);
+            loup::baoab_first_kernel<<<(N + 31) / 32, 32, 0, h->stream>>>(
+                N, dt_ase, h->d_int_work, seed, h->d_step_counter, h->d_forces_f64, h->d_inv_masses,
+                h->d_sqrt_inv_masses, h->d_pos64, h->d_vel64, h->d_max_step_disp2);
         } else if (kind == 5) {
             // Berendsen NPT: lambda from the kinetic energy; the barostat's factors from the stress of the last
             // force pass and the scaled velocities' ideal-gas part; the atoms scaled with the cell (the cell
@@ -2819,6 +2867,12 @@ static int run_md_loop(
                 h->d_row_ptr + N, h->d_celldev, h->d_tmp_snd, h->d_tmp_rcv, h->d_tmp_pairs, h->d_shift_cart);
         }
         record_force_pass(h, var_cell ? 1 : 0);
+        if (kind == 6) {  // the cell force from the velocities before the last kick, then barostat B
+            loup::kinetic_tensor_kernel<<<gridN, 256, 0, h->stream>>>(N, h->d_masses, h->d_vel64, h->d_int_work);
+            loup::baoab_cell_second_kernel<<<1, 1, 0, h->stream>>>(
+                npt->full, 1, 1, dt_ase, bao_ndof, -npt->pressure, h->d_virial_grad_f64, h->d_celldev, h->d_int_work,
+                h->d_int_state, h->d_step_counter);
+        }
         if (kind != 1) {
             loup::nve_second_half_kernel<<<gridN, 256, 0, h->stream>>>(
                 N, dt_ase, h->d_forces_f64, h->d_inv_masses, h->d_vel64);
@@ -2921,6 +2975,12 @@ static int run_md_loop(
         return bits_to_disp((unsigned)flags[2] > (unsigned)flags[3] ? flags[2] : flags[3]);
     };
 
+    if (bao_start) {  // LangevinBAOAB.__init__: the cell force of the forces, stress and velocities it starts from
+        loup::kinetic_tensor_kernel<<<gridN, 256, 0, h->stream>>>(N, h->d_masses, h->d_vel64, h->d_int_work);
+        loup::baoab_cell_second_kernel<<<1, 1, 0, h->stream>>>(
+            npt->full, 0, 0, dt_ase, bao_ndof, -npt->pressure, h->d_virial_grad_f64, h->d_celldev, h->d_int_work,
+            h->d_int_state, h->d_step_counter);
+    }
     EventPairGuard evg;
     cudaEvent_t ev0 = evg.e0, ev1 = evg.e1;
     CUDA_CHECK(cudaEventRecord(ev0, h->stream));
@@ -3474,10 +3534,9 @@ static int run_impl(LoupHandle* h, const LoupIntegrator* caller, int n_steps, Lo
     const LoupIntegrator it = *caller;
     const char* name = integrator_name(it.kind);
     if (!name) { loup::set_error("unknown integrator kind %d", it.kind); return -1; }
-    if (it.kind != LOUP_NVE && it.kind != LOUP_LANGEVIN && it.kind != LOUP_CSVR && it.kind != LOUP_NHC &&
-        it.kind != LOUP_BERENDSEN_NVT && it.kind != LOUP_BERENDSEN_NPT) {
+    if (it.kind == LOUP_MTK_NPT) {
         loup::set_error("integrator %s is not built in this version of the library (LOUP_NVE, LOUP_LANGEVIN, "
-                        "LOUP_CSVR, LOUP_NHC, LOUP_BERENDSEN_NVT and LOUP_BERENDSEN_NPT are)", name);
+                        "LOUP_CSVR, LOUP_NHC, LOUP_BERENDSEN_NVT, LOUP_BERENDSEN_NPT and LOUP_BAOAB_NPT are)", name);
         return -1;
     }
     if (it.fix_com != 0 && h && h->n_fixed > 0) {
@@ -3517,6 +3576,55 @@ static int run_impl(LoupHandle* h, const LoupIntegrator* caller, int n_steps, Lo
     if (it.kind == LOUP_LANGEVIN && (!std::isfinite(it.friction_per_fs) || it.friction_per_fs < 0.0)) {
         loup::set_error("friction_per_fs must be finite and not negative, got %g /fs", it.friction_per_fs);
         return -1;
+    }
+    if (it.kind == LOUP_BAOAB_NPT) {
+        // ASE's LangevinBAOAB with a barostat: T_tau = 1 / friction_per_fs, P_tau = tau_p_fs (0: 20 T_tau), the
+        // external stress minus pressure_gpa, hydrostatic or the full cell.
+        if (!std::isfinite(it.friction_per_fs) || !(it.friction_per_fs > 0.0)) {
+            loup::set_error("friction_per_fs must be finite and positive for LOUP_BAOAB_NPT (1 / T_tau), got %g /fs",
+                            it.friction_per_fs);
+            return -1;
+        }
+        if (!std::isfinite(it.tau_p_fs) || it.tau_p_fs < 0.0) {
+            loup::set_error("tau_p_fs must be finite and not negative (0 takes 20 / friction_per_fs), got %g fs",
+                            it.tau_p_fs);
+            return -1;
+        }
+        if (!std::isfinite(it.pressure_gpa)) {
+            loup::set_error("pressure_gpa must be finite, got %g GPa", it.pressure_gpa);
+            return -1;
+        }
+        if (it.cell_mode != LOUP_CELL_HYDROSTATIC && it.cell_mode != LOUP_CELL_FULL) {
+            loup::set_error("unknown cell_mode %d (LOUP_CELL_HYDROSTATIC or LOUP_CELL_FULL)", it.cell_mode);
+            return -1;
+        }
+        if (it.fix_com != 0) {
+            loup::set_error("fix_com is not part of LOUP_BAOAB_NPT: ASE's LangevinBAOAB leaves the centre of mass "
+                            "to its thermostat");
+            return -1;
+        }
+        if (!std::isfinite(it.temp_rate_k_per_step) ||
+            it.temp_k + it.temp_rate_k_per_step * (double)n_steps < 0.0) {
+            loup::set_error("temp_rate_k_per_step must be finite and must not take the target below 0 K: %g K + %d "
+                            "steps of %g K", it.temp_k, n_steps, it.temp_rate_k_per_step);
+            return -1;
+        }
+        if (h && h->n_fixed > 0) {
+            loup::set_error("a barostat with fixed atoms: the cell's scaling would move the %d fixed atoms", h->n_fixed);
+            return -1;
+        }
+        if (h && h->gen && h->gen->has_lr()) {
+            loup::set_error("the variable cell is not built for long-range models (MACE-POLAR-1): their k-space "
+                            "terms are set up for one cell");
+            return -1;
+        }
+        NptParams npt;
+        npt.pressure = it.pressure_gpa / loup::GPA_PER_EV_A3;
+        npt.tau_p_fs = it.tau_p_fs;
+        npt.full = it.cell_mode == LOUP_CELL_FULL ? 1 : 0;
+        if (h) h->req_var_cell = true;
+        return run_md_loop(h, 6, n_steps, it.dt_fs, it.temp_k, it.temp_rate_k_per_step, it.friction_per_fs, it.seed,
+                           it.thermo_every, false, out_stats, 0.0, 0, 1, 0.0, &npt);
     }
     if ((it.kind == LOUP_CSVR || it.kind == LOUP_NHC || it.kind == LOUP_BERENDSEN_NVT ||
          it.kind == LOUP_BERENDSEN_NPT) &&

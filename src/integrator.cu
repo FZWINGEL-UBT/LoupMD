@@ -3,6 +3,8 @@
 #include <cmath>
 #include <cstdint>
 
+#include "cell.hpp"
+
 namespace loup {
 
 constexpr double ASE_FS = 0.09822694788464063;
@@ -477,6 +479,235 @@ __global__ void kinetic_energy_kernel(
         for (int w = 0; w < nw; ++w) sum += s_ke[w];
         atomicAdd(out_ke, sum);
     }
+}
+
+// ---- Langevin BAOAB NPT: ASE 3.27's LangevinBAOAB with a barostat (Leimkuhler and Matthews' BAOAB for the atoms,
+// Quigley and Probert's Langevin-Hoover barostat for the cell), hydrostatic or with the full cell. ----
+// The barostat's momentum p_eps and the cell force force_eps live in the integrator's state slots (state[1..9] and
+// state[10..18]; the hydrostatic mode uses the first of each), so they travel in the state block. One step:
+//   baoab_cell_first_kernel (one thread): barostat B (p += dt/2 F); the cell's first half step as a matrix M1 for
+//     the atoms; the matrix of the atoms' O step (friction plus the barostat's drag on the velocities); barostat O
+//     (friction and noise on p); the cell's second half step M2 from the new p; the cell's own deformation M1 M2.
+//   baoab_first_kernel (per atom): B, x <- x M1, A, O, A, x <- x M2.
+//   [force pass with stress]
+//   kinetic_tensor_kernel, baoab_cell_second_kernel (one thread): the cell force from the velocities before the
+//     last kick, the virial and the volume; barostat B. Then the atoms' last B (nve_second_half_kernel).
+// Work slots (work[]): [0..5] sum m v v (xx, xy, xz, yy, yz, zz), [8..16] M1, [17..25] M2, [26..34] the O step's
+// matrix, [35] the noise amplitude without the atom's 1 / sqrt(m).
+constexpr int kBaoabM1 = 8, kBaoabM2 = 17, kBaoabVm = 26, kBaoabAmp = 35;
+constexpr int kBaoabP = 1, kBaoabF = 10;
+
+__device__ void mat3_mul_d(const double* a, const double* b, double* out) {
+    for (int r = 0; r < 3; ++r)
+        for (int c = 0; c < 3; ++c)
+            out[r * 3 + c] = a[r * 3 + 0] * b[0 * 3 + c] + a[r * 3 + 1] * b[1 * 3 + c] + a[r * 3 + 2] * b[2 * 3 + c];
+}
+
+// exp(a) of a 3 x 3 matrix: scaling and squaring with a Taylor series, as FastMACE's expm_3x3 (exact in float64
+// for |a| <= 1; a barostat half step moves |a| ~ 1e-4).
+__device__ void mat3_expm(const double* a_in, double* out) {
+    const int scaling = 2, degree = 14;
+    double a[9], term[9], next[9];
+    for (int i = 0; i < 9; ++i) {
+        a[i] = a_in[i] / (double)(1 << scaling);
+        term[i] = out[i] = (i % 4 == 0) ? 1.0 : 0.0;
+    }
+    for (int k = 1; k <= degree; ++k) {
+        mat3_mul_d(term, a, next);
+        for (int i = 0; i < 9; ++i) {
+            term[i] = next[i] / (double)k;
+            out[i] += term[i];
+        }
+    }
+    for (int s = 0; s < scaling; ++s) {
+        mat3_mul_d(out, out, next);
+        for (int i = 0; i < 9; ++i) out[i] = next[i];
+    }
+}
+
+__device__ void mat3_transpose(const double* a, double* out) {
+    for (int r = 0; r < 3; ++r)
+        for (int c = 0; c < 3; ++c) out[r * 3 + c] = a[c * 3 + r];
+}
+
+// The cell's half step for the atoms: x <- x m. Hydrostatic: every length times cbrt(exp(3 dt/2 p / W)); full:
+// m = expm(dt/2 p / W)^T (ASE: cell @ expm(...).T, atoms scaled with it).
+__device__ void baoab_cell_half(int full, double dt, double mass, const double* p, double* m) {
+    if (!full) {
+        const double f = cbrt(exp(0.5 * dt * 3.0 * p[0] / mass));
+        for (int i = 0; i < 9; ++i) m[i] = (i % 4 == 0) ? f : 0.0;
+        return;
+    }
+    double a[9], e[9];
+    for (int i = 0; i < 9; ++i) a[i] = 0.5 * dt * p[i] / mass;
+    mat3_expm(a, e);
+    mat3_transpose(e, m);
+}
+
+__global__ void baoab_cell_first_kernel(
+    int full, double dt, double gamma, double ou_unit, double gamma_b, double ou_b_unit, double mass, int ndof,
+    double kb, unsigned long long seed, const unsigned long long* __restrict__ step_counter,
+    double* __restrict__ target, double* __restrict__ state, double* __restrict__ work, CellDev* __restrict__ cell
+) {
+    const double temp = fmax(target[0], 0.0);
+    target[0] += target[1];
+    const double sqrt_kt = sqrt(kb * temp);
+    double* p = state + kBaoabP;
+    const double* f = state + kBaoabF;
+    const int np = full ? 9 : 1;
+    for (int i = 0; i < np; ++i) p[i] += 0.5 * dt * f[i];                    // barostat B
+    baoab_cell_half(full, dt, mass, p, work + kBaoabM1);                      // barostat A, first half
+    // O for the atoms: v <- v exp(-(gamma + drag) dt), drag = (1 + 3 / Ndof) p / W (hydrostatic) or the matrix
+    // (p + Tr(p) / Ndof 1) / W (Quigley and Probert 2004, Eq. 5b; ASE 3.27 adds the trace to all nine elements)
+    if (!full) {
+        const double drag = (1.0 + 3.0 / (double)ndof) * p[0] / mass;
+        const double e = exp(-(gamma + drag) * dt);
+        for (int i = 0; i < 9; ++i) work[kBaoabVm + i] = (i % 4 == 0) ? e : 0.0;
+    } else {
+        const double trace = (p[0] + p[4] + p[8]) / (double)ndof;
+        double a[9], e[9];
+        for (int i = 0; i < 9; ++i) a[i] = -(((i % 4 == 0) ? gamma : 0.0) + (p[i] + ((i % 4 == 0) ? trace : 0.0)) / mass) * dt;
+        mat3_expm(a, e);
+        mat3_transpose(e, work + kBaoabVm);
+    }
+    work[kBaoabAmp] = ou_unit * sqrt_kt;
+    if (gamma_b > 0.0) {                                                       // barostat O
+        const double decay = exp(-gamma_b * dt);
+        const double amp = ou_b_unit * sqrt_kt;
+        for (int i = 0; i < np; ++i) p[i] *= decay;
+        if (amp > 0.0) {
+            // Its own Philox subsequence, beyond every atom's; 16 outputs per step as the atoms' draws.
+            curandStatePhilox4_32_10_t rng;
+            curand_init(seed, 1ULL << 41, step_counter[0] * 16ULL, &rng);
+            if (!full) {
+                p[0] += amp * curand_normal2_double(&rng).x;
+            } else {
+                double r[9];
+                for (int i = 0; i < 8; i += 2) {
+                    const double2 n = curand_normal2_double(&rng);
+                    r[i] = n.x;
+                    r[i + 1] = n.y;
+                }
+                r[8] = curand_normal2_double(&rng).x;
+                for (int a = 0; a < 3; ++a)
+                    for (int b = 0; b < 3; ++b) p[a * 3 + b] += amp * 0.5 * (r[a * 3 + b] + r[b * 3 + a]);
+            }
+        }
+    }
+    baoab_cell_half(full, dt, mass, p, work + kBaoabM2);                      // barostat A, second half
+    mat3_mul_d(work + kBaoabM1, work + kBaoabM2, cell->move);                 // the cell: h <- h M1 M2
+    cell->has_move = 1;
+}
+
+__global__ void baoab_first_kernel(
+    int N, double dt, const double* __restrict__ work, unsigned long long seed,
+    const unsigned long long* __restrict__ step_counter, const double* __restrict__ forces,
+    const double* __restrict__ inv_masses, const double* __restrict__ sqrt_inv_masses,
+    double* __restrict__ pos64, double* __restrict__ vel64, unsigned int* __restrict__ max_step_disp2
+) {
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    double d2 = 0.0;
+    if (i < N) {
+        const double* m1 = work + kBaoabM1;
+        const double* m2 = work + kBaoabM2;
+        const double* vm = work + kBaoabVm;
+        const double amp = work[kBaoabAmp] * sqrt_inv_masses[i];
+        const double half_dt_im = 0.5 * dt * inv_masses[i];
+        double x[3], v[3], t[3];
+        #pragma unroll
+        for (int c = 0; c < 3; ++c) {
+            x[c] = pos64[i * 3 + c];
+            v[c] = vel64[i * 3 + c] + half_dt_im * forces[i * 3 + c];        // B
+        }
+        const double x0[3] = {x[0], x[1], x[2]};
+        #pragma unroll
+        for (int c = 0; c < 3; ++c) t[c] = x[0] * m1[c] + x[1] * m1[3 + c] + x[2] * m1[6 + c];   // barostat A
+        #pragma unroll
+        for (int c = 0; c < 3; ++c) x[c] = t[c] + 0.5 * dt * v[c];           // A
+        #pragma unroll
+        for (int c = 0; c < 3; ++c) t[c] = v[0] * vm[c] + v[1] * vm[3 + c] + v[2] * vm[6 + c];   // O
+        if (amp > 0.0) {
+            curandStatePhilox4_32_10_t rng;
+            curand_init(seed, (unsigned long long)i, step_counter[0] * 16ULL, &rng);
+            const double2 n0 = curand_normal2_double(&rng);
+            const double2 n1 = curand_normal2_double(&rng);
+            t[0] += amp * n0.x;
+            t[1] += amp * n0.y;
+            t[2] += amp * n1.x;
+        }
+        #pragma unroll
+        for (int c = 0; c < 3; ++c) {
+            v[c] = t[c];
+            x[c] += 0.5 * dt * v[c];                                          // A
+        }
+        #pragma unroll
+        for (int c = 0; c < 3; ++c) {
+            const double xn = x[0] * m2[c] + x[1] * m2[3 + c] + x[2] * m2[6 + c];   // barostat A
+            pos64[i * 3 + c] = xn;
+            vel64[i * 3 + c] = v[c];
+            d2 += (xn - x0[c]) * (xn - x0[c]);
+        }
+    }
+    record_step_disp2(d2, max_step_disp2);
+}
+
+// sum_i m_i v_i v_i^T: xx, xy, xz, yy, yz, zz into out[0..5] (zeroed by baoab_cell_second_kernel).
+__global__ void kinetic_tensor_kernel(int N, const double* __restrict__ masses, const double* __restrict__ vel64,
+                                      double* __restrict__ out) {
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    double k[6] = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
+    if (i < N) {
+        const double m = masses[i];
+        const double vx = vel64[i * 3 + 0], vy = vel64[i * 3 + 1], vz = vel64[i * 3 + 2];
+        k[0] = m * vx * vx; k[1] = m * vx * vy; k[2] = m * vx * vz;
+        k[3] = m * vy * vy; k[4] = m * vy * vz; k[5] = m * vz * vz;
+    }
+    __shared__ double s_k[6][8];
+    const int warp = threadIdx.x >> 5;
+    #pragma unroll
+    for (int a = 0; a < 6; ++a) {
+        double v = k[a];
+        #pragma unroll
+        for (int off = 16; off > 0; off >>= 1) v += __shfl_xor_sync(0xffffffffu, v, off);
+        if ((threadIdx.x & 31) == 0) s_k[a][warp] = v;
+    }
+    __syncthreads();
+    if (threadIdx.x < 6) {
+        double sum = 0.0;
+        const int nw = blockDim.x >> 5;
+        for (int w = 0; w < nw; ++w) sum += s_k[threadIdx.x][w];
+        atomicAdd(out + threadIdx.x, sum);
+    }
+}
+
+// The cell force (LangevinBAOAB._update_force_eps) from the kinetic tensor in work[0..5], the force pass's virial
+// (dE / d strain: the stress times the volume) and the cell's volume; ext is the external stress in eV/A^3 (minus
+// the target pressure). With `kick` also barostat B (p += dt/2 F); with `advance` the step counter moves on.
+__global__ void baoab_cell_second_kernel(
+    int full, int kick, int advance, double dt, int ndof, double ext, const double* __restrict__ virial,
+    const CellDev* __restrict__ cell, double* __restrict__ work, double* __restrict__ state,
+    unsigned long long* __restrict__ step_counter
+) {
+    const double volume = cell->volume;
+    double* p = state + kBaoabP;
+    double* f = state + kBaoabF;
+    const double ke2 = work[0] + work[3] + work[5];
+    if (!full) {
+        const double tr_virial = -(virial[0] + virial[3] + virial[5]);       // -V Tr(stress)
+        const double x = (ke2 + tr_virial) / (3.0 * volume);
+        f[0] = 3.0 * volume * (x + ext) + (3.0 / (double)ndof) * ke2;
+        if (kick) p[0] += 0.5 * dt * f[0];
+    } else {
+        const int map[9] = {0, 1, 2, 1, 3, 4, 2, 4, 5};
+        for (int i = 0; i < 9; ++i) {
+            const double x = (work[map[i]] - virial[map[i]]) / volume;
+            const double unit = (i % 4 == 0) ? 1.0 : 0.0;
+            f[i] = volume * (x + ext * unit) + ke2 / (double)ndof * unit;
+            if (kick) p[i] += 0.5 * dt * f[i];
+        }
+    }
+    for (int i = 0; i < 6; ++i) work[i] = 0.0;
+    if (advance) step_counter[0] += 1ULL;
 }
 
 }  // namespace loup

@@ -146,8 +146,13 @@ enum {
                              // Inhomogeneous_NPTBerendsen (LOUP_CELL_FULL with cell_mask), with one force call
                              // per step: the first kick uses the forces of the cell before its scaling, where
                              // ASE's classes evaluate again. Experimental. Not with fixed atoms
+    LOUP_BAOAB_NPT = 6,      // Langevin BAOAB with the Langevin-Hoover barostat, as ASE's LangevinBAOAB with
+                             // externalstress: T_tau = 1 / friction_per_fs, P_tau = tau_p_fs (0: 20 T_tau), the
+                             // barostat's mass from ASE's heuristic, external stress -pressure_gpa,
+                             // LOUP_CELL_HYDROSTATIC or LOUP_CELL_FULL. In the full-cell mode the barostat's drag
+                             // on the velocities is Quigley and Probert's (p + Tr(p) / Ndof 1) / W; ASE 3.27
+                             // adds the trace to all nine elements. Experimental. Not with fixed atoms or fix_com
                              // the kinds from here on are refused by name until their task builds them
-    LOUP_BAOAB_NPT = 6,
     LOUP_MTK_NPT = 7
 };
 enum { LOUP_CELL_HYDROSTATIC = 0, LOUP_CELL_FULL = 1 };
