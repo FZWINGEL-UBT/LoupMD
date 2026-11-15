@@ -157,6 +157,25 @@ int loup_get_state(LoupHandle* h, double* out_positions, double* out_velocities,
 int loup_export_state(LoupHandle* h, void* buffer, size_t capacity, size_t* written);
 int loup_import_state(LoupHandle* h, const void* buffer, size_t size);
 
+// How a force call is executed. Only LOUP_EXEC_WHOLE is built; the tiled modes come with the capacity stage.
+enum { LOUP_EXEC_AUTO = 0, LOUP_EXEC_WHOLE = 1, LOUP_EXEC_TILED = 2, LOUP_EXEC_WAVEFRONT = 3 };
+
+// The device memory a system of `n_atoms` with `edges_per_atom` neighbours per atom inside cutoff + skin would
+// take, scaled from the buffers of the handle's current system, which must have a neighbour list (any size: a
+// small cell of the same material will do). edges_per_atom <= 0 takes the current system's value.
+typedef struct {
+    size_t whole_bytes;          // every buffer of the whole-system call that scales with atoms or edges
+    size_t tiled_global_bytes;   // 0 until the tiled mode is built
+    size_t tile_workspace_bytes; // 0 until the tiled mode is built
+    size_t free_bytes;           // free device memory now (cudaMemGetInfo), the current system's buffers included
+                                 // in what is used
+    int receivers;               // receiver cap of the tiled mode; 0 until it is built
+    int mode;                    // LOUP_EXEC_WHOLE if the whole-system call fits with 10% headroom once the current
+                                 // system is released, else LOUP_EXEC_TILED (the size needs the capacity mode)
+} LoupMemoryPlan;
+// Not counted: MACE-POLAR-1's long-range buffers, captured graphs and cuBLAS's own allocations.
+int loup_plan_memory(LoupHandle* h, int n_atoms, double edges_per_atom, LoupMemoryPlan* out);
+
 // Timing breakdown across components for diagnostics (averages over `n_calls` force evaluations).
 int loup_profile_force(LoupHandle* h, int warmup, int n_calls, double* out_total_us);
 

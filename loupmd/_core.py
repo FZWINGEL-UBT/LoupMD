@@ -73,6 +73,32 @@ class LoupIntegrator(ctypes.Structure):
     ]
 
 
+LOUP_EXEC_AUTO, LOUP_EXEC_WHOLE, LOUP_EXEC_TILED, LOUP_EXEC_WAVEFRONT = 0, 1, 2, 3
+
+
+class LoupMemoryPlan(ctypes.Structure):
+    _fields_ = [
+        ("whole_bytes", ctypes.c_size_t),
+        ("tiled_global_bytes", ctypes.c_size_t),
+        ("tile_workspace_bytes", ctypes.c_size_t),
+        ("free_bytes", ctypes.c_size_t),
+        ("receivers", ctypes.c_int),
+        ("mode", ctypes.c_int),
+    ]
+
+
+@dataclass(frozen=True)
+class MemoryPlan:
+    """Device memory a system would take (``loup_plan_memory``), in bytes."""
+
+    whole_bytes: int
+    tiled_global_bytes: int
+    tile_workspace_bytes: int
+    free_bytes: int
+    receivers: int
+    mode: int               # LOUP_EXEC_WHOLE: fits whole; LOUP_EXEC_TILED: needs the capacity mode
+
+
 def integrator(kind: int, dt_fs: float = 1.0, **fields) -> LoupIntegrator:
     """A ``LoupIntegrator`` with ``size`` set and every field not named left at zero."""
     it = LoupIntegrator()
@@ -172,6 +198,7 @@ def _load_lib():
     lib.loup_export_state.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_size_t,
                                       ctypes.POINTER(ctypes.c_size_t)]
     lib.loup_import_state.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_size_t]
+    lib.loup_plan_memory.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_double, ctypes.POINTER(LoupMemoryPlan)]
     lib.loup_create.argtypes = [ctypes.c_char_p, ctypes.c_int]
     lib.loup_create.restype = ctypes.c_void_p
     lib.loup_destroy.argtypes = [ctypes.c_void_p]
@@ -187,7 +214,7 @@ def _load_lib():
     lib.loup_profile_force.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_int, _c_double_p]
     for name in ("loup_set_system", "loup_evaluate", "loup_set_state", "loup_run_nve", "loup_run_langevin",
                  "loup_get_state", "loup_profile_force", "loup_get_info", "loup_run", "loup_export_state",
-                 "loup_import_state"):
+                 "loup_import_state", "loup_plan_memory"):
         getattr(lib, name).restype = ctypes.c_int
     _LIB = lib
     return lib
@@ -306,6 +333,15 @@ class LoupEngine:
         self._check(self._lib.loup_get_state(self._h, _ptr(pos), _ptr(vel), _ptr(frc), ctypes.byref(en)),
                     "loup_get_state")
         return pos, vel, frc, float(en.value)
+
+    def plan_memory(self, n_atoms: int, edges_per_atom: float = 0.0) -> MemoryPlan:
+        """Device memory for ``n_atoms`` of the current material, scaled from the current system's buffers.
+        ``edges_per_atom`` defaults to the current system's."""
+        raw = LoupMemoryPlan()
+        self._check(self._lib.loup_plan_memory(self._h, int(n_atoms), float(edges_per_atom), ctypes.byref(raw)),
+                    "loup_plan_memory")
+        return MemoryPlan(raw.whole_bytes, raw.tiled_global_bytes, raw.tile_workspace_bytes, raw.free_bytes,
+                          raw.receivers, raw.mode)
 
     def export_state(self) -> bytes:
         """Positions, velocities, cell, step counter and displacement tracker as one versioned block of bytes."""

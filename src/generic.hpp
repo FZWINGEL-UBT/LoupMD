@@ -63,6 +63,10 @@ public:
     const std::vector<int>& atomic_numbers() const { return Z_; }
     const std::vector<double>& e0() const { return e0_; }
     int n_layers() const { return n_layers_; }
+    // Bytes of the per-system buffers (alloc_system) and of the edge buffers (ensure_edges), for loup_plan_memory.
+    // The long-range part's buffers (polar.cu) are not counted.
+    size_t system_bytes() const { return sys_bytes_; }
+    size_t edge_bytes() const { return edge_bytes_; }
     // The compiled product kernels this bundle uses, one signature per layer, joined by ';' (loup_get_info).
     std::string kernel_signature() const;
 
@@ -100,6 +104,7 @@ private:
     float *d_zbl_rc_ = nullptr, *d_zbl_inv_a_ = nullptr, *d_zbl_pref_ = nullptr;
     // system buffers
     int N_ = 0, E_cap_ = 0;
+    size_t sys_bytes_ = 0, edge_bytes_ = 0;
     std::vector<void*> sys_allocs_;
     float* d_edge_dvec_ = nullptr;  // [E_cap, 3]
     void* d_zero_slab_ = nullptr;

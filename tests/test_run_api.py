@@ -32,6 +32,9 @@ int main(void) {
     F(LoupInfo, abi); F(LoupInfo, compute_capability); F(LoupInfo, n_layers); F(LoupInfo, has_long_range);
     F(LoupInfo, specialised); F(LoupInfo, n_species); F(LoupInfo, r_max); F(LoupInfo, gpu_name);
     F(LoupInfo, kernel_signature);
+    printf("LoupMemoryPlan %zu\n", sizeof(LoupMemoryPlan));
+    F(LoupMemoryPlan, whole_bytes); F(LoupMemoryPlan, tiled_global_bytes); F(LoupMemoryPlan, tile_workspace_bytes);
+    F(LoupMemoryPlan, free_bytes); F(LoupMemoryPlan, receivers); F(LoupMemoryPlan, mode);
     printf("LoupMDStats %zu\n", sizeof(LoupMDStats));
     F(LoupMDStats, step_ms); F(LoupMDStats, rebuilds); F(LoupMDStats, final_potential_energy_ev);
     F(LoupMDStats, final_kinetic_energy_ev); F(LoupMDStats, final_temperature_k); F(LoupMDStats, dangerous_builds);
@@ -54,7 +57,7 @@ def test_ctypes_structs_have_the_headers_layout(tmp_path):
     subprocess.run([cc, "-I", str(ROOT / "include"), str(src), "-o", str(exe)], check=True)
     lines = subprocess.run([str(exe)], capture_output=True, text=True, check=True).stdout.split("\n")
     seen = dict(line.rsplit(" ", 1) for line in lines if line and not line.startswith("kinds"))
-    for struct in (_core.LoupIntegrator, _core.LoupInfo, _core.LoupMDStats):
+    for struct in (_core.LoupIntegrator, _core.LoupInfo, _core.LoupMemoryPlan, _core.LoupMDStats):
         name = struct.__name__
         assert int(seen.pop(name)) == ctypes.sizeof(struct), name
         for field, _ in struct._fields_:

@@ -587,6 +587,10 @@ struct LoupHandle {
     // d_forces_f64 and d_energy_f64 belong to the positions in d_pos64: the last call was a force evaluation or a
     // completed run, with no new positions since. A run then starts without a force pass of its own.
     bool forces_current = false;
+    // Bytes of the buffers that scale with the system, counted where they are allocated (loup_plan_memory scales
+    // them to another size): per atom (set_system_impl), per edge of capacity (ensure_edge_capacity), and the
+    // [K, N] weight copies of the GEMMs, which do not scale.
+    size_t sys_atom_bytes = 0, sys_edge_bytes = 0, weight_copy_bytes = 0;
 
     void free_system() {
         if (gen) gen->free_system();
@@ -600,6 +604,8 @@ struct LoupHandle {
         nl_valid = false;
         forces_current = false;
         disp_window_steps = 0;
+        sys_atom_bytes = 0;
+        sys_edge_bytes = 0;
         n_rebuilds = 0;
         N = 0;
         auto freep = [](auto*& p) {
@@ -675,6 +681,7 @@ static const float* weight_kn(LoupHandle* h, const float* B, int N, int K, cudaS
     if (it != h->bt_cache.end()) return it->second;
     float* bt = nullptr;
     CUDA_CHECK_THROW(cudaMalloc(&bt, (size_t)N * K * sizeof(float)));
+    h->weight_copy_bytes += (size_t)N * K * sizeof(float);
     loup::transpose(N, K, B, bt, strm);
     cudaStreamCaptureStatus cap = cudaStreamCaptureStatusNone;
     CUDA_CHECK_THROW(cudaStreamIsCapturing(strm, &cap));
@@ -924,9 +931,11 @@ static int ensure_edge_capacity(LoupHandle* h, int needed) {
     // instead of running on freed or null arrays.
     h->invalidate_graphs();
     h->E_cap = 0;
+    h->sys_edge_bytes = 0;
     auto reallocp = [&](auto*& p, size_t elem_sz) {
         if (p) cudaFree(p);
         p = nullptr;
+        h->sys_edge_bytes += (size_t)cap * elem_sz;
         return cudaMalloc(&p, (size_t)cap * elem_sz);
     };
     CUDA_CHECK(reallocp(h->d_senders, sizeof(int)));
@@ -1712,6 +1721,14 @@ void loup_destroy(LoupHandle* h) {
     delete h;
 }
 
+// Every cudaMalloc inside set_system_impl is counted into the handle's sys_atom_bytes (for loup_plan_memory): the
+// macro spares its sixty allocation lines an edit each. It ends right after the function.
+static cudaError_t counted_malloc(size_t& counter, void** p, size_t bytes) {
+    const cudaError_t err = cudaMalloc(p, bytes);
+    if (err == cudaSuccess) counter += bytes;
+    return err;
+}
+#define cudaMalloc(p, bytes) counted_malloc(h->sys_atom_bytes, (void**)(p), (bytes))
 static int set_system_impl(LoupHandle* h, int n_atoms, const int* atomic_numbers, const double* masses_amu, double skin) {
     if (!h) return -1;
     if (n_atoms <= 0) { loup::set_error("n_atoms must be positive, got %d", n_atoms); return -1; }
@@ -1915,6 +1932,7 @@ static int set_system_impl(LoupHandle* h, int n_atoms, const int* atomic_numbers
     h->N = n_atoms;  // last: a failure above leaves N = 0
     return 0;
 }
+#undef cudaMalloc
 
 // Upload positions (caller order) and the cell. Returns 1 if the cell changed (the neighbour list's Cartesian
 // shifts depend on it, so the list must be rebuilt), 0 if not, -1 on error.
@@ -2551,6 +2569,41 @@ static int import_state_impl(LoupHandle* h, const void* buffer, size_t size) {
     return 0;
 }
 
+// loup_plan_memory: the device memory a system of n_atoms would take, scaled from the buffers the handle's current
+// system has. Every per-system buffer is proportional to the atom count or to the edge capacity, so the scaling is
+// exact up to alignment; what it leaves out is small and does not scale (captured graphs, cuBLAS internals).
+static int plan_memory_impl(LoupHandle* h, int n_atoms, double edges_per_atom, LoupMemoryPlan* out) {
+    if (!out) { loup::set_error("out is NULL"); return -1; }
+    if (!has_system(h)) return -1;
+    if (!h->nl_valid || h->E_cap <= 0) {
+        loup::set_error("no neighbour list to scale from (call loup_set_state or loup_evaluate on a system with "
+                        "neighbours first; a small cell of the same material is enough)");
+        return -1;
+    }
+    if (n_atoms <= 0) { loup::set_error("n_atoms must be positive, got %d", n_atoms); return -1; }
+    const double epa = edges_per_atom > 0.0 ? edges_per_atom : (double)h->E_skin / h->N;
+    if (!std::isfinite(epa)) { loup::set_error("edges_per_atom must be finite, got %g", edges_per_atom); return -1; }
+    CUDA_CHECK(cudaSetDevice(h->device_id));
+    const double scale = (double)n_atoms / h->N;
+    const double atom_now = (double)h->sys_atom_bytes + (h->gen ? (double)h->gen->system_bytes() : 0.0);
+    const double edge_now = (double)h->sys_edge_bytes + (h->gen ? (double)h->gen->edge_bytes() : 0.0);
+    const double edges = std::ceil((double)n_atoms * epa);
+    const double cap = std::max(edges + std::floor(edges / 4.0) + 1024.0, 4096.0);  // ensure_edge_capacity's rule
+    const double whole = atom_now * scale + edge_now / h->E_cap * cap + (double)h->cub_tmp_bytes * scale +
+                         (double)h->weight_copy_bytes;
+    size_t free_b = 0, total_b = 0;
+    CUDA_CHECK(cudaMemGetInfo(&free_b, &total_b));
+    LoupMemoryPlan plan{};
+    plan.whole_bytes = (size_t)whole;
+    plan.free_bytes = free_b;
+    // The planned system would replace the current one, so its buffers count as free; 10% stay as headroom. Edge
+    // indices are 32-bit: beyond that the whole-system call cannot run whatever the memory.
+    const double budget = (double)free_b + atom_now + edge_now + (double)h->cub_tmp_bytes;
+    plan.mode = (whole <= 0.9 * budget && cap < 2147483647.0) ? LOUP_EXEC_WHOLE : LOUP_EXEC_TILED;
+    *out = plan;
+    return 0;
+}
+
 static int profile_force_impl(LoupHandle* h, int warmup, int n_calls, double* out_total_us) {
     if (!has_system(h)) return -1;
     if (!h->nl_valid) {
@@ -2631,6 +2684,10 @@ int loup_export_state(LoupHandle* h, void* buffer, size_t capacity, size_t* writ
 
 int loup_import_state(LoupHandle* h, const void* buffer, size_t size) {
     return guarded(h, "loup_import_state", [&] { return import_state_impl(h, buffer, size); });
+}
+
+int loup_plan_memory(LoupHandle* h, int n_atoms, double edges_per_atom, LoupMemoryPlan* out) {
+    return guarded(h, "loup_plan_memory", [&] { return plan_memory_impl(h, n_atoms, edges_per_atom, out); });
 }
 
 const char* loup_last_error(const LoupHandle* h) {

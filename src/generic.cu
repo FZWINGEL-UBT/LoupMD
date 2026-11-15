@@ -1373,9 +1373,11 @@ void GenericModel::free_system() {
 
 void GenericModel::alloc_system(int N) {
     free_system();
+    sys_bytes_ = 0;
     auto alloc = [&](size_t floats) -> float* {
         float* p = nullptr;
         CUDA_CHECK_THROW(cudaMalloc(&p, std::max<size_t>(floats, 1) * sizeof(float)));
+        sys_bytes_ += std::max<size_t>(floats, 1) * sizeof(float);
         sys_allocs_.push_back(p);
         return p;
     };
@@ -1394,6 +1396,7 @@ void GenericModel::alloc_system(int N) {
     if (zbytes) {
         CUDA_CHECK_THROW(cudaMalloc(&d_zero_slab_, zbytes));
         zero_slab_bytes_ = zbytes;
+        sys_bytes_ += zbytes;
     }
     char* zbase = static_cast<char*>(d_zero_slab_);
     size_t zoff = 0;
@@ -1469,6 +1472,7 @@ void GenericModel::ensure_edges(int E_cap) {
     E_cap_ = 0;  // a failed allocation must not leave the old capacity on a null array
     CUDA_CHECK_THROW(cudaMalloc(&d_edge_dvec_, (size_t)E_cap * 3 * sizeof(float)));
     E_cap_ = E_cap;
+    edge_bytes_ = (size_t)E_cap * 3 * sizeof(float);
 }
 
 // ------------------------------------------------------------------------------------------------- force pass
