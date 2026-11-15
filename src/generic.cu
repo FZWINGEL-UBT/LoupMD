@@ -6,12 +6,67 @@
 #include <cstdlib>
 #include <stdexcept>
 
+#include <dlfcn.h>
+
+#include <string>
+
 #include "bundle.hpp"
 #include "generated_generic.cuh"
+#include "kernel_plugin.h"
 #include "model.hpp"
 #include "polar.hpp"
 
 namespace loup {
+
+// ------------------------------------------------------------------------------------------------- kernel plugins
+// The product kernels of `sig` from a plugin library (kernel_plugin.h), or NULL with the reason in `why`.
+// LOUP_DEBUG_HIDE_KERNEL=<sig> (testing) makes the library's own kernels of that signature invisible, so that a
+// plugin for a model the library does have can be exercised. A loaded plugin stays loaded.
+static const GProdKernels* find_plugin_gprod(const std::string& sig, std::string& why) {
+    const char* path = std::getenv("LOUP_KERNEL_PATH");
+    if (!path || !*path) {
+        why = "LOUP_KERNEL_PATH names no folder to look for a kernel plugin in";
+        return nullptr;
+    }
+    const std::string dirs(path);
+    size_t start = 0;
+    why = "no loupmd-kernels-" + sig + ".so in " + dirs;
+    while (start <= dirs.size()) {
+        const size_t end = std::min(dirs.find(':', start), dirs.size());
+        const std::string file = dirs.substr(start, end - start) + "/loupmd-kernels-" + sig + ".so";
+        start = end + 1;
+        void* lib = dlopen(file.c_str(), RTLD_NOW | RTLD_LOCAL);
+        if (!lib) continue;
+        typedef int (*abi_fn)();
+        typedef const GProdKernels* (*find_fn)(const char*);
+        abi_fn abi = reinterpret_cast<abi_fn>(dlsym(lib, "loup_kernel_abi"));
+        find_fn find = reinterpret_cast<find_fn>(dlsym(lib, "loup_plugin_gprod"));
+        if (!abi || !find) {
+            why = file + " is not a kernel plugin (loup_kernel_abi or loup_plugin_gprod is missing)";
+            continue;
+        }
+        if (abi() != LOUP_KERNEL_ABI) {
+            why = file + " was built for kernel ABI " + std::to_string(abi()) + ", this library has " +
+                  std::to_string(LOUP_KERNEL_ABI) + ": build it again with `loupmd build-kernels`";
+            continue;
+        }
+        if (const GProdKernels* k = find(sig.c_str())) return k;
+        why = file + " does not hold the kernels of signature " + sig;
+    }
+    return nullptr;
+}
+
+static const GProdKernels* find_product_kernels(const std::string& sig) {
+    const char* hidden = std::getenv("LOUP_DEBUG_HIDE_KERNEL");
+    if (!(hidden && sig == hidden)) {
+        if (const GProdKernels* k = find_gprod(sig.c_str())) return k;
+    }
+    std::string why;
+    if (const GProdKernels* k = find_plugin_gprod(sig, why)) return k;
+    throw std::runtime_error("generic bundle: no compiled product kernel for signature " + sig +
+                             ": this library was not built with this model's kernels, and " + why +
+                             ". `loupmd build-kernels MODEL` builds them (needs nvcc)");
+}
 
 // ------------------------------------------------------------------------------------------------- layer state
 struct GenericLayer {
@@ -1190,8 +1245,7 @@ void GenericModel::load(const Bundle& b) {
         // product
         {
             const std::string sig = b.meta(p + "prod_sig");
-            L->prod = find_gprod(sig.c_str());
-            if (!L->prod) throw std::runtime_error("generic bundle: no compiled product kernel for signature " + sig);
+            L->prod = find_product_kernels(sig);
             if (L->prod->lmax_out != L->lmax_out) throw std::runtime_error("generic bundle: product degree mismatch");
             L->prod_species = mi("prod_species");
             L->prod_segw = mi("prod_segments_w");

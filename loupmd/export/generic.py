@@ -509,6 +509,7 @@ def joint_embedding_vector(m64, charge, spin_multiplicity):
 
 
 def export_model(model_path, atomic_nums, out_path, head=None, charge=None, spin_multiplicity=None):
+    signatures = []          # of the layers' symmetric contractions (kernel manifest)
     from ._fastmace import rad, rspline
 
     atomic_nums = sorted({int(z) for z in atomic_nums})
@@ -685,6 +686,7 @@ def export_model(model_path, atomic_nums, out_path, head=None, charge=None, spin
         meta[p + "spline_cert_ppm"] = int(cert["worst"] * 1e6)
         # product
         w, sig, sh, agnostic = product_tensors(mc64, mc32, t, cols)
+        signatures.append(sig)
         T[p + "prod_w"] = w
         meta[p + "prod_sig"] = sig
         meta[p + "prod_species"] = int(not agnostic)
@@ -741,6 +743,11 @@ def export_model(model_path, atomic_nums, out_path, head=None, charge=None, spin
         T["zbl_pref"] = np.array(pref, np.float32)
     tensors = {k: (v.numpy() if hasattr(v, "numpy") else np.asarray(v)) for k, v in T.items()}
     tensors = {k: (v.astype(np.float64) if v.dtype == np.float64 else v) for k, v in tensors.items()}
+    from loupmd import kernels            # the library's kernel manifest (plan task S2-T06)
+
+    missing = kernels.missing_signatures(signatures)
+    if missing:
+        raise kernels.unsupported(Path(model_path).name, missing)
     write_bundle(out_path, meta, tensors)
     print(f"Exported {out_path} ({Path(out_path).stat().st_size / 1e6:.1f} MB), head {heads[head_idx]}")
     return meta

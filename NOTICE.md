@@ -46,6 +46,7 @@ those are read from a `.loup` bundle at run time.
 | `src/generated_kernels_signature.h` | `codegen/gen_kernels.py` | the signature string that bundles of the specialised path must carry |
 | `src/generated_generic.cu` | `codegen/gen_generic.py`, from the architectures of the model files found at generation time | FastMACE's factored symmetric contraction (as above); e3nn's Wigner 3j coefficients; sympy for the spherical-harmonic gradient |
 | `src/generated_generic.cuh` | `codegen/gen_generic.py` | as above |
+| `src/generated_generic_manifest.json` | `codegen/gen_generic.py` | the signatures of the product kernels in `src/generated_generic.cu` and the model files each came from; no third-party content |
 
 ## Vendored from FastMACE (`loupmd/export/_vendor/`)
 

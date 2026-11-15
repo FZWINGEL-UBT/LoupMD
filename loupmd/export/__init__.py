@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import sys
 from pathlib import Path
 
 os.environ.setdefault("TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD", "1")
@@ -51,5 +52,13 @@ def main():
     else:
         from . import generic as export_generic
 
-        export_generic.export_model(a.model, elems, Path(a.output), a.head, a.charge, a.spin_multiplicity)
+        from ..errors import UnsupportedModel
+        from ..kernels import UNSUPPORTED_MARKER, UNSUPPORTED_STATUS
+
+        try:
+            export_generic.export_model(a.model, elems, Path(a.output), a.head, a.charge, a.spin_multiplicity)
+        except UnsupportedModel as error:      # for the caller (bundles.ensure_bundle): the marker, then the status
+            print(str(error), file=sys.stderr)
+            print(f"{UNSUPPORTED_MARKER} {' '.join(error.signatures)}", file=sys.stderr)
+            raise SystemExit(UNSUPPORTED_STATUS) from None
 

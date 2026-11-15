@@ -17,7 +17,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from . import cache
+from . import cache, kernels
 from .errors import InputError, LoupError
 
 _PACKAGE = Path(__file__).resolve().parent
@@ -133,6 +133,11 @@ def ensure_bundle(model_path, atomic_numbers, *, head=None, generic=None, charge
             cmd = _export_command(model_path, z_sorted, part, head, generic, charge, spin_multiplicity, exporter)
             try:
                 done = subprocess.run(cmd, capture_output=True, text=True, env=exporter_environment())
+                marked = [line for line in (done.stderr or "").splitlines()
+                          if line.startswith(kernels.UNSUPPORTED_MARKER)]
+                if done.returncode == kernels.UNSUPPORTED_STATUS and marked:
+                    raise kernels.unsupported(model_path.name,
+                                              marked[-1][len(kernels.UNSUPPORTED_MARKER):].split())
                 if done.returncode != 0 or not part.is_file():
                     tail = (done.stderr or done.stdout or "").strip().splitlines()[-6:]
                     raise LoupError(f"the export of {model_path.name} for elements {z_sorted} failed",

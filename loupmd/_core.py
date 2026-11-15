@@ -336,8 +336,11 @@ class LoupEngine:
     """One engine handle: a bundle on one GPU, then a system, then single points or MD."""
 
     def __init__(self, loup_path: str | Path, device_id: int = 0):
+        from . import kernels
+
         self._lib = _load_lib()
         self._n = 0
+        os.environ[kernels.PLUGIN_PATH_VARIABLE] = kernels.plugin_search_path()   # where the engine finds plugins
         self._h = self._lib.loup_create(os.fsencode(str(loup_path)), int(device_id))
         if not self._h:
             _fail("loup_create")
