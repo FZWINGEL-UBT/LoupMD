@@ -29,7 +29,11 @@ __device__ __forceinline__ void mat3_mul(const double* a, const double* b, doubl
 
 __global__ void cell_derive_kernel(CellDev* __restrict__ cell, int* __restrict__ need_rebuild) {
     double h[9];
-    if (cell->has_move) {
+    if (cell->has_move == 2) {
+        for (int i = 0; i < 9; ++i) h[i] = cell->row_scale[i / 3] * cell->h[i];
+        for (int i = 0; i < 9; ++i) cell->h[i] = h[i];
+        cell->has_move = 0;
+    } else if (cell->has_move) {
         mat3_mul(cell->h, cell->move, h);
         for (int i = 0; i < 9; ++i) cell->h[i] = h[i];
         cell->has_move = 0;
@@ -103,6 +107,82 @@ __global__ void shift_cart_kernel(
     shift_cart[e * 3 + 0] = x * c[0] + y * c[3] + z * c[6];
     shift_cart[e * 3 + 1] = x * c[1] + y * c[4] + z * c[7];
     shift_cart[e * 3 + 2] = x * c[2] + y * c[5] + z * c[8];
+}
+
+__global__ void kinetic_diag_kernel(int N, const double* __restrict__ masses, const double* __restrict__ vel64,
+                                    double* __restrict__ out) {
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    double k[3] = {0.0, 0.0, 0.0};
+    if (i < N) {
+        #pragma unroll
+        for (int a = 0; a < 3; ++a) k[a] = masses[i] * vel64[i * 3 + a] * vel64[i * 3 + a];
+    }
+    __shared__ double s_k[3][8];
+    const int warp = threadIdx.x >> 5;
+    #pragma unroll
+    for (int a = 0; a < 3; ++a) {
+        double v = k[a];
+        #pragma unroll
+        for (int off = 16; off > 0; off >>= 1) v += __shfl_xor_sync(0xffffffffu, v, off);
+        if ((threadIdx.x & 31) == 0) s_k[a][warp] = v;
+    }
+    __syncthreads();
+    if (threadIdx.x < 3) {
+        double sum = 0.0;
+        const int nw = blockDim.x >> 5;
+        for (int w = 0; w < nw; ++w) sum += s_k[threadIdx.x][w];
+        atomicAdd(out + threadIdx.x, sum);
+    }
+}
+
+__global__ void berendsen_npt_kernel(int full, int mask_x, int mask_y, int mask_z, double pressure, double dt,
+                                     double taup, double compressibility, double* __restrict__ work,
+                                     const double* __restrict__ virial, CellDev* __restrict__ cell) {
+    const double lambda2 = work[1] * work[1];
+    const double volume = cell->volume;
+    double s[3];
+    if (!full) {
+        // ASE: taupscl = dt / taup; scl = 1 - taupscl * compressibility / 3 * (pressure - old_pressure)
+        const double trace = (virial[0] + virial[3] + virial[5]) / volume - lambda2 * 2.0 * work[5] / volume;
+        const double old_pressure = -trace / 3.0;
+        const double taupscl = dt / taup;
+        s[0] = s[1] = s[2] = 1.0 - taupscl * compressibility / 3.0 * (pressure - old_pressure);
+    } else {
+        // ASE: taupscl = dt * compressibility / taup / 3; scl_a = 1 - taupscl * (pressure - (-stress_aa)) * mask_a
+        const double taupscl = dt * compressibility / taup / 3.0;
+        const int mask[3] = {mask_x, mask_y, mask_z};
+        const int diag[3] = {0, 3, 5};
+        for (int a = 0; a < 3; ++a) {
+            const double minus_stress = -(virial[diag[a]] / volume - lambda2 * work[2 + a] / volume);
+            s[a] = 1.0 - taupscl * (pressure - minus_stress) * (double)mask[a];
+        }
+    }
+    work[2] = work[3] = work[4] = 0.0;
+    // The cell's vectors are scaled, h <- diag(s) h, and the atoms keep their fractional coordinates:
+    // x <- x h^-1 diag(s) h. For equal factors that is the factor itself.
+    if (s[0] == s[1] && s[1] == s[2]) {
+        for (int i = 0; i < 9; ++i) cell->move[i] = (i % 4 == 0) ? s[0] : 0.0;
+    } else {
+        const double* h = cell->h;
+        const double c00 = h[4] * h[8] - h[5] * h[7], c01 = h[5] * h[6] - h[3] * h[8], c02 = h[3] * h[7] - h[4] * h[6];
+        const double inv_det = 1.0 / (h[0] * c00 + h[1] * c01 + h[2] * c02);
+        double inv[9];
+        inv[0] = c00 * inv_det;
+        inv[1] = (h[2] * h[7] - h[1] * h[8]) * inv_det;
+        inv[2] = (h[1] * h[5] - h[2] * h[4]) * inv_det;
+        inv[3] = c01 * inv_det;
+        inv[4] = (h[0] * h[8] - h[2] * h[6]) * inv_det;
+        inv[5] = (h[2] * h[3] - h[0] * h[5]) * inv_det;
+        inv[6] = c02 * inv_det;
+        inv[7] = (h[1] * h[6] - h[0] * h[7]) * inv_det;
+        inv[8] = (h[0] * h[4] - h[1] * h[3]) * inv_det;
+        double dh[9];
+        for (int r = 0; r < 3; ++r)
+            for (int c = 0; c < 3; ++c) dh[r * 3 + c] = s[r] * h[r * 3 + c];
+        mat3_mul(inv, dh, cell->move);
+    }
+    for (int a = 0; a < 3; ++a) cell->row_scale[a] = s[a];
+    cell->has_move = 2;
 }
 
 __global__ void positions_times_matrix_kernel(int N, Mat3 mat, double* __restrict__ pos64) {

@@ -142,8 +142,11 @@ enum {
     LOUP_CSVR = 2,           // canonical sampling through velocity rescaling (Bussi), as ASE's Bussi
     LOUP_NHC = 3,            // Nose-Hoover chain, as ASE's NoseHooverChainNVT
     LOUP_BERENDSEN_NVT = 4,  // Berendsen thermostat, as ASE's NVTBerendsen (not canonical: for equilibration)
+    LOUP_BERENDSEN_NPT = 5,  // with Berendsen's barostat: ASE's NPTBerendsen (LOUP_CELL_HYDROSTATIC) or its
+                             // Inhomogeneous_NPTBerendsen (LOUP_CELL_FULL with cell_mask), with one force call
+                             // per step: the first kick uses the forces of the cell before its scaling, where
+                             // ASE's classes evaluate again. Experimental. Not with fixed atoms
                              // the kinds from here on are refused by name until their task builds them
-    LOUP_BERENDSEN_NPT = 5,
     LOUP_BAOAB_NPT = 6,
     LOUP_MTK_NPT = 7
 };
@@ -164,11 +167,12 @@ typedef struct {
                                    // target, not the masses
     double pressure_gpa;           // barostat pressure in GPa
     double tau_p_fs;               // barostat time constant in fs
-    double compressibility_per_gpa;// Berendsen NPT
+    double compressibility_per_gpa;// Berendsen NPT: the material's compressibility in 1/GPa
     int chain_length;              // Nose-Hoover chain: thermostats in the chain (ASE's tchain), 1 to 16
     int chain_loops;               // Nose-Hoover chain: sub-steps of the chain per half step (ASE's tloop); 0 is 1
-    int cell_mode;                 // LOUP_CELL_HYDROSTATIC or LOUP_CELL_FULL
-    int cell_mask[3];              // per-axis mask of the barostat
+    int cell_mode;                 // LOUP_CELL_HYDROSTATIC (the shape is kept) or LOUP_CELL_FULL
+    int cell_mask[3];              // LOUP_CELL_FULL, Berendsen: 1 for a cell vector the barostat may scale, 0 for
+                                   // one it leaves alone (ASE's mask); the angles stay
     int fix_com;                   // keep the centre of mass at rest. Langevin: both noise terms lose their
                                    // mass-weighted mean every step, so the thermostat puts no momentum into the
                                    // centre of mass (FastMACE's "mass_weighted" projection). NVE and CSVR: the

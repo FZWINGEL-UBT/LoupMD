@@ -140,6 +140,7 @@ __global__ void zbl_energy0_kernel(
     double* __restrict__ energy_f64);
 constexpr double ASE_FS = 0.09822694788464063;
 constexpr double ASE_KB = 8.617330337217213e-5;
+constexpr double GPA_PER_EV_A3 = 160.21766208;  // ASE: 1 / units.GPa
 
 __global__ void nve_first_half_kernel(int N, double dt_ase, const double* __restrict__ forces,
                                       const double* __restrict__ inv_masses,
@@ -757,6 +758,9 @@ struct LoupHandle {
     bool md_graph_fixcom = false;  // the graphs are the fix_com variant (and its degrees of freedom)
     bool md_graph_varcell = false; // the graphs are the variable-cell step
     double md_graph_cellrate = 0.0;
+    double md_graph_npt[7] = {0, 0, 0, 0, 0, 0, 0};  // the barostat's settings the graphs bake in (NptParams)
+    bool last_pass_stress = false; // the last force pass carried stress: the virial on the device is current with
+                                   // the forces (a barostat's first step needs it)
 
     // Thermo buffer (thermo.hpp), allocated by the first run that asks for rows. The host knows the step count and
     // the number of unread rows exactly and writes the device's control block at the start of every such run.
@@ -1196,6 +1200,7 @@ static int upload_cell_dev(LoupHandle* h) {
         c.ref_inv[i] = h->cell.inv[i];
         c.f[i] = c.move[i] = (i % 4 == 0) ? 1.0 : 0.0;
     }
+    c.row_scale[0] = c.row_scale[1] = c.row_scale[2] = 1.0;
     c.r_max = (double)h->cutoff();
     c.r_list = c.r_max + h->skin;
     c.thr = 0.5 * h->skin;
@@ -1801,6 +1806,7 @@ static void record_force_pass(LoupHandle* h, int compute_stress, bool energy_onl
 }
 
 static int ensure_force_graph(LoupHandle* h, int compute_stress) {
+    h->last_pass_stress = compute_stress != 0;  // every launch of the force graph comes through here first
     if (h->force_graph_exec && h->force_graph_stress == compute_stress) return 0;
     if (h->force_graph_exec) { cudaGraphExecDestroy(h->force_graph_exec); h->force_graph_exec = nullptr; }
     if (h->force_graph) { cudaGraphDestroy(h->force_graph); h->force_graph = nullptr; }
@@ -2544,11 +2550,18 @@ static int evaluate2_impl(
     return 0;
 }
 
+// A barostat's settings (Berendsen NPT, kind 5): pressure in eV/A^3, compressibility in A^3/eV.
+struct NptParams {
+    double pressure = 0.0, tau_p_fs = 0.0, compressibility = 0.0;
+    int full = 0;
+    int mask[3] = {1, 1, 1};
+};
+
 static int run_md_loop(
     LoupHandle* h, int kind, int n_steps, double dt_fs,
     double temp_k, double temp_rate, double friction_per_fs, unsigned long long seed, int thermo_every,
     bool fix_com, LoupMDStats* out_stats, double tau_fs = 0.0, int tchain = 0, int tloop = 1,
-    double mass_temp_k = 0.0
+    double mass_temp_k = 0.0, const NptParams* npt = nullptr
 ) {
     // nl_valid: positions and a neighbour list exist (set_state or evaluate ran and its rebuild completed).
     if (!has_system(h)) return -1;
@@ -2632,7 +2645,7 @@ static int run_md_loop(
     // a completed run at these positions, so a run made of many short calls pays one force pass per step and none
     // per call. (lt_cache: the uncaptured pass of ensure_force_graph, which the MD graphs' capture relies on.)
     const bool debug_graphs = std::getenv("LOUP_DEBUG_GRAPHS") != nullptr;
-    if (!h->forces_current || h->lt_cache.empty()) {
+    if (!h->forces_current || h->lt_cache.empty() || (var_cell && !h->last_pass_stress)) {
         if (ensure_force_graph(h, var_cell ? 1 : 0) != 0) return -1;
         if (debug_graphs) fputs("loupmd: initial force pass\n", stderr);
         CUDA_CHECK(cudaGraphLaunch(h->force_graph_exec, h->stream));
@@ -2675,13 +2688,14 @@ static int run_md_loop(
         }
         CUDA_CHECK(cudaMemsetAsync(h->d_int_work, 0, kIntWorkSlots * sizeof(double), h->stream));
     }
-    // Berendsen (kind 4): the target as for CSVR; it has no state of its own.
-    if (kind == 4) {
+    // Berendsen (kind 4, and 5 with its barostat): the target as for CSVR; it has no state of its own.
+    if (kind == 4 || kind == 5) {
         const double target[5] = {temp_k + temp_rate, temp_rate, 0.0, 0.0, 0.0};
         CUDA_CHECK(cudaMemcpy(h->d_langevin_target, target, sizeof(target), cudaMemcpyHostToDevice));
-        if (h->int_state_kind != LOUP_BERENDSEN_NVT) {
+        const int state_kind = kind == 4 ? LOUP_BERENDSEN_NVT : LOUP_BERENDSEN_NPT;
+        if (h->int_state_kind != state_kind) {
             CUDA_CHECK(cudaMemsetAsync(h->d_int_state, 0, kIntStateSlots * sizeof(double), h->stream));
-            h->int_state_kind = LOUP_BERENDSEN_NVT;
+            h->int_state_kind = state_kind;
         }
         CUDA_CHECK(cudaMemsetAsync(h->d_int_work, 0, kIntWorkSlots * sizeof(double), h->stream));
     }
@@ -2733,6 +2747,25 @@ static int run_md_loop(
             loup::kinetic_energy_kernel<<<gridN, 256, 0, h->stream>>>(N, h->d_masses, h->d_vel64, h->d_int_work);
             loup::berendsen_scale_kernel<<<1, 1, 0, h->stream>>>(h->kinetic_dof(), dt_fs / tau_fs, loup::ASE_KB,
                                                                  h->d_langevin_target, h->d_int_work);
+            loup::csvr_first_half_kernel<<<gridN, 256, 0, h->stream>>>(
+                N, dt_ase, h->d_int_work, h->d_forces_f64, h->d_inv_masses, h->d_pos64, h->d_vel64,
+                h->d_max_step_disp2);
+        } else if (kind == 5) {
+            // Berendsen NPT: lambda from the kinetic energy; the barostat's factors from the stress of the last
+            // force pass and the scaled velocities' ideal-gas part; the atoms scaled with the cell (the cell
+            // itself follows in cell_derive_kernel below); then the half-kick on the scaled velocities and the
+            // drift. One force call per step, as FastMACE's port: ASE's class kicks with forces of the scaled cell.
+            loup::kinetic_energy_kernel<<<gridN, 256, 0, h->stream>>>(N, h->d_masses, h->d_vel64, h->d_int_work);
+            if (npt->full) {
+                loup::kinetic_diag_kernel<<<gridN, 256, 0, h->stream>>>(N, h->d_masses, h->d_vel64,
+                                                                        h->d_int_work + 2);
+            }
+            loup::berendsen_scale_kernel<<<1, 1, 0, h->stream>>>(h->kinetic_dof(), dt_fs / tau_fs, loup::ASE_KB,
+                                                                 h->d_langevin_target, h->d_int_work);
+            loup::berendsen_npt_kernel<<<1, 1, 0, h->stream>>>(
+                npt->full, npt->mask[0], npt->mask[1], npt->mask[2], npt->pressure, dt_fs, npt->tau_p_fs,
+                npt->compressibility, h->d_int_work, h->d_virial_grad_f64, h->d_celldev);
+            loup::cell_move_positions_kernel<<<gridN, 256, 0, h->stream>>>(N, h->d_celldev, h->d_pos64);
             loup::csvr_first_half_kernel<<<gridN, 256, 0, h->stream>>>(
                 N, dt_ase, h->d_int_work, h->d_forces_f64, h->d_inv_masses, h->d_pos64, h->d_vel64,
                 h->d_max_step_disp2);
@@ -2810,6 +2843,9 @@ static int run_md_loop(
                                                             var_cell ? h->d_virial_grad_f64 : nullptr);
         }
     };
+    const double npt_key[7] = {npt ? npt->pressure : 0.0, npt ? npt->tau_p_fs : 0.0, npt ? npt->compressibility : 0.0,
+                               npt ? (double)npt->full : 0.0, npt ? (double)npt->mask[0] : 0.0,
+                               npt ? (double)npt->mask[1] : 0.0, npt ? (double)npt->mask[2] : 0.0};
     auto capture = [&](cudaGraph_t& g, cudaGraphExec_t& ge, auto&& body) -> int {
         if (ge) { cudaGraphExecDestroy(ge); ge = nullptr; }
         if (g) { cudaGraphDestroy(g); g = nullptr; }
@@ -2832,6 +2868,7 @@ static int run_md_loop(
         h->md_graph_fixcom = fix_com;
         h->md_graph_varcell = var_cell;
         h->md_graph_cellrate = cell_rate;
+        memcpy(h->md_graph_npt, npt_key, sizeof(npt_key));
     };
     auto ensure_piped = [&]() -> int {
         if (h->md_graph_exec) return 0;
@@ -2854,7 +2891,8 @@ static int run_md_loop(
         h->md_graph_fr != friction_per_fs || h->md_graph_tau != tau_fs || h->md_graph_seed != seed ||
         h->md_graph_mass_temp != mass_temp_k || h->md_graph_chain != 1000 * tchain + tloop ||
         h->md_graph_thermo != (thermo_every > 0) ||
-        h->md_graph_fixcom != fix_com || h->md_graph_varcell != var_cell || h->md_graph_cellrate != cell_rate) {
+        h->md_graph_fixcom != fix_com || h->md_graph_varcell != var_cell || h->md_graph_cellrate != cell_rate ||
+        memcmp(h->md_graph_npt, npt_key, sizeof(npt_key)) != 0) {
         h->invalidate_md_graphs();
     }
 
@@ -2979,6 +3017,7 @@ static int run_md_loop(
                         "state");
         return -1;
     }
+    h->last_pass_stress = var_cell;  // the steps' force passes, not the force graph's
     if (var_cell) {  // the host's cell follows; a cell that moved since the list was built makes the plain check stale
         loup::CellDev c;
         if (download_cell_dev(h, &c) != 0) return -1;
@@ -3418,9 +3457,9 @@ static int run_impl(LoupHandle* h, const LoupIntegrator* caller, int n_steps, Lo
     const char* name = integrator_name(it.kind);
     if (!name) { loup::set_error("unknown integrator kind %d", it.kind); return -1; }
     if (it.kind != LOUP_NVE && it.kind != LOUP_LANGEVIN && it.kind != LOUP_CSVR && it.kind != LOUP_NHC &&
-        it.kind != LOUP_BERENDSEN_NVT) {
+        it.kind != LOUP_BERENDSEN_NVT && it.kind != LOUP_BERENDSEN_NPT) {
         loup::set_error("integrator %s is not built in this version of the library (LOUP_NVE, LOUP_LANGEVIN, "
-                        "LOUP_CSVR, LOUP_NHC and LOUP_BERENDSEN_NVT are)", name);
+                        "LOUP_CSVR, LOUP_NHC, LOUP_BERENDSEN_NVT and LOUP_BERENDSEN_NPT are)", name);
         return -1;
     }
     if (it.fix_com != 0 && h && h->n_fixed > 0) {
@@ -3461,7 +3500,8 @@ static int run_impl(LoupHandle* h, const LoupIntegrator* caller, int n_steps, Lo
         loup::set_error("friction_per_fs must be finite and not negative, got %g /fs", it.friction_per_fs);
         return -1;
     }
-    if ((it.kind == LOUP_CSVR || it.kind == LOUP_NHC || it.kind == LOUP_BERENDSEN_NVT) &&
+    if ((it.kind == LOUP_CSVR || it.kind == LOUP_NHC || it.kind == LOUP_BERENDSEN_NVT ||
+         it.kind == LOUP_BERENDSEN_NPT) &&
         (!std::isfinite(it.tau_t_fs) || !(it.tau_t_fs > 0.0))) {
         loup::set_error("tau_t_fs must be finite and positive, got %g fs", it.tau_t_fs);
         return -1;
@@ -3475,14 +3515,67 @@ static int run_impl(LoupHandle* h, const LoupIntegrator* caller, int n_steps, Lo
         return run_md_loop(h, 2, n_steps, it.dt_fs, it.temp_k, it.temp_rate_k_per_step, 0.0, it.seed,
                            it.thermo_every, it.fix_com != 0, out_stats, it.tau_t_fs);
     }
-    if (it.kind == LOUP_BERENDSEN_NVT) {
+    if (it.kind == LOUP_BERENDSEN_NVT || it.kind == LOUP_BERENDSEN_NPT) {
         if (it.tau_t_fs < it.dt_fs) {  // sqrt(1 + (T0 / T - 1) dt / taut) needs dt / taut <= 1
             loup::set_error("tau_t_fs must be at least the timestep for the Berendsen thermostat: %g fs against "
                             "dt_fs = %g fs", it.tau_t_fs, it.dt_fs);
             return -1;
         }
-        return run_md_loop(h, 4, n_steps, it.dt_fs, it.temp_k, it.temp_rate_k_per_step, 0.0, 0, it.thermo_every,
-                           it.fix_com != 0, out_stats, it.tau_t_fs);
+        if (it.kind == LOUP_BERENDSEN_NVT) {
+            return run_md_loop(h, 4, n_steps, it.dt_fs, it.temp_k, it.temp_rate_k_per_step, 0.0, 0,
+                               it.thermo_every, it.fix_com != 0, out_stats, it.tau_t_fs);
+        }
+        // The barostat (ASE's NPTBerendsen; with LOUP_CELL_FULL its Inhomogeneous_NPTBerendsen and the mask).
+        if (!std::isfinite(it.tau_p_fs) || !(it.tau_p_fs > 0.0)) {
+            loup::set_error("tau_p_fs must be finite and positive, got %g fs", it.tau_p_fs);
+            return -1;
+        }
+        if (!std::isfinite(it.pressure_gpa)) {
+            loup::set_error("pressure_gpa must be finite, got %g GPa", it.pressure_gpa);
+            return -1;
+        }
+        if (!std::isfinite(it.compressibility_per_gpa) || !(it.compressibility_per_gpa > 0.0)) {
+            loup::set_error("compressibility_per_gpa must be finite and positive, got %g per GPa",
+                            it.compressibility_per_gpa);
+            return -1;
+        }
+        if (it.cell_mode != LOUP_CELL_HYDROSTATIC && it.cell_mode != LOUP_CELL_FULL) {
+            loup::set_error("unknown cell_mode %d (LOUP_CELL_HYDROSTATIC or LOUP_CELL_FULL)", it.cell_mode);
+            return -1;
+        }
+        NptParams npt;
+        npt.pressure = it.pressure_gpa / loup::GPA_PER_EV_A3;
+        npt.tau_p_fs = it.tau_p_fs;
+        npt.compressibility = it.compressibility_per_gpa * loup::GPA_PER_EV_A3;
+        npt.full = it.cell_mode == LOUP_CELL_FULL ? 1 : 0;
+        if (npt.full) {
+            int freed = 0;
+            for (int a = 0; a < 3; ++a) {
+                if (it.cell_mask[a] != 0 && it.cell_mask[a] != 1) {
+                    loup::set_error("cell_mask entries must be 0 or 1, got (%d, %d, %d)", it.cell_mask[0],
+                                    it.cell_mask[1], it.cell_mask[2]);
+                    return -1;
+                }
+                npt.mask[a] = it.cell_mask[a];
+                freed += it.cell_mask[a];
+            }
+            if (freed == 0) {
+                loup::set_error("cell_mask frees no axis: (0, 0, 0) is a run at fixed cell (LOUP_BERENDSEN_NVT)");
+                return -1;
+            }
+        }
+        if (h && h->n_fixed > 0) {
+            loup::set_error("a barostat with fixed atoms: the cell's scaling would move the %d fixed atoms", h->n_fixed);
+            return -1;
+        }
+        if (h && h->gen && h->gen->has_lr()) {
+            loup::set_error("the variable cell is not built for long-range models (MACE-POLAR-1): their k-space "
+                            "terms are set up for one cell");
+            return -1;
+        }
+        if (h) h->req_var_cell = true;
+        return run_md_loop(h, 5, n_steps, it.dt_fs, it.temp_k, it.temp_rate_k_per_step, 0.0, 0, it.thermo_every,
+                           it.fix_com != 0, out_stats, it.tau_t_fs, 0, 1, 0.0, &npt);
     }
     if (it.kind == LOUP_NHC) {
         if (it.chain_length < 1 || it.chain_length > 16) {

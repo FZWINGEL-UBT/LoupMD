@@ -12,12 +12,14 @@ struct CellDev {
     double ref_inv[9];  // inverse of the cell the neighbour list was built in
     double f[9];        // ref_inv h: a position x0 of then has moved with the cell to x0 f
     double move[9];     // this step's deformation, set by whoever moves the cell: h <- h move, x <- x move
+    double row_scale[3];// has_move == 2: the cell's vectors are scaled, h[a] <- row_scale[a] h[a] (exact for a
+                        // factor of 1), while the atoms still go x <- x move with move = h^-1 diag(row_scale) h
     double thr;         // the list holds every pair while no atom is further than this from its x0 f
     double volume;      // |det h| in A^3
     double v0;          // the trajectory's first volume: the run stops outside [v0 / 20, 20 v0]
     double r_list;      // r_max + skin: what the list was built to
     double r_max;
-    int has_move;       // move is set for this step
+    int has_move;       // 0: no deformation in this step; 1: move; 2: row_scale for the cell, move for the atoms
     int pad;
 };
 
@@ -27,7 +29,7 @@ __global__ void cell_debug_rate_kernel(double rate, CellDev* __restrict__ cell);
 // x <- x move for every atom, if a deformation is set for this step.
 __global__ void cell_move_positions_kernel(int N, const CellDev* __restrict__ cell, double* __restrict__ pos64);
 
-// One thread, after the positions: h <- h move (and the deformation is cleared), then what the step needs from
+// One thread, after the positions: h <- h move, or its vectors scaled (and the deformation is cleared), then what the step needs from
 // the cell: f, the volume and the list check's threshold. With F = f the pair vector of the list's reference,
 // r0, has become r0 F + u_j - u_i, where u is an atom's displacement from its x0 f; a pair that was outside the
 // list (|r0| > r_list) is still outside r_max while sigma_min(F) r_list - 2 max|u| >= r_max, and
@@ -52,6 +54,21 @@ __global__ void sorted_shifts_kernel(int E, const int* __restrict__ sort_vals, c
 __global__ void shift_cart_kernel(const int* __restrict__ n_edges, const CellDev* __restrict__ cell,
                                   const int* __restrict__ sx, const int* __restrict__ sy,
                                   const int* __restrict__ sz, double* __restrict__ shift_cart);
+
+// Berendsen NPT (ASE 3.27's NPTBerendsen and Inhomogeneous_NPTBerendsen), between the thermostat's scale and
+// the half-kick. kinetic_diag_kernel sums m v_a^2 per axis into out[0..2] (the ideal-gas part of the stress's
+// diagonal; the caller's accumulators, zeroed by berendsen_npt_kernel). berendsen_npt_kernel, one thread, reads
+// the thermostat's lambda (work[1]) and the kinetic energy it was made from (work[5]), the virial of the last
+// force pass and the cell's volume, and sets this step's deformation:
+//   hydrostatic: every length times 1 - dt / taup * kappa / 3 * (P0 - P), P = -trace(stress) / 3;
+//   full (the mask's axes): cell vector a times 1 - dt * kappa / taup / 3 * (P0 + stress_aa) mask_a; angles stay;
+// with stress = virial / V - lambda^2 sum(m v v) / V, ASE's get_stress(include_ideal_gas=True) after its
+// velocity scaling. pressure in eV/A^3, compressibility in A^3/eV.
+__global__ void kinetic_diag_kernel(int N, const double* __restrict__ masses, const double* __restrict__ vel64,
+                                    double* __restrict__ out);
+__global__ void berendsen_npt_kernel(int full, int mask_x, int mask_y, int mask_z, double pressure, double dt,
+                                     double taup, double compressibility, double* __restrict__ work,
+                                     const double* __restrict__ virial, CellDev* __restrict__ cell);
 
 // x <- x m for every atom (loup_set_cell with scale_atoms: m = old cell^-1 new cell).
 struct Mat3 {

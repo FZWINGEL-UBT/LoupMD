@@ -432,6 +432,7 @@ __global__ void berendsen_scale_kernel(int ndof, double dt_over_tau, double kb, 
     target[0] += target[1];
     const double kinetic = work[0];
     work[0] = 0.0;
+    work[5] = kinetic;  // for the barostat's ideal-gas pressure (berendsen_npt_kernel)
     double scale = t0 > 0.0 ? 1.1 : 1.0;
     if (kinetic > 1e-100) {
         const double temp = 2.0 * kinetic / ((double)ndof * kb);
