@@ -2818,6 +2818,20 @@ static int csvr_noise_impl(LoupHandle* h, unsigned long long seed, unsigned long
     return 0;
 }
 
+static int step_displacement_impl(LoupHandle* h, double* out_max_a) {
+    if (!has_system(h)) return -1;
+    if (!out_max_a) { loup::set_error("out_max_a is NULL"); return -1; }
+    CUDA_CHECK(cudaSetDevice(h->device_id));
+    unsigned int bits[2] = {0u, 0u};
+    CUDA_CHECK(cudaStreamSynchronize(h->stream));
+    CUDA_CHECK(cudaMemcpy(bits, h->d_max_step_disp2, sizeof(bits), cudaMemcpyDeviceToHost));
+    const unsigned int larger = bits[0] > bits[1] ? bits[0] : bits[1];
+    float d2 = 0.0f;
+    memcpy(&d2, &larger, sizeof(d2));
+    *out_max_a = std::sqrt((double)d2);
+    return 0;
+}
+
 // loup_run: every integrator enters here; loup_run_nve and loup_run_langevin fill the struct and call it.
 static const char* integrator_name(int kind) {
     switch (kind) {
@@ -3376,6 +3390,10 @@ int loup_debug_evaluate_domain(LoupHandle* h, const double* positions, const dou
 
 int loup_read_thermo(LoupHandle* h, LoupThermoRow* rows, int max_rows, int* n_rows) {
     return guarded(h, "loup_read_thermo", [&] { return read_thermo_impl(h, rows, max_rows, n_rows); });
+}
+
+int loup_get_step_displacement(LoupHandle* h, double* out_max_a) {
+    return guarded(h, "loup_get_step_displacement", [&] { return step_displacement_impl(h, out_max_a); });
 }
 
 int loup_debug_csvr_noise(LoupHandle* h, unsigned long long seed, unsigned long long first_step, int n_steps,

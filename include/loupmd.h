@@ -40,7 +40,7 @@ typedef struct {
 // The library prints nothing on a failure. LOUP_DEBUG_ERRORS (set to anything) also prints each message to stderr.
 const char* loup_last_error(const LoupHandle* h);
 
-// Create engine from a .loup bundle (python/export.py; python/loupmd.py's ensure_loup_bundle caches them) on CUDA
+// Create engine from a .loup bundle (python -m loupmd.export; loupmd.bundles caches them) on CUDA
 // device `device_id`. Two architectures: MACE-OMAT-0 medium on its specialised kernels, and the generic path for
 // MACE-OMAT-0 small, MACE-OFF23/23b/24, MACE-MH-1 (one head per bundle) and MACE-POLAR-1 S/M/L. MACE-POLAR-1 is
 // evaluated for neutral singlet systems in zero external field; its stress includes the k-space terms' cell
@@ -200,6 +200,12 @@ typedef struct {
 // loup_import_state discard unread rows.
 int loup_read_thermo(LoupHandle* h, LoupThermoRow* rows, int max_rows, int* n_rows);
 
+// The largest distance in A any atom moved in one MD step, over the current and the previous window of the
+// displacement tracker (a window holds 32 to 512 steps; a neighbour rebuild ends one); 0 before the first step.
+// The run loop compares four times this with half the skin: below it, steps run in the pipelined loop. A caller
+// that picks the skin (loup_set_system) can measure with this what the skin has to cover.
+int loup_get_step_displacement(LoupHandle* h, double* out_max_a);
+
 // Read back state in caller's original atom order (velocities in ASE units, as for loup_set_state).
 int loup_get_state(LoupHandle* h, double* out_positions, double* out_velocities, double* out_forces, double* out_energy_ev);
 
@@ -258,13 +264,13 @@ int loup_profile_force(LoupHandle* h, int warmup, int n_calls, double* out_total
 //                   name, compute capability, cuBLASLt version and a hash of this library; plans whose winner leads
 //                   the runner-up by less than 3% are not persisted.
 //   LOUP_RETUNE     if set, ignore the plan cache and re-time every GEMM shape (results are still saved).
-//   LOUP_SPLINE_VARIANT, LOUP_WPRIME_THREADS, LOUP_REORDER  force kernel variants (testing; see python/test_gate.py).
+//   LOUP_SPLINE_VARIANT, LOUP_WPRIME_THREADS, LOUP_REORDER  force kernel variants (testing; see tools/dev/test_gate.py).
 //   LOUP_POLAR_FOLD=0  POLAR long range without the load-time dot^T weight fold (testing the path other GPUs take).
 //   LOUP_CHAIN_FOLD=0  generic models (OMOL-0) without the load-time skip-chain fold (testing the path other GPUs take).
 //   LOUP_SPECIES_TABLES=0  generic models (OMOL-0, MH-1) with layer 0's species-only GEMMs instead of per-species tables.
 //   LOUP_CONV_TUNE=0|1  generic models: 0 keeps the default conv forward variant (no per-system timing at the first
 //                   rebuild); 1 times the variants on any GPU (testing; sm_120 times them by default).
-//   LOUP_CONV_FWD_VARIANT=0|1|2  force a generic conv forward variant (testing; see python/test_gate.py).
+//   LOUP_CONV_FWD_VARIANT=0|1|2  force a generic conv forward variant (testing; see tools/dev/test_gate.py).
 //   LOUP_NO_HYBRID=1  no tensor-core GEMM cubin (float32 SIMT GEMMs only).
 //   LOUP_HYBRID_CUBIN=path  load this GEMM cubin instead of cubins/tf32x3_hyb_sm<arch>.cubin (testing; LoupMD's own
 //                   cubins/src/gemm_tc.cu builds add tiles and beta support). GEMM plans are keyed by the cubin file.

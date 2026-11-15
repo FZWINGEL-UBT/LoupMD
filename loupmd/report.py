@@ -67,6 +67,12 @@ def _plan_lines(metadata) -> list:
     if plan["memory"]:
         lines.append(f"memory: {_bytes(plan['memory']['whole_bytes'])} planned, {_bytes(plan['memory']['free_bytes'])} "
                      "free on the card")
+    skin = metadata.get("skin")
+    if skin and skin["mode"] == "auto":
+        measured = skin.get("measured_step_A")
+        how = (f"largest step measured {measured:.3f} A" if measured is not None
+               else "estimated; too few steps for a measurement")
+        lines.append(f"neighbour skin {skin['skin_A']:g} A (auto: {how})")
     lines.append(plan["precision"])
     return lines
 

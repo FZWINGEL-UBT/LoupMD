@@ -102,7 +102,7 @@ class _Dynamics:
         self.atoms = atoms
         self.dt = timestep                                   # ASE's attribute, in ASE time units
         self.simulation = Simulation(atoms, force_field_of(model, head, options, what),
-                                     integrator=integrator, output=output, seed=seed, check=check)
+                                     integrator=integrator, output=output, seed=seed, check=check, skin="auto")
         self.observers = []
         self.nsteps = 0
         self._closables = []

@@ -20,6 +20,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from . import output as _output
+from . import skin as _skin
 from .config import GateConfig, IntegratorConfig, Output
 from .errors import (BackendError, GateFailed, GateUnavailable, InputError, LoupError, NonFiniteError, PlanRefused,
                      RestartMismatch)
@@ -80,7 +81,9 @@ class Simulation:
     - ``output``: an ``lm.Output`` (directory and cadences), or ``None`` for no files;
     - ``seed``: the thermostat's noise seed; ``None`` draws one (``Simulation.seed``, written to
       ``simulation.json``);
-    - ``skin``: the neighbour-list skin in A;
+    - ``skin``: the neighbour-list skin in A, or ``"auto"``: chosen from how far the atoms move per step, first
+      estimated from the temperature and the lightest atom, then corrected once from what the engine measured
+      (``loupmd.skin``; ``Simulation.skin_record``). It decides speed only;
     - ``check``: ``"skip"`` (default), ``"gate"`` or ``"allow_unavailable"``: the accuracy gate (the 3x rule
       against MACE float64, ``loupmd.validate``) on rattled copies of the structure before the first step;
       ``gate`` is its ``GateConfig``. ``Simulation.gate`` holds the status and the record.
@@ -130,7 +133,18 @@ class Simulation:
                        "dangerous_builds": 0}
         self.setup_s = None                # export, engine, gate and the first force evaluation
         self.relaxation = None             # the RelaxResult of relax(), if it was called
-        self.force_field, self.output, self.skin = force_field, output, float(skin)
+        self.force_field, self.output = force_field, output
+        if skin == "auto":
+            self.skin = _skin.skin_for_step(_skin.estimate_step_A(atoms, self.config.timestep_fs,
+                                                                  self.config.temperature_K, fixed))
+            self.skin_record = {"mode": "auto", "estimated_A": self.skin, "measured_step_A": None,
+                                "skin_A": self.skin}
+        elif isinstance(skin, bool) or not isinstance(skin, (int, float)) or not math.isfinite(skin) or skin < 0:
+            raise InputError(f"skin must be a length in A (0 or more) or 'auto', got {skin!r}")
+        else:
+            self.skin = float(skin)
+            self.skin_record = {"mode": "fixed", "skin_A": self.skin}
+        self._skin_probe = None            # auto: the step the measurement counts from and the run's highest target
         self.step = 0
         self.status = "new"                # "new", "running", "idle", "non-finite", "closed"
         self._atoms = atoms.copy()
@@ -157,6 +171,15 @@ class Simulation:
             self._writer = _output.AsyncWriter()
         if self._resume is None and self.check != "skip":
             self._run_gate()
+        if self.skin_record["mode"] == "auto":
+            hottest = self.config.temperature_K
+            state = self._schedule
+            if state is not None:            # a schedule attached before the start: its highest target counts
+                hottest = max(state.resolved.target(b) for b in state.resolved.boundaries)
+                self.skin = max(self.skin, _skin.skin_for_step(_skin.estimate_step_A(
+                    atoms, self.config.timestep_fs, hottest, self._fixed)))
+                self.skin_record.update(estimated_A=self.skin, skin_A=self.skin)
+            self._skin_probe = {"from": self._resume[1] if self._resume else 0, "hottest_K": hottest}
         engine = self.force_field.new_engine(atoms, self.skin)
         self._bundle = self.force_field.last_bundle
         if self._fixed is not None:
@@ -413,11 +436,39 @@ class Simulation:
                 self._submit_frame(positions, velocities, forces, energy)
             if restarts is not None and self.step % restarts == 0:
                 self.save_restart()
+            if self._skin_probe is not None:
+                self._adjust_skin(thermo)
         if self._writer is not None:
             self._writer.drain()
         self.status = "idle"
         return RunSummary(steps=steps, ms_per_step=wall_ms / steps, pipelined_steps=pipelined, rebuilds=rebuilds,
                           dangerous_builds=dangerous, final_temperature_K=temperature)
+
+    def _adjust_skin(self, thermo):
+        """``skin="auto"``: once enough steps have run near the run's highest target, replace the estimated skin
+        by the one the measured step size asks for. The engine's system is set again with it and the state moved
+        across, which changes nothing else; its step count starts anew, so this happens on a thermo step."""
+        probe = self._skin_probe
+        if self.step - probe["from"] < _skin.PROBE_STEPS or (thermo is not None and self.step % thermo != 0):
+            return
+        target = self._phase_target(self.step)[1]
+        if probe["hottest_K"] and not target >= _skin.PROBE_TARGET_FRACTION * probe["hottest_K"]:
+            return                               # still heating: the atoms will be faster than they are now
+        self._skin_probe = None
+        measured = self._engine.step_displacement()
+        self.skin_record.update(measured_step_A=measured, measured_at_step=self.step)
+        wanted = _skin.adjusted(self.skin, measured)
+        if wanted is None:
+            return
+        engine = self._engine
+        blob = engine.export_state()
+        engine.set_system(self._atoms.numbers, self._masses, skin=wanted)
+        if self._fixed is not None:
+            engine.set_fixed_atoms(self._fixed)
+        engine.import_state(blob)
+        self._base = self.step
+        self.skin = wanted
+        self.skin_record["skin_A"] = wanted
 
     # ------------------------------------------------------------------------------------------ the state
 

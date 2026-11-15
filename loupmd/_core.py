@@ -248,6 +248,8 @@ def _bind(lib):
                                       ctypes.c_double, ctypes.c_ulonglong, ctypes.POINTER(LoupMDStats)]
     lib.loup_get_state.argtypes = [ctypes.c_void_p, _c_double_p, _c_double_p, _c_double_p, _c_double_p]
     lib.loup_profile_force.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_int, _c_double_p]
+    lib.loup_get_step_displacement.argtypes = [ctypes.c_void_p, _c_double_p]
+    lib.loup_get_step_displacement.restype = ctypes.c_int
     lib.loup_debug_csvr_noise.argtypes = [ctypes.c_void_p, ctypes.c_ulonglong, ctypes.c_ulonglong, ctypes.c_int,
                                           ctypes.c_int, _c_double_p, _c_double_p]
     lib.loup_debug_csvr_noise.restype = ctypes.c_int
@@ -401,6 +403,14 @@ class LoupEngine:
         self._check(self._lib.loup_debug_csvr_noise(self._h, int(seed), int(first_step), int(n_steps), int(ndof),
                                                     _ptr(normal), _ptr(chi2)), "loup_debug_csvr_noise")
         return normal, chi2
+
+    def step_displacement(self) -> float:
+        """The largest distance in A an atom moved in one MD step lately (the displacement tracker's two windows):
+        what the neighbour skin has to cover for the pipelined loop, which runs while four times this is below
+        half the skin."""
+        out = ctypes.c_double()
+        self._check(self._lib.loup_get_step_displacement(self._h, ctypes.byref(out)), "loup_get_step_displacement")
+        return float(out.value)
 
     def thermo_pending(self) -> int:
         """Unread rows in the device's thermo buffer."""

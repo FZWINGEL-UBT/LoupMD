@@ -43,6 +43,8 @@ def _arguments_parser(parser):
     parser.add_argument("--check", default="skip", help="skip (default), gate or allow_unavailable: the accuracy "
                                                         "gate before the first step")
     parser.add_argument("--device", type=int, default=0, metavar="N", help="the GPU index (default 0)")
+    parser.add_argument("--skin", default="auto", metavar="A", help="the neighbour-list skin in A, or auto "
+                        "(default): chosen from how far the atoms move per step; it decides speed only")
     parser.add_argument("--output", metavar="DIR", help="the output directory (default <structure stem>.loupmd)")
     parser.add_argument("--thermo-every", type=int, metavar="N", help="thermo rows every N steps (default 20)")
     parser.add_argument("--trajectory-every", type=int, metavar="N", help="trajectory frames every N steps (default "
@@ -79,6 +81,11 @@ def arguments_of(args) -> dict:
             raise InputError(f"--initial-velocities {velocities!r} is not keep, maxwell_boltzmann or a temperature "
                              "in K") from None
     arguments = {"structure": args.structure, "model": args.model}
+    if args.skin != "auto":
+        try:
+            arguments["skin"] = float(args.skin)
+        except ValueError:
+            raise InputError(f"--skin {args.skin!r} is not a length in A or auto") from None
     for key in ("head", "checkpoint", "sha256", "charge", "spin_multiplicity", "temperature_K", "profile", "steps",
                 "seed"):
         if getattr(args, key) is not None:

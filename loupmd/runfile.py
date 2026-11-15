@@ -21,7 +21,7 @@ KEYS = {
     "structure": None, "model": None, "head": None, "checkpoint": None, "sha256": None, "trusted": False,
     "download": False, "charge": None, "spin_multiplicity": None, "ensemble": "NVT", "temperature_K": None,
     "profile": None, "timestep_fs": 0.5, "steps": None, "repeat": [1, 1, 1], "seed": None,
-    "initial_velocities": "keep", "check": "skip", "capacity": "auto", "device": 0,
+    "initial_velocities": "keep", "check": "skip", "capacity": "auto", "device": 0, "skin": "auto",
 }
 TABLES = ("output", "integrator", "schedule")
 _COMMENTS = {
@@ -45,6 +45,7 @@ _COMMENTS = {
     "check": '"skip", "gate" or "allow_unavailable": the accuracy gate before the first step',
     "capacity": '"auto" or "whole"',
     "device": "the GPU index",
+    "skin": 'the neighbour-list skin in A, or "auto": chosen from how far the atoms move per step',
 }
 
 

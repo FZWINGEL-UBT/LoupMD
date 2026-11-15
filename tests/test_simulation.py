@@ -24,6 +24,7 @@ class SpringEngine:
 
     made = []
     poison_at = None      # an md step whose energy is reported as NaN
+    step_disp = 0.01      # A: what step_displacement() reports
 
     def __init__(self, bundle, device_id=0):
         self.bundle, self.device_id = bundle, device_id
@@ -34,6 +35,10 @@ class SpringEngine:
     # --- system and state
     def set_system(self, numbers, masses, skin=0.5):
         self.numbers, self.masses, self.n = np.array(numbers), np.array(masses, dtype=float), len(numbers)
+        self.skins = getattr(self, "skins", []) + [skin]       # every set_system of this handle
+
+    def step_displacement(self):
+        return SpringEngine.step_disp
 
     def set_state(self, positions, velocities, cell):
         self.sites = getattr(self, "sites", None)

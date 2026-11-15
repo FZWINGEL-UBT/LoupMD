@@ -134,8 +134,8 @@ def md(structure, *, model, head=None, charge=None, spin_multiplicity=None, sha2
        checkpoint=None, download=False, ensemble="NVT", temperature_K=None, schedule=None, pressure_GPa=0.0,
        cell_mode="hydrostatic", timestep_fs=0.5, steps=None, mc=None, min_mc_temperature_K=None, dispersion=None,
        repeat=(1, 1, 1), output=None, seed=None, initial_velocities="keep", check="skip", integrator=None,
-       capacity="auto", device=0, gate=None, mode=None, allow_reference=False, fallback=None, runner=None,
-       engine=None, neighbours=None, calibrate=False) -> RunResult:
+       capacity="auto", device=0, gate=None, skin="auto", mode=None, allow_reference=False, fallback=None,
+       runner=None, engine=None, neighbours=None, calibrate=False) -> RunResult:
     """Run MD on ``structure`` (a path or an ``Atoms``) with ``model`` and return a ``RunResult``.
 
     - ``model``: a label, path or URL, with ``head``, ``charge``, ``spin_multiplicity``, ``sha256`` / ``trusted``,
@@ -152,6 +152,8 @@ def md(structure, *, model, head=None, charge=None, spin_multiplicity=None, sha2
       ``"maxwell_boltzmann"``: seeded Maxwell-Boltzmann momenta at the run's starting target. A temperature in K:
       Maxwell-Boltzmann momenta at it. A structure that already moves keeps its momenta; the report says which;
     - ``check``: ``"skip"`` (default), ``"gate"`` or ``"allow_unavailable"``, with ``gate=`` a ``GateConfig``;
+    - ``skin``: the neighbour-list skin in A, or ``"auto"`` (default): chosen from how far the atoms move per
+      step (``loupmd.skin``). It decides speed only;
     - ``capacity``: ``"auto"`` or ``"whole"``; the tiled modes are not in this version;
     - ``device``: the GPU index.
     """
@@ -184,6 +186,9 @@ def md(structure, *, model, head=None, charge=None, spin_multiplicity=None, sha2
         raise InputError(f"check={check!r} is not one of {CHECK_MODES}")
     if gate is not None and not isinstance(gate, GateConfig):
         raise InputError(f"gate must be a GateConfig or None, got {type(gate).__name__}")
+    if skin != "auto" and (isinstance(skin, bool) or not isinstance(skin, (int, float)) or not math.isfinite(skin)
+                           or skin < 0):
+        raise InputError(f"skin must be a length in A (0 or more) or 'auto', got {skin!r}")
 
     if isinstance(model, ForceField):
         options = {"head": head, "charge": charge, "spin_multiplicity": spin_multiplicity, "sha256": sha256,
@@ -276,7 +281,7 @@ def md(structure, *, model, head=None, charge=None, spin_multiplicity=None, sha2
                  "ensemble": ensemble, "temperature_K": temperature_K,
                  "schedule": schedule.to_data() if schedule is not None else None, "timestep_fs": timestep_fs,
                  "steps": steps, "repeat": list(repeat), "seed": seed, "initial_velocities": initial_velocities,
-                 "check": check, "capacity": capacity, "device": device,
+                 "check": check, "capacity": capacity, "device": device, "skin": skin,
                  "output": {"directory": out.directory, "trajectory_every": out.trajectory_every,
                             "thermo_every": out.thermo_every, "restart_every": out.restart_every}}
     if explicit is not None:                    # so that the record repeats the run: `loupmd run metadata.json`
@@ -288,7 +293,8 @@ def md(structure, *, model, head=None, charge=None, spin_multiplicity=None, sha2
         spin_multiplicity=spin_multiplicity, device=device)
     if force_field.label is None:              # a file outside the table: its hash, so the record can load it again
         arguments.update(model=str(force_field.path), sha256=force_field.sha256)
-    sim = Simulation(atoms, force_field, integrator=integrator, output=out, seed=seed, check=check, gate=gate)
+    sim = Simulation(atoms, force_field, integrator=integrator, output=out, seed=seed, check=check, gate=gate,
+                     skin=skin)
     sim.run(steps=steps, schedule=schedule)
     sim.save_restart()
     metadata = provenance.collect(sim, source=source, repeat=repeat, arguments=arguments, warnings=warnings)

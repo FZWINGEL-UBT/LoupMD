@@ -107,7 +107,7 @@ def collect(sim, *, source=None, repeat=None, arguments=None, warnings=()) -> di
         "integrator": dataclasses.asdict(sim.config),
         "schedule": schedule.resolved.record() if schedule is not None else None,
         "output": dataclasses.asdict(sim.output) if sim.output is not None else None,
-        "seed": sim.seed, "skin_A": sim.skin,
+        "seed": sim.seed, "skin_A": sim.skin, "skin": dict(sim.skin_record),
         "plan": _plan(sim),
         "gate": sim.gate,
         "step": sim.step,
