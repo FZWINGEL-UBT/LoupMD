@@ -105,6 +105,11 @@ private:
     // system buffers
     int N_ = 0, E_cap_ = 0;
     size_t sys_bytes_ = 0, edge_bytes_ = 0;
+    // LOUP_SWEEP_REPLAY=1 (testing): record() runs the per-layer sweep schedule of a domain with ghost atoms on the
+    // whole system; see record(). sys_alloc_bytes_ parallels sys_allocs_.
+    bool sweep_replay_ = false;
+    double* d_energy_sink_ = nullptr;  // a replayed forward adds its readout's energy here: it is already counted
+    std::vector<size_t> sys_alloc_bytes_;
     std::vector<void*> sys_allocs_;
     float* d_edge_dvec_ = nullptr;  // [E_cap, 3]
     void* d_zero_slab_ = nullptr;

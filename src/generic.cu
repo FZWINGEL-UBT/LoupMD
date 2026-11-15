@@ -865,6 +865,7 @@ void GenericModel::free_model() {
         p = nullptr;
     };
     freep(d_embedding_);
+    freep(d_energy_sink_);
     freep(d_zbl_rc_);
     freep(d_zbl_inv_a_);
     freep(d_zbl_pref_);
@@ -1237,6 +1238,13 @@ void GenericModel::load(const Bundle& b) {
     }
     setup_species_tables(b);
     setup_chain_fold(b);
+    if (std::getenv("LOUP_SWEEP_REPLAY")) {
+        if (lr_ || chain_fold_)
+            throw std::runtime_error("LOUP_SWEEP_REPLAY: the sweep schedule is not available for long-range models, "
+                                     "nor with the skip-chain fold (set LOUP_CHAIN_FOLD=0)");
+        sweep_replay_ = true;
+    }
+    CUDA_CHECK_THROW(cudaMalloc(&d_energy_sink_, sizeof(double)));
 }
 
 // S59 species tables. Layer 0's input h_in[0] is the species embedding row, so every product of it alone is a
@@ -1354,6 +1362,7 @@ void GenericModel::free_system() {
     if (lr_) lr_->free_system();
     for (void* p : sys_allocs_) cudaFree(p);
     sys_allocs_.clear();
+    sys_alloc_bytes_.clear();
     if (d_zero_slab_) cudaFree(d_zero_slab_);
     d_zero_slab_ = nullptr;
     zero_slab_bytes_ = 0;
@@ -1379,6 +1388,7 @@ void GenericModel::alloc_system(int N) {
         CUDA_CHECK_THROW(cudaMalloc(&p, std::max<size_t>(floats, 1) * sizeof(float)));
         sys_bytes_ += std::max<size_t>(floats, 1) * sizeof(float);
         sys_allocs_.push_back(p);
+        sys_alloc_bytes_.push_back(std::max<size_t>(floats, 1) * sizeof(float));
         return p;
     };
     const size_t n = (size_t)N;
@@ -1532,9 +1542,10 @@ void GenericModel::record(const GenericPassInputs& in) {
 
     gather_rows_kernel<<<(unsigned)(((int64_t)N * C0_ + 255) / 256), 256, 0, st>>>(N, C0_, in.species, d_embedding_, d_h0_);
 
-    // ---------------- forward
+    // ---------------- forward of layer t: everything from its linear_up to its readout. `energy` takes the
+    // readout's energy (a sink when a backward sweep replays the layer).
     std::vector<const float*> written;  // S57 fold destinations already assigned in this pass
-    for (int t = 0; t < n_layers_; ++t) {
+    auto forward_layer = [&](int t, double* energy) {
         GenericLayer* L = layers_[t];
         const int Cx = L->C_x, Cm = L->C_msg, Co = L->C_out;
         // the hidden-table layer 0 needs x only for the nonlinear residual (none with the S59 residual table); with
@@ -1636,8 +1647,8 @@ void GenericModel::record(const GenericPassInputs& in) {
             launch_prod_ro1_fused(L->prod, st, N, Cm, L->msgf, Dp, L->prod_w,
                                   L->prod_species ? (int64_t)L->prod_segw * Cm : 0, in.species,
                                   L->sc_has[0] ? L->hid : nullptr, L->ro_W1, L->ro_b1, L->ro_W2, L->ro_act_c,
-                                  L->dhid, in.energy, dm, dDp);
-            continue;
+                                  L->dhid, energy, dm, dDp);
+            return;
         }
         launch_prod(L->prod, false, st, N, Cm, L->msgf, Dp, L->prod_w,
                     L->prod_species ? (int64_t)L->prod_segw * Cm : 0, in.species, L->y, nullptr, nullptr);
@@ -1689,7 +1700,7 @@ void GenericModel::record(const GenericPassInputs& in) {
         }
         // readout (energy) and its gradient seed into dhout[0] (or dhid directly when ro_folded)
         if (L->readout == 0) {
-            ro_linear_kernel<<<(N + 7) / 8, 256, 0, st>>>(N, Co, L->hout[0], L->ro_w, L->dhout[0], in.energy);
+            ro_linear_kernel<<<(N + 7) / 8, 256, 0, st>>>(N, Co, L->hout[0], L->ro_w, L->dhout[0], energy);
         } else if (L->readout > 0) {
             const int H = L->ro_H;
             const unsigned gH = (unsigned)(((int64_t)N * H + 255) / 256);
@@ -1712,14 +1723,14 @@ void GenericModel::record(const GenericPassInputs& in) {
             }
             if (L->readout == 1) {
                 ro_mlp_kernel<<<gH, 256, 0, st>>>(N, H, L->ro_act_c, L->hid, L->ro_b1, L->ro_W2, nullptr, L->dhid,
-                                                  in.energy, 1);
+                                                  energy, 1);
             } else {
                 // stage 1: hid -> act1 (pre kept in dhid2 as scratch), stage 2 on hid2 = act1 @ Wm
                 ro_mlp_kernel<<<gH, 256, 0, st>>>(N, H, L->ro_act_c, L->hid, L->ro_b1, nullptr, L->dhid2, nullptr,
                                                   nullptr, 0);
                 in.gemm(false, N, H, H, 1.0f, L->hid, H, L->ro_Wm, H, 0.0f, L->hid2, H);
                 ro_mlp_kernel<<<gH, 256, 0, st>>>(N, H, L->ro_act_c, L->hid2, L->ro_bm, L->ro_W2, nullptr, L->dhid,
-                                                  in.energy, 1);
+                                                  energy, 1);
                 // dhid = (dhid @ Wm^T) * c silu'(pre1)
                 in.gemm(true, N, H, H, 1.0f, L->dhid, H, L->ro_Wm, H, 0.0f, L->hid2, H);
                 ro_act_bwd_kernel<<<gH, 256, 0, st>>>((int64_t)N * H, L->ro_act_c, L->dhid2, L->hid2);
@@ -1729,20 +1740,11 @@ void GenericModel::record(const GenericPassInputs& in) {
             if (!L->ro_folded)
                 in.gemm(true, N, Co, H, 1.0f, L->dhid, H, L->ro_W1, H, 1.0f, L->dhout[0], Co);
         }
-    }
-    // ---------------- long range: energy, k-space forces and its gradient seeds into every layer's dhout
-    if (lr_) {
-        std::vector<std::vector<float*>> hs, dhs;
-        for (auto* L : layers_) {
-            hs.emplace_back(L->hout, L->hout + L->lmax_out + 1);
-            dhs.emplace_back(L->dhout, L->dhout + L->lmax_out + 1);
-        }
-        lr_->record(st, N, in.gemm, in.gemm_fork, in.gemm_lane, in.gemm_join, in.species, in.pos64, hs, dhs,
-                    in.energy, in.forces, in.compute_stress, in.virial);
-    }
+    };
 
-    // ---------------- backward
-    for (int t = n_layers_ - 1; t >= 0; --t) {
+    // ---------------- backward of layer t: from the gradient of its output (dhout, or the fused readout's dhid)
+    // to its edge gradients and, for t > 0, the gradient of the previous layer's output (dh_in).
+    auto backward_layer = [&](int t) {
         GenericLayer* L = layers_[t];
         const int Cx = L->C_x, Cm = L->C_msg, Co = L->C_out;
         const bool ro1_fused = L->ro_folded && L->readout == 1 && L->ro_H == 16 && L->prod->ro1_128 != nullptr &&
@@ -1885,7 +1887,7 @@ void GenericModel::record(const GenericPassInputs& in) {
                         in.act_vec_len, in.species, L->table, L->S0[0], L->S0[1], L->S0[2], L->S0[3],
                         density ? L->dD : nullptr, d_edge_dvec_);
             }
-            continue;
+            return;
         }
         // dmid (aliases mid: the forward values are dead) = dlin @ W_lin^T (or dmsgf @ W_lin_folded^T)
         if (L->skip_folded) {
@@ -1921,6 +1923,48 @@ void GenericModel::record(const GenericPassInputs& in) {
                 in.gemm(true, N * dimL(l), L->C_in, Cx, 1.0f, L->dx[l], Cx, L->W_up[l], Cx, 1.0f, L->dh_in[l], L->C_in);
             }
             if (L->lmax_x > 0) join();
+        }
+    };
+
+    // ---------------- the pass
+    if (!sweep_replay_) {
+        // Whole system: every layer forward, the long range, every layer backward, all activations kept.
+        for (int t = 0; t < n_layers_; ++t) forward_layer(t, in.energy);
+        // long range: energy, k-space forces and its gradient seeds into every layer's dhout
+        if (lr_) {
+            std::vector<std::vector<float*>> hs, dhs;
+            for (auto* L : layers_) {
+                hs.emplace_back(L->hout, L->hout + L->lmax_out + 1);
+                dhs.emplace_back(L->dhout, L->dhout + L->lmax_out + 1);
+            }
+            lr_->record(st, N, in.gemm, in.gemm_fork, in.gemm_lane, in.gemm_join, in.species, in.pos64, hs, dhs,
+                        in.energy, in.forces, in.compute_stress, in.virial);
+        }
+        for (int t = n_layers_ - 1; t >= 0; --t) backward_layer(t);
+    } else {
+        // The sweep schedule of a domain with ghost atoms (PLAN.md 4.4), on the whole system. Between sweeps only
+        // each layer's output (hout) and the gradient of it that later layers added (dhout) survive:
+        //   forward sweeps:  layer t forward; its readout's own seed in dhout is dropped again.
+        //   last layer:      forward and backward together.
+        //   backward sweeps: everything but the stored outputs is overwritten with NaN, layer t is replayed forward
+        //                    (which adds the readout's seed onto dhout; its energy goes to the sink), then backward.
+        for (int t = 0; t < n_layers_; ++t) {
+            forward_layer(t, in.energy);
+            if (t == n_layers_ - 1) break;
+            const GenericLayer* L = layers_[t];
+            for (int l = 0; l <= L->lmax_out; ++l)
+                CUDA_CHECK_THROW(cudaMemsetAsync(L->dhout[l], 0, (size_t)N * dimL(l) * L->C_out * sizeof(float), st));
+        }
+        backward_layer(n_layers_ - 1);
+        for (int t = n_layers_ - 2; t >= 0; --t) {
+            for (size_t i = 0; i < sys_allocs_.size(); ++i) {
+                bool keep = sys_allocs_[i] == d_h0_;
+                for (const GenericLayer* K : layers_)
+                    for (const float* p : K->hout) keep = keep || (p != nullptr && p == sys_allocs_[i]);
+                if (!keep) CUDA_CHECK_THROW(cudaMemsetAsync(sys_allocs_[i], 0xFF, sys_alloc_bytes_[i], st));
+            }
+            forward_layer(t, d_energy_sink_);
+            backward_layer(t);
         }
     }
     const bool edge_done = layers_[0]->first_hidden && layers_[0]->J - 1 <= 96;
