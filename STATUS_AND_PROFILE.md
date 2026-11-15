@@ -761,6 +761,41 @@ RTX 5060 Ti only. Engine builds: `1fe8f24` (the variable cell; library sha256 `f
   every force pass, the Cartesian shifts formed per step (24 bytes written per edge), and one host wait per
   step in place of the pipelined loop.
 - Berendsen NPT's distance from ASE's own class is PLAN.md D48.
-- Not run: `test_[r-z]*.py` on `7df6798` (queued behind the other session when this was written);
-  `tests/test_gate_wrapper.py` on these builds; the barostat on other systems than `SrTiO3` 3x3x3; its step time;
+- `test_[r-z]*.py` on `7df6798` ran after this was first written: 120 passed, 1 skipped.
+- Not run: `tests/test_gate_wrapper.py` on these builds; the barostat on other systems than `SrTiO3` 3x3x3; its step time;
   anything on the RTX 4000 Ada or an A100 (O12).
+
+### 6.8 Langevin BAOAB NPT, MTK NPT, and what two builds differ by in the benchmark (15 November 2026, 18:45 to 20:25)
+
+RTX 5060 Ti only. Engine builds: `e689cf7` (BAOAB; library sha256 `342ca4cb0ca213fc...`) and `a8a3e06` (MTK;
+`433ffe6558b55fa0...`, the build of every later commit of this section). With these every integrator kind of
+`include/loupmd.h` is built.
+
+| Check | Result |
+|---|---|
+| BAOAB NPT at a target of 0 K (nothing is drawn), hydrostatic, 100 steps from `SrTiO3` 3x3x3 compressed by 1%, against ASE 3.27's `LangevinBAOAB` driven by `lm.calc` | volume 1560.03 -> 1599.148 A^3; cell within 2.4e-9 of its length (3.7e-10 in the first run), positions within 9.6e-8 A, velocities within 7.1e-8 |
+| the same with the full cell, against ASE's class with the identity in its drag | volume 1726.976 A^3; cell within 7.2e-10 of its length, positions within 1.1e-7 A |
+| BAOAB NPT, `SrTiO3` 5x5x5 (625 atoms), 300 K, 1 GPa, T_tau 50 fs, P_tau 500 fs, 20,000 steps after 5,000, rows every 10 steps, blocks of 1,000 steps | pressure 1.000 +- 0.001 GPa, temperature 299.3 +- 0.4 K, volume 12.3305 A^3/atom, relative scatter 2.0e-3 |
+| BAOAB NPT, 200 steps in one call, in two calls, from a state block imported into another engine after 100 | volume within 3.7e-9 and 3.0e-9 relative |
+| `lm.md(ensemble="NPT")` at 300 K and 1 GPa from the compressed `SrTiO3` 3x3x3, then resumed from the restart | volume 1560.03 -> 1639.64 A^3 after 400 steps, 1707.65 after 600; mean pressure of steps 300 to 600 1.57 GPa from 11.65 at step 0; mean temperature 244 K (still expanding) |
+| MTK NPT, isotropic, chains 3x1 and 3x1, 200 steps, against ASE's `IsotropicMTKNPT` | volume 1560.03 -> 1614.760 A^3, ASE the same to 3.5e-10 relative; cell within 1.4e-9 A, positions within 3.0e-7 A; the conserved quantity beside E_pot + E_kin -0.192892 eV in both |
+| MTK NPT, full cell, against ASE's `MTKNPT` | volume 1614.554 A^3, relative 3.0e-10; cell within 5.4e-8 A, positions within 2.1e-7 A; -0.208253 eV in both |
+| MTK NPT, isotropic, chains 2x2 and 4x3 | volume relative 7.6e-9; positions within 2.2e-7 A; 0.377626 against 0.377625 eV |
+| MTK NPT, 20,000 steps of 1 fs at 300 K and 1 GPa, 135 atoms: conserved quantity | isotropic: drift +0.0002 meV/atom/ps, range 0.022 meV/atom; full cell: -0.0002 and 0.026; potential plus kinetic moved 27 to 28 meV/atom |
+| the same runs, second half | isotropic 297.8 K, 0.980 GPa, 12.3395 A^3/atom; full cell 299.5 K, 1.004 GPa, 12.3433 A^3/atom |
+| MTK NPT in one call, two calls, from an imported state block | volume within 7.3e-11 and 6.4e-9 relative |
+| `lm.integrators.MTK` through `lm.Simulation`, and the `IsotropicMTKNPT` drop-in, against one engine call | volume within 6.0e-9 and 1.9e-9 relative |
+| gate on `e689cf7`, default (generic) and `--specialised` | PASS, 18 rows, worst force 1.82, stress 1.41; PASS, 30 rows, 1.50 and 1.83 |
+| gate on `a8a3e06` | PASS, 18 rows, 1.90 and 1.21; PASS, 30 rows, 1.57 and 1.71 |
+| suite on `e689cf7` with the BAOAB front end: `test_[a-e]*.py`; `test_f*.py test_gate_cache.py`; `test_[m-q]*.py`; `test_[r-z]*.py` | 257, 38, 152 and 123 passed, 1 skipped |
+| suite on `a8a3e06` with the MTK front end | 258, 38, 160 and 123 passed, 1 skipped |
+| `bench_md.py`, generic path, `e689cf7` against the build of §6.6, each with its own stored plans, three pairs (new / old; old first, new first) | `NbCl5` 1.0127 and 1.0026, 1.0109 and 1.0032 (the first of these while CPU tests ran), 1.0099 and 1.0025; `SrTiO3` 0.9994 and 1.0009, 1.0093 and 1.0007, 1.0027 and 1.0003 |
+| the same, `a8a3e06` against §6.6's build, old new new old twice | `NbCl5` 1.855, 1.852, 1.855, 1.852 against 1.832, 1.850, 1.841, 1.844 ms/step (1.0064); `SrTiO3` 8.049 against 8.041 (1.0010) |
+| `e689cf7` against §6.6's build with a fresh plan directory per run, three runs of two each | `NbCl5` 1.853 to 1.864 (mean 1.855) against 1.828 to 1.860 (mean 1.849); `SrTiO3` 8.054 against 8.043 |
+| four builds (§6.6's, `1fe8f24`, `7df6798`, `a8a3e06`), each with its own script, a fresh plan directory per run, four rounds | `NbCl5` means 1.853, 1.857, 1.861, 1.858 ms/step (single runs 1.839 to 1.864); `SrTiO3` 8.042, 8.055, 8.052, 8.047 (8.024 to 8.060); the last build against the first 1.0027 and 1.0006, and 1.001 and 1.000 without the job's first run (1.839, 8.024) |
+
+- The fixed-cell benchmark has not changed: with fresh plans the four builds agree within 0.4% on `NbCl5` and 0.2% on `SrTiO3`, which is less than one build's own run-to-run spread (0.6 to 1.3%) and not in the order of the commits. The pairs with stored plans read up to 1.3% apart because each library keeps the GEMM plans it timed once, and because the first run of a job is about 1% faster than the later ones: it was the old build in every old-first pair and in round 1 of the four-build job.
+- BAOAB's and MTK's own step times were not measured; both run in the variable-cell step of §6.7 (1.026 to 1.030
+  of the pipelined fixed-cell step) with one single-thread kernel and one or two kinetic sums more.
+- Not run: `tests/test_gate_wrapper.py` on these builds; the family gates (`--set organic`, `--set crystals`);
+  the NPT integrators on any other system than `SrTiO3`; anything on the RTX 4000 Ada or an A100 (O12).

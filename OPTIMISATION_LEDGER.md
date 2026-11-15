@@ -180,6 +180,8 @@ Conventions:
 | [min-lbfgs-device](#min-lbfgs-device) | LBFGS on the device (`loup_minimize`, owner's decision O15): history on the device, one host wait per step, the list check of a small step after the force pass | `loup_minimize`, `LOUP_MIN_AHEAD=0|1` (testing) | both | DEFAULT on `release/v1` for LBFGS at fixed cell (5060 Ti only) | release Stage 4 | optimiser's own time at 5,000 atoms 17% of the force calls (host) -> 9.70% (device, two waits and pageable copies) -> 1.71%; a step 10.7 -> 9.1 -> 8.2 ms | [§6.6][s66] |
 | [md-variable-cell](#md-variable-cell) | The variable-cell step: the cell on the device, Cartesian shifts formed per step, stress in every force pass, list check against the deformed reference; not pipelined (release task S4-T06) | `LOUP_VARIABLE_CELL=1`, `LOUP_DEBUG_CELL_RATE` (testing); the NPT integrators | both | DEFAULT on `release/v1` for runs with a barostat (5060 Ti only) | release Stage 4 | against the pipelined fixed-cell step at 5,000 atoms 1.026 to 1.030; the fixed-cell benchmark unchanged (generic 0.9998 to 1.0015) | [§6.7][s67] |
 | [md-berendsen-npt](#md-berendsen-npt) | Berendsen NPT in the variable-cell step, hydrostatic or per axis, one force call per step (release task S4-T07) | `LOUP_BERENDSEN_NPT`, `lm.integrators.Berendsen(pressure_GPa=...)` | both | DEFAULT on `release/v1` for Berendsen NPT runs; experimental (5060 Ti only) | release Stage 4 | its step time is not measured (the variable-cell step plus three small nodes) | [§6.7][s67] |
+| [md-baoab-npt](#md-baoab-npt) | Langevin BAOAB NPT in the variable-cell step: one thread for the barostat and the step's matrices, one kernel per atom for B, A, O, A (release task S4-T08) | `LOUP_BAOAB_NPT`, `lm.integrators.LangevinBAOAB`, `lm.md(ensemble="NPT")` | both | DEFAULT on `release/v1` for NPT runs; experimental (5060 Ti only) | release Stage 4 | its step time is not measured (the variable-cell step plus two small nodes) | [§6.8][s68] |
+| [md-mtk-npt](#md-mtk-npt) | MTK NPT in the variable-cell step: both Nose-Hoover chains, the cell kick and the step's matrices by one thread per half step (release task S4-T09) | `LOUP_MTK_NPT`, `lm.integrators.MTK` | both | DEFAULT on `release/v1` for MTK runs; experimental (5060 Ti only) | release Stage 4 | its step time is not measured (the variable-cell step plus six small nodes) | [§6.8][s68] |
 | [md-small-systems](#md-small-systems) | Small-system latency (< ~1,000 atoms) | – | spec | NOT BUILT (open) | – | 135 atoms: GEMM groups 32% of 358 us | [§4.1 #3][s41] |
 | [comp-active-edge-tighten](#comp-active-edge-tighten) | Tighten active-edge compaction (`compute_and_count_active` + `scatter_active_edges`) | – | both | NOT BUILT | – | untried (101 us/step on `SrTiO3` 5060 Ti, `tmp_vec_len` round-trip) | `OMAT0_SPEEDUP_BRIEF.md` |
 | [nl-lane-groups](#nl-lane-groups) | Neighbour count / fill with 8 lanes per atom (neighbouring bins split round-robin; fill keeps the exact row order via per-bin offsets in shared memory) | `kNeighborLanes`, `count/fill_neighbors_kernel`; other GPUs `*_scalar_kernel` | both (`sm_120`) | DEFAULT (5060 Ti only) | S34 | per rebuild `SrTiO3` 433 -> 292 us, `NbCl5` 284 -> 110, water 439 -> 302; ABBA `OFF23-S` water `0.9945` / `0.9856`, `OFF23-M` `0.9961` / `0.9943`, `OMAT-0-S` `0.9961` / `0.9972` | this file |
@@ -1224,6 +1226,24 @@ Each entry has the same fields. Unless stated, the system is OMAT-0 medium on th
 - Not measured: its step time (the variable-cell step of `md-variable-cell` plus one single-thread kernel and, per axis, one kinetic sum); other systems; anything on the RTX 4000 Ada.
 - Sources: [§6.7][s67]; `tests/test_berendsen_npt_gpu.py`, `tests/test_simulation_npt.py`.
 
+<a id="md-baoab-npt"></a>
+#### md-baoab-npt: Langevin BAOAB NPT
+- Switch: `LOUP_BAOAB_NPT` (`friction_per_fs` = 1 / T_tau, `tau_p_fs` = P_tau, `pressure_gpa`, `cell_mode`); `lm.integrators.LangevinBAOAB`, `lm.md(ensemble="NPT")`, `loupmd md --ensemble NPT`, `loupmd.ase.LangevinBAOAB`. `src/integrator.cu` (`baoab_cell_first_kernel`, `baoab_first_kernel`, `kinetic_tensor_kernel`, `baoab_cell_second_kernel`).
+- Status: DEFAULT for NPT runs; experimental. 5060 Ti only.
+- What: ASE 3.27's `LangevinBAOAB` with a barostat. One thread kicks the barostat, forms the cell's two half steps and the O step's matrix (friction plus the barostat's drag), and applies the barostat's own friction and noise; one kernel per atom does B, the cell's half step, A, O, A, the cell's half step; after the force pass the cell force comes from the kinetic tensor, the virial and the volume. Barostat momentum and cell force travel in the state block.
+- Measured (15 November 2026): without noise 100 steps equal ASE's to 2.4e-9 of the cell's length; `SrTiO3` 5x5x5 at 300 K and 1 GPa over 20,000 steps: 1.000 +- 0.001 GPa, 299.3 +- 0.4 K.
+- Not measured: its step time; anything on the RTX 4000 Ada.
+- Sources: [§6.8][s68]; `tests/test_baoab_gpu.py`; PLAN.md D53.
+
+<a id="md-mtk-npt"></a>
+#### md-mtk-npt: Martyna-Tobias-Klein NPT
+- Switch: `LOUP_MTK_NPT` (`tau_t_fs`, `tau_p_fs`, `chain_length`, `chain_loops`, `p_chain_length`, `p_chain_loops`, `mass_temp_k`, `cell_mode`); `lm.integrators.MTK`, `loupmd.ase.IsotropicMTKNPT`, `MTKNPT`. `src/integrator.cu` (`mtk_first_kernel`, `mtk_first_atoms_kernel`, `mtk_kick_kernel`, `mtk_second_kernel`).
+- Status: DEFAULT for MTK runs; experimental. 5060 Ti only.
+- What: ASE 3.27's `IsotropicMTKNPT` and `MTKNPT`. Per half step one thread integrates both Nose-Hoover chains and kicks the cell from the stress with the ideal-gas part; the atoms' kick and drift are two 3 x 3 matrices each (exp and exprel of the cell momentum, a Horner series with scaling and squaring where ASE diagonalises).
+- Measured (15 November 2026): volume within 3.5e-10 relative of ASE's after 200 steps; conserved quantity drift 0.0002 meV/atom/ps over 20,000 steps.
+- Not measured: its step time; anything on the RTX 4000 Ada.
+- Sources: [§6.8][s68]; `tests/test_mtk_gpu.py`; PLAN.md D54.
+
 <a id="md-small-systems"></a>
 #### md-small-systems: small-system latency
 - Status: NOT BUILT (open).
@@ -1944,4 +1964,5 @@ POLAR-1 NaCl 3x3x3 (216) and POLAR-1-M `NbCl5` 3x3x3 (1,944).
 [s65]: STATUS_AND_PROFILE.md#65-csvr-the-layout-move-and-the-skin-chosen-from-the-step-size-15-november-2026-1205-to-1310
 [s66]: STATUS_AND_PROFILE.md#66-nose-hoover-chain-berendsen-nvt-lbfgs-on-the-device-and-the-generic-path-as-the-default-15-november-2026-1330-to-1740
 [s67]: STATUS_AND_PROFILE.md#67-the-variable-cell-and-berendsen-npt-15-november-2026-1720-to-1845
+[s68]: STATUS_AND_PROFILE.md#68-langevin-baoab-npt-mtk-npt-and-what-two-builds-differ-by-in-the-benchmark-15-november-2026-1845-to-2025
 [s55]: STATUS_AND_PROFILE.md#55-known-limitations
