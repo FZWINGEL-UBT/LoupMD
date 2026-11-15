@@ -28,6 +28,6 @@ def test_every_generated_source_is_listed():
 
 def test_licence_texts_are_present():
     assert (ROOT / "LICENSE").read_text(encoding="utf-8").startswith("MIT License")
-    assert "BSD-3-Clause" in (ROOT / "cubins" / "LICENSE").read_text(encoding="utf-8")
+    assert "BSD-3-Clause" in (ROOT / "cubins" / "LICENSE.cutlass").read_text(encoding="utf-8")
     listed = set(re.findall(r"`(cubins/[^`]+\.cubin)`", NOTICE))
     assert listed == {f"cubins/{p.name}" for p in (ROOT / "cubins").glob("*.cubin")}

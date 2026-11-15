@@ -26,6 +26,8 @@ struct GenericLayer {
     float* S0[4] = {};                    // [N, 2l+1, K0] (the backward reuses it for dS0)
     int has_sc = 0, sc_species = 0, readout = -1, ro_H = 0, prod_species = 0, prod_segw = 0;
     int skip_folded = 0, ro_folded = 0;
+    int fwd_var = 0;           // S64: conv forward variant (launch_conv_fwd; tune_conv_variants picks it per system)
+    bool last_preloc = false;  // S64: the preloc flag of the last recorded conv forward (for the re-launch)
     int lin_cols[4] = {0, 0, 0, 0};
     int sc_has[3] = {0, 0, 0};
     SplineGrid grid{};
@@ -1255,6 +1257,13 @@ void GenericModel::load(const Bundle& b) {
         d_zbl_pref_ = upload(own, b.f32("zbl_pref", {P}));
     }
     setup_species_tables(b);
+    // S64 test override (as LOUP_SPLINE_VARIANT for the specialised path): LOUP_CONV_FWD_VARIANT=v forces conv forward
+    // variant v on every layer that has it, without tuning (gates of each variant; see tune_conv_variants)
+    conv_var_override_ = -1;
+    if (const char* e = std::getenv("LOUP_CONV_FWD_VARIANT"); e && e[0] >= '0' && e[0] <= '9') conv_var_override_ = e[0] - '0';
+    // LOUP_CONV_TUNE, read here (per engine) like the forced variant: 0 never times, 1 times on any GPU (tests)
+    conv_tune_env_ = -1;
+    if (const char* e = std::getenv("LOUP_CONV_TUNE"); e && (e[0] == '0' || e[0] == '1')) conv_tune_env_ = e[0] - '0';
     setup_chain_fold(b);
     if (std::getenv("LOUP_SWEEP_REPLAY")) {
         if (lr_ || chain_fold_)
@@ -1381,7 +1390,66 @@ std::string GenericModel::kernel_signature() const {
 // ------------------------------------------------------------------------------------------------- buffers
 bool GenericModel::set_cell(const double* cell) { return lr_ ? lr_->set_cell(cell) : false; }
 
+// S64: the conv forward variants (launch_conv_fwd's var: for lx 1 at C 128 the one-receiver paired block, the
+// unpaired one, and five receivers per 640-thread block) rank differently per system (5060 Ti, gconv_fwd_L1 us per
+// step R1p / R1 / R5: OMAT-0 medium SrTiO3 2,200 / 2,176 / 1,742, NbCl5 346 / 327 / 321; OFF24-M water 2,723 /
+// 2,686 / 2,437; MP-0 medium SrTiO3 2,385 / 2,273 / 2,136, NbCl5 354 / 348 / 357), so each layer's are timed once
+// per system on the last force pass's inputs, as the specialised path times its spline variants
+// (tune_rebuild_variants); a variant replaces the current one only if >= 2% faster. Its outputs (mid, D) are
+// rewritten by every force pass. sm_120 by default; LOUP_CONV_TUNE=0 keeps the default variant, LOUP_CONV_TUNE=1
+// times them on any GPU (tests). Returns -1 before a pass has been recorded for this system (call again later), 0 if
+// nothing changed, 1 if a variant changed.
+int GenericModel::tune_conv_variants(cudaStream_t st) {
+    if (conv_tune_env_ == 0) return 0;
+    if (!device_is_cc120() && conv_tune_env_ != 1) return 0;
+    if (conv_var_override_ >= 0) return 0;  // forced variant: nothing to time
+    if (!conv_args_.valid) return -1;
+    const ConvTuneArgs& a = conv_args_;
+    cudaEvent_t e0, e1;
+    CUDA_CHECK_THROW(cudaEventCreate(&e0));
+    CUDA_CHECK_THROW(cudaEventCreate(&e1));
+    bool changed = false;
+    for (size_t t = 0; t < layers_.size(); ++t) {
+        GenericLayer* L = layers_[t];
+        if (L->first_hidden) continue;
+        const int nv = conv_fwd_variants(L->lmax_x, L->C_x);
+        if (nv <= 1) continue;
+        float best[8] = {};
+        for (int v = 0; v < nv; ++v) {
+            best[v] = 1e30f;
+            for (int round = 0; round < 4; ++round) {  // round 0 warms up
+                CUDA_CHECK_THROW(cudaEventRecord(e0, st));
+                launch_conv_fwd(L->lmax_x, st, a.N, L->C_x, S_, L->intervals, L->grid, sh_perm_, L->pair_sym, a.row_ptr,
+                                a.senders, a.vec_len, a.slab, a.t_sx, L->last_preloc, a.species, L->packed_table,
+                                L->density_table, L->cubic_bias_shift, L->x, L->mid, L->D, v);
+                CUDA_CHECK_THROW(cudaEventRecord(e1, st));
+                CUDA_CHECK_THROW(cudaEventSynchronize(e1));
+                float ms = 0.0f;
+                CUDA_CHECK_THROW(cudaEventElapsedTime(&ms, e0, e1));
+                if (round > 0) best[v] = std::min(best[v], ms);
+            }
+        }
+        int fast = L->fwd_var;
+        for (int v = 0; v < nv; ++v)
+            if (best[v] < best[fast]) fast = v;
+        if (fast != L->fwd_var && best[fast] < 0.98f * best[L->fwd_var]) {
+            L->fwd_var = fast;
+            changed = true;
+        }
+        if (std::getenv("LOUP_DEBUG_SPLINE")) {
+            fprintf(stderr, "generic layer %zu conv forward us:", t);
+            for (int v = 0; v < nv; ++v) fprintf(stderr, " %d: %.1f", v, best[v] * 1e3f);
+            fprintf(stderr, " -> %d\n", L->fwd_var);
+        }
+    }
+    cudaEventDestroy(e0);
+    cudaEventDestroy(e1);
+    return changed ? 1 : 0;
+}
+
 void GenericModel::free_system() {
+    conv_args_ = ConvTuneArgs{};
+    for (auto* L : layers_) L->fwd_var = 0;
     if (lr_) lr_->free_system();
     for (void* p : sys_allocs_) cudaFree(p);
     sys_allocs_.clear();
@@ -1533,6 +1601,9 @@ void GenericModel::record(const GenericPassInputs& in) {
     };
     const int N = in.N;
     const int Nx = in.N + in.n_ghost;  // rows of what senders provide: h_in, x = h_in W_up, dx, dh_in
+    // S64: what tune_conv_variants needs to re-launch the conv forwards (valid until the next rebuild)
+    conv_args_ = ConvTuneArgs{true, N, in.act_row_ptr, in.act_senders, in.act_vec_len, in.act_slab, in.act_t_sx,
+                              in.species};
     cudaStream_t st = in.stream;
     const auto& start = *in.species_start;
     const auto& count = *in.species_count;
@@ -1622,9 +1693,12 @@ void GenericModel::record(const GenericPassInputs& in) {
                 join();
             }
         } else {
+            L->last_preloc = can_preloc(L);
+            const int var = (conv_var_override_ >= 0 && conv_var_override_ < conv_fwd_variants(L->lmax_x, Cx))
+                                ? conv_var_override_ : L->fwd_var;
             launch_conv_fwd(L->lmax_x, st, N, Cx, S, L->intervals, L->grid, sh_perm_, L->pair_sym, in.act_row_ptr,
-                            in.act_senders, in.act_vec_len, in.act_slab, in.act_t_sx, can_preloc(L), in.species,
-                            L->packed_table, L->density_table, L->cubic_bias_shift, L->x, L->mid, L->D);
+                            in.act_senders, in.act_vec_len, in.act_slab, in.act_t_sx, L->last_preloc, in.species,
+                            L->packed_table, L->density_table, L->cubic_bias_shift, L->x, L->mid, L->D, var);
             if (L->skip_folded) {
                 fork();
                 for (int l = 0; l < 4; ++l)

@@ -9927,10 +9927,14 @@ const GProdKernels* find_gprod(const char* sig) {
     return nullptr;
 }
 
+// S64: conv forward variants (tuned per system by GenericModel::tune_conv_variants): lx 1 at C 128 has three, 0 one
+// receiver per block with the paired-edge decode (the default), 1 without, 2 five receivers per 640-thread block.
+int conv_fwd_variants(int lx, int C) { return (lx == 1 && C == 128) ? 3 : 1; }
+
 void launch_conv_fwd(int lx, cudaStream_t st, int N, int C, int S, int I, const SplineGrid& sg, int perm, int psym,
                      const int* rp, const int* snd, const float4* vl, const int* act_slab, const float2* act_t_sx,
                      bool preloc, const int* sp, const uint2* packed, const float4* dens, unsigned bias_shift,
-                     float* const* x, float* const* mid, float* D) {
+                     float* const* x, float* const* mid, float* D, int var) {
     if (lx == 0) {
         if (C == 128) {
             auto fn = preloc ? gconv_fwd_L0<1, true, 256, true, 128> : gconv_fwd_L0<1, true, 256, false, 128>;
@@ -9947,9 +9951,16 @@ void launch_conv_fwd(int lx, cudaStream_t st, int N, int C, int S, int I, const 
         }
     } else if (lx == 1) {
         if (C == 128) {
-            auto fn = preloc ? gconv_fwd_L1<1, true, 256, true, 128> : gconv_fwd_L1<1, true, 256, false, 128>;
-            fn<<<N, 128, 0, st>>>(N, C, S, I, sg, perm, psym, rp, snd, vl, act_slab, act_t_sx, sp, packed, dens,
-                                  bias_shift, x[0], x[1], mid[0], mid[1], mid[2], mid[3], D);
+            if (var == 2) {
+                auto fn = preloc ? gconv_fwd_L1<5, false, 640, true, 128> : gconv_fwd_L1<5, false, 640, false, 128>;
+                fn<<<(N + 4) / 5, 640, 0, st>>>(N, C, S, I, sg, perm, psym, rp, snd, vl, act_slab, act_t_sx, sp, packed,
+                                                dens, bias_shift, x[0], x[1], mid[0], mid[1], mid[2], mid[3], D);
+            } else {
+                auto fn = var == 1 ? (preloc ? gconv_fwd_L1<1, false, 256, true, 128> : gconv_fwd_L1<1, false, 256, false, 128>)
+                                   : (preloc ? gconv_fwd_L1<1, true, 256, true, 128> : gconv_fwd_L1<1, true, 256, false, 128>);
+                fn<<<N, 128, 0, st>>>(N, C, S, I, sg, perm, psym, rp, snd, vl, act_slab, act_t_sx, sp, packed, dens,
+                                      bias_shift, x[0], x[1], mid[0], mid[1], mid[2], mid[3], D);
+            }
         } else if (C == 256) {
             auto fn = preloc ? gconv_fwd_L1<1, false, 256, true, 256> : gconv_fwd_L1<1, false, 256, false, 256>;
             fn<<<N, 256, 0, st>>>(N, C, S, I, sg, perm, psym, rp, snd, vl, act_slab, act_t_sx, sp, packed, dens,

@@ -25,7 +25,8 @@ from ase.md.velocitydistribution import MaxwellBoltzmannDistribution  # noqa: E4
 
 from loupmd import LoupEngine, ensure_loup_bundle  # noqa: E402
 
-ROOTS = ["/mnt/d/Margraf", "/mnt/homes/zwingel"]
+# Directories holding ResearchModule/ and FastMACE/: LOUP_DATA_ROOT (other machines, e.g. the cluster) first.
+ROOTS = [r for r in (os.environ.get("LOUP_DATA_ROOT"), "/mnt/d/Margraf", "/mnt/homes/zwingel") if r]
 
 
 def _find(rel):

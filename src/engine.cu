@@ -161,16 +161,38 @@ __global__ void kinetic_energy_kernel(int N, const double* __restrict__ masses,
                                       const double* __restrict__ vel64, double* __restrict__ out_ke);
 }  // namespace loup
 
+// FNV-1a over a file's bytes (0 if unreadable).
+static uint64_t fnv1a_file(const char* path) {
+    FILE* fp = fopen(path, "rb");
+    if (!fp) return 0;
+    uint64_t hsh = 1469598103934665603ULL;
+    std::vector<unsigned char> buf(1 << 16);
+    size_t n;
+    while ((n = fread(buf.data(), 1, buf.size(), fp)) > 0)
+        for (size_t i = 0; i < n; ++i) hsh = (hsh ^ buf[i]) * 1099511628211ULL;
+    fclose(fp);
+    return hsh ? hsh : 1;
+}
+
+// Tensor-core GEMM cubin (GEMM autotune candidates). Two formats: the shipped FastMACE builds (cubins/tf32x3_hyb_*,
+// fm_tf32x3_info: tiles 64x64, 32x64, 64x32, beta 0 only) and LoupMD's own (cubins/src/gemm_tc.cu,
+// loup_gemm_tc_info: math, beta support and up to kMaxTiles tiles; through LOUP_HYBRID_CUBIN for now). Tiles 0-2 are
+// the same shapes in both, so a stored plan's tile index means the same kernel shape.
 struct HybCubin {
+    static constexpr int kMaxTiles = 8;
     bool loaded = false;
+    bool own_format = false;  // loup_gemm_tc_info: entries take beta
+    bool beta_ok = false;     // C = A B + beta C may use it
+    int ntiles = 0;
+    uint64_t cubin_hash = 0;  // the loaded cubin file's FNV-1a hash (keys the GEMM plan cache)
+    std::string path_loaded;  // for diagnostics (the cubin's math: its build, see cubins/src)
     void* lib = nullptr;
     CUmodule mod = nullptr;
-    // 0: 64x64, 1: 32x64, 2: 64x32; [tile][transB ? 1 : 0]
-    CUfunction fn[3][2] = {{nullptr, nullptr}, {nullptr, nullptr}, {nullptr, nullptr}};
-    int threads[3] = {0, 0, 0};
-    int smem[3][2] = {{0, 0}, {0, 0}, {0, 0}};
-    int tile_m[3] = {64, 32, 64};
-    int tile_n[3] = {64, 64, 32};
+    CUfunction fn[kMaxTiles][2] = {};  // [tile][transB ? 1 : 0]
+    int threads[kMaxTiles] = {};
+    int smem[kMaxTiles][2] = {};
+    int tile_m[kMaxTiles] = {};
+    int tile_n[kMaxTiles] = {};
     CUresult (*p_cuModuleLoad)(CUmodule*, const char*) = nullptr;
     CUresult (*p_cuModuleUnload)(CUmodule) = nullptr;
     CUresult (*p_cuModuleGetFunction)(CUfunction*, CUmodule, const char*) = nullptr;
@@ -204,6 +226,8 @@ struct HybCubin {
             }
         }
         if (path.empty()) return;
+        cubin_hash = fnv1a_file(path.c_str());
+        path_loaded = path;
         FILE* chk = fopen(path.c_str(), "rb");
         if (!chk) return;
         fclose(chk);
@@ -225,42 +249,65 @@ struct HybCubin {
         }
         if (p_cuModuleLoad(&mod, path.c_str()) != CUDA_SUCCESS) { mod = nullptr; return; }
         CUdeviceptr gptr = 0; size_t gsz = 0;
-        if (p_cuModuleGetGlobal(&gptr, &gsz, mod, "fm_tf32x3_info") != CUDA_SUCCESS || gsz < 40) {
-            destroy(); return;
-        }
-        int info[10] = {0};
-        if (p_cuMemcpyDtoH(info, gptr, sizeof(info)) != CUDA_SUCCESS) { destroy(); return; }
-        threads[0] = info[0]; smem[0][0] = info[1]; smem[0][1] = info[2];
-        threads[1] = info[5]; smem[1][0] = info[6]; smem[1][1] = info[7];
-        threads[2] = info[5]; smem[2][0] = info[8]; smem[2][1] = info[9];
-        const char* names[3][2] = {
-            {"fm_tf32x3_rr_64x64", "fm_tf32x3_rc_64x64"},
-            {"fm_tf32x3_rr_32x64", "fm_tf32x3_rc_32x64"},
-            {"fm_tf32x3_rr_64x32", "fm_tf32x3_rc_64x32"},
-        };
-        for (int t = 0; t < 3; ++t) {
-            for (int b = 0; b < 2; ++b) {
-                if (p_cuModuleGetFunction(&fn[t][b], mod, names[t][b]) != CUDA_SUCCESS) { destroy(); return; }
-                if (smem[t][b] > 48 * 1024) {
-                    p_cuFuncSetAttribute(fn[t][b], CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES, smem[t][b]);
+        if (p_cuModuleGetGlobal(&gptr, &gsz, mod, "loup_gemm_tc_info") == CUDA_SUCCESS && gsz >= 4 * sizeof(int)) {
+            std::vector<int> info(gsz / sizeof(int));
+            if (p_cuMemcpyDtoH(info.data(), gptr, gsz) != CUDA_SUCCESS || info[0] != 1) { destroy(); return; }
+            own_format = true;
+            beta_ok = info[2] != 0;
+            ntiles = info[3];
+            if (ntiles < 1 || ntiles > kMaxTiles || (int)info.size() < 4 + 5 * ntiles) { destroy(); return; }
+            for (int t = 0; t < ntiles; ++t) {
+                const int* ti = &info[4 + 5 * t];
+                tile_m[t] = ti[0]; tile_n[t] = ti[1]; threads[t] = ti[2]; smem[t][0] = ti[3]; smem[t][1] = ti[4];
+                for (int b = 0; b < 2; ++b) {
+                    char name[48];
+                    snprintf(name, sizeof(name), "loup_gemm_tc_%s_%d", b ? "rc" : "rr", t);
+                    if (p_cuModuleGetFunction(&fn[t][b], mod, name) != CUDA_SUCCESS) { destroy(); return; }
                 }
             }
+        } else {
+            if (p_cuModuleGetGlobal(&gptr, &gsz, mod, "fm_tf32x3_info") != CUDA_SUCCESS || gsz < 40) {
+                destroy(); return;
+            }
+            int info[10] = {0};
+            if (p_cuMemcpyDtoH(info, gptr, sizeof(info)) != CUDA_SUCCESS) { destroy(); return; }
+            ntiles = 3;
+            tile_m[0] = 64; tile_n[0] = 64; tile_m[1] = 32; tile_n[1] = 64; tile_m[2] = 64; tile_n[2] = 32;
+            threads[0] = info[0]; smem[0][0] = info[1]; smem[0][1] = info[2];
+            threads[1] = info[5]; smem[1][0] = info[6]; smem[1][1] = info[7];
+            threads[2] = info[5]; smem[2][0] = info[8]; smem[2][1] = info[9];
+            const char* names[3][2] = {
+                {"fm_tf32x3_rr_64x64", "fm_tf32x3_rc_64x64"},
+                {"fm_tf32x3_rr_32x64", "fm_tf32x3_rc_32x64"},
+                {"fm_tf32x3_rr_64x32", "fm_tf32x3_rc_64x32"},
+            };
+            for (int t = 0; t < 3; ++t)
+                for (int b = 0; b < 2; ++b)
+                    if (p_cuModuleGetFunction(&fn[t][b], mod, names[t][b]) != CUDA_SUCCESS) { destroy(); return; }
         }
+        for (int t = 0; t < ntiles; ++t)
+            for (int b = 0; b < 2; ++b)
+                if (smem[t][b] > 48 * 1024)
+                    p_cuFuncSetAttribute(fn[t][b], CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES, smem[t][b]);
         loaded = true;
     }
 
+    // Whether a product with this beta may run on the cubin (alpha 1 always).
+    bool takes(float beta) const { return loaded && (beta == 0.0f || beta_ok); }
+
     void launch(int tile, bool transB, int M, int N, int K,
-                const float* A, int lda, const float* B, int ldb, float* C, int ldc, cudaStream_t stream) const {
-        void* args[9] = {
+                const float* A, int lda, const float* B, int ldb, float* C, int ldc, float beta,
+                cudaStream_t stream) const {
+        void* args[10] = {
             (void*)&M, (void*)&N, (void*)&K,
-            (void*)&A, (void*)&lda, (void*)&B, (void*)&ldb, (void*)&C, (void*)&ldc
+            (void*)&A, (void*)&lda, (void*)&B, (void*)&ldb, (void*)&C, (void*)&ldc, (void*)&beta
         };
         unsigned gx = (unsigned)((M + tile_m[tile] - 1) / tile_m[tile]);
         unsigned gy = (unsigned)((N + tile_n[tile] - 1) / tile_n[tile]);
         CUresult rc = p_cuLaunchKernel(
             fn[tile][transB ? 1 : 0], gx, gy, 1,
             (unsigned)threads[tile], 1, 1, (unsigned)smem[tile][transB ? 1 : 0],
-            (CUstream)stream, args, nullptr);
+            (CUstream)stream, args, nullptr);  // the legacy entries take the first 9 arguments only
         if (rc != CUDA_SUCCESS) throw std::runtime_error("cuLaunchKernel hybrid failed");
     }
 
@@ -301,18 +348,9 @@ static constexpr bool kSplineVarPair[kSplineVar] = {false, true, false, true, fa
 static uint64_t library_build_hash() {
     static uint64_t cached = 0;
     if (cached) return cached;
-    uint64_t hsh = 1469598103934665603ULL;
     Dl_info info{};
-    if (dladdr((void*)&library_build_hash, &info) && info.dli_fname) {
-        if (FILE* fp = fopen(info.dli_fname, "rb")) {
-            std::vector<unsigned char> buf(1 << 16);
-            size_t n;
-            while ((n = fread(buf.data(), 1, buf.size(), fp)) > 0)
-                for (size_t i = 0; i < n; ++i) hsh = (hsh ^ buf[i]) * 1099511628211ULL;
-            fclose(fp);
-        }
-    }
-    cached = hsh ? hsh : 1;
+    if (dladdr((void*)&library_build_hash, &info) && info.dli_fname) cached = fnv1a_file(info.dli_fname);
+    if (!cached) cached = 1;
     return cached;
 }
 
@@ -327,6 +365,9 @@ struct LoupHandle {
     int device_id = 0;
     int l2_bytes = 0;
     bool is_sm120 = false;
+    // The own-SGEMM extensions measured on the 5060 Ti (sgemm64 / sgemm32 + split-K candidates, the narrow-N rules,
+    // N-fastest rasterisation and the N = 96 kernel of sgemm128): on for sm_120; LOUP_OWN_EXT=0|1 forces them (tests).
+    bool own_ext = false;
     cudaStream_t stream = nullptr;
     cublasHandle_t cublas = nullptr;
     cublasLtHandle_t cublas_lt = nullptr;
@@ -392,9 +433,12 @@ struct LoupHandle {
             gname.push_back((isalnum(c) || c == '_') ? (char)c : '_');
         }
         char buf[512];
-        snprintf(buf, sizeof(buf), "%s/plans_%s_sm%d%d_lt%zu_hyb%d_%016llx.bin",
+        // The loaded cubin keys the plans too: a replaced cubin file (other tiles, math or beta support) is re-timed.
+        char cub[24] = "";
+        if (hyb.loaded) snprintf(cub, sizeof(cub), "_c%016llx", (unsigned long long)hyb.cubin_hash);
+        snprintf(buf, sizeof(buf), "%s/plans_%s_sm%d%d_lt%zu_hyb%d_%016llx%s.bin",
                  dir.c_str(), gname.c_str(), prop.major, prop.minor,
-                 cublasLtGetVersion(), hyb.loaded ? 1 : 0, (unsigned long long)library_build_hash());
+                 cublasLtGetVersion(), hyb.loaded ? 1 : 0, (unsigned long long)library_build_hash(), cub);
         plan_cache_path = buf;
         if (std::getenv("LOUP_RETUNE")) return;  // re-time everything; the new plans still overwrite the file
         FILE* fp = fopen(plan_cache_path.c_str(), "rb");
@@ -804,13 +848,13 @@ static inline void sgemm_rm(
                 return N <= 32 || (M <= 2500 && N <= 160);
             };
             if (dp.use_own == 1 ||
-                (dp.use_own >= 2 && dp.use_own <= 5 && h->is_sm120 && narrow_ok(dp.use_own) && splitk_ok(dp.use_own))) {
+                (dp.use_own >= 2 && dp.use_own <= 5 && h->own_ext && narrow_ok(dp.use_own) && splitk_ok(dp.use_own))) {
                 if (own_ok) {
                     plan.own_mode = dp.use_own;
                     hit_disk = true;
                 }
             } else if (dp.use_hyb) {
-                if (dp.hyb_tile < 3 && h->hyb.loaded && alpha == 1.0f && beta == 0.0f && (K & 3) == 0 && (N & 3) == 0 &&
+                if (dp.hyb_tile < h->hyb.ntiles && alpha == 1.0f && h->hyb.takes(beta) && (K & 3) == 0 && (N & 3) == 0 &&
                     ((((uintptr_t)A | (uintptr_t)B) & 15) == 0)) {
                     plan.use_hyb = true;
                     plan.hyb_tile = dp.hyb_tile;
@@ -880,18 +924,18 @@ static inline void sgemm_rm(
                     });
                     if (consider(ms)) { plan.algo = res[r].algo; plan.use_hyb = false; }
                 }
-                if (h->hyb.loaded && alpha == 1.0f && beta == 0.0f && (K & 3) == 0 && (N & 3) == 0 &&
+                if (alpha == 1.0f && h->hyb.takes(beta) && (K & 3) == 0 && (N & 3) == 0 &&
                     ((((uintptr_t)A | (uintptr_t)B | (uintptr_t)d_tmpC) & 15) == 0)) {
-                    for (int t = 0; t < 3; ++t) {
-                        const float ms = time_min([&] { h->hyb.launch(t, transB, M, N, K, A, lda, B, ldb, d_tmpC, ldc, strm); });
+                    for (int t = 0; t < h->hyb.ntiles; ++t) {
+                        const float ms = time_min([&] { h->hyb.launch(t, transB, M, N, K, A, lda, B, ldb, d_tmpC, ldc, beta, strm); });
                         if (consider(ms)) { plan.use_hyb = true; plan.hyb_tile = t; }
                     }
                 }
                 if (own_ok && (((uintptr_t)d_tmpC & 15) == 0)) {
                     const float* Bkn = own_b();
-                    const float ms128 = time_min([&] { loup::sgemm128(M, N, K, A, Bkn, d_tmpC, beta, h->is_sm120, strm); });
+                    const float ms128 = time_min([&] { loup::sgemm128(M, N, K, A, Bkn, d_tmpC, beta, h->own_ext, strm); });
                     if (consider(ms128)) { plan.own_mode = 1; plan.use_hyb = false; }
-                    if (h->is_sm120) {
+                    if (h->own_ext) {
                         if (M <= 1600 || N <= 64 || (M <= 2500 && N <= 160)) {
                             const float ms64 = time_min([&] { loup::sgemm64(M, N, K, A, Bkn, d_tmpC, beta, strm); });
                             if (consider(ms64)) { plan.own_mode = 2; plan.use_hyb = false; }
@@ -941,13 +985,13 @@ static inline void sgemm_rm(
         } else if (plan.own_mode == 2) {
             loup::sgemm64(M, N, K, A, own_b(), C, beta, strm);
         } else {
-            loup::sgemm128(M, N, K, A, own_b(), C, beta, h->is_sm120, strm);
+            loup::sgemm128(M, N, K, A, own_b(), C, beta, h->own_ext, strm);
         }
         return;
     }
-    if (plan.use_hyb && alpha == 1.0f && beta == 0.0f &&
+    if (plan.use_hyb && alpha == 1.0f && h->hyb.takes(beta) &&
         ((((uintptr_t)A | (uintptr_t)B | (uintptr_t)C) & 15) == 0)) {
-        h->hyb.launch(plan.hyb_tile, transB, M, N, K, A, lda, B, ldb, C, ldc, strm);
+        h->hyb.launch(plan.hyb_tile, transB, M, N, K, A, lda, B, ldb, C, ldc, beta, strm);
         return;
     }
     CUBLAS_CHECK_THROW(cublasLtMatmul(
@@ -1268,12 +1312,15 @@ static float time_best_of_3(LoupHandle* h, cudaEvent_t e0, cudaEvent_t e1, const
 
 static void tune_rebuild_variants(LoupHandle* h) {
     if (h->variants_tuned) return;
-    if (h->generic()) {  // the timed variants are the specialised path's kernels
-        h->variants_tuned = true;
-        return;
-    }
     // No pair inside r_max + skin: the active-edge arrays were never written. Time later, on a list with edges.
     if (h->E_graph == 0) return;
+    if (h->generic()) {  // S64: the generic layers' conv forward variants (GenericModel::tune_conv_variants)
+        const int r = h->gen->tune_conv_variants(h->stream);
+        if (r < 0) return;  // no force pass recorded for this system yet: time at a later rebuild
+        h->variants_tuned = true;
+        if (r > 0) h->invalidate_graphs();
+        return;
+    }
     h->variants_tuned = true;
     EventPairGuard ev;
     cudaEvent_t e0 = ev.e0, e1 = ev.e1;
@@ -1728,6 +1775,8 @@ LoupHandle* loup_create(const char* loup_path, int device_id) {
             CUDA_CHECK_THROW(cudaDeviceGetAttribute(&cc_maj, cudaDevAttrComputeCapabilityMajor, device_id));
             CUDA_CHECK_THROW(cudaDeviceGetAttribute(&cc_min, cudaDevAttrComputeCapabilityMinor, device_id));
             h->is_sm120 = (cc_maj == 12 && cc_min == 0);
+            h->own_ext = h->is_sm120;
+            if (const char* e = std::getenv("LOUP_OWN_EXT"); e && (e[0] == '0' || e[0] == '1')) h->own_ext = e[0] == '1';
         }
         CUDA_CHECK_THROW(cudaStreamCreate(&h->stream));
         CUBLAS_CHECK_THROW(cublasCreate(&h->cublas));
@@ -1755,7 +1804,10 @@ LoupHandle* loup_create(const char* loup_path, int device_id) {
         // MACE-POLAR-1's charge updates amplify GEMM rounding: with the 3xTF32 tensor-core GEMMs (~4x float32's
         // rounding per product) the RTX 4000 Ada's float32 stress and NaNbO3 forces failed the 3x gate that plain
         // float32 GEMMs pass, so long-range models run on float32 SIMT GEMMs only.
-        if (!(h->gen && h->gen->has_lr())) h->hyb.init(device_id);
+        // LOUP_LR_HYBRID=1 (tests): load the GEMM cubin for long-range models too (e.g. a true 3xTF32 build through
+        // LOUP_HYBRID_CUBIN, gated before any adoption).
+        const char* lr_hyb = std::getenv("LOUP_LR_HYBRID");
+        if (!(h->gen && h->gen->has_lr()) || (lr_hyb && lr_hyb[0] == '1')) h->hyb.init(device_id);
         h->load_disk_plans(device_id);
         tune_l1(device_id);
         loup::sgemm128_init();
@@ -2117,6 +2169,27 @@ static int set_state_impl(LoupHandle* h, const double* positions, const double* 
     return rebuild_neighbors(h);
 }
 
+// The TF32 + FP16 hybrid GEMMs (gemm-hybrid-cubin) overflow to inf when a GEMM operand element reaches 32,752. A
+// non-finite energy, force or stress with the hybrid loaded drops it for this engine: later GEMM plans are re-tuned
+// without it (disk plans that chose it are skipped while it is unloaded) and the captured graphs are re-recorded.
+// The notice goes to stderr: the call that triggered it goes on and can succeed, so it is not an error of the error
+// channel.
+static bool drop_hybrid(LoupHandle* h) {
+    if (!h->hyb.loaded) return false;
+    fprintf(stderr, "loupmd: non-finite energy / forces with the tensor-core GEMM cubin %s: disabled for this engine "
+                    "(GEMMs re-tuned without it; the TF32+FP16 hybrid builds overflow at |operand| >= 32,752)\n",
+            h->hyb.path_loaded.c_str());
+    h->hyb.loaded = false;
+    h->clear_lt_cache();
+    // The plans in memory and the file were timed with the hybrid: drop them and save nothing from this engine, so a
+    // later process (hybrid loaded) still times the hybrid for these shapes.
+    h->disk_plans.clear();
+    h->disk_dirty = false;
+    h->plan_cache_path.clear();
+    h->invalidate_graphs();
+    return true;
+}
+
 // What every evaluation starts with: the new positions and cell on the device and a neighbour list that is complete
 // for them.
 static int prepare_evaluate(LoupHandle* h, const double* positions, const double* cell) {
@@ -2141,9 +2214,9 @@ static int prepare_evaluate(LoupHandle* h, const double* positions, const double
     return 0;
 }
 
-static int evaluate_impl(
+static int evaluate_once(
     LoupHandle* h, const double* positions, const double* cell, int compute_stress,
-    double* out_energy_ev, double* out_forces, double* out_stress
+    double* out_energy_ev, double* out_forces, double* out_stress, bool* finite
 ) {
     if (prepare_evaluate(h, positions, cell) != 0) return -1;
     if (ensure_force_graph(h, compute_stress) != 0) return -1;
@@ -2158,8 +2231,11 @@ static int evaluate_impl(
         CUDA_CHECK(cudaMemcpyAsync(v_grad, h->d_virial_grad_f64, 6 * sizeof(double), cudaMemcpyDeviceToHost, h->stream));
     }
     CUDA_CHECK(cudaStreamSynchronize(h->stream));
-    h->forces_current = true;
 
+    *finite = std::isfinite(inter_e);
+    for (size_t i = 0; *finite && i < f_sorted.size(); ++i) *finite = std::isfinite(f_sorted[i]);
+    for (int i = 0; *finite && i < 6; ++i) *finite = std::isfinite(v_grad[i]);
+    h->forces_current = *finite;  // a run may start from these forces only if they are usable
     if (out_energy_ev) *out_energy_ev = h->e0_total + inter_e;
     if (out_forces) {
         for (int dst = 0; dst < h->N; ++dst) {
@@ -2176,6 +2252,22 @@ static int evaluate_impl(
         out_stress[6] = v_grad[2] * inv_v; out_stress[7] = v_grad[4] * inv_v; out_stress[8] = v_grad[5] * inv_v;
     }
     return 0;
+}
+
+static int evaluate_impl(
+    LoupHandle* h, const double* positions, const double* cell, int compute_stress,
+    double* out_energy_ev, double* out_forces, double* out_stress
+) {
+    bool finite = true;
+    int rc = evaluate_once(h, positions, cell, compute_stress, out_energy_ev, out_forces, out_stress, &finite);
+    if (rc == 0 && !finite && drop_hybrid(h)) {
+        rc = evaluate_once(h, positions, cell, compute_stress, out_energy_ev, out_forces, out_stress, &finite);
+    }
+    if (rc == 0 && !finite) {
+        loup::set_error("non-finite energy, forces or stress (model output; the configuration may be unphysical)");
+        return -1;
+    }
+    return rc;
 }
 
 static int evaluate2_impl(
@@ -2199,13 +2291,21 @@ static int evaluate2_impl(
         return -1;
     }
     // prepare_evaluate has marked the forces on the device as stale; they stay so (a run that follows starts with
-    // a force pass).
-    if (prepare_evaluate(h, positions, cell) != 0) return -1;
-    if (ensure_energy_graph(h) != 0) return -1;
-    CUDA_CHECK(cudaGraphLaunch(h->energy_graph_exec, h->stream));
+    // a force pass). A non-finite energy with the hybrid GEMMs loaded drops them and evaluates once more, as the
+    // full call does.
     double inter_e = 0.0;
-    CUDA_CHECK(cudaMemcpyAsync(&inter_e, h->d_energy_f64, sizeof(double), cudaMemcpyDeviceToHost, h->stream));
-    CUDA_CHECK(cudaStreamSynchronize(h->stream));
+    for (int attempt = 0; attempt < 2; ++attempt) {
+        if (prepare_evaluate(h, positions, cell) != 0) return -1;
+        if (ensure_energy_graph(h) != 0) return -1;
+        CUDA_CHECK(cudaGraphLaunch(h->energy_graph_exec, h->stream));
+        CUDA_CHECK(cudaMemcpyAsync(&inter_e, h->d_energy_f64, sizeof(double), cudaMemcpyDeviceToHost, h->stream));
+        CUDA_CHECK(cudaStreamSynchronize(h->stream));
+        if (std::isfinite(inter_e) || !drop_hybrid(h)) break;
+    }
+    if (!std::isfinite(inter_e)) {
+        loup::set_error("non-finite energy (model output; the configuration may be unphysical)");
+        return -1;
+    }
     if (out_energy_ev) *out_energy_ev = h->e0_total + inter_e;
     return 0;
 }
@@ -2475,11 +2575,21 @@ static int run_md_loop(
     float ms = 0.0f;
     CUDA_CHECK(cudaEventElapsedTime(&ms, ev0, ev1));
 
+    // The block's last energy (forces feed it every step): non-finite means the run is lost; with the hybrid GEMMs
+    // loaded they are dropped first, so a run restarted from a saved state does not hit the same overflow.
+    double inter_e = 0.0;
+    CUDA_CHECK(cudaMemcpyAsync(&inter_e, h->d_energy_f64, sizeof(double), cudaMemcpyDeviceToHost, h->stream));
+    CUDA_CHECK(cudaStreamSynchronize(h->stream));
+    if (!std::isfinite(inter_e)) {
+        drop_hybrid(h);
+        loup::set_error("non-finite potential energy after the MD block: the state is lost; restart from a saved "
+                        "state");
+        return -1;
+    }
     if (out_stats) {
-        double inter_e = 0.0, ke = 0.0;
+        double ke = 0.0;
         CUDA_CHECK(cudaMemsetAsync(h->d_ke_f64, 0, sizeof(double), h->stream));
         loup::kinetic_energy_kernel<<<gridN, 256, 0, h->stream>>>(N, h->d_masses, h->d_vel64, h->d_ke_f64);
-        CUDA_CHECK(cudaMemcpyAsync(&inter_e, h->d_energy_f64, sizeof(double), cudaMemcpyDeviceToHost, h->stream));
         CUDA_CHECK(cudaMemcpyAsync(&ke, h->d_ke_f64, sizeof(double), cudaMemcpyDeviceToHost, h->stream));
         CUDA_CHECK(cudaStreamSynchronize(h->stream));
         out_stats->step_ms = std::max(0.0, (double)ms - tune_ms) / n_steps;
