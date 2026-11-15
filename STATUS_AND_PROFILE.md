@@ -522,3 +522,48 @@ reservation, with its own plan cache (`LOUP_CACHE_DIR=$HOME/.cache/loupmd-releas
   relaxed and compressed; its speed was not measured.
 - Not measured: anything on the RTX 4000 Ada; `nsys` kernel lists; the family benchmarks (`bench_family.py`).
 
+### 6.1 After the merge of `round6-hardening` `e21faa2` (15 November 2026, 04:30 to 05:15)
+
+RTX 5060 Ti only, same conditions as above. Head: `release/v1` at `11edd3c` (library sha256 `9f89f02c26e7792a...`,
+`loup_version()` `1.0.0a1+2929486ab9da008c`); the later commits change Python only. Tip: `round6-hardening`
+`e21faa2` built from a `git archive` (library `5cbfaca706805301...`). Each library has its own GEMM plan files.
+
+| Check | Tip `e21faa2` | Head |
+|---|---|---|
+| `pytest -q` | not run | 212 passed (331 s) |
+| `python/test_gate.py` (OMAT-0 medium, oxide set, every forced variant) | not run | PASS, 30 rows and 2 reorder checks, worst force 1.52, stress 1.68 |
+| `bench_md.py`, tip first, twice (`NbCl5` / `SrTiO3` ms/step) | 1.805 / 8.008; 1.790 / 8.036 | 1.812 / 8.043 (1.0040 / 1.0044); 1.804 / 8.050 (1.0080 / 1.0017) |
+| `bench_md.py`, head first, twice | 1.798 / 8.037; 1.802 / 8.038 | 1.807 / 8.019 (1.0052 / 0.9977); 1.793 / 8.030 (0.9946 / 0.9990) |
+| `bench_md.py`, tip first, three fresh plan directories a side | 1.822 / 8.029; 1.808 / 8.057; 1.818 / 8.079 | 1.813 / 8.034 (0.9955 / 1.0006); 1.820 / 8.029 (1.0069 / 0.9965); 1.830 / 8.064 (1.0067 / 0.9981) |
+| mean of the seven ratios | | 1.0030 / 0.9997 |
+| `bench_family.py` OMAT-0 small `SrTiO3` (r6 head head r6) | 4.541 | 4.531 (0.9977) |
+| `bench_family.py` OMAT-0 small `NbCl5` (six runs a side) | 1.058 (1.046 to 1.071) | 1.065 (1.043 to 1.115): 1.0066 |
+| `bench_family.py` MH-1 `SrTiO3` | 34.978 | 35.010 (1.0009) |
+| `bench_family.py` OFF23 medium `water216` (six runs a side) | 1.234 (1.217 to 1.244) | 1.250 (1.203 to 1.289): 1.0127 |
+| the same, per block (18 blocks a side, `.tmp_o/water_blocks.py`) | 1.230 (1.127 to 1.317) | 1.223 (1.126 to 1.292): 0.9944 |
+| 100 run calls of 10 steps against one call of 1,000 (`SrTiO3`) | not run | 1.0106 |
+
+- Single `NbCl5` runs of the head spread from 1.783 to 1.839 ms (3%) across these jobs, the tip's from 1.781 to
+  1.834 ms. The seven ratios' mean for `NbCl5` is 1.0030 with a standard error of 0.0021; `SrTiO3` 0.9997 with
+  0.0010. Counted as a tie
+  (`PLAN.md` §1.3 D21). The MD loop of the head differs from the tip's by Stage 1's host-side counters only.
+- OFF23 medium on the 648-atom water box: no step is pipelined and the rebuild counts are equal in both builds
+  (60, 52, 51, ... per 256 steps); its blocks spread by 13 to 15% in both, so the six-run means differ by noise.
+  Observation, both builds: the final temperatures of these twelve runs are 272 to 295 K (mean 284 K) for a 300 K
+  thermostat; not investigated here.
+- Release tools on the same build (`h11` / `h12` snapshots: Python of `93f296e` / `9521e71`):
+  `python -m loupmd bench --model omat0-medium` 1.795 / 7.997 and 1.830 / 8.040 ms against `bench_md.py` 1.807 /
+  8.034 in between (-0.7% / -0.5% and +1.3% / +0.1%); `--quick` (`SrTiO3` 6x6x6, 1,080 atoms, 2 x 128 steps) 1.787
+  and 1.767 ms; `--suite families` for `omat0-small` 4.540 ms; `--quick --compare mace` 395.8 ms/step for
+  mace-torch 0.3.16's ASE calculator (float32, 3 x 20 steps) against 1.767: 224 times LoupMD's step;
+  `--quick --ab - LOUP_NO_HYBRID=1` 1.774 against 1.781 ms (1.0042). Every record validates against
+  `loupmd.bench/1`; the GPU read 1% utilisation before each run.
+- `python -m loupmd validate --model omat0-medium`: PASSED, worst ratios energy 0.66, force 1.53, stress 1.67, from
+  the reference file `python/test_gate.py` wrote (same key); `test_gate.py` on the same build PASS, 1.52 / 1.68.
+  `--structure` on `SrTiO3` 3x3x3 (two copies rattled by 0.05 A, references computed on the GPU): PASSED, 0.89 /
+  1.98 / 1.43.
+- `lm.calc` (`tests/test_ase_calculator_gpu.py`): ASE `VelocityVerlet`, 1,000 steps of 1 fs on `SrTiO3` 3x3x3 from
+  300 K: drift -0.0006 meV/atom/ps, fluctuation 0.0035 meV/atom, 137 K at the end.
+- Not measured: anything on the RTX 4000 Ada; `nsys` kernel lists; the gates of the generic families on the merged
+  code (`--set organic`, `--set crystals`); `loupmd bench` for models other than OMAT-0 medium and small.
+

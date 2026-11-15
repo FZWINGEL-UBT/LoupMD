@@ -1,4 +1,60 @@
 {
   "schema": "loupmd.bench-reference/1",
-  "entries": []
+  "entries": [
+    {
+      "gpu": "NVIDIA GeForce RTX 5060 Ti",
+      "label": "omat0-medium",
+      "model_sha256": "d4b14be9afa294eebdbe31a0280b26a0fa29715771e978cbfd3ca24e0d90307a",
+      "system": "NbCl5 3x3x3",
+      "protocol": "standard",
+      "ms_per_step": 1.813,
+      "runs": [
+        1.795,
+        1.83
+      ],
+      "library": "1.0.0a1+2929486ab9da008c",
+      "measured": "2026-11-15"
+    },
+    {
+      "gpu": "NVIDIA GeForce RTX 5060 Ti",
+      "label": "omat0-medium",
+      "model_sha256": "d4b14be9afa294eebdbe31a0280b26a0fa29715771e978cbfd3ca24e0d90307a",
+      "system": "SrTiO3 10x10x10",
+      "protocol": "standard",
+      "ms_per_step": 8.018,
+      "runs": [
+        7.997,
+        8.04
+      ],
+      "library": "1.0.0a1+2929486ab9da008c",
+      "measured": "2026-11-15"
+    },
+    {
+      "gpu": "NVIDIA GeForce RTX 5060 Ti",
+      "label": "omat0-medium",
+      "model_sha256": "d4b14be9afa294eebdbe31a0280b26a0fa29715771e978cbfd3ca24e0d90307a",
+      "system": "SrTiO3 6x6x6",
+      "protocol": "quick",
+      "ms_per_step": 1.777,
+      "runs": [
+        1.787,
+        1.767
+      ],
+      "library": "1.0.0a1+2929486ab9da008c",
+      "measured": "2026-11-15"
+    },
+    {
+      "gpu": "NVIDIA GeForce RTX 5060 Ti",
+      "label": "omat0-small",
+      "model_sha256": "0abfde07862cf1e93b8b4d03cb702f29ce9c344ff2fc4de2ec0d7166d6c113a5",
+      "system": "SrTiO3 10x10x10",
+      "protocol": "standard",
+      "ms_per_step": 4.54,
+      "runs": [
+        4.54
+      ],
+      "library": "1.0.0a1+2929486ab9da008c",
+      "measured": "2026-11-15"
+    }
+  ]
 }

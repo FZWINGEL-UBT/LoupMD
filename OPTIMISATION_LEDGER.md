@@ -169,6 +169,7 @@ Conventions:
 | [md-disp-decay](#md-disp-decay) | Step-displacement maximum kept for two windows instead of from `set_state` on (release task S1-T11, review item S2) | – | both | DEFAULT on `release/v1` (5060 Ti only) | release S1-T11 | one fast step no longer blocks pipelining; water pipelines at skin 1.0 A, not at 0.5 A; standard A/B tie | [§6][s6] |
 | [md-thermo-buffer](#md-thermo-buffer) | Thermo rows written on the device inside the captured step (release task S1-T05) | `LoupIntegrator.thermo_every` | both | DEFAULT on `release/v1`, off unless asked (5060 Ti only) | release S1-T05 | `thermo_every = 20` against off: `NbCl5` 1.0005 / 1.0041, `SrTiO3` 1.0003 / 1.0007 | [§6][s6] |
 | [rel-stage1-api](#rel-stage1-api) | Release branch, Stage 1 as a whole against its baseline (error channel, `loup_run`, state blob, memory plan, `loup_evaluate2`, per-layer sweeps, open domains) | – | both | DEFAULT on `release/v1` (5060 Ti only) | release Stage 1 | A/B 0.9994 / 1.0006 (baseline first), 0.9986 / 0.9975 (head first): tie | [§6][s6] |
+| [rel-merge-r6tip](#rel-merge-r6tip) | Release branch after merging `round6-hardening` `e21faa2` (S64 to S67), against that tip's own build | – | both | DEFAULT on `release/v1` (5060 Ti only) | release Stage 1 | seven A/B: `NbCl5` 1.0030 (0.9946 to 1.0080), `SrTiO3` 0.9997 (0.9965 to 1.0044): tie; generic families 0.9944 to 1.0066 | [§6.1][s61] |
 | [md-small-systems](#md-small-systems) | Small-system latency (< ~1,000 atoms) | – | spec | NOT BUILT (open) | – | 135 atoms: GEMM groups 32% of 358 us | [§4.1 #3][s41] |
 | [comp-active-edge-tighten](#comp-active-edge-tighten) | Tighten active-edge compaction (`compute_and_count_active` + `scatter_active_edges`) | – | both | NOT BUILT | – | untried (101 us/step on `SrTiO3` 5060 Ti, `tmp_vec_len` round-trip) | `OMAT0_SPEEDUP_BRIEF.md` |
 | [nl-lane-groups](#nl-lane-groups) | Neighbour count / fill with 8 lanes per atom (neighbouring bins split round-robin; fill keeps the exact row order via per-bin offsets in shared memory) | `kNeighborLanes`, `count/fill_neighbors_kernel`; other GPUs `*_scalar_kernel` | both (`sm_120`) | DEFAULT (5060 Ti only) | S34 | per rebuild `SrTiO3` 433 -> 292 us, `NbCl5` 284 -> 110, water 439 -> 302; ABBA `OFF23-S` water `0.9945` / `0.9856`, `OFF23-M` `0.9961` / `0.9943`, `OMAT-0-S` `0.9961` / `0.9972` | this file |
@@ -1101,6 +1102,17 @@ Each entry has the same fields. Unless stated, the system is OMAT-0 medium on th
 - Gate: `python/test_gate.py` at head PASS, 30 rows, worst force ratio 1.55, worst stress ratio 1.71 (baseline 1.56 / 1.71). `pytest`: 205 passed at `7bafa23` (baseline 71).
 - Sources: [§6][s6].
 
+<a id="rel-merge-r6tip"></a>
+#### rel-merge-r6tip: the release branch after merging the `round6-hardening` tip
+- Stage: release Stage 1 (`release/v1` at `11edd3c`, library `9f89f02c26e7792a`) against `round6-hardening` `e21faa2` built from a `git archive` (library `5cbfaca706805301`).
+- Status: DEFAULT on `release/v1`. 5060 Ti only.
+- What: the merge keeps both sides in `src/engine.cu` (upstream's hybrid drop-and-retry of S65 around the release branch's `prepare_evaluate` and `loup_evaluate2`; failure messages on the error channel) and `src/generic.cu` (S64's conv variants beside the per-layer pieces and the ghost rows). The head's MD loop differs from the tip's by Stage 1's changes only: kept graphs, the two-window displacement maximum, the optional thermo kernels.
+- Measured (15 November 2026, `python/bench_md.py`, each library with its own plan files): tip first 1.0040 / 1.0044 and 1.0080 / 1.0017; head first 1.0052 / 0.9977 and 0.9946 / 0.9990 (head / tip, `NbCl5` / `SrTiO3`); three more with fresh plan directories 0.9955 / 1.0006, 1.0069 / 0.9965, 1.0067 / 0.9981. Mean of seven: 1.0030 (standard error 0.0021) / 0.9997 (0.0010). Single `NbCl5` runs of the head spread from 1.783 to 1.839 ms, the tip's from 1.781 to 1.834 ms. Counted as a tie; the owner has the number (`PLAN.md` §1.3 D21).
+- Measured, generic path (`python/bench_family.py`, r6 head head r6): OMAT-0 small `SrTiO3` 4.541 to 4.531 ms (0.9977); OMAT-0 small `NbCl5` 1.058 to 1.065 ms over six runs a side (1.0066; one head run at 1.115); MH-1 `SrTiO3` 34.978 to 35.010 ms (1.0009); OFF23 medium `water216` 1.234 to 1.250 ms over six runs a side (1.0127) and 1.230 to 1.223 ms over 18 blocks a side (0.9944), with no pipelined step and equal rebuild counts in both builds.
+- Gate: `python/test_gate.py` at head PASS, 30 rows and both reorder checks, worst force ratio 1.52, stress 1.68. `pytest`: 212 passed.
+- Not measured: the tip's own gate and suite; the gates of the generic families at head; anything on the RTX 4000 Ada.
+- Sources: [§6.1][s61].
+
 <a id="md-small-systems"></a>
 #### md-small-systems: small-system latency
 - Status: NOT BUILT (open).
@@ -1796,4 +1808,5 @@ POLAR-1 NaCl 3x3x3 (216) and POLAR-1-M `NbCl5` 3x3x3 (1,944).
 [s51]: STATUS_AND_PROFILE.md#51-pipeline
 [s54]: STATUS_AND_PROFILE.md#54-fixes-found-by-the-family-work
 [s6]: STATUS_AND_PROFILE.md#6-release-branch-releasev1-stage-1-of-the-release-plan
+[s61]: STATUS_AND_PROFILE.md#61-after-the-merge-of-round6-hardening-e21faa2-15-november-2026-0430-to-0515
 [s55]: STATUS_AND_PROFILE.md#55-known-limitations

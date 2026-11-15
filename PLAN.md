@@ -63,8 +63,8 @@ row; "Undo" says what a different answer costs.
 | D3 | `loup_set_charge_spin` of §4.3 against the code, which folds charge and spin into the bundle at export | **decided, O7:** the call is dropped from ABI v1; charge and spin are arguments of `lm.load` / `ensure_bundle` and select a bundle | | |
 | D4 | OMOL-0 extra large has three layers; §4.4's sweeps assumed two | **changed after O9:** not refused. The sweeps are defined per layer: a model with L layers takes 2L - 1 sweeps and keeps L - 1 layer states, each sweep with a halo of one cutoff. S1-T08, S1-T09 and Stage 5 are written for any L; OMOL-0 extra large joins their acceptance lists | the refusal came only from the plan's two-layer wording | extra effort, an estimate: about one week across S1-T08 and Stage 5. If the five-sweep wavefront proves too costly, the fallback is plain tiled for L = 3 and the wavefront for L = 2, put to the owner with numbers |
 | D5 | §2 forbade FP16 "anywhere on the force path"; the default hybrid GEMM cubins use one FP16 tensor-core instruction for the cross terms of the 3xTF32 split | **decided, O8:** allowed where accurate. §2 now says so; the 3x gate is the test | | |
-| D6 | `cubins/tf32x3_hyb_sm120.cubin` has no build record in either repository | **with the developing session** (owner, 15 Nov 2026: it is working on this on the Alex cluster). The record reaches `release/v1` by merge; `NOTICE.md` takes it over then (S7-T03) | | |
-| D7 | The hybrid kernels overflow for matrix elements of 32752 and above (FastMACE `hybrid_f16.h`) | add a check to S2-T06: the loader refuses the hybrid plan for a weight matrix above the bound; activations are bounded by the gate's normalisation but this is not proven for every label | a silent `inf` would be worse than a slower GEMM | none |
+| D6 | `cubins/tf32x3_hyb_sm120.cubin` has no build record in either repository | **partly answered by the merge of `e21faa2`:** the developing session added its own `cubins/gemm_tc_*.cubin` with source, recipe and build record (`cubins/src/`), `gemm_tc_hyb_sm120.cubin` being the recorded rebuild of the default; the default `tf32x3_hyb_sm120.cubin` itself still has none. Recommended: make the recorded cubin the default once it is gated (the developing session's work); `NOTICE.md` lists both sets | | |
+| D7 | The hybrid kernels overflow for matrix elements of 32752 and above (FastMACE `hybrid_f16.h`) | **done upstream (S65, merged with `e21faa2`):** a non-finite energy, force or stress with the hybrid loaded drops it for that engine and evaluates again without it; `loup_run` reports a non-finite energy after a block. A loader check on the weights is no longer planned | a silent `inf` would be worse than a slower GEMM | none |
 | D8 | Version string while the stages run | `LOUP_VERSION "1.0.0a1"`, so `loup_version()` gives `1.0.0a1+<hash>`; `1.0.0+<hash>` at the release | a library built today should not call itself 1.0.0 | one line in the header and one in `loupmd/__init__.py` |
 | D9 | `python/bench_md.py`, `bench_family.py`, `test_gate.py` still bind the library through `python/loupmd.py`, which cannot read `loup_last_error` | leave them until S0-T03; `LOUP_DEBUG_ERRORS=1` prints the reason | editing `python/` is what D2 holds back | a ten-line edit of `python/loupmd.py` |
 | D10 | Baseline commit of S0-T01 | the merged code (`bac354c`), not `0336751` | the owner's order put the merge first; Stage 1 is compared with what it starts from | none |
@@ -74,6 +74,14 @@ row; "Undo" says what a different answer costs.
 | D14 | S1-T07's per-atom energies need variants of the readout kernels, which `python/gen_kernels.py` and `python/gen_generic.py` generate; `python/` is held by D2 | energy-only is built for both paths (`loup_evaluate2`); `LOUP_EVAL_PER_ATOM` is refused by name. Recommend doing the per-atom variants right after the layout move, in `codegen/`, together with S6-T08 which is their only user | editing the generators now would collide with the developing session's open work in the same files | none |
 | D15 | The plan says 19 model labels; FastMACE's table has 20 since 8 November (`omat0-small` was added) | `loupmd/models.py` carries all 20; "19 labels" in S2-T04, S2-T06 and S7 reads as "every label of the table" | the engine supports and gates `omat0-small` | none |
 | D12 | S6-T06 and S6-T07 are done on `round6-hardening`; A2 concerns five labels | **accepted by the owner (15 Nov 2026):** the two tasks shrink to the gate under the release layout and the front-end arguments; S6-T10 measures all five labels | | |
+| D17 | S2-T01 pins the export extra | exact versions the exporters were tested with: `torch==2.14.1`, `mace-torch==0.3.16`, `cuequivariance==0.12.0`, `cuequivariance-torch==0.12.0`; the runtime pins `cuda-toolkit[cublas,cudart]==13.0.3`, as torch 2.14.1+cu130 does | an export with another mace or torch version was never gated | loosen the pins in `pyproject.toml` once a second version passes the gates |
+| D18 | The benchmark and gate structures are not in the package: `NbCl5_R2SCAN.cif` (standard suite, default gate set), the 216-molecule water box, the three COD cells of the `organic` set, the three R2SCAN cells of the `crystals` set | they are read from the folders of `$LOUPMD_BENCH_STRUCTURES`; `loupmd bench --quick` and the `families` suite for the Materials Project, MH-1 and POLAR models need no file (`SrTiO3` and rocksalt NaCl are generated) | redistribution is the owner's decision (§8) | copy the allowed files into `loupmd/bench/structures/`; nothing else changes |
+| D19 | `loupmd bench`: `--compare fastmace` is not built, and `--ab` cannot take a library of another C interface version (the `round6-hardening` tip has version 0 and is refused, as S1-T02 requires) | compare against FastMACE by hand until its step timing has a public entry point; `python/bench_md.py` stays the A/B tool against builds without the version call | the comparison is not part of S2-T08's acceptance; refusing a foreign library is the ABI rule | build `--compare fastmace` on `fastmace.bench.step_time` when wanted |
+| D20 | S2-T08's acceptance says `loupmd bench` reproduces `bench_md.py` within 1% on the same build. Measured: `SrTiO3` -0.5% and +0.1%; `NbCl5` -0.7% and +1.3% in two runs, while `bench_md.py`'s own `NbCl5` runs of this build spread from 1.783 to 1.839 ms (3%) on the same day | read the criterion as "within the run-to-run spread of `bench_md.py`" (1% for `SrTiO3`, 3% for `NbCl5`); the protocol is the same code path, call for call | 1% is below what the card repeats for the 1,944-atom cell | none |
+| D21 | After the merge of `round6-hardening` `e21faa2`, seven `bench_md.py` A/B runs against that tip give head / tip 1.0030 for `NbCl5` (0.9946 to 1.0080) and 0.9997 for `SrTiO3` (0.9965 to 1.0044); before the merge Stage 1 tied its baseline at 0.9994 / 0.9986 | counted as a tie: the `NbCl5` mean is 1.4 standard errors from 1, the MD loop differs from the tip only by Stage 1's host-side counters, and single `NbCl5` runs of one build spread by 3% | §2 forbids a speed regression on the standard benchmarks, so the owner should see the number | a longer A/B on an idle machine, or `nsys` kernel lists of both builds, if 0.3% is to be chased |
+| D22 | §4.4 said every family has two interaction layers except OMOL-0. The released files say: POLAR-1-S one, POLAR-1-L three, OMOL-0 extra large three, all others two (`loupmd/models.py`, read with `loupmd/_probe.py`) | §4.4 corrected; no consequence for the sweeps, which take any layer count, and POLAR is refused for tiled execution | the plan was wrong | none |
+| D23 | A built wheel cannot run yet: `loupmd/__init__.py` loads the bundle cache from `python/loupmd.py` and the exporters live in `python/`, neither of which is in the wheel; `_lib/` is empty until S2-T02 | S2-T01 is checked with an editable install; S2-T03, S2-T11, S2-T12 and the tag `v1.0.0a2` wait for the layout move (D2) | a wheel needs the move | none |
+| D24 | `IntegratorConfig` (S3-T01) has no `fixcm`: the engine's NVE and Langevin do not remove the centre-of-mass momentum, and FastMACE's records default to removing it | the field arrives with S4-T01 (degrees of freedom, `fix_com`) and then takes FastMACE's default; until then a LoupMD run keeps whatever total momentum it starts with | a field that does nothing would be a silent difference from FastMACE | none |
 
 ---
 
@@ -296,8 +304,9 @@ void sweep_backward(int t, Domain&, LayerState* states, ForceAccumulators&, bool
   not replay, and all run back to back inside one captured graph, as `record` does today.
 - A tile is an open domain. A backward sweep replays its layer's forward because the activations were not kept.
   Each sweep needs a halo of one cutoff: what reaches further travels through the stored layer states.
-- The families have two interaction layers, except MACE-OMOL-0 extra large with three (five sweeps, two layer
-  states). No model is refused for its layer count (owner, O9).
+- Most families have two interaction layers. MACE-OMOL-0 extra large and MACE-POLAR-1-L have three (five sweeps,
+  two layer states) and MACE-POLAR-1-S has one (one sweep), read from the released files (§1.3 D22). No model is
+  refused for its layer count (owner, O9).
 - MACE-POLAR-1 is refused for tiled execution: its k-space part is global (as in FastMACE).
 
 ### 4.5 Python API (same names and arguments as FastMACE wherever the feature exists)
@@ -368,7 +377,7 @@ Effort is in working weeks of one focused lane and is a rough estimate.
   `tests/test_notice.py` (3 passed). The `sm_120` cubin's build record is with the developing session (D6).
 - S0-T03: waits for the owner's moment. New Python code goes to `loupmd/`; `python/` is untouched.
 - S0-T04: **done** as a rule; merges so far: `da42ec3` merged `round6-hardening` `11778cd` on 15 November 2026,
-  before Stage 0.
+  before Stage 0; `11edd3c` merged `e21faa2` (S64 to S67) on 15 November 2026, during Stage 1.
 
 ### Stage 1: core API v1 (3 weeks)
 
@@ -414,9 +423,20 @@ Stage 1 as a whole against the baseline (`plans/baseline-20261115.md`): `pytest`
 
 Also done ahead of its stage, because it needs no GPU: S2-T04 (`3bdbd39`), the model registry and `loupmd models`.
 
-Not done for the exit of Stage 1: the merge of `round6-hardening` (three commits since `11778cd`: S64 and S65; the
-preview shows conflicts in `src/engine.cu` and `src/generic.cu`), the full suite and gates on the merged code, the
-rest of S1-T07, and the owner's word on D13, D14 and D16. One observation is open:
+**After the merge of `round6-hardening` `e21faa2` (`11edd3c`, 15 November 2026, 04:30 to 05:10; RTX 5060 Ti
+only).** Conflicts in `src/engine.cu` and `src/generic.cu` were resolved by keeping both sides: upstream's
+hybrid drop-and-retry (S65) around this branch's `prepare_evaluate` / `evaluate2`, with its messages on the error
+channel. On the merged code: `pytest` 212 passed; default gate PASS, 30 rows and both reorder checks, worst force
+ratio 1.52, stress 1.68; `bench_md.py` against the tip's own build in seven A/B runs, head / tip 1.0030 for
+`NbCl5` (0.9946 to 1.0080) and 0.9997 for `SrTiO3` (0.9965 to 1.0044), counted as a tie (§1.3 D21); the generic
+path (S1-T08's open A/B) with `bench_family.py`: OMAT-0 small `SrTiO3` 0.9977, OMAT-0 small `NbCl5` 1.0066 (six runs
+a side), MH-1 `SrTiO3` 1.0009, OFF23 medium `water216` 0.9944 over 18 blocks a side (1.0127 over six runs before
+that; its blocks spread by 13 to 15% in both builds); 100 calls of 10 steps cost 1.0106 of one call of 1,000. Numbers
+and commands: `STATUS_AND_PROFILE.md` §6.1, ledger `rel-merge-r6tip`.
+
+Not done for the exit of Stage 1: the rest of S1-T07 (D14), the family gates of S1-T08 on the merged code (the
+default gate ran; `--set organic` and `--set crystals` for the generic families did not), and the owner's word on
+D13, D14, D16 and D21. The tag `v1.0.0a1` is not set. One observation is open:
 `test_polar_energy_follows_a_small_cell_change_on_the_same_engine` failed once inside a full run (stress difference
 3.97e-8 against its 3e-8 eV/A^3 bound) and passed in 12 isolated repeats and in the next full run.
 
@@ -440,6 +460,23 @@ rest of S1-T07, and the owner's word on D13, D14 and D16. One observation is ope
 **Exit:** a user with a CUDA 13 driver can install, run `doctor`, `bench` and `validate`, and use the ASE calculator.
 Tag `v1.0.0a2`.
 
+**Progress (15 November 2026, 05:15).** Tasks that need neither the layout move nor a container were done ahead of
+Stage 1's exit; GPU checks on the RTX 5060 Ti only, on the merged engine build (`11edd3c`).
+
+| Task | Commits | State |
+| --- | --- | --- |
+| S2-T01 | `1cf9cfc` | **done except the network install**: `pyproject.toml`, `loupmd.runtime_info()`. Checked offline: the wheel's metadata; an editable install in a venv without torch prints library version and GPU. Not checked: installing the dependencies from PyPI; loading the CUDA runtime from the NVIDIA wheels on a machine without a toolkit (D17, D23) |
+| S2-T02 | | not started (needs a manylinux CUDA 13 image) |
+| S2-T03 | | waits for the layout move (D2) |
+| S2-T04 | `3bdbd39`, `4358fcc` | **done**: 20 labels (D15); since `4358fcc` each release's elements, cutoff and layer count |
+| S2-T05 | `403f65a` | **done**: `loupmd cache list / size / prune`, the bundle cache with a file lock (CPU tests: two processes export once; prune keeps files in use) |
+| S2-T06 | | not started (generators are in `python/`, D2) |
+| S2-T07 | `dd8eb2f` | **done**: `loupmd doctor`, every failure faked in CPU tests, run once on the GPU |
+| S2-T08 | `93f296e` | **done except `--compare fastmace` and the shipped structures** (D18, D19): suites `standard`, `quick`, `families`; `capacity` is refused until Stage 5. On the GPU: 1.795 / 7.997 and 1.830 / 8.040 ms against `bench_md.py`'s 1.807 / 8.034 on the same build (D20); records valid; `--compare mace` 395.8 ms/step against 1.767 on `SrTiO3` 6x6x6; `--ab` a b b a runs. The reference table holds these RTX 5060 Ti numbers |
+| S2-T09 | `9521e71` | **done for the default set**: `loupmd validate` PASSED with worst ratios 0.66 / 1.53 / 1.67 (energy / force / stress) against `python/test_gate.py`'s PASS with 1.52 / 1.68 on the same build, reading the same cached references; a user structure (`SrTiO3` 3x3x3, two rattled copies) PASSED at 1.98 / 1.43. Not run: `--set organic`, `--set crystals`, a model on the CPU reference path |
+| S2-T10 | `f99f1d1`, `4358fcc` | **done**: `lm.calc`. ASE `VelocityVerlet` on `SrTiO3` 3x3x3 drifts -0.0006 meV/atom/ps over 1 ps (criterion 0.05); energy, forces and stress equal `LoupEngine.evaluate`; a FIRE relaxation converges |
+| S2-T11, S2-T12 | | wait for the layout move (D2, D23) |
+
 ### Stage 3: FastMACE-shaped front end (3.5 weeks)
 
 | Task | What | Files | Acceptance |
@@ -456,6 +493,10 @@ Tag `v1.0.0a2`.
 | S3-T10 | `check="gate"` inside a run: two rattled copies (0.05 A), plus two strained copies (2%) for NPT, through `loupmd.validate`; statuses `passed`, `failed`, `unavailable`, `skipped` | `loupmd/simulation.py`, `loupmd/validate/` | a deliberately corrupted bundle table fails the gate and the run does not start |
 
 **Exit:** `lm.md`, `Simulation`, output, resume and the CLI run NVE and Langevin end to end. Tag `v1.0.0a3`.
+
+**Progress (15 November 2026, 05:15).** S3-T01 **done** (`43aff6c` the error family, `459e07a` the records;
+`IntegratorConfig` without `fixcm`, D24). S3-T02 **done** (`4358fcc`): `lm.load`, `ForceField.evaluate`; a missing
+element and a multi-head model without `head=` are refused before any export (CPU tests). The others are not started.
 
 ### Stage 4: dynamics, relaxation and ASE drop-ins (4.5 weeks)
 
@@ -662,8 +703,9 @@ Scope changes after 14 November 2026 need the owner's approval; cut variants are
 - **Suites**: `standard` (`NbCl5` 3x3x3 and `SrTiO3` 10x10x10 for the chosen model), `quick` (one system, 2 x 128
   steps, under a minute), `families` (one system per model family, as `bench_family.py`), `capacity` (the tiled call
   at a size that does not fit whole).
-- **Structures** ship in the wheel: `SrTiO3` is generated; `NbCl5_R2SCAN.cif`, the NaCl cell and the 216-molecule
-  water box are copied in once the owner confirms they may be redistributed (S2-T08 asks before copying).
+- **Structures** ship in the wheel: `SrTiO3` and rocksalt NaCl (a = 5.64 A) are generated; `NbCl5_R2SCAN.cif` and
+  the 216-molecule water box are copied in once the owner confirms they may be redistributed (S2-T08 asks before
+  copying). Until then they are read from the folders of `$LOUPMD_BENCH_STRUCTURES` (§1.3 D18).
 - **Output**: a table with ms/step, us per atom-step, ns/day at the timestep, block spread, final temperature and
   dangerous builds; the stored reference for the same GPU model with the ratio; a JSON record `loupmd.bench/1` with
   GPU name, compute capability, NVIDIA driver, library hash, model SHA-256, bundle key, protocol, per-block times and
