@@ -12,10 +12,11 @@ from ..errors import LoupError
 from . import bench as _bench
 from . import cache as _cache
 from . import doctor as _doctor
+from . import md as _md
 from . import models as _models
 from . import validate as _validate
 
-COMMANDS = (_doctor, _models, _cache, _bench, _validate)
+COMMANDS = (_doctor, _models, _cache, _bench, _validate, _md)
 
 
 def build_parser() -> argparse.ArgumentParser:

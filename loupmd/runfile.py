@@ -1,0 +1,153 @@
+"""Run files: the arguments of ``lm.md`` as a TOML file (``loupmd init`` writes one, ``loupmd run`` runs one).
+
+The table of a run file is the ``arguments`` block of ``metadata.json``, so ``loupmd run metadata.json`` repeats a
+finished run. Unknown keys are refused by name. A schedule is a list of segments (``[[schedule]]`` tables); a
+profile (``profile = "fast"`` or a profile file) gives the schedule and the output cadences.
+"""
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+from . import protocols, quick
+from .config import Output, from_mapping
+from .errors import InputError
+
+FORMAT = "loupmd.run/1"
+# key -> default (None: no default, the key is left out unless given). The order is the file's.
+KEYS = {
+    "structure": None, "model": None, "head": None, "checkpoint": None, "sha256": None, "trusted": False,
+    "download": False, "charge": None, "spin_multiplicity": None, "ensemble": "NVT", "temperature_K": None,
+    "profile": None, "timestep_fs": 0.5, "steps": None, "repeat": [1, 1, 1], "seed": None,
+    "initial_velocities": "keep", "check": "skip", "capacity": "auto", "device": 0,
+}
+TABLES = ("output", "schedule")
+_COMMENTS = {
+    "structure": "the structure file (anything ASE reads)",
+    "model": "a label (`loupmd models`), a checkpoint path or a URL",
+    "head": "the head of a multi-head model",
+    "checkpoint": "the file of a label, when it is not in LOUPMD_MODELS or the cache",
+    "sha256": "the stated hash of a file that is not in the label table",
+    "trusted": "load a file outside the label table without a hash",
+    "download": "download a label's checkpoint if it is missing",
+    "charge": "total charge (models with a charge embedding)",
+    "spin_multiplicity": "2S + 1 (models with a spin embedding)",
+    "ensemble": '"NVT" (Langevin) or "NVE"',
+    "temperature_K": "the thermostat's target; not with a schedule or a profile",
+    "profile": 'a shipped profile ("slow", "fast", "ultrafast", "anneal") or a profile file; gives the schedule',
+    "timestep_fs": "the timestep",
+    "steps": "the number of steps; optional with a schedule (the whole schedule)",
+    "repeat": "the supercell",
+    "seed": "the noise seed; left out: one is drawn and recorded",
+    "initial_velocities": '"keep", "maxwell_boltzmann" or a temperature in K, for a structure at rest',
+    "check": '"skip", "gate" or "allow_unavailable": the accuracy gate before the first step',
+    "capacity": '"auto" or "whole"',
+    "device": "the GPU index",
+}
+
+
+def _value(value) -> str:
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (int, float)):
+        return repr(value)
+    if isinstance(value, (list, tuple)):
+        return "[" + ", ".join(_value(v) for v in value) + "]"
+    return json.dumps(str(value))                 # a TOML basic string has JSON's escapes
+
+
+def to_toml(arguments) -> str:
+    """The run file of ``arguments``: every key, those at their default as a comment."""
+    check(arguments)
+    lines = [f"# LoupMD run file ({FORMAT}): the arguments of `loupmd md`. Run it with `loupmd run FILE`.",
+             "# A line that starts with # is a key at its default.", ""]
+    for key, default in KEYS.items():
+        value = arguments.get(key)
+        given = value is not None and value != default
+        shown = value if given else default
+        text = f"{key} = {_value(shown)}" if shown is not None else f"{key} ="
+        lines.append(f"{'' if given else '# '}{text:<40s} # {_COMMENTS[key]}")
+    out = arguments.get("output") or {}
+    lines += ["", "[output]"]
+    defaults = {"directory": None, "trajectory_every": 20, "thermo_every": 20, "restart_every": 10_000}
+    for key, default in defaults.items():
+        if key in out and out[key] is None:
+            lines.append(f"# {key}: none")
+        elif key in out and out[key] != default:
+            lines.append(f"{key} = {_value(out[key])}")
+        elif default is not None:
+            lines.append(f"# {key} = {_value(default)}")
+        else:
+            lines.append("# directory =                  # default: <structure stem>.loupmd")
+    for segment in arguments.get("schedule") or []:
+        lines += ["", "[[schedule]]"] + [f"{key} = {_value(value)}" for key, value in segment.items()]
+    return "\n".join(lines) + "\n"
+
+
+def check(arguments) -> None:
+    """Refuse unknown keys by name, all at once."""
+    if not isinstance(arguments, dict):
+        raise InputError(f"a run file is a table of keys and values, got {type(arguments).__name__}")
+    unknown = [key for key in arguments if key not in KEYS and key not in TABLES]
+    if unknown:
+        raise InputError(f"unknown key{'s' if len(unknown) > 1 else ''} {', '.join(repr(k) for k in unknown)} in "
+                         "the run file", next_step=f"Keys: {', '.join(list(KEYS) + list(TABLES))}.")
+    if arguments.get("profile") is not None and arguments.get("schedule"):
+        raise InputError("profile and [[schedule]] exclude each other: a profile gives the schedule")
+
+
+def load(path) -> dict:
+    """The arguments of a run file (``.toml``) or of a finished run's ``metadata.json``."""
+    path = Path(path)
+    if not path.is_file():
+        raise InputError(f"run file {path} not found")
+    if path.suffix.lower() == ".json":
+        metadata = json.loads(path.read_text())
+        arguments = metadata.get("arguments") if isinstance(metadata, dict) else None
+        if not isinstance(arguments, dict):
+            raise InputError(f"{path} has no arguments block", why="it was not written by lm.md or loupmd md")
+    elif path.suffix.lower() == ".toml":
+        try:
+            import tomllib
+        except ModuleNotFoundError:  # Python 3.10
+            import tomli as tomllib
+        with path.open("rb") as handle:
+            try:
+                arguments = tomllib.load(handle)
+            except tomllib.TOMLDecodeError as error:
+                raise InputError(f"{path} is not valid TOML", why=str(error)) from None
+    else:
+        raise InputError(f"a run file is .toml or a metadata.json, got {path.name}")
+    check(arguments)
+    return arguments
+
+
+def md_options(arguments) -> tuple:
+    """``(structure, keyword arguments)`` for ``lm.md`` from a run file's table."""
+    check(arguments)
+    for key in ("structure", "model"):
+        if not arguments.get(key):
+            raise InputError(f"the run file lacks {key}")
+    options = {key: arguments[key] for key in KEYS if key not in ("structure", "profile")
+               and arguments.get(key) is not None}
+    if "repeat" in options:
+        options["repeat"] = tuple(options["repeat"])
+    out = dict(arguments.get("output") or {})
+    profile = arguments.get("profile")
+    if profile is not None:
+        found = protocols.PROFILES.get(profile) or protocols.load_profile(profile)
+        options["schedule"] = found.schedule
+        out.setdefault("thermo_every", found.sample_interval)
+        out.setdefault("trajectory_every", found.trajectory_interval)
+    elif arguments.get("schedule"):
+        options["schedule"] = protocols.Schedule.from_data(arguments["schedule"])
+    if out:
+        out.setdefault("directory", Path(str(arguments["structure"])).stem + quick.OUTPUT_SUFFIX)
+        options["output"] = from_mapping(Output, out, section="output")
+    return arguments["structure"], options
+
+
+def run(arguments):
+    """Run ``lm.md`` with a run file's table."""
+    structure, options = md_options(arguments)
+    return quick.md(structure, **options)

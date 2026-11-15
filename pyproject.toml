@@ -28,6 +28,7 @@ classifiers = [
 dependencies = [
     "numpy>=1.26",
     "ase>=3.23",
+    "tomli>=2; python_version < '3.11'",
     "cuda-toolkit[cublas,cudart]==13.0.3; platform_system == 'Linux'",
 ]
 

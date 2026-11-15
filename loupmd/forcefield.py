@@ -73,6 +73,7 @@ class ForceField:
         self.licence = known.licence if known is not None else None
         self.functional = entry.functional if entry is not None else None
         self.engine = None                 # the LoupEngine of the last structure
+        self.last_bundle = None
         self.bundle = None                 # its bundle file
         self._bundle_elements = frozenset()
         self._system = None                # (atomic numbers, skin) the engine's system was set with
@@ -146,6 +147,7 @@ class ForceField:
                                spin_multiplicity=self.spin_multiplicity, environ=self._environ)
         engine = factory(bundle, device_id=self.device)
         engine.set_system(atoms.numbers, atoms.get_masses(), skin=float(skin))
+        self.last_bundle = bundle                  # of the engine made last, for the run's record
         return engine
 
     def engine_for(self, atoms, skin=0.5):

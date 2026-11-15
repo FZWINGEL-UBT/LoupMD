@@ -31,7 +31,7 @@ def test_name_version_and_entry_point(project):
 def test_the_runtime_needs_neither_torch_nor_a_compiler(project):
     base = project["project"]["dependencies"]
     names = {d.split(";")[0].split("[")[0].split("=")[0].split(">")[0].split("<")[0].strip().lower() for d in base}
-    assert names == {"numpy", "ase", "cuda-toolkit"}
+    assert names == {"numpy", "ase", "tomli", "cuda-toolkit"}      # tomli: run files on Python 3.10 only
     # The CUDA 13 runtime and cuBLAS exactly as torch 2.14.1+cu130 pins them, so both resolve to the same wheels.
     assert "cuda-toolkit[cublas,cudart]==13.0.3; platform_system == 'Linux'" in base
 
