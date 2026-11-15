@@ -358,12 +358,14 @@ Effort is in working weeks of one focused lane and is a rough estimate.
 | S0-T04 | Merge rule: `release/v1` merges `round6-hardening` at least at every stage exit; speed work stays on that branch | `PLAN.md` §9 | recorded in the stage exit notes |
 
 **Progress (15 November 2026).** Step-level plan: `plans/stage-0-ground-rules.md` (`d78b8de`).
-- S0-T01: open. The library of the merged tree is built (sha256 `df58a9bd2623a502...`); tests, gate and benchmark
-  are queued behind the other session's GPU jobs. The baseline is the merged code (`bac354c`), not `0336751`.
-- S0-T02: written on the default A6 (§1.3 D1): `LICENSE`, `cubins/LICENSE`, `NOTICE.md`, `tests/test_notice.py`
-  (3 passed, no GPU needed). The `sm_120` cubin has no build record (D6).
+- S0-T01: **done**, `c0f70bf`: `plans/baseline-20261115.md`. Measured on the merged code (`bac354c`, §1.3 D10):
+  71 tests passed, default gate PASS (worst force ratio 1.56, stress 1.71), `NbCl5` 1.820 and `SrTiO3` 8.137
+  ms/step, library sha256 `df58a9bd2623a502...`.
+- S0-T02: **done**, `bcb529f` (licences confirmed by the owner, O6): `LICENSE`, `cubins/LICENSE`, `NOTICE.md`,
+  `tests/test_notice.py` (3 passed). The `sm_120` cubin's build record is with the developing session (D6).
 - S0-T03: waits for the owner's moment. New Python code goes to `loupmd/`; `python/` is untouched.
-- S0-T04: merges so far: `da42ec3` merged `round6-hardening` `11778cd` on 15 November 2026, before Stage 0.
+- S0-T04: **done** as a rule; merges so far: `da42ec3` merged `round6-hardening` `11778cd` on 15 November 2026,
+  before Stage 0.
 
 ### Stage 1: core API v1 (3 weeks)
 
@@ -385,14 +387,33 @@ The base of everything else. Each task keeps the standard benchmarks within nois
 
 **Exit:** all of the above, the default gate and `pytest`; tag `v1.0.0a1`.
 
-**Progress (15 November 2026).** Step-level plan: `plans/stage-1-core-api.md` (`d78b8de`). No task is marked done:
-the three below are written and committed, and their GPU tests have not been run (the card was in use).
-- S1-T01: `22b5f57`. Run without the GPU: `tests/test_errors.py` (7 passed) and the NULL-handle test, which fails
-  on the baseline library and passes on this one.
-- S1-T02: `d1eba02`. Run without the GPU: version tests and the refusal of two stub libraries (4 passed).
-  `loup_version` reports `1.0.0a1+<hash>` while the stages run, not the `1.0.0+<hash>` of §4.3.
-- S1-T03: `dd5268d`. Builds; nothing run. Besides the kept graphs it removes the force pass each run call made
-  before its first step, which the 2% criterion needs.
+**Progress (15 November 2026).** Step-level plan: `plans/stage-1-core-api.md`. "Tests pass" below means the task's
+own test file and the rest of the fast tier (everything but `tests/test_gate_wrapper.py`) on the RTX 5060 Ti:
+137 passed on the snapshot of `5f40a54`, 154 of 160 on `d0b1fc9`, and the six failures' files again after the
+fixes of `2f56b11` (23 passed). A task is **done** only with its speed criterion measured as well. Still to run at
+the time of writing: the full `pytest` with the family gates, the default gate, the A/B against the baseline in
+both orders, the chunked-run and thermo cost.
+- S1-T01 error channel: `22b5f57`. Tests pass (every refusal of `engine.cu` has its own text; nothing on stderr).
+- S1-T02 versions and `loup_get_info`: `d1eba02`. Tests pass. `loup_version` gives `1.0.0a1+<hash>` (D8).
+- S1-T03 MD graphs kept: `dd5268d`. Tests pass. The 2% cost criterion and the A/B are queued.
+- S1-T04 `loup_run`: `5f40a54`. Tests pass. Step graphs are shared with the old entry points; `nsys` not run
+  (`run_md_loop` is unchanged).
+- S1-T05 thermo buffer: `d0b1fc9`. Tests pass. The step cost at `thermo_every = 20` is queued.
+- S1-T06 state blob: `2cfec6d`. Tests pass (bitwise round trip, resumed Langevin run, seven refusals).
+- S1-T07 `loup_evaluate2`: not started. Per-atom energies need new variants of the generated kernels, whose
+  generators live in `python/` (held by D2); energy-only needs a ZBL-energy kernel per path.
+- S1-T08 sweeps: first part `11c5205` (the pass cut per layer; the replay schedule behind `LOUP_SWEEP_REPLAY=1`).
+  Builds; `tests/test_sweeps.py` queued. Open: the public interface over a `Domain` (with S1-T09), gates, A/B.
+- S1-T09 open domains: not started; design notes in the stage plan.
+- S1-T10 memory plan: `e9b55c5`, fix `2f56b11`. Tests pass. Measured against memory: predicted 487.8 / 1,878.2 /
+  3,631.7 MB for 5,000 / 20,480 / 40,000 `SrTiO3` atoms from a 135-atom probe, measured 513.8 / 1,851.8 / 3,636.5
+  MB (-5.1%, +1.4%, -0.1%); generic path at 5,000 atoms 467.3 against 507.5 MB (-7.9%). It scales the current
+  system's buffers instead of repeating their sizes, so a small system must be set first.
+- S1-T11 displacement decay: `d4d5433`, fix `2f56b11`. Tests pass, water included (pipelines at skin 1.0 A, not at
+  0.5 A: D13). A/B queued.
+- Open observation: `test_polar_energy_follows_a_small_cell_change_on_the_same_engine` failed once (stress
+  difference 3.97e-8 against its 3e-8 eV/A^3 bound) after passing on the baseline and on an earlier snapshot;
+  repeats on both trees are queued.
 
 ### Stage 2: installable runtime, benchmark and validation (2.5 weeks)
 
