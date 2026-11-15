@@ -249,22 +249,26 @@ def test_refusals(sto_engine, fields, reason):
 
 
 def test_what_the_thermostat_costs(model_path):
-    """CSVR adds a kinetic-energy sum and one thread's noise to a velocity-Verlet step: 5,000 atoms, a b b a."""
+    """CSVR adds a kinetic-energy sum and one thread's noise to a velocity-Verlet step, and draws no noise per
+    atom. Compared with Langevin at the same temperature (NVE from the same start is 150 K colder and rebuilds
+    its neighbour list less often): 5,000 atoms, a b b a."""
     from loupmd import integrators
 
     at = srtio3(10)
     at.set_velocities(maxwell_velocities(at, 300.0, seed=11))
-    records = {"csvr": integrators.CSVR(timestep_fs=1.0, temperature_K=300.0, tau_fs=100.0),
-               "nve": integrators.NVE(timestep_fs=1.0)}
+    records = {"csvr": integrators.CSVR(timestep_fs=1.0, temperature_K=300.0, tau_fs=100.0, fixcm=False),
+               "langevin": integrators.Langevin(timestep_fs=1.0, temperature_K=300.0, friction_per_fs=0.01,
+                                                fixcm=False)}
     runs = {name: loupmd.Simulation(at, loupmd.load(model_path, trusted=True), seed=1, integrator=record)
             for name, record in records.items()}
     for run in runs.values():
-        run.run(steps=100)
-    times = {"csvr": [], "nve": []}
-    for name in ("nve", "csvr", "csvr", "nve"):
+        run.run(steps=300)
+    times = {"csvr": [], "langevin": []}
+    for name in ("langevin", "csvr", "csvr", "langevin"):
         times[name].append(runs[name].run(steps=400).ms_per_step)
-    ratio = sum(times["csvr"]) / sum(times["nve"])
-    print(f"CSVR against NVE, 5,000 atoms: ms/step {times['csvr']} against {times['nve']}, ratio {ratio:.4f}")
+    ratio = sum(times["csvr"]) / sum(times["langevin"])
+    print(f"CSVR against Langevin, 5,000 atoms at 300 K: ms/step {times['csvr']} against {times['langevin']}, "
+          f"ratio {ratio:.4f}")
     assert ratio < 1.02
     for run in runs.values():
         run.close()
