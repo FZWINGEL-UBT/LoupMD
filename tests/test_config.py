@@ -36,6 +36,26 @@ def test_nve_takes_no_thermostat_settings():
         IntegratorConfig(ensemble="nve", temperature_K=300)
     with pytest.raises(InputError, match="scheme 'langevin' is not a scheme of ensemble 'nve'"):
         IntegratorConfig(ensemble="nve", scheme="langevin")
+    with pytest.raises(InputError, match="IntegratorConfig.tau_fs: NVE has no thermostat"):
+        IntegratorConfig(ensemble="nve", tau_fs=100.0)
+
+
+def test_csvr_needs_a_temperature_and_a_time_constant():
+    record = IntegratorConfig(scheme="csvr", temperature_K=300, tau_fs=100.0)
+    assert (record.ensemble, record.scheme, record.tau_fs, record.friction_per_fs) == ("nvt", "csvr", 100.0, None)
+    for missing in ({"temperature_K": 300}, {"tau_fs": 100.0}, {}):
+        with pytest.raises(InputError, match="CSVR needs temperature_K and tau_fs"):
+            IntegratorConfig(scheme="csvr", **missing)
+    with pytest.raises(InputError, match="IntegratorConfig.tau_fs must be positive and finite, got 0"):
+        IntegratorConfig(scheme="csvr", temperature_K=300, tau_fs=0)
+    with pytest.raises(InputError, match="CSVR has a time constant .tau_fs., not a friction, got 0.01"):
+        IntegratorConfig(scheme="csvr", temperature_K=300, tau_fs=100.0, friction_per_fs=0.01)
+    with pytest.raises(InputError, match="Langevin has a friction, not a time constant, got 100.0"):
+        IntegratorConfig(temperature_K=300, friction_per_fs=0.01, tau_fs=100.0)
+    it = record.to_struct(thermo_every=10, temperature_K=250.0, rate_K_per_step=0.5)
+    assert (it.kind, it.dt_fs, it.temp_k, it.temp_rate_k_per_step, it.tau_t_fs, it.friction_per_fs, it.seed,
+            it.thermo_every, it.fix_com) == (_core.LOUP_CSVR, 0.5, 250.0, 0.5, 100.0, 0.0, 20261001, 10, 0)
+    assert dataclasses.replace(record, fixcm=True).to_struct().fix_com == 1
 
 
 @pytest.mark.parametrize("fields,message", [
@@ -57,13 +77,13 @@ def test_integrator_values_are_checked(fields, message):
 
 
 @pytest.mark.parametrize("fields,word", [
-    ({"ensemble": "npt"}, "npt"), ({"scheme": "csvr"}, "csvr"), ({"scheme": "nose_hoover"}, "nose_hoover"),
+    ({"ensemble": "npt"}, "npt"), ({"scheme": "berendsen"}, "berendsen"), ({"scheme": "nose_hoover"}, "nose_hoover"),
 ])
 def test_schemes_that_are_not_built_are_refused_naming_what_is(fields, word):
     with pytest.raises(InputError) as caught:
         IntegratorConfig(temperature_K=300.0, friction_per_fs=0.01, **fields)
     text = str(caught.value)
-    assert word in text and "not in this version" in text and "nve, langevin" in text
+    assert word in text and "not in this version" in text and "nve, langevin, csvr" in text
 
 
 def test_the_engine_struct_of_a_record():
@@ -151,8 +171,8 @@ def test_unknown_keys_are_refused_by_name_all_at_once():
                             section="integrator")
     text = str(caught.value)
     assert text.startswith("unknown keys 'friction', 'timestep' in [integrator]")
-    assert ("Next: Keys of [integrator]: ensemble, scheme, timestep_fs, temperature_K, friction_per_fs, seed, "
-            "fixcm.") in text
+    assert ("Next: Keys of [integrator]: ensemble, scheme, timestep_fs, temperature_K, friction_per_fs, tau_fs, "
+            "seed, fixcm.") in text
     with pytest.raises(InputError, match=r"unknown key 'every' in Output"):
         config.from_mapping(Output, {"directory": "run", "every": 5})
     with pytest.raises(InputError, match="is not a table"):

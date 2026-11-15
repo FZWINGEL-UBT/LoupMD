@@ -10,7 +10,7 @@ from ase.io import write
 from test_simulation import SpringEngine
 
 import loupmd
-from loupmd import output, protocols, quick, runfile, simulation
+from loupmd import _core, output, protocols, quick, runfile, simulation
 from loupmd.cli import main
 from loupmd.cli import md as cli_md
 from loupmd.errors import InputError
@@ -182,3 +182,36 @@ def test_usage(world, capsys):
     with pytest.raises(SystemExit):
         main(["md", "salt.cif"])                                                # --model is required
     assert cli_md._segments("hold:300:1") == [{"kind": "hold", "temperature_K": 300.0, "ps": 1.0}]
+
+
+def test_the_thermostat_on_the_command_line_and_in_a_run_file(world, capsys):
+    csvr = ["--thermostat", "csvr", "--tau", "50"]
+    assert main(["md", *_args(world, "--output", "c", *csvr)]) == 0
+    assert "NVT, CSVR (Bussi), timestep 1 fs, time constant 50 fs, 300 K" in capsys.readouterr().out
+    assert {e[2] for e in SpringEngine.made[-1].log if isinstance(e, tuple) and e[0] == "run"} == {_core.LOUP_CSVR}
+    metadata = json.loads((world.path / "c" / "metadata.json").read_text())
+    assert metadata["arguments"]["integrator"] == {"type": "CSVR", "timestep_fs": 1.0, "temperature_K": 300.0,
+                                                   "tau_fs": 50.0, "fixcm": "auto"}
+    # init writes the table, run reads it; the record of the first run repeats it.
+    assert main(["init", "md", *_args(world, "--output", "d", *csvr)]) == 0
+    text = capsys.readouterr().out
+    assert tomllib.loads(text)["integrator"] == {"type": "CSVR", "tau_fs": 50.0}
+    (world.path / "csvr.toml").write_text(text)
+    assert main(["run", "csvr.toml"]) == 0
+    metadata["arguments"]["output"]["directory"] = "e"
+    (world.path / "again.json").write_text(json.dumps(metadata))
+    assert main(["run", "again.json"]) == 0
+    assert _rows(world.path / "c") == _rows(world.path / "d") == _rows(world.path / "e")
+    assert {e[2] for e in SpringEngine.made[-1].log if isinstance(e, tuple) and e[0] == "run"} == {_core.LOUP_CSVR}
+    capsys.readouterr()
+    assert main(["md", *_args(world, "--output", "f", "--friction", "0.05")]) == 0
+    assert "NVT, Langevin, timestep 1 fs, friction 0.05/fs" in capsys.readouterr().out
+    for more, message in ((["--thermostat", "csvr"], "--thermostat csvr takes --tau FS"),
+                          (["--tau", "50"], "--tau is the time constant of --thermostat csvr"),
+                          ([*csvr, "--friction", "0.1"], "--thermostat csvr takes --tau FS"),
+                          ([*csvr, "--ensemble", "NVE"], "conflicts with integrator=CSVR")):
+        assert main(["md", *_args(world, "--output", "g", *more)]) == 1
+        assert message in capsys.readouterr().err
+    (world.path / "bad.toml").write_text(text.replace("tau_fs = 50.0", "tau = 50.0"))
+    assert main(["run", "bad.toml"]) == 1
+    assert "unknown key 'tau' in [integrator] of type CSVR" in capsys.readouterr().err

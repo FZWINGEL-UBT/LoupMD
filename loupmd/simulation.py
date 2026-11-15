@@ -113,6 +113,13 @@ class Simulation:
         else:
             raise InputError(f"integrator must be an lm.integrators record, got {type(integrator).__name__}",
                              next_step="integrator=lm.integrators.Langevin(temperature_K=300, friction_per_fs=0.01)")
+        if self.config.scheme == "csvr" and math.isclose(float(atoms.get_kinetic_energy()), 0.0, rel_tol=0,
+                                                         abs_tol=1e-12):
+            raise InputError("the structure is at rest, and CSVR rescales the velocities it finds (as ASE's Bussi)",
+                             why="a structure at rest has no velocities to rescale",
+                             next_step="Draw velocities first: lm.md(..., initial_velocities='maxwell_boltzmann'), "
+                                       "or ase.md.velocitydistribution.MaxwellBoltzmannDistribution(atoms, "
+                                       "temperature_K=...).")
         if check not in CHECK_MODES:
             raise InputError(f"check={check!r} is not one of {CHECK_MODES}")
         if gate is not None and not isinstance(gate, GateConfig):
@@ -305,7 +312,7 @@ class Simulation:
                                  next_step="schedule=lm.protocols.ramp(0, 400, ps=3) + lm.protocols.hold(400, ps=1)")
             if self.config.temperature_K is None:
                 raise InputError("a schedule moves a thermostat's target, and NVE has none",
-                                 next_step="Use lm.integrators.Langevin.")
+                                 next_step="Use lm.integrators.Langevin or lm.integrators.CSVR.")
             if active is not None:
                 raise InputError(f"a schedule is in progress: {active.remaining} of its {active.total_steps} steps "
                                  "remain", next_step="Finish it with run() first.")

@@ -2,13 +2,13 @@
 
 Names and arguments are FastMACE's (``fm.integrators``). Units: fs, K, friction per fs. A thermostat's temperature
 and friction have no defaults: physics is not chosen silently. Each record maps onto an ``IntegratorConfig``
-(``to_config``), which is what the engine runs. Built so far: ``NVE`` and ``Langevin``; the other schemes of
-FastMACE arrive with the engine's integrators (PLAN.md Stage 4).
+(``to_config``), which is what the engine runs. Built so far: ``NVE``, ``Langevin`` and ``CSVR``; the other
+schemes of FastMACE arrive with the engine's integrators (PLAN.md Stage 4).
 
 ``fixcm`` keeps the centre of mass at rest, as in FastMACE: ``"auto"`` (the default) is on, and off when the
 structure has fixed atoms, which pin the frame already; ``True`` with fixed atoms is refused. Langevin's noise then
-loses its mass-weighted mean every step (FastMACE's ``"mass_weighted"`` projection); NVE's total momentum is removed
-at the start of every run call. The temperature counts three degrees of freedom fewer.
+loses its mass-weighted mean every step (FastMACE's ``"mass_weighted"`` projection); the total momentum of NVE and
+CSVR is removed at the start of every run call. The temperature counts three degrees of freedom fewer.
 """
 from __future__ import annotations
 
@@ -18,7 +18,7 @@ from typing import Literal
 from .config import IntegratorConfig
 from .errors import InputError, PlanRefused
 
-__all__ = ["Langevin", "NVE"]
+__all__ = ["CSVR", "Langevin", "NVE"]
 
 
 def resolve_fixcm(fixcm, fixed_atoms) -> bool:
@@ -69,3 +69,70 @@ class Langevin:
                                 temperature_K=float(self.temperature_K),
                                 friction_per_fs=float(self.friction_per_fs), seed=seed,
                                 fixcm=resolve_fixcm(self.fixcm, fixed_atoms))
+
+
+@dataclass(frozen=True, kw_only=True)
+class CSVR:
+    """Canonical sampling through velocity rescaling (Bussi, Donadio, Parrinello), as ASE's ``Bussi``:
+    ``lm.integrators.CSVR(timestep_fs=1.0, temperature_K=300, tau_fs=100)``.
+
+    ``tau_fs`` is ASE's ``taut``. The conserved quantity is E_kin + E_pot minus the energy the thermostat has
+    transferred. The velocities are rescaled, so the structure must move at the start (as ASE's ``Bussi``)."""
+
+    timestep_fs: float
+    temperature_K: float
+    tau_fs: float
+    fixcm: bool | Literal["auto"] = "auto"
+
+    def __post_init__(self):
+        IntegratorConfig(scheme="csvr", timestep_fs=self.timestep_fs, temperature_K=self.temperature_K,
+                         tau_fs=self.tau_fs)                                 # checks the values
+        if not isinstance(self.fixcm, bool) and self.fixcm != "auto":
+            raise InputError(f"CSVR.fixcm must be True, False or 'auto', got {self.fixcm!r}")
+
+    def to_config(self, *, seed: int, fixed_atoms: bool = False) -> IntegratorConfig:
+        return IntegratorConfig(ensemble="nvt", scheme="csvr", timestep_fs=float(self.timestep_fs),
+                                temperature_K=float(self.temperature_K), tau_fs=float(self.tau_fs), seed=seed,
+                                fixcm=resolve_fixcm(self.fixcm, fixed_atoms))
+
+
+RECORDS = {"NVE": NVE, "Langevin": Langevin, "CSVR": CSVR}
+
+
+def to_data(record) -> dict:
+    """An integrator record as a table: ``{"type": "CSVR", "timestep_fs": ..., ...}`` (a run file's
+    ``[integrator]``)."""
+    import dataclasses
+
+    if type(record) not in RECORDS.values():
+        raise InputError(f"integrator must be an lm.integrators record, got {type(record).__name__}")
+    return {"type": type(record).__name__, **dataclasses.asdict(record)}
+
+
+def from_data(data, *, timestep_fs=None, temperature_K=None):
+    """The record of a table (``to_data``). ``timestep_fs`` and ``temperature_K`` fill those fields where the
+    table leaves them out (a run file states them once, outside the table). Unknown keys are refused by name."""
+    import dataclasses
+    from collections.abc import Mapping
+
+    if not isinstance(data, Mapping):
+        raise InputError(f"[integrator] is not a table of keys and values, got {type(data).__name__}")
+    data = dict(data)
+    kind = data.pop("type", None)
+    if kind not in RECORDS:
+        raise InputError(f"[integrator] type {kind!r} is not one of {', '.join(RECORDS)}",
+                         why="the other integrators of FastMACE are not in this version")
+    names = [field.name for field in dataclasses.fields(RECORDS[kind])]
+    unknown = [key for key in data if key not in names]
+    if unknown:
+        raise InputError(f"unknown key{'s' if len(unknown) > 1 else ''} {', '.join(repr(k) for k in unknown)} in "
+                         f"[integrator] of type {kind}", next_step=f"Its keys: type, {', '.join(names)}.")
+    for name, value in (("timestep_fs", timestep_fs), ("temperature_K", temperature_K)):
+        if name in names and name not in data and value is not None:
+            data[name] = value
+    missing = [field.name for field in dataclasses.fields(RECORDS[kind])
+               if field.default is dataclasses.MISSING and field.name not in data]
+    if missing:
+        raise InputError(f"[integrator] of type {kind} lacks {', '.join(missing)}",
+                         why="a thermostat's temperature, friction and time constant have no defaults")
+    return RECORDS[kind](**data)

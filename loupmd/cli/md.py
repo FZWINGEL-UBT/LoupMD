@@ -21,7 +21,13 @@ def _arguments_parser(parser):
     parser.add_argument("--download", action="store_true", help="download a label's checkpoint if it is missing")
     parser.add_argument("--charge", type=int, help="total charge (models with a charge embedding)")
     parser.add_argument("--spin-multiplicity", type=int, help="2S + 1 (models with a spin embedding)")
-    parser.add_argument("--ensemble", default="NVT", help="NVT (Langevin, default) or NVE")
+    parser.add_argument("--ensemble", default="NVT", help="NVT (default) or NVE")
+    parser.add_argument("--thermostat", choices=("langevin", "csvr"), help="the NVT thermostat: langevin (default) "
+                        "or csvr (Bussi's velocity rescaling, which needs --tau)")
+    parser.add_argument("--friction", type=float, metavar="PER_FS", help="Langevin's friction per fs (default about "
+                                                                         "0.002)")
+    parser.add_argument("--tau", type=float, metavar="FS", dest="tau_fs", help="the thermostat's time constant in "
+                                                                               "fs (csvr; no default)")
     parser.add_argument("--temperature", type=float, metavar="K", dest="temperature_K", help="the thermostat's target")
     parser.add_argument("--schedule", metavar="SEGMENTS", help="ramps and holds in order, separated by commas: "
                         "ramp:START_K:END_K:PS and hold:K:PS, for example ramp:0:400:3,hold:400:1,ramp:400:0:24")
@@ -83,6 +89,15 @@ def arguments_of(args) -> dict:
             arguments[key] = getattr(args, key)
     if velocities != "keep":
         arguments["initial_velocities"] = velocities
+    if args.thermostat == "csvr":
+        if args.tau_fs is None or args.friction is not None:
+            raise InputError("--thermostat csvr takes --tau FS (its time constant, which has no default) and no "
+                             "--friction")
+        arguments["integrator"] = {"type": "CSVR", "tau_fs": args.tau_fs}
+    elif args.tau_fs is not None:
+        raise InputError("--tau is the time constant of --thermostat csvr; Langevin takes --friction")
+    elif args.friction is not None:
+        arguments["integrator"] = {"type": "Langevin", "friction_per_fs": args.friction}
     if args.schedule:
         arguments["schedule"] = _segments(args.schedule)
     out = {}

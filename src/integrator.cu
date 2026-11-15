@@ -255,6 +255,109 @@ __global__ void langevin_second_half_kernel(
     }
 }
 
+// ---- CSVR: canonical sampling through velocity rescaling (Bussi, Donadio, Parrinello, J. Chem. Phys. 126, 014101
+// (2007)), as ASE 3.27's Bussi does it: at the start of a step the velocities are scaled by alpha of equation A7,
+// then the step is velocity Verlet. ----
+// A step's noise: R1, a standard normal, and the sum of ndof - 1 squared standard normals, drawn as a chi-square
+// variate, 2 Gamma((ndof - 1) / 2) (Marsaglia and Tsang, ACM Trans. Math. Softw. 26, 363 (2000)). One Philox stream
+// apart from the atoms' (their subsequences are the atom indices), 256 words per step: the normal pair takes 4, a
+// shape below 1 takes 2, and each of at most 32 rounds takes 6. A round accepts with a probability above 0.95.
+constexpr unsigned long long kCsvrSequence = 1ULL << 40;
+
+__device__ __forceinline__ void csvr_draw(unsigned long long seed, unsigned long long step, int ndof,
+                                          double* normal, double* chi2) {
+    curandStatePhilox4_32_10_t rng;
+    curand_init(seed, kCsvrSequence, step * 256ULL, &rng);
+    const double2 first = curand_normal2_double(&rng);
+    *normal = first.x;
+    *chi2 = 0.0;
+    if (ndof <= 1) return;  // no further degrees of freedom
+    double shape = 0.5 * (double)(ndof - 1);
+    double boost = 1.0;
+    if (shape < 1.0) {  // Gamma(a) = Gamma(a + 1) U^(1 / a)
+        boost = pow(curand_uniform_double(&rng), 1.0 / shape);
+        shape += 1.0;
+    }
+    const double d = shape - 1.0 / 3.0;
+    const double c = 1.0 / sqrt(9.0 * d);
+    double x = first.y;
+    double gamma = d;  // the distribution's bulk; reached only if all 32 rounds reject
+    for (int round = 0; round < 32; ++round) {
+        if (round > 0) x = curand_normal2_double(&rng).x;
+        const double u = curand_uniform_double(&rng);
+        double v = 1.0 + c * x;
+        if (v <= 0.0) continue;
+        v = v * v * v;
+        const double x2 = x * x;
+        if (u < 1.0 - 0.0331 * x2 * x2 || log(u) < 0.5 * x2 + d * (1.0 - v + log(v))) {
+            gamma = d * v;
+            break;
+        }
+    }
+    *chi2 = 2.0 * gamma * boost;
+}
+
+// Testing only (loup_debug_csvr_noise): the draws of steps first_step .. first_step + n - 1.
+__global__ void csvr_noise_debug_kernel(unsigned long long seed, unsigned long long first_step, int n, int ndof,
+                                        double* __restrict__ normal, double* __restrict__ chi2) {
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    csvr_draw(seed, first_step + (unsigned long long)i, ndof, normal + i, chi2 + i);
+}
+
+// One thread, after kinetic_energy_kernel has summed the kinetic energy into work[0]: alpha of this step into
+// work[1], the energy the scaling adds into state[0] (ASE's transferred_energy), work[0] back to zero for the next
+// step. Advances the step counter (the offset of the noise) and the target (target[0] += target[1], the ramp's
+// change per step). A system at rest has nothing to scale: alpha is 1 until the forces have set it in motion.
+__global__ void csvr_alpha_kernel(int ndof, double exp_term, double kb, unsigned long long seed,
+                                  unsigned long long* __restrict__ step_counter, double* __restrict__ target,
+                                  double* __restrict__ work, double* __restrict__ state) {
+    const unsigned long long step = *step_counter;
+    *step_counter = step + 1ULL;
+    const double temp = fmax(target[0], 0.0);
+    target[0] += target[1];
+    const double kinetic = work[0];
+    work[0] = 0.0;
+    double alpha = 1.0;
+    if (kinetic > 1e-100) {
+        double normal, chi2;
+        csvr_draw(seed, step, ndof, &normal, &chi2);
+        // ASE's order of operations: energy_scaling_term = (1 - e) K_target / K / ndof, K_target = kT ndof / 2.
+        const double target_kinetic = 0.5 * (temp * kb) * (double)ndof;
+        const double scaling = (1.0 - exp_term) * target_kinetic / kinetic / (double)ndof;
+        alpha = sqrt(exp_term + scaling * (chi2 + normal * normal) + 2.0 * normal * sqrt(exp_term * scaling));
+        state[0] += (alpha * alpha - 1.0) * kinetic;
+    }
+    work[1] = alpha;
+}
+
+// Velocity Verlet's first half with the velocities scaled by alpha (work[1]) first.
+__global__ void csvr_first_half_kernel(
+    int N, double dt_ase, const double* __restrict__ work,
+    const double* __restrict__ forces,
+    const double* __restrict__ inv_masses,
+    double* __restrict__ pos64,
+    double* __restrict__ vel64,
+    unsigned int* __restrict__ max_step_disp2
+) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    double d2 = 0.0;
+    if (i < N) {
+        const double alpha = work[1];
+        double half_dt_im = 0.5 * dt_ase * inv_masses[i];
+        #pragma unroll
+        for (int c = 0; c < 3; ++c) {
+            int idx = i * 3 + c;
+            double v = alpha * vel64[idx] + half_dt_im * forces[idx];
+            vel64[idx] = v;
+            const double dx = dt_ase * v;
+            pos64[idx] += dx;
+            d2 += dx * dx;
+        }
+    }
+    record_step_disp2(d2, max_step_disp2);
+}
+
 __global__ void kinetic_energy_kernel(
     int N,
     const double* __restrict__ masses,

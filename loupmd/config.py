@@ -27,7 +27,7 @@ GATE_STRESS_FLOOR_EV_PER_A3 = 1e-7
 # Integrator schemes of each ensemble, the first being its default. BUILT are those the engine has.
 SCHEMES = {"nve": ("nve",), "nvt": ("langevin", "csvr", "nose_hoover", "berendsen"),
            "npt": ("baoab", "mtk", "berendsen")}
-BUILT = {"nve": ("nve",), "nvt": ("langevin",), "npt": ()}
+BUILT = {"nve": ("nve",), "nvt": ("langevin", "csvr"), "npt": ()}
 
 
 def _name(record, field):
@@ -75,13 +75,15 @@ def _count(record, field, optional=False, what="an int of at least 1", unit=""):
 @dataclass(frozen=True)
 class IntegratorConfig:
     """What the engine integrates with. ``scheme=None`` takes the ensemble's default (``nve``; ``langevin`` for
-    NVT). A thermostat's temperature and friction have no defaults: physics is not chosen silently."""
+    NVT). A thermostat's temperature, friction and time constant have no defaults: physics is not chosen silently.
+    ``tau_fs`` is the time constant of the thermostats that have one (``csvr``: ASE's ``taut``)."""
 
     ensemble: Literal["nve", "nvt", "npt"] = "nvt"
     scheme: str | None = None
     timestep_fs: float = 0.5
     temperature_K: float | None = None
     friction_per_fs: float | None = None       # Langevin
+    tau_fs: float | None = None                # CSVR: the thermostat's time constant
     seed: int = 20261001
     fixcm: bool = False                        # keep the centre of mass at rest (three degrees of freedom fewer)
 
@@ -102,15 +104,26 @@ class IntegratorConfig:
         if isinstance(self.seed, bool) or not isinstance(self.seed, int) or not 0 <= self.seed < 2 ** 64:
             raise InputError(f"{_name(self, 'seed')} must be an int from 0 to 2**64 - 1, got {self.seed!r}")
         if scheme == "nve":
-            for field in ("temperature_K", "friction_per_fs"):
+            for field in ("temperature_K", "friction_per_fs", "tau_fs"):
                 if getattr(self, field) is not None:
                     raise InputError(f"{_name(self, field)}: NVE has no thermostat, got {getattr(self, field)!r}")
         elif scheme == "langevin":
             if self.temperature_K is None or self.friction_per_fs is None:
                 raise InputError("IntegratorConfig: Langevin needs temperature_K and friction_per_fs",
                                  why="neither has a default")
+            if self.tau_fs is not None:
+                raise InputError(f"{_name(self, 'tau_fs')}: Langevin has a friction, not a time constant, got "
+                                 f"{self.tau_fs!r}")
             _not_negative(self, "temperature_K")
             _positive(self, "friction_per_fs")
+        elif scheme == "csvr":
+            if self.temperature_K is None or self.tau_fs is None:
+                raise InputError("IntegratorConfig: CSVR needs temperature_K and tau_fs", why="neither has a default")
+            if self.friction_per_fs is not None:
+                raise InputError(f"{_name(self, 'friction_per_fs')}: CSVR has a time constant (tau_fs), not a "
+                                 f"friction, got {self.friction_per_fs!r}")
+            _not_negative(self, "temperature_K")
+            _positive(self, "tau_fs")
 
     def to_struct(self, thermo_every: int = 0, temperature_K=None, rate_K_per_step: float = 0.0):
         """The ``LoupIntegrator`` of this record for ``loup_run``; ``thermo_every`` is the output's cadence. A
@@ -122,6 +135,10 @@ class IntegratorConfig:
             return _core.integrator(_core.LOUP_NVE, self.timestep_fs, thermo_every=int(thermo_every),
                                     fix_com=int(self.fixcm))
         temperature = self.temperature_K if temperature_K is None else temperature_K
+        if self.scheme == "csvr":
+            return _core.integrator(_core.LOUP_CSVR, self.timestep_fs, temp_k=float(temperature),
+                                    temp_rate_k_per_step=float(rate_K_per_step), tau_t_fs=float(self.tau_fs),
+                                    seed=self.seed, thermo_every=int(thermo_every), fix_com=int(self.fixcm))
         return _core.integrator(_core.LOUP_LANGEVIN, self.timestep_fs, temp_k=float(temperature),
                                 temp_rate_k_per_step=float(rate_K_per_step),
                                 friction_per_fs=float(self.friction_per_fs), seed=self.seed,

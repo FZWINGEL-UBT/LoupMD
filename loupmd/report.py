@@ -36,7 +36,10 @@ def _physics_lines(metadata) -> list:
         if integrator.get("fixcm"):
             first += ", total momentum removed"
     else:
-        first = (f"NVT, Langevin, timestep {timestep:g} fs, friction {integrator['friction_per_fs']:.4g}/fs")
+        if integrator["scheme"] == "csvr":
+            first = f"NVT, CSVR (Bussi), timestep {timestep:g} fs, time constant {integrator['tau_fs']:g} fs"
+        else:
+            first = f"NVT, Langevin, timestep {timestep:g} fs, friction {integrator['friction_per_fs']:.4g}/fs"
         if schedule is None:
             first += f", {integrator['temperature_K']:g} K"
         if integrator.get("fixcm"):

@@ -2,14 +2,16 @@
 
 The table of a run file is the ``arguments`` block of ``metadata.json``, so ``loupmd run metadata.json`` repeats a
 finished run. Unknown keys are refused by name. A schedule is a list of segments (``[[schedule]]`` tables); a
-profile (``profile = "fast"`` or a profile file) gives the schedule and the output cadences.
+profile (``profile = "fast"`` or a profile file) gives the schedule and the output cadences. ``[integrator]``
+chooses an ``lm.integrators`` record by ``type`` (``Langevin``, ``CSVR``, ``NVE``) with its fields; ``timestep_fs``
+and ``temperature_K`` may be left to the keys above it.
 """
 from __future__ import annotations
 
 import json
 from pathlib import Path
 
-from . import protocols, quick
+from . import integrators, protocols, quick
 from .config import Output, from_mapping
 from .errors import InputError
 
@@ -21,7 +23,7 @@ KEYS = {
     "profile": None, "timestep_fs": 0.5, "steps": None, "repeat": [1, 1, 1], "seed": None,
     "initial_velocities": "keep", "check": "skip", "capacity": "auto", "device": 0,
 }
-TABLES = ("output", "schedule")
+TABLES = ("output", "integrator", "schedule")
 _COMMENTS = {
     "structure": "the structure file (anything ASE reads)",
     "model": "a label (`loupmd models`), a checkpoint path or a URL",
@@ -32,7 +34,7 @@ _COMMENTS = {
     "download": "download a label's checkpoint if it is missing",
     "charge": "total charge (models with a charge embedding)",
     "spin_multiplicity": "2S + 1 (models with a spin embedding)",
-    "ensemble": '"NVT" (Langevin) or "NVE"',
+    "ensemble": '"NVT" or "NVE"; [integrator] chooses the thermostat',
     "temperature_K": "the thermostat's target; not with a schedule or a profile",
     "profile": 'a shipped profile ("slow", "fast", "ultrafast", "anneal") or a profile file; gives the schedule',
     "timestep_fs": "the timestep",
@@ -79,6 +81,10 @@ def to_toml(arguments) -> str:
             lines.append(f"# {key} = {_value(default)}")
         else:
             lines.append("# directory =                  # default: <structure stem>.loupmd")
+    lines += ["", "# [integrator]                           # default: Langevin for NVT, velocity Verlet for NVE",
+              '# type = "CSVR"                          # "Langevin" (friction_per_fs), "CSVR" (tau_fs) or "NVE"',
+              "# tau_fs = 100.0"] if not arguments.get("integrator") else ["", "[integrator]"] + [
+                  f"{key} = {_value(value)}" for key, value in arguments["integrator"].items()]
     for segment in arguments.get("schedule") or []:
         lines += ["", "[[schedule]]"] + [f"{key} = {_value(value)}" for key, value in segment.items()]
     return "\n".join(lines) + "\n"
@@ -144,6 +150,13 @@ def md_options(arguments) -> tuple:
     if out:
         out.setdefault("directory", Path(str(arguments["structure"])).stem + quick.OUTPUT_SUFFIX)
         options["output"] = from_mapping(Output, out, section="output")
+    table = arguments.get("integrator")
+    if table:
+        timestep = arguments.get("timestep_fs", KEYS["timestep_fs"])
+        start = arguments.get("temperature_K")
+        if start is None and "schedule" in options and isinstance(table, dict):   # the schedule's first target
+            start = protocols.ScheduleState(options["schedule"], table.get("timestep_fs", timestep)).target_K
+        options["integrator"] = integrators.from_data(table, timestep_fs=timestep, temperature_K=start)
     return arguments["structure"], options
 
 

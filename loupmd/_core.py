@@ -248,6 +248,9 @@ def _bind(lib):
                                       ctypes.c_double, ctypes.c_ulonglong, ctypes.POINTER(LoupMDStats)]
     lib.loup_get_state.argtypes = [ctypes.c_void_p, _c_double_p, _c_double_p, _c_double_p, _c_double_p]
     lib.loup_profile_force.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_int, _c_double_p]
+    lib.loup_debug_csvr_noise.argtypes = [ctypes.c_void_p, ctypes.c_ulonglong, ctypes.c_ulonglong, ctypes.c_int,
+                                          ctypes.c_int, _c_double_p, _c_double_p]
+    lib.loup_debug_csvr_noise.restype = ctypes.c_int
     for name in ("loup_set_system", "loup_evaluate", "loup_set_state", "loup_run_nve", "loup_run_langevin",
                  "loup_get_state", "loup_profile_force", "loup_get_info", "loup_run", "loup_export_state",
                  "loup_import_state", "loup_plan_memory", "loup_read_thermo", "loup_evaluate2"):
@@ -389,6 +392,15 @@ class LoupEngine:
         self._check(self._lib.loup_get_state(self._h, _ptr(pos), _ptr(vel), _ptr(frc), ctypes.byref(en)),
                     "loup_get_state")
         return pos, vel, frc, float(en.value)
+
+    def debug_csvr_noise(self, seed: int, first_step: int, n_steps: int, ndof: int):
+        """Testing only: the standard normal and the chi-square variate (``ndof - 1`` degrees of freedom) CSVR
+        draws in each of ``n_steps`` steps from ``first_step`` on, as two arrays."""
+        normal = np.empty(int(n_steps), dtype=np.float64)
+        chi2 = np.empty(int(n_steps), dtype=np.float64)
+        self._check(self._lib.loup_debug_csvr_noise(self._h, int(seed), int(first_step), int(n_steps), int(ndof),
+                                                    _ptr(normal), _ptr(chi2)), "loup_debug_csvr_noise")
+        return normal, chi2
 
     def thermo_pending(self) -> int:
         """Unread rows in the device's thermo buffer."""

@@ -139,8 +139,8 @@ int loup_run_langevin(
 enum {
     LOUP_NVE = 0,            // velocity Verlet
     LOUP_LANGEVIN = 1,       // ASE's Vanden-Eijnden-Ciccotti Langevin scheme
-    LOUP_CSVR = 2,           // the kinds from here on are refused by name until their task builds them
-    LOUP_NHC = 3,
+    LOUP_CSVR = 2,           // canonical sampling through velocity rescaling (Bussi), as ASE's Bussi
+    LOUP_NHC = 3,            // the kinds from here on are refused by name until their task builds them
     LOUP_BERENDSEN_NVT = 4,
     LOUP_BERENDSEN_NPT = 5,
     LOUP_BAOAB_NPT = 6,
@@ -153,7 +153,7 @@ typedef struct {
     int kind;                      // LOUP_NVE ...
     double dt_fs;                  // timestep in fs
     double temp_k;                 // thermostat temperature in K
-    double temp_rate_k_per_step;   // Langevin: step i of the call (1 .. n_steps) runs at temp_k + i * this (a
+    double temp_rate_k_per_step;   // thermostats: step i of the call (1 .. n_steps) runs at temp_k + i * this (a
                                    // ramp; 0 = constant). The target lives on the device, so calls that differ
                                    // only in temperature reuse the captured step
     double friction_per_fs;        // Langevin friction in 1/fs
@@ -166,16 +166,20 @@ typedef struct {
     int cell_mask[3];              // per-axis mask of the barostat
     int fix_com;                   // keep the centre of mass at rest. Langevin: both noise terms lose their
                                    // mass-weighted mean every step, so the thermostat puts no momentum into the
-                                   // centre of mass (FastMACE's "mass_weighted" projection). NVE: the total
-                                   // momentum is removed at the start of the call. Temperatures then count three
-                                   // degrees of freedom fewer. Refused together with fixed atoms
+                                   // centre of mass (FastMACE's "mass_weighted" projection). NVE and CSVR: the
+                                   // total momentum is removed at the start of the call. Temperatures then count
+                                   // three degrees of freedom fewer. Refused together with fixed atoms
     int thermo_every;              // write a thermo row every so many steps (loup_read_thermo); 0 = none
     unsigned long long seed;       // noise stream of the stochastic integrators
 } LoupIntegrator;
 
 // Runs `n_steps` steps of `it`. NVE reads dt_fs; Langevin reads dt_fs, temp_k, temp_rate_k_per_step, friction_per_fs
-// and seed. The rules
-// of loup_run_nve and loup_run_langevin apply: those two calls are this one with the struct filled in.
+// and seed; CSVR reads dt_fs, temp_k, temp_rate_k_per_step, tau_t_fs and seed. All read fix_com and thermo_every.
+// The rules of loup_run_nve and loup_run_langevin apply: those two calls are this one with the struct filled in.
+// CSVR scales the velocities at the start of every step by the factor of Bussi, Donadio and Parrinello's equation
+// A7 (one normal and one chi-square variate per step, from the seed and the step counter), then steps as NVE. Its
+// degrees of freedom are those of the reported temperature. A system at rest is not scaled until the forces have
+// set it in motion.
 int loup_run(LoupHandle* h, const LoupIntegrator* it, int n_steps, LoupMDStats* out_stats);
 
 // Thermodynamic output without a host round trip per row: with LoupIntegrator.thermo_every = k, every k-th step
@@ -187,7 +191,8 @@ typedef struct {
     double temp_k;        // 2 e_kin / (3 N k_B)
     double pressure_gpa;  // 0 until a step carries stress
     double volume_a3;     // 0 until a step carries stress
-    double conserved;     // e_pot + e_kin: NVE's conserved quantity (thermostats add their terms with their task)
+    double conserved;     // e_pot + e_kin (NVE's conserved quantity); for CSVR minus the energy its thermostat has
+                          // transferred since the last loup_set_state (it travels in the state block)
 } LoupThermoRow;
 // Copies up to `max_rows` of the oldest unread rows to `rows`, removes them from the buffer and sets *n_rows to
 // their number. loup_read_thermo(h, NULL, 0, &n) only counts the unread rows. The buffer holds 4096 rows: a run
@@ -199,8 +204,9 @@ int loup_read_thermo(LoupHandle* h, LoupThermoRow* rows, int max_rows, int* n_ro
 int loup_get_state(LoupHandle* h, double* out_positions, double* out_velocities, double* out_forces, double* out_energy_ev);
 
 // The state a restart needs, as one versioned block of bytes: positions, velocities and cell as the caller gave
-// them (caller atom order), the step counter (the offset of the noise stream, so a resumed Langevin run continues
-// its noise) and the displacement tracker. Forces and the neighbour list are not in it.
+// them (caller atom order), the step counter (the offset of the noise streams, so a resumed Langevin or CSVR run
+// continues its noise), the integrator's scalars (CSVR's transferred energy) and the displacement tracker. Forces
+// and the neighbour list are not in it.
 //   loup_export_state(h, NULL, 0, &n) sets n to the size in bytes. With a buffer it writes the block; a buffer
 //   smaller than that is refused, and n still holds the size.
 //   loup_import_state needs the same system on the handle (loup_set_system with the same atomic numbers in the
@@ -238,6 +244,11 @@ int loup_plan_memory(LoupHandle* h, int n_atoms, double edges_per_atom, LoupMemo
 int loup_debug_set_domain(LoupHandle* h, int n_local, int n_ghost, const int* atomic_numbers, double skin);
 int loup_debug_evaluate_domain(LoupHandle* h, const double* positions, const double* cell, const int* ghost_of,
                                double* out_energy_ev, double* out_forces, double* out_stress);
+// Testing only: the noise CSVR draws in steps first_step .. first_step + n_steps - 1 (counted by the handle's step
+// counter, which loup_set_system zeroes) with `seed` for `ndof` degrees of freedom: the standard normal R1 and the
+// chi-square variate of ndof - 1 degrees of freedom of each step.
+int loup_debug_csvr_noise(LoupHandle* h, unsigned long long seed, unsigned long long first_step, int n_steps,
+                          int ndof, double* out_normal, double* out_chi2);
 
 // Timing breakdown across components for diagnostics (averages over `n_calls` force evaluations).
 int loup_profile_force(LoupHandle* h, int warmup, int n_calls, double* out_total_us);

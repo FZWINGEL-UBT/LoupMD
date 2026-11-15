@@ -139,7 +139,7 @@ REFUSED = [
 ] + [
     (name.lower(), dict(kind=getattr(_core, name)),
      f"loup_run: integrator {name} is not built in this version of the library")
-    for name in ("LOUP_CSVR", "LOUP_NHC", "LOUP_BERENDSEN_NVT", "LOUP_BERENDSEN_NPT", "LOUP_BAOAB_NPT", "LOUP_MTK_NPT")
+    for name in ("LOUP_NHC", "LOUP_BERENDSEN_NVT", "LOUP_BERENDSEN_NPT", "LOUP_BAOAB_NPT", "LOUP_MTK_NPT")
 ]
 
 

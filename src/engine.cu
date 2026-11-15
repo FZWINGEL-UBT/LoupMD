@@ -174,7 +174,21 @@ __global__ void momentum_remove_kernel(int N, double inv_total_mass, const doubl
                                        double* __restrict__ vel64);
 __global__ void kinetic_energy_kernel(int N, const double* __restrict__ masses,
                                       const double* __restrict__ vel64, double* __restrict__ out_ke);
+__global__ void csvr_noise_debug_kernel(unsigned long long seed, unsigned long long first_step, int n, int ndof,
+                                        double* __restrict__ normal, double* __restrict__ chi2);
+__global__ void csvr_alpha_kernel(int ndof, double exp_term, double kb, unsigned long long seed,
+                                  unsigned long long* __restrict__ step_counter, double* __restrict__ target,
+                                  double* __restrict__ work, double* __restrict__ state);
+__global__ void csvr_first_half_kernel(
+    int N, double dt_ase, const double* __restrict__ work, const double* __restrict__ forces,
+    const double* __restrict__ inv_masses, double* __restrict__ pos64, double* __restrict__ vel64,
+    unsigned int* __restrict__ max_step_disp2);
 }  // namespace loup
+
+// Scalars an integrator carries from step to step and a restart needs (the state block holds all of them):
+// CSVR: [0] the energy the thermostat has transferred. The other slots are for the integrators to come.
+constexpr int kIntStateSlots = 64;
+constexpr int kIntWorkSlots = 8;  // per-step scratch: CSVR's kinetic energy and alpha
 
 // FNV-1a over a file's bytes (0 if unreadable).
 static uint64_t fnv1a_file(const char* path) {
@@ -540,6 +554,9 @@ struct LoupHandle {
     unsigned long long* d_step_counter = nullptr;
     double* d_langevin_target = nullptr;  // [5]: the thermostat's target of the next step in K, its change per step,
                                           // and that step's noise coefficients (c3, c4, c5 without the mass factor)
+    double* d_int_state = nullptr;        // [kIntStateSlots]: the integrator's scalars (see kIntStateSlots)
+    double* d_int_work = nullptr;         // [kIntWorkSlots]
+    int int_state_kind = -1;              // the LOUP_* kind whose scalars d_int_state holds; -1: none (all zero)
     // Fixed atoms (loup_set_fixed_atoms): their inverse masses on the device are zero, so no kernel moves them.
     int n_fixed = 0;
     std::vector<double> masses_caller;        // caller order: restores the inverse mass of an atom set free
@@ -648,6 +665,7 @@ struct LoupHandle {
     int md_graph_kind = -1;  // 0=NVE, 1=Langevin
     double md_graph_dt = 0.0;
     double md_graph_fr = 0.0;
+    double md_graph_tau = 0.0;
     unsigned long long md_graph_seed = 0;
     bool md_graph_thermo = false;  // the graphs carry the two thermo kernels
     bool md_graph_fixcom = false;  // the graphs are the fix_com variant (and its degrees of freedom)
@@ -713,6 +731,8 @@ struct LoupHandle {
         freep(d_species); freep(d_pos64); freep(d_ref_pos64); freep(d_vel64);
         freep(d_masses); freep(d_inv_masses); freep(d_sqrt_inv_masses); freep(d_rnd_vel);
         freep(d_need_rebuild); freep(d_max_step_disp2); freep(d_step_counter); freep(d_langevin_target);
+        freep(d_int_state); freep(d_int_work);
+        int_state_kind = -1;
         freep(d_rnd_pos); freep(d_com);
         freep(d_ke_f64);
         freep(d_thermo_ctrl); freep(d_thermo_rows);
@@ -1987,6 +2007,10 @@ static int set_system_impl(LoupHandle* h, int n_atoms, const int* atomic_numbers
     CUDA_CHECK(cudaMemsetAsync(h->d_step_counter, 0, sizeof(unsigned long long), h->stream));
     CUDA_CHECK(cudaMalloc(&h->d_langevin_target, 5 * sizeof(double)));
     CUDA_CHECK(cudaMemsetAsync(h->d_langevin_target, 0, 5 * sizeof(double), h->stream));
+    CUDA_CHECK(cudaMalloc(&h->d_int_state, kIntStateSlots * sizeof(double)));
+    CUDA_CHECK(cudaMemsetAsync(h->d_int_state, 0, kIntStateSlots * sizeof(double), h->stream));
+    CUDA_CHECK(cudaMalloc(&h->d_int_work, kIntWorkSlots * sizeof(double)));
+    CUDA_CHECK(cudaMemsetAsync(h->d_int_work, 0, kIntWorkSlots * sizeof(double), h->stream));
     CUDA_CHECK(cudaMalloc(&h->d_ke_f64, sizeof(double)));
 
     // Neighbour scratch
@@ -2189,6 +2213,8 @@ static int set_state_impl(LoupHandle* h, const double* positions, const double* 
     if (!valid_input(h->N, positions, cell, velocities)) return -1;
     if (upload_positions(h, positions, cell) < 0) return -1;
     CUDA_CHECK(cudaMemsetAsync(h->d_max_step_disp2, 0, 2 * sizeof(unsigned int), h->stream));
+    CUDA_CHECK(cudaMemsetAsync(h->d_int_state, 0, kIntStateSlots * sizeof(double), h->stream));  // a new trajectory
+    h->int_state_kind = -1;
     h->disp_window_steps = 0;
     h->md_steps = 0;
     h->thermo_pending = 0;
@@ -2387,7 +2413,7 @@ static int evaluate2_impl(
 static int run_md_loop(
     LoupHandle* h, int kind, int n_steps, double dt_fs,
     double temp_k, double temp_rate, double friction_per_fs, unsigned long long seed, int thermo_every,
-    bool fix_com, LoupMDStats* out_stats
+    bool fix_com, LoupMDStats* out_stats, double tau_fs = 0.0
 ) {
     // nl_valid: positions and a neighbour list exist (set_state or evaluate ran and its rebuild completed).
     if (!has_system(h)) return -1;
@@ -2486,6 +2512,20 @@ static int run_md_loop(
         const double target[5] = {first, temp_rate, a3 * sigma, a4 * sigma, a5 * sigma};
         CUDA_CHECK(cudaMemcpy(h->d_langevin_target, target, sizeof(target), cudaMemcpyHostToDevice));
     }
+    // CSVR (kind 2): ASE's exp(-dt / taut). The target of the call's first step and its change per step go into the
+    // thermostat target's first two slots; the scaling's own kernel advances them. The transferred energy carries
+    // on from the last CSVR call on this trajectory.
+    double csvr_exp = 0.0;
+    if (kind == 2) {
+        csvr_exp = exp(-dt_fs / tau_fs);
+        const double target[5] = {temp_k + temp_rate, temp_rate, 0.0, 0.0, 0.0};
+        CUDA_CHECK(cudaMemcpy(h->d_langevin_target, target, sizeof(target), cudaMemcpyHostToDevice));
+        if (h->int_state_kind != LOUP_CSVR) {
+            CUDA_CHECK(cudaMemsetAsync(h->d_int_state, 0, kIntStateSlots * sizeof(double), h->stream));
+            h->int_state_kind = LOUP_CSVR;
+        }
+        CUDA_CHECK(cudaMemsetAsync(h->d_int_work, 0, kIntWorkSlots * sizeof(double), h->stream));
+    }
 
     // fix_com: the buffers of the two-pass noise, and for NVE the total momentum removed once (the forces of a
     // periodic system sum to zero to rounding, so it stays removed).
@@ -2493,7 +2533,7 @@ static int run_md_loop(
     if (fix_com) {
         if (!h->d_com) CUDA_CHECK(cudaMalloc(&h->d_com, 6 * sizeof(double)));
         if (kind == 1 && !h->d_rnd_pos) CUDA_CHECK(cudaMalloc(&h->d_rnd_pos, (size_t)N * 3 * sizeof(double)));
-        if (kind == 0) {
+        if (kind != 1) {  // NVE and CSVR (whose scaling keeps a zero total momentum zero)
             CUDA_CHECK(cudaMemsetAsync(h->d_com, 0, 6 * sizeof(double), h->stream));
             loup::momentum_sum_kernel<<<(N + 255) / 256, 256, 0, h->stream>>>(N, h->d_masses, h->d_vel64, h->d_com);
             loup::momentum_remove_kernel<<<(N + 255) / 256, 256, 0, h->stream>>>(N, inv_total_mass, h->d_com,
@@ -2515,6 +2555,15 @@ static int run_md_loop(
         } else if (kind == 0) {
             loup::nve_first_half_kernel<<<gridN, 256, 0, h->stream>>>(
                 N, dt_ase, h->d_forces_f64, h->d_inv_masses, h->d_pos64, h->d_vel64, h->d_max_step_disp2);
+        } else if (kind == 2) {
+            // The kinetic energy, alpha from it and this step's noise, then the half-kick on the scaled velocities.
+            loup::kinetic_energy_kernel<<<gridN, 256, 0, h->stream>>>(N, h->d_masses, h->d_vel64, h->d_int_work);
+            loup::csvr_alpha_kernel<<<1, 1, 0, h->stream>>>(h->kinetic_dof(), csvr_exp, loup::ASE_KB, seed,
+                                                            h->d_step_counter, h->d_langevin_target, h->d_int_work,
+                                                            h->d_int_state);
+            loup::csvr_first_half_kernel<<<gridN, 256, 0, h->stream>>>(
+                N, dt_ase, h->d_int_work, h->d_forces_f64, h->d_inv_masses, h->d_pos64, h->d_vel64,
+                h->d_max_step_disp2);
         } else {
             // 32-thread blocks: the FP64 Box-Muller (3 curand_normal2_double per atom) is FP64-throughput bound on
             // consumer GPUs, so spread the atoms over every SM instead of N / 256 of them.
@@ -2530,7 +2579,7 @@ static int run_md_loop(
     };
     auto record_rest = [&]() {
         record_force_pass(h, 0);
-        if (kind == 0) {
+        if (kind != 1) {
             loup::nve_second_half_kernel<<<gridN, 256, 0, h->stream>>>(
                 N, dt_ase, h->d_forces_f64, h->d_inv_masses, h->d_vel64);
         } else {
@@ -2542,7 +2591,8 @@ static int run_md_loop(
             loup::thermo_kinetic_kernel<<<gridN, 256, 0, h->stream>>>(N, h->d_masses, h->d_vel64, h->d_thermo_ctrl);
             loup::thermo_row_kernel<<<1, 1, 0, h->stream>>>(h->kinetic_dof(), h->e0_total, loup::ASE_KB,
                                                             h->d_energy_f64,
-                                                            h->d_thermo_ctrl, h->d_thermo_rows);
+                                                            h->d_thermo_ctrl, h->d_thermo_rows,
+                                                            kind == 2 ? h->d_int_state : nullptr);
         }
     };
     auto capture = [&](cudaGraph_t& g, cudaGraphExec_t& ge, auto&& body) -> int {
@@ -2559,6 +2609,7 @@ static int run_md_loop(
         h->md_graph_kind = kind;
         h->md_graph_dt = dt_fs;
         h->md_graph_fr = friction_per_fs;
+        h->md_graph_tau = tau_fs;
         h->md_graph_seed = seed;
         h->md_graph_thermo = thermo_every > 0;
         h->md_graph_fixcom = fix_com;
@@ -2576,12 +2627,13 @@ static int run_md_loop(
         note_params();
         return 0;
     };
-    // The graphs bake in dt, friction and seed: those of an earlier call are kept when all of them are the same
+    // The graphs bake in dt, friction, time constant and seed: those of an earlier call are kept when all are the same
     // (review item S4) and dropped otherwise. The thermostat's temperature is not baked in (d_langevin_target), so a
     // schedule's calls reuse the graphs. Everything else a graph bakes in (edge bucket, scan workspace, kernel
     // variants, the long-range part's cell) drops the graphs where it changes: invalidate_graphs.
     if (h->md_graph_kind != kind || h->md_graph_dt != dt_fs ||
-        h->md_graph_fr != friction_per_fs || h->md_graph_seed != seed || h->md_graph_thermo != (thermo_every > 0) ||
+        h->md_graph_fr != friction_per_fs || h->md_graph_tau != tau_fs || h->md_graph_seed != seed ||
+        h->md_graph_thermo != (thermo_every > 0) ||
         h->md_graph_fixcom != fix_com) {
         h->invalidate_md_graphs();
     }
@@ -2742,6 +2794,30 @@ static int read_thermo_impl(LoupHandle* h, LoupThermoRow* rows, int max_rows, in
     return 0;
 }
 
+// Testing only: the noise CSVR draws in steps first_step .. first_step + n_steps - 1 for `ndof` degrees of freedom,
+// as the captured step draws it.
+static int csvr_noise_impl(LoupHandle* h, unsigned long long seed, unsigned long long first_step, int n_steps,
+                           int ndof, double* out_normal, double* out_chi2) {
+    if (!h) { loup::set_error("the handle is NULL"); return -1; }
+    if (n_steps <= 0 || ndof <= 0 || !out_normal || !out_chi2) {
+        loup::set_error("n_steps and ndof must be positive and both outputs given (n_steps = %d, ndof = %d)", n_steps,
+                        ndof);
+        return -1;
+    }
+    CUDA_CHECK(cudaSetDevice(h->device_id));
+    double* d_out = nullptr;
+    CUDA_CHECK(cudaMalloc(&d_out, (size_t)n_steps * 2 * sizeof(double)));
+    loup::csvr_noise_debug_kernel<<<(n_steps + 255) / 256, 256>>>(seed, first_step, n_steps, ndof, d_out,
+                                                                  d_out + n_steps);
+    cudaError_t rc = cudaMemcpy(out_normal, d_out, (size_t)n_steps * sizeof(double), cudaMemcpyDeviceToHost);
+    if (rc == cudaSuccess) {
+        rc = cudaMemcpy(out_chi2, d_out + n_steps, (size_t)n_steps * sizeof(double), cudaMemcpyDeviceToHost);
+    }
+    cudaFree(d_out);
+    CUDA_CHECK(rc);
+    return 0;
+}
+
 // loup_run: every integrator enters here; loup_run_nve and loup_run_langevin fill the struct and call it.
 static const char* integrator_name(int kind) {
     switch (kind) {
@@ -2770,9 +2846,9 @@ static int run_impl(LoupHandle* h, const LoupIntegrator* caller, int n_steps, Lo
     const LoupIntegrator it = *caller;
     const char* name = integrator_name(it.kind);
     if (!name) { loup::set_error("unknown integrator kind %d", it.kind); return -1; }
-    if (it.kind != LOUP_NVE && it.kind != LOUP_LANGEVIN) {
-        loup::set_error("integrator %s is not built in this version of the library (LOUP_NVE and LOUP_LANGEVIN are)",
-                        name);
+    if (it.kind != LOUP_NVE && it.kind != LOUP_LANGEVIN && it.kind != LOUP_CSVR) {
+        loup::set_error("integrator %s is not built in this version of the library (LOUP_NVE, LOUP_LANGEVIN and "
+                        "LOUP_CSVR are)", name);
         return -1;
     }
     if (it.fix_com != 0 && h && h->n_fixed > 0) {
@@ -2786,14 +2862,22 @@ static int run_impl(LoupHandle* h, const LoupIntegrator* caller, int n_steps, Lo
         loup::set_error("temp_k must be finite and not negative, got %g K", it.temp_k);
         return -1;
     }
-    if (!std::isfinite(it.friction_per_fs) || it.friction_per_fs < 0.0) {
+    if (it.kind == LOUP_LANGEVIN && (!std::isfinite(it.friction_per_fs) || it.friction_per_fs < 0.0)) {
         loup::set_error("friction_per_fs must be finite and not negative, got %g /fs", it.friction_per_fs);
+        return -1;
+    }
+    if (it.kind == LOUP_CSVR && (!std::isfinite(it.tau_t_fs) || !(it.tau_t_fs > 0.0))) {
+        loup::set_error("tau_t_fs must be finite and positive, got %g fs", it.tau_t_fs);
         return -1;
     }
     if (!std::isfinite(it.temp_rate_k_per_step) || it.temp_k + it.temp_rate_k_per_step * (double)n_steps < 0.0) {
         loup::set_error("temp_rate_k_per_step must be finite and must not take the target below 0 K: %g K + %d steps "
                         "of %g K", it.temp_k, n_steps, it.temp_rate_k_per_step);
         return -1;
+    }
+    if (it.kind == LOUP_CSVR) {
+        return run_md_loop(h, 2, n_steps, it.dt_fs, it.temp_k, it.temp_rate_k_per_step, 0.0, it.seed,
+                           it.thermo_every, it.fix_com != 0, out_stats, it.tau_t_fs);
     }
     return run_md_loop(h, 1, n_steps, it.dt_fs, it.temp_k, it.temp_rate_k_per_step, it.friction_per_fs, it.seed,
                        it.thermo_every, it.fix_com != 0, out_stats);
@@ -2865,9 +2949,9 @@ static int get_state_impl(LoupHandle* h, double* out_positions, double* out_velo
 }
 
 // The state blob (loup_export_state / loup_import_state): what a restart needs beyond the system itself, in the
-// caller's atom order. Version 1 covers NVE and Langevin, whose only state besides positions and velocities is the
-// step counter (the offset of the noise stream). Forces and the neighbour list are not stored: import rebuilds
-// the list, and the next run starts with a force pass.
+// caller's atom order: positions, velocities, the step counter (the offset of the noise streams) and the
+// integrator's scalars (kIntStateSlots: CSVR's transferred energy) with the kind they belong to. Forces and the
+// neighbour list are not stored: import rebuilds the list, and the next run starts with a force pass.
 //   StateHeader | positions [N, 3] f64 | velocities [N, 3] f64 | FNV-1a of everything before, u64
 struct StateHeader {
     char magic[8];            // "LOUPSTA1"
@@ -2878,8 +2962,11 @@ struct StateHeader {
     uint64_t step_counter;
     uint32_t max_step_disp2[2];  // the displacement tracker: current and previous window (float bits)
     double cell[9];
+    int32_t integrator_kind;     // the LOUP_* kind whose scalars follow; -1: none
+    uint32_t reserved;
+    double integrator_state[kIntStateSlots];
 };
-static_assert(sizeof(StateHeader) == 120, "StateHeader has padding");
+static_assert(sizeof(StateHeader) == 128 + 8 * kIntStateSlots, "StateHeader has padding");
 static const char kStateMagic[8] = {'L', 'O', 'U', 'P', 'S', 'T', 'A', '1'};
 static size_t state_blob_bytes(int n_atoms) {
     return sizeof(StateHeader) + (size_t)n_atoms * 6 * sizeof(double) + sizeof(uint64_t);
@@ -2913,6 +3000,8 @@ static int export_state_impl(LoupHandle* h, void* buffer, size_t capacity, size_
     CUDA_CHECK(cudaMemcpyAsync(v_sorted.data(), h->d_vel64, n3 * sizeof(double), cudaMemcpyDeviceToHost, h->stream));
     CUDA_CHECK(cudaMemcpyAsync(&hd.step_counter, h->d_step_counter, sizeof(hd.step_counter), cudaMemcpyDeviceToHost, h->stream));
     CUDA_CHECK(cudaMemcpyAsync(hd.max_step_disp2, h->d_max_step_disp2, sizeof(hd.max_step_disp2), cudaMemcpyDeviceToHost, h->stream));
+    hd.integrator_kind = h->int_state_kind;
+    CUDA_CHECK(cudaMemcpyAsync(hd.integrator_state, h->d_int_state, sizeof(hd.integrator_state), cudaMemcpyDeviceToHost, h->stream));
     CUDA_CHECK(cudaStreamSynchronize(h->stream));
     std::vector<double> body(2 * n3);
     for (int dst = 0; dst < h->N; ++dst) {
@@ -2941,8 +3030,13 @@ static int import_state_impl(LoupHandle* h, const void* buffer, size_t size) {
     const unsigned char* in = static_cast<const unsigned char*>(buffer);
     memcpy(&hd, in, sizeof(hd));
     if (memcmp(hd.magic, kStateMagic, 8) != 0) { loup::set_error("not a LoupMD state blob"); return -1; }
-    if (hd.version != 1 || hd.header_bytes != sizeof(StateHeader)) {
+    if (hd.version != 1) {
         loup::set_error("the state blob has version %u, and this library reads version 1", hd.version);
+        return -1;
+    }
+    if (hd.header_bytes != sizeof(StateHeader)) {
+        loup::set_error("the state blob's header has %u bytes, and this library's has %zu (written by another "
+                        "build of the library)", hd.header_bytes, sizeof(StateHeader));
         return -1;
     }
     if (hd.n_atoms != (uint64_t)h->N) {
@@ -2983,6 +3077,8 @@ static int import_state_impl(LoupHandle* h, const void* buffer, size_t size) {
     if (rebuild_neighbors(h) != 0) return -1;
     CUDA_CHECK(cudaMemcpyAsync(h->d_step_counter, &hd.step_counter, sizeof(hd.step_counter), cudaMemcpyHostToDevice, h->stream));
     CUDA_CHECK(cudaMemcpyAsync(h->d_max_step_disp2, hd.max_step_disp2, sizeof(hd.max_step_disp2), cudaMemcpyHostToDevice, h->stream));
+    CUDA_CHECK(cudaMemcpyAsync(h->d_int_state, hd.integrator_state, sizeof(hd.integrator_state), cudaMemcpyHostToDevice, h->stream));
+    h->int_state_kind = hd.integrator_kind;
     h->disp_window_steps = 0;
     h->md_steps = 0;
     h->thermo_pending = 0;
@@ -3280,6 +3376,13 @@ int loup_debug_evaluate_domain(LoupHandle* h, const double* positions, const dou
 
 int loup_read_thermo(LoupHandle* h, LoupThermoRow* rows, int max_rows, int* n_rows) {
     return guarded(h, "loup_read_thermo", [&] { return read_thermo_impl(h, rows, max_rows, n_rows); });
+}
+
+int loup_debug_csvr_noise(LoupHandle* h, unsigned long long seed, unsigned long long first_step, int n_steps,
+                          int ndof, double* out_normal, double* out_chi2) {
+    return guarded(h, "loup_debug_csvr_noise", [&] {
+        return csvr_noise_impl(h, seed, first_step, n_steps, ndof, out_normal, out_chi2);
+    });
 }
 
 int loup_plan_memory(LoupHandle* h, int n_atoms, double edges_per_atom, LoupMemoryPlan* out) {

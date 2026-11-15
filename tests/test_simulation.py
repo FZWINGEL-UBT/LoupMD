@@ -226,7 +226,8 @@ def test_langevin_reaches_the_engine_with_its_settings(setup):
     assert rows[-1][3] == "350.0" and float(rows[-1][1]) == pytest.approx(0.04)
     record = json.loads((setup.tmp_path / "run" / "simulation.json").read_text())
     assert record["integrator"] == {"ensemble": "nvt", "scheme": "langevin", "timestep_fs": 2.0,
-                                    "temperature_K": 350.0, "friction_per_fs": 0.02, "seed": 7, "fixcm": True}
+                                    "temperature_K": 350.0, "friction_per_fs": 0.02, "tau_fs": None, "seed": 7,
+                                    "fixcm": True}
     assert record["seed"] == 7 and record["model"]["sha256"] == sim.force_field.sha256
 
 
@@ -511,3 +512,41 @@ def test_fixcm_is_on_by_default_off_with_fixed_atoms_and_counts_three_degrees_fe
     with pytest.raises(PlanRefused, match="fixcm with fixed atoms"):
         loupmd.Simulation(_with_fixed(setup, [0]), setup.force_field(),
                           integrator=IntegratorConfig(ensemble="nve", fixcm=True))
+
+
+def test_csvr_runs_with_its_time_constant_and_refuses_a_structure_at_rest(setup):
+    record = integrators.CSVR(timestep_fs=1.0, temperature_K=200.0, tau_fs=50.0)
+    at_rest = setup.atoms.copy()
+    at_rest.set_velocities(np.zeros(at_rest.positions.shape))
+    with pytest.raises(InputError, match="the structure is at rest, and CSVR rescales the velocities it finds"):
+        loupmd.Simulation(at_rest, setup.force_field(), integrator=record)
+    assert SpringEngine.made == []
+    sim = loupmd.Simulation(setup.atoms, setup.force_field(), integrator=record, seed=5)
+    assert (sim.config.scheme, sim.config.tau_fs, sim.config.fixcm) == ("csvr", 50.0, True)
+    sim.run(schedule=protocols.ramp(200, 300, ps=0.04))
+    engine, = SpringEngine.made
+    assert [e for e in engine.log if isinstance(e, tuple) and e[0] == "run"] == [("run", 40, _core.LOUP_CSVR, 0)]
+    assert engine.targets == [(40, 200.0, pytest.approx(2.5))] and engine.fix_com is True
+    assert sim.config.temperature_K == 300.0                 # the thermostat stays at the schedule's last target
+    for fields, message in (({"tau_fs": 0.0}, "IntegratorConfig.tau_fs must be positive and finite"),
+                            ({"fixcm": "yes"}, "CSVR.fixcm must be True, False or 'auto'")):
+        with pytest.raises(InputError, match=message):
+            integrators.CSVR(**{"timestep_fs": 1.0, "temperature_K": 300.0, "tau_fs": 50.0, **fields})
+
+
+def test_records_as_tables():
+    record = integrators.CSVR(timestep_fs=1.0, temperature_K=300.0, tau_fs=100.0)
+    table = integrators.to_data(record)
+    assert table == {"type": "CSVR", "timestep_fs": 1.0, "temperature_K": 300.0, "tau_fs": 100.0, "fixcm": "auto"}
+    assert integrators.from_data(table) == record
+    assert integrators.from_data({"type": "CSVR", "tau_fs": 100.0}, timestep_fs=1.0, temperature_K=300.0) == record
+    assert integrators.from_data({"type": "NVE"}, timestep_fs=2.0, temperature_K=300.0) == integrators.NVE(
+        timestep_fs=2.0)
+    for data, message in (({"type": "MTK"}, "type 'MTK' is not one of NVE, Langevin, CSVR"),
+                          ({"tau_fs": 1.0}, "type None is not one of"),
+                          ({"type": "CSVR", "tau_fs": 100.0, "friction": 1}, "unknown key 'friction' in .integrator. "
+                                                                             "of type CSVR"),
+                          ({"type": "Langevin"}, "of type Langevin lacks temperature_K, friction_per_fs"),
+                          ("CSVR", "is not a table")):
+        with pytest.raises(InputError, match=message):
+            integrators.from_data(data)

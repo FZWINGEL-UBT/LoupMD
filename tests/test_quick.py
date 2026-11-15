@@ -210,3 +210,17 @@ def test_an_unavailable_gate_stops_or_is_recorded(ff, atoms, tmp_path, monkeypat
                        check="allow_unavailable")
     assert result.gate == {"status": "unavailable", "why": "the gate needs mace-torch, which is not installed"}
     assert "unavailable: the gate needs mace-torch" in result.summary and result.simulation.step == 20
+
+
+def test_an_explicit_csvr_record_runs_and_is_recorded(ff, atoms, tmp_path):
+    record = integrators.CSVR(timestep_fs=1.0, temperature_K=250.0, tau_fs=40.0)
+    result = loupmd.md(atoms, model=ff, steps=20, integrator=record, output=str(tmp_path / "run"), seed=3,
+                       initial_velocities="maxwell_boltzmann")
+    assert result.simulation.config.scheme == "csvr" and result.simulation.config.tau_fs == 40.0
+    assert result.metadata["arguments"]["integrator"] == {"type": "CSVR", "timestep_fs": 1.0, "temperature_K": 250.0,
+                                                          "tau_fs": 40.0, "fixcm": "auto"}
+    assert "NVT, CSVR (Bussi), timestep 1 fs, time constant 40 fs, 250 K" in result.summary
+    assert "Maxwell-Boltzmann at 250 K" in result.metadata["warnings"][0]
+    with pytest.raises(InputError, match="the structure is at rest, and CSVR rescales the velocities"):
+        loupmd.md(atoms, model=ff, steps=20, integrator=record, output=str(tmp_path / "rest"))
+    assert not (tmp_path / "rest").exists()

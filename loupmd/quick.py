@@ -5,7 +5,8 @@ to a ``Simulation``, which gates (if asked), runs and writes. Every argument err
 loaded. What ``md`` decides itself:
 
 - the integrator: ``ensemble="NVT"`` is ``lm.integrators.Langevin``, ``"NVE"`` is ``NVE``; ``"NPT"`` is refused
-  until its integrators are built. An explicit ``integrator=`` wins; a conflicting argument is an error;
+  until its integrators are built. An explicit ``integrator=`` (any ``lm.integrators`` record, for example
+  ``CSVR``) wins; a conflicting argument is an error;
 - NVE has no target: the momenta are the structure's, and ``temperature_K=`` and ``schedule=`` are errors;
 - the defaults: friction 0.02 per ASE time unit (about 0.001965/fs, FastMACE's), a drawn and recorded seed, the
   output directory ``./<structure stem>.loupmd/`` (``./loupmd-run/`` for an in-memory ``Atoms``),
@@ -198,7 +199,7 @@ def md(structure, *, model, head=None, charge=None, spin_multiplicity=None, sha2
         raise InputError(f"model must be a label, path, URL or lm.load result, got {type(model).__name__}")
 
     if integrator is not None:
-        if not isinstance(integrator, (integrators.NVE, integrators.Langevin)):
+        if not isinstance(integrator, tuple(integrators.RECORDS.values())):
             raise InputError(f"integrator must be an lm.integrators record, got {type(integrator).__name__}")
         record_ensemble = "NVE" if isinstance(integrator, integrators.NVE) else "NVT"
         if ensemble != "NVT" and ensemble != record_ensemble:
@@ -264,6 +265,7 @@ def md(structure, *, model, head=None, charge=None, spin_multiplicity=None, sha2
         else:
             warnings.append(f"starting velocities: the structure's own; initial_velocities={initial_velocities!r} "
                             "draws only for a structure at rest")
+    explicit = integrator
     if integrator is None:
         integrator = (integrators.NVE(timestep_fs=timestep_fs) if nve else
                       integrators.Langevin(timestep_fs=timestep_fs, temperature_K=start,
@@ -277,6 +279,8 @@ def md(structure, *, model, head=None, charge=None, spin_multiplicity=None, sha2
                  "check": check, "capacity": capacity, "device": device,
                  "output": {"directory": out.directory, "trajectory_every": out.trajectory_every,
                             "thermo_every": out.thermo_every, "restart_every": out.restart_every}}
+    if explicit is not None:                    # so that the record repeats the run: `loupmd run metadata.json`
+        arguments["integrator"] = integrators.to_data(explicit)
 
     # ---- load: from here on the model file is needed ----
     force_field = model if isinstance(model, ForceField) else load(

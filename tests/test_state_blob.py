@@ -13,7 +13,7 @@ from conftest import maxwell_velocities, srtio3
 
 from loupmd import BackendError, LoupEngine
 
-HEADER = 120   # StateHeader of src/engine.cu
+HEADER = 640   # StateHeader of src/engine.cu
 LANGEVIN = dict(dt_fs=1.0, temp_k=300.0, friction_per_fs=0.01, seed=5)
 
 
@@ -109,8 +109,8 @@ def test_blobs_that_do_not_fit_are_refused_with_the_reason(sto_bundle):
         reordered.import_state(blob)
 
     cases = [
-        (blob[:-8], "the state blob has 6600 bytes, and 6608 are expected for 135 atoms"),
-        (blob + b"\0" * 8, "the state blob has 6616 bytes, and 6608 are expected"),
+        (blob[:-8], "the state blob has 7120 bytes, and 7128 are expected for 135 atoms"),
+        (blob + b"\0" * 8, "the state blob has 7136 bytes, and 7128 are expected"),
         (blob[:64], "the state blob has 64 bytes, fewer than its header"),
         (b"NOTSTATE" + blob[8:], "not a LoupMD state blob"),
         (_patched(blob, 8, "<I", 2), "the state blob has version 2, and this library reads version 1"),
