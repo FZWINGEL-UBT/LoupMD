@@ -75,7 +75,23 @@ public:
     int preloc_pair_sym() const;
     // Records the whole force pass on in.stream (capturable; no host syncs, no allocation).
     void record(const GenericPassInputs& in);
+    // S64: times each layer's conv forward variants on the last recorded pass's inputs (outside capture; sm_120) and
+    // keeps the fastest. -1: no pass recorded for this system yet (call again later); 0: unchanged; 1: a variant
+    // changed (captured graphs must be re-recorded).
+    int tune_conv_variants(cudaStream_t st);
 private:
+    struct ConvTuneArgs {
+        bool valid = false;
+        int N = 0;
+        const int* row_ptr = nullptr;
+        const int* senders = nullptr;
+        const float4* vec_len = nullptr;
+        const int* slab = nullptr;
+        const float2* t_sx = nullptr;
+        const int* species = nullptr;
+    };
+    ConvTuneArgs conv_args_;
+    int conv_var_override_ = -1;  // S64: LOUP_CONV_FWD_VARIANT (test override), -1 none
     void free_model();
     // S57 skip-chain fold (sm_120; LOUP_CHAIN_FOLD=0 disables): see setup_chain_fold in generic.cu.
     void setup_chain_fold(const Bundle& b);

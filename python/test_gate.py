@@ -107,10 +107,9 @@ def read_bundle_meta(path):
     return read_bundle(path)[0]
 
 
-NBCL5_CIFS = [
-    "/mnt/d/Margraf/FastMACE/fastmace/protocols/data/NbCl5_R2SCAN.cif",
-    "/mnt/homes/zwingel/FastMACE/fastmace/protocols/data/NbCl5_R2SCAN.cif",
-]
+# Directories holding ResearchModule/ and FastMACE/: LOUP_DATA_ROOT (other machines, e.g. the cluster) first.
+DATA_ROOTS = [r for r in (os.environ.get("LOUP_DATA_ROOT"), "/mnt/d/Margraf", "/mnt/homes/zwingel") if r]
+NBCL5_CIFS = [f"{r}/FastMACE/fastmace/protocols/data/NbCl5_R2SCAN.cif" for r in DATA_ROOTS]
 
 # Forced kernel paths (environment read at engine creation, see include/loupmd.h).
 LARGE_VARIANTS = (
@@ -118,10 +117,20 @@ LARGE_VARIANTS = (
     + [{"LOUP_WPRIME_THREADS": "512"}, {"LOUP_REORDER": "1"}, {"LOUP_REORDER": "0"}]
 )
 SMALL_VARIANTS = [{"LOUP_WPRIME_RCV": "1"}, {"LOUP_WPRIME_RCV": "1", "LOUP_WPRIME_THREADS": "512"}]
-VARIANT_KEYS = ("LOUP_SPLINE_VARIANT", "LOUP_WPRIME_THREADS", "LOUP_WPRIME_RCV", "LOUP_REORDER")
+# Generic models: the conv forward variants of lx 1 layers at C 128 (GenericModel::tune_conv_variants picks one per
+# system on sm_120; each is gated forced, on every configuration)
+GENERIC_VARIANTS = [{"LOUP_CONV_FWD_VARIANT": v} for v in ("1", "2")]
+VARIANT_KEYS = ("LOUP_SPLINE_VARIANT", "LOUP_WPRIME_THREADS", "LOUP_WPRIME_RCV", "LOUP_REORDER", "LOUP_CONV_FWD_VARIANT")
 
 
-STRUCTURE_ROOTS = ["/mnt/d/Margraf/ResearchModule/Structures", "/mnt/homes/zwingel/ResearchModule/Structures"]
+def has_conv_variants(meta) -> bool:
+    """A generic bundle with an lx 1, C 128 conv layer (launch_conv_fwd's conv_fwd_variants > 1)."""
+    return meta.get("arch") == "generic" and any(
+        not int(meta.get(f"L{t}.first_hidden", 0)) and int(meta.get(f"L{t}.lmax_x", -1)) == 1
+        and int(meta.get(f"L{t}.C_x", 0)) == 128 for t in range(int(meta.get("n_layers", 0))))
+
+
+STRUCTURE_ROOTS = [f"{r}/ResearchModule/Structures" for r in DATA_ROOTS]
 
 
 def _structure(rel):
@@ -318,6 +327,7 @@ def main():
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
     specialised = {}
+    conv_variants = {}
 
     engines = {}
     all_pass = True
@@ -334,7 +344,9 @@ def main():
             os.environ.update(variant)
             bundle = ensure_loup_bundle(model_path, list(zs), head=head, generic=args.generic or None,
                                         charge=args.charge, spin_multiplicity=args.spin_multiplicity)
-            specialised[key] = read_bundle_meta(bundle).get("arch") != "generic"
+            meta = read_bundle_meta(bundle)
+            specialised[key] = meta.get("arch") != "generic"
+            conv_variants[key] = has_conv_variants(meta)
             engines[key] = LoupEngine(bundle, device_id=0)
             for k in VARIANT_KEYS:
                 os.environ.pop(k, None)
@@ -369,6 +381,9 @@ def main():
         zs = tuple(sorted(set(at.get_atomic_numbers().tolist())))
         if specialised.get((zs, ())):  # the forced-variant matrix exists only for the specialised kernels
             for variant in (LARGE_VARIANTS if len(at) >= 512 else SMALL_VARIANTS):
+                run(name, at, (r64, r32, sr), variant)
+        elif conv_variants.get((zs, ())):
+            for variant in GENERIC_VARIANTS:
                 run(name, at, (r64, r32, sr), variant)
 
     # The reorder only permutes atoms inside species groups: results must agree to float32 summation-order noise.

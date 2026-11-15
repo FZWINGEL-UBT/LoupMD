@@ -63,7 +63,8 @@ const GProdKernels* find_gprod(const char* sig);
 void launch_conv_fwd(int lx, cudaStream_t st, int N, int C, int S, int I, const SplineGrid& sg, int perm, int psym,
                      const int* rp, const int* snd, const float4* vl, const int* act_slab, const float2* act_t_sx,
                      bool preloc, const int* sp, const uint2* packed, const float4* dens, unsigned bias_shift,
-                     float* const* x, float* const* mid, float* D);
+                     float* const* x, float* const* mid, float* D, int var = 0);
+int conv_fwd_variants(int lx, int C);
 void launch_conv_bwd(int lx, cudaStream_t st, int N, int C, int S, int I, const SplineGrid& sg, int perm, int psym,
                      const int* rp, const int* snd, const float4* vl, const int* act_slab, const float2* act_t_sx,
                      bool preloc, const int* sp, const uint2* packed, const float4* dens, unsigned bias_shift,

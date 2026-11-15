@@ -1205,12 +1205,15 @@ static float time_best_of_3(LoupHandle* h, cudaEvent_t e0, cudaEvent_t e1, const
 
 static void tune_rebuild_variants(LoupHandle* h) {
     if (h->variants_tuned) return;
-    if (h->generic()) {  // the timed variants are the specialised path's kernels
-        h->variants_tuned = true;
-        return;
-    }
     // No pair inside r_max + skin: the active-edge arrays were never written. Time later, on a list with edges.
     if (h->E_graph == 0) return;
+    if (h->generic()) {  // S64: the generic layers' conv forward variants (GenericModel::tune_conv_variants)
+        const int r = h->gen->tune_conv_variants(h->stream);
+        if (r < 0) return;  // no force pass recorded for this system yet: time at a later rebuild
+        h->variants_tuned = true;
+        if (r > 0) h->invalidate_graphs();
+        return;
+    }
     h->variants_tuned = true;
     EventPairGuard ev;
     cudaEvent_t e0 = ev.e0, e1 = ev.e1;

@@ -86,6 +86,8 @@ int loup_profile_force(LoupHandle* h, int warmup, int n_calls, double* out_total
 //   LOUP_POLAR_FOLD=0  POLAR long range without the load-time dot^T weight fold (testing the path other GPUs take).
 //   LOUP_CHAIN_FOLD=0  generic models (OMOL-0) without the load-time skip-chain fold (testing the path other GPUs take).
 //   LOUP_SPECIES_TABLES=0  generic models (OMOL-0, MH-1) with layer 0's species-only GEMMs instead of per-species tables.
+//   LOUP_CONV_TUNE=0  generic models keep the default conv forward variant (no per-system timing at the first rebuild).
+//   LOUP_CONV_FWD_VARIANT=0|1|2  force a generic conv forward variant (testing; see python/test_gate.py).
 //   LOUP_DEBUG_SPLINE, LOUP_DEBUG_GEMM  print the variant / GEMM tuning decisions to stderr.
 
 #ifdef __cplusplus
