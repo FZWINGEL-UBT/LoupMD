@@ -47,6 +47,26 @@ behaviour is an estimate and says so.
 | A6 | Licence | MIT for LoupMD's own code; LGPL-2.1-or-later for files ported from ASE; third-party notices as FastMACE's | none if settled before the first tag | S7-T03 |
 | A7 | Pre-releases | stages end in internal tags (`v1.0.0a1` ...); nothing is uploaded before 1.0.0 | none | Stage 7 |
 
+### 1.3 Open points found while building (owner's instruction of 15 November 2026: document, recommend, keep working)
+
+Each row is the owner's to decide. Work continues on the recommendation, which is the reversible choice in every
+row; "Undo" says what a different answer costs.
+
+| Id | Question | Recommendation, in use | Why | Undo |
+| --- | --- | --- | --- | --- |
+| D1 | Licence (A6) | MIT for LoupMD's code, LGPL-2.1-or-later for files ported from ASE, as FastMACE. `LICENSE` and `NOTICE.md` are written on this default | same owner and the same third-party sources as FastMACE; nothing is published before a tag | replace `LICENSE` and one sentence of `NOTICE.md` |
+| D2 | When to move `python/` into `loupmd/` and `codegen/` (S0-T03) | not moved. New Python goes to `loupmd/`; `loupmd/_legacy.py` loads the bundle cache from `python/loupmd.py` | the owner named this as waiting for his go | none; the move itself is `plans/stage-0-ground-rules.md` |
+| D3 | `loup_set_charge_spin` of §4.3 against the code, which folds charge and spin into the bundle at export | drop the call from ABI v1. Charge and spin are arguments of `lm.load` / `ensure_bundle` and select a bundle | the fold is what is gated (four settings) and it keeps layer 0 species-only, which the S57 and S59 speed-ups rely on; a run-time setter would need the unfolded path back | add the call later as an ABI addition |
+| D4 | OMOL-0 extra large has three layers; §4.4's sweeps assume two | refused for tiled execution at 1.0, like POLAR-1; `loup_get_info` reports the layer count | a three-layer wavefront needs five sweeps and two halo widths: a design of its own | a Stage 5 extension |
+| D5 | §2 forbids FP16 "anywhere on the force path"; the default hybrid GEMM cubins use one FP16 tensor-core instruction for the cross terms of the 3xTF32 split | keep the cubins; read §2 as "no reduced-precision arithmetic". The FP16 instruction multiplies parts that float16 holds exactly, so the product keeps 3xTF32's accuracy. State the exception in §2 when the owner agrees | in use since stage S1 of the optimisation work, passes the gate on every model set, off for long-range models | `LOUP_NO_HYBRID=1` as the default costs the hybrid GEMM's speed (not measured here) |
+| D6 | `cubins/tf32x3_hyb_sm120.cubin` has no build record in either repository | rebuild it with FastMACE's `tools/build_cutlass_tf32x3.sh` for `sm_120`, record compiler, CUTLASS commit and SHA-256 in `NOTICE.md`; swap the file only after the gate and an A/B if the bytes differ (S7-T03) | a shipped binary needs a recipe | none |
+| D7 | The hybrid kernels overflow for matrix elements of 32752 and above (FastMACE `hybrid_f16.h`) | add a check to S2-T06: the loader refuses the hybrid plan for a weight matrix above the bound; activations are bounded by the gate's normalisation but this is not proven for every label | a silent `inf` would be worse than a slower GEMM | none |
+| D8 | Version string while the stages run | `LOUP_VERSION "1.0.0a1"`, so `loup_version()` gives `1.0.0a1+<hash>`; `1.0.0+<hash>` at the release | a library built today should not call itself 1.0.0 | one line in the header and one in `loupmd/__init__.py` |
+| D9 | `python/bench_md.py`, `bench_family.py`, `test_gate.py` still bind the library through `python/loupmd.py`, which cannot read `loup_last_error` | leave them until S0-T03; `LOUP_DEBUG_ERRORS=1` prints the reason | editing `python/` is what D2 holds back | a ten-line edit of `python/loupmd.py` |
+| D10 | Baseline commit of S0-T01 | the merged code (`bac354c`), not `0336751` | the owner's order put the merge first; Stage 1 is compared with what it starts from | none |
+| D11 | S1-T03's scope | besides keeping the graphs, a run call no longer makes a force pass before its first step when the forces on the device are current | the 2% criterion cannot be met otherwise: that pass is one force evaluation per call | one `if` in `run_md_loop` |
+| D12 | S6-T06 and S6-T07 are done on `round6-hardening`; A2 concerns five labels | the two tasks shrink to the gate under the release layout and the front-end arguments; S6-T10 measures all five labels | the code is ahead of the plan | none |
+
 ---
 
 ## 2. Global constraints
@@ -325,7 +345,8 @@ Effort is in working weeks of one focused lane and is a rough estimate.
 **Progress (15 November 2026).** Step-level plan: `plans/stage-0-ground-rules.md` (`d78b8de`).
 - S0-T01: open. The library of the merged tree is built (sha256 `df58a9bd2623a502...`); tests, gate and benchmark
   are queued behind the other session's GPU jobs. The baseline is the merged code (`bac354c`), not `0336751`.
-- S0-T02: waits for the owner's answer on A6. The inventory is made (three cubins, four generated files).
+- S0-T02: written on the default A6 (§1.3 D1): `LICENSE`, `cubins/LICENSE`, `NOTICE.md`, `tests/test_notice.py`
+  (3 passed, no GPU needed). The `sm_120` cubin has no build record (D6).
 - S0-T03: waits for the owner's moment. New Python code goes to `loupmd/`; `python/` is untouched.
 - S0-T04: merges so far: `da42ec3` merged `round6-hardening` `11778cd` on 15 November 2026, before Stage 0.
 
