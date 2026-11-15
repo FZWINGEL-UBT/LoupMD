@@ -60,11 +60,12 @@ def test_a_bundle_is_exported_once_and_found_again(stage):
     others = {
         bundles.ensure_bundle(model, [8, 22], exporter=exporter),
         bundles.ensure_bundle(model, [8, 22, 38], head="omat_pbe", exporter=exporter),
-        bundles.ensure_bundle(model, [8, 22, 38], generic=True, exporter=exporter),
+        bundles.ensure_bundle(model, [8, 22, 38], generic=False, exporter=exporter),
         bundles.ensure_bundle(model, [8, 22, 38], charge=1, spin_multiplicity=2, exporter=exporter),
     }
     assert len(others | {first}) == 5 and len(_runs(tmp_path)) == 5
-    assert "--head omat_pbe" in _runs(tmp_path)[2] and "--generic" in _runs(tmp_path)[3]
+    assert "--head omat_pbe" in _runs(tmp_path)[2]
+    assert "--generic" in _runs(tmp_path)[0] and "--generic" not in _runs(tmp_path)[3]      # generic by default
     assert "--charge 1 --spin-multiplicity 2" in _runs(tmp_path)[4]
     assert bundles.ensure_bundle(model, [8, 22, 38], charge=1.0, spin_multiplicity=2, exporter=exporter) in others
     with pytest.raises(InputError, match="charge must be an integer, got 0.5"):

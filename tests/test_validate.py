@@ -357,11 +357,11 @@ def test_the_command_exits_0_on_a_pass_and_1_on_a_failure(monkeypatch, tmp_path,
     assert seen["model"] == "omat0-medium" and seen["set_name"] == "oxide" and seen["structures"] is None
     seen["want"] = False
     assert main(["validate", "--model", "omat0-medium", "--set", "crystals", "--ref-device", "cpu", "--no-ref-cache",
-                 "--include-unstable", "--generic", "--charge", "-1", "--spin-multiplicity", "2"]) == 1
+                 "--include-unstable", "--specialised", "--charge", "-1", "--spin-multiplicity", "2"]) == 1
     captured = capsys.readouterr()
     assert "gate FAILED" in captured.out
     assert (seen["set_name"], seen["use_ref_cache"], seen["include_unstable"], seen["generic"], seen["charge"],
-            seen["spin_multiplicity"]) == ("crystals", False, True, True, -1, 2)
+            seen["spin_multiplicity"]) == ("crystals", False, True, False, -1, 2)
     assert seen["gate_config"].reference_device == "cpu"
 
 

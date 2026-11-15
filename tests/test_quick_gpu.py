@@ -22,7 +22,7 @@ def test_md_runs_reports_and_records(model_path, tmp_path):
                        initial_velocities="maxwell_boltzmann")
     metadata = json.loads((tmp_path / "run" / "metadata.json").read_text())
     assert provenance.validate(metadata) == [] and metadata["step"] == 200 and metadata["status"] == "idle"
-    assert metadata["plan"]["kernels"] == "specialised" and metadata["plan"]["interaction_layers"] == 2
+    assert metadata["plan"]["kernels"] == "generic" and metadata["plan"]["interaction_layers"] == 2
     assert metadata["plan"]["memory"]["whole_bytes"] > 0 and metadata["plan"]["library"].startswith("1.0.0a1+")
     assert metadata["gpu"]["name"] and metadata["gpu"]["driver"]
     assert metadata["structure"]["atoms"] == 320 and metadata["bundle"].endswith(".loup")
@@ -31,7 +31,7 @@ def test_md_runs_reports_and_records(model_path, tmp_path):
     assert [int(r[0]) for r in rows] == list(range(0, 201, 20)) and len(output.read_frames(tmp_path / "run")) == 11
     assert 100.0 < float(rows[-1][4]) < 400.0                         # a thermostat at 300 K, 320 atoms
     print(result.summary)
-    for line in ("specialised kernels, 2 interaction layers, cutoff 6 A", "memory:", "ms/step with output",
+    for line in ("generic kernels, 2 interaction layers, cutoff 6 A", "memory:", "ms/step with output",
                  "Academic Software License", "sto.cif x (4, 4, 4): 320 atoms (O 192, Sr 64, Ti 64)"):
         assert line in result.summary, line
     result.simulation.close()

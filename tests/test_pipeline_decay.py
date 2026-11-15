@@ -14,8 +14,6 @@ from conftest import find_model, maxwell_velocities, srtio3
 
 from loupmd import LoupEngine, ensure_loup_bundle
 
-WATER_BOXES = ("/mnt/d/Margraf/ResearchModule/Structures/Organic/water_216.extxyz",
-               "/mnt/homes/zwingel/ResearchModule/Structures/Organic/water_216.extxyz")
 KICK = 0.75  # A per ASE time unit: 0.074 A in a 1 fs step, above skin / 8 = 0.0625 A at skin 0.5
 
 
@@ -77,9 +75,9 @@ def test_water_pipelines_at_a_skin_its_hydrogens_allow(skin, pipelines):
     above skin / 2 at skin 0.5 in every step, so no decay can pipeline water there; at skin 1.0 it fits."""
     from ase.io import read
 
-    box = next((p for p in WATER_BOXES if os.path.exists(p)), None)
-    if box is None:
-        pytest.skip("water_216.extxyz not found")
+    from loupmd.bench import suites
+
+    box = suites.find_file("water_216.extxyz", {})      # shipped with the package
     at = read(box)
     eng = LoupEngine(ensure_loup_bundle(find_model("MACE-OFF23_small.model"), [1, 8]))
     eng.set_system(at.get_atomic_numbers(), at.get_masses(), skin=skin)

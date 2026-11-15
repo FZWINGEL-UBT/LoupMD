@@ -44,11 +44,11 @@ def test_specialised_export_refuses_an_uncertified_first_table(model_path, tmp_p
     assert "interaction 0 radial table: certificate 1.500" in proc.stderr, proc.stderr[-600:]
 
 
-def test_specialised_bundle_signature_names_the_product_basis(sto_bundle):
+def test_specialised_bundle_signature_names_the_product_basis(spec_bundle):
     """The signature ties a bundle to the compiled kernels' factored product programs, not only to the shapes."""
     from loupmd.export.bundle import read_bundle
 
-    sig = read_bundle(sto_bundle)[0]["kernel_signature"]
+    sig = read_bundle(spec_bundle)[0]["kernel_signature"]
     assert re.search(r":p0=[0-9a-f]{16}:p1=[0-9a-f]{16}$", sig), sig
     header = (ROOT / "src" / "generated_kernels_signature.h").read_text()
     assert f'"{sig}"' in header

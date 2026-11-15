@@ -19,8 +19,6 @@ from conftest import find_model, srtio3
 from loupmd import BackendError, LoupEngine, ensure_loup_bundle
 from loupmd import _core
 
-WATER_BOXES = ("/mnt/d/Margraf/ResearchModule/Structures/Organic/water_216.extxyz",
-               "/mnt/homes/zwingel/ResearchModule/Structures/Organic/water_216.extxyz")
 SKIN = 0.5
 _dp = ctypes.POINTER(ctypes.c_double)
 _ip = ctypes.POINTER(ctypes.c_int)
@@ -43,10 +41,9 @@ def _oxide():
 def _water():
     from ase.io import read
 
-    box = next((p for p in WATER_BOXES if os.path.exists(p)), None)
-    if box is None:
-        pytest.skip("water_216.extxyz not found")
-    at = read(box)
+    from loupmd.bench import suites
+
+    at = read(suites.find_file("water_216.extxyz", {}))      # the box shipped with the package
     at.positions += np.random.default_rng(8).normal(scale=0.02, size=at.positions.shape)
     return at
 
@@ -118,7 +115,7 @@ def test_a_cell_as_an_open_domain_with_its_images_as_ghosts(model, structure, ge
     at = structure()
     n = len(at)
     zs = sorted(set(at.get_atomic_numbers().tolist()))
-    bundle = ensure_loup_bundle(find_model(model), zs, generic=generic or None)
+    bundle = ensure_loup_bundle(find_model(model), zs, generic=generic if "omat-0-medium" in model else None)
     e_a, f_a, s_a, r_max = _periodic(bundle, at)
     e_b, f_b, s_b, _ = _periodic(bundle, at)
     # The same periodic call on other GEMM kernels (no tensor-core hybrids): what float32 rounding in another order
@@ -163,11 +160,11 @@ def test_sweeps_on_a_periodic_system_without_ghosts():
     assert abs(e - e_ref) / len(at) < 1e-7 and np.abs(f - f_ref).max() < 3e-6 and np.abs(s - s_ref).max() < 3e-8
 
 
-def test_domain_refusals(sto_bundle):
+def test_domain_refusals(sto_bundle, spec_bundle):
     at = _oxide()
     n = len(at)
     z2 = np.ascontiguousarray(np.concatenate([at.get_atomic_numbers(), at.get_atomic_numbers()[:5]]), dtype=np.int32)
-    spec = LoupEngine(sto_bundle)                      # the specialised kernels have no sweeps
+    spec = LoupEngine(spec_bundle)                     # the specialised kernels have no sweeps
     _bind(spec._lib)
     assert spec._lib.loup_debug_set_domain(spec._h, n, 5, z2.ctypes.data_as(_ip), SKIN) == -1
     assert spec.last_error().startswith("loup_debug_set_domain: an open domain needs a bundle of the generic path")

@@ -64,13 +64,16 @@ def test_a_run_after_evaluate_needs_no_force_pass_and_one_after_new_positions_do
     assert debug_graphs.readouterr().err.count(FORCE_PASS) == 1
 
 
-def test_a_changed_temperature_reuses_the_graphs(sto_bundle, debug_graphs):
+def test_a_changed_temperature_reuses_the_graphs(sto_bundle, debug_graphs, monkeypatch):
     """The thermostat's target lives on the device (plan task S3-T06), so a schedule's calls capture nothing.
 
     Two engines run the same eight short calls, one at a constant temperature and one whose temperature changes
     a little with every call (and ramps in the last). A graph is captured the first time its loop variant is
     used, which both runs do at the same steps; before this change the second run captured every graph again at
     every call."""
+    # The generic layers' conv variants are timed at an engine's first MD rebuild, and a faster one drops the graphs
+    # (ledger S64). On 135 atoms they are near ties, so whether an engine captures once more would be chance.
+    monkeypatch.setenv("LOUP_CONV_TUNE", "0")
     def captures(temperatures, rate):
         eng = LoupEngine(sto_bundle)
         _start(eng)

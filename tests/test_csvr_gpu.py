@@ -216,6 +216,9 @@ def test_a_changed_target_keeps_the_captured_step_and_a_changed_time_constant_do
     """As tests/test_md_graph_reuse.py: a graph is captured the first time its loop variant is used, so the
     captures of a run whose target changes with every call are compared with those of a constant one."""
     monkeypatch.setenv("LOUP_DEBUG_GRAPHS", "1")
+    # The generic layers' conv variants are timed at an engine's first MD rebuild, and a faster one drops the graphs
+    # (ledger S64). On 135 atoms they are near ties, so whether an engine captures once more would be chance.
+    monkeypatch.setenv("LOUP_CONV_TUNE", "0")
 
     def captures(temperatures, rate, tau_fs=50.0):
         eng = LoupEngine(sto_bundle)

@@ -71,8 +71,8 @@ def _gpu_name():
                           capture_output=True, text=True, check=True).stdout.strip()
 
 
-def test_info_of_a_model_on_the_specialised_kernels(sto_engine):
-    info = sto_engine.info()
+def test_info_of_a_model_on_the_specialised_kernels(spec_bundle):
+    info = LoupEngine(spec_bundle).info()
     assert info.abi == 1
     assert info.specialised and not info.has_long_range
     assert (info.n_layers, info.n_species, info.r_max) == (2, 3, 6.0)

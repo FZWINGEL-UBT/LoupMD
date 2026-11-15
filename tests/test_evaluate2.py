@@ -47,7 +47,8 @@ def test_energy_only_equals_the_full_calls_energy(model, structure, generic, sca
     the order of the sums only. The compressed cell brings pairs inside the ZBL range."""
     at = structure(scale)
     zs = sorted(set(at.get_atomic_numbers().tolist()))
-    eng = LoupEngine(ensure_loup_bundle(find_model(model), zs, generic=generic or None))
+    eng = LoupEngine(ensure_loup_bundle(find_model(model), zs,
+                                        generic=generic if "omat-0-medium" in model else None))
     eng.set_system(at.get_atomic_numbers(), at.get_masses())
     full, _, _ = eng.evaluate(at.positions, at.cell.array, compute_stress=False)
     only = eng.evaluate_energy(at.positions, at.cell.array)

@@ -274,7 +274,8 @@ def main():
         if os.path.exists("/home/fzwin/models/mace-omat-0-medium.model")
         else "/mnt/homes/zwingel/ResearchModule/Models/mace-omat-0-medium.model"))
     ap.add_argument("--head", default=None)
-    ap.add_argument("--generic", action="store_true")
+    ap.add_argument("--generic", action="store_true", help="the generic kernels (the default of this branch)")
+    ap.add_argument("--specialised", action="store_true", help="the kernels specialised to MACE-OMAT-0 medium")
     ap.add_argument("--set", default="oxide", choices=("oxide", "organic", "crystals"))
     ap.add_argument("--ref-device", default="cuda", help="device of the MACE references (cpu for models whose "
                     "float64 reference does not fit the GPU)")
@@ -342,7 +343,7 @@ def main():
             for k in VARIANT_KEYS:
                 os.environ.pop(k, None)
             os.environ.update(variant)
-            bundle = ensure_loup_bundle(model_path, list(zs), head=head, generic=args.generic or None,
+            bundle = ensure_loup_bundle(model_path, list(zs), head=head, generic=True if args.generic else False if args.specialised else None,
                                         charge=args.charge, spin_multiplicity=args.spin_multiplicity)
             meta = read_bundle_meta(bundle)
             specialised[key] = meta.get("arch") != "generic"

@@ -62,6 +62,14 @@ def exporter_environment(environ=None) -> dict:
     return env
 
 
+def default_generic() -> bool:
+    """Whether a model takes the generic kernels when the caller does not say: yes, every model (owner's decision
+    O20 of 15 November 2026). MACE-OMAT-0 medium also has kernels specialised to it, about 8% faster on the RTX
+    5060 Ti and not faster on the A100; ``generic=False`` or the environment variable ``LOUP_GENERIC=0`` selects
+    them, for development and comparisons."""
+    return os.environ.get("LOUP_GENERIC", "1") != "0"
+
+
 def _integral(name, value):
     """Charge and spin multiplicity are categorical model inputs: 0.5 must not become 0, and 1.0 is 1."""
     if value is None:
@@ -77,7 +85,7 @@ def bundle_name(model_path, atomic_numbers, head=None, generic=None, charge=None
     spin_multiplicity = _integral("spin_multiplicity", spin_multiplicity)
     z_sorted = sorted({int(z) for z in atomic_numbers})
     if generic is None:
-        generic = os.environ.get("LOUP_GENERIC", "0") == "1"
+        generic = default_generic()
     tag = (f"{_model_digest(str(model_path))}|{z_sorted}|{head}|{int(bool(generic))}|{charge}|"
            f"{spin_multiplicity}|{exporter_fingerprint()}")
     key = hashlib.sha256(tag.encode()).hexdigest()[:16]
@@ -111,7 +119,7 @@ def ensure_bundle(model_path, atomic_numbers, *, head=None, generic=None, charge
     spin_multiplicity = _integral("spin_multiplicity", spin_multiplicity)
     z_sorted = sorted({int(z) for z in atomic_numbers})
     if generic is None:
-        generic = os.environ.get("LOUP_GENERIC", "0") == "1"
+        generic = default_generic()
     name = bundle_name(model_path, z_sorted, head, generic, charge, spin_multiplicity)
     out = cache.cache_dir("bundles", environ=environ) / name
     old_layout = cache.cache_root(environ) / name       # where ensure_loup_bundle keeps its bundles
@@ -143,8 +151,9 @@ def ensure_loup_bundle(model_path: str, atomic_numbers: list[int], cache_dir: st
     """The cached bundle for (model contents, species, head, path, charge / spin, exporter sources) in the flat
     cache of the source checkout (``cache_dir``, default ``~/.cache/loupmd``), exporting it on a miss.
 
-    The specialised OMAT-0-medium kernels are used when the model has that architecture; ``generic=True`` (or the
-    environment variable LOUP_GENERIC=1) forces the generic path. ``head`` selects a multi-head model's head
+    Every model takes the generic kernels unless ``generic=False`` (or the environment variable LOUP_GENERIC=0)
+    asks for the kernels specialised to MACE-OMAT-0 medium (``default_generic``). ``head`` selects a multi-head
+    model's head
     (default: omat_pbe if present, else the last head). ``charge`` and ``spin_multiplicity`` (total charge in e and
     2S + 1) apply to models with a total charge / spin embedding (MACE-OMOL-0; default 0 and 1); the export folds
     them into the bundle, so each setting is its own bundle. Other models refuse them."""
@@ -159,7 +168,7 @@ def ensure_loup_bundle(model_path: str, atomic_numbers: list[int], cache_dir: st
     spin_multiplicity = integral("spin_multiplicity", spin_multiplicity)
     z_sorted = sorted({int(z) for z in atomic_numbers})
     if generic is None:
-        generic = os.environ.get("LOUP_GENERIC", "0") == "1"
+        generic = default_generic()
     cdir = Path(cache_dir or Path.home() / ".cache" / "loupmd")
     cdir.mkdir(parents=True, exist_ok=True)
     tag = (f"{_model_digest(model_path)}|{z_sorted}|{head}|{int(generic)}|{charge}|{spin_multiplicity}|"
