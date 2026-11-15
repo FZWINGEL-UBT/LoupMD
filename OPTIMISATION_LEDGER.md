@@ -172,6 +172,7 @@ Conventions:
 | [rel-merge-r6tip](#rel-merge-r6tip) | Release branch after merging `round6-hardening` `e21faa2` (S64 to S67), against that tip's own build | – | both | DEFAULT on `release/v1` (5060 Ti only) | release Stage 1 | seven A/B: `NbCl5` 1.0030 (0.9946 to 1.0080), `SrTiO3` 0.9997 (0.9965 to 1.0044): tie; generic families 0.9944 to 1.0066 | [§6.1][s61] |
 | [md-langevin-target](#md-langevin-target) | Langevin's target temperature as a device scalar that the step advances (release task S3-T06): ramps move it every step, a changed temperature captures no graph | `LoupIntegrator.temp_rate_k_per_step` | both | DEFAULT on `release/v1` (5060 Ti only) | release Stage 3 | A/B 1.0085 / 0.9989 (old first), 0.9943 / 0.9938 (new first): tie | [§6.2][s62] |
 | [md-fixed-atoms](#md-fixed-atoms) | Fixed atoms as zero inverse masses; the reported temperature counts 3 (N - n_fixed) (release task S4-T02) | `loup_set_fixed_atoms` | both | DEFAULT on `release/v1` (5060 Ti only) | release Stage 4 | A/B mean of four 1.0032 / 0.9995: tie; no step kernel changed | [§6.3][s63] |
+| [md-fix-com](#md-fix-com) | Centre of mass at rest: Langevin's noise in two passes without its mass-weighted mean, NVE's momentum removed at a call's start; noise coefficients formed once per step (release task S4-T01) | `LoupIntegrator.fix_com` | both | DEFAULT on `release/v1` for `lm.md` / `lm.Simulation`; off in `loup_run_langevin` (5060 Ti only) | release Stage 4 | current build against the merge build, four A/B: 0.9999 / 0.9982: tie; `fix_com` on against off 1.0009 at 5,000 atoms | [§6.4][s64] |
 | [md-small-systems](#md-small-systems) | Small-system latency (< ~1,000 atoms) | – | spec | NOT BUILT (open) | – | 135 atoms: GEMM groups 32% of 358 us | [§4.1 #3][s41] |
 | [comp-active-edge-tighten](#comp-active-edge-tighten) | Tighten active-edge compaction (`compute_and_count_active` + `scatter_active_edges`) | – | both | NOT BUILT | – | untried (101 us/step on `SrTiO3` 5060 Ti, `tmp_vec_len` round-trip) | `OMAT0_SPEEDUP_BRIEF.md` |
 | [nl-lane-groups](#nl-lane-groups) | Neighbour count / fill with 8 lanes per atom (neighbouring bins split round-robin; fill keeps the exact row order via per-bin offsets in shared memory) | `kNeighborLanes`, `count/fill_neighbors_kernel`; other GPUs `*_scalar_kernel` | both (`sm_120`) | DEFAULT (5060 Ti only) | S34 | per rebuild `SrTiO3` 433 -> 292 us, `NbCl5` 284 -> 110, water 439 -> 302; ABBA `OFF23-S` water `0.9945` / `0.9856`, `OFF23-M` `0.9961` / `0.9943`, `OMAT-0-S` `0.9961` / `0.9972` | this file |
@@ -1134,6 +1135,17 @@ Each entry has the same fields. Unless stated, the system is OMAT-0 medium on th
 - Gate: `python/test_gate.py` PASS, worst force ratio 1.54, stress 1.68. `pytest`: 458 passed.
 - Sources: [§6.3][s63]; `tests/test_fixed_atoms_gpu.py`.
 
+<a id="md-fix-com"></a>
+#### md-fix-com: the centre of mass at rest, and the noise coefficients once per step
+- Switch: `LoupIntegrator.fix_com`; `IntegratorConfig.fixcm`, `lm.integrators.*(fixcm="auto")`. `src/integrator.cu` (`langevin_noise_kernel`, `langevin_first_half_fixcom_kernel`, `momentum_sum_kernel`, `momentum_remove_kernel`), `src/engine.cu` (`run_md_loop`).
+- Status: DEFAULT for `lm.md` and `lm.Simulation` (`fixcm="auto"` is on without fixed atoms, as in FastMACE); off for `loup_run_langevin`, `loup_run_nve` and `bench_md.py`. 5060 Ti only.
+- What: with `fix_com` the Langevin noise of a step is drawn by a kernel of its own that also sums m_i times both random terms over the atoms; the half-kick subtracts the mass-weighted mean, so the thermostat puts no momentum into the centre of mass (FastMACE's `mass_weighted` projection, canonical for unequal masses). NVE removes the total momentum once per run call. The temperature then counts 3N - 3 degrees of freedom. Without `fix_com` the step is the one of before. In both variants the noise coefficients (ASE's c3, c4, c5 without the mass factor) are now formed by the first thread of the second half-kick for the next step and read from the device, so the first half-kick does per atom what it did before the ramp of `md-langevin-target`.
+- Measured (15 November 2026, `python/bench_md.py`, library `7c835aab4e62167d` against the merge build `9f89f02c26e7792a`): merge first 1.0064 / 0.9982 and 1.0047 / 1.0005; new first 0.9965 / 0.9964 and 0.9919 / 0.9976; mean 0.9999 / 0.9982. A tie: Stages 1 to 4 so far cost nothing on the standard benchmarks.
+- Measured, `fix_com` on against off (5,000 atoms `SrTiO3`, Langevin through `lm.Simulation`, a b b a): 1.0009; on the build before 0.9995. Total momentum after 500 steps on 135 atoms: 1.6e-15 of sqrt(M kB T) with `fix_com`, 1.40 without.
+- Gate: `python/test_gate.py` PASS, worst force ratio 1.55, stress 1.64.
+- Not measured: `fix_com`'s cost on the 1,944-atom cell; anything on the RTX 4000 Ada.
+- Sources: [§6.4][s64]; `tests/test_fix_com_gpu.py`.
+
 <a id="md-small-systems"></a>
 #### md-small-systems: small-system latency
 - Status: NOT BUILT (open).
@@ -1832,4 +1844,5 @@ POLAR-1 NaCl 3x3x3 (216) and POLAR-1-M `NbCl5` 3x3x3 (1,944).
 [s61]: STATUS_AND_PROFILE.md#61-after-the-merge-of-round6-hardening-e21faa2-15-november-2026-0430-to-0515
 [s62]: STATUS_AND_PROFILE.md#62-stage-3-front-end-and-the-thermostat-target-on-the-device-15-november-2026-0520-to-0610
 [s63]: STATUS_AND_PROFILE.md#63-fixed-atoms-and-the-host-side-optimisers-15-november-2026-0615-to-0650
+[s64]: STATUS_AND_PROFILE.md#64-centre-of-mass-at-rest-fix_com-and-the-current-build-against-the-merge-build-15-november-2026-0655-to-0735
 [s55]: STATUS_AND_PROFILE.md#55-known-limitations

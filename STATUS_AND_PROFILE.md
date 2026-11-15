@@ -626,3 +626,28 @@ RTX 5060 Ti only. Engine build of `06230cf` (library sha256 `6c2af2c880580942...
 - Not measured: anything on the RTX 4000 Ada; a cell relaxation with a model of the generic path; the full suite
   at `1d7380e` (the last full run, at `4f20442`, had 491 passed and the optimiser-cost test failing).
 
+### 6.4 Centre of mass at rest (`fix_com`) and the current build against the merge build (15 November 2026, 06:55 to 07:35)
+
+RTX 5060 Ti only. Engine build of `42cd77d` (library sha256 `7c835aab4e62167d...`). Two changes: `fix_com`
+(the Langevin noise in two passes with FastMACE's mass-weighted projection, used only when it is on; NVE's total
+momentum removed at the start of a call), and the Langevin noise coefficients formed once per step by one thread
+of the second half-kick instead of per atom (the per-atom square root came in with the ramp of §6.2).
+
+| Check | Result |
+|---|---|
+| `bench_md.py` against the merge build of §6.1 (`9f89f02c26e7792a`), merge build first, twice (`NbCl5` / `SrTiO3`, new / merge) | 1.0064 / 0.9982 and 1.0047 / 1.0005 |
+| the same, new build first, twice | 0.9965 / 0.9964 (one `SrTiO3` run of the new build was disturbed, 8.763 ms, and is left out) and 0.9919 / 0.9976 |
+| mean of the four | 0.9999 / 0.9982 |
+| `python/test_gate.py` | PASS, 30 rows and 2 reorder checks, worst force 1.55, stress 1.64 |
+| `pytest -q` | 496 passed |
+| total momentum after 500 Langevin steps, 135 atoms, in units of sqrt(M kB T) | 1.6e-15 with `fix_com`, 1.40 without |
+| NVE with `fix_com` from a start with a net drift | the total momentum falls below 1e-7 of its start value; without `fix_com` it is conserved to 1e-6 |
+| Langevin with `fix_com` against without, 5,000 atoms, through `lm.Simulation` (a b b a) | 7.992, 7.986 against 7.961, 8.003 ms/step: 1.0009 (0.9995 on the build before) |
+
+- Within one `bench_md.py` job the first run is the fastest for `NbCl5` (1.796 to 1.809 ms) and the later ones are
+  slower (1.811 to 1.825), whichever library runs; the two orders cancel this. Across the four jobs the current
+  build equals the merge build: nothing of Stage 1 to Stage 4 so far costs speed on the standard benchmarks.
+- The build before this one (`fix_com` without the per-step coefficients, library `019f60731d9f9ad0`) read 1.0160 /
+  1.0024 and 0.9958 / 0.9982 against the build of §6.3; its full suite: 496 passed and one outdated test.
+- Not measured: `fix_com`'s cost on the 1,944-atom `NbCl5` cell; anything on the RTX 4000 Ada.
+
