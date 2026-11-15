@@ -318,6 +318,23 @@ typedef struct {
 // Not counted: MACE-POLAR-1's long-range buffers, captured graphs and cuBLAS's own allocations.
 int loup_plan_memory(LoupHandle* h, int n_atoms, double edges_per_atom, LoupMemoryPlan* out);
 
+// The tile planner of the tiled mode, on the host: no handle and no GPU. loup_tile_plan divides `n_atoms` atoms at
+// `positions` [n_atoms, 3] in `cell` (rows are the lattice vectors) into tiles of at most `receivers` local atoms
+// and keeps the plan for the calling thread; loup_tile_plan_copy copies it out (an output that is NULL is left
+// out). `degree` with `edges` > 0 also caps a tile's edges (degree: each atom's edge count); NULL and 0: no edge
+// cap. `reach` > 0 (cutoff plus skin, Angstrom) lists each tile's ghost candidates: every image of an atom that
+// can lie within `reach` of one of the tile's locals. `shape`: the blocks per cell axis, or NULL for the planner's
+// choice. Outputs: local_ptr and ghost_ptr [n_tiles + 1], local [n_atoms] (every atom once, tile by tile),
+// local_shift [n_atoms, 3] and ghost_shift [n_ghosts, 3]: the whole cell vectors to add to an atom's position for
+// the place it has in its tile, ghost [n_ghosts] the candidates' atoms. Both return 0, or -1 with the reason in
+// loup_tile_plan_error().
+int loup_tile_plan(const double* positions, long long n_atoms, const double* cell, int receivers, long long edges,
+                   const int* degree, double reach, const int* shape, long long* n_tiles, long long* n_ghosts,
+                   int* grid);
+int loup_tile_plan_copy(long long* local_ptr, int* local, int* local_shift, long long* ghost_ptr, int* ghost,
+                        int* ghost_shift);
+const char* loup_tile_plan_error(void);
+
 // Testing only; not part of the interface a caller may rely on. A handle as an open domain (the unit a tiled run
 // evaluates): the first n_local atoms are local and receive, the n_ghost atoms after them only send. Bundles of the
 // generic path without long range. loup_debug_evaluate_domain runs the per-layer sweeps on it for a domain whose

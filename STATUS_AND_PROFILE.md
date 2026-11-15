@@ -860,3 +860,27 @@ this file so far ran on), "wheels" the NVIDIA wheels the package pins (cuda-tool
   library has to come from the container build.
 - Not run: the fast tier on its own (about 320 s of the 612 s run, by subtraction); the acceptance tier after the
   move; an NPT profile on the GPU; the wheel build (its scripts are written, the image is not built).
+
+### 6.11 The tile planner, the fast tier alone and the version 0.1.0a1 (15 November 2026, 22:00 to 22:30)
+
+RTX 5060 Ti only. The library is the build of the working tree with the planner and the version `0.1.0a1` (sha256
+`929a8f5a57d5a5f4...`); the planner is host code that nothing in the step calls yet.
+
+| Check | Result |
+|---|---|
+| `pytest tests/cpu/test_tile_plan.py` (g++ build of `src/tile_plan.cu`) | 14 passed; 1,026,895 atoms planned in 72 ms (criterion 0.5 s) |
+| `pytest tests/gpu` fast tier alone (default selection) | 243 passed, 30 deselected, 284 s |
+| `pytest tests/gpu -m full` | 20 passed, 253 deselected, 239 s |
+| `tools/dev/test_gate.py`, default and `--specialised` | default: 18 rows PASS, 0 FAIL; `--specialised`: 32 PASS, 0 FAIL |
+
+A/B against the build before (`9d39c8e75f8571b1...`, §6.10), `tools/dev/bench_md.py`, generic path, a fresh plan
+directory per run, four rounds alternating:
+
+| Build | `NbCl5` 3x3x3, ms/step (mean; range) | `SrTiO3` 10x10x10, ms/step (mean; range) |
+|---|---|---|
+| before (`9d39c8e7`) | 1.859; 1.850 to 1.869 | 8.037; 8.006 to 8.061 |
+| with the planner (`929a8f5a`) | 1.862; 1.858 to 1.868 | 8.046; 8.041 to 8.058 |
+| ratio | 1.0019 | 1.0012 |
+
+- A tie: each difference is inside the other side's range, as expected for code the step does not run.
+- Not run: the wheel (Docker Desktop does not start, PLAN.md D59), the acceptance tier, anything on another GPU.

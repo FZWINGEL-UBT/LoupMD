@@ -100,3 +100,29 @@ def test_info_marks_a_long_range_model():
 def test_get_info_without_an_output_struct_is_refused(sto_engine):
     assert sto_engine._lib.loup_get_info(sto_engine._h, None) == -1
     assert sto_engine.last_error() == "loup_get_info: out is NULL"
+
+
+def test_the_library_has_the_tile_planner():
+    """The planner of ``tests/cpu/test_tile_plan.py`` (plan task S5-T01) as the library exports it; no GPU."""
+    import ctypes
+
+    import numpy as np
+
+    lib = _core._load_lib()
+    c_ll, c_int, c_double, ptr = ctypes.c_longlong, ctypes.c_int, ctypes.c_double, ctypes.POINTER
+    lib.loup_tile_plan.argtypes = [ptr(c_double), c_ll, ptr(c_double), c_int, c_ll, ptr(c_int), c_double, ptr(c_int),
+                                   ptr(c_ll), ptr(c_ll), ptr(c_int)]
+    lib.loup_tile_plan_copy.argtypes = [ptr(c_ll), ptr(c_int), ptr(c_int), ptr(c_ll), ptr(c_int), ptr(c_int)]
+    lib.loup_tile_plan_error.restype = ctypes.c_char_p
+    rng = np.random.default_rng(1)
+    cell = np.diag([20.0, 20.0, 20.0])
+    positions = rng.uniform(0.0, 20.0, (500, 3))
+    tiles, ghosts, grid = c_ll(), c_ll(), (c_int * 3)()
+    args = (positions.ctypes.data_as(ptr(c_double)), 500, cell.ctypes.data_as(ptr(c_double)))
+    assert lib.loup_tile_plan(*args, 100, 0, None, 6.5, None, ctypes.byref(tiles), ctypes.byref(ghosts), grid) == 0
+    assert tiles.value >= 5 and ghosts.value > 500 and min(grid) >= 1
+    local = np.empty(500, np.int32)
+    assert lib.loup_tile_plan_copy(None, local.ctypes.data_as(ptr(c_int)), None, None, None, None) == 0
+    assert np.array_equal(np.sort(local), np.arange(500))
+    assert lib.loup_tile_plan(*args, 0, 0, None, 6.5, None, None, None, None) == -1
+    assert b"receivers must be positive" in lib.loup_tile_plan_error()
