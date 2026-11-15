@@ -21,8 +21,11 @@ def test_the_calculator_equals_evaluate(model_path):
     at.calc = loupmd.calc(model_path, trusted=True)
     forces = at.get_forces()                          # a call without stress first, as MD and optimisers make it
     energy = at.get_potential_energy()
-    stress = at.get_stress(voigt=False)
-    assert at.get_potential_energy(force_consistent=True) == energy
+    assert at.get_potential_energy(force_consistent=True) == energy          # the same result: no second pass
+    stress = at.get_stress(voigt=False)                                      # a second pass, now with the stress
+    # Two passes over one state agree to the order of the sums on the device (seen: 5e-13 eV of 1,076 eV).
+    assert abs(at.get_potential_energy() - energy) < 1e-9 * abs(energy)
+    assert at.get_potential_energy(force_consistent=True) == at.get_potential_energy()
 
     engine = LoupEngine(ensure_loup_bundle(model_path, [8, 22, 38]), device_id=0)
     engine.set_system(at.numbers, at.get_masses(), skin=0.5)
