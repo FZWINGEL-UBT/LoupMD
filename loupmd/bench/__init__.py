@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import json
 import os
-import shutil
 import statistics
 import subprocess
 import sys
@@ -11,6 +10,7 @@ import tempfile
 import time
 from pathlib import Path
 
+from .. import _gpu
 from ..errors import InputError, LoupError
 from . import compare, protocol, reference, suites
 from .protocol import PROTOCOLS, Protocol, Row, format_table, make_record, validate_record  # noqa: F401
@@ -21,10 +21,7 @@ BUSY_PERCENT = 20
 
 
 def _nvidia_smi():
-    exe = shutil.which("nvidia-smi")
-    if exe is None and os.path.isfile("/usr/lib/wsl/lib/nvidia-smi"):
-        exe = "/usr/lib/wsl/lib/nvidia-smi"
-    return exe
+    return _gpu.nvidia_smi()
 
 
 def _query(*args):

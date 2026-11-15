@@ -8,12 +8,11 @@ from __future__ import annotations
 import ctypes
 import importlib.util
 import os
-import shutil
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
-from .. import cache, models
+from .. import _gpu, cache, models
 from ..errors import LoupError
 
 OK, WARN, FAIL = "ok", "warn", "FAIL"
@@ -42,19 +41,7 @@ class Check:
 
 def probe_gpus():
     """``[(name, driver, compute capability as major * 10 + minor)]`` from nvidia-smi; raises OSError without it."""
-    exe = shutil.which("nvidia-smi")
-    if exe is None:
-        raise OSError("nvidia-smi was not found on the PATH")
-    done = subprocess.run([exe, "--query-gpu=name,driver_version,compute_cap", "--format=csv,noheader"],
-                          capture_output=True, text=True, timeout=30)
-    if done.returncode != 0:
-        raise OSError((done.stderr or done.stdout).strip() or f"nvidia-smi ended with status {done.returncode}")
-    gpus = []
-    for line in done.stdout.strip().splitlines():
-        name, driver, cap = [part.strip() for part in line.split(",")]
-        major, _, minor = cap.partition(".")
-        gpus.append((name, driver, int(major) * 10 + int(minor or 0)))
-    return gpus
+    return _gpu.query_gpus()
 
 
 def probe_runtime_library(name):

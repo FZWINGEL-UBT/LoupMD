@@ -5,6 +5,8 @@ libloupmd*.so
 
 # Python
 __pycache__/
+*.egg-info/
+dist/
 .pytest_cache/
 
 # Scratch scripts and logs of a working session
