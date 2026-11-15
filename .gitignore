@@ -11,3 +11,6 @@ dist/
 
 # Scratch scripts and logs of a working session
 .tmp_o/
+
+# The wheel build copies the library and what ships beside it here (tools/release/wheel_in_container.sh)
+loupmd/_lib/
