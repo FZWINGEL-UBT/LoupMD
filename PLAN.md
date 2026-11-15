@@ -599,7 +599,7 @@ need new engine kernels are not. RTX 5060 Ti only; numbers in `STATUS_AND_PROFIL
 
 | Task | Commits | State |
 | --- | --- | --- |
-| S4-T01 | `42cd77d` | **partly**: `fix_com` for Langevin and NVE with 3N - 3 degrees of freedom (D31): the total momentum stays at 1.6e-15 of its thermal value over 500 Langevin steps (1.4 without). The thermostat's target and its noise coefficients are a device struct the step advances. Not built: slots for further integrator kinds |
+| S4-T01 | `42cd77d` | **done**: `fix_com` for Langevin and NVE with 3N - 3 degrees of freedom (D31): the total momentum stays at 1.6e-15 of its thermal value over 500 Langevin steps (1.4 without). The thermostat's target and its noise coefficients are a device struct the step advances. The slots came with the integrators: 64 scalars of state that travel in the state block (`6437f8e`), 64 of per-step scratch, the device cell (`1fe8f24`); each kind's kernels before and after the force pass are branches of `run_md_loop`'s two recorders. NVE's and Langevin's kernel lists are unchanged |
 | S4-T02 | `06230cf` | **done**: `loup_set_fixed_atoms`, `FixAtoms` in `Simulation` and the optimisers, other constraints refused by name. 27 fixed atoms keep their positions bit for bit over 1,000 Langevin steps; the temperature counts 3 (N - n_fixed) |
 | S4-T03 | `6437f8e`, `692aacf` | **done**: `LOUP_CSVR`, `lm.integrators.CSVR`, `loupmd md --thermostat csvr --tau`. With the engine's noise ASE's `Bussi` driven by `lm.calc` gives the same positions to 2.5e-7 A after 200 steps (transferred energy 2.955326 eV both). 20,000 steps on 135 atoms, three runs: mean 300.5 to 301.0 K, Kolmogorov-Smirnov p = 0.886, 0.605, 0.639 against the canonical distribution (criterion p > 0.01), conserved quantity drift at most 0.0003 meV/atom/ps (criterion 0.05) while the thermostat moved 24 to 26 meV/atom. Cost 1.0029 of Langevin at 5,000 atoms. Gate PASS (force 1.57, stress 1.55). The state block carries the integrator's scalars (D34); a structure at rest is refused in Python and not scaled in the engine (D35) |
 | S4-T04 | `763aaa5` | **done**: `LOUP_NHC`, `lm.integrators.NoseHooverChain`, the `NoseHooverChainNVT` drop-in. Against ASE's class driven by `lm.calc`, 200 steps on 135 atoms: positions within 2.1e-7, 2.2e-7 and 2.5e-7 A for chains of 3x1, 1x1 and 5x2 (criterion 1e-4), the chain's energy equal to 2e-6 eV. 20,000 steps: mean 298.0 to 300.3 K in three runs, conserved quantity drift +0.0002 meV/atom/ps (criterion 0.05) while potential plus kinetic moved 29 to 36 meV/atom. Cost 1.0067 of Langevin at 5,000 atoms. Decisions in D45 |
@@ -624,6 +624,14 @@ energy over 20,000 steps on 135 atoms and the conserved quantity's drift.
 | S4-T11 | `4f20442` | **done**: the Frechet cell filter with pressure, hydrostatic, constant-volume and mask options, refused with fixed atoms and for POLAR-1. Strained `SrTiO3` 3x3x3: 157 steps as ASE's `FrechetCellFilter`, lattice constants within 1.0e-5 A (criterion 1e-4) |
 | S4-T12 | `06230cf`, `4f20442` | **done**: `Simulation.relax`, `loupmd relax` (writes extended XYZ equal to the Python call's), `loupmd quench` with FastMACE's selection and files (CPU tests on the fake engine). Both commands ran once on the GPU: `loupmd relax` on rattled `SrTiO3` 3x3x3 converged in 25 steps; a 1,000-step ramp 0 to 600 to 300 K and `loupmd quench` of five picked frames, all to -7.98953 eV/atom |
 | S4-T13 | `4f20442`, `7b029b1` | **done** (`3cdc96e`, `e0cf962`, `c353289`): all twelve classes, also by name from `loupmd.ase` (`from loupmd.ase import Langevin`, as FastMACE's), with `dyn.summary`. FastMACE's ASE example (its `docs/guide/ase.md`) runs after changing the import line, on the fake engine (trajectory, log file, observer, summary); on the GPU each MD class ran against the engine's own call. Since `7b029b1` they take ASE's own arguments (O18, D32): `trajectory`, `logfile`, `loginterval`, ASE's log lines, ASE's `FrechetCellFilter` object |
+
+Stage 4 as it stands (15 November 2026, 20:30): every task from S4-T01 to S4-T13 is built and measured on the
+RTX 5060 Ti, and every integrator kind of `include/loupmd.h` runs. Not done for the exit: the owner's word on
+D48 (Berendsen NPT's one force call per step against the criterion's 1e-6); the family gates (`--set organic`,
+`--set crystals`) and `tests/test_gate_wrapper.py` on the last build (the default gate and `--specialised`
+pass); the step times of the three NPT integrators (the variable-cell step is 1.026 to 1.030 of the fixed-cell
+step, D49); NPT on any system but `SrTiO3`; anything on the RTX 4000 Ada (O12). The tag `v1.0.0a4` is not set:
+the exits of Stages 1 to 3 are open.
 
 ### Stage 5: tiled and wavefront capacity mode (6 weeks)
 
