@@ -799,3 +799,34 @@ RTX 5060 Ti only. Engine builds: `e689cf7` (BAOAB; library sha256 `342ca4cb0ca21
   of the pipelined fixed-cell step) with one single-thread kernel and one or two kinetic sums more.
 - Not run: `tests/test_gate_wrapper.py` on these builds; the family gates (`--set organic`, `--set crystals`);
   the NPT integrators on any other system than `SrTiO3`; anything on the RTX 4000 Ada or an A100 (O12).
+
+### 6.9 The family gates on the last integrator build, and kernel plugins (15 November 2026, 20:15 to 21:10)
+
+RTX 5060 Ti only. Gates: `tools/dev/test_gate.py MODEL [--set ...]` on the build of `a8a3e06` (library sha256
+`433ffe6558b55fa0...`), every model on the generic path, references from the cache except OMOL-0 with charge 0
+and multiplicity 1 (computed on the CPU in this run). Each row: gate rows, failures, the worst force and stress
+ratios (a quantity passes up to 3).
+
+| Model, set | Result |
+|---|---|
+| MACE-OFF23 small, medium, large; OFF23b medium; OFF24 medium (`--set organic`; large and the last two with `--ref-device cpu`) | 8, 24, 8, 24, 24 rows, 0 failed; force 0.62, 0.33, 0.43, 0.94, 0.69; stress 1.88, 0.62, 0.91, 0.53, 1.03 |
+| MACE-MH-1; MACE-POLAR-1 S, M, L (`--set crystals`; L with `--ref-device cpu`) | 18, 5, 18, 6 rows, 0 failed; force 0.90, 0.70, 2.10, 2.20; stress 0.31, 0.59, 0.73, 0.83 |
+| MACE-OMAT-0 small; MP-0b3 medium; MPA-0 medium; MP-0 large (`MACE_MPtrj_2022.9`); MP-0 medium (default set) | 6, 18, 18, 6, 18 rows, 0 failed; force 1.34, 1.15, 2.02, 1.30, 0.63; stress 1.33, 0.83, 2.19, 0.99, 0.38 |
+| MATPES PBE and r2SCAN (`--set crystals`) | 18 and 18 rows, 0 failed; force 1.02 and 1.41; stress 1.02 and 0.62 |
+| MACE-OMOL-0 extra large (`--set organic --charge 0 --spin-multiplicity 1 --ref-device cpu`) | 8 rows, 0 failed; force 0.83, stress 0.73 |
+| MACE-OMAT-0 medium, default set, generic and `--specialised`, on the build of `8b858e0` (`9d39c8e75f8571b1...`) | 18 and 30 rows, 0 failed |
+
+Kernel plugins (`8b858e0`, PLAN.md S2-T06 and D57):
+
+| Check | Result |
+|---|---|
+| `kernels.build_plugins` on `mace-omat-0-medium.model`, forced (nvcc 13, `-arch=sm_120`, the shared CUDA runtime) | two plugins, 76,368 and 157,720 bytes |
+| `SrTiO3` 3x3x3 with the library's own kernels of one signature hidden, so the plugin's run; three jobs | energy within 1.1e-8 eV/atom, forces within 9.2e-7 to 1.2e-6 eV/A, stress within 5.1e-9 eV/A^3 of the library's own kernels |
+| the same with nvcc's default static runtime in the plugin | `loup_evaluate: invalid resource handle`: kernels registered with a second copy of the runtime |
+| a hidden signature and no plugin | `no compiled product kernel for signature ...` naming the folder searched and `loupmd build-kernels` |
+| `loupmd build-kernels omat0-small` | "nothing to build: every kernel of mace-omat-0-small.model is there" |
+| `codegen/gen_generic.py` after the change, against the tracked `generated_generic.cu`, `.cuh` and manifest | byte-identical |
+
+- Not run: `loupmd validate --set organic | crystals` (the same library code as `test_gate.py`, through the
+  command); the gate wrapper tests on these builds; a model whose kernels the library really lacks; a plugin built
+  for another architecture than `sm_120`; anything on the RTX 4000 Ada or an A100 (O12).
