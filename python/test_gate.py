@@ -30,11 +30,12 @@ from ase.io import read as ase_read
 from mace.calculators import MACECalculator
 
 from loupmd import LoupEngine, _model_digest, ensure_loup_bundle
+import polar_reference
 
 # MACE references (float64, float32, and PolarMACE's finite-difference stress) do not depend on LoupMD, so they are
 # cached: repeat gates of the large models (CPU references, ~30 min for POLAR-1-L) take seconds, and the float32
 # bound (MACE's own run-to-run noise) is the same in every run. The key covers everything a reference depends on.
-REF_CACHE_FORMAT = "gate-refs-1"
+REF_CACHE_FORMAT = "gate-refs-2-fixed-polar-kset"
 FD_STRESS_H = 1e-5
 
 
@@ -238,33 +239,6 @@ def eval_mace(model_path: str, dtype: str, configs, head=None, device="cuda", ch
     return out
 
 
-def fd_stress(model_path, configs, device="cuda", h=FD_STRESS_H):
-    """Stress as the float64 MACE energy's central difference under symmetric strain (positions and cell strained,
-    so the reciprocal cell and the volume follow). For PolarMACE this is the corrected stress (MACE PR 1718, as
-    FastMACE): the installed PolarMACE's autograd stress leaves out the k-space terms' cell dependence."""
-    calc = MACECalculator(model_paths=model_path, device=device, default_dtype="float64")
-    out = []
-    for _, at in configs:
-        def energy(eps):
-            a = at.copy()
-            F = np.eye(3) + eps
-            a.set_cell(at.cell.array @ F, scale_atoms=False)
-            a.positions = at.positions @ F
-            a.calc = calc
-            return a.get_potential_energy()
-
-        V = at.get_volume()
-        s = np.zeros((3, 3))
-        for i in range(3):
-            for j in range(i, 3):
-                e = np.zeros((3, 3))
-                e[i, j] = e[j, i] = h
-                d = (energy(e) - energy(-e)) / (2 * h) / V / (1 if i == j else 2)
-                s[i, j] = s[j, i] = d
-        out.append(s)
-    return out
-
-
 def main():
     import argparse
 
@@ -320,8 +294,8 @@ def main():
         # same local float32 rounding).
         stress_ref = [s for _, _, s in ref64]
         if polar:
-            print("PolarMACE: stress reference from float64 energy differences (corrected k-space cell dependence)")
-            stress_ref = fd_stress(model_path, configs, args.ref_device)
+            print("PolarMACE: float64 energy differences with fixed reciprocal indices (corrected cell dependence)")
+            stress_ref = polar_reference.fd_stress(model_path, configs, device=args.ref_device, h=FD_STRESS_H)
         save_refs(cache, ref64, ref32, stress_ref)
         print(f"MACE references saved to {cache}")
     if torch.cuda.is_available():

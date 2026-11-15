@@ -44,6 +44,21 @@ Practical rules, commands, invariants, and hard-won lessons for working on LoupM
   - Always run `sed -i 's/\r$//'` on `.sh` scripts written from Windows before executing in WSL.
   - Write `.sh` script files instead of passing `$var` / `awk` inside nested `wsl bash -c "..."`.
   - Always use `set -euo pipefail` (and `&&`) when generating + building: a failed generator script can otherwise leave a stale `.cuh`/`.cu` on disk that `make` silently compiles.
+- **Shared local-GPU reservation (mandatory, including single evaluations):**
+  ```bash
+  python3 /mnt/d/Margraf/FastMACE/tools/ci/local_gpu.py status
+  python3 /mnt/d/Margraf/FastMACE/tools/ci/local_gpu.py run \
+    --purpose "loupmd dev: <what>" --wait-minutes 240 \
+    -- bash /mnt/d/Margraf/LoupMD/.tmp_o/<job>.sh
+  ```
+  - Every local GPU gate, benchmark, test, profiler and diagnostic runs inside `run`; add `--quiet` for timing jobs. Pure `make` / `nvcc` builds do not need a reservation.
+  - Keep the GPU work in the foreground until it finishes. Do not background it with `&`, `nohup` or a service: returning from the command releases the reservation.
+  - Keep queued/running job scripts immutable. Bash reads scripts incrementally; editing one in flight can splice old and new commands. Write a new version for the next job instead.
+  - Exit 75 means no reservation was obtained: retry through the queue, never bypass it. `status`, not WSL's unreliable `nvidia-smi` process list, determines ownership.
+  - Reserve one short job at a time (about 15 minutes or less), separately per model/chunk. Before the first GPU job, report what will run and the reservation status.
+  - Never edit, build or run in `D:\Margraf\LoupMD-release` (`release/v1`). Its jobs share this lock.
+  - Use `--ref-device cpu` for the large models listed in section 3. Serialize large CPU references too: concurrent POLAR-L references exhausted WSL RAM. Imports of the MACE/CUDA stack can probe the driver even with `CUDA_VISIBLE_DEVICES=""`; run those diagnostic processes under the reservation as well.
+  - Incident: the owner's 15 November 2026 12:32 BSOD report identified NVIDIA `nvlddmkm.sys`, bug check `0xD1`, while an unreserved POLAR gate batch overlapped the release suite. An empty GPU process list is not evidence that sharing the 16 GB card is safe.
 
 ---
 
@@ -54,6 +69,7 @@ Practical rules, commands, invariants, and hard-won lessons for working on LoupM
   - `dF <= max(3 dF32, 1e-5 eV/A)`
   - `dS <= max(3 dS32, 1e-7 eV/A^3)`
   - Reference cache lives in `~/.cache/loupmd/gate_refs/` (`--no-ref-cache` recomputes).
+    POLAR stress references freeze the unstrained cell's reciprocal **integer index set** while straining positions and cell; vectors and norms are recomputed. Differencing across a cutoff membership jump is not the stress. Cache format `gate-refs-2-fixed-polar-kset` invalidates the old live-set references without overwriting them. The 3x limit and absolute floors are unchanged.
   - **Large models (`OFF23-L`, `OFF23b-M`, `OFF24-M`, `POLAR-1-L`)** exceed 16 GB VRAM alongside two PyTorch models: pass `--ref-device cpu`. Note: computing an uncached `MACE-POLAR-1-L` CPU float64 stress ref on `NbCl5` takes many minutes; for fast smoke checks during iteration compare candidate vs a gate-verified baseline `.so`, then run `test_gate.py` before adoption.
   - `POLAR-1-S NaNbO3_c0` is marked `UNSTABLE` (skipped unless `--include-unstable`) because MACE float32-vs-float64 itself diverges there.
 - **Precision constraints:**
