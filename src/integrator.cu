@@ -19,9 +19,13 @@ __device__ __forceinline__ void record_step_disp2(double d2, unsigned int* max_s
     if ((threadIdx.x & 31) == 0 && m != 0u) atomicMax(max_step_disp2, m);
 }
 
-__global__ void rotate_step_disp_kernel(unsigned int* __restrict__ max_step_disp2) {
+// Ending a window also clears bit 4 of the skin check's flag word ("list too old to switch to the pipelined loop"):
+// that bit was set against the old maximum and otherwise stays until a rebuild, which a cold system never has. The
+// next unpipelined check sets it again if it still holds. Bits 1 and 2 are not touched.
+__global__ void rotate_step_disp_kernel(unsigned int* __restrict__ max_step_disp2, int* __restrict__ need_rebuild) {
     max_step_disp2[1] = max_step_disp2[0];
     max_step_disp2[0] = 0u;
+    need_rebuild[0] &= ~4;
 }
 
 __global__ void nve_first_half_kernel(

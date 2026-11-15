@@ -140,7 +140,7 @@ __global__ void nve_first_half_kernel(int N, double dt_ase, const double* __rest
                                       unsigned int* __restrict__ max_step_disp2);
 __global__ void nve_second_half_kernel(int N, double dt_ase, const double* __restrict__ forces,
                                        const double* __restrict__ inv_masses, double* __restrict__ vel64);
-__global__ void rotate_step_disp_kernel(unsigned int* __restrict__ max_step_disp2);
+__global__ void rotate_step_disp_kernel(unsigned int* __restrict__ max_step_disp2, int* __restrict__ need_rebuild);
 __global__ void langevin_first_half_kernel(
     int N, double dt_ase, double c1, double c2, double k_c3, double k_c4, double k_c5,
     unsigned long long seed, const unsigned long long* __restrict__ step_counter,
@@ -600,6 +600,7 @@ struct LoupHandle {
     // them to another size): per atom (set_system_impl), per edge of capacity (ensure_edge_capacity), and the
     // [K, N] weight copies of the GEMMs, which do not scale.
     size_t sys_atom_bytes = 0, sys_edge_bytes = 0, weight_copy_bytes = 0;
+    size_t sys_fixed_bytes = 0;  // buffers of set_system_impl whose size does not depend on the atom count
 
     void free_system() {
         if (gen) gen->free_system();
@@ -615,6 +616,7 @@ struct LoupHandle {
         disp_window_steps = 0;
         sys_atom_bytes = 0;
         sys_edge_bytes = 0;
+        sys_fixed_bytes = 0;
         n_rebuilds = 0;
         N = 0;
         auto freep = [](auto*& p) {
@@ -1836,6 +1838,9 @@ static int set_system_impl(LoupHandle* h, int n_atoms, const int* atomic_numbers
     CUDA_CHECK(cudaMalloc(&h->d_bin_counts, (h->max_bins + 1) * sizeof(int)));
     CUDA_CHECK(cudaMalloc(&h->d_bin_offsets, (h->max_bins + 1) * sizeof(int)));
     CUDA_CHECK(cudaMalloc(&h->d_bin_cursor, (h->max_bins + 1) * sizeof(int)));
+    // The three bin arrays above have a fixed size: loup_plan_memory must not scale them with the atom count.
+    h->sys_fixed_bytes = 3 * (size_t)(h->max_bins + 1) * sizeof(int);
+    h->sys_atom_bytes -= h->sys_fixed_bytes;
     CUDA_CHECK(cudaMalloc(&h->d_bin_atom_id, n_atoms * sizeof(int)));
     CUDA_CHECK(cudaMalloc(&h->d_bin_pos, (size_t)n_atoms * 3 * sizeof(double)));
     CUDA_CHECK(cudaMalloc(&h->d_bin_pos_f32, (size_t)n_atoms * sizeof(float4)));
@@ -2149,7 +2154,7 @@ static int run_md_loop(
     // after kDispWindowMax steps without a rebuild, so a system too cold to rebuild forgets a fast start as well.
     constexpr int kDispWindowMin = 32, kDispWindowMax = 512;
     auto rotate_disp = [&] {
-        loup::rotate_step_disp_kernel<<<1, 1, 0, h->stream>>>(h->d_max_step_disp2);
+        loup::rotate_step_disp_kernel<<<1, 1, 0, h->stream>>>(h->d_max_step_disp2, h->d_need_rebuild);
         h->disp_window_steps = 0;
     };
     auto note_step = [&] {
@@ -2655,8 +2660,12 @@ static int plan_memory_impl(LoupHandle* h, int n_atoms, double edges_per_atom, L
     const double edge_now = (double)h->sys_edge_bytes + (h->gen ? (double)h->gen->edge_bytes() : 0.0);
     const double edges = std::ceil((double)n_atoms * epa);
     const double cap = std::max(edges + std::floor(edges / 4.0) + 1024.0, 4096.0);  // ensure_edge_capacity's rule
-    const double whole = atom_now * scale + edge_now / h->E_cap * cap + (double)h->cub_tmp_bytes * scale +
-                         (double)h->weight_copy_bytes;
+    // kPlanAllowance stands for what is not counted (captured graphs, the allocator's rounding of sixty buffers):
+    // on SrTiO3 with OMAT-0 medium the counted bytes were 58, -1 and 25 MB below the measured memory at 5,000, 20,480
+    // and 40,000 atoms (RTX 5060 Ti, 15 November 2026).
+    constexpr double kPlanAllowance = 32.0 * 1024.0 * 1024.0;
+    const double whole = atom_now * scale + (double)h->sys_fixed_bytes + edge_now / h->E_cap * cap +
+                         (double)h->cub_tmp_bytes * scale + (double)h->weight_copy_bytes + kPlanAllowance;
     size_t free_b = 0, total_b = 0;
     CUDA_CHECK(cudaMemGetInfo(&free_b, &total_b));
     LoupMemoryPlan plan{};
@@ -2664,7 +2673,7 @@ static int plan_memory_impl(LoupHandle* h, int n_atoms, double edges_per_atom, L
     plan.free_bytes = free_b;
     // The planned system would replace the current one, so its buffers count as free; 10% stay as headroom. Edge
     // indices are 32-bit: beyond that the whole-system call cannot run whatever the memory.
-    const double budget = (double)free_b + atom_now + edge_now + (double)h->cub_tmp_bytes;
+    const double budget = (double)free_b + atom_now + (double)h->sys_fixed_bytes + edge_now + (double)h->cub_tmp_bytes;
     plan.mode = (whole <= 0.9 * budget && cap < 2147483647.0) ? LOUP_EXEC_WHOLE : LOUP_EXEC_TILED;
     *out = plan;
     return 0;

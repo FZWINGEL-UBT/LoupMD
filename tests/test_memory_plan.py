@@ -44,6 +44,8 @@ def test_prediction_from_a_small_cell_matches_the_measured_memory(sto_bundle, re
     predicted = probe.plan_memory(n)
     assert predicted.mode == _core.LOUP_EXEC_WHOLE
     measured, own = _measured(sto_bundle, probe, rep)
+    print(f"memory plan {n} atoms: predicted {predicted.whole_bytes / 1e6:.1f} MB, measured {measured / 1e6:.1f} MB, "
+          f"own {own / 1e6:.1f} MB")
     assert abs(predicted.whole_bytes - measured) < 0.10 * measured, (predicted.whole_bytes, measured)
     assert abs(predicted.whole_bytes - own) < 0.03 * own, (predicted.whole_bytes, own)  # the scaling itself
 
@@ -53,6 +55,8 @@ def test_prediction_on_the_generic_path(tmp_path):
     probe = _probe(bundle)
     predicted = probe.plan_memory(5000)
     measured, own = _measured(bundle, probe, 10)
+    print(f"memory plan generic 5000 atoms: predicted {predicted.whole_bytes / 1e6:.1f} MB, measured "
+          f"{measured / 1e6:.1f} MB, own {own / 1e6:.1f} MB")
     assert abs(predicted.whole_bytes - measured) < 0.10 * measured, (predicted.whole_bytes, measured)
     assert abs(predicted.whole_bytes - own) < 0.03 * own
 
