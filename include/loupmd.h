@@ -353,6 +353,13 @@ int loup_debug_evaluate_domain(LoupHandle* h, const double* positions, const dou
 int loup_debug_domain_edges(LoupHandle* h, const double* positions, const double* cell, long long capacity,
                             int* out_receivers, int* out_senders, double* out_shifts, long long* out_count,
                             unsigned char* out_ghost_used);
+// Testing only (plan task S5-T03, until S5-T05 makes it a mode of the public calls): energy, forces [n_atoms, 3]
+// and stress of the periodic system `positions` in `cell`, evaluated tile by tile with the per-layer sweeps, at most
+// `receivers` local atoms per tile. Bundles of the generic path without long range; the handle afterwards holds
+// the last tile's domain (call loup_set_system for an ordinary system again). *out_tiles (optional): the tiles.
+int loup_debug_evaluate_tiled(LoupHandle* h, int n_atoms, const int* atomic_numbers, const double* positions,
+                              const double* cell, int receivers, double skin, double* out_energy_ev, double* out_forces,
+                              double* out_stress, long long* out_tiles);
 // Testing only: the noise CSVR draws in steps first_step .. first_step + n_steps - 1 (counted by the handle's step
 // counter, which loup_set_system zeroes) with `seed` for `ndof` degrees of freedom: the standard normal R1 and the
 // chi-square variate of ndof - 1 degrees of freedom of each step.

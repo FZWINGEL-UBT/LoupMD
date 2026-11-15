@@ -902,3 +902,26 @@ RTX 5060 Ti only; library of the working tree after `40bdf96` with `loup_debug_d
 - Not measured: the time of a tile's list build, and of a second build without the dropped candidates.
 - `pytest tests/gpu` with no marker filter (fast, full and acceptance tiers, with the two tests above) on this
   build: 275 passed in 1,458 s. The acceptance tier after the move of S2-T11 thus passes as well.
+
+### 6.13 The tiled call (15 November 2026, 23:30)
+
+RTX 5060 Ti only; library of the working tree after `9abd36d` with `loup_debug_evaluate_tiled` (sha256
+`d7ad0d9be7f8ce99...`). `pytest -s tests/gpu/test_tiled.py`, skin 0.5 A; each line compares the tiled call with
+the whole-system call of the same build (energy per atom, largest force and stress component).
+
+| Model | Atoms | Tiles | Default GEMMs: dE eV/atom, dF eV/A, dS eV/A^3 | No hybrids on either side | Whole system, default against no hybrids |
+|---|---|---|---|---|---|
+| OMAT-0 medium (generic) | 40,000 `SrTiO3` | 8 | 6.8e-7, 5.8e-6, 2.8e-8 | 1.2e-9, 1.8e-6, 2.1e-10 | 1.3e-8, 1.3e-6, 3.2e-9 |
+| OMAT-0 small | 40,000 `SrTiO3` | 8 | 4.5e-7, 6.7e-6, 4.7e-8 | 1.2e-9, 1.7e-6, 1.6e-10 | 1.7e-10, 1.1e-6, 2.8e-10 |
+| MH-1 | 24,565 `SrTiO3` | 8 | 4.4e-8, 5.5e-6, 4.3e-9 | 2.5e-10, 1.7e-6, 5.6e-10 | 4.4e-8, 1.6e-6, 1.6e-9 |
+| OFF23 medium | 41,472 water | 8 | 4.3e-8, 2.9e-6, 1.5e-9 | 2.6e-10, 1.2e-6, 8.3e-11 | 4.0e-9, 1.6e-6, 6.4e-10 |
+| OMOL-0 extra large (five sweeps) | 1,296 water | 4 | 5.9e-9, 1.2e-6, 1.4e-9 | 8.1e-10, 1.5e-6, 6.1e-10 | 1.9e-9, 1.2e-6, 1.1e-9 |
+
+- Without hybrids the tiled call is the whole-system call to float32 rounding; with the default GEMMs the
+  difference is the hybrid kernels' rounding where a tile's GEMM shape gets another kernel (PLAN.md D16, D60).
+- MH-1's whole-system call runs out of memory at 40,000 atoms on 16 GB (24,565 fit): the case for tiling.
+- No device memory is left behind: three tiled and two whole-system calls in one process leave 1,129 MiB in use
+  before and after (`cudaMemGetInfo`).
+- `pytest tests/gpu -m "not acceptance"`: 270 passed, 1 failed in 653 s. The failure, `test_the_calculator_equals_evaluate` (two engines of one bundle 3.0e-7 eV/atom apart against its bound of 2e-7), passed five runs in a row on this build and three on the build before; its bound is now 1e-6 eV/atom (PLAN.md D61).
+- A/B against the build of §6.12 (the tiled code is not on the step path): four rounds alternating, a fresh plan directory per run: `NbCl5` 1.898 ms/step before and 1.894 after, `SrTiO3` 8.230 and 8.233 (ratios 0.998 and 1.0004), a tie. Both sides ran about 2% slower than the runs of §6.11 earlier that evening; only the alternating comparison counts.
+- Not measured: the tiled call's time (every tile sweep sets its domain up again; S5-T06, S5-T10).

@@ -7,6 +7,7 @@
 #include "bundle.hpp"
 #include "thermo.hpp"
 #include "cell.hpp"
+#include "tiled.hpp"
 #include <cstddef>
 
 #include <cub/cub.cuh>
@@ -28,6 +29,7 @@
 #include <cmath>
 #include <cstring>
 #include <vector>
+#include <stdexcept>
 
 // Defined in neighbors.cu & integrator.cu (compiled into same or linked translation units;
 // we include or forward-declare cleanly here).
@@ -4236,6 +4238,266 @@ static int domain_edges_impl(LoupHandle* h, const double* positions, const doubl
     return 0;
 }
 
+// ---- The tiled call (plan task S5-T03), testing only until S5-T05 makes it a mode of the public calls ----
+// A whole periodic system evaluated tile by tile (src/tiled.hpp): every tile is an open domain of its locals and the
+// ghost candidates that send along some edge of its list. The per-layer sweeps run over all tiles in turn, and the
+// state between sweeps lives in whole-system arrays on the device: each forward sweep writes its locals' rows of
+// the layer's output, the next sweep gathers the rows of its locals and ghosts; the last sweep and each backward
+// sweep scatter-add the gradient rows of every row (ghosts fold onto the atom they are an image of), and the
+// backward sweep of a layer takes its locals' gradient rows as its adjoint. Forces fold the same way.
+// Plain launches, no graphs; every tile sweep sets its domain up again (S5-T06 keeps lists, S5-T10 the speed).
+extern "C++" {
+__global__ void tile_gather_rows_kernel(int rows, int width, const int* __restrict__ row_atom,
+                                        const float* __restrict__ whole, float* __restrict__ tile) {
+    const int64_t k = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
+    if (k >= (int64_t)rows * width) return;
+    const int r = (int)(k / width), c = (int)(k % width);
+    tile[k] = whole[(int64_t)row_atom[r] * width + c];
+}
+
+__global__ void tile_scatter_rows_kernel(int rows, int width, const int* __restrict__ row_atom,
+                                         const float* __restrict__ tile, float* __restrict__ whole) {
+    const int64_t k = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
+    if (k >= (int64_t)rows * width) return;
+    const int r = (int)(k / width), c = (int)(k % width);
+    whole[(int64_t)row_atom[r] * width + c] = tile[k];
+}
+
+template <typename T>
+__global__ void tile_scatter_add_rows_kernel(int rows, int width, const int* __restrict__ row_atom,
+                                             const T* __restrict__ tile, T* __restrict__ whole) {
+    const int64_t k = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
+    if (k >= (int64_t)rows * width) return;
+    const int r = (int)(k / width), c = (int)(k % width);
+    atomicAdd(&whole[(int64_t)row_atom[r] * width + c], tile[k]);
+}
+}  // extern "C++"
+
+namespace {
+struct TileDomain {        // one tile as an open domain: locals, then the ghosts it keeps
+    int n_local = 0;
+    std::vector<int> atom;           // [n_local + n_ghost] the whole system's atom of each row (caller order)
+    std::vector<int> z;
+    std::vector<double> place;       // [rows, 3] positions in the domain's box
+    double box[9] = {0, 0, 0, 0, 0, 0, 0, 0, 0};
+    int n_ghost() const { return (int)atom.size() - n_local; }
+};
+}  // namespace
+
+// Sets the handle up as `t`'s domain and builds its list; row_atom (device, [rows]) maps each device row to its atom.
+static int activate_tile(LoupHandle* h, const TileDomain& t, double skin, int* row_atom) {
+    if (set_domain_impl(h, t.n_local, t.n_ghost(), t.z.data(), skin) != 0) return -1;
+    if (upload_positions(h, t.place.data(), t.box) < 0) return -1;
+    if (rebuild_neighbors(h) != 0) return -1;
+    h->invalidate_graphs();
+    CUDA_CHECK(cudaMemsetAsync(static_cast<char*>(h->d_zero_slab) + h->zero_tail_off, 0,
+                               h->zero_slab_bytes - h->zero_tail_off, h->stream));
+    const int rows = (int)t.atom.size();
+    std::vector<int> map(rows);
+    for (int dst = 0; dst < rows; ++dst) map[dst] = t.atom[h->perm[dst]];
+    CUDA_CHECK(cudaMemcpyAsync(row_atom, map.data(), (size_t)rows * sizeof(int), cudaMemcpyHostToDevice, h->stream));
+    CUDA_CHECK(cudaStreamSynchronize(h->stream));  // `map` goes out of scope
+    return 0;
+}
+
+static int evaluate_tiled_impl(LoupHandle* h, int n_atoms, const int* atomic_numbers, const double* positions,
+                               const double* cell, int receivers, double skin, double* out_energy_ev,
+                               double* out_forces, double* out_stress, long long* out_tiles) {
+    if (!h) return -1;
+    if (n_atoms <= 0 || !atomic_numbers || !positions || !cell) {
+        loup::set_error("n_atoms must be positive and atomic_numbers, positions and cell given");
+        return -1;
+    }
+    if (!(h->gen && h->gen->sweeps_available())) {
+        loup::set_error("the tiled call needs a bundle of the generic path without long range, and "
+                        "LOUP_CHAIN_FOLD=0 where the skip-chain fold applies");
+        return -1;
+    }
+    const int L = h->gen->n_layers();
+    if (L < 2) { loup::set_error("the tiled call needs a model of two or more layers, this one has %d", L); return -1; }
+    if (!(skin >= 0.0) || !std::isfinite(skin)) { loup::set_error("skin must be finite and not negative"); return -1; }
+    CUDA_CHECK(cudaSetDevice(h->device_id));
+    const double r_list = (double)h->gen->r_max() + skin;
+    loup::TilePlan plan;
+    try {
+        plan = loup::plan_tiles(positions, n_atoms, cell, receivers, 0, nullptr, r_list + 1e-3, nullptr);
+    } catch (const std::exception& e) {
+        loup::set_error("tile plan: %s", e.what());
+        return -1;
+    }
+    const int64_t T = plan.tiles();
+    if (out_tiles) *out_tiles = T;
+
+    // The tiles' domains; the candidates that send along no edge are dropped (S5-T02).
+    std::vector<TileDomain> tiles((size_t)T);
+    int max_rows = 0;
+    for (int64_t k = 0; k < T; ++k) {
+        TileDomain all;
+        const int64_t l0 = plan.local_ptr[k], l1 = plan.local_ptr[k + 1];
+        const int64_t g0 = plan.ghost_ptr[k], g1 = plan.ghost_ptr[k + 1];
+        all.n_local = (int)(l1 - l0);
+        auto add = [&](int a, const int32_t* s) {
+            all.atom.push_back(a);
+            all.z.push_back(atomic_numbers[a]);
+            for (int c = 0; c < 3; ++c)
+                all.place.push_back(positions[(int64_t)a * 3 + c] + s[0] * cell[c] + s[1] * cell[3 + c] +
+                                    s[2] * cell[6 + c]);
+        };
+        for (int64_t i = l0; i < l1; ++i) add(plan.local[i], &plan.local_shift[i * 3]);
+        for (int64_t i = g0; i < g1; ++i) add(plan.ghost[i], &plan.ghost_shift[i * 3]);
+        double lo[3] = {INFINITY, INFINITY, INFINITY}, hi[3] = {-INFINITY, -INFINITY, -INFINITY};
+        for (size_t r = 0; r < all.atom.size(); ++r)
+            for (int c = 0; c < 3; ++c) {
+                lo[c] = std::min(lo[c], all.place[r * 3 + c]);
+                hi[c] = std::max(hi[c], all.place[r * 3 + c]);
+            }
+        const double pad = r_list + 1.0;  // the box's own images then lie beyond the list's reach
+        for (size_t r = 0; r < all.atom.size(); ++r)
+            for (int c = 0; c < 3; ++c) all.place[r * 3 + c] -= lo[c] - pad;
+        for (int c = 0; c < 3; ++c) all.box[c * 4] = hi[c] - lo[c] + 2.0 * pad;
+
+        TileDomain& t = tiles[(size_t)k];
+        const int G = all.n_ghost();
+        if (G == 0) { t = std::move(all); max_rows = std::max(max_rows, t.n_local); continue; }
+        if (set_domain_impl(h, all.n_local, G, all.z.data(), skin) != 0) return -1;
+        if (upload_positions(h, all.place.data(), all.box) < 0) return -1;
+        if (rebuild_neighbors(h) != 0) return -1;
+        std::vector<unsigned char> used((size_t)G, 0);
+        DeviceBufferGuard dm;
+        CUDA_CHECK(cudaMalloc(&dm.p, G));
+        CUDA_CHECK(cudaMemsetAsync(dm.p, 0, G, h->stream));
+        if (h->E_skin > 0)
+            mark_ghost_senders_kernel<<<(h->E_skin + 255) / 256, 256, 0, h->stream>>>(
+                h->E_skin, h->N, h->d_senders, static_cast<unsigned char*>(dm.p));
+        CUDA_CHECK(cudaMemcpyAsync(used.data(), dm.p, G, cudaMemcpyDeviceToHost, h->stream));
+        CUDA_CHECK(cudaStreamSynchronize(h->stream));
+        t.n_local = all.n_local;
+        std::copy(all.box, all.box + 9, t.box);
+        for (int r = 0; r < (int)all.atom.size(); ++r) {
+            if (r >= all.n_local && !used[(size_t)(r - all.n_local)]) continue;
+            t.atom.push_back(all.atom[r]);
+            t.z.push_back(all.z[r]);
+            t.place.insert(t.place.end(), &all.place[(size_t)r * 3], &all.place[(size_t)r * 3 + 3]);
+        }
+        max_rows = std::max(max_rows, (int)t.atom.size());
+    }
+
+    // The whole system's layer outputs, their gradients and the forces, on the device
+    std::vector<DeviceBufferGuard> x((size_t)(L - 1) * 4), dx((size_t)(L - 1) * 4);
+    auto width = [&](int t, int l) { return (2 * l + 1) * h->gen->out_width(t); };
+    for (int t = 0; t + 1 < L; ++t)
+        for (int l = 0; l <= h->gen->out_lmax(t); ++l) {
+            const size_t bytes = (size_t)n_atoms * width(t, l) * sizeof(float);
+            CUDA_CHECK(cudaMalloc(&x[(size_t)t * 4 + l].p, bytes));
+            CUDA_CHECK(cudaMalloc(&dx[(size_t)t * 4 + l].p, bytes));
+            CUDA_CHECK(cudaMemset(dx[(size_t)t * 4 + l].p, 0, bytes));
+        }
+    DeviceBufferGuard d_forces, d_row_atom, adj[4];
+    CUDA_CHECK(cudaMalloc(&d_forces.p, (size_t)n_atoms * 3 * sizeof(double)));
+    CUDA_CHECK(cudaMemset(d_forces.p, 0, (size_t)n_atoms * 3 * sizeof(double)));
+    CUDA_CHECK(cudaMalloc(&d_row_atom.p, (size_t)max_rows * sizeof(int)));
+    for (int l = 0; l < 4; ++l) {
+        size_t floats = 0;
+        for (int t = 0; t + 1 < L; ++t)
+            if (l <= h->gen->out_lmax(t)) floats = std::max(floats, (size_t)max_rows * width(t, l));
+        if (floats) CUDA_CHECK(cudaMalloc(&adj[l].p, floats * sizeof(float)));
+    }
+    int* row_atom = static_cast<int*>(d_row_atom.p);
+    auto fx = [&](int t, int l) { return static_cast<float*>(x[(size_t)t * 4 + l].p); };
+    auto fdx = [&](int t, int l) { return static_cast<float*>(dx[(size_t)t * 4 + l].p); };
+    auto grid = [](int64_t n) { return (unsigned)((n + 255) / 256); };
+    struct NoFork {
+        LoupHandle* h;
+        bool saved;
+        explicit NoFork(LoupHandle* h_) : h(h_), saved(h_->fork_ok) { h->fork_ok = false; }
+        ~NoFork() { h->fork_ok = saved; }
+    } no_fork(h);
+    const int stress = out_stress ? 1 : 0;
+    double energy = 0.0, virial[6] = {0, 0, 0, 0, 0, 0};
+
+    // After a tile's sweep: its energy and virial, and (fold) its forces onto the whole system's atoms
+    auto finish = [&](const TileDomain& t, bool fold) -> int {
+        double e = 0.0, v[6];
+        CUDA_CHECK(cudaMemcpyAsync(&e, h->d_energy_f64, sizeof(double), cudaMemcpyDeviceToHost, h->stream));
+        CUDA_CHECK(cudaMemcpyAsync(v, h->d_virial_grad_f64, 6 * sizeof(double), cudaMemcpyDeviceToHost, h->stream));
+        if (fold)
+            tile_scatter_add_rows_kernel<double><<<grid((int64_t)t.atom.size() * 3), 256, 0, h->stream>>>(
+                (int)t.atom.size(), 3, row_atom, h->d_forces_f64, static_cast<double*>(d_forces.p));
+        CUDA_CHECK(cudaStreamSynchronize(h->stream));
+        CUDA_CHECK(cudaGetLastError());
+        energy += e;
+        for (int i = 0; i < 6; ++i) virial[i] += v[i];
+        return 0;
+    };
+    auto gather_input = [&](const TileDomain& t, int layer) {  // layer `layer`'s output rows of locals and ghosts
+        for (int l = 0; layer >= 0 && l <= h->gen->out_lmax(layer); ++l)
+            tile_gather_rows_kernel<<<grid((int64_t)t.atom.size() * width(layer, l)), 256, 0, h->stream>>>(
+                (int)t.atom.size(), width(layer, l), row_atom, fx(layer, l), h->gen->layer_out(layer, l));
+    };
+    auto scatter_grad = [&](const TileDomain& t, int layer) {  // the gradient of layer `layer`'s output, every row
+        for (int l = 0; layer >= 0 && l <= h->gen->out_lmax(layer); ++l)
+            tile_scatter_add_rows_kernel<float><<<grid((int64_t)t.atom.size() * width(layer, l)), 256, 0, h->stream>>>(
+                (int)t.atom.size(), width(layer, l), row_atom, h->gen->layer_out_grad(layer, l), fdx(layer, l));
+    };
+
+    for (int layer = 0; layer + 1 < L; ++layer)  // forward sweeps
+        for (const TileDomain& t : tiles) {
+            if (activate_tile(h, t, skin, row_atom) != 0) return -1;
+            if (layer == 0) energy += h->e0_total;
+            gather_input(t, layer - 1);
+            DomainSweep sw;
+            sw.kind = loup::GenericPassInputs::SweepForward;
+            sw.layer = layer;
+            record_force_pass(h, stress, false, &sw);
+            for (int l = 0; l <= h->gen->out_lmax(layer); ++l)
+                tile_scatter_rows_kernel<<<grid((int64_t)t.n_local * width(layer, l)), 256, 0, h->stream>>>(
+                    t.n_local, width(layer, l), row_atom, h->gen->layer_out(layer, l), fx(layer, l));
+            if (finish(t, false) != 0) return -1;
+        }
+    for (const TileDomain& t : tiles) {  // the last layer
+        if (activate_tile(h, t, skin, row_atom) != 0) return -1;
+        gather_input(t, L - 2);
+        DomainSweep sw;
+        sw.kind = loup::GenericPassInputs::SweepLast;
+        record_force_pass(h, stress, false, &sw);
+        scatter_grad(t, L - 2);
+        if (finish(t, true) != 0) return -1;
+    }
+    for (int layer = L - 2; layer >= 0; --layer)  // backward sweeps
+        for (const TileDomain& t : tiles) {
+            if (activate_tile(h, t, skin, row_atom) != 0) return -1;
+            gather_input(t, layer - 1);
+            DomainSweep sw;
+            sw.kind = loup::GenericPassInputs::SweepBackward;
+            sw.layer = layer;
+            for (int l = 0; l <= h->gen->out_lmax(layer); ++l) {
+                float* a = static_cast<float*>(adj[l].p);
+                tile_gather_rows_kernel<<<grid((int64_t)t.n_local * width(layer, l)), 256, 0, h->stream>>>(
+                    t.n_local, width(layer, l), row_atom, fdx(layer, l), a);
+                sw.adjoint[l] = a;
+            }
+            record_force_pass(h, stress, false, &sw);
+            scatter_grad(t, layer - 1);
+            if (finish(t, true) != 0) return -1;
+        }
+
+    if (out_energy_ev) *out_energy_ev = energy;
+    if (out_forces)
+        CUDA_CHECK(cudaMemcpy(out_forces, d_forces.p, (size_t)n_atoms * 3 * sizeof(double), cudaMemcpyDeviceToHost));
+    if (out_stress) {
+        const double vol = std::fabs(cell[0] * (cell[4] * cell[8] - cell[5] * cell[7]) -
+                                     cell[1] * (cell[3] * cell[8] - cell[5] * cell[6]) +
+                                     cell[2] * (cell[3] * cell[7] - cell[4] * cell[6]));
+        const double inv_v = 1.0 / vol;
+        const double* v = virial;
+        out_stress[0] = v[0] * inv_v; out_stress[1] = v[1] * inv_v; out_stress[2] = v[2] * inv_v;
+        out_stress[3] = v[1] * inv_v; out_stress[4] = v[3] * inv_v; out_stress[5] = v[4] * inv_v;
+        out_stress[6] = v[2] * inv_v; out_stress[7] = v[4] * inv_v; out_stress[8] = v[5] * inv_v;
+    }
+    h->save_disk_plans();
+    return 0;
+}
+
 // loup_plan_memory: the device memory a system of n_atoms would take, scaled from the buffers the handle's current
 // system has. Every per-system buffer is proportional to the atom count or to the edge capacity, so the scaling is
 // exact up to alignment; what it leaves out is small and does not scale (captured graphs, cuBLAS internals).
@@ -4387,6 +4649,15 @@ int loup_debug_domain_edges(LoupHandle* h, const double* positions, const double
     return guarded(h, "loup_debug_domain_edges", [&] {
         return domain_edges_impl(h, positions, cell, capacity, out_receivers, out_senders, out_shifts, out_count,
                                  out_ghost_used);
+    });
+}
+
+int loup_debug_evaluate_tiled(LoupHandle* h, int n_atoms, const int* atomic_numbers, const double* positions,
+                              const double* cell, int receivers, double skin, double* out_energy_ev, double* out_forces,
+                              double* out_stress, long long* out_tiles) {
+    return guarded(h, "loup_debug_evaluate_tiled", [&] {
+        return evaluate_tiled_impl(h, n_atoms, atomic_numbers, positions, cell, receivers, skin, out_energy_ev,
+                                   out_forces, out_stress, out_tiles);
     });
 }
 

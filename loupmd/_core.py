@@ -386,6 +386,26 @@ class LoupEngine:
                                             ctypes.byref(energy), _ptr(forces), _ptr(stress)), "loup_evaluate")
         return float(energy.value), forces, stress
 
+    def evaluate_tiled(self, atomic_numbers, positions, cell, receivers: int, skin: float = 0.5):
+        """Energy, forces and stress of a periodic system evaluated tile by tile (plan task S5-T03; testing until
+        the capacity mode of S5-T05): at most ``receivers`` local atoms per tile. Returns ``(energy, forces,
+        stress, tiles)``. The handle then holds the last tile's domain: call ``set_system`` before other calls."""
+        lib = self._lib
+        n = len(atomic_numbers)
+        lib.loup_debug_evaluate_tiled.argtypes = [ctypes.c_void_p, ctypes.c_int, _c_int_p, _c_double_p, _c_double_p,
+                                                  ctypes.c_int, ctypes.c_double, _c_double_p, _c_double_p,
+                                                  _c_double_p, ctypes.POINTER(ctypes.c_longlong)]
+        z = np.ascontiguousarray(atomic_numbers, dtype=np.int32)
+        pos = _array(positions, (n, 3), "positions")
+        cel = _array(cell, (3, 3), "cell")
+        energy, tiles = ctypes.c_double(), ctypes.c_longlong()
+        forces = np.empty((n, 3), dtype=np.float64)
+        stress = np.empty((3, 3), dtype=np.float64)
+        self._check(lib.loup_debug_evaluate_tiled(self._h, n, z.ctypes.data_as(_c_int_p), _ptr(pos), _ptr(cel),
+                                                  int(receivers), float(skin), ctypes.byref(energy), _ptr(forces),
+                                                  _ptr(stress), ctypes.byref(tiles)), "loup_debug_evaluate_tiled")
+        return float(energy.value), forces, stress, int(tiles.value)
+
     def evaluate_energy(self, positions, cell) -> float:
         """The energy alone, from a pass without gradients (``LOUP_EVAL_ENERGY_ONLY``). The forces on the device
         are not those of these positions afterwards."""
