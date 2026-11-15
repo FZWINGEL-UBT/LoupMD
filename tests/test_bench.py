@@ -150,10 +150,26 @@ def test_several_structure_folders_are_searched_in_order(tmp_path):
 
     (tmp_path / "a").mkdir()
     (tmp_path / "b").mkdir()
-    (tmp_path / "b" / "water_216.extxyz").write_text("")
-    found = suites.find_file("water_216.extxyz", {"LOUPMD_BENCH_STRUCTURES": os.pathsep.join(
+    (tmp_path / "b" / "NbCl5_R2SCAN.cif").write_text("")
+    found = suites.find_file("NbCl5_R2SCAN.cif", {"LOUPMD_BENCH_STRUCTURES": os.pathsep.join(
         [str(tmp_path / "a"), str(tmp_path / "b")])})
-    assert found == tmp_path / "b" / "water_216.extxyz"
+    assert found == tmp_path / "b" / "NbCl5_R2SCAN.cif"
+
+
+def test_the_shipped_structures_are_found_first_and_named_with_their_hashes():
+    import hashlib
+    from pathlib import Path
+
+    folder = Path(suites.__file__).resolve().parent / "structures"
+    sources = (folder / "SOURCES.md").read_text(encoding="utf-8")
+    shipped = sorted(p for p in folder.iterdir() if p.name != "SOURCES.md")
+    assert [p.name for p in shipped] == ["naphthalene_cod2311090.cif", "paracetamol_cod2104364.cif",
+                                         "urea_cod1008787.cif", "water_216.extxyz"]
+    for path in shipped:
+        assert f"| `{path.name}` |" in sources and hashlib.sha256(path.read_bytes()).hexdigest() in sources
+        assert suites.find_file(path.name, {}) == path
+    (name, water), = suites.systems_of("standard", systems=["water 216"], environ={})   # no folder is named
+    assert name == "water 216" and len(water) == 648
 
 
 def test_the_standard_suite_reads_the_structure_folder(tmp_path):

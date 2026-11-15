@@ -1,8 +1,8 @@
 """The benchmark systems and suites.
 
 ``SrTiO3`` and ``NaCl`` are generated. ``NbCl5`` and the water box are files: they are looked for in
-``loupmd/bench/structures/`` (empty until the owner allows them in the wheel, PLAN.md section 8) and then in
-``$LOUPMD_BENCH_STRUCTURES``.
+``loupmd/bench/structures/`` and then in ``$LOUPMD_BENCH_STRUCTURES``. The water box and the organic crystals of
+the gate ship with the package; ``NbCl5`` does not yet (``structures/SOURCES.md`` says why).
 """
 from __future__ import annotations
 

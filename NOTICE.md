@@ -36,16 +36,16 @@ The `3x` cubin is CUTLASS's 3xTF32 without the FP16 instruction.
 
 ## Generated sources (`src/generated_*`)
 
-Written by the generators in `python/`; not edited by hand. They hold kernel source specialised to model
+Written by the generators in `codegen/`; not edited by hand. They hold kernel source specialised to model
 architectures (channel counts, irreps, tensor-product paths, coupling coefficients). They hold no model weights:
 those are read from a `.loup` bundle at run time.
 
 | File | Generator | Made with |
 | --- | --- | --- |
-| `src/generated_kernels.cuh` | `python/gen_kernels.py`, from the architecture of `mace-omat-0-medium.model` | FastMACE's factored symmetric contraction (`fastmace/kernels/cuda/sc_factored.py`, `sc_generated.py`; MIT, © 2026 Fabian Zwingel) and the streaming schedule of FastMACE's `fastmace/kernels/oeq_streaming/` (`schedule.py`, adapted from OpenEquivariance pull request 223 by P. Fuchs, commit `ef051c3f9efa2d1daf74cfbe3beaad152235f47d`; BSD-3-Clause, © 2025 The Regents of the University of California, through Lawrence Berkeley National Laboratory). The generator takes the schedule from that module and emits the kernel text itself; MACE's `convert_e3nn_cueq` (MIT, © 2022 ACEsuit/mace) and e3nn (MIT) supply the coupling coefficients |
-| `src/generated_kernels_signature.h` | `python/gen_kernels.py` | the signature string that bundles of the specialised path must carry |
-| `src/generated_generic.cu` | `python/gen_generic.py`, from the architectures of the model files found at generation time | FastMACE's factored symmetric contraction (as above); e3nn's Wigner 3j coefficients; sympy for the spherical-harmonic gradient |
-| `src/generated_generic.cuh` | `python/gen_generic.py` | as above |
+| `src/generated_kernels.cuh` | `codegen/gen_kernels.py`, from the architecture of `mace-omat-0-medium.model` | FastMACE's factored symmetric contraction (`fastmace/kernels/cuda/sc_factored.py`, `sc_generated.py`; MIT, © 2026 Fabian Zwingel) and the streaming schedule of FastMACE's `fastmace/kernels/oeq_streaming/` (`schedule.py`, adapted from OpenEquivariance pull request 223 by P. Fuchs, commit `ef051c3f9efa2d1daf74cfbe3beaad152235f47d`; BSD-3-Clause, © 2025 The Regents of the University of California, through Lawrence Berkeley National Laboratory). The generator takes the schedule from that module and emits the kernel text itself; MACE's `convert_e3nn_cueq` (MIT, © 2022 ACEsuit/mace) and e3nn (MIT) supply the coupling coefficients |
+| `src/generated_kernels_signature.h` | `codegen/gen_kernels.py` | the signature string that bundles of the specialised path must carry |
+| `src/generated_generic.cu` | `codegen/gen_generic.py`, from the architectures of the model files found at generation time | FastMACE's factored symmetric contraction (as above); e3nn's Wigner 3j coefficients; sympy for the spherical-harmonic gradient |
+| `src/generated_generic.cuh` | `codegen/gen_generic.py` | as above |
 
 ## Code and data ported from FastMACE
 
@@ -81,9 +81,17 @@ The records of `loupmd/optimize/__init__.py` and `loupmd/integrators.py` take AS
 implement the published algorithms with ASE's coefficient conventions; they were written for the engine and are
 MIT.
 
+## Structure files
+
+`loupmd/bench/structures/` holds the structures of the benchmark and the accuracy gate that ship with the package;
+`loupmd/bench/structures/SOURCES.md` names the source, licence and SHA-256 of each. The water box was built by the
+authors (MIT, as LoupMD); the urea, naphthalene and paracetamol cells are entries of the Crystallography Open
+Database, whose data are in the public domain (CC0). The Materials Project cells of the benchmark (`NbCl5`) and
+of the gate's `crystals` set are not in the package (PLAN.md, decision O11).
+
 ## Not yet in this file
 
 Later stages add files that need an entry here when they land: the FastMACE modules vendored for export
 (S2-T03), further modules ported from ASE (Stage 4: the remaining integrators), the D3
-reference parameters (Stage 6D) and the benchmark structures (S2-T08, if the owner allows them in the
-wheel). S7-T03 is the audit.
+reference parameters (Stage 6D) and the Materials Project structures, if their terms allow it. S7-T03 is the
+audit.
