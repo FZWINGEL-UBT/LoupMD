@@ -183,6 +183,28 @@ Owner, 15 November (O9): no model is refused for its layer count. The sweeps are
 one sweep of the last layer (forward, readouts, backward), L - 1 backward sweeps. Two layers give FastMACE's three
 sweeps; OMOL-0 extra large gives five.
 
+Design, from reading `GenericModel::record` (generic.cu 1481-1933) and FastMACE's `docs/design/tiled-backend.md`
+§2-§4 on 15 November:
+
+- Atoms couple only through the convolutions' sender gathers (`launch_conv_fwd` reads `x[sender]`,
+  `launch_conv_bwd` adds to `dx[sender]`; layer 0 of most families reads the sender's species only). Everything
+  else in a layer is per receiver.
+- The state at the boundary after layer t is therefore the layer's output `hout_t` (all degrees, width `C_out`)
+  for every atom, and its adjoint `dhout_t`; not the post-`linear_up` rows the plan's sketch named. The sweep of
+  layer t + 1 gathers `hout_t` for its locals and ghosts and applies `W_up` to both (FastMACE does the same:
+  `linear_up` on tile and halo), so the locals also have `h_in` for their skip connections and readout skip.
+- The sweep of layer t + 1 scatter-adds `dh_in` for locals and ghosts into `dhout_t`. Layer t's backward sweep
+  replays its forward, seeds `dhout_t` with its readout's gradient plus the stored adjoint, and goes on. Energy is
+  accumulated by the forward sweeps only: a replay must not add its readout's energy again.
+- Forces and virial stay per edge (`d_edge_dvec_`, then `assemble_forces_kernel` or the first layer's edge
+  kernel), with ZBL in the layer-0 backward sweep; every edge belongs to its receiver's domain.
+- OMOL-0's S57 fold writes later layers' inputs straight from `y_t` and never forms `hout_t`. The whole-system
+  call keeps the fold. Domains use the plain path (what `LOUP_CHAIN_FOLD=0` runs today); its whole-system cost is
+  on record in the ledger (S57: 0.821), so tiled OMOL-0 is slower per atom by about that factor, an estimate.
+- For the whole system nothing moves: `record` becomes preamble, `forward_layer(t)` for each layer, the long
+  range, `backward_layer(t)` in reverse, the final assembly; the kernel sequence of today, so the captured graph
+  is the same.
+
 1. Tests first: for every generic family (two layers: OMAT-0 small, OFF23 medium, MH-1, MP-0 medium; three:
    OMOL-0 extra large on water), energy, forces and stress of the composed sweeps differ from the unsplit pass by
    no more than two calls of the unsplit pass differ from each other (measured in the test; the unsplit pass stays
