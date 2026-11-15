@@ -6,6 +6,7 @@
 #include "generic.hpp"
 #include "bundle.hpp"
 #include "thermo.hpp"
+#include "cell.hpp"
 
 #include <cub/cub.cuh>
 #ifndef _GNU_SOURCE
@@ -604,6 +605,18 @@ struct LoupHandle {
     uint64_t species_hash = 0;                        // of the atomic numbers in caller order (state blob)
     double cell_vol = 0.0;
     double cell_heights[3] = {0, 0, 0};
+    // The variable cell (cell.hpp), from the handle's first variable-cell run on: the cell on the device, which the
+    // captured step reads and writes, and the edges' integer image shifts in the edges' order, kept in the
+    // rebuild's scratch arrays (d_tmp_snd, d_tmp_rcv, d_tmp_pairs). Every rebuild refreshes both from the host's
+    // cell; the host's cell follows the device's before a rebuild inside such a run and at the end of the call.
+    bool var_cell = false;
+    loup::CellDev* d_celldev = nullptr;
+    loup::CellDev celldev_host{};
+    double cell_v0 = 0.0;          // the volume at loup_set_state / loup_import_state: the cell limits refer to it
+    bool cell_ref_stale = false;   // the cell has changed since the list was built (a variable-cell run ended so):
+                                   // whoever checks the list without the device's cell rebuilds first
+    bool req_var_cell = false;     // this loup_run call goes through the variable-cell step
+    double req_cell_rate = 0.0;    // testing: the cell and the positions scaled by 1 + this in every step
 
     // Atom device buffers
     int* d_species = nullptr;
@@ -742,6 +755,8 @@ struct LoupHandle {
     unsigned long long md_graph_seed = 0;
     bool md_graph_thermo = false;  // the graphs carry the two thermo kernels
     bool md_graph_fixcom = false;  // the graphs are the fix_com variant (and its degrees of freedom)
+    bool md_graph_varcell = false; // the graphs are the variable-cell step
+    double md_graph_cellrate = 0.0;
 
     // Thermo buffer (thermo.hpp), allocated by the first run that asks for rows. The host knows the step count and
     // the number of unread rows exactly and writes the device's control block at the start of every such run.
@@ -1173,6 +1188,40 @@ static int ensure_cub_tmp(LoupHandle* h, size_t bytes) {
     return 0;
 }
 
+// The device's cell from the host's, with the list's reference at this cell (at the end of a rebuild).
+static int upload_cell_dev(LoupHandle* h) {
+    loup::CellDev& c = h->celldev_host;
+    for (int i = 0; i < 9; ++i) {
+        c.h[i] = h->cell.c[i];
+        c.ref_inv[i] = h->cell.inv[i];
+        c.f[i] = c.move[i] = (i % 4 == 0) ? 1.0 : 0.0;
+    }
+    c.r_max = (double)h->cutoff();
+    c.r_list = c.r_max + h->skin;
+    c.thr = 0.5 * h->skin;
+    c.volume = h->cell_vol;
+    c.v0 = h->cell_v0 > 0.0 ? h->cell_v0 : h->cell_vol;
+    c.has_move = 0;
+    c.pad = 0;
+    CUDA_CHECK(cudaMemcpyAsync(h->d_celldev, &c, sizeof(c), cudaMemcpyHostToDevice, h->stream));
+    return 0;
+}
+
+// The host's cell from the device's: before a rebuild inside a variable-cell run and at the end of one.
+static int download_cell_dev(LoupHandle* h, loup::CellDev* out = nullptr) {
+    loup::CellDev c;
+    CUDA_CHECK(cudaStreamSynchronize(h->stream));
+    CUDA_CHECK(cudaMemcpy(&c, h->d_celldev, sizeof(c), cudaMemcpyDeviceToHost));
+    bool finite = true;
+    for (int i = 0; i < 9; ++i) finite = finite && std::isfinite(c.h[i]);
+    if (finite) {
+        memcpy(h->cell_in, c.h, sizeof(h->cell_in));
+        loup::compute_cell_mat(c.h, h->cell, h->cell_vol, h->cell_heights);
+    }
+    if (out) *out = c;
+    return 0;
+}
+
 static int rebuild_neighbors(LoupHandle* h) {
     h->nl_valid = false;  // set again only when the rebuild completes
     const int N = h->N;
@@ -1350,12 +1399,18 @@ static int rebuild_neighbors(LoupHandle* h) {
             loup::set_error("internal error: neighbour rows are not grouped by ascending sender species");
             return -1;
         }
+        if (h->var_cell) {  // the integer shifts in the edges' order; the scratch arrays are free until the next rebuild
+            loup::sorted_shifts_kernel<<<gridE, 256, 0, h->stream>>>(
+                E_new, d_vals.Current(), h->d_tmp_shifts, h->d_tmp_snd, h->d_tmp_rcv, h->d_tmp_pairs);
+        }
     } else if (h->E_graph != 0) {
         h->E_graph = 0;
         h->invalidate_graphs();
     }
     CUDA_CHECK(cudaMemcpyAsync(h->d_ref_pos64, h->d_pos64, (size_t)NT * 3 * sizeof(double), cudaMemcpyDeviceToDevice, h->stream));
     CUDA_CHECK(cudaMemsetAsync(h->d_need_rebuild, 0, sizeof(int), h->stream));
+    if (h->var_cell && upload_cell_dev(h) != 0) return -1;
+    h->cell_ref_stale = false;
     CUDA_CHECK(cudaGetLastError());
     h->nl_valid = true;
     return 0;
@@ -1962,6 +2017,7 @@ void loup_destroy(LoupHandle* h) {
         if (h->side[i]) cudaStreamDestroy(h->side[i]);
     }
     if (h->h_reb_pinned) cudaFreeHost(h->h_reb_pinned);
+    if (h->d_celldev) cudaFree(h->d_celldev);
     h->hyb.destroy();
     if (h->d_cublas_ws) cudaFree(h->d_cublas_ws);
     for (auto& kv : h->bt_cache) cudaFree(kv.second);
@@ -2288,6 +2344,7 @@ static int set_state_impl(LoupHandle* h, const double* positions, const double* 
     CUDA_CHECK(cudaSetDevice(h->device_id));
     if (!valid_input(h->N, positions, cell, velocities)) return -1;
     if (upload_positions(h, positions, cell) < 0) return -1;
+    h->cell_v0 = h->cell_vol;  // a new trajectory: the cell limits of a variable-cell run refer to this volume
     CUDA_CHECK(cudaMemsetAsync(h->d_max_step_disp2, 0, 2 * sizeof(unsigned int), h->stream));
     CUDA_CHECK(cudaMemsetAsync(h->d_int_state, 0, kIntStateSlots * sizeof(double), h->stream));  // a new trajectory
     h->int_state_kind = -1;
@@ -2376,7 +2433,7 @@ static int prepare_evaluate(LoupHandle* h, const double* positions, const double
     // moved more than skin/2 since the last build; the force graph is reused unless the rebuild outgrew it.
     const int cell_changed = upload_positions(h, positions, cell);
     if (cell_changed < 0) return -1;
-    bool rebuild = cell_changed != 0 || !h->nl_valid;
+    bool rebuild = cell_changed != 0 || !h->nl_valid || h->cell_ref_stale;
     if (!rebuild) {
         const double half_skin = 0.5 * h->skin;
         CUDA_CHECK(cudaMemsetAsync(h->d_need_rebuild, 0, sizeof(int), h->stream));
@@ -2510,6 +2567,19 @@ static int run_md_loop(
     const int gridN = (N + 255) / 256;
     const double dt_ase = dt_fs * loup::ASE_FS;
     const double half_skin = 0.5 * h->skin;
+    // The variable-cell step (cell.hpp): the cell on the device, the Cartesian shifts formed from the integer ones
+    // in every step, stress in every force pass, the list check against the deformed reference. One host wait per
+    // step: it does not pipeline. The first such run of a handle rebuilds the list once, which brings the cell and
+    // the sorted integer shifts onto the device; a fixed-cell run after a cell change rebuilds for its plain check.
+    const bool var_cell = h->req_var_cell;
+    const double cell_rate = var_cell ? h->req_cell_rate : 0.0;
+    if (var_cell && !h->var_cell) {
+        if (!h->d_celldev) CUDA_CHECK(cudaMalloc(&h->d_celldev, sizeof(loup::CellDev)));
+        h->var_cell = true;
+        if (rebuild_neighbors(h) != 0) return -1;
+    } else if (!var_cell && h->cell_ref_stale) {
+        if (rebuild_neighbors(h) != 0) return -1;
+    }
     // Thermo rows of this call: counted on the host, so a run that would overflow the buffer is refused here.
     int thermo_rows = 0;
     if (thermo_every > 0) {
@@ -2539,7 +2609,7 @@ static int run_md_loop(
     // displacement is well below the skin, so the loop starts unpipelined, switches to pipelining once
     // 4 x max step displacement < skin/2, and drops back if that stops holding or a step is found to have run on an
     // incomplete list (counted in dangerous_builds).
-    const bool allow_pipeline = (h->skin > 0.1 && n_steps > 1);
+    const bool allow_pipeline = (h->skin > 0.1 && n_steps > 1) && !var_cell;
     constexpr int kPipeLag = 3;  // steps by which the pipelined check lowers its threshold (two of lag, one of margin)
     auto bits_to_disp = [](int bits) {
         float d2;
@@ -2563,7 +2633,7 @@ static int run_md_loop(
     // per call. (lt_cache: the uncaptured pass of ensure_force_graph, which the MD graphs' capture relies on.)
     const bool debug_graphs = std::getenv("LOUP_DEBUG_GRAPHS") != nullptr;
     if (!h->forces_current || h->lt_cache.empty()) {
-        if (ensure_force_graph(h, 0) != 0) return -1;
+        if (ensure_force_graph(h, var_cell ? 1 : 0) != 0) return -1;
         if (debug_graphs) fputs("loupmd: initial force pass\n", stderr);
         CUDA_CHECK(cudaGraphLaunch(h->force_graph_exec, h->stream));
     }
@@ -2692,13 +2762,29 @@ static int run_md_loop(
                 h->d_forces_f64, h->d_inv_masses, h->d_sqrt_inv_masses,
                 h->d_pos64, h->d_vel64, h->d_rnd_vel, h->d_max_step_disp2);
         }
+        if (var_cell) {
+            // Whoever moves the cell sets this step's deformation; the atoms follow it, then the cell itself and
+            // what the step needs from it. The list check measures from the deformed reference.
+            if (cell_rate != 0.0) {
+                loup::cell_debug_rate_kernel<<<1, 1, 0, h->stream>>>(cell_rate, h->d_celldev);
+                loup::cell_move_positions_kernel<<<gridN, 256, 0, h->stream>>>(N, h->d_celldev, h->d_pos64);
+            }
+            loup::cell_derive_kernel<<<1, 1, 0, h->stream>>>(h->d_celldev, h->d_need_rebuild);
+            loup::check_skin_cell_kernel<<<gridN, 256, 0, h->stream>>>(
+                N, lag, 0, h->d_pos64, h->d_ref_pos64, h->d_celldev, h->d_max_step_disp2, h->d_need_rebuild);
+            return;
+        }
         // The unpipelined check (lag 0) also reports whether the list is still young enough for the pipelined loop.
         loup::check_skin_kernel<<<gridN, 256, 0, h->stream>>>(
             N, half_skin, lag, lag == 0 ? kPipeLag : 0, h->d_pos64, h->d_ref_pos64, h->d_max_step_disp2,
             h->d_need_rebuild);
     };
     auto record_rest = [&]() {
-        record_force_pass(h, 0);
+        if (var_cell && h->E_graph > 0) {  // the edges' Cartesian shifts in the cell of this step
+            loup::shift_cart_kernel<<<(h->E_graph + 255) / 256, 256, 0, h->stream>>>(
+                h->d_row_ptr + N, h->d_celldev, h->d_tmp_snd, h->d_tmp_rcv, h->d_tmp_pairs, h->d_shift_cart);
+        }
+        record_force_pass(h, var_cell ? 1 : 0);
         if (kind != 1) {
             loup::nve_second_half_kernel<<<gridN, 256, 0, h->stream>>>(
                 N, dt_ase, h->d_forces_f64, h->d_inv_masses, h->d_vel64);
@@ -2719,7 +2805,9 @@ static int run_md_loop(
             loup::thermo_row_kernel<<<1, 1, 0, h->stream>>>(h->kinetic_dof(), h->e0_total, loup::ASE_KB,
                                                             h->d_energy_f64,
                                                             h->d_thermo_ctrl, h->d_thermo_rows,
-                                                            kind >= 2 ? h->d_int_state : nullptr);
+                                                            kind >= 2 ? h->d_int_state : nullptr,
+                                                            var_cell ? h->d_celldev : nullptr,
+                                                            var_cell ? h->d_virial_grad_f64 : nullptr);
         }
     };
     auto capture = [&](cudaGraph_t& g, cudaGraphExec_t& ge, auto&& body) -> int {
@@ -2742,6 +2830,8 @@ static int run_md_loop(
         h->md_graph_seed = seed;
         h->md_graph_thermo = thermo_every > 0;
         h->md_graph_fixcom = fix_com;
+        h->md_graph_varcell = var_cell;
+        h->md_graph_cellrate = cell_rate;
     };
     auto ensure_piped = [&]() -> int {
         if (h->md_graph_exec) return 0;
@@ -2764,7 +2854,7 @@ static int run_md_loop(
         h->md_graph_fr != friction_per_fs || h->md_graph_tau != tau_fs || h->md_graph_seed != seed ||
         h->md_graph_mass_temp != mass_temp_k || h->md_graph_chain != 1000 * tchain + tloop ||
         h->md_graph_thermo != (thermo_every > 0) ||
-        h->md_graph_fixcom != fix_com) {
+        h->md_graph_fixcom != fix_com || h->md_graph_varcell != var_cell || h->md_graph_cellrate != cell_rate) {
         h->invalidate_md_graphs();
     }
 
@@ -2806,8 +2896,18 @@ static int run_md_loop(
             CUDA_CHECK(cudaMemcpyAsync(&flags[0], h->d_need_rebuild, sizeof(int), cudaMemcpyDeviceToHost, h->stream));
             copy_disp();
             CUDA_CHECK(cudaStreamSynchronize(h->stream));
+            if (var_cell && (flags[0] & 8)) {  // cell_derive_kernel: the volume left its limits
+                loup::CellDev c;
+                if (download_cell_dev(h, &c) != 0) return -1;
+                h->cell_ref_stale = true;
+                loup::set_error("the cell diverged: its volume is %g A^3, outside [V0 / 20, 20 V0] with V0 = %g A^3 "
+                                "(step %lld of the trajectory); the state on the handle is that step's",
+                                c.volume, c.v0, (long long)(h->md_steps + launched + 1));
+                return -1;
+            }
             // Rebuilt before this step's forces, so bit 2 (already beyond skin/2) is not a violation here.
             if (flags[0] & 1) {
+                if (var_cell && download_cell_dev(h) != 0) return -1;  // the list is built in the cell of now
                 if (rebuild(1) != 0) return -1;
                 if (ensure_unpiped() != 0) return -1;
             }
@@ -2878,6 +2978,13 @@ static int run_md_loop(
         loup::set_error("non-finite potential energy after the MD block: the state is lost; restart from a saved "
                         "state");
         return -1;
+    }
+    if (var_cell) {  // the host's cell follows; a cell that moved since the list was built makes the plain check stale
+        loup::CellDev c;
+        if (download_cell_dev(h, &c) != 0) return -1;
+        bool moved = false;
+        for (int i = 0; i < 9; ++i) moved = moved || c.f[i] != ((i % 4 == 0) ? 1.0 : 0.0);
+        h->cell_ref_stale = moved;
     }
     if (out_stats) {
         double ke = 0.0;
@@ -3052,6 +3159,7 @@ static int minimize_impl(LoupHandle* h, const LoupMinimizer* caller, int max_ste
         return 0;
     };
     const auto t_start = std::chrono::steady_clock::now();
+    if (h->cell_ref_stale && rebuild_neighbors(h) != 0) return -1;  // after a variable-cell run: see run_md_loop
     if (!h->forces_current || h->lt_cache.empty()) {
         if (force_pass() != 0) return -1;
     }
@@ -3229,6 +3337,44 @@ static int minimize_impl(LoupHandle* h, const LoupMinimizer* caller, int max_ste
     return 0;
 }
 
+// loup_set_cell: a new cell for the positions on the handle. With scale_atoms the atoms keep their fractional
+// coordinates (x <- x old^-1 new, as ASE's set_cell(scale_atoms=True)). Velocities stay.
+static int set_cell_impl(LoupHandle* h, const double* cell, int scale_atoms) {
+    if (!has_system(h)) return -1;
+    if (!h->nl_valid) {
+        loup::set_error("no positions (call loup_set_state or loup_evaluate first)");
+        return -1;
+    }
+    if (!cell) { loup::set_error("cell is NULL"); return -1; }
+    if (!valid_input(0, cell, cell, nullptr)) return -1;
+    CUDA_CHECK(cudaSetDevice(h->device_id));
+    if (scale_atoms) {
+        loup::Mat3 m;
+        for (int r = 0; r < 3; ++r)
+            for (int c = 0; c < 3; ++c)
+                m.m[r * 3 + c] = h->cell.inv[r * 3 + 0] * cell[0 * 3 + c] + h->cell.inv[r * 3 + 1] * cell[1 * 3 + c] +
+                                 h->cell.inv[r * 3 + 2] * cell[2 * 3 + c];
+        loup::positions_times_matrix_kernel<<<(h->N + 255) / 256, 256, 0, h->stream>>>(h->N, m, h->d_pos64);
+    }
+    memcpy(h->cell_in, cell, sizeof(h->cell_in));
+    loup::compute_cell_mat(cell, h->cell, h->cell_vol, h->cell_heights);
+    if (h->gen && h->gen->set_cell(cell)) h->invalidate_graphs();
+    h->forces_current = false;
+    ++h->pos_epoch;
+    return rebuild_neighbors(h);
+}
+
+static int get_cell_impl(LoupHandle* h, double* out_cell) {
+    if (!has_system(h)) return -1;
+    if (!h->nl_valid) {
+        loup::set_error("no positions (call loup_set_state or loup_evaluate first)");
+        return -1;
+    }
+    if (!out_cell) { loup::set_error("out_cell is NULL"); return -1; }
+    memcpy(out_cell, h->cell_in, sizeof(h->cell_in));
+    return 0;
+}
+
 static int step_displacement_impl(LoupHandle* h, double* out_max_a) {
     if (!has_system(h)) return -1;
     if (!out_max_a) { loup::set_error("out_max_a is NULL"); return -1; }
@@ -3280,6 +3426,29 @@ static int run_impl(LoupHandle* h, const LoupIntegrator* caller, int n_steps, Lo
     if (it.fix_com != 0 && h && h->n_fixed > 0) {
         loup::set_error("fix_com with fixed atoms: %d fixed atoms pin the frame already", h->n_fixed);
         return -1;
+    }
+    // The variable-cell step. No integrator of this version moves the cell, so it runs for tests only:
+    // LOUP_VARIABLE_CELL=1 sends this call through it, and LOUP_DEBUG_CELL_RATE scales the cell and the positions
+    // by 1 + rate in every step.
+    if (h) {
+        h->req_var_cell = false;
+        h->req_cell_rate = 0.0;
+        if (const char* e = std::getenv("LOUP_VARIABLE_CELL"); e && e[0] == '1') {
+            if (h->gen && h->gen->has_lr()) {
+                loup::set_error("the variable cell is not built for long-range models (MACE-POLAR-1): their k-space "
+                                "terms are set up for one cell");
+                return -1;
+            }
+            h->req_var_cell = true;
+            if (const char* r = std::getenv("LOUP_DEBUG_CELL_RATE")) {
+                const double rate = atof(r);
+                if (!std::isfinite(rate) || std::fabs(rate) > 0.1) {
+                    loup::set_error("LOUP_DEBUG_CELL_RATE must be within -0.1 to 0.1 per step, got %s", r);
+                    return -1;
+                }
+                h->req_cell_rate = rate;
+            }
+        }
     }
     if (it.kind == LOUP_NVE) {
         return run_md_loop(h, 0, n_steps, it.dt_fs, 0.0, 0.0, 0.0, 0, it.thermo_every, it.fix_com != 0, out_stats);
@@ -3839,6 +4008,14 @@ int loup_minimize(LoupHandle* h, const LoupMinimizer* minimizer, int max_steps, 
 
 int loup_get_step_displacement(LoupHandle* h, double* out_max_a) {
     return guarded(h, "loup_get_step_displacement", [&] { return step_displacement_impl(h, out_max_a); });
+}
+
+int loup_set_cell(LoupHandle* h, const double* cell, int scale_atoms) {
+    return guarded(h, "loup_set_cell", [&] { return set_cell_impl(h, cell, scale_atoms); });
+}
+
+int loup_get_cell(LoupHandle* h, double* out_cell) {
+    return guarded(h, "loup_get_cell", [&] { return get_cell_impl(h, out_cell); });
 }
 
 int loup_debug_csvr_noise(LoupHandle* h, unsigned long long seed, unsigned long long first_step, int n_steps,

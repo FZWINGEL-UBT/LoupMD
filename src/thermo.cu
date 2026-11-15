@@ -30,7 +30,8 @@ __global__ void thermo_kinetic_kernel(int N, const double* __restrict__ masses, 
 
 __global__ void thermo_row_kernel(int dof, double e0_total, double kb, const double* __restrict__ energy,
                                   ThermoCtrl* __restrict__ ctrl, LoupThermoRow* __restrict__ rows,
-                                  const double* __restrict__ transferred) {
+                                  const double* __restrict__ transferred, const CellDev* __restrict__ cell,
+                                  const double* __restrict__ virial) {
     const unsigned long long step = ctrl->step + 1ULL;
     ctrl->step = step;
     const int every = ctrl->every;
@@ -41,8 +42,15 @@ __global__ void thermo_row_kernel(int dof, double e0_total, double kb, const dou
         row.e_pot = e0_total + *energy;
         row.e_kin = ctrl->ke;
         row.temp_k = 2.0 * row.e_kin / ((double)dof * kb);
-        row.pressure_gpa = 0.0;  // filled once a step carries stress (plan task S4-T06)
+        row.pressure_gpa = 0.0;
         row.volume_a3 = 0.0;
+        if (cell && virial) {  // the variable-cell step: its force pass carries stress
+            const double volume = cell->volume;
+            row.volume_a3 = volume;
+            // minus a third of the stress's trace, plus the ideal-gas part 2 E_kin / (3 V); eV/A^3 -> GPa
+            row.pressure_gpa = (2.0 * row.e_kin - (virial[0] + virial[3] + virial[5])) / (3.0 * volume) *
+                               160.21766208;
+        }
         row.conserved = row.e_pot + row.e_kin - (transferred ? transferred[0] : 0.0);
         rows[ctrl->count] = row;
         ctrl->count += 1;

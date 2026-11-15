@@ -286,6 +286,10 @@ def _bind(lib):
     lib.loup_minimize.restype = ctypes.c_int
     lib.loup_get_step_displacement.argtypes = [ctypes.c_void_p, _c_double_p]
     lib.loup_get_step_displacement.restype = ctypes.c_int
+    lib.loup_set_cell.argtypes = [ctypes.c_void_p, _c_double_p, ctypes.c_int]
+    lib.loup_set_cell.restype = ctypes.c_int
+    lib.loup_get_cell.argtypes = [ctypes.c_void_p, _c_double_p]
+    lib.loup_get_cell.restype = ctypes.c_int
     lib.loup_debug_csvr_noise.argtypes = [ctypes.c_void_p, ctypes.c_ulonglong, ctypes.c_ulonglong, ctypes.c_int,
                                           ctypes.c_int, _c_double_p, _c_double_p]
     lib.loup_debug_csvr_noise.restype = ctypes.c_int
@@ -453,6 +457,19 @@ class LoupEngine:
         self._check(self._lib.loup_minimize(self._h, ctypes.byref(settings), int(max_steps), ctypes.byref(stats)),
                     "loup_minimize")
         return stats
+
+    def set_cell(self, cell, scale_atoms: bool = True):
+        """A new cell (3 x 3, rows are the cell vectors, in A) for the positions on the handle; with
+        ``scale_atoms`` the atoms keep their fractional coordinates, as ASE's ``set_cell(scale_atoms=True)``.
+        Velocities stay; forces are those of the old cell until the next evaluation or run."""
+        cel = _array(cell, (3, 3), "cell")
+        self._check(self._lib.loup_set_cell(self._h, _ptr(cel), 1 if scale_atoms else 0), "loup_set_cell")
+
+    def get_cell(self) -> np.ndarray:
+        """The cell of the positions on the handle: the one last given, or where a variable-cell run took it."""
+        out = np.empty((3, 3), dtype=np.float64)
+        self._check(self._lib.loup_get_cell(self._h, _ptr(out)), "loup_get_cell")
+        return out
 
     def step_displacement(self) -> float:
         """The largest distance in A an atom moved in one MD step lately (the displacement tracker's two windows):

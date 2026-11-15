@@ -238,8 +238,9 @@ typedef struct {
     double e_pot;         // eV, as loup_get_state's energy at that step
     double e_kin;         // eV
     double temp_k;        // 2 e_kin / (3 N k_B)
-    double pressure_gpa;  // 0 until a step carries stress
-    double volume_a3;     // 0 until a step carries stress
+    double pressure_gpa;  // variable-cell steps: minus a third of the stress's trace plus 2 e_kin / (3 V) (ASE's
+                          // stress with the ideal-gas part); 0 in a fixed-cell step, which carries no stress
+    double volume_a3;     // variable-cell steps: the cell's volume; 0 in a fixed-cell step
     double conserved;     // e_pot + e_kin (NVE's conserved quantity); for CSVR minus the energy its thermostat has
                           // transferred since the last loup_set_state (it travels in the state block); for the
                           // Nose-Hoover chain plus the chain's energy (ASE's get_conserved_energy)
@@ -255,6 +256,15 @@ int loup_read_thermo(LoupHandle* h, LoupThermoRow* rows, int max_rows, int* n_ro
 // The run loop compares four times this with half the skin: below it, steps run in the pipelined loop. A caller
 // that picks the skin (loup_set_system) can measure with this what the skin has to cover.
 int loup_get_step_displacement(LoupHandle* h, double* out_max_a);
+
+// The cell of the positions on the handle (row-major, rows are the cell vectors, in A): the one last given, or
+// where a variable-cell run has taken it.
+int loup_get_cell(LoupHandle* h, double* out_cell);
+
+// A new cell for the positions on the handle. scale_atoms != 0: the atoms keep their fractional coordinates
+// (ASE's set_cell(scale_atoms=True)); 0: they stay where they are. Velocities are kept, the neighbour list is
+// rebuilt, and forces are those of the old cell until the next evaluation or run.
+int loup_set_cell(LoupHandle* h, const double* cell, int scale_atoms);
 
 // Read back state in caller's original atom order (velocities in ASE units, as for loup_set_state).
 int loup_get_state(LoupHandle* h, double* out_positions, double* out_velocities, double* out_forces, double* out_energy_ev);
