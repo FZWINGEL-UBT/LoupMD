@@ -560,6 +560,17 @@ need new engine kernels are not. RTX 5060 Ti only; numbers in `STATUS_AND_PROFIL
 | S4-T01 | `42cd77d` | **partly**: `fix_com` for Langevin and NVE with 3N - 3 degrees of freedom (D31): the total momentum stays at 1.6e-15 of its thermal value over 500 Langevin steps (1.4 without). The thermostat's target and its noise coefficients are a device struct the step advances. Not built: slots for further integrator kinds |
 | S4-T02 | `06230cf` | **done**: `loup_set_fixed_atoms`, `FixAtoms` in `Simulation` and the optimisers, other constraints refused by name. 27 fixed atoms keep their positions bit for bit over 1,000 Langevin steps; the temperature counts 3 (N - n_fixed) |
 | S4-T03 to S4-T09 | | **not started**: CSVR, Nose-Hoover chain, Berendsen, the variable cell in the graph, the three NPT integrators |
+
+Next in line, S4-T03 (CSVR), as it will be built (design read off ASE 3.27's `Bussi` and the engine as it stands):
+each step scales the velocities by alpha and then does the velocity-Verlet step. In the captured step that is a
+kinetic-energy reduction, one thread that draws R1 and a Gamma((Nf - 1) / 2) variate (Marsaglia-Tsang on Philox,
+offset by the device step counter), forms alpha from equation A7 with the target read from the device struct of
+the Langevin target (so schedules work), and adds (alpha^2 - 1) K to the transferred energy; and a first half-kick
+that multiplies the velocities by alpha. Three small nodes more than NVE, in CSVR runs only. The thermo row's
+conserved quantity subtracts the transferred energy. The state block does not hold the transferred energy, so the
+conserved quantity starts anew after a resume (the block's format would have to change to keep it). A structure
+at rest is refused, as ASE's class does. Acceptance as in the table: a Kolmogorov-Smirnov test of the kinetic
+energy over 20,000 steps on 135 atoms and the conserved quantity's drift.
 | S4-T10 | `4f20442`, `8c709b9` | **done**, with one criterion missed: LBFGS and FIRE take ASE's step counts on rattled `SrTiO3` 3x3x3 (15 = 15 and 44 = 44, positions within 3e-7 A of ASE's with `lm.calc`). FIRE costs 0.9% of the force calls at 5,000 atoms, LBFGS 17% (D30) |
 | S4-T11 | `4f20442` | **done**: the Frechet cell filter with pressure, hydrostatic, constant-volume and mask options, refused with fixed atoms and for POLAR-1. Strained `SrTiO3` 3x3x3: 157 steps as ASE's `FrechetCellFilter`, lattice constants within 1.0e-5 A (criterion 1e-4) |
 | S4-T12 | `06230cf`, `4f20442` | **done**: `Simulation.relax`, `loupmd relax` (writes extended XYZ equal to the Python call's), `loupmd quench` with FastMACE's selection and files (CPU tests on the fake engine). Both commands ran once on the GPU: `loupmd relax` on rattled `SrTiO3` 3x3x3 converged in 25 steps; a 1,000-step ramp 0 to 600 to 300 K and `loupmd quench` of five picked frames, all to -7.98953 eV/atom |
