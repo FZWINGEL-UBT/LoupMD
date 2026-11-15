@@ -683,6 +683,16 @@ Each entry has the same fields. Unless stated, the system is OMAT-0 medium on th
 - Measured: alone not recorded (part of S0 -> S1). Ada uses them for most products ([§2][s2] top kernels: `fm_tf32x3_*` 1,179 / 750 us on `SrTiO3`).
 - Sources: [§3.1 #2][s31].
 
+<a id="gemm-tc-own-cubins"></a>
+#### gemm-tc-own-cubins: LoupMD's own tensor-core GEMM cubins (A100 candidates)
+- Switch: `cubins/src/gemm_tc.cu` (CUTLASS v4.8.1 `DefaultGemm`, from FastMACE's `tf32x3_sm80.cu`), `cubins/src/build_gemm_tc.sh`; self-describing table `loup_gemm_tc_info` (math, beta support, tiles), entries `loup_gemm_tc_{rr,rc}_<t>` taking beta. `HybCubin` (`src/engine.cu`) reads both this format and the shipped `fm_tf32x3_info` cubins; the autotune offers every tile the cubin has, and products with beta != 0 only if it supports beta. Used only through `LOUP_HYBRID_CUBIN` (tests); the shipped cubins stay the default everywhere.
+- Stage: S66 / S67 (15 November 2026).
+- Builds: `gemm_tc_hyb_sm80` (TF32 + FP16 hybrid) and `gemm_tc_3x_sm80` (true 3xTF32, no FP16), 6 tiles (64x64, 32x64, 64x32; 128x64 and 64x128 with 32x32 warps, 132-138 registers; 128x128 with 64x32 warps, 240-246 registers; no spills) and beta; `_sm90` / `_sm120` hybrid builds with the three legacy tiles and no beta. A 128x128 tile with 64x64 warps (CUTLASS example 27) spilled 368-392 B of stack with the 3xTF32 fragments and was replaced.
+- Plan cache: the file name now carries the loaded cubin's FNV-1a hash (`_c<hash>`), so a replaced or overridden cubin is re-timed (a one-time re-tune on every GPU); after `drop_hybrid` the engine clears its disk plans and saves none, so a later process with the hybrid still times it.
+- Status: TEST PATH (adoption on the A100 only with a measured >= 10% kernel win on the shapes that carry the time, model gates and in-process A/B).
+- Measured (5060 Ti, `.tmp_o/alex64/tc_bench.cu`, hybrid three-tile build): `5000 x 512 x 512` 0.83x `cublasSgemm` (190 us), `1944 x 128 x 512` (transposed B) 1.36x; relative error of the hybrid 3.6e-7 / 4.0e-7 against cuBLAS FP32's 9.8e-7 / 3.5e-7 (float64 reference).
+- Sources: this file.
+
 <a id="gemm-autotune"></a>
 #### gemm-autotune: per-shape GEMM autotune
 - Switch: `sgemm_rm`; `LOUP_DEBUG_GEMM=1` prints every choice.

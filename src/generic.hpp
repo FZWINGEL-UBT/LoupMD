@@ -92,6 +92,7 @@ private:
     };
     ConvTuneArgs conv_args_;
     int conv_var_override_ = -1;  // S64: LOUP_CONV_FWD_VARIANT (test override), -1 none
+    int conv_tune_env_ = -1;      // LOUP_CONV_TUNE at load: -1 unset (sm_120 only), 0 off, 1 any GPU (tests)
     void free_model();
     // S57 skip-chain fold (sm_120; LOUP_CHAIN_FOLD=0 disables): see setup_chain_fold in generic.cu.
     void setup_chain_fold(const Bundle& b);

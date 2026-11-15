@@ -1242,6 +1242,9 @@ void GenericModel::load(const Bundle& b) {
     // variant v on every layer that has it, without tuning (gates of each variant; see tune_conv_variants)
     conv_var_override_ = -1;
     if (const char* e = std::getenv("LOUP_CONV_FWD_VARIANT"); e && e[0] >= '0' && e[0] <= '9') conv_var_override_ = e[0] - '0';
+    // LOUP_CONV_TUNE, read here (per engine) like the forced variant: 0 never times, 1 times on any GPU (tests)
+    conv_tune_env_ = -1;
+    if (const char* e = std::getenv("LOUP_CONV_TUNE"); e && (e[0] == '0' || e[0] == '1')) conv_tune_env_ = e[0] - '0';
     setup_chain_fold(b);
 }
 
@@ -1353,11 +1356,12 @@ bool GenericModel::set_cell(const double* cell) { return lr_ ? lr_->set_cell(cel
 // 2,686 / 2,437; MP-0 medium SrTiO3 2,385 / 2,273 / 2,136, NbCl5 354 / 348 / 357), so each layer's are timed once
 // per system on the last force pass's inputs, as the specialised path times its spline variants
 // (tune_rebuild_variants); a variant replaces the current one only if >= 2% faster. Its outputs (mid, D) are
-// rewritten by every force pass. sm_120 only; LOUP_CONV_TUNE=0 keeps the default variant. Returns -1 before a pass
-// has been recorded for this system (call again later), 0 if nothing changed, 1 if a variant changed.
+// rewritten by every force pass. sm_120 by default; LOUP_CONV_TUNE=0 keeps the default variant, LOUP_CONV_TUNE=1
+// times them on any GPU (tests). Returns -1 before a pass has been recorded for this system (call again later), 0 if
+// nothing changed, 1 if a variant changed.
 int GenericModel::tune_conv_variants(cudaStream_t st) {
-    if (!device_is_cc120()) return 0;
-    if (const char* e = std::getenv("LOUP_CONV_TUNE"); e && e[0] == '0') return 0;
+    if (conv_tune_env_ == 0) return 0;
+    if (!device_is_cc120() && conv_tune_env_ != 1) return 0;
     if (conv_var_override_ >= 0) return 0;  // forced variant: nothing to time
     if (!conv_args_.valid) return -1;
     const ConvTuneArgs& a = conv_args_;
