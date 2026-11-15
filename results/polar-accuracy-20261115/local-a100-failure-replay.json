@@ -1,0 +1,353 @@
+{
+  "scope": "5060 Ti replay of exact saved A100 inputs and A100 yardsticks; convolution tuning disabled throughout; folded and unfolded paths",
+  "models": {
+    "S": {
+      "metadata": {
+        "model_sha256": "e4495612037b3b3312633182882a38a694ecac9ea0be2b9889ac0b2a84a99510",
+        "library_sha256": "70b7ee01479d6520b277e878f8d41cb945a931578fcad58ca29b23a098fa7409",
+        "cubin_sha256": "01170f423f45e8242a30d62521ce8ebaf03d7b365dc46bffa7c2e6cce6c3a2cc",
+        "script_sha256": "adf903e0fa185b8d42af9c6a8822c99f3963a7b264cfda0930592b9955114840",
+        "convolution_tuning": false,
+        "reference_device": "saved A100; no PyTorch references constructed",
+        "cif_sha256": {
+          "Nb2O5": "0ae72f77e9d9a94fa4b70d08606bdfb8da1e1481a6a47900ffbb941942f1edb2",
+          "Ta2O5": "ecc64cbe1ae31cae9dd9fb37393967fb2a088d6be508700293e1640d2a417231",
+          "Na2O": "fe796226610e4aceec88cfa0b6053bd852a21b86263ebb2b0d66b72f1b7d78e2"
+        },
+        "rows": 8
+      },
+      "rows": [
+        {
+          "model": "S",
+          "config": "Nb2O5_c0",
+          "path": "simt",
+          "fold": 1,
+          "reference": "saved A100",
+          "error": [
+            0.006023785837377156,
+            0.004464090477853233,
+            8.919851744026985e-05
+          ],
+          "yardstick": [
+            1.6338103928969108,
+            0.0028248099962695505,
+            9.73861889042027e-06
+          ],
+          "ratio": [
+            0.0036869552694522743,
+            1.5803153074891831,
+            9.159257431052474
+          ],
+          "finite": true,
+          "tc_seen": false,
+          "fallback": false,
+          "passed": false
+        },
+        {
+          "model": "S",
+          "config": "Nb2O5_c0",
+          "path": "3x_rnacc",
+          "fold": 1,
+          "reference": "saved A100",
+          "error": [
+            0.008779980167413928,
+            0.005562503820101483,
+            0.00012484381746835638
+          ],
+          "yardstick": [
+            1.6338103928969108,
+            0.0028248099962695505,
+            9.73861889042027e-06
+          ],
+          "ratio": [
+            0.005373928459254159,
+            1.9691603426238706,
+            12.819458166821102
+          ],
+          "finite": true,
+          "tc_seen": true,
+          "fallback": false,
+          "passed": false
+        },
+        {
+          "model": "S",
+          "config": "Nb2O5_c0",
+          "path": "simt",
+          "fold": 0,
+          "reference": "saved A100",
+          "error": [
+            0.008831332057265431,
+            0.006155560169872842,
+            0.00012496688649532572
+          ],
+          "yardstick": [
+            1.6338103928969108,
+            0.0028248099962695505,
+            9.73861889042027e-06
+          ],
+          "ratio": [
+            0.005405359211607528,
+            2.17910591438075,
+            12.832095382462676
+          ],
+          "finite": true,
+          "tc_seen": false,
+          "fallback": false,
+          "passed": false
+        },
+        {
+          "model": "S",
+          "config": "Nb2O5_c0",
+          "path": "3x_rnacc",
+          "fold": 0,
+          "reference": "saved A100",
+          "error": [
+            0.00854302353608156,
+            0.005319953519887122,
+            0.00012204380308533658
+          ],
+          "yardstick": [
+            1.6338103928969108,
+            0.0028248099962695505,
+            9.73861889042027e-06
+          ],
+          "ratio": [
+            0.005228895331565321,
+            1.8832960542169783,
+            12.531941588287143
+          ],
+          "finite": true,
+          "tc_seen": true,
+          "fallback": false,
+          "passed": false
+        },
+        {
+          "model": "S",
+          "config": "Ta2O5_c0",
+          "path": "simt",
+          "fold": 1,
+          "reference": "saved A100",
+          "error": [
+            111.09679087623215,
+            1118.2619772274047,
+            41.803133471607
+          ],
+          "yardstick": [
+            67.77315436112177,
+            755.1169558297843,
+            40.32495630036283
+          ],
+          "ratio": [
+            1.63924480015,
+            1.4809122859631287,
+            1.0366566341754688
+          ],
+          "finite": true,
+          "tc_seen": false,
+          "fallback": false,
+          "passed": true
+        },
+        {
+          "model": "S",
+          "config": "Ta2O5_c0",
+          "path": "3x_rnacc",
+          "fold": 1,
+          "reference": "saved A100",
+          "error": [
+            42.79676515221899,
+            424.55584473721683,
+            123.46182546639466
+          ],
+          "yardstick": [
+            67.77315436112177,
+            755.1169558297843,
+            40.32495630036283
+          ],
+          "ratio": [
+            0.631470757937297,
+            0.5622385267070055,
+            3.0616728892842917
+          ],
+          "finite": true,
+          "tc_seen": true,
+          "fallback": false,
+          "passed": false
+        },
+        {
+          "model": "S",
+          "config": "Ta2O5_c0",
+          "path": "simt",
+          "fold": 0,
+          "reference": "saved A100",
+          "error": [
+            79.04779801809502,
+            794.2362418491393,
+            58.7460331468028
+          ],
+          "yardstick": [
+            67.77315436112177,
+            755.1169558297843,
+            40.32495630036283
+          ],
+          "ratio": [
+            1.1663585495356696,
+            1.051805598745121,
+            1.4568157919187683
+          ],
+          "finite": true,
+          "tc_seen": false,
+          "fallback": false,
+          "passed": true
+        },
+        {
+          "model": "S",
+          "config": "Ta2O5_c0",
+          "path": "3x_rnacc",
+          "fold": 0,
+          "reference": "saved A100",
+          "error": [
+            47.93611330757221,
+            478.4395039808005,
+            126.27312174075632
+          ],
+          "yardstick": [
+            67.77315436112177,
+            755.1169558297843,
+            40.32495630036283
+          ],
+          "ratio": [
+            0.7073023789353218,
+            0.6335965578405692,
+            3.1313889294808774
+          ],
+          "finite": true,
+          "tc_seen": true,
+          "fallback": false,
+          "passed": false
+        }
+      ]
+    },
+    "L": {
+      "metadata": {
+        "model_sha256": "9f65f8dc6ddaff1d631e299cb531376a7da5e68d1bef04f34a2d5073d5ef114b",
+        "library_sha256": "70b7ee01479d6520b277e878f8d41cb945a931578fcad58ca29b23a098fa7409",
+        "cubin_sha256": "01170f423f45e8242a30d62521ce8ebaf03d7b365dc46bffa7c2e6cce6c3a2cc",
+        "script_sha256": "adf903e0fa185b8d42af9c6a8822c99f3963a7b264cfda0930592b9955114840",
+        "convolution_tuning": false,
+        "reference_device": "saved A100; no PyTorch references constructed",
+        "cif_sha256": {
+          "Nb2O5": "0ae72f77e9d9a94fa4b70d08606bdfb8da1e1481a6a47900ffbb941942f1edb2",
+          "Ta2O5": "ecc64cbe1ae31cae9dd9fb37393967fb2a088d6be508700293e1640d2a417231",
+          "Na2O": "fe796226610e4aceec88cfa0b6053bd852a21b86263ebb2b0d66b72f1b7d78e2"
+        },
+        "rows": 4
+      },
+      "rows": [
+        {
+          "model": "L",
+          "config": "Na2O_c2",
+          "path": "simt",
+          "fold": 1,
+          "reference": "saved A100",
+          "error": [
+            2.1593771130421464,
+            1.7032890930559006,
+            1.803430343398304
+          ],
+          "yardstick": [
+            4.761729191091877,
+            0.3986222923404057,
+            0.19208098725107448
+          ],
+          "ratio": [
+            0.45348591370585595,
+            4.272939887670325,
+            9.388906050555589
+          ],
+          "finite": true,
+          "tc_seen": false,
+          "fallback": false,
+          "passed": false
+        },
+        {
+          "model": "L",
+          "config": "Na2O_c2",
+          "path": "3x_rnacc",
+          "fold": 1,
+          "reference": "saved A100",
+          "error": [
+            5.583450203922427,
+            4.340406986956623,
+            3.124878683876659
+          ],
+          "yardstick": [
+            4.761729191091877,
+            0.3986222923404057,
+            0.19208098725107448
+          ],
+          "ratio": [
+            1.1725677752459769,
+            10.888520462498642,
+            16.268547598581645
+          ],
+          "finite": true,
+          "tc_seen": true,
+          "fallback": false,
+          "passed": false
+        },
+        {
+          "model": "L",
+          "config": "Na2O_c2",
+          "path": "simt",
+          "fold": 0,
+          "reference": "saved A100",
+          "error": [
+            2.9326039725730633,
+            2.2915885783577323,
+            2.1014341208056067
+          ],
+          "yardstick": [
+            4.761729191091877,
+            0.3986222923404057,
+            0.19208098725107448
+          ],
+          "ratio": [
+            0.6158695412707016,
+            5.7487717631226145,
+            10.94035464352733
+          ],
+          "finite": true,
+          "tc_seen": false,
+          "fallback": false,
+          "passed": false
+        },
+        {
+          "model": "L",
+          "config": "Na2O_c2",
+          "path": "3x_rnacc",
+          "fold": 0,
+          "reference": "saved A100",
+          "error": [
+            5.610062834162863,
+            4.35901609780467,
+            3.134700057174996
+          ],
+          "yardstick": [
+            4.761729191091877,
+            0.3986222923404057,
+            0.19208098725107448
+          ],
+          "ratio": [
+            1.1781566336569553,
+            10.935204030391416,
+            16.319679016838563
+          ],
+          "finite": true,
+          "tc_seen": true,
+          "fallback": false,
+          "passed": false
+        }
+      ]
+    }
+  }
+}

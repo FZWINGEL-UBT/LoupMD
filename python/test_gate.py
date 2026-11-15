@@ -32,10 +32,11 @@ from mace.calculators import MACECalculator
 from loupmd import LoupEngine, _model_digest, ensure_loup_bundle
 import polar_reference
 
-# MACE references (float64, float32, and PolarMACE's finite-difference stress) do not depend on LoupMD, so they are
-# cached: repeat gates of the large models (CPU references, ~30 min for POLAR-1-L) take seconds, and the float32
-# bound (MACE's own run-to-run noise) is the same in every run. The key covers everything a reference depends on.
-REF_CACHE_FORMAT = "gate-refs-2-fixed-polar-kset"
+# MACE references and complete POLAR strain targets are cached. Cached yardsticks remain fixed between
+# comparisons; fresh float32 reductions can differ between evaluations. The key includes the model,
+# configuration, device, package versions and reference protocol.
+REF_CACHE_FORMAT = "gate-refs-3-polar-strain-autograd"
+# Initial step for independent FD diagnostics only; production POLAR targets use strain autograd.
 FD_STRESS_H = 1e-5
 
 
@@ -61,7 +62,7 @@ def ref_cache_path(model_path, head, set_name, ref_device, configs, charge_spin=
 
     h = hashlib.sha256()
     for part in (REF_CACHE_FORMAT, _model_digest(model_path), str(head), set_name, ref_device_tag(ref_device),
-                 getattr(mace, "__version__", "?"), torch.__version__, repr(FD_STRESS_H)):
+                 getattr(mace, "__version__", "?"), torch.__version__):
         h.update(part.encode() + b"\0")
     if charge_spin is not None and charge_spin != (None, None):  # OMOL-0 settings (keys of other runs unchanged)
         h.update(f"charge={charge_spin[0]}|spin={charge_spin[1]}".encode() + b"\0")
@@ -289,13 +290,12 @@ def main():
         print("Running MACE float32 reference...")
         ref32 = eval_mace(model_path, "float32", configs, head, args.ref_device, *cs)
         polar = type(torch.load(model_path, map_location="cpu", weights_only=False)).__name__ == "PolarMACE"
-        # Stress reference per config: MACE float64 autograd, or for PolarMACE the corrected float64 stress (finite
-        # differences); the float32 noise level stays the MACE float32-vs-float64 autograd difference (both carry the
-        # same local float32 rounding).
+        # POLAR's target differentiates the native energy through all cell-dependent geometry. Keep the
+        # existing float32-vs-float64 autograd yardstick unchanged: this fixes the target, not the allowance.
         stress_ref = [s for _, _, s in ref64]
         if polar:
-            print("PolarMACE: float64 energy differences with fixed reciprocal indices (corrected cell dependence)")
-            stress_ref = polar_reference.fd_stress(model_path, configs, device=args.ref_device, h=FD_STRESS_H)
+            print("PolarMACE: float64 native-energy strain gradient (complete cell dependence)")
+            stress_ref = polar_reference.stress_reference(model_path, configs, device=args.ref_device)
         save_refs(cache, ref64, ref32, stress_ref)
         print(f"MACE references saved to {cache}")
     if torch.cuda.is_available():

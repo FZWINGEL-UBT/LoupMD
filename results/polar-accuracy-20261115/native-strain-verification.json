@@ -1,0 +1,79 @@
+{
+  "tests": "Cannot read termcap database;\nusing dumb terminal settings.\n.........                                                                [100%]\n=============================== warnings summary ===============================\n../../../../home/fzwin/environments/mace_cueq_latest/lib/python3.10/site-packages/torch/cuda/__init__.py:68\n  /home/fzwin/environments/mace_cueq_latest/lib/python3.10/site-packages/torch/cuda/__init__.py:68: FutureWarning: The pynvml package is deprecated. Please install nvidia-ml-py instead. If you did not install pynvml directly, please report this to the maintainers of the package that installed pynvml for you.\n    import pynvml  # type: ignore[import]\n\n../../../../home/fzwin/environments/mace_cueq_latest/lib/python3.10/site-packages/e3nn/o3/_wigner.py:10\n  /home/fzwin/environments/mace_cueq_latest/lib/python3.10/site-packages/e3nn/o3/_wigner.py:10: UserWarning: Environment variable TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD detected, since the`weights_only` argument was not explicitly passed to `torch.load`, forcing weights_only=False.\n    _Jd, _W3j_flat, _W3j_indices = torch.load(os.path.join(os.path.dirname(__file__), 'constants.pt'))\n\n../../../../home/fzwin/environments/mace_cueq_latest/lib/python3.10/site-packages/torch/jit/_script.py:1491\n../../../../home/fzwin/environments/mace_cueq_latest/lib/python3.10/site-packages/torch/jit/_script.py:1491\n../../../../home/fzwin/environments/mace_cueq_latest/lib/python3.10/site-packages/torch/jit/_script.py:1491\n  /home/fzwin/environments/mace_cueq_latest/lib/python3.10/site-packages/torch/jit/_script.py:1491: FutureWarning: `torch.jit.script` is deprecated. Please switch to `torch.compile` or `torch.export`.\n    warnings.warn(\n\n../../../../home/fzwin/environments/mace_cueq_latest/lib/python3.10/site-packages/matplotlib/_fontconfig_pattern.py:64\n  /home/fzwin/environments/mace_cueq_latest/lib/python3.10/site-packages/matplotlib/_fontconfig_pattern.py:64: PyparsingDeprecationWarning: 'oneOf' deprecated - use 'one_of'\n    prop = Group((name + Suppress(\"=\") + comma_separated(value)) | oneOf(_CONSTANTS))\n\n../../../../home/fzwin/environments/mace_cueq_latest/lib/python3.10/site-packages/matplotlib/_fontconfig_pattern.py:85\n../../../../home/fzwin/environments/mace_cueq_latest/lib/python3.10/site-packages/matplotlib/_fontconfig_pattern.py:85\n../../../../home/fzwin/environments/mace_cueq_latest/lib/python3.10/site-packages/matplotlib/_fontconfig_pattern.py:85\n../../../../home/fzwin/environments/mace_cueq_latest/lib/python3.10/site-packages/matplotlib/_fontconfig_pattern.py:85\n../../../../home/fzwin/environments/mace_cueq_latest/lib/python3.10/site-packages/matplotlib/_fontconfig_pattern.py:85\n../../../../home/fzwin/environments/mace_cueq_latest/lib/python3.10/site-packages/matplotlib/_fontconfig_pattern.py:85\n  /home/fzwin/environments/mace_cueq_latest/lib/python3.10/site-packages/matplotlib/_fontconfig_pattern.py:85: PyparsingDeprecationWarning: 'parseString' deprecated - use 'parse_string'\n    parse = parser.parseString(pattern)\n\n../../../../home/fzwin/environments/mace_cueq_latest/lib/python3.10/site-packages/matplotlib/_fontconfig_pattern.py:89\n../../../../home/fzwin/environments/mace_cueq_latest/lib/python3.10/site-packages/matplotlib/_fontconfig_pattern.py:89\n../../../../home/fzwin/environments/mace_cueq_latest/lib/python3.10/site-packages/matplotlib/_fontconfig_pattern.py:89\n../../../../home/fzwin/environments/mace_cueq_latest/lib/python3.10/site-packages/matplotlib/_fontconfig_pattern.py:89\n../../../../home/fzwin/environments/mace_cueq_latest/lib/python3.10/site-packages/matplotlib/_fontconfig_pattern.py:89\n../../../../home/fzwin/environments/mace_cueq_latest/lib/python3.10/site-packages/matplotlib/_fontconfig_pattern.py:89\n  /home/fzwin/environments/mace_cueq_latest/lib/python3.10/site-packages/matplotlib/_fontconfig_pattern.py:89: PyparsingDeprecationWarning: 'resetCache' deprecated - use 'reset_cache'\n    parser.resetCache()\n\n../../../../home/fzwin/environments/mace_cueq_latest/lib/python3.10/site-packages/matplotlib/_mathtext.py:45\n  /home/fzwin/environments/mace_cueq_latest/lib/python3.10/site-packages/matplotlib/_mathtext.py:45: PyparsingDeprecationWarning: 'enablePackrat' deprecated - use 'enable_packrat'\n    ParserElement.enablePackrat()\n\n-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html\n9 passed, 19 warnings in 4.15s\n",
+  "prototype_S": [
+    {
+      "config": "Nb2O5_c0",
+      "energy_minus_stock64": 0.0,
+      "stress_minus_corrected64_max": 7.993605777301127e-15,
+      "stress": [
+        [
+          -1.6960498526954744,
+          0.023731830447533308,
+          0.42444607400004525
+        ],
+        [
+          0.023731830447533308,
+          -1.9156673101807422,
+          0.024918597186774014
+        ],
+        [
+          0.42444607400004525,
+          0.024918597186774014,
+          3.4562286972414613
+        ]
+      ]
+    },
+    {
+      "config": "Ta2O5_c0",
+      "energy_minus_stock64": 0.0,
+      "stress_minus_corrected64_max": 8.381903171539307e-09,
+      "stress": [
+        [
+          -100971.67832805206,
+          -158.80297211866352,
+          -1273.2649321666636
+        ],
+        [
+          -158.80297211866352,
+          -76807.5316500639,
+          1051.9801156011947
+        ],
+        [
+          -1273.2649321666636,
+          1051.9801156011947,
+          -101316.60690302886
+        ]
+      ]
+    }
+  ],
+  "production_L": [
+    {
+      "config": "Na2O_c2",
+      "energy_minus_stock64": 0.0,
+      "stress_minus_corrected64_max": 5.4797055781818926e-11,
+      "stress": [
+        [
+          -1406.2006814447645,
+          0.42196286781152614,
+          23.92280963778447
+        ],
+        [
+          0.42196286781152614,
+          -1407.7887881684726,
+          -30.76479137385941
+        ],
+        [
+          23.92280963778447,
+          -30.76479137385941,
+          -1397.27624000743
+        ]
+      ]
+    }
+  ],
+  "source_sha256": {
+    "python/polar_reference.py": "1408a2798613aeb11787376cdd8fe94243a98d6efa4ec5aab5cea7ab6a9eee5f",
+    "python/test_gate.py": "10e8292694378034524044b135e7de1a6fe0ac0a13d4a3754b21dd15094105e1",
+    "tests/test_polar_strain_reference.py": "b560097ba21c5d495bc2b8fc57dad55eab41d4bd93bd039bbcc4e4d80e0cbec0"
+  },
+  "scope": "S prototype preserves native formulas except reassociated radial multiplication; production restores the original multiplication order, covered by the radial regressions and real L CPU comparison. Gate integration is checked separately."
+}

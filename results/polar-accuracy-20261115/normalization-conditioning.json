@@ -1,0 +1,890 @@
+{
+  "protocol": "Same exact expanded-screen configurations. Native MACE energy-only forward with float64 then float32; source-map hooks record pre-normalization Fukui values. S CUDA; L CPU. Deterministic Torch, TF32 disabled, six CPU threads; separate shared reservations.",
+  "definition": "kappa = sum(abs(fukui_sources)) / abs(sum(fukui_sources)); measured for both spin channels at each of three stages. This is the condition number of that sum, not of the complete network.",
+  "summary": [
+    {
+      "model": "S",
+      "config": "NaCl_c0",
+      "max_kappa64": 2.1399278789817733,
+      "stage": "recursion_1",
+      "spin_index": 0,
+      "denominator64": 770.415797492384,
+      "denominator32": 770.4151244163513,
+      "relative_denominator_change": -8.736529479498303e-07,
+      "energy32_minus_energy64": -0.5158544611185789
+    },
+    {
+      "model": "S",
+      "config": "Na2O_c0",
+      "max_kappa64": 1.1580535272974593,
+      "stage": "recursion_1",
+      "spin_index": 0,
+      "denominator64": 4458.449352085819,
+      "denominator32": 4458.440204024315,
+      "relative_denominator_change": -2.051848250667144e-06,
+      "energy32_minus_energy64": -0.21417615073733032
+    },
+    {
+      "model": "S",
+      "config": "Nb2O5_c0",
+      "max_kappa64": 11.894529697624327,
+      "stage": "recursion_0",
+      "spin_index": 1,
+      "denominator64": -67.50054483025903,
+      "denominator32": -67.49867652356625,
+      "relative_denominator_change": -2.7678394263084604e-05,
+      "energy32_minus_energy64": -0.05347352800890803
+    },
+    {
+      "model": "S",
+      "config": "Ta2O5_c0",
+      "max_kappa64": 17.997980122786302,
+      "stage": "recursion_0",
+      "spin_index": 0,
+      "denominator64": -310.02804553865303,
+      "denominator32": -310.0323362648487,
+      "relative_denominator_change": 1.383980016460189e-05,
+      "energy32_minus_energy64": -134.65767026832327
+    },
+    {
+      "model": "L",
+      "config": "NaCl_c0",
+      "max_kappa64": 1.2581623528985388,
+      "stage": "recursion_1",
+      "spin_index": 0,
+      "denominator64": 424.60642175537595,
+      "denominator32": 424.6065103709698,
+      "relative_denominator_change": 2.0870055016672212e-07,
+      "energy32_minus_energy64": -0.39459886052645743
+    },
+    {
+      "model": "L",
+      "config": "Na2O_c2",
+      "max_kappa64": 32.537724926542175,
+      "stage": "recursion_0",
+      "spin_index": 0,
+      "denominator64": 10.280794958547041,
+      "denominator32": 10.280643343925476,
+      "relative_denominator_change": -1.4747363620839647e-05,
+      "energy32_minus_energy64": 1.7928002595435828
+    },
+    {
+      "model": "L",
+      "config": "Nb2O5_c0",
+      "max_kappa64": 37.42698448324402,
+      "stage": "recursion_1",
+      "spin_index": 0,
+      "denominator64": 39.72853161137911,
+      "denominator32": 39.72200122475624,
+      "relative_denominator_change": -0.00016437523255956093,
+      "energy32_minus_energy64": 115.00730634381762
+    }
+  ],
+  "rows": {
+    "S": [
+      {
+        "model": "S",
+        "config": "NaCl_c0",
+        "dtype": "float64",
+        "energy": -1829825.3591455389,
+        "energy_minus_saved64": 0.0,
+        "stages": [
+          {
+            "stage": "initial",
+            "sum": [
+              31775.845277445987,
+              26835.909232310514
+            ],
+            "sum_abs": [
+              31775.845277445987,
+              26835.909232310514
+            ],
+            "condition": [
+              1.0,
+              1.0
+            ]
+          },
+          {
+            "stage": "recursion_0",
+            "sum": [
+              986.7332052246692,
+              529.4575963391551
+            ],
+            "sum_abs": [
+              986.7332052246692,
+              529.4575963391551
+            ],
+            "condition": [
+              1.0,
+              1.0
+            ]
+          },
+          {
+            "stage": "recursion_1",
+            "sum": [
+              770.415797492384,
+              994.6853743299878
+            ],
+            "sum_abs": [
+              1648.6342434619285,
+              1001.9432634802017
+            ],
+            "condition": [
+              2.1399278789817733,
+              1.0072966682103905
+            ]
+          }
+        ]
+      },
+      {
+        "model": "S",
+        "config": "Na2O_c0",
+        "dtype": "float64",
+        "energy": -1175190.4108238493,
+        "energy_minus_saved64": 0.0,
+        "stages": [
+          {
+            "stage": "initial",
+            "sum": [
+              57901.05922120995,
+              56230.83217987385
+            ],
+            "sum_abs": [
+              57901.05922120995,
+              56230.83217987385
+            ],
+            "condition": [
+              1.0,
+              1.0
+            ]
+          },
+          {
+            "stage": "recursion_0",
+            "sum": [
+              6926.909730167647,
+              8011.5420316391655
+            ],
+            "sum_abs": [
+              6933.934734433509,
+              8543.717401862315
+            ],
+            "condition": [
+              1.0010141613705845,
+              1.0664260847813671
+            ]
+          },
+          {
+            "stage": "recursion_1",
+            "sum": [
+              4458.449352085819,
+              5034.128652373876
+            ],
+            "sum_abs": [
+              5163.122998460054,
+              5038.979954478951
+            ],
+            "condition": [
+              1.1580535272974593,
+              1.0009636825834372
+            ]
+          }
+        ]
+      },
+      {
+        "model": "S",
+        "config": "Nb2O5_c0",
+        "dtype": "float64",
+        "energy": -427015.227776472,
+        "energy_minus_saved64": 0.0,
+        "stages": [
+          {
+            "stage": "initial",
+            "sum": [
+              39525.966306914015,
+              34204.93850512573
+            ],
+            "sum_abs": [
+              39525.966306914015,
+              34204.93850512573
+            ],
+            "condition": [
+              1.0,
+              1.0
+            ]
+          },
+          {
+            "stage": "recursion_0",
+            "sum": [
+              -417.9173073265206,
+              -67.50054483025903
+            ],
+            "sum_abs": [
+              1069.4831644080039,
+              802.8872350893382
+            ],
+            "condition": [
+              2.5590784245085407,
+              11.894529697624327
+            ]
+          },
+          {
+            "stage": "recursion_1",
+            "sum": [
+              7103.752778802542,
+              5855.398423174017
+            ],
+            "sum_abs": [
+              7103.752778802542,
+              5855.398423174017
+            ],
+            "condition": [
+              1.0,
+              1.0
+            ]
+          }
+        ]
+      },
+      {
+        "model": "S",
+        "config": "Ta2O5_c0",
+        "dtype": "float64",
+        "energy": -818127.4673297317,
+        "energy_minus_saved64": 4.7031790018081665e-07,
+        "stages": [
+          {
+            "stage": "initial",
+            "sum": [
+              241838.53571200732,
+              268055.1403769037
+            ],
+            "sum_abs": [
+              241838.53571200732,
+              268055.1403769037
+            ],
+            "condition": [
+              1.0,
+              1.0
+            ]
+          },
+          {
+            "stage": "recursion_0",
+            "sum": [
+              -310.02804553865303,
+              -2270.5907666989024
+            ],
+            "sum_abs": [
+              5579.878601110964,
+              8679.763977755403
+            ],
+            "condition": [
+              17.997980122786302,
+              3.8226897180483452
+            ]
+          },
+          {
+            "stage": "recursion_1",
+            "sum": [
+              772.9762443432921,
+              11172.101785273624
+            ],
+            "sum_abs": [
+              13232.832855300385,
+              15497.2849001142
+            ],
+            "condition": [
+              17.119326696181695,
+              1.387141398992781
+            ]
+          }
+        ]
+      },
+      {
+        "model": "S",
+        "config": "NaCl_c0",
+        "dtype": "float32",
+        "energy": -1829825.875,
+        "energy_minus_saved64": -0.5158544611185789,
+        "stages": [
+          {
+            "stage": "initial",
+            "sum": [
+              31775.828788757324,
+              26835.893451690674
+            ],
+            "sum_abs": [
+              31775.828788757324,
+              26835.893451690674
+            ],
+            "condition": [
+              1.0,
+              1.0
+            ]
+          },
+          {
+            "stage": "recursion_0",
+            "sum": [
+              986.7329704761505,
+              529.4573838710785
+            ],
+            "sum_abs": [
+              986.7329704761505,
+              529.4573838710785
+            ],
+            "condition": [
+              1.0,
+              1.0
+            ]
+          },
+          {
+            "stage": "recursion_1",
+            "sum": [
+              770.4151244163513,
+              994.6846072673798
+            ],
+            "sum_abs": [
+              1648.6345009803772,
+              1001.9425075054169
+            ],
+            "condition": [
+              2.1399300827970436,
+              1.0072966849843752
+            ]
+          }
+        ]
+      },
+      {
+        "model": "S",
+        "config": "Na2O_c0",
+        "dtype": "float32",
+        "energy": -1175190.625,
+        "energy_minus_saved64": -0.21417615073733032,
+        "stages": [
+          {
+            "stage": "initial",
+            "sum": [
+              57901.03323364258,
+              56230.78688812256
+            ],
+            "sum_abs": [
+              57901.03323364258,
+              56230.78688812256
+            ],
+            "condition": [
+              1.0,
+              1.0
+            ]
+          },
+          {
+            "stage": "recursion_0",
+            "sum": [
+              6926.920305728912,
+              8011.546259880066
+            ],
+            "sum_abs": [
+              6933.944220602512,
+              8543.721508979797
+            ],
+            "condition": [
+              1.0010140025528793,
+              1.0664260346051722
+            ]
+          },
+          {
+            "stage": "recursion_1",
+            "sum": [
+              4458.440204024315,
+              5034.1247791051865
+            ],
+            "sum_abs": [
+              5163.125747919083,
+              5038.977056622505
+            ],
+            "condition": [
+              1.158056520138747,
+              1.000963877084942
+            ]
+          }
+        ]
+      },
+      {
+        "model": "S",
+        "config": "Nb2O5_c0",
+        "dtype": "float32",
+        "energy": -427015.28125,
+        "energy_minus_saved64": -0.05347352800890803,
+        "stages": [
+          {
+            "stage": "initial",
+            "sum": [
+              39525.96982574463,
+              34204.94906616211
+            ],
+            "sum_abs": [
+              39525.96982574463,
+              34204.94906616211
+            ],
+            "condition": [
+              1.0,
+              1.0
+            ]
+          },
+          {
+            "stage": "recursion_0",
+            "sum": [
+              -417.9122696518898,
+              -67.49867652356625
+            ],
+            "sum_abs": [
+              1069.4788487553596,
+              802.8871607333422
+            ],
+            "condition": [
+              2.5590989459252014,
+              11.894857826627534
+            ]
+          },
+          {
+            "stage": "recursion_1",
+            "sum": [
+              7103.678686141968,
+              5855.389183998108
+            ],
+            "sum_abs": [
+              7103.678686141968,
+              5855.389183998108
+            ],
+            "condition": [
+              1.0,
+              1.0
+            ]
+          }
+        ]
+      },
+      {
+        "model": "S",
+        "config": "Ta2O5_c0",
+        "dtype": "float32",
+        "energy": -818262.125,
+        "energy_minus_saved64": -134.65766979800537,
+        "stages": [
+          {
+            "stage": "initial",
+            "sum": [
+              241838.60720825195,
+              268055.175201416
+            ],
+            "sum_abs": [
+              241838.60720825195,
+              268055.175201416
+            ],
+            "condition": [
+              1.0,
+              1.0
+            ]
+          },
+          {
+            "stage": "recursion_0",
+            "sum": [
+              -310.0323362648487,
+              -2270.6040212213993
+            ],
+            "sum_abs": [
+              5579.864483684301,
+              8679.752212911844
+            ],
+            "condition": [
+              17.99768550244913,
+              3.822662221941652
+            ]
+          },
+          {
+            "stage": "recursion_1",
+            "sum": [
+              773.3351901471615,
+              11172.409122169018
+            ],
+            "sum_abs": [
+              13232.647035390139,
+              15497.29464763403
+            ],
+            "condition": [
+              17.11114042653618,
+              1.3871041131928559
+            ]
+          }
+        ]
+      }
+    ],
+    "L": [
+      {
+        "model": "L",
+        "config": "NaCl_c0",
+        "dtype": "float64",
+        "energy": -1829813.9804011395,
+        "energy_minus_saved64": null,
+        "stages": [
+          {
+            "stage": "initial",
+            "sum": [
+              24291.936675757806,
+              -29132.964961880672
+            ],
+            "sum_abs": [
+              24291.936675757806,
+              29132.964961880672
+            ],
+            "condition": [
+              1.0,
+              1.0
+            ]
+          },
+          {
+            "stage": "recursion_0",
+            "sum": [
+              -420.0197942064039,
+              -180.6384563581227
+            ],
+            "sum_abs": [
+              420.0197942064039,
+              211.18627415490806
+            ],
+            "condition": [
+              1.0,
+              1.169110268171375
+            ]
+          },
+          {
+            "stage": "recursion_1",
+            "sum": [
+              424.60642175537595,
+              -352.3130709293484
+            ],
+            "sum_abs": [
+              534.2238146515731,
+              352.3130709293484
+            ],
+            "condition": [
+              1.2581623528985388,
+              1.0
+            ]
+          }
+        ]
+      },
+      {
+        "model": "L",
+        "config": "Na2O_c2",
+        "dtype": "float64",
+        "energy": -1172928.1678002595,
+        "energy_minus_saved64": -1.6298145055770874e-09,
+        "stages": [
+          {
+            "stage": "initial",
+            "sum": [
+              111332.43560740285,
+              -102173.08485081233
+            ],
+            "sum_abs": [
+              111332.43560740285,
+              102173.08485081233
+            ],
+            "condition": [
+              1.0,
+              1.0
+            ]
+          },
+          {
+            "stage": "recursion_0",
+            "sum": [
+              10.280794958547041,
+              -538.234963579926
+            ],
+            "sum_abs": [
+              334.5136783873852,
+              538.234963579926
+            ],
+            "condition": [
+              32.537724926542175,
+              1.0
+            ]
+          },
+          {
+            "stage": "recursion_1",
+            "sum": [
+              9890.095410859843,
+              -2916.87345063715
+            ],
+            "sum_abs": [
+              12381.076633321682,
+              2917.3080367209436
+            ],
+            "condition": [
+              1.2518662478955067,
+              1.00014899037999
+            ]
+          }
+        ]
+      },
+      {
+        "model": "L",
+        "config": "Nb2O5_c0",
+        "dtype": "float64",
+        "energy": -76549.19480634382,
+        "energy_minus_saved64": -3.8498546928167343e-07,
+        "stages": [
+          {
+            "stage": "initial",
+            "sum": [
+              65461.17590381606,
+              -70597.93457701337
+            ],
+            "sum_abs": [
+              65461.17590381606,
+              70597.93457701337
+            ],
+            "condition": [
+              1.0,
+              1.0
+            ]
+          },
+          {
+            "stage": "recursion_0",
+            "sum": [
+              -1113.4764943567925,
+              -450.69870038826497
+            ],
+            "sum_abs": [
+              1714.9990629273914,
+              883.2775700799729
+            ],
+            "condition": [
+              1.5402202665428268,
+              1.9597961328023636
+            ]
+          },
+          {
+            "stage": "recursion_1",
+            "sum": [
+              39.72853161137911,
+              -337.3970508106844
+            ],
+            "sum_abs": [
+              1486.9191361611556,
+              929.4594869504924
+            ],
+            "condition": [
+              37.42698448324402,
+              2.754794343095838
+            ]
+          }
+        ]
+      },
+      {
+        "model": "L",
+        "config": "NaCl_c0",
+        "dtype": "float32",
+        "energy": -1829814.375,
+        "energy_minus_saved64": null,
+        "stages": [
+          {
+            "stage": "initial",
+            "sum": [
+              24291.937942504883,
+              -29132.967964172363
+            ],
+            "sum_abs": [
+              24291.937942504883,
+              29132.967964172363
+            ],
+            "condition": [
+              1.0,
+              1.0
+            ]
+          },
+          {
+            "stage": "recursion_0",
+            "sum": [
+              -420.0206425189972,
+              -180.63875436410308
+            ],
+            "sum_abs": [
+              420.0206425189972,
+              211.18680119886994
+            ],
+            "condition": [
+              1.0,
+              1.1691112571181317
+            ]
+          },
+          {
+            "stage": "recursion_1",
+            "sum": [
+              424.6065103709698,
+              -352.3131636977196
+            ],
+            "sum_abs": [
+              534.2238710224628,
+              352.3131636977196
+            ],
+            "condition": [
+              1.2581622230797231,
+              1.0
+            ]
+          }
+        ]
+      },
+      {
+        "model": "L",
+        "config": "Na2O_c2",
+        "dtype": "float32",
+        "energy": -1172926.375,
+        "energy_minus_saved64": 1.7928002579137683,
+        "stages": [
+          {
+            "stage": "initial",
+            "sum": [
+              111332.49423217773,
+              -102173.12506103516
+            ],
+            "sum_abs": [
+              111332.49423217773,
+              102173.12506103516
+            ],
+            "condition": [
+              1.0,
+              1.0
+            ]
+          },
+          {
+            "stage": "recursion_0",
+            "sum": [
+              10.280643343925476,
+              -538.2352054268122
+            ],
+            "sum_abs": [
+              334.5137881040573,
+              538.2352054268122
+            ],
+            "condition": [
+              32.53821545143977,
+              1.0
+            ]
+          },
+          {
+            "stage": "recursion_1",
+            "sum": [
+              9890.18770107627,
+              -2916.9210709035397
+            ],
+            "sum_abs": [
+              12381.174681037664,
+              2917.3562028110027
+            ],
+            "condition": [
+              1.2518644797499971,
+              1.0001491750708662
+            ]
+          }
+        ]
+      },
+      {
+        "model": "L",
+        "config": "Nb2O5_c0",
+        "dtype": "float32",
+        "energy": -76434.1875,
+        "energy_minus_saved64": 115.00730595883215,
+        "stages": [
+          {
+            "stage": "initial",
+            "sum": [
+              65461.12028503418,
+              -70597.89013671875
+            ],
+            "sum_abs": [
+              65461.12028503418,
+              70597.89013671875
+            ],
+            "condition": [
+              1.0,
+              1.0
+            ]
+          },
+          {
+            "stage": "recursion_0",
+            "sum": [
+              -1113.4734251499176,
+              -450.698505230248
+            ],
+            "sum_abs": [
+              1714.9935238361359,
+              883.2777098044753
+            ],
+            "condition": [
+              1.5402195374399976,
+              1.959797291435959
+            ]
+          },
+          {
+            "stage": "recursion_1",
+            "sum": [
+              39.72200122475624,
+              -337.3930189907551
+            ],
+            "sum_abs": [
+              1486.9066566228867,
+              929.4567442238331
+            ],
+            "condition": [
+              37.432823391994425,
+              2.7548191334963605
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "L_Nb2O5_native_stress": {
+    "energy": -76549.19480634382,
+    "stress": [
+      [
+        -56564.77531733383,
+        652.4222570567309,
+        24459.190821779095
+      ],
+      [
+        652.4222570567309,
+        -128982.87952345055,
+        2140.6257328277443
+      ],
+      [
+        24459.190821779095,
+        2140.6257328277443,
+        -67764.02553239926
+      ]
+    ],
+    "saved_A100_yardstick": 0.24242423808027525,
+    "rescore": {
+      "simt": {
+        "native_stress_error": 20.4547220558743,
+        "stress_ratio_to_unchanged_A100_yardstick": 84.37572999239876,
+        "energy_minus_saved64_eV": -37.69565180374775
+      },
+      "3x_rnacc": {
+        "native_stress_error": 44.61595193622634,
+        "stress_ratio_to_unchanged_A100_yardstick": 184.0408050347359,
+        "energy_minus_saved64_eV": 80.71900816477137
+      }
+    },
+    "scope": "Uses production native strain helper; this case did not receive a separate FD convergence sweep."
+  },
+  "interpretation": "Cancellation in the normalization can amplify upstream rounding. Both installed MACE and LoupMD already reduce the denominators in double precision. The measurements do not isolate the sole source of full-model error and do not justify clipping or changing model normalization.",
+  "reference_comparison_limit": {
+    "saved_A100_Nb2O5_energy32": -76549.0,
+    "saved_A100_Nb2O5_energy64": -76549.19480595883,
+    "note": "The local energy-only FP32 diagnostic is not a repeat of the A100 full E/F/stress evaluation. Hardware, CPU reduction execution and forward flags differ; no single cause of the difference is established."
+  },
+  "source_sha256": {
+    "diagnostic": "80ecb05b46c56477128bc4dc98c9b05fcc7fce767179fa4710314642fa9a228b",
+    "native_strain_helper": "1408a2798613aeb11787376cdd8fe94243a98d6efa4ec5aab5cea7ab6a9eee5f"
+  },
+  "diagnostic_source": "\"\"\"Observe native Fukui cancellation without changing model outputs; reserved execution only.\"\"\"\nimport argparse\nimport gc\nimport json\nfrom pathlib import Path\n\nimport numpy as np\nimport torch\nfrom ase import Atoms\nfrom ase.io import read as ase_read\nfrom mace.calculators import MACECalculator\n\nap = argparse.ArgumentParser()\nap.add_argument(\"model\", choices=[\"S\", \"L\"])\nap.add_argument(\"--ref-device\", required=True, choices=[\"cuda\", \"cpu\"])\na = ap.parse_args()\nif a.model == \"L\" and a.ref_device != \"cpu\":\n    ap.error(\"POLAR-L references must stay on CPU\")\ntorch.backends.cuda.matmul.allow_tf32 = False\ntorch.set_float32_matmul_precision(\"highest\")\ntorch.use_deterministic_algorithms(True)\nroot = Path(\"/mnt/d/Margraf/LoupMD/.tmp_o\")\nout = root / f\"polar_fukui_condition_{a.model}\"\nout.mkdir(exist_ok=False)\ncases = [\"NaCl_c0\", \"Na2O_c0\", \"Nb2O5_c0\", \"Ta2O5_c0\"] if a.model == \"S\" else [\"NaCl_c0\", \"Na2O_c2\", \"Nb2O5_c0\"]\nconfigs = {}\nreference_energy = {}\nfor name in cases:\n    if name in (\"NaCl_c0\", \"Na2O_c0\"):\n        with np.load(root/f\"polar_pure_S_0/{name}_reference.npz\") as z:\n            ref = {k:z[k].copy() for k in z.files}\n        cif = Path(f\"/mnt/d/Margraf/ResearchModule/Structures/Benchmark/R2SCAN/{name.rsplit('_c',1)[0]}.cif\")\n        base = ase_read(cif)\n        at = base.repeat([max(1, int(np.ceil(13/h))) for h in base.cell.cellpar()[:3]])\n        at.set_cell(ref[\"cell\"], scale_atoms=False)\n        at.positions[:] = ref[\"positions\"]\n        if a.model == \"S\":\n            reference_energy[name] = float(ref[\"e64\"])\n    else:\n        owner = \"L\" if name == \"Na2O_c2\" else \"S\"\n        with np.load(root/f\"local_polar_replay_{owner}/{name}_input.npz\") as z:\n            at = Atoms(numbers=z[\"numbers\"], positions=z[\"positions\"], cell=z[\"cell\"], pbc=True)\n        with np.load(root/f\"a100_failure_replay/{a.model}_{name}/{name}_reference.npz\") as z:\n            assert np.array_equal(at.positions, z[\"positions\"])\n            assert np.array_equal(at.cell.array, z[\"cell\"])\n            reference_energy[name] = float(z[\"e64\"])\n    configs[name] = at\n\nrecords = []\nfor dtype in (\"float64\", \"float32\"):\n    calc = MACECalculator(model_paths=f\"/home/fzwin/models/MACE-POLAR-1-{a.model}.model\", device=a.ref_device, default_dtype=dtype)\n    model = calc.models[0]\n    captured = []\n\n    def observe(stage):\n        def hook(module, inputs, output):\n            raw = output[:, -2:].detach().double()\n            norm = raw.sum(0)\n            l1 = raw.abs().sum(0)\n            condition = l1 / norm.abs()\n            captured.append({\"stage\": stage, \"sum\": norm.cpu().tolist(), \"sum_abs\": l1.cpu().tolist(), \"condition\": [float(x) if np.isfinite(x) else None for x in condition.cpu().tolist()]})\n        return hook\n\n    hooks = [model.fukui_source_map.register_forward_hook(observe(\"initial\"))]\n    hooks += [m.register_forward_hook(observe(f\"recursion_{i}\")) for i,m in enumerate(model.field_dependent_charges_maps)]\n    for name, at in configs.items():\n        captured.clear()\n        data = calc._atoms_to_batch(at).to_dict()\n        with torch.no_grad():\n            energy = float(model(data, compute_force=False, compute_stress=False)[\"energy\"].item())\n        assert len(captured) == 1 + model.num_recursion_steps\n        row = {\"model\": a.model, \"config\": name, \"dtype\": dtype, \"energy\": energy, \"energy_minus_saved64\": None if name not in reference_energy else energy-reference_energy[name], \"stages\": list(captured)}\n        records.append(row)\n        print(json.dumps(row, allow_nan=False), flush=True)\n        if a.model == \"L\" and name == \"Nb2O5_c0\" and dtype == \"float64\":\n            from polar_reference import energy_stress\n            native_energy, native_stress = energy_stress(calc, at)\n            np.savez(out / \"Nb2O5_c0_native64.npz\", e=native_energy, s=native_stress)\n        del data\n    for hook in hooks:\n        hook.remove()\n    del model, calc\n    gc.collect(); torch.cuda.empty_cache()\n(out / \"rows.json\").write_text(json.dumps(records, indent=2, allow_nan=False)+\"\\n\")\n"
+}

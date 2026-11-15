@@ -1,0 +1,265 @@
+{
+  "scope": "Failures in completed tasks 0-6 of array 5008099; tasks 7-8 were outstanding at collection",
+  "chunks": [
+    {
+      "task": 1,
+      "model": "S",
+      "metadata": {
+        "argv": [
+          "/home/atuin/v130cb/v130cb18/loup-s64/polar-arithmetic/polar_arithmetic.py",
+          "/home/atuin/v130cb/v130cb18/loup-s64/models/MACE-POLAR-1-S.model",
+          "--configs",
+          "all",
+          "--chunks",
+          "1",
+          "--fixed-reference",
+          "--compute-refs",
+          "--paths",
+          "simt",
+          "3x_rnacc",
+          "--arch",
+          "80",
+          "--cubins",
+          "/home/atuin/v130cb/v130cb18/loup-s64/polar-arithmetic/cub80",
+          "--output",
+          "/home/atuin/v130cb/v130cb18/loup-s64/polar-arithmetic/results/5008099_1"
+        ],
+        "model_sha256": "e4495612037b3b3312633182882a38a694ecac9ea0be2b9889ac0b2a84a99510",
+        "library_sha256": "009006b6c3b80151b6e959ba9a220c2d94b84402d758674ef6e53e3720b52ea5",
+        "cubins_sha256": {
+          "3x_rnacc": "de1240d99d0e35fb3e010b6e10a23deb2978c599de1ac8e7b8902d938e7af2cb"
+        },
+        "references": {
+          "/home/atuin/v130cb/v130cb18/loup-s64/gate_refs/MACE-POLAR-1-S_widecrystals1_ce456b7783b4716b8abc.npz": "be67d7b4e63dd2d085c73e8b6a8c58755043cb5de4656f5359785b22fb3be90e",
+          "/home/atuin/v130cb/v130cb18/loup-s64/gate_refs/MACE-POLAR-1-S_widecrystals1_ce456b7783b4716b8abc_fixed_kset1.npz": "37fc66df0af72aa46db5f72f0843cde2b1859dada47b3511855d1ece8495ac9f"
+        },
+        "script_sha256": "6fd04639dfa7660e8efb8da43dc51151d901961ad47b63e238901231e13096d4",
+        "stress_protocol": "frozen-kset1",
+        "polar_reference_sha256": "c0ab4a4e4df4b5313bc1c7f5ba3a800b6ae8017d03300b23dab441ab214cfb82"
+      },
+      "rows": [
+        {
+          "config": "Nb2O5_c0",
+          "path": "simt",
+          "atoms": 224,
+          "error": [
+            0.005427019589530703,
+            0.0036834716082978503,
+            6.445969928847717e-05
+          ],
+          "yardstick": [
+            1.6338103928969108,
+            0.0028248099962695505,
+            9.73861889042027e-06
+          ],
+          "ratio": [
+            0.0033216948632013837,
+            1.3039714576067947,
+            6.618977497095115
+          ],
+          "finite": true,
+          "fallback": false,
+          "tc_seen": false,
+          "passed": false
+        },
+        {
+          "config": "Nb2O5_c0",
+          "path": "3x_rnacc",
+          "atoms": 224,
+          "error": [
+            0.0018020707232478475,
+            0.0017799048120252792,
+            3.625069285240201e-05
+          ],
+          "yardstick": [
+            1.6338103928969108,
+            0.0028248099962695505,
+            9.73861889042027e-06
+          ],
+          "ratio": [
+            0.0011029864487840564,
+            0.6300971797663648,
+            3.7223648712715582
+          ],
+          "finite": true,
+          "fallback": false,
+          "tc_seen": true,
+          "passed": false
+        }
+      ]
+    },
+    {
+      "task": 2,
+      "model": "S",
+      "metadata": {
+        "argv": [
+          "/home/atuin/v130cb/v130cb18/loup-s64/polar-arithmetic/polar_arithmetic.py",
+          "/home/atuin/v130cb/v130cb18/loup-s64/models/MACE-POLAR-1-S.model",
+          "--configs",
+          "all",
+          "--chunks",
+          "2",
+          "--fixed-reference",
+          "--compute-refs",
+          "--paths",
+          "simt",
+          "3x_rnacc",
+          "--arch",
+          "80",
+          "--cubins",
+          "/home/atuin/v130cb/v130cb18/loup-s64/polar-arithmetic/cub80",
+          "--output",
+          "/home/atuin/v130cb/v130cb18/loup-s64/polar-arithmetic/results/5008099_2"
+        ],
+        "model_sha256": "e4495612037b3b3312633182882a38a694ecac9ea0be2b9889ac0b2a84a99510",
+        "library_sha256": "009006b6c3b80151b6e959ba9a220c2d94b84402d758674ef6e53e3720b52ea5",
+        "cubins_sha256": {
+          "3x_rnacc": "de1240d99d0e35fb3e010b6e10a23deb2978c599de1ac8e7b8902d938e7af2cb"
+        },
+        "references": {
+          "/home/atuin/v130cb/v130cb18/loup-s64/gate_refs/MACE-POLAR-1-S_widecrystals2_14828bf63c3801b79aaf.npz": "a4e7a29864b655a32845eda68e6f56453970b891a6fff3ab93023526efb84ba8",
+          "/home/atuin/v130cb/v130cb18/loup-s64/gate_refs/MACE-POLAR-1-S_widecrystals2_14828bf63c3801b79aaf_fixed_kset1.npz": "d30dd0952e2e822fad46e730fc359a9205fa6e4a0bb0b1874474b2b7ba42fe90"
+        },
+        "script_sha256": "6fd04639dfa7660e8efb8da43dc51151d901961ad47b63e238901231e13096d4",
+        "stress_protocol": "frozen-kset1",
+        "polar_reference_sha256": "c0ab4a4e4df4b5313bc1c7f5ba3a800b6ae8017d03300b23dab441ab214cfb82"
+      },
+      "rows": [
+        {
+          "config": "Ta2O5_c0",
+          "path": "simt",
+          "atoms": 504,
+          "error": [
+            221.12333821594746,
+            2208.310424597934,
+            44.56416612886824
+          ],
+          "yardstick": [
+            67.77315436112177,
+            755.1169558297843,
+            40.32495630036283
+          ],
+          "ratio": [
+            3.2626980446817653,
+            2.9244614460699823,
+            1.1051262101049633
+          ],
+          "finite": true,
+          "fallback": false,
+          "tc_seen": false,
+          "passed": false
+        },
+        {
+          "config": "Ta2O5_c0",
+          "path": "3x_rnacc",
+          "atoms": 504,
+          "error": [
+            49.61279087902291,
+            494.719918621704,
+            127.05773358297301
+          ],
+          "yardstick": [
+            67.77315436112177,
+            755.1169558297843,
+            40.32495630036283
+          ],
+          "ratio": [
+            0.7320419323360196,
+            0.655156681097255,
+            3.1508461568210007
+          ],
+          "finite": true,
+          "fallback": false,
+          "tc_seen": true,
+          "passed": false
+        }
+      ]
+    },
+    {
+      "task": 6,
+      "model": "L",
+      "metadata": {
+        "argv": [
+          "/home/atuin/v130cb/v130cb18/loup-s64/polar-arithmetic/polar_arithmetic.py",
+          "/home/atuin/v130cb/v130cb18/loup-s64/models/MACE-POLAR-1-L.model",
+          "--configs",
+          "all",
+          "--chunks",
+          "0",
+          "--fixed-reference",
+          "--compute-refs",
+          "--paths",
+          "simt",
+          "3x_rnacc",
+          "--arch",
+          "80",
+          "--cubins",
+          "/home/atuin/v130cb/v130cb18/loup-s64/polar-arithmetic/cub80",
+          "--output",
+          "/home/atuin/v130cb/v130cb18/loup-s64/polar-arithmetic/results/5008099_6"
+        ],
+        "model_sha256": "9f65f8dc6ddaff1d631e299cb531376a7da5e68d1bef04f34a2d5073d5ef114b",
+        "library_sha256": "009006b6c3b80151b6e959ba9a220c2d94b84402d758674ef6e53e3720b52ea5",
+        "cubins_sha256": {
+          "3x_rnacc": "de1240d99d0e35fb3e010b6e10a23deb2978c599de1ac8e7b8902d938e7af2cb"
+        },
+        "references": {
+          "/home/atuin/v130cb/v130cb18/loup-s64/gate_refs/MACE-POLAR-1-L_widecrystals0_277df21f51d5fd5c4956_fixed_kset1.npz": "310ce7383b813fb17ef9aa1aa82b48e1c05ca6cbeb3ddd00ddb6d3139bcf20cd"
+        },
+        "script_sha256": "6fd04639dfa7660e8efb8da43dc51151d901961ad47b63e238901231e13096d4",
+        "stress_protocol": "frozen-kset1",
+        "polar_reference_sha256": "c0ab4a4e4df4b5313bc1c7f5ba3a800b6ae8017d03300b23dab441ab214cfb82"
+      },
+      "rows": [
+        {
+          "config": "Na2O_c2",
+          "path": "simt",
+          "atoms": 324,
+          "error": [
+            0.03483418639703297,
+            0.07130180997251045,
+            0.9617337590393618
+          ],
+          "yardstick": [
+            4.761729191091877,
+            0.3986222923404057,
+            0.19208098725107448
+          ],
+          "ratio": [
+            0.007315448863030659,
+            0.1788706034323386,
+            5.006918033913749
+          ],
+          "finite": true,
+          "fallback": false,
+          "tc_seen": false,
+          "passed": false
+        },
+        {
+          "config": "Na2O_c2",
+          "path": "3x_rnacc",
+          "atoms": 324,
+          "error": [
+            2.3385235769559203,
+            1.8197295601848964,
+            1.8606382947316433
+          ],
+          "yardstick": [
+            4.761729191091877,
+            0.3986222923404057,
+            0.19208098725107448
+          ],
+          "ratio": [
+            0.49110805825135356,
+            4.565047151529921,
+            9.686738502127493
+          ],
+          "finite": true,
+          "fallback": false,
+          "tc_seen": true,
+          "passed": false
+        }
+      ]
+    }
+  ]
+}

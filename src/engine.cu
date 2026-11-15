@@ -1673,9 +1673,9 @@ LoupHandle* loup_create(const char* loup_path, int device_id) {
                 h->model.load(bundle, loup_path);
             }
         }
-        // MACE-POLAR-1's charge updates amplify GEMM rounding: with the 3xTF32 tensor-core GEMMs (~4x float32's
-        // rounding per product) the RTX 4000 Ada's float32 stress and NaNbO3 forces failed the 3x gate that plain
-        // float32 GEMMs pass, so long-range models run on float32 SIMT GEMMs only.
+        // Tensor-core GEMM implementations have failed full-model POLAR accuracy gates. Their rounding depends on
+        // the operands and MMA accumulation, not a fixed multiple of FP32 error. Keep long-range models on FP32
+        // until a candidate clears both accuracy and performance qualification (see gemm-tc-rounded-polar in the ledger).
         // LOUP_LR_HYBRID=1 (tests): load the GEMM cubin for long-range models too (e.g. a true 3xTF32 build through
         // LOUP_HYBRID_CUBIN, gated before any adoption).
         const char* lr_hyb = std::getenv("LOUP_LR_HYBRID");
