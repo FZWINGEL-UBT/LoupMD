@@ -175,6 +175,9 @@ Conventions:
 | [md-fix-com](#md-fix-com) | Centre of mass at rest: Langevin's noise in two passes without its mass-weighted mean, NVE's momentum removed at a call's start; noise coefficients formed once per step (release task S4-T01) | `LoupIntegrator.fix_com` | both | DEFAULT on `release/v1` for `lm.md` / `lm.Simulation`; off in `loup_run_langevin` (5060 Ti only) | release Stage 4 | current build against the merge build, four A/B: 0.9999 / 0.9982: tie; `fix_com` on against off 1.0009 at 5,000 atoms | [§6.4][s64] |
 | [md-csvr](#md-csvr) | CSVR (Bussi) as three small nodes before a velocity-Verlet step; the integrator's scalars travel in the state block (release task S4-T03) | `LOUP_CSVR`, `lm.integrators.CSVR` | both | DEFAULT on `release/v1` for CSVR runs (5060 Ti only) | release Stage 4 | CSVR against Langevin 1.0029 at 5,000 atoms; the benchmark's Langevin step unchanged (four A/B: 0.9991 / 1.0032) | [§6.5][s65] |
 | [md-skin-auto](#md-skin-auto) | The neighbour skin chosen from the largest per-step displacement, so that light atoms run in the pipelined loop (owner's decision O17) | `skin="auto"`, `loup_get_step_displacement` | both | DEFAULT on `release/v1` for `lm.md`, `loupmd md` and the ASE drop-ins; the engine's default stays 0.5 A (5060 Ti only) | release Stage 3 | water 216, OFF23 small: 0.676 -> 0.556 ms/step (0.82); 0 -> 799 of 800 steps pipelined | [§6.5][s65] |
+| [md-nose-hoover](#md-nose-hoover) | Nose-Hoover chain: per half step one kinetic-energy sum, one single-thread kernel and one velocity scale (release task S4-T04) | `LOUP_NHC`, `lm.integrators.NoseHooverChain` | both | DEFAULT on `release/v1` for Nose-Hoover runs (5060 Ti only) | release Stage 4 | against Langevin 1.0067 at 5,000 atoms; the benchmark's Langevin step unchanged (0.9995 / 0.9993 against the build before CSVR) | [§6.6][s66] |
+| [md-berendsen-nvt](#md-berendsen-nvt) | Berendsen NVT: one scale per step from the kinetic energy (release task S4-T05) | `LOUP_BERENDSEN_NVT`, `lm.integrators.Berendsen` | both | DEFAULT on `release/v1` for Berendsen runs (5060 Ti only) | release Stage 4 | cost against Langevin not measured (two small nodes fewer than the Nose-Hoover step) | [§6.6][s66] |
+| [min-lbfgs-device](#min-lbfgs-device) | LBFGS on the device (`loup_minimize`, owner's decision O15): history on the device, one host wait per step, the list check of a small step after the force pass | `loup_minimize`, `LOUP_MIN_AHEAD=0|1` (testing) | both | DEFAULT on `release/v1` for LBFGS at fixed cell (5060 Ti only) | release Stage 4 | optimiser's own time at 5,000 atoms 17% of the force calls (host) -> 9.70% (device, two waits and pageable copies) -> 1.71%; a step 10.7 -> 9.1 -> 8.2 ms | [§6.6][s66] |
 | [md-small-systems](#md-small-systems) | Small-system latency (< ~1,000 atoms) | – | spec | NOT BUILT (open) | – | 135 atoms: GEMM groups 32% of 358 us | [§4.1 #3][s41] |
 | [comp-active-edge-tighten](#comp-active-edge-tighten) | Tighten active-edge compaction (`compute_and_count_active` + `scatter_active_edges`) | – | both | NOT BUILT | – | untried (101 us/step on `SrTiO3` 5060 Ti, `tmp_vec_len` round-trip) | `OMAT0_SPEEDUP_BRIEF.md` |
 | [nl-lane-groups](#nl-lane-groups) | Neighbour count / fill with 8 lanes per atom (neighbouring bins split round-robin; fill keeps the exact row order via per-bin offsets in shared memory) | `kNeighborLanes`, `count/fill_neighbors_kernel`; other GPUs `*_scalar_kernel` | both (`sm_120`) | DEFAULT (5060 Ti only) | S34 | per rebuild `SrTiO3` 433 -> 292 us, `NbCl5` 284 -> 110, water 439 -> 302; ABBA `OFF23-S` water `0.9945` / `0.9856`, `OFF23-M` `0.9961` / `0.9943`, `OMAT-0-S` `0.9961` / `0.9972` | this file |
@@ -237,6 +240,7 @@ Conventions:
 | [s60-omol-prod-floor](#s60-omol-prod-floor) | OMOL-0 product and gate kernels after S59: `ncu` limiter | (measurement) | gen (OMOL-0) | MEASURED | S60 | all four product kernels DRAM-bound (`ncu` DRAM 87-95% of peak, FMA pipe 4-16%, L2 hit 1-4%): `gprod_fwd` / `gprod_bwd` 121 / 259 us (layers 0, 1), 118 / 191 us (last layer); gates at the same floor; only fewer bytes (fusion into the per-degree `W_2` GEMMs) would shorten them | this file |
 | [gen-prod-w2-fusion](#gen-prod-w2-fusion) | Symmetric product fused into the `W_2` GEMMs: atom-major tiles mixing the four degrees; forward prototype = grouped GEMM writing `msgf` with the generated product body in its epilogue | `.tmp_o/sg_grp.cu`, `.tmp_o/gen_fused.py` / `sg_fused_tmpl.cu` (harness only) | gen (OMOL-0) | REJECTED | S61 | fused forward (GEMM + product, bit-identical `msgf` and `y`) vs four GEMM lanes + `gprod_fwd`: 648 atoms `0.921` / `0.946` (90-135 us per layer), 5,184 atoms `1.053`; grouped GEMM alone `1.028-1.042` / `1.133`; ~1% of the water216 step, a loss on large systems; backward not prototyped (product backward recomputed per output-channel tile, 8x) | this file |
 | [gen-w2-fused](#gen-w2-fused) | S61's fused forward built into the engine: `gprod_w2f_<sig>` per product signature (generated; the grouped GEMM in a shared header), used for gated layers with `C_msg >= 1024` up to 448 atoms (sm_120) | `src/w2_grouped.cuh`, `gen_generic.py`, `generic.cu` record (reverted) | gen (OMOL-0) | REJECTED | S62 | exact (`dF` 1.4-3.5e-6); full-step ABBA fused / plain, both orders: urea128 `1.020` / `1.019`, naph288 `1.014` / `1.011`, urea432 `1.013` / `1.012`; nsys naph288: summed kernel time -812 us per step but step span +135 us (the per-layer W_2 + product segment 694-704 -> 727-742 us) | this file |
+| [gen-default](#gen-default) | The generic path as the default for OMAT-0 medium too (owner's decision O20); the specialised kernels stay built and gated | `LOUP_GENERIC=0`, `generic=False`, `test_gate.py --specialised`, `loupmd validate --specialised` | generic | DEFAULT on `release/v1` (5060 Ti only) | release Stage 2 | generic / specialised in one library, both orders: `NbCl5` 1.0409, 1.0399; `SrTiO3` 1.0184, 1.0144 | [§6.6][s66] |
 | [s63-spec-vs-gen](#s63-spec-vs-gen) | OMAT-0 medium on the specialised path against the generic path (`LOUP_GENERIC=1`), stage by stage; falsifier for the interaction-0 backward gap: the density-derivative polynomial per lane before the edge loop (sm_120) | `src/interaction0.cu` (reverted) | specialised | REJECTED | S63 | generic 7.4% / 2.9% slower overall (SrTiO3 / NbCl5); faster only in the interaction-0 backward (`first_bwd_edge` 484 / 76 us vs 554 / 113); the per-lane `qd` change: ABBA SrTiO3 `0.9997` / `0.9998`, NbCl5 `1.0015` / `1.010` (tie) | this file |
 | [gen-conv-fwd-variants](#gen-conv-fwd-variants) | `gconv_fwd_L1` at `C = 128` with five receivers per 640-thread block (the specialised forward's `R5`) or unpaired, chosen per layer and system by timing at the first MD rebuild | `launch_conv_fwd` `var`, `GenericModel::tune_conv_variants` (sm_120; `LOUP_CONV_TUNE=0` disables, `LOUP_CONV_FWD_VARIANT=0\|1\|2` forces) | gen (lx 1, `C = 128`: OFF23-M, OFF23b-M, OFF24-M, MH-1, MP-0 medium, POLAR-1-M) | DEFAULT (5060 Ti only) | S64 | kernel R1p / R1 / R5: OMAT-0-M generic SrTiO3 2,200 / 2,176 / 1,742 us, OFF24-M water 2,723 / 2,686 / 2,437, MP-0-M SrTiO3 2,385 / 2,273 / 2,136, NbCl5 354 / 348 / 357; full-step ABBA tuned / old, both orders: MP-0-M SrTiO3 `0.968` / `0.967`, OFF24-M water `0.978` / `0.978`, OFF23-M water `0.975` / `0.980`, small cells tie | this file |
 | [gen-conv-bwd-multi-rcv](#gen-conv-bwd-multi-rcv) | `gconv_bwd_L1` (C 128, dx) with R receivers per block (own `s_q` slice and named barrier each), so receivers walking the same table slabs share them in L1 (the forward's R5 idea) | `emit_conv_bwd_lp` `R`, `TPR` (reverted) | gen (lx 1, `C = 128`) | REJECTED (5060 Ti) | S68 | `ncu` (5060 Ti, MP-0 medium SrTiO3): the backward is L2-bandwidth bound (83.8% of peak; sectors 85% reads, 14% `dx` atomics, LG throttle 0.09%); variants exact (`dF` <= 1.3e-6) but slower: R2 x 256 `+20%`, R4 x 128 `+16%`, R2 x 128 `+69%` (2,910-2,935 -> 3,374-4,941 us) | this file |
@@ -1168,6 +1172,36 @@ Each entry has the same fields. Unless stated, the system is OMAT-0 medium on th
 - Not measured: other light-atom systems and models; the upper bound of 1.5 A (the only point on file is S46's water at 1.5 A: 2.90 against 3.13 ms/step); anything on the RTX 4000 Ada.
 - Sources: [§6.5][s65]; `tests/test_skin.py`, `tests/test_skin_gpu.py`.
 
+<a id="md-nose-hoover"></a>
+#### md-nose-hoover: the Nose-Hoover chain in the captured step
+- Switch: `LOUP_NHC` in `LoupIntegrator` (`tau_t_fs`, `chain_length`, `chain_loops`, `mass_temp_k`); `lm.integrators.NoseHooverChain`, `loupmd.ase.md.NoseHooverChainNVT`. `src/integrator.cu` (`nhc_half_kernel`, `scale_velocities_kernel`), `src/engine.cu` (`run_md_loop`, kind 3).
+- Status: DEFAULT for Nose-Hoover runs. 5060 Ti only.
+- What: ASE 3.27's `NoseHooverChainNVT`. Each half step sums the kinetic energy, one thread integrates the chain (Suzuki-Yoshida weights times `tloop`, the kinetic energy carried along analytically) and returns one factor, and a kernel scales the velocities by it. The chain's variables are in the integrator's state slots, so they travel in the state block; the thermo row's conserved quantity adds the chain's energy. The thermostat masses come from their own temperature, so a ramp of the target captures nothing.
+- Measured (15 November 2026): positions within 2.1e-7 to 2.5e-7 A of ASE's after 200 steps for chains of 3 x 1, 1 x 1 and 5 x 2; 20,000 steps: drift +0.0002 meV/atom/ps. Cost against Langevin at 5,000 atoms: 1.0067 (medians of four runs of 400 steps each; single runs scatter by about 2%).
+- Gate: `tools/dev/test_gate.py` PASS on this build, default and `--specialised`.
+- Not measured: anything on the RTX 4000 Ada or an A100.
+- Sources: [§6.6][s66]; `tests/test_nhc_gpu.py`.
+
+<a id="md-berendsen-nvt"></a>
+#### md-berendsen-nvt: Berendsen NVT in the captured step
+- Switch: `LOUP_BERENDSEN_NVT` (`tau_t_fs`); `lm.integrators.Berendsen`, `loupmd.ase.md.NVTBerendsen`. `src/integrator.cu` (`berendsen_scale_kernel`), `src/engine.cu` (kind 4).
+- Status: DEFAULT for Berendsen runs. 5060 Ti only.
+- What: ASE's `NVTBerendsen`: before the velocity-Verlet step the velocities are scaled by sqrt(1 + (T0 / T - 1) dt / tau), kept within [0.9, 1.1]. One kinetic-energy sum, one thread, one scaling. A time constant below the timestep is refused.
+- Measured (15 November 2026): positions within 2.0e-7 and 2.1e-7 A of ASE's after 200 steps (tau 50 fs; tau 2 fs from 900 K).
+- Not measured: its cost against Langevin (it has two small nodes fewer than the Nose-Hoover step, which costs 1.0067); anything on the RTX 4000 Ada.
+- Sources: [§6.6][s66]; `tests/test_berendsen_gpu.py`.
+
+<a id="min-lbfgs-device"></a>
+#### min-lbfgs-device: LBFGS on the device
+- Switch: `loup_minimize` (`LoupMinimizer`, `LoupMinStats`), `LoupEngine.minimize`; `lm.optimize.relax` with `LBFGS` at fixed cell. `src/minimize.cu`, `src/engine.cu` (`minimize_impl`). `LOUP_MIN_AHEAD=0|1` (testing) forces the list check before or after the force pass.
+- Status: DEFAULT for LBFGS at fixed cell. FIRE and cell relaxations run on host arrays. 5060 Ti only.
+- What: ASE 3.27's LBFGS without line search in matrix form. The history S, Y is a ring on the device; one pass over it gives the five products per row the host needs, the host solves the two triangular systems of at most `memory` unknowns, a second pass forms the direction, and a kernel moves the atoms.
+- Three versions, optimiser's own time at 5,000 atoms after 40 steps (history up to 39 pairs): on the host 1.4 ms a step, 17% of the force calls; on the device with pageable copies and two host waits per step 0.825 ms, 9.70% (the kernels were not the cost: three synchronous downloads, three uploads and a second wait for the list check); with pinned buffers, one wait per step and the list check after the force pass 0.141 ms, 1.71%. A whole step: 10.7, 9.1 and 8.2 ms.
+- The list check: where the displacement since the list was built plus twice the last step is inside half the skin, the force pass is launched at once and the measured displacement arrives with the next step's downloads; a pass that ran on an outdated list is run again. With a skin of 0.2 A and a rattle of 0.12 A: 5 rebuilds in 30 steps; forced to check afterwards 5 passes are repeated, by the engine's choice none.
+- Gate: not a force-path change; `tools/dev/test_gate.py` PASS on this build.
+- Not measured: relaxations of other systems and sizes; the cost at small cells, where a host wait is a larger part of a step; anything on the RTX 4000 Ada.
+- Sources: [§6.6][s66]; `tests/test_optimize_gpu.py`; PLAN.md D30, D43, D44.
+
 <a id="md-small-systems"></a>
 #### md-small-systems: small-system latency
 - Status: NOT BUILT (open).
@@ -1637,6 +1671,16 @@ POLAR-1 NaCl 3x3x3 (216) and POLAR-1-M `NbCl5` 3x3x3 (1,944).
 - Status: REJECTED (code reverted).
 - Sources: this file.
 
+<a id="gen-default"></a>
+#### gen-default: every model on the generic path
+- Switch: `loupmd/bundles.py` (`default_generic`): `LOUP_GENERIC=0` or `generic=False` select the specialised OMAT-0 medium kernels; `tools/dev/test_gate.py --specialised`, `loupmd validate --specialised`.
+- Status: DEFAULT on `release/v1` (owner's decision O20: the specialised kernels are marginally faster on the 5060 Ti and not faster on the A100). 5060 Ti only here.
+- Measured (15 November 2026, `tools/dev/bench_md.py`, one library, both orders): generic / specialised `NbCl5` 3x3x3 1.896 / 1.821 and 1.886 / 1.814 ms/step (1.0409, 1.0399); `SrTiO3` 10x10x10 8.245 / 8.097 and 8.230 / 8.113 (1.0184, 1.0144). `loupmd bench`'s shipped reference is the generic path's since: 1.881, 8.243 and 1.833 (`SrTiO3` 6x6x6, quick) against 1.813, 8.018 and 1.777.
+- Against S63: 2.9% and 7.4% then; the per-system conv forward variants (S64) are the generic change since.
+- Gate: PASS for the default and for `--specialised`.
+- Not measured: the A100's figure on this build (the owner's statement stands for it); anything on the RTX 4000 Ada.
+- Sources: [§6.6][s66]; PLAN.md O20, D42.
+
 <a id="s63-spec-vs-gen"></a>
 #### s63-spec-vs-gen: the specialised OMAT-0 path against the generic path (no change)
 - Stage: S63 (14 November 2026), 5060 Ti, installed S59 library, `nsys` and `ncu`, `mace-omat-0-medium` (the specialised path also serves MP-0b3, MPA-0 and both MatPES models).
@@ -1876,4 +1920,5 @@ POLAR-1 NaCl 3x3x3 (216) and POLAR-1-M `NbCl5` 3x3x3 (1,944).
 [s63]: STATUS_AND_PROFILE.md#63-fixed-atoms-and-the-host-side-optimisers-15-november-2026-0615-to-0650
 [s64]: STATUS_AND_PROFILE.md#64-centre-of-mass-at-rest-fix_com-and-the-current-build-against-the-merge-build-15-november-2026-0655-to-0735
 [s65]: STATUS_AND_PROFILE.md#65-csvr-the-layout-move-and-the-skin-chosen-from-the-step-size-15-november-2026-1205-to-1310
+[s66]: STATUS_AND_PROFILE.md#66-nose-hoover-chain-berendsen-nvt-lbfgs-on-the-device-and-the-generic-path-as-the-default-15-november-2026-1330-to-1740
 [s55]: STATUS_AND_PROFILE.md#55-known-limitations

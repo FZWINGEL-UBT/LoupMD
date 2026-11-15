@@ -681,3 +681,48 @@ scripts are `tools/dev/bench_md.py` and `tools/dev/test_gate.py`.
   0xD1 in `nvlddmkm.sys` while two sessions used the GPU), and the WSL distribution was shut down repeatedly from
   13:12 to 13:31 (PLAN.md D40). Anything on the RTX 4000 Ada: the workstations are down (O12).
 
+### 6.6 Nose-Hoover chain, Berendsen NVT, LBFGS on the device and the generic path as the default (15 November 2026, 13:30 to 17:40)
+
+RTX 5060 Ti only. Engine build of `763aaa5` (library sha256 `53abaad3e9aca96c...`); the generic default is
+`5d7f363`. Where a row names `7b31011e...`, it was measured on the build before the last change to
+`loup_minimize`, which differs in that function only.
+
+| Check | Result |
+|---|---|
+| Nose-Hoover chain against ASE 3.27's `NoseHooverChainNVT` driven by `lm.calc`, 200 steps, 135 atoms, tdamp 50 fs | positions within 2.1e-7 A (3 thermostats x 1 loop), 2.2e-7 A (1 x 1), 2.5e-7 A (5 x 2); the chain's energy -3.919513 / -5.646661 / -3.204603 eV against ASE's -3.919514 / -5.646663 / -3.204602 |
+| Nose-Hoover chain, 20,000 steps of 1 fs, tdamp 100 fs, 135 atoms, three runs | mean 299.6, 300.3, 298.0 K; conserved quantity drift +0.0002 meV/atom/ps, range 0.026 meV/atom while potential plus kinetic moved 29 to 36 meV/atom |
+| Nose-Hoover target ramp 100 to 500 K in 2 ps, tdamp 25 fs, thermostat masses of 300 K | 196 K at 0.5 ps, 238 K at 1 ps, 494 K at the end; held at 500 K: mean 497 K |
+| Nose-Hoover chain against Langevin, 5,000 atoms at 300 K, `lm.Simulation`, a b b a twice, 400 steps each | 8.157 to 8.223 against 8.119 to 8.159 ms/step, ratio of the medians 1.0067 (single a b b a runs before: 1.0077 and 1.0218) |
+| Berendsen against ASE's `NVTBerendsen`, 200 steps, 135 atoms | positions within 2.0e-7 A (tau 50 fs from 300 K) and 2.1e-7 A (tau 2 fs from 900 K, the scale at its bound of 0.9) |
+| Berendsen from 100 K to a 300 K target, tau 20 fs; then a ramp to 500 K in 2 ps | 285 K after 0.1 ps, 297 K after 1 ps; 394 K at a target of 400 K, 489 K at the end |
+| LBFGS on the device against ASE's `LBFGS` with `lm.calc`, rattled `SrTiO3` 3x3x3 to 0.05 eV/A | 15 steps, ASE 15; positions within 2.5e-7 A |
+| LBFGS on the device against the host LBFGS, to 0.02 eV/A, memory 100 and memory 4 | 22 steps each way, positions within 2.8e-7 and 2.2e-7 A; one step per call: 22 steps |
+| the optimisers' own time at 5,000 atoms, 40 steps | LBFGS on the device 0.141 ms a step, 1.71% of the force calls (8.04 ms each); FIRE on the host 0.111 ms, 1.14% |
+| the same before pinned buffers and the list check after the pass (`7b31011e...`) | LBFGS 0.825 ms a step, 9.70% (force calls 8.29 ms); on the host (§6.3) 1.4 ms, 17% |
+| LBFGS with a skin of 0.2 A, rattle 0.12 A: list check before the force pass, after it, and the engine's choice | 30 steps and 5 rebuilds each; 31, 36 and 31 force passes (0, 5 and 0 repeated); positions within 3.7e-7 A |
+| cell relaxation on the host (Frechet filter), strained `SrTiO3` 3x3x3 | 157 steps, ASE 157; lattice constants within 7.3e-6 A |
+| gate, default (generic) and `--specialised` | PASS and PASS (exit 0 each); worst ratios in the rows the log kept: force 1.91, stress 1.10 and force 1.56, stress 1.53 |
+| `bench_md.py`, this build against the build before CSVR (§6.4), both orders (`NbCl5` / `SrTiO3`, new / old), specialised kernels | 1.0035 / 0.9993 and 0.9954 / 0.9992 |
+| `bench_md.py`, `LOUP_GENERIC=1` against `LOUP_GENERIC=0` in one library (`7b31011e...`), both orders | `NbCl5` 3x3x3 1.0409 and 1.0399; `SrTiO3` 10x10x10 1.0184 and 1.0144 |
+| `loupmd bench --model omat0-medium`, generic path, two runs each | `NbCl5` 3x3x3 1.876, 1.886; `SrTiO3` 10x10x10 8.236, 8.250; `SrTiO3` 6x6x6 (quick) 1.830, 1.837 ms/step |
+| the library of `make wheel-lib` (six architectures, 32 MB) on this card, `loupmd bench --quick` | 1.833 ms/step on `SrTiO3` 6x6x6 |
+| `pytest tests/test_[a-e]*.py`; `test_f*.py test_gate_cache.py`; `test_[m-q]*.py`; `test_[r-z]*.py` on the tree of `5d7f363` less its last change | 247 passed; exit 0; exit 0; one failure (the sweep replay's energy, 1.6e-8 against a floor of 1e-8 eV/atom) |
+| `pytest tests/test_sweeps.py tests/test_run_api.py` with the floor at 1e-7 | 25 passed |
+| `tests/test_gate_wrapper.py` (19 minutes), on `7b31011e...` | 10 passed |
+| open domain against the periodic call, today's build, two runs of the test and two of a probe | energy within 3.9e-9 (OMAT-0 small), 1.9e-8 (medium), 3.8e-8 (MH-1), 3.4e-9 (OFF23 medium), 1.8e-9 eV/atom (OMOL-0); forces within 1.8e-6 eV/A; the same periodic call with its atoms in another order: 2e-9 to 3.4e-8 eV/atom |
+| the same on the two builds of the morning (`2e7e904a`, `9f89f02c`), default GEMMs and `LOUP_NO_HYBRID=1` | OMAT-0 small 2.9e-7 against 1.5e-8 and 4.6e-9; medium 1.6e-7 and 2.2e-7 against 2.6e-8 and 5.9e-9 eV/atom |
+
+- The open domain's energy difference (PLAN.md D16) is the rounding of the tensor-core hybrid GEMMs: on the
+  morning's builds it is there with the default GEMMs and gone with `LOUP_NO_HYBRID=1` on every engine. The
+  domain's GEMMs have 843 rows where the periodic call has 135, and the autotune picks a kernel per shape from
+  timings. Which kernels today's plan files pick was not read out; the difference is small today and can return
+  with other plan files.
+- The generic path costs 4.0% on `NbCl5` and 1.4 to 1.8% on `SrTiO3` against the specialised kernels in the same
+  library. S63 (14 November) had 2.9% and 7.4%; the per-system conv variants (S64) came between.
+- The graph-capture tests failed by chance on the generic path: the conv variants are timed at an engine's first
+  MD rebuild and a faster one drops the graphs. On 135 atoms the three are near ties, so one of two engines doing
+  the same steps captured three graphs more in 4 of 8 repeats. The tests now switch the timing off
+  (`LOUP_CONV_TUNE=0`). The behaviour itself is unchanged: such a run captures its graphs twice instead of once.
+- Not run: the suite as one run on the last tree (its parts ran on the tree before the sweep floor changed, and the
+  two changed files after); `tests/test_gate_wrapper.py` on the last build; the family gates (`--set organic`,
+  `--set crystals`); anything on the RTX 4000 Ada or an A100 (O12).
