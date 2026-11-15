@@ -16,14 +16,14 @@ import loupmd
 DRIVER = """
 import sys
 sys.path.insert(0, {python_dir!r})
-import export_omat0 as ex
+from loupmd.export import omat0 as ex
 {patch}
 ex.export_model({model!r}, [8, 22, 38], ex.Path({out!r}))
 """
 
 
 def _export_with(patch: str, model_path: str, tmp_path):
-    src = DRIVER.format(python_dir=str(ROOT / "python"), patch=patch, model=model_path, out=str(tmp_path / "x.loup"))
+    src = DRIVER.format(python_dir=str(ROOT), patch=patch, model=model_path, out=str(tmp_path / "x.loup"))
     proc = subprocess.run([sys.executable, "-W", "ignore", "-c", src], capture_output=True, text=True)
     return proc, (tmp_path / "x.loup").exists()
 
@@ -46,7 +46,7 @@ def test_specialised_export_refuses_an_uncertified_first_table(model_path, tmp_p
 
 def test_specialised_bundle_signature_names_the_product_basis(sto_bundle):
     """The signature ties a bundle to the compiled kernels' factored product programs, not only to the shapes."""
-    from bundle import read_bundle
+    from loupmd.export.bundle import read_bundle
 
     sig = read_bundle(sto_bundle)[0]["kernel_signature"]
     assert re.search(r":p0=[0-9a-f]{16}:p1=[0-9a-f]{16}$", sig), sig
@@ -65,5 +65,6 @@ def test_bundle_cache_key_follows_the_exporter_sources(tmp_path):
     assert first != loupmd.exporter_fingerprint([a, b])
     # the real key covers every exporter, the container writer and the compiled kernels' signature
     names = {p.name for p in loupmd.EXPORTER_SOURCES}
-    assert {"export.py", "export_omat0.py", "export_generic.py", "export_polar.py", "bundle.py",
+    assert {"__init__.py", "omat0.py", "generic.py", "polar.py", "bundle.py",
             "generated_kernels_signature.h"} <= names
+    assert all(p.is_file() for p in loupmd.EXPORTER_SOURCES)

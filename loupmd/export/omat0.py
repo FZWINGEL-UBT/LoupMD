@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Export mace-omat-0-medium.model + certified radial tables for a given set of atomic numbers into a .loup bundle
-(the container of python/bundle.py; arch=omat0_medium_spec, read by src/model_loader.cu).
+(the container of loupmd/export/bundle.py; arch=omat0_medium_spec, read by src/model_loader.cu).
 
 Usage:
-  python export_omat0.py --elements 8,22,38 --output /tmp/omat0_SrTiO3.loup
+  python -m loupmd.export.omat0 --elements 8,22,38 --output /tmp/omat0_SrTiO3.loup
 """
 from __future__ import annotations
 
@@ -36,8 +36,7 @@ from fastmace.rewrites.linear.modules import block_linear, raw_blocks
 from fastmace.rewrites.radial import _GenericChain, power_basis, spline as rspline
 
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-from bundle import write_bundle  # noqa: E402
+from .bundle import write_bundle  # noqa: E402
 
 EXPORTER_VERSION = 4
 ARCH = "omat0_medium_spec"

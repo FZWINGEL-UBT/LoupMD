@@ -12,8 +12,8 @@ import numpy as np
 import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT / "python"))
-sys.path.insert(0, str(ROOT))  # the loupmd package, ahead of python/loupmd.py (see loupmd/_legacy.py)
+sys.path.insert(0, str(ROOT / "tools" / "dev"))  # the developer scripts some tests import (test_gate.py)
+sys.path.insert(0, str(ROOT))  # the loupmd package
 os.environ.setdefault("TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD", "1")
 
 from loupmd import LoupEngine, ensure_loup_bundle  # noqa: E402

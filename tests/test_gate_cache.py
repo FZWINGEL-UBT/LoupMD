@@ -1,4 +1,4 @@
-"""The gate's MACE-reference cache (python/test_gate.py): a stale reference would silently change what the gate
+"""The gate's MACE-reference cache (tools/dev/test_gate.py): a stale reference would silently change what the gate
 measures, so the key must follow every input, and a cached set must read back as it was written."""
 from __future__ import annotations
 

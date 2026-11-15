@@ -1,4 +1,4 @@
-"""Runs python/test_gate.py (3x float32 rule) per supported model family; slow (exports and float64 references).
+"""Runs tools/dev/test_gate.py (3x float32 rule) per supported model family; slow (exports and float64 references).
 
 The default model (LOUP_TEST_MODEL or MACE-OMAT-0 medium) also runs the 576-atom cell and every forced kernel
 variant of the specialised path. The other families run on their FastMACE gate sets when their model file exists
@@ -31,7 +31,7 @@ FAMILIES = [
 
 
 def _run(args):
-    proc = subprocess.run([sys.executable, str(ROOT / "python" / "test_gate.py"), *args], capture_output=True,
+    proc = subprocess.run([sys.executable, str(ROOT / "tools" / "dev" / "test_gate.py"), *args], capture_output=True,
                           text=True)
     print(proc.stdout[-6000:])
     assert proc.returncode == 0, proc.stdout[-3000:] + proc.stderr[-3000:]

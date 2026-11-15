@@ -15,7 +15,7 @@ import sys
 
 CHILD = r"""
 import os, sys, statistics
-sys.path.insert(0, os.path.dirname(os.path.abspath(sys.argv[1])))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(sys.argv[1])))))
 import numpy as np
 from ase import Atoms
 from ase.io import read as ase_read

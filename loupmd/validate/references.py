@@ -2,7 +2,7 @@
 
 They do not depend on LoupMD, so they are computed once per model, head, structures, reference device and
 mace / torch version and kept under ``<cache root>/gate_refs`` (``LOUP_GATE_CACHE`` overrides the folder). The key
-recipe is ``python/test_gate.py``'s, so both read each other's files. Needs the export extra (torch, mace-torch).
+recipe is ``tools/dev/test_gate.py``'s, so both read each other's files. Needs the export extra (torch, mace-torch).
 """
 from __future__ import annotations
 

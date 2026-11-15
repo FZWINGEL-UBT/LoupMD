@@ -21,7 +21,7 @@ import sys
 from pathlib import Path
 
 os.environ.setdefault("TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD", "1")
-sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))  # the repository root: the loupmd package
 
 import numpy as np
 from ase import Atoms
@@ -102,7 +102,7 @@ def save_refs(path, ref64, ref32, stress_ref):
 
 
 def read_bundle_meta(path):
-    from bundle import read_bundle
+    from loupmd.export.bundle import read_bundle
 
     return read_bundle(path)[0]
 

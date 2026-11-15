@@ -1,4 +1,4 @@
-"""The structures the gate runs on: the sets of ``python/test_gate.py`` and rattled copies of a user's structure.
+"""The structures the gate runs on: the sets of ``tools/dev/test_gate.py`` and rattled copies of a user's structure.
 
 The sets are built exactly as ``test_gate.py`` builds them (same strains, rattles and seed), so both find the same
 cached references. Files are found as the benchmark's are (``loupmd.bench.suites.find_file``).

@@ -1,6 +1,6 @@
 """The benchmark protocol: how one system is timed, and the record a benchmark writes.
 
-The standard protocol is ``python/bench_md.py``'s, so numbers stay comparable with the optimisation ledger:
+The standard protocol is ``tools/dev/bench_md.py``'s, so numbers stay comparable with the optimisation ledger:
 Langevin at 300 K, 1 fs, skin 0.5 A, friction 0.01/fs, velocities from a Maxwell-Boltzmann draw with seed 42, 100
 warm-up steps (seed 1), then the median of 6 blocks of 256 steps (seeds 2 .. 7).
 """

@@ -166,9 +166,10 @@ def run_gate(model, *, head=None, checkpoint=None, sha256=None, trusted=False, d
 
         ensure_bundle = bundles.ensure_bundle
     if bundle_meta is None:
-        from .. import _legacy
+        from ..export.bundle import read_bundle
 
-        bundle_meta = _legacy.read_bundle_meta
+        def bundle_meta(path):
+            return read_bundle(path)[0]
     library = "(engine replaced)"
     if engine_factory is None:
         from .. import _core

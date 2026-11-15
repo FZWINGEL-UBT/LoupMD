@@ -73,7 +73,7 @@ def test_the_oxide_set_is_the_one_of_test_gate(structures):
     again = sets.configs("oxide", environ=structures)
     assert all(np.array_equal(a.positions, b.positions) and np.array_equal(a.cell.array, b.cell.array)
                for (_, a), (_, b) in zip(configs, again))
-    # c0 is strained by +2 % and rattled by 0.05 A, c1 by -1.5 % and 0.08 A (python/test_gate.py).
+    # c0 is strained by +2 % and rattled by 0.05 A, c1 by -1.5 % and 0.08 A (tools/dev/test_gate.py).
     relaxed = bulk("NaCl", "rocksalt", a=5.64, cubic=True).repeat((2, 2, 2))
     assert configs[0][1].get_volume() > relaxed.get_volume() > configs[1][1].get_volume()
 

@@ -36,8 +36,8 @@ from fastmace.kernels.oeq_streaming.fused_forward import _lit, _node, block_map
 from fastmace.kernels.oeq_streaming.runtime import NUM_THREADS, render_kernels
 from fastmace.kernels.oeq_streaming.wprime_backward import _stage_layout, factored_paths
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-from export_omat0 import check_architecture, kernel_signature, product_signature  # noqa: E402
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # the repository root: the loupmd package
+from loupmd.export.omat0 import check_architecture, kernel_signature, product_signature  # noqa: E402
 
 
 def _load_model(model_path: str):

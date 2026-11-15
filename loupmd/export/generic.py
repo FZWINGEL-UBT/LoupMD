@@ -11,7 +11,7 @@ Engine layouts: node features of degree l are [N, 2l+1, C] (component-major, cha
 product of instruction k = (l1, l2, l3) computes per channel c: mid_k[m3] = R_k,c(r) * sum T_k[m1, m2, m3] x_l1[m1]
 Y_l2[m2] with T_k = wigner_3j(l1, l2, l3) (generated into the kernels); the e3nn path weight is folded into R_k.
 
-Usage: python export_generic.py --model M --elements 8,22,38 --output out.loup [--head NAME]
+Usage: python -m loupmd.export --generic --model M --elements 8,22,38 --output out.loup [--head NAME]
 """
 from __future__ import annotations
 
@@ -29,13 +29,12 @@ FASTMACE_ROOT = next(
     Path("/mnt/d/Margraf/FastMACE"),
 )
 sys.path.insert(0, str(FASTMACE_ROOT))
-sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import numpy as np  # noqa: E402
 import torch  # noqa: E402
 from e3nn import o3  # noqa: E402
 
-from bundle import write_bundle  # noqa: E402
+from .bundle import write_bundle  # noqa: E402
 
 EXPORTER_VERSION = 2
 KINDS = {
@@ -722,7 +721,7 @@ def export_model(model_path, atomic_nums, out_path, head=None, charge=None, spin
     T["e0"] = e0
     meta["has_lr"] = int(cls == "PolarMACE")
     if cls == "PolarMACE":
-        import export_polar
+        from . import polar as export_polar
 
         export_polar.export_lr(m64, cols, T, meta, str(m64.products[-1].linear.irreps_out))
 

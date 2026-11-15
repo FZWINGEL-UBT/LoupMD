@@ -16,7 +16,7 @@ import sys
 from pathlib import Path
 
 os.environ.setdefault("TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD", "1")
-sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))  # the repository root: the loupmd package
 
 import numpy as np  # noqa: E402
 from ase import Atoms  # noqa: E402

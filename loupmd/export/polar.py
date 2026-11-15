@@ -21,7 +21,7 @@ import numpy as np
 import torch
 from e3nn import o3
 
-import export_generic as eg
+from . import generic as eg
 
 F32 = lambda x: x.detach().to(torch.float32).numpy()  # noqa: E731
 

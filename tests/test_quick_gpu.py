@@ -56,7 +56,7 @@ def test_the_gate_inside_a_run_passes_on_a_good_bundle(model_path, tmp_path):
 
 def test_a_corrupted_bundle_fails_the_gate_and_the_run_does_not_start(model_path, tmp_path, monkeypatch):
     """S3-T10: one weight table of the bundle scaled by 2%: the engine loads it, the gate does not pass it."""
-    from bundle import read_bundle, write_bundle
+    from loupmd.export.bundle import read_bundle, write_bundle
 
     good = ensure_loup_bundle(model_path, [8, 22, 38])
     cache = tmp_path / "cache"

@@ -10,8 +10,7 @@ __version__ = "1.0.0a1"  # LOUP_VERSION of include/loupmd.h (tests/test_abi.py k
 
 from .runtime import GpuInfo, RuntimeInfo, runtime_info  # noqa: E402  (reads __version__ when called)
 
-# Until the layout move (PLAN.md S0-T03) the bundle cache lives in python/loupmd.py of the source checkout.
-from ._legacy import EXPORTER_SOURCES, _model_digest, ensure_loup_bundle, exporter_fingerprint  # noqa: E402
+from .bundles import EXPORTER_SOURCES, _model_digest, ensure_loup_bundle, exporter_fingerprint  # noqa: E402
 
 
 def load(model, head=None, **options):

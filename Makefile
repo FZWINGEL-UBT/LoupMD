@@ -12,7 +12,7 @@ DEPS = $(OBJS:.o=.d)
 
 .PHONY: all objects clean
 
-# `make` builds for CUDA_ARCH and installs the library at ./libloupmd.so, where python/loupmd.py looks for it.
+# `make` builds for CUDA_ARCH and installs the library at ./libloupmd.so, where the loupmd package looks for it.
 # `make CUDA_ARCH=sm_89 objects` only compiles, for linking on the machine that has that GPU.
 all: $(OBJDIR)/libloupmd.so
 	cp $(OBJDIR)/libloupmd.so libloupmd.so

@@ -14,14 +14,13 @@ import sys
 from pathlib import Path
 
 os.environ.setdefault("TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD", "1")
-sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import numpy as np  # noqa: E402
 import torch  # noqa: E402
 from e3nn import o3  # noqa: E402
 
-import export_generic as eg  # noqa: E402
-from bundle import read_bundle  # noqa: E402
+from . import generic as eg  # noqa: E402
+from .bundle import read_bundle  # noqa: E402
 
 torch.set_default_dtype(torch.float64)
 

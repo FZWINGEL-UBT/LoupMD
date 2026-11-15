@@ -6,7 +6,7 @@ import numpy as np
 import pytest
 from conftest import find_model, srtio3
 
-from bundle import read_bundle, write_bundle
+from loupmd.export.bundle import read_bundle, write_bundle
 from loupmd import LoupEngine, ensure_loup_bundle
 
 

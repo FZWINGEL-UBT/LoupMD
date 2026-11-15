@@ -22,7 +22,7 @@ from pathlib import Path
 
 os.environ.setdefault("TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD", "1")
 os.environ.setdefault("CUDA_VISIBLE_DEVICES", "")
-sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # the repository root: the loupmd package
 
 np = sp = torch = o3 = eg = None
 
@@ -35,7 +35,7 @@ def _ensure_imports():
     import sympy as _sp
     import torch as _torch
     from e3nn import o3 as _o3
-    import export_generic as _eg
+    from loupmd.export import generic as _eg
     np, sp, torch, o3, eg = _np, _sp, _torch, _o3, _eg
 LX = (0, 1, 2)
 # Discovers every supported *.model in MODELS_DIR (sorted, deduplicated by product_signature); models outside
@@ -1214,7 +1214,7 @@ PRODUCT_C_MIN, PRODUCT_C_MAX = 32, 1024
 def _ir_hash():
     here = Path(__file__).resolve().parent
     return _hash_files((
-        here / "export_generic.py",
+        here.parent / "loupmd" / "export" / "generic.py",
         Path("/mnt/d/Margraf/FastMACE/fastmace/kernels/cuda/sc_factored.py"),
         Path("/mnt/d/Margraf/FastMACE/fastmace/kernels/cuda/sc_generated.py"),
     )) + f":C{PRODUCT_C_MIN}-{PRODUCT_C_MAX}"

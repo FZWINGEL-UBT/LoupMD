@@ -15,7 +15,7 @@ from loupmd.errors import InputError, LoupError
 
 ROOT = Path(__file__).resolve().parent.parent
 
-# Stands in for python/export.py: takes the same arguments, counts its runs, takes a while, writes the bundle.
+# Stands in for loupmd.export: takes the same arguments, counts its runs, takes a while, writes the bundle.
 EXPORTER = r"""
 import os, sys, time
 args = sys.argv[1:]
@@ -103,7 +103,7 @@ def test_bundles_of_the_old_layout_are_found(stage):
     tmp_path, model, exporter = stage
     old = tmp_path / "cache" / bundles.bundle_name(model, [8, 22, 38])
     old.parent.mkdir(parents=True)
-    old.write_bytes(b"written by python/loupmd.py")
+    old.write_bytes(b"written by ensure_loup_bundle")
     assert bundles.ensure_bundle(model, [8, 22, 38], exporter=exporter) == old
     assert _runs(tmp_path) == []
 
