@@ -178,6 +178,8 @@ Conventions:
 | [md-nose-hoover](#md-nose-hoover) | Nose-Hoover chain: per half step one kinetic-energy sum, one single-thread kernel and one velocity scale (release task S4-T04) | `LOUP_NHC`, `lm.integrators.NoseHooverChain` | both | DEFAULT on `release/v1` for Nose-Hoover runs (5060 Ti only) | release Stage 4 | against Langevin 1.0067 at 5,000 atoms; the benchmark's Langevin step unchanged (0.9995 / 0.9993 against the build before CSVR) | [§6.6][s66] |
 | [md-berendsen-nvt](#md-berendsen-nvt) | Berendsen NVT: one scale per step from the kinetic energy (release task S4-T05) | `LOUP_BERENDSEN_NVT`, `lm.integrators.Berendsen` | both | DEFAULT on `release/v1` for Berendsen runs (5060 Ti only) | release Stage 4 | cost against Langevin not measured (two small nodes fewer than the Nose-Hoover step) | [§6.6][s66] |
 | [min-lbfgs-device](#min-lbfgs-device) | LBFGS on the device (`loup_minimize`, owner's decision O15): history on the device, one host wait per step, the list check of a small step after the force pass | `loup_minimize`, `LOUP_MIN_AHEAD=0|1` (testing) | both | DEFAULT on `release/v1` for LBFGS at fixed cell (5060 Ti only) | release Stage 4 | optimiser's own time at 5,000 atoms 17% of the force calls (host) -> 9.70% (device, two waits and pageable copies) -> 1.71%; a step 10.7 -> 9.1 -> 8.2 ms | [§6.6][s66] |
+| [md-variable-cell](#md-variable-cell) | The variable-cell step: the cell on the device, Cartesian shifts formed per step, stress in every force pass, list check against the deformed reference; not pipelined (release task S4-T06) | `LOUP_VARIABLE_CELL=1`, `LOUP_DEBUG_CELL_RATE` (testing); the NPT integrators | both | DEFAULT on `release/v1` for runs with a barostat (5060 Ti only) | release Stage 4 | against the pipelined fixed-cell step at 5,000 atoms 1.026 to 1.030; the fixed-cell benchmark unchanged (generic 0.9998 to 1.0015) | [§6.7][s67] |
+| [md-berendsen-npt](#md-berendsen-npt) | Berendsen NPT in the variable-cell step, hydrostatic or per axis, one force call per step (release task S4-T07) | `LOUP_BERENDSEN_NPT`, `lm.integrators.Berendsen(pressure_GPa=...)` | both | DEFAULT on `release/v1` for Berendsen NPT runs; experimental (5060 Ti only) | release Stage 4 | its step time is not measured (the variable-cell step plus three small nodes) | [§6.7][s67] |
 | [md-small-systems](#md-small-systems) | Small-system latency (< ~1,000 atoms) | – | spec | NOT BUILT (open) | – | 135 atoms: GEMM groups 32% of 358 us | [§4.1 #3][s41] |
 | [comp-active-edge-tighten](#comp-active-edge-tighten) | Tighten active-edge compaction (`compute_and_count_active` + `scatter_active_edges`) | – | both | NOT BUILT | – | untried (101 us/step on `SrTiO3` 5060 Ti, `tmp_vec_len` round-trip) | `OMAT0_SPEEDUP_BRIEF.md` |
 | [nl-lane-groups](#nl-lane-groups) | Neighbour count / fill with 8 lanes per atom (neighbouring bins split round-robin; fill keeps the exact row order via per-bin offsets in shared memory) | `kNeighborLanes`, `count/fill_neighbors_kernel`; other GPUs `*_scalar_kernel` | both (`sm_120`) | DEFAULT (5060 Ti only) | S34 | per rebuild `SrTiO3` 433 -> 292 us, `NbCl5` 284 -> 110, water 439 -> 302; ABBA `OFF23-S` water `0.9945` / `0.9856`, `OFF23-M` `0.9961` / `0.9943`, `OMAT-0-S` `0.9961` / `0.9972` | this file |
@@ -1202,6 +1204,26 @@ Each entry has the same fields. Unless stated, the system is OMAT-0 medium on th
 - Not measured: relaxations of other systems and sizes; the cost at small cells, where a host wait is a larger part of a step; anything on the RTX 4000 Ada.
 - Sources: [§6.6][s66]; `tests/test_optimize_gpu.py`; PLAN.md D30, D43, D44.
 
+<a id="md-variable-cell"></a>
+#### md-variable-cell: the variable-cell step
+- Switch: none for users: the step of every integrator with a barostat. `LOUP_VARIABLE_CELL=1` sends a fixed-cell integrator through it and `LOUP_DEBUG_CELL_RATE=r` scales cell and positions by 1 + r per step (tests). `src/cell.hpp`, `src/cell.cu`, `src/engine.cu` (`run_md_loop`, `rebuild_neighbors`, `upload_cell_dev`, `download_cell_dev`).
+- Status: DEFAULT for runs with a barostat. 5060 Ti only.
+- What: the cell is a struct on the device. A rebuild leaves the edges' integer image shifts in the edges' order in its own scratch arrays (no extra memory), and each step forms the Cartesian shifts from them and the cell of the step before its force pass, which carries stress. The list check measures an atom's displacement from where the cell's deformation F has taken its reference position and compares it with (r_list (1 - |F - 1|) - r_max) / 2, half the skin for an undeformed cell. The host's cell follows the device's before a rebuild and at the end of a call. A volume outside [V0 / 20, 20 V0] stops the run.
+- Not pipelined: the step waits for the host once (the list check). Measured against the pipelined fixed-cell step, Langevin at 5,000 atoms, constant cell: 1.0296 and 1.0263.
+- Fixed-cell runs: unchanged graph; `bench_md.py` against the build before, both orders: generic `NbCl5` 0.9998 / 1.0007, `SrTiO3` 1.0015 / 1.0001; specialised 1.0105 / 0.9973 and 1.0028 / 0.9995.
+- Gate: PASS, default and `--specialised`.
+- Not measured: the three parts of the extra cost apart; a fused variant that forms the shifts where the edge vectors are computed (saves the 24 bytes per edge written and read); pipelining; anything on the RTX 4000 Ada.
+- Sources: [§6.7][s67]; `tests/test_variable_cell_gpu.py`; PLAN.md D49.
+
+<a id="md-berendsen-npt"></a>
+#### md-berendsen-npt: Berendsen NPT
+- Switch: `LOUP_BERENDSEN_NPT` (`pressure_gpa`, `tau_p_fs`, `compressibility_per_gpa`, `cell_mode`, `cell_mask`); `lm.integrators.Berendsen(pressure_GPa=..., taup_fs=..., compressibility_per_GPa=..., mask=...)`, `loupmd.ase.md.NPTBerendsen`, `Inhomogeneous_NPTBerendsen`. `src/cell.cu` (`berendsen_npt_kernel`, `kinetic_diag_kernel`).
+- Status: DEFAULT for Berendsen NPT runs; experimental. 5060 Ti only.
+- What: ASE 3.27's `NPTBerendsen` and `Inhomogeneous_NPTBerendsen` with one force call per step (ASE: two; PLAN.md D48). After the thermostat's scale one thread forms the barostat's factors from the last force pass's virial and the scaled velocities' ideal-gas part; atoms and cell are scaled, then the half-kick and the drift.
+- Measured (15 November 2026, `SrTiO3` 3x3x3 from 10 GPa above the target): volume within 2e-8 relative of ASE's class taken with one force call per step after 200 steps, 1.1e-5 of ASE's own class.
+- Not measured: its step time (the variable-cell step of `md-variable-cell` plus one single-thread kernel and, per axis, one kinetic sum); other systems; anything on the RTX 4000 Ada.
+- Sources: [§6.7][s67]; `tests/test_berendsen_npt_gpu.py`, `tests/test_simulation_npt.py`.
+
 <a id="md-small-systems"></a>
 #### md-small-systems: small-system latency
 - Status: NOT BUILT (open).
@@ -1921,4 +1943,5 @@ POLAR-1 NaCl 3x3x3 (216) and POLAR-1-M `NbCl5` 3x3x3 (1,944).
 [s64]: STATUS_AND_PROFILE.md#64-centre-of-mass-at-rest-fix_com-and-the-current-build-against-the-merge-build-15-november-2026-0655-to-0735
 [s65]: STATUS_AND_PROFILE.md#65-csvr-the-layout-move-and-the-skin-chosen-from-the-step-size-15-november-2026-1205-to-1310
 [s66]: STATUS_AND_PROFILE.md#66-nose-hoover-chain-berendsen-nvt-lbfgs-on-the-device-and-the-generic-path-as-the-default-15-november-2026-1330-to-1740
+[s67]: STATUS_AND_PROFILE.md#67-the-variable-cell-and-berendsen-npt-15-november-2026-1720-to-1845
 [s55]: STATUS_AND_PROFILE.md#55-known-limitations

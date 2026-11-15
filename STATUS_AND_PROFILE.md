@@ -726,3 +726,41 @@ RTX 5060 Ti only. Engine build of `763aaa5` (library sha256 `53abaad3e9aca96c...
 - Not run: the suite as one run on the last tree (its parts ran on the tree before the sweep floor changed, and the
   two changed files after); `tests/test_gate_wrapper.py` on the last build; the family gates (`--set organic`,
   `--set crystals`); anything on the RTX 4000 Ada or an A100 (O12).
+
+### 6.7 The variable cell and Berendsen NPT (15 November 2026, 17:20 to 18:45)
+
+RTX 5060 Ti only. Engine builds: `1fe8f24` (the variable cell; library sha256 `fbbaee33a44c9267...`), `fd731a9`
+(Berendsen NPT; `0e89b6d050da93ff...`) and `7df6798` (`loup_set_reference_volume`; `c640e85347aeb330...`).
+
+| Check | Result |
+|---|---|
+| NVE through the variable-cell step with a constant cell, 135 atoms: forces after one step against the fixed-cell step, two runs | within 7.5e-7 and 1.6e-6 eV/A; two fixed-cell runs differ by 1.2e-6 |
+| the same after 40 steps | positions within 4.3e-8 A, forces within 4.7e-6 eV/A; two fixed-cell runs: 4.9e-8 A, 4.5e-6 eV/A |
+| a row's pressure against the stress of an evaluation at the same state plus the ideal-gas part | 6.3236 GPa both |
+| cell and positions scaled by 1 - 2e-4 per step for 150 steps (0.9704 in length), then a new engine at the final cell | forces within 2.1e-6 eV/A (1.4e-6 in a second run), energy within 3.7e-8 eV/atom, 6 rebuilds, pressure 26.755 GPa both |
+| the same with 1 + 2e-4 per step (1.0305) | forces within 1.8e-6 eV/A, energy within 3.9e-8 eV/atom, 6 rebuilds, pressure -6.329 GPa both |
+| Langevin, 5,000 atoms, through the variable-cell step (constant cell) against the pipelined fixed-cell step, a b b a twice | 8.377 to 8.416 against 8.142 to 8.202 ms/step: 1.0296; a second job 8.511 to 8.562 against 8.329 to 8.361: 1.0263 |
+| Berendsen NPT, `SrTiO3` 3x3x3 compressed by 1% (11.65 GPa at step 0), target 0 GPa, taup 100 fs, 200 steps | volume 1560.03 -> 1655.083 A^3; pressure 7.05 GPa at step 50, 1.78 GPa at step 200 |
+| against ASE 3.27's `NPTBerendsen` taken with one force call per step, three jobs | volume within 3.4e-10, 2.2e-8 and 1.3e-9 relative; positions within 1.8e-7 to 3.0e-7 A |
+| against ASE's own class (two force calls per step) | volume within 1.1e-5 relative; 3.2e-6 from a start 0.5 GPa off the target |
+| mask (1, 1, 0) against ASE's `Inhomogeneous_NPTBerendsen` with one force call per step | cell lengths 11.86512, 11.86363, 11.59785 A from 11.59785; within 1.0e-9 relative; z unchanged bit for bit |
+| to 0 GPa with taup 50 fs, 800 steps | 9.21 GPa at step 10; mean of the last 200 steps -0.022 GPa (scatter 0.14); volume 1678.07 A^3 |
+| eight calls of 100 steps against one of 800 | volume within 2.2e-8 relative |
+| `lm.Simulation` with `lm.integrators.Berendsen(pressure_GPa=0)`, 200 steps, against one engine call; the `NPTBerendsen` drop-in | volume within 5.8e-10 relative; 1.5e-9; resumed from the restart for 100 more steps: 1666.495 A^3 |
+| gate on `1fe8f24`, default (generic) and `--specialised` | PASS, 18 rows, worst force 1.87, stress 1.26; PASS, 30 rows, 1.55 and 1.69 |
+| gate on `7df6798` | PASS, 18 rows, 1.88 and 1.20; PASS, 30 rows, 1.55 and 1.71 |
+| `bench_md.py`, `1fe8f24` against the build of §6.6, both orders, new / old: specialised kernels | `NbCl5` 1.0105 and 0.9973; `SrTiO3` 1.0028 and 0.9995 |
+| the same on the generic path | `NbCl5` 0.9998 and 1.0007; `SrTiO3` 1.0015 and 1.0001 |
+| `bench_md.py`, `7df6798` against the build of §6.6, generic path, both orders | `NbCl5` 1.0110 and 1.0000; `SrTiO3` 1.0016 and 0.9979 |
+| suite on `1fe8f24`: `test_[a-e]*.py`; `test_f*.py test_gate_cache.py`; `test_[m-q]*.py`; `test_[r-z]*.py` | 247, 38, 150 and 115 passed, 1 skipped |
+| suite on `7df6798` less its last change to `lm.md`: the first three parts | 252, 38 and 150 passed |
+
+- The fixed-cell step is the same captured graph as before: the rebuild's two extra kernels and the device cell
+  exist only on a handle that has run a variable-cell step.
+- The variable-cell step's extra 2.6 to 3.0% is the sum of three things that were not measured apart: stress in
+  every force pass, the Cartesian shifts formed per step (24 bytes written per edge), and one host wait per
+  step in place of the pipelined loop.
+- Berendsen NPT's distance from ASE's own class is PLAN.md D48.
+- Not run: `test_[r-z]*.py` on `7df6798` (queued behind the other session when this was written);
+  `tests/test_gate_wrapper.py` on these builds; the barostat on other systems than `SrTiO3` 3x3x3; its step time;
+  anything on the RTX 4000 Ada or an A100 (O12).
