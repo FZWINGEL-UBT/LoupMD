@@ -101,12 +101,15 @@ class Simulation:
                              next_step='output=lm.Output("run/")')
         if seed is not None and (isinstance(seed, bool) or not isinstance(seed, int) or not 0 <= seed < 2 ** 63):
             raise InputError(f"seed must be an int from 0 to 2**63 - 1 or None, got {seed!r}")
+        fixed = fixed_mask(atoms)                  # refuses other constraints before anything is exported
         if isinstance(integrator, IntegratorConfig):
             self.seed = integrator.seed if seed is None else seed
             self.config = dataclasses.replace(integrator, seed=self.seed)
+            if self.config.fixcm and fixed is not None:
+                raise PlanRefused("fixcm with fixed atoms", why="the fixed atoms pin the frame already")
         elif hasattr(integrator, "to_config"):
             self.seed = secrets.randbits(62) if seed is None else seed
-            self.config = integrator.to_config(seed=self.seed)
+            self.config = integrator.to_config(seed=self.seed, fixed_atoms=fixed is not None)
         else:
             raise InputError(f"integrator must be an lm.integrators record, got {type(integrator).__name__}",
                              next_step="integrator=lm.integrators.Langevin(temperature_K=300, friction_per_fs=0.01)")
@@ -124,8 +127,9 @@ class Simulation:
         self.step = 0
         self.status = "new"                # "new", "running", "idle", "non-finite", "closed"
         self._atoms = atoms.copy()
-        self._fixed = fixed_mask(self._atoms)      # refuses other constraints before anything is exported
-        self._dof = 3 * (len(atoms) - (int(self._fixed.sum()) if self._fixed is not None else 0))
+        self._fixed = fixed
+        self._dof = (3 * (len(atoms) - (int(fixed.sum()) if fixed is not None else 0))
+                     - (3 if self.config.fixcm else 0))
         self._engine = self._bundle = None
         self._chunks = self._writer = None
         self._base = 0                     # the step at which the engine's own count was zero

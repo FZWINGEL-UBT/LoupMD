@@ -148,7 +148,7 @@ __global__ void nve_second_half_kernel(int N, double dt_ase, const double* __res
                                        const double* __restrict__ inv_masses, double* __restrict__ vel64);
 __global__ void rotate_step_disp_kernel(unsigned int* __restrict__ max_step_disp2, int* __restrict__ need_rebuild);
 __global__ void langevin_first_half_kernel(
-    int N, double dt_ase, double c1, double c2, double a3, double a4, double a5, double two_fr_kb,
+    int N, double dt_ase, double c1, double c2,
     const double* __restrict__ target, unsigned long long seed, const unsigned long long* __restrict__ step_counter,
     const double* __restrict__ forces, const double* __restrict__ inv_masses,
     const double* __restrict__ sqrt_inv_masses, double* __restrict__ pos64,
@@ -156,7 +156,22 @@ __global__ void langevin_first_half_kernel(
 __global__ void langevin_second_half_kernel(
     int N, double c1, double c2, const double* __restrict__ forces,
     const double* __restrict__ inv_masses, const double* __restrict__ rnd_vel_save,
-    double* __restrict__ vel64, unsigned long long* __restrict__ step_counter, double* __restrict__ target);
+    double* __restrict__ vel64, unsigned long long* __restrict__ step_counter, double* __restrict__ target,
+    double a3, double a4, double a5, double two_fr_kb);
+__global__ void langevin_noise_kernel(
+    int N, const double* __restrict__ target,
+    unsigned long long seed, const unsigned long long* __restrict__ step_counter,
+    const double* __restrict__ masses, const double* __restrict__ sqrt_inv_masses,
+    double* __restrict__ rnd_pos, double* __restrict__ rnd_vel, double* __restrict__ com);
+__global__ void langevin_first_half_fixcom_kernel(
+    int N, double dt_ase, double c1, double c2, double inv_total_mass, const double* __restrict__ com,
+    const double* __restrict__ forces, const double* __restrict__ inv_masses, const double* __restrict__ rnd_pos,
+    double* __restrict__ rnd_vel, double* __restrict__ pos64, double* __restrict__ vel64,
+    unsigned int* __restrict__ max_step_disp2);
+__global__ void momentum_sum_kernel(int N, const double* __restrict__ masses, const double* __restrict__ vel64,
+                                    double* __restrict__ com);
+__global__ void momentum_remove_kernel(int N, double inv_total_mass, const double* __restrict__ com,
+                                       double* __restrict__ vel64);
 __global__ void kinetic_energy_kernel(int N, const double* __restrict__ masses,
                                       const double* __restrict__ vel64, double* __restrict__ out_ke);
 }  // namespace loup
@@ -523,12 +538,18 @@ struct LoupHandle {
     unsigned int* d_max_step_disp2 = nullptr;
     int disp_window_steps = 0;
     unsigned long long* d_step_counter = nullptr;
-    double* d_langevin_target = nullptr;  // [2]: the thermostat's target of the next step in K, its change per step
+    double* d_langevin_target = nullptr;  // [5]: the thermostat's target of the next step in K, its change per step,
+                                          // and that step's noise coefficients (c3, c4, c5 without the mass factor)
     // Fixed atoms (loup_set_fixed_atoms): their inverse masses on the device are zero, so no kernel moves them.
     int n_fixed = 0;
     std::vector<double> masses_caller;        // caller order: restores the inverse mass of an atom set free
     std::vector<unsigned char> fixed_caller;  // caller order
-    int kinetic_dof() const { return 3 * (N - n_fixed); }
+    // fix_com (LoupIntegrator.fix_com) of the run in progress or run last: three degrees of freedom fewer.
+    bool fix_com = false;
+    double total_mass = 0.0;
+    double* d_rnd_pos = nullptr;  // [N, 3]: the position noise of a fix_com Langevin step (allocated on first use)
+    double* d_com = nullptr;      // [6]: mass-weighted sums of the two noise terms, or the total momentum
+    int kinetic_dof() const { return 3 * (N - n_fixed) - (fix_com ? 3 : 0); }
     double* d_ke_f64 = nullptr;
 
     // Neighbour build scratch
@@ -629,6 +650,7 @@ struct LoupHandle {
     double md_graph_fr = 0.0;
     unsigned long long md_graph_seed = 0;
     bool md_graph_thermo = false;  // the graphs carry the two thermo kernels
+    bool md_graph_fixcom = false;  // the graphs are the fix_com variant (and its degrees of freedom)
 
     // Thermo buffer (thermo.hpp), allocated by the first run that asks for rows. The host knows the step count and
     // the number of unread rows exactly and writes the device's control block at the start of every such run.
@@ -691,6 +713,7 @@ struct LoupHandle {
         freep(d_species); freep(d_pos64); freep(d_ref_pos64); freep(d_vel64);
         freep(d_masses); freep(d_inv_masses); freep(d_sqrt_inv_masses); freep(d_rnd_vel);
         freep(d_need_rebuild); freep(d_max_step_disp2); freep(d_step_counter); freep(d_langevin_target);
+        freep(d_rnd_pos); freep(d_com);
         freep(d_ke_f64);
         freep(d_thermo_ctrl); freep(d_thermo_rows);
         md_steps = 0;
@@ -1920,6 +1943,8 @@ static int set_system_impl(LoupHandle* h, int n_atoms, const int* atomic_numbers
     h->masses_caller.assign(n_atoms, 1.0);
     h->fixed_caller.assign(n_atoms, 0);
     h->n_fixed = 0;
+    h->fix_com = false;
+    h->total_mass = 0.0;
     h->species_start.assign(S + 1, 0);
     h->species_count.assign(S, 0);
     for (int i = 0; i < n_local; ++i) h->species_count[sp_orig[i]]++;
@@ -1933,6 +1958,7 @@ static int set_system_impl(LoupHandle* h, int n_atoms, const int* atomic_numbers
         sp_sorted[dst] = sp_orig[i];
         double m = masses_amu ? masses_amu[i] : 1.0;
         h->masses_caller[i] = m;
+        if (i < n_local) h->total_mass += m;
         m_sorted[dst] = m;
         inv_m_sorted[dst] = 1.0 / m;
         sim_sorted[dst] = 1.0 / sqrt(m);
@@ -1959,8 +1985,8 @@ static int set_system_impl(LoupHandle* h, int n_atoms, const int* atomic_numbers
     CUDA_CHECK(cudaMemsetAsync(h->d_max_step_disp2, 0, 2 * sizeof(unsigned int), h->stream));
     CUDA_CHECK(cudaMalloc(&h->d_step_counter, sizeof(unsigned long long)));
     CUDA_CHECK(cudaMemsetAsync(h->d_step_counter, 0, sizeof(unsigned long long), h->stream));
-    CUDA_CHECK(cudaMalloc(&h->d_langevin_target, 2 * sizeof(double)));
-    CUDA_CHECK(cudaMemsetAsync(h->d_langevin_target, 0, 2 * sizeof(double), h->stream));
+    CUDA_CHECK(cudaMalloc(&h->d_langevin_target, 5 * sizeof(double)));
+    CUDA_CHECK(cudaMemsetAsync(h->d_langevin_target, 0, 5 * sizeof(double), h->stream));
     CUDA_CHECK(cudaMalloc(&h->d_ke_f64, sizeof(double)));
 
     // Neighbour scratch
@@ -2361,7 +2387,7 @@ static int evaluate2_impl(
 static int run_md_loop(
     LoupHandle* h, int kind, int n_steps, double dt_fs,
     double temp_k, double temp_rate, double friction_per_fs, unsigned long long seed, int thermo_every,
-    LoupMDStats* out_stats
+    bool fix_com, LoupMDStats* out_stats
 ) {
     // nl_valid: positions and a neighbour list exist (set_state or evaluate ran and its rebuild completed).
     if (!has_system(h)) return -1;
@@ -2453,20 +2479,47 @@ static int run_md_loop(
         a3 = sqrt(dt_ase) / 2.0 - pow(dt_ase, 1.5) * fr / 8.0;
         a5 = pow(dt_ase, 1.5) / (2.0 * sqrt(3.0));
         a4 = (fr / 2.0) * a5;
-        // The target of this call's first step (its end point) and the change per step.
-        const double target[2] = {temp_k + temp_rate, temp_rate};
+        // The target of this call's first step (its end point), the change per step, and the first step's noise
+        // coefficients; the second half-kick advances all of them.
+        const double first = temp_k + temp_rate;
+        const double sigma = sqrt(two_fr_kb * (first > 0.0 ? first : 0.0));
+        const double target[5] = {first, temp_rate, a3 * sigma, a4 * sigma, a5 * sigma};
         CUDA_CHECK(cudaMemcpy(h->d_langevin_target, target, sizeof(target), cudaMemcpyHostToDevice));
     }
 
-    auto record_move = [&](int lag) {
+    // fix_com: the buffers of the two-pass noise, and for NVE the total momentum removed once (the forces of a
+    // periodic system sum to zero to rounding, so it stays removed).
+    const double inv_total_mass = fix_com ? 1.0 / h->total_mass : 0.0;
+    if (fix_com) {
+        if (!h->d_com) CUDA_CHECK(cudaMalloc(&h->d_com, 6 * sizeof(double)));
+        if (kind == 1 && !h->d_rnd_pos) CUDA_CHECK(cudaMalloc(&h->d_rnd_pos, (size_t)N * 3 * sizeof(double)));
         if (kind == 0) {
+            CUDA_CHECK(cudaMemsetAsync(h->d_com, 0, 6 * sizeof(double), h->stream));
+            loup::momentum_sum_kernel<<<(N + 255) / 256, 256, 0, h->stream>>>(N, h->d_masses, h->d_vel64, h->d_com);
+            loup::momentum_remove_kernel<<<(N + 255) / 256, 256, 0, h->stream>>>(N, inv_total_mass, h->d_com,
+                                                                                  h->d_vel64);
+        }
+    }
+    h->fix_com = fix_com;
+
+    auto record_move = [&](int lag) {
+        if (kind == 1 && fix_com) {
+            // (No CUDA_CHECK inside this lambda: a failed node fails the capture, which is checked.)
+            (void)cudaMemsetAsync(h->d_com, 0, 6 * sizeof(double), h->stream);
+            loup::langevin_noise_kernel<<<(N + 31) / 32, 32, 0, h->stream>>>(
+                N, h->d_langevin_target, seed, h->d_step_counter, h->d_masses, h->d_sqrt_inv_masses, h->d_rnd_pos,
+                h->d_rnd_vel, h->d_com);
+            loup::langevin_first_half_fixcom_kernel<<<gridN, 256, 0, h->stream>>>(
+                N, dt_ase, c1, c2, inv_total_mass, h->d_com, h->d_forces_f64, h->d_inv_masses, h->d_rnd_pos,
+                h->d_rnd_vel, h->d_pos64, h->d_vel64, h->d_max_step_disp2);
+        } else if (kind == 0) {
             loup::nve_first_half_kernel<<<gridN, 256, 0, h->stream>>>(
                 N, dt_ase, h->d_forces_f64, h->d_inv_masses, h->d_pos64, h->d_vel64, h->d_max_step_disp2);
         } else {
             // 32-thread blocks: the FP64 Box-Muller (3 curand_normal2_double per atom) is FP64-throughput bound on
             // consumer GPUs, so spread the atoms over every SM instead of N / 256 of them.
             loup::langevin_first_half_kernel<<<(N + 31) / 32, 32, 0, h->stream>>>(
-                N, dt_ase, c1, c2, a3, a4, a5, two_fr_kb, h->d_langevin_target, seed, h->d_step_counter,
+                N, dt_ase, c1, c2, h->d_langevin_target, seed, h->d_step_counter,
                 h->d_forces_f64, h->d_inv_masses, h->d_sqrt_inv_masses,
                 h->d_pos64, h->d_vel64, h->d_rnd_vel, h->d_max_step_disp2);
         }
@@ -2483,7 +2536,7 @@ static int run_md_loop(
         } else {
             loup::langevin_second_half_kernel<<<gridN, 256, 0, h->stream>>>(
                 N, c1, c2, h->d_forces_f64, h->d_inv_masses, h->d_rnd_vel, h->d_vel64, h->d_step_counter,
-                h->d_langevin_target);
+                h->d_langevin_target, a3, a4, a5, two_fr_kb);
         }
         if (thermo_every > 0) {  // the row cadence lives on the device: only on / off is baked into the graph
             loup::thermo_kinetic_kernel<<<gridN, 256, 0, h->stream>>>(N, h->d_masses, h->d_vel64, h->d_thermo_ctrl);
@@ -2508,6 +2561,7 @@ static int run_md_loop(
         h->md_graph_fr = friction_per_fs;
         h->md_graph_seed = seed;
         h->md_graph_thermo = thermo_every > 0;
+        h->md_graph_fixcom = fix_com;
     };
     auto ensure_piped = [&]() -> int {
         if (h->md_graph_exec) return 0;
@@ -2527,7 +2581,8 @@ static int run_md_loop(
     // schedule's calls reuse the graphs. Everything else a graph bakes in (edge bucket, scan workspace, kernel
     // variants, the long-range part's cell) drops the graphs where it changes: invalidate_graphs.
     if (h->md_graph_kind != kind || h->md_graph_dt != dt_fs ||
-        h->md_graph_fr != friction_per_fs || h->md_graph_seed != seed || h->md_graph_thermo != (thermo_every > 0)) {
+        h->md_graph_fr != friction_per_fs || h->md_graph_seed != seed || h->md_graph_thermo != (thermo_every > 0) ||
+        h->md_graph_fixcom != fix_com) {
         h->invalidate_md_graphs();
     }
 
@@ -2720,9 +2775,12 @@ static int run_impl(LoupHandle* h, const LoupIntegrator* caller, int n_steps, Lo
                         name);
         return -1;
     }
-    if (it.fix_com != 0) { loup::set_error("fix_com is not built in this version of the library"); return -1; }
+    if (it.fix_com != 0 && h && h->n_fixed > 0) {
+        loup::set_error("fix_com with fixed atoms: %d fixed atoms pin the frame already", h->n_fixed);
+        return -1;
+    }
     if (it.kind == LOUP_NVE) {
-        return run_md_loop(h, 0, n_steps, it.dt_fs, 0.0, 0.0, 0.0, 0, it.thermo_every, out_stats);
+        return run_md_loop(h, 0, n_steps, it.dt_fs, 0.0, 0.0, 0.0, 0, it.thermo_every, it.fix_com != 0, out_stats);
     }
     if (!std::isfinite(it.temp_k) || it.temp_k < 0.0) {
         loup::set_error("temp_k must be finite and not negative, got %g K", it.temp_k);
@@ -2738,7 +2796,7 @@ static int run_impl(LoupHandle* h, const LoupIntegrator* caller, int n_steps, Lo
         return -1;
     }
     return run_md_loop(h, 1, n_steps, it.dt_fs, it.temp_k, it.temp_rate_k_per_step, it.friction_per_fs, it.seed,
-                       it.thermo_every, out_stats);
+                       it.thermo_every, it.fix_com != 0, out_stats);
 }
 
 static int run_nve_impl(LoupHandle* h, int n_steps, double dt_fs, LoupMDStats* out_stats) {

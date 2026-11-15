@@ -164,7 +164,11 @@ typedef struct {
     int chain_length;              // Nose-Hoover chain
     int cell_mode;                 // LOUP_CELL_HYDROSTATIC or LOUP_CELL_FULL
     int cell_mask[3];              // per-axis mask of the barostat
-    int fix_com;                   // remove the centre-of-mass motion (refused until built)
+    int fix_com;                   // keep the centre of mass at rest. Langevin: both noise terms lose their
+                                   // mass-weighted mean every step, so the thermostat puts no momentum into the
+                                   // centre of mass (FastMACE's "mass_weighted" projection). NVE: the total
+                                   // momentum is removed at the start of the call. Temperatures then count three
+                                   // degrees of freedom fewer. Refused together with fixed atoms
     int thermo_every;              // write a thermo row every so many steps (loup_read_thermo); 0 = none
     unsigned long long seed;       // noise stream of the stochastic integrators
 } LoupIntegrator;

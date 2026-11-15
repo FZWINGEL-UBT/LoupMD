@@ -68,8 +68,8 @@ def test_velocity_verlet_and_observers_of_different_intervals(ff):
 
 def test_what_is_refused(ff):
     atoms = _moving()
-    with pytest.raises(PlanRefused, match="fixcm=True"):
-        ase_md.Langevin(atoms, units.fs, temperature_K=300, friction=0.01 / units.fs, model=ff)   # ASE's default
+    assert ase_md.Langevin(atoms, units.fs, temperature_K=300, friction=0.01 / units.fs,
+                           model=ff).simulation.config.fixcm is True                       # ASE's default
     with pytest.raises(InputError, match="needs model="):
         ase_md.VelocityVerlet(atoms, units.fs)
     with pytest.raises(InputError, match="needs temperature_K and friction"):

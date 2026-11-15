@@ -130,7 +130,6 @@ REFUSED = [
     ("size_small", dict(size=8), "loup_run: LoupIntegrator.size is 8, and this library's layout has"),
     ("size_large", dict(size=4096), "loup_run: LoupIntegrator.size is 4096"),
     ("unknown_kind", dict(kind=99), "loup_run: unknown integrator kind 99"),
-    ("fix_com", dict(fix_com=1), "loup_run: fix_com is not built in this version"),
     ("thermo_every", dict(thermo_every=-1), "loup_run: thermo_every must not be negative, got -1"),
     ("timestep", dict(dt_fs=0.0), "loup_run: dt_fs must be finite and positive, got 0 fs"),
     ("temperature", dict(kind=_core.LOUP_LANGEVIN, temp_k=-5.0),

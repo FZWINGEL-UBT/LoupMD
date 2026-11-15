@@ -73,7 +73,8 @@ class SpringEngine:
             self.log.append("force pass")
         dt = it.dt_fs * units.fs
         inverse_mass = self._inverse_mass()
-        dof = 3 * (self.n - (int(self.fixed.sum()) if getattr(self, "fixed", None) is not None else 0))
+        dof = (3 * (self.n - (int(self.fixed.sum()) if getattr(self, "fixed", None) is not None else 0))
+               - (3 if it.fix_com else 0))
         forces = self._forces()
         for _ in range(n_steps):
             self.vel += 0.5 * dt * forces * inverse_mass
@@ -90,6 +91,7 @@ class SpringEngine:
         self.forces_current = True
         self.log.append(("run", n_steps, it.kind, it.thermo_every))
         self.targets.append((n_steps, it.temp_k, it.temp_rate_k_per_step))
+        self.fix_com = bool(it.fix_com)
         return _core.LoupMDStats(step_ms=0.5, rebuilds=1, final_temperature_k=300.0, pipelined_steps=n_steps - 1)
 
     def thermo_pending(self):
@@ -224,7 +226,7 @@ def test_langevin_reaches_the_engine_with_its_settings(setup):
     assert rows[-1][3] == "350.0" and float(rows[-1][1]) == pytest.approx(0.04)
     record = json.loads((setup.tmp_path / "run" / "simulation.json").read_text())
     assert record["integrator"] == {"ensemble": "nvt", "scheme": "langevin", "timestep_fs": 2.0,
-                                    "temperature_K": 350.0, "friction_per_fs": 0.02, "seed": 7}
+                                    "temperature_K": 350.0, "friction_per_fs": 0.02, "seed": 7, "fixcm": True}
     assert record["seed"] == 7 and record["model"]["sha256"] == sim.force_field.sha256
 
 
@@ -244,8 +246,8 @@ def test_argument_errors_come_before_anything_is_exported(setup):
     for steps in (0, -5, 2.5):
         with pytest.raises(InputError, match="steps must be a positive whole number"):
             sim.run(steps=steps)
-    with pytest.raises(PlanRefused, match="fixcm"):
-        integrators.Langevin(temperature_K=300, friction_per_fs=0.01, fixcm=True).to_config(seed=1)
+    with pytest.raises(PlanRefused, match="fixcm=True with fixed atoms"):
+        integrators.Langevin(temperature_K=300, friction_per_fs=0.01, fixcm=True).to_config(seed=1, fixed_atoms=True)
     assert SpringEngine.made == []
 
 
@@ -320,7 +322,7 @@ def test_resume_rebuilds_the_run_from_its_directory(setup, monkeypatch):
     resumed = loupmd.Simulation.resume(setup.tmp_path / "run")
     assert made["model"] == str(setup.checkpoint.resolve()) and made["options"]["sha256"] == sim.force_field.sha256
     assert resumed.step == 40 and resumed.seed == 7 and resumed.output.thermo_every == 10
-    assert resumed.config == IntegratorConfig(temperature_K=300.0, friction_per_fs=0.01, seed=7)
+    assert resumed.config == IntegratorConfig(temperature_K=300.0, friction_per_fs=0.01, seed=7, fixcm=True)
     assert np.array_equal(resumed.atoms.numbers, setup.atoms.numbers) and all(resumed.atoms.pbc)
 
 
@@ -488,3 +490,24 @@ def test_other_constraints_are_refused_by_name_before_anything_is_exported(setup
     with pytest.raises(PlanRefused, match="every atom of the structure is fixed"):
         loupmd.Simulation(everything, setup.force_field(), integrator=integrators.NVE(timestep_fs=1.0))
     assert SpringEngine.made == []
+
+
+# ----------------------------------------------------------------------------------------- centre of mass
+
+def test_fixcm_is_on_by_default_off_with_fixed_atoms_and_counts_three_degrees_fewer(setup):
+    assert integrators.Langevin(temperature_K=300, friction_per_fs=0.01).to_config(seed=1).fixcm is True
+    assert integrators.NVE(timestep_fs=1.0).to_config(seed=1, fixed_atoms=True).fixcm is False
+    assert integrators.NVE(timestep_fs=1.0, fixcm=False).to_config(seed=1).fixcm is False
+    with pytest.raises(InputError, match="fixcm must be a bool"):
+        IntegratorConfig(ensemble="nve", fixcm="auto")
+    sim = setup("run")                                              # NVE, fixcm "auto": on
+    sim.run(steps=20)
+    assert SpringEngine.made[0].fix_com is True and sim._dof == 45
+    for row in output.read_thermo(setup.tmp_path / "run")[1]:
+        assert float(row[4]) == pytest.approx(2 * float(row[6]) * 16 / (45 * units.kB), rel=1e-12)
+    held = loupmd.Simulation(_with_fixed(setup, [0]), setup.force_field(), integrator=integrators.NVE(timestep_fs=1.0))
+    held.run(steps=5)
+    assert SpringEngine.made[-1].fix_com is False and held._dof == 45
+    with pytest.raises(PlanRefused, match="fixcm with fixed atoms"):
+        loupmd.Simulation(_with_fixed(setup, [0]), setup.force_field(),
+                          integrator=IntegratorConfig(ensemble="nve", fixcm=True))

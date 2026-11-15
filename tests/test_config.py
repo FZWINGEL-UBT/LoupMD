@@ -71,6 +71,7 @@ def test_the_engine_struct_of_a_record():
     assert isinstance(it, _core.LoupIntegrator)
     assert (it.kind, it.dt_fs, it.temp_k, it.friction_per_fs, it.seed, it.thermo_every) == (
         _core.LOUP_LANGEVIN, 2.0, 350.0, 0.02, 7, 20)
+    assert it.fix_com == 0 and IntegratorConfig(ensemble="nve", fixcm=True).to_struct().fix_com == 1
     nve = IntegratorConfig(ensemble="nve", timestep_fs=1.0).to_struct()
     assert (nve.kind, nve.dt_fs, nve.temp_k, nve.friction_per_fs, nve.thermo_every) == (_core.LOUP_NVE, 1.0, 0.0, 0.0, 0)
 
@@ -150,7 +151,8 @@ def test_unknown_keys_are_refused_by_name_all_at_once():
                             section="integrator")
     text = str(caught.value)
     assert text.startswith("unknown keys 'friction', 'timestep' in [integrator]")
-    assert "Next: Keys of [integrator]: ensemble, scheme, timestep_fs, temperature_K, friction_per_fs, seed." in text
+    assert ("Next: Keys of [integrator]: ensemble, scheme, timestep_fs, temperature_K, friction_per_fs, seed, "
+            "fixcm.") in text
     with pytest.raises(InputError, match=r"unknown key 'every' in Output"):
         config.from_mapping(Output, {"directory": "run", "every": 5})
     with pytest.raises(InputError, match="is not a table"):

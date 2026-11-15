@@ -9,9 +9,10 @@ Beyond ASE's arguments: ``model=`` (a label, path or ``lm.load`` result; require
 ``output=`` (a directory or ``lm.Output``), ``check=`` and what ``lm.load`` takes. ASE's ``trajectory``, ``logfile``
 and ``loginterval`` are not taken: use ``output=``.
 
-Built: ``Langevin`` and ``VelocityVerlet``. ASE's ``fixcm=True`` (its default for Langevin) is refused until the
-engine removes the centre-of-mass motion; pass ``fixcm=False``. The other classes of FastMACE's ``fastmace.ase``
-are refused by name until their integrators are built.
+Built: ``Langevin`` and ``VelocityVerlet``. Langevin's ``fixcm=True`` (ASE's default) keeps the centre of mass at
+rest with the mass-weighted projection of the noise, which is canonical for unequal masses too; ASE's own
+projection differs from it for unequal masses. The other classes of FastMACE's ``fastmace.ase`` are refused by
+name until their integrators are built.
 """
 from __future__ import annotations
 

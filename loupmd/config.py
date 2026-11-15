@@ -83,6 +83,7 @@ class IntegratorConfig:
     temperature_K: float | None = None
     friction_per_fs: float | None = None       # Langevin
     seed: int = 20261001
+    fixcm: bool = False                        # keep the centre of mass at rest (three degrees of freedom fewer)
 
     def __post_init__(self):
         _check_choices(self)
@@ -96,6 +97,8 @@ class IntegratorConfig:
                              next_step=f"Built schemes: {built}.")
         object.__setattr__(self, "scheme", scheme)
         _positive(self, "timestep_fs")
+        if not isinstance(self.fixcm, bool):
+            raise InputError(f"{_name(self, 'fixcm')} must be a bool, got {self.fixcm!r}")
         if isinstance(self.seed, bool) or not isinstance(self.seed, int) or not 0 <= self.seed < 2 ** 64:
             raise InputError(f"{_name(self, 'seed')} must be an int from 0 to 2**64 - 1, got {self.seed!r}")
         if scheme == "nve":
@@ -116,12 +119,13 @@ class IntegratorConfig:
         from . import _core
 
         if self.scheme == "nve":
-            return _core.integrator(_core.LOUP_NVE, self.timestep_fs, thermo_every=int(thermo_every))
+            return _core.integrator(_core.LOUP_NVE, self.timestep_fs, thermo_every=int(thermo_every),
+                                    fix_com=int(self.fixcm))
         temperature = self.temperature_K if temperature_K is None else temperature_K
         return _core.integrator(_core.LOUP_LANGEVIN, self.timestep_fs, temp_k=float(temperature),
                                 temp_rate_k_per_step=float(rate_K_per_step),
                                 friction_per_fs=float(self.friction_per_fs), seed=self.seed,
-                                thermo_every=int(thermo_every))
+                                thermo_every=int(thermo_every), fix_com=int(self.fixcm))
 
 
 # --------------------------------------------------------------------------------------------------- output

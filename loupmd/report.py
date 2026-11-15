@@ -33,10 +33,14 @@ def _physics_lines(metadata) -> list:
     timestep = integrator["timestep_fs"]
     if integrator["scheme"] == "nve":
         first = f"NVE, velocity Verlet, timestep {timestep:g} fs"
+        if integrator.get("fixcm"):
+            first += ", total momentum removed"
     else:
         first = (f"NVT, Langevin, timestep {timestep:g} fs, friction {integrator['friction_per_fs']:.4g}/fs")
         if schedule is None:
             first += f", {integrator['temperature_K']:g} K"
+        if integrator.get("fixcm"):
+            first += ", centre of mass at rest"
     lines = [first]
     if schedule is not None:
         parts = [f"{s['phase']} {s['start_K']:g} -> {s['end_K']:g} K in {s['ps']:g} ps ({s['steps']} steps)"
