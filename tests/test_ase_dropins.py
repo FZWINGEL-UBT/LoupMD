@@ -11,7 +11,7 @@ from ase.optimize import LBFGS as AseLBFGS
 from test_simulation import SpringEngine
 
 import loupmd
-from loupmd import _core, optimize
+from loupmd import _core, integrators, optimize
 from loupmd.ase import md as ase_md
 from loupmd.ase import optimize as ase_optimize
 from loupmd.errors import InputError, PlanRefused
@@ -74,11 +74,15 @@ def test_what_is_refused(ff):
         ase_md.VelocityVerlet(atoms, units.fs)
     with pytest.raises(InputError, match="needs temperature_K and friction"):
         ase_md.Langevin(atoms, units.fs, fixcm=False, model=ff)
-    with pytest.raises(TypeError, match="unexpected keyword arguments trajectory"):
-        ase_md.VelocityVerlet(atoms, units.fs, model=ff, trajectory="md.traj")
+    with pytest.raises(TypeError, match="unexpected keyword arguments nonsense"):
+        ase_md.VelocityVerlet(atoms, units.fs, model=ff, nonsense="md.traj")
     with pytest.raises(InputError, match="already loaded"):
         ase_md.VelocityVerlet(atoms, units.fs, model=ff, head="x")
-    for name in ("LangevinBAOAB", "Bussi", "NoseHooverChainNVT", "MTKNPT", "NVTBerendsen", "NPTBerendsen"):
+    with pytest.raises(InputError, match="VelocityVerlet: rng= is not taken"):
+        ase_md.VelocityVerlet(atoms, units.fs, model=ff, rng=np.random.default_rng(1))
+    with pytest.raises(TypeError, match="temperature .in eV. or temperature_K, not both"):
+        ase_md.Langevin(atoms, units.fs, 0.025, 0.01 / units.fs, temperature_K=300, model=ff)
+    for name in ("LangevinBAOAB", "NoseHooverChainNVT", "MTKNPT", "NVTBerendsen", "NPTBerendsen"):
         with pytest.raises(PlanRefused, match=f"loupmd.ase.md.{name} is not in this version"):
             getattr(ase_md, name)
     with pytest.raises(AttributeError):
@@ -133,7 +137,101 @@ def test_a_cell_filter_and_refusals_of_the_optimisers(monkeypatch):
     opt.run(fmax=0.02, steps=50)
     assert np.abs(atoms.cell.array - reference.cell.array).max() < 1e-8
     assert np.abs(atoms.positions - reference.positions).max() < 1e-8
-    with pytest.raises(InputError, match="takes an ase.Atoms"):
-        ase_optimize.LBFGS(FrechetCellFilter(atoms), model="anything")
+    with pytest.raises(InputError, match="takes an ase.Atoms or an ase.filters.FrechetCellFilter, got str"):
+        ase_optimize.LBFGS("atoms", model="anything")
     with pytest.raises(InputError, match="use_line_search=True is not offered"):
         ase_optimize.LBFGS(atoms, use_line_search=True, model="anything")
+    with pytest.raises(InputError, match="LBFGS: restart= is not offered"):
+        ase_optimize.LBFGS(atoms, "history.json", model="anything")
+    with pytest.raises(InputError, match="FIRE: position_reset_callback= is not offered"):
+        ase_optimize.FIRE(atoms, position_reset_callback=print, model="anything")
+
+
+def test_ase_s_filter_object_and_its_settings_are_taken(monkeypatch):
+    from ase.filters import FrechetCellFilter, UnitCellFilter
+
+    monkeypatch.setattr(ase_optimize, "force_field_of", lambda model, head, options, what: EMTField())
+    settings = dict(mask=[1, 1, 1, 0, 0, 0], scalar_pressure=0.02)
+    atoms = _rattled_copper()
+    atoms.set_cell(atoms.cell.array * 1.03, scale_atoms=True)
+    reference = atoms.copy()
+    reference.calc = EMT()
+    AseLBFGS(FrechetCellFilter(reference, **settings), logfile=None).run(fmax=0.02, steps=40)
+    opt = ase_optimize.LBFGS(FrechetCellFilter(atoms, **settings), logfile=None, model="anything")
+    assert opt.record.cell_filter == optimize.FrechetCell(
+        scalar_pressure_GPa=0.02 / units.GPa, mask=((1, 0, 0), (0, 1, 0), (0, 0, 1)), exp_cell_factor=32.0)
+    opt.run(fmax=0.02, steps=40)
+    assert np.abs(atoms.cell.array - reference.cell.array).max() < 1e-8          # the caller's atoms, in place
+    assert np.abs(atoms.positions - reference.positions).max() < 1e-8
+    assert atoms.get_stress().shape == (6,)
+    with pytest.raises(PlanRefused, match="got ASE's UnitCellFilter, which is not supported"):
+        ase_optimize.LBFGS(UnitCellFilter(atoms), model="anything")
+    with pytest.raises(InputError, match="a FrechetCellFilter and cell_filter=; one of the two"):
+        ase_optimize.LBFGS(FrechetCellFilter(atoms), cell_filter=optimize.FrechetCell(), model="anything")
+
+
+def test_the_optimisers_write_ase_s_log_and_trajectory(monkeypatch, tmp_path, capsys):
+    from ase.io import read
+
+    monkeypatch.setattr(ase_optimize, "force_field_of", lambda model, head, options, what: EMTField())
+    atoms = _rattled_copper()
+    reference = atoms.copy()
+    reference.calc = EMT()
+    AseLBFGS(reference, logfile=str(tmp_path / "ase.log"), trajectory=str(tmp_path / "ase.traj")).run(fmax=0.02)
+    with ase_optimize.LBFGS(atoms, logfile=str(tmp_path / "own.log"), trajectory=str(tmp_path / "own.traj"),
+                            model="anything") as opt:
+        opt.run(fmax=0.02)
+
+    def columns(path):                                   # everything but the wall-clock time
+        return [(line.split()[0], line.split()[1], line.split()[3:]) for line in path.read_text().splitlines()]
+
+    ours, theirs = columns(tmp_path / "own.log"), columns(tmp_path / "ase.log")
+    assert [row[:2] for row in ours] == [row[:2] for row in theirs] and ours[0] == theirs[0]
+    assert np.allclose([[float(x) for x in row[2]] for row in ours[1:]],
+                       [[float(x) for x in row[2]] for row in theirs[1:]], atol=2e-6)
+    frames, expected = read(tmp_path / "own.traj", ":"), read(tmp_path / "ase.traj", ":")
+    assert len(frames) == len(expected) == opt.get_number_of_steps() + 1
+    assert np.abs(frames[-1].positions - expected[-1].positions).max() < 1e-9
+    assert frames[3].get_potential_energy() == pytest.approx(expected[3].get_potential_energy(), abs=1e-9)
+    assert np.allclose(frames[3].get_forces(), expected[3].get_forces(), atol=1e-9)
+    ase_optimize.FIRE(_rattled_copper(), model="anything").run(fmax=0.5, steps=2)          # ASE's default: stdout
+    printed = capsys.readouterr().out.splitlines()
+    assert printed[0].split() == ["Step", "Time", "Energy", "fmax"] and printed[1].startswith("FIRE:    0 ")
+
+
+def test_bussi_takes_ase_s_arguments(ff):
+    atoms = _moving()
+    dyn = ase_md.Bussi(atoms, 2.0 * units.fs, 350, 100 * units.fs, model=ff, seed=4)
+    config = dyn.simulation.config
+    assert (config.scheme, config.temperature_K, config.seed, config.fixcm) == ("csvr", 350.0, 4, False)
+    assert (config.timestep_fs, config.tau_fs) == (pytest.approx(2.0), pytest.approx(100.0))
+    assert dyn.run(20) is True and dyn.get_time() == pytest.approx(40 * units.fs)
+    engine, = SpringEngine.made
+    assert [e for e in engine.log if isinstance(e, tuple) and e[0] == "run"] == [("run", 20, _core.LOUP_CSVR, 0)]
+    with pytest.raises(InputError, match="Bussi: rng= is not taken"):
+        ase_md.Bussi(atoms, units.fs, 300, 100 * units.fs, rng=np.random.default_rng(1), model=ff)
+    at_rest = atoms.copy()
+    at_rest.set_velocities(np.zeros((len(atoms), 3)))
+    with pytest.raises(InputError, match="the structure is at rest, and CSVR rescales the velocities"):
+        ase_md.Bussi(at_rest, units.fs, 300, 100 * units.fs, model=ff)
+    assert integrators.CSVR(timestep_fs=1.0, temperature_K=300, tau_fs=100).to_config(seed=1).fixcm is True
+
+
+def test_ase_s_trajectory_and_logfile_mean_what_they_mean_in_ase(ff, tmp_path):
+    from ase.io import read
+
+    atoms = _moving()
+    with ase_md.Langevin(atoms, 1.0 * units.fs, temperature_K=300, friction=0.01 / units.fs, model=ff, seed=2,
+                         trajectory=str(tmp_path / "md.traj"), logfile=str(tmp_path / "md.log"),
+                         loginterval=5) as dyn:
+        dyn.run(20)
+    frames = read(tmp_path / "md.traj", ":")
+    assert len(frames) == 5                                          # steps 0, 5, 10, 15, 20
+    assert np.array_equal(frames[-1].positions, atoms.positions)
+    assert frames[-1].get_potential_energy() == atoms.get_potential_energy()
+    lines = (tmp_path / "md.log").read_text().splitlines()
+    assert lines[0].split()[:2] == ["Time[ps]", "Etot[eV]"] and len(lines) == 6
+    assert [float(line.split()[0]) for line in lines[1:]] == pytest.approx([0.0, 0.005, 0.010, 0.015, 0.020])
+    assert float(lines[-1].split()[2]) == pytest.approx(atoms.get_potential_energy(), abs=1e-3)
+    engine, = SpringEngine.made
+    assert [e[1] for e in engine.log if isinstance(e, tuple) and e[0] == "run"] == [5, 5, 5, 5]

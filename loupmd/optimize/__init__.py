@@ -166,7 +166,8 @@ class RelaxResult:
                 f"{self.energy:.6f} eV")
 
 
-def relax(force_field, atoms, optimizer=None, *, fmax=0.05, steps=100_000_000, skin=0.5, callback=None) -> RelaxResult:
+def relax(force_field, atoms, optimizer=None, *, fmax=0.05, steps=100_000_000, skin=0.5, callback=None,
+          _on_step=None) -> RelaxResult:
     """Relax ``atoms`` until the largest force on an atom is below ``fmax`` (eV/A), or ``steps`` optimiser steps
     were taken. ``optimizer`` is an ``lm.optimize`` record (default ``LBFGS()``); with its ``cell_filter`` the cell
     is relaxed too and the cell's rows count for ``fmax`` as in ASE. ``force_field`` is what ``lm.load`` returned.
@@ -214,10 +215,23 @@ def relax(force_field, atoms, optimizer=None, *, fmax=0.05, steps=100_000_000, s
         rows = forces if view is None else view.forces(forces, stress)
         return float(energy), rows, float(np.sqrt((rows ** 2).sum(axis=1).max()))
 
+    def notify(step):
+        if callback is not None:
+            callback(step, work.positions, energy, largest)
+        if _on_step is not None:       # the ASE drop-ins: the structure with its results, and ASE's logged value
+            work.calc = SinglePointCalculator(work, energy=energy, forces=last["forces"], **results_extra())
+            _on_step(step, work, energy if view is None else view.value(energy), largest)
+
+    def results_extra():
+        if view is None:
+            return {}
+        from ase.stress import full_3x3_to_voigt_6_stress
+
+        return {"stress": full_3x3_to_voigt_6_stress(last["stress"])}
+
     energy, forces, largest = evaluate()
     taken = 0
-    if callback is not None:
-        callback(taken, work.positions, energy, largest)
+    notify(taken)
     while largest >= fmax and taken < steps:
         started = time.perf_counter()
         if view is None:
@@ -227,13 +241,7 @@ def relax(force_field, atoms, optimizer=None, *, fmax=0.05, steps=100_000_000, s
         timers["optimizer"] += time.perf_counter() - started
         energy, forces, largest = evaluate()
         taken += 1
-        if callback is not None:
-            callback(taken, work.positions, energy, largest)
-    extra = {}
-    if view is not None:
-        from ase.stress import full_3x3_to_voigt_6_stress
-
-        extra["stress"] = full_3x3_to_voigt_6_stress(last["stress"])
-    work.calc = SinglePointCalculator(work, energy=energy, forces=last["forces"], **extra)
+        notify(taken)
+    work.calc = SinglePointCalculator(work, energy=energy, forces=last["forces"], **results_extra())
     return RelaxResult(atoms=work, steps=taken, converged=bool(largest < fmax), max_force=largest, energy=energy,
                        force_calls=taken + 1, optimizer_s=timers["optimizer"], force_s=timers["force"])
