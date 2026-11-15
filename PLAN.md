@@ -53,6 +53,11 @@ behaviour is an estimate and says so.
 | O22 | The session may start Docker Desktop itself for the wheel container (S2-T02) | 15 Nov 2026, 21:00 |
 | O23 | Profiles take NPT too (settles the open point of D55) | 15 Nov 2026, 21:00 |
 | O24 | The code of the specialised OMAT-0 medium kernels stays in the tree, built and gated as it is; it is not removed | 15 Nov 2026, 21:00 |
+| O25 | The Materials Project files need not ship: the three structures (`NbCl5`, and the `NaCl` and `NaNbO3` cells of the gate) are rebuilt by ourselves (settles D39's question; the rebuild is open work) | 15 Nov 2026, 21:30 |
+| O26 | A3 accepted, with one change of wording: the float64 force mode is deferred (it may be added later), not left out for good. No fallback to the MACE calculator and no bitwise-reproducible mode | 15 Nov 2026, 21:30 |
+| O27 | A4 accepted: CUDA 13 only | 15 Nov 2026, 21:30 |
+| O28 | A5 accepted: Linux x86-64 and WSL2, compute capability 8.0 and newer, no T4 | 15 Nov 2026, 21:30 |
+| O29 | A7 accepted, and the first public release is 0.1.0, not 1.0.0, until the owner is sure of the scope. Stages end in internal tags (`v0.1.0a1` ...); nothing is uploaded before 0.1.0 | 15 Nov 2026, 21:30 |
 
 ### 1.2 Defaults this plan assumes (open; each can be changed before the stage that depends on it)
 
@@ -60,11 +65,11 @@ behaviour is an estimate and says so.
 | --- | --- | --- | --- | --- |
 | A1 | Package name: `loupmd`, or `loup` (free on PyPI on 28 Oct, reserved in FastMACE's rename plan) | **decided, O19: `loupmd`.** `loupmd` for distribution, import and CLI | a directory and `pyproject.toml` rename, if done before the first upload | Stage 7 |
 | A2 | Keep the specialised OMAT-0 medium kernels (about 8% faster on `SrTiO3`: 8.28 against about 8.9 ms) | **decided, O20: not kept for now.** Every model runs the generic path (before the decision: kept for whole-system runs) | the source files (`interaction0.cu`, `generated_kernels.cuh`, `gen_kernels.py`, `export_omat0.py`) stay in the tree until the last merge of `round6-hardening`, which still edits them; bringing the path back is then a switch | S6-T10 |
-| A3 | FastMACE features left out | no float64 force mode, no fallback to the MACE calculator, no bitwise-reproducible mode; each is refused with a message that names the alternative | float64 and bitwise would each be a stage of their own | Stage 3 |
-| A4 | CUDA 12 wheels | CUDA 13 only at 1.0 (as FastMACE) | a second build and test matrix | Stage 2 |
-| A5 | Platforms | Linux x86-64 and WSL2; GPUs of compute capability 8.0 and newer. The T4 (7.5) is not supported: the own SGEMM uses `cp.async` and the hybrid GEMMs use TF32 tensor cores | T4 support needs fallbacks for both | Stage 2 |
+| A3 | FastMACE features left out | **decided, O26.** No fallback to the MACE calculator and no bitwise-reproducible mode; the float64 force mode is deferred and may be added later. Each is refused with a message that names the alternative | float64 and bitwise would each be a stage of their own | Stage 3 |
+| A4 | CUDA 12 wheels | **decided, O27.** CUDA 13 only at the first release (as FastMACE) | a second build and test matrix | Stage 2 |
+| A5 | Platforms | **decided, O28.** Linux x86-64 and WSL2; GPUs of compute capability 8.0 and newer. The T4 (7.5) is not supported: the own SGEMM uses `cp.async` and the hybrid GEMMs use TF32 tensor cores | T4 support needs fallbacks for both | Stage 2 |
 | A6 | Licence | settled by O6 (15 Nov 2026): MIT for LoupMD's own code; LGPL-2.1-or-later for files ported from ASE; third-party notices as FastMACE's | | |
-| A7 | Pre-releases | stages end in internal tags (`v1.0.0a1` ...); nothing is uploaded before 1.0.0 | none | Stage 7 |
+| A7 | Pre-releases | **decided, O29.** Stages end in internal tags (`v0.1.0a1` ...); nothing is uploaded before 0.1.0, the first public release (the plan said 1.0.0 until 15 November) | none | Stage 7 |
 
 ### 1.3 Open points found while building (owner's instruction of 15 November 2026: document, recommend, keep working)
 
@@ -80,7 +85,7 @@ row; "Undo" says what a different answer costs.
 | D5 | §2 forbade FP16 "anywhere on the force path"; the default hybrid GEMM cubins use one FP16 tensor-core instruction for the cross terms of the 3xTF32 split | **decided, O8:** allowed where accurate. §2 now says so; the 3x gate is the test | | |
 | D6 | `cubins/tf32x3_hyb_sm120.cubin` has no build record in either repository | **partly answered by the merge of `e21faa2`:** the developing session added its own `cubins/gemm_tc_*.cubin` with source, recipe and build record (`cubins/src/`), `gemm_tc_hyb_sm120.cubin` being the recorded rebuild of the default; the default `tf32x3_hyb_sm120.cubin` itself still has none. Recommended: make the recorded cubin the default once it is gated (the developing session's work); `NOTICE.md` lists both sets | | |
 | D7 | The hybrid kernels overflow for matrix elements of 32752 and above (FastMACE `hybrid_f16.h`) | **done upstream (S65, merged with `e21faa2`):** a non-finite energy, force or stress with the hybrid loaded drops it for that engine and evaluates again without it; `loup_run` reports a non-finite energy after a block. A loader check on the weights is no longer planned | a silent `inf` would be worse than a slower GEMM | none |
-| D8 | Version string while the stages run | `LOUP_VERSION "1.0.0a1"`, so `loup_version()` gives `1.0.0a1+<hash>`; `1.0.0+<hash>` at the release | a library built today should not call itself 1.0.0 | one line in the header and one in `loupmd/__init__.py` |
+| D8 | Version string while the stages run | `LOUP_VERSION "0.1.0a1"`, so `loup_version()` gives `0.1.0a1+<hash>`; `0.1.0+<hash>` at the release | a library built today should not call itself 0.1.0 | one line in the header and one in `loupmd/__init__.py` (O29, 15 November: the numbers were `1.0.0a1` and `1.0.0` until then) |
 | D9 | `python/bench_md.py`, `bench_family.py`, `test_gate.py` still bind the library through `python/loupmd.py`, which cannot read `loup_last_error` | leave them until S0-T03; `LOUP_DEBUG_ERRORS=1` prints the reason | editing `python/` is what D2 holds back | a ten-line edit of `python/loupmd.py` |
 | D10 | Baseline commit of S0-T01 | the merged code (`bac354c`), not `0336751` | the owner's order put the merge first; Stage 1 is compared with what it starts from | none |
 | D11 | S1-T03's scope | besides keeping the graphs, a run call no longer makes a force pass before its first step when the forces on the device are current | the 2% criterion cannot be met otherwise: that pass is one force evaluation per call | one `if` in `run_md_loop` |
@@ -95,7 +100,7 @@ row; "Undo" says what a different answer costs.
 | D20 | S2-T08's acceptance says `loupmd bench` reproduces `bench_md.py` within 1% on the same build. Measured: `SrTiO3` -0.5% and +0.1%; `NbCl5` -0.7% and +1.3% in two runs, while `bench_md.py`'s own `NbCl5` runs of this build spread from 1.783 to 1.839 ms (3%) on the same day | **accepted, O14.** read the criterion as "within the run-to-run spread of `bench_md.py`" (1% for `SrTiO3`, 3% for `NbCl5`); the protocol is the same code path, call for call | 1% is below what the card repeats for the 1,944-atom cell | none |
 | D21 | After the merge of `round6-hardening` `e21faa2`, seven `bench_md.py` A/B runs against that tip give head / tip 1.0030 for `NbCl5` (0.9946 to 1.0080) and 0.9997 for `SrTiO3` (0.9965 to 1.0044); before the merge Stage 1 tied its baseline at 0.9994 / 0.9986 | **accepted as a tie, O14.** counted as a tie: the `NbCl5` mean is 1.4 standard errors from 1, the MD loop differs from the tip only by Stage 1's host-side counters, and single `NbCl5` runs of one build spread by 3% | §2 forbids a speed regression on the standard benchmarks, so the owner should see the number | a longer A/B on an idle machine, or `nsys` kernel lists of both builds, if 0.3% is to be chased |
 | D22 | §4.4 said every family has two interaction layers except OMOL-0. The released files say: POLAR-1-S one, POLAR-1-L three, OMOL-0 extra large three, all others two (`loupmd/models.py`, read with `loupmd/_probe.py`) | §4.4 corrected; no consequence for the sweeps, which take any layer count, and POLAR is refused for tiled execution | the plan was wrong | none |
-| D23 | A built wheel cannot run yet: `loupmd/__init__.py` loads the bundle cache from `python/loupmd.py` and the exporters live in `python/`, neither of which is in the wheel; `_lib/` is empty until S2-T02 | S2-T01 is checked with an editable install; S2-T03, S2-T11, S2-T12 and the tag `v1.0.0a2` wait for the layout move (D2) | a wheel needs the move | none |
+| D23 | A built wheel cannot run yet: `loupmd/__init__.py` loads the bundle cache from `python/loupmd.py` and the exporters live in `python/`, neither of which is in the wheel; `_lib/` is empty until S2-T02 | S2-T01 is checked with an editable install; S2-T03, S2-T11, S2-T12 and the tag `v0.1.0a2` wait for the layout move (D2) | a wheel needs the move | none |
 | D24 | `IntegratorConfig` (S3-T01) had no `fixcm` | **settled by S4-T01 (`42cd77d`):** `IntegratorConfig.fixcm`, and the records' `fixcm="auto"` is on (off with fixed atoms), as in FastMACE | | |
 | D25 | S3-T06 said the engine sees a schedule's temperature at chunk boundaries | built more exactly: the thermostat's target is a device scalar that the step advances, so every step of a ramp runs at its end-point target, as in FastMACE, and a changed temperature captures no graph. `LoupIntegrator` gained `temp_rate_k_per_step` (the layout of ABI v1 changed before its first release) | a target constant over 20 steps would differ from FastMACE's runs and each change would capture the step again | none |
 | D26 | When a restart is written | **accepted, O18.** `Simulation.run` writes one every `Output.restart_every` steps and when `save_restart()` is called; `lm.md` and `loupmd md` save one at the end of the run. What FastMACE's `fm.md` does at its end was not compared | a finished run should be resumable without the user thinking of it | drop the call at the end of `md` |
@@ -111,7 +116,7 @@ row; "Undo" says what a different answer costs.
 | D36 | The conserved quantity of CSVR and the Nose-Hoover chain is in the engine's thermo rows, not in `thermo.*.csv` | the CSV keeps FastMACE's eight columns (`total_eV_atom` is potential plus kinetic) | FastMACE's files have no such column; adding one changes the format every reader of S3-T03 expects | add `conserved_eV_atom` as a ninth column |
 | D37 | Choosing the thermostat from the command line and in a run file | `loupmd md --thermostat langevin|csvr`, `--friction PER_FS`, `--tau FS`; run files and `metadata.json` take an `[integrator]` table (`type`, then the record's fields; `timestep_fs` and `temperature_K` may be left to the keys above it). `lm.md` writes an explicit `integrator=` into the arguments block, so `loupmd run metadata.json` repeats it | LoupMD's own spelling, as D27 | rename before the documentation stage |
 | D38 | The layout move's step plan put `test_gate.py` into `loupmd/validate/` and the two bench scripts into `loupmd/bench/` | they are developer tools in `tools/dev/`; the gate library and `loupmd bench` were written since and are what users run. Generated sources keep `LoupMD/python/gen_*.py` in their header comment, and comments in `src/` still name `python/` paths | moving scripts over the new modules would have overwritten them; changing generated headers or `src/` comments would conflict with every merge of `round6-hardening` | rename and regenerate after the last merge |
-| D39 | The Materials Project's terms could not be read from this machine (15 November: the site refuses automated requests) | `NbCl5_R2SCAN.cif` and the `NaCl` and `NaNbO3` cells stay outside the package; `loupmd/bench/structures/SOURCES.md` says so | O11: MP files only once their terms are confirmed | the owner, or a session with a browser, reads the terms; then copy the three files and add them to `SOURCES.md` |
+| D39 | The Materials Project's terms could not be read from this machine (15 November: the site refuses automated requests, and the browser pane is not allowed to open it) | **O25: the files need not ship; the structures are rebuilt by ourselves.** Until that is done `NbCl5_R2SCAN.cif` and the `NaCl` and `NaNbO3` cells stay outside the package and `loupmd/bench/structures/SOURCES.md` says so | O11: files ship where the licence allows | open, with a recommendation: rocksalt `NaCl` is built in code already; for `NbCl5` and `NaNbO3` take the entries of the Crystallography Open Database (public domain, as the three organic crystals that ship) and, if wanted, relax them with a model ourselves. This needs the owner's go for two downloads from crystallography.net and a re-measured `NbCl5` reference, because a rebuilt cell is not the r2SCAN cell every figure so far was measured on; development A/Bs can keep the old file through `LOUPMD_BENCH_STRUCTURES` |
 | D40 | Two sessions on one GPU. On 15 November at 12:32 the PC stopped with bug check 0xD1 in `nvlddmkm.sys` (fault bucket `AV_nvlddmkm!__nvoc_objCreate_IoAperture`) while this session's test suite ran under FastMACE's reservation and the developing session started POLAR-1 gates without it. From 13:12 on the WSL distribution was shut down every one to two minutes by something outside this session, which killed the GPU queue and CPU jobs alike | this session's jobs wait for an idle GPU, for no fresh file in the other checkout and for the reservation; the full suite is split into jobs of a few minutes. The developing session was given the reservation command and asked not to terminate WSL | the driver crash is the fifth NVIDIA or hypervisor record since 10 November (driver 621.14) | the owner: one session at a time on the GPU if this repeats; a driver update |
 | D41 | `skin="auto"` (O17) | `705af4c`: default of `lm.md`, `loupmd md` and the ASE drop-ins; `lm.Simulation` keeps 0.5 A unless asked. Estimate `5 sqrt(kT / m_min) dt` (or the fastest atom now), then one correction from `loup_get_step_displacement` after 200 steps near the run's highest target; skin = 10 x the largest step on a 0.05 A grid within 0.5 to 1.5 A. Measured (water 216, MACE-OFF23 small, 300 K, 1 fs): 0 of 800 steps in the pipelined loop at 0.5 A and 0.676 ms/step; 799 of 800 at the chosen 0.8 A and 0.556 ms/step | the upper bound 1.5 A is the largest skin with a measurement on file | change the constants of `loupmd/skin.py` |
 | D42 | O20 said the specialised kernels are about 8% faster on the RTX 5060 Ti | `5d7f363`: the generic path is the default. Measured on today's build, generic against specialised in one library, both orders: `NbCl5` 3x3x3 1.0409 and 1.0399, `SrTiO3` 10x10x10 1.0184 and 1.0144 (S63 of 14 November had 1.029 and 1.074; the generic conv variants of S64 came since). `loupmd bench`'s reference numbers are the generic path's: 1.881, 8.243 and 1.833 ms/step (specialised: 1.813, 8.018, 1.777). Both gates pass | the cost is 4% on `NbCl5` and 1.4 to 1.8% on `SrTiO3`, less than the decision assumed | none; the specialised kernels stay built and gated (`--specialised`) until the owner drops them |
@@ -156,7 +161,7 @@ Every task inherits these. They come from `AGENTS.md`, the status file and the o
   This guard is never weakened.
 - **No bitwise criteria on GPU results across runs:** force and adjoint sums use atomics, so two runs of one build
   differ at rounding level. Acceptance compares against the measured run-to-run spread or a stated tolerance.
-- **Fully periodic, one structure, one GPU** at 1.0 (as FastMACE). The domain abstraction of Stage 1 is built so
+- **Fully periodic, one structure, one GPU** at the first release (as FastMACE). The domain abstraction of Stage 1 is built so
   that non-periodic systems and several GPUs can follow without another redesign.
 - **Git:** run git from Git Bash on Windows inside this worktree. WSL's git (2.43) cannot read the worktree's
   `D:/` gitdir, and `git worktree add --relative-paths` must not be used: it sets a repository extension that
@@ -274,7 +279,7 @@ All calls return 0 or -1 as today. New and changed entry points:
 ```c
 #define LOUP_ABI_VERSION 1
 int         loup_abi_version(void);
-const char* loup_version(void);                       /* "1.0.0+<library hash>" */
+const char* loup_version(void);                       /* "0.1.0+<library hash>" */
 const char* loup_last_error(const LoupHandle* h);     /* h == NULL: the calling thread's last create error */
 
 typedef struct {
@@ -457,7 +462,7 @@ The base of everything else. Each task keeps the standard benchmarks within nois
 | S1-T10 | Memory plan from buffer sizes and `cudaMemGetInfo` | engine, header | `loup_plan_memory`, `LoupMemoryPlan` | the predicted whole-system bytes are within 10% of the measured peak for 5,000, 20,480 and 40,000 `SrTiO3` atoms |
 | S1-T11 | Decaying displacement maximum (review item S2), so one fast step no longer keeps a run out of the pipelined loop | `src/engine.cu`, `src/integrator.cu`, `src/neighbors.cu` | none | a run with one fast first step pipelines again after two windows; water at 300 K reports `pipelined_steps > 0` at skin 1.0 A and 0 at skin 0.5 A, where its hydrogens are too fast for any decay (§1.3 D13), with `dangerous_builds == 0`; the existing pipeline tests pass |
 
-**Exit:** all of the above, the default gate and `pytest`; tag `v1.0.0a1`.
+**Exit:** all of the above, the default gate and `pytest`; tag `v0.1.0a1`.
 
 **Progress (15 November 2026, 02:30).** Step-level plan: `plans/stage-1-core-api.md`. Everything below was
 measured on the RTX 5060 Ti only; numbers and commands are in `STATUS_AND_PROFILE.md` §6 and the ledger
@@ -470,7 +475,7 @@ Stage 1 as a whole against the baseline (`plans/baseline-20261115.md`): `pytest`
 | Task | Commits | State |
 | --- | --- | --- |
 | S1-T01 | `22b5f57` | **done**: every refusal of `engine.cu` has its own text, tested; nothing on stderr |
-| S1-T02 | `d1eba02` | **done**. `loup_version` gives `1.0.0a1+<hash>` (D8) |
+| S1-T02 | `d1eba02` | **done**. `loup_version` gives `0.1.0a1+<hash>` (D8) |
 | S1-T03 | `dd5268d` | **done**: 100 calls of 10 steps cost 1.011 and 1.006 of one call of 1,000 (baseline 1.113); criterion 2% |
 | S1-T04 | `5f40a54` | **done**, except the `nsys` kernel list, which was not run (`run_md_loop` is unchanged; the old entry points share their graphs with `loup_run`, tested) |
 | S1-T05 | `d0b1fc9` | **done**: rows equal the engine's energies; `thermo_every = 20` costs 1.0003 to 1.0041 of the step, inside the block spread |
@@ -496,7 +501,7 @@ and commands: `STATUS_AND_PROFILE.md` §6.1, ledger `rel-merge-r6tip`.
 
 Not done for the exit of Stage 1: the rest of S1-T07 (D14), the family gates of S1-T08 on the merged code (the
 default gate ran; `--set organic` and `--set crystals` for the generic families did not), and the owner's word on
-D13, D14, D16 and D21. The tag `v1.0.0a1` is not set. Two observations are open. The replay schedule of
+D13, D14, D16 and D21. The tag `v0.1.0a1` is not set. Two observations are open. The replay schedule of
 S1-T08 on OFF23 medium failed once inside a full run of 450 tests (15 November, 06:05) and passed in 12 isolated
 repeats, with and without the per-system conv variant timing; its message was not kept, so the size is unknown.
 And:
@@ -521,7 +526,7 @@ And:
 | S2-T12 | Clean-install proof: fresh venv without torch, install the wheel, `loupmd doctor`, `loupmd bench --quick` on a pre-exported bundle, with `nvcc`, `g++` and torch shadowed; a second venv with the export extra exports and runs | `tools/release/clean_install.sh` | the script exits 0 and prints both runs' ms/step |
 
 **Exit:** a user with a CUDA 13 driver can install, run `doctor`, `bench` and `validate`, and use the ASE calculator.
-Tag `v1.0.0a2`.
+Tag `v0.1.0a2`.
 
 **Progress (15 November 2026, 05:15).** Tasks that need neither the layout move nor a container were done ahead of
 Stage 1's exit; GPU checks on the RTX 5060 Ti only, on the merged engine build (`11edd3c`).
@@ -556,7 +561,7 @@ Stage 1's exit; GPU checks on the RTX 5060 Ti only, on the merged engine build (
 | S3-T09 | Provenance `metadata.json`: code version and git commit, library hash, bundle key and model SHA-256, label and licence, plan (execution mode, kernel variants, GEMM plan file), precision, software versions, GPU name, compute capability and the NVIDIA driver number from NVML, seed, gate record, counters, timing | `loupmd/provenance.py` | schema test; a run's metadata reproduces the run when fed back through `loupmd run` |
 | S3-T10 | `check="gate"` inside a run: two rattled copies (0.05 A), plus two strained copies (2%) for NPT, through `loupmd.validate`; statuses `passed`, `failed`, `unavailable`, `skipped` | `loupmd/simulation.py`, `loupmd/validate/` | a deliberately corrupted bundle table fails the gate and the run does not start |
 
-**Exit:** `lm.md`, `Simulation`, output, resume and the CLI run NVE and Langevin end to end. Tag `v1.0.0a3`.
+**Exit:** `lm.md`, `Simulation`, output, resume and the CLI run NVE and Langevin end to end. Tag `v0.1.0a3`.
 
 **Progress (15 November 2026, 06:10).** Every task of the stage is built for what the engine has today (NVE and
 Langevin). GPU checks on the RTX 5060 Ti only; numbers and commands in `STATUS_AND_PROFILE.md` §6.2. Full suite on
@@ -575,7 +580,7 @@ the last engine build: 450 tests, 449 passed and 1 failed (`tests/test_sweeps.py
 | S3-T09 | `cb8b020` | **done**: `metadata.json` validates against `loupmd.metadata/1`, and `loupmd run metadata.json` repeats the run (CPU). Deviations from the task's list: the driver number comes from nvidia-smi, not NVML, and the GEMM plan file is not recorded (the engine does not report which file it read) |
 | S3-T10 | `e11370e`, `cb8b020`, `1b06826` | **done for NVE and NVT**: `check="gate"` passes on `SrTiO3` 3x3x3 (worst ratios 0.91 / 1.80 / 1.44); a bundle with one table scaled by 2% fails with ratios 6,172 / 6,637 / 19,809 and no step runs. Strained copies wait for NPT; the CPU fallback of the reference is untested on a real large cell (D28) |
 
-Not done for the exit of Stage 3: the tag `v1.0.0a3` (not set; Stage 1's and 2's exits are open, see above),
+Not done for the exit of Stage 3: the tag `v0.1.0a3` (not set; Stage 1's and 2's exits are open, see above),
 and a comparison of the front end's spelling with FastMACE's on a real FastMACE run (D26, D27).
 
 ### Stage 4: dynamics, relaxation and ASE drop-ins (4.5 weeks)
@@ -599,7 +604,7 @@ FastMACE's integrators are ports of ASE 3.27 classes and are the reference imple
 | S4-T12 | `Simulation.relax`, CLI `relax` and `quench`; relax writes extxyz | `loupmd/simulation.py`, `loupmd/cli/` | `loupmd relax` output equals the Python call's |
 | S4-T13 | `loupmd.ase` drop-ins: `Langevin`, `LangevinBAOAB`, `VelocityVerlet`, `Bussi`, `NoseHooverChainNVT`, `IsotropicMTKNPT`, `MTKNPT`, `NVTBerendsen`, `NPTBerendsen`, `Inhomogeneous_NPTBerendsen`, `LBFGS`, `FIRE`, with ASE's arguments and units plus `model=`, `head=`, `seed=`, `output=`, `check=`; `dyn.attach` supported with a host sync per call | `loupmd/ase/md.py`, `optimize.py` | FastMACE's ASE-port example runs after changing the import line |
 
-**Exit:** every ensemble and optimiser of FastMACE runs natively. Tag `v1.0.0a4`.
+**Exit:** every ensemble and optimiser of FastMACE runs natively. Tag `v0.1.0a4`.
 
 **Progress (15 November 2026, 06:50).** The host side of the stage and fixed atoms are built; the integrators that
 need new engine kernels are not. RTX 5060 Ti only; numbers in `STATUS_AND_PROFILE.md` §6.3.
@@ -636,7 +641,7 @@ Stage 4 as it stands (15 November 2026, 20:30): every task from S4-T01 to S4-T13
 RTX 5060 Ti, and every integrator kind of `include/loupmd.h` runs. Not done for the exit: the owner's word on
 D48 (Berendsen NPT's one force call per step against the criterion's 1e-6); `tests/test_gate_wrapper.py` on the last build (the default gate, `--specialised` and the family gates of
 seventeen models pass, §6.9 of the status file); the step times of the three NPT integrators (the variable-cell step is 1.026 to 1.030 of the fixed-cell
-step, D49); NPT on any system but `SrTiO3`; anything on the RTX 4000 Ada (O12). The tag `v1.0.0a4` is not set:
+step, D49); NPT on any system but `SrTiO3`; anything on the RTX 4000 Ada (O12). The tag `v0.1.0a4` is not set:
 the exits of Stages 1 to 3 are open.
 
 ### Stage 5: tiled and wavefront capacity mode (6 weeks)
@@ -665,7 +670,7 @@ with the generic path.
 | S5-T11 | Capacity records with the owner's go for each machine: largest `SrTiO3` cell on the RTX 5060 Ti; on the Ada and on an A100 if allowed | `docs/validation/capacity.md` | each record names atoms, edges per atom, energy per atom, largest force, device and host peaks, time per call |
 | S5-T12 | Front end: `capacity=` in `lm.md` and `Simulation`, the plan line in the report, documentation page | `loupmd/quick.py`, `docs/guide/large-cells.md` | `loupmd md --capacity auto` on a cell that does not fit whole runs tiled and says so |
 
-**Exit:** tiled and wavefront runs pass the gate and run MD without user tuning. Tag `v1.0.0b1`.
+**Exit:** tiled and wavefront runs pass the gate and run MD without user tuning. Tag `v0.1.0b1`.
 
 ### Stage 6: remaining parity (3.5 weeks without dispersion)
 
@@ -713,7 +718,7 @@ and research on what to build comes first. Starting points, read on 14 November 
 | S6-D10 | `loupmd validate --dispersion`: compares the chosen settings with simple-dftd3 on the user's structure; documentation page on choosing a variant, with the recipe for adding D4 through its own ASE calculator | `loupmd/validate/`, `docs/guide/dispersion.md` | the command passes for every preset and fails for a deliberately wrong parameter set |
 
 **Approved scope (decision O4).** The default is the fastest evaluation of the pair sum that is as accurate as the
-conventional setting; the three-body term is offered but off by default; the mesh sum is in 1.0; D4 is not.
+conventional setting; the three-body term is offered but off by default; the mesh sum is in the first release; D4 is not.
 By decision O5 every summation method can also be chosen by name, and the automatic mode checks its candidates on the
 user's own structure before it picks one.
 
@@ -746,7 +751,7 @@ meV/atom/ps. If no candidate beats the 40 bohr sum within the contract, that sum
 
 Scope changes after 14 November 2026 need the owner's approval; cut variants are listed in §11.
 
-**Exit:** every row of §6 is done or an acknowledged cut, and every dispersion variant approved in S6-D01 passes its checks. Tag `v1.0.0rc1`.
+**Exit:** every row of §6 is done or an acknowledged cut, and every dispersion variant approved in S6-D01 passes its checks. Tag `v0.1.0rc1`.
 
 ### Stage 7: release (2.5 weeks)
 
@@ -757,7 +762,7 @@ Scope changes after 14 November 2026 need the owner's approval; cut variants are
 | S7-T03 | Licence audit: every vendored and ported file with its origin and licence; the cubins' build recipe; the D3 parameter file | `NOTICE.md` complete; `pip-licenses` of the run-time dependencies attached |
 | S7-T04 | Five examples as FastMACE's (NVT anneal, NPT with dispersion melt-quench, swap MC, relaxations, ASE port) plus a large-cell example | each runs with `--steps 200` in the acceptance tier |
 | S7-T05 | Reference benchmarks for the shipped `reference/*.json`: RTX 5060 Ti and, with the owner's go, RTX 4000 Ada, A100, L4 | each record carries its provenance block |
-| S7-T06 | Final verification: full CPU suite, all GPU tiers, the gate for every label in whole and tiled mode, clean-install proof on the built wheel, A/B against `v1.0.0a1` | all pass; results in `docs/validation/release-1.0.0.md` |
+| S7-T06 | Final verification: full CPU suite, all GPU tiers, the gate for every label in whole and tiled mode, clean-install proof on the built wheel, A/B against `v0.1.0a1` | all pass; results in `docs/validation/release-0.1.0.md` |
 | S7-T07 | `tools/release/make_release.sh`: git archive, build, `twine check --strict`, SHA-256; it never uploads | artefacts and hashes listed |
 | S7-T08 | **Owner go-ahead:** name (A1), repository visibility, upload to PyPI | recorded |
 

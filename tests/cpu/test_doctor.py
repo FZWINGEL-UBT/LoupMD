@@ -28,7 +28,7 @@ def healthy(tmp_path, monkeypatch):
         (lib.parent / "cubins" / name).write_bytes(b"")
     monkeypatch.setattr(doctor, "probe_gpus", lambda: [("NVIDIA GeForce RTX 5060 Ti", "621.14", 120)])
     monkeypatch.setattr(doctor, "probe_runtime_library", lambda name: None)
-    monkeypatch.setattr(doctor, "probe_library", lambda: (lib, "1.0.0a1+0123456789abcdef"))
+    monkeypatch.setattr(doctor, "probe_library", lambda: (lib, "0.1.0a1+0123456789abcdef"))
     monkeypatch.setattr(doctor, "probe_module", lambda name: True)
     monkeypatch.setenv("LOUPMD_CACHE", str(tmp_path / "cache"))
     monkeypatch.setenv("LOUPMD_MODELS", str(tmp_path / "models"))
@@ -51,7 +51,7 @@ def test_a_healthy_machine_has_no_failure_and_only_the_missing_models_warning(he
     assert [c.what for c in checks if c.status == doctor.WARN] == ["model files"]
     text = _report(checks)
     assert "[ ok ] GPU 0: NVIDIA GeForce RTX 5060 Ti, driver 621.14, compute capability 12.0" in text
-    assert "[ ok ] libloupmd 1.0.0a1+0123456789abcdef" in text
+    assert "[ ok ] libloupmd 0.1.0a1+0123456789abcdef" in text
     assert "[ ok ] tensor-core GEMM kernels for GPU 0" in text and "tf32x3_hyb_sm120.cubin" in text
     assert "[ ok ] cache root" in text and "(not created yet)" in text
     assert not (healthy / "cache").exists()                      # the doctor changes nothing

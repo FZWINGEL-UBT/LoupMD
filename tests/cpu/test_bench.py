@@ -107,7 +107,7 @@ def test_time_system_runs_warm_up_then_the_blocks_with_the_seeds_of_bench_md():
 
 def test_a_record_validates_and_survives_json():
     record = protocol.make_record([_row()], protocol.PROTOCOLS["quick"], "quick", GPU, MODEL,
-                                  "1.0.0a1+0123456789abcdef", "1.0.0a1", other_gpu_processes=[],
+                                  "0.1.0a1+0123456789abcdef", "0.1.0a1", other_gpu_processes=[],
                                   gpu_utilisation_percent=0)
     assert record["schema"] == "loupmd.bench/1" and protocol.validate_record(record) == []
     back = json.loads(json.dumps(record))
@@ -126,7 +126,7 @@ def test_a_record_validates_and_survives_json():
     (lambda r: r["rows"][0].update(atoms="many"), "row 0: 'atoms' is not a int"),
 ])
 def test_a_damaged_record_is_reported(damage, problem):
-    record = protocol.make_record([_row()], protocol.PROTOCOLS["quick"], "quick", GPU, MODEL, "lib", "1.0.0a1")
+    record = protocol.make_record([_row()], protocol.PROTOCOLS["quick"], "quick", GPU, MODEL, "lib", "0.1.0a1")
     damage(record)
     assert any(problem in p for p in protocol.validate_record(record)), protocol.validate_record(record)
 
@@ -354,9 +354,9 @@ def test_the_reference_table_is_keyed_by_gpu_model_system_and_protocol(tmp_path)
     table = tmp_path / "reference.json"
     table.write_text(json.dumps({"schema": "loupmd.bench-reference/1", "entries": [
         {"gpu": GPU["name"], "model_sha256": MODEL["sha256"], "system": "SrTiO3 6x6x6", "protocol": "quick",
-         "ms_per_step": 2.0, "library": "1.0.0a1+0123456789abcdef", "measured": "2026-11-15"}]}))
+         "ms_per_step": 2.0, "library": "0.1.0a1+0123456789abcdef", "measured": "2026-11-15"}]}))
     record = protocol.make_record([_row(), _row(name="NaCl 3x3x3", atoms=216)], protocol.PROTOCOLS["quick"], "quick",
-                                  GPU, MODEL, "lib", "1.0.0a1")
+                                  GPU, MODEL, "lib", "0.1.0a1")
     found = reference.lookup(record, table)
     assert set(found) == {"SrTiO3 6x6x6"} and found["SrTiO3 6x6x6"]["ms_per_step"] == 2.0
     other = dict(record, gpu=dict(GPU, name="NVIDIA A100-SXM4-40GB"))
@@ -383,7 +383,7 @@ def test_ab_runs_the_sides_in_fresh_processes_in_the_order_a_b_b_a(monkeypatch, 
         seen.append((env.get("LOUP_LIB"), env.get("LOUP_NO_HYBRID"), cmd[:4], cmd[4:-2]))
         ms = 2.0 if env.get("LOUP_LIB") == "/a.so" else 1.9
         record = protocol.make_record([_row(blocks=(ms, ms))], protocol.PROTOCOLS["quick"], "quick", GPU, MODEL, "lib",
-                                      "1.0.0a1")
+                                      "0.1.0a1")
         with open(target, "w") as out:
             json.dump(record, out)
         return types.SimpleNamespace(returncode=0, stdout="", stderr="")
@@ -422,7 +422,7 @@ def fake_suite(monkeypatch):
     def run_suite(model, **kw):
         calls.append((model, kw))
         rows = [_row()]
-        return protocol.make_record(rows, protocol.PROTOCOLS["quick"], kw["suite"], GPU, MODEL, "lib", "1.0.0a1"), rows
+        return protocol.make_record(rows, protocol.PROTOCOLS["quick"], kw["suite"], GPU, MODEL, "lib", "0.1.0a1"), rows
 
     monkeypatch.setattr(bench, "run_suite", run_suite)
     monkeypatch.setattr(reference, "lookup", lambda record, table=None: {})
@@ -461,7 +461,7 @@ def test_the_command_reports_a_refusal_without_a_traceback(monkeypatch, capsys):
 def test_an_unstable_row_makes_the_command_fail(monkeypatch, capsys):
     def run_suite(model, **kw):
         rows = [_row(temperature=float("inf"))]
-        return protocol.make_record(rows, protocol.PROTOCOLS["quick"], "quick", GPU, MODEL, "lib", "1.0.0a1"), rows
+        return protocol.make_record(rows, protocol.PROTOCOLS["quick"], "quick", GPU, MODEL, "lib", "0.1.0a1"), rows
 
     monkeypatch.setattr(bench, "run_suite", run_suite)
     monkeypatch.setattr(reference, "lookup", lambda record, table=None: {})

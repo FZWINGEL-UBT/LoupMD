@@ -23,7 +23,7 @@ def test_md_runs_reports_and_records(model_path, tmp_path):
     metadata = json.loads((tmp_path / "run" / "metadata.json").read_text())
     assert provenance.validate(metadata) == [] and metadata["step"] == 200 and metadata["status"] == "idle"
     assert metadata["plan"]["kernels"] == "generic" and metadata["plan"]["interaction_layers"] == 2
-    assert metadata["plan"]["memory"]["whole_bytes"] > 0 and metadata["plan"]["library"].startswith("1.0.0a1+")
+    assert metadata["plan"]["memory"]["whole_bytes"] > 0 and metadata["plan"]["library"].startswith("0.1.0a1+")
     assert metadata["gpu"]["name"] and metadata["gpu"]["driver"]
     assert metadata["structure"]["atoms"] == 320 and metadata["bundle"].endswith(".loup")
     assert metadata["counters"]["dangerous_builds"] == 0 and metadata["timing"]["ms_per_step"] > 0

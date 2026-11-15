@@ -31,7 +31,7 @@ dispersion code (the GPU was in use), no molecular-dynamics run, and FourierD3's
 | D3, zero damping | pairwise C6 and C8 terms, C6 from the coordination number | nothing | build |
 | D3, Becke-Johnson damping | same sum, rational damping; the Grimme group's recommendation ("does not lead to artificial repulsive forces") | nothing | build; the default |
 | D3M(0), D3M(BJ) | refitted parameters; D3M(0) adds one parameter | nothing | build: same kernel, other numbers |
-| D3(op), D3(CSO), D3(Z) | further dampings in the reference code; few parametrisations (CSO: eight functionals; Z: none) | nothing | not at 1.0 |
+| D3(op), D3(CSO), D3(Z) | further dampings in the reference code; few parametrisations (CSO: eight functionals; Z: none) | nothing | not at the first release |
 | ATM three-body term | Axilrod-Teller-Muto triple sum, zero-damped, C9 from the pair C6 | nothing | build as an option |
 | D4 | D3's successor with charge-dependent polarisabilities; BJ damping and ATM on by default | atomic charges from an electronegativity-equilibration solve with Ewald summation | not at 1.0 (§6.3) |
 | Reciprocal-space D3 (FourierD3) | the damped pair sum on a particle mesh, no real-space cutoff | nothing | build second |
@@ -310,7 +310,7 @@ About 11.5 weeks, against the 7.5 the plan assumed before this research.
    it does not serve the largest tiled cells and covers BJ only.
 4. **D4 left out of 1.0** (below).
 
-### 6.3 Not at 1.0, with reasons
+### 6.3 Not at the first release, with reasons
 
 - **D4.** No periodic GPU implementation exists to build on or compare with: the Grimme group's PyTorch version
   states that periodic boundary conditions are not implemented, and ALCHEMI, LAMMPS and SevenNet have D3 only. The

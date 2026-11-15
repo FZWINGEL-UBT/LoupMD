@@ -14,6 +14,7 @@ from pathlib import Path
 
 import pytest
 
+import loupmd
 from loupmd import models
 from loupmd.errors import CacheLocationError, CheckpointTrustError, InputError
 
@@ -180,7 +181,7 @@ def test_cli_models_lists_every_label(tmp_path):
 
 def test_cli_exit_codes_and_error_form(tmp_path):
     env = {"LOUPMD_CACHE": str(tmp_path / "cache")}
-    assert _cli("--version").stdout.startswith("loupmd 1.")
+    assert _cli("--version").stdout.strip() == f"loupmd {loupmd.__version__}"
     assert _cli(env=env).returncode == 2
     assert _cli("no-such-command", env=env).returncode == 2
     bad = _cli("models", "--download", "no-such-label", env=env)

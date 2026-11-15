@@ -135,7 +135,7 @@ def test_an_npt_profile_gives_the_ensemble_and_the_pressure(world):
 def test_md_prints_the_report_and_writes_the_run(world, capsys):
     assert main(["md", *_args(world, "--output", "a")]) == 0
     out = capsys.readouterr().out
-    assert "LoupMD 1.0.0a1: MD run, status idle" in out and "salt.cif x (2, 1, 1): 16 atoms" in out
+    assert "LoupMD 0.1.0a1: MD run, status idle" in out and "salt.cif x (2, 1, 1): 16 atoms" in out
     assert [int(r[0]) for r in _rows(world.path / "a")] == [0, 20, 40]
     assert world.loads == [(world.model, None, {"trusted": True})]
     metadata = json.loads((world.path / "a" / "metadata.json").read_text())

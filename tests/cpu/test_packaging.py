@@ -85,16 +85,16 @@ def test_runtime_info_names_the_gpus_and_the_library(monkeypatch):
 
     monkeypatch.setattr(_gpu, "query_gpus", lambda: [("NVIDIA GeForce RTX 5060 Ti", "621.14", 120)])
     monkeypatch.setattr(_core, "library_path", lambda: Path("/opt/x/libloupmd.so"))
-    monkeypatch.setattr(_core, "library_version", lambda: "1.0.0a1+0123456789abcdef")
+    monkeypatch.setattr(_core, "library_version", lambda: "0.1.0a1+0123456789abcdef")
     monkeypatch.setattr(runtime, "_loaded", lambda part: "/usr/local/cuda/lib64/libcudart.so.13")
     info = loupmd.runtime_info()
     assert info.version == loupmd.__version__ and info.abi_version == _core.ABI_VERSION
-    assert info.library == "/opt/x/libloupmd.so" and info.library_version == "1.0.0a1+0123456789abcdef"
+    assert info.library == "/opt/x/libloupmd.so" and info.library_version == "0.1.0a1+0123456789abcdef"
     assert info.library_error is None and info.cuda_runtime == "/usr/local/cuda/lib64/libcudart.so.13"
     gpu, = info.gpus
     assert (gpu.index, gpu.name, gpu.driver, gpu.compute_capability) == (0, "NVIDIA GeForce RTX 5060 Ti", "621.14", "12.0")
     text = str(info)
-    assert f"loupmd {loupmd.__version__}" in text and "library 1.0.0a1+0123456789abcdef (/opt/x/libloupmd.so)" in text
+    assert f"loupmd {loupmd.__version__}" in text and "library 0.1.0a1+0123456789abcdef (/opt/x/libloupmd.so)" in text
     assert "GPU 0: NVIDIA GeForce RTX 5060 Ti, compute capability 12.0, driver 621.14" in text
     with pytest.raises(Exception):
         info.version = "2"                                            # a frozen record
@@ -162,7 +162,7 @@ def test_a_library_that_lacks_a_call_of_the_binding_is_reported_by_name(monkeypa
 
         def __init__(self):
             self.loup_abi_version = lambda: _core.ABI_VERSION
-            self.loup_version = lambda: b"1.0.0a1+old"
+            self.loup_version = lambda: b"0.1.0a1+old"
 
         def __getattr__(self, name):
             raise AttributeError(f"undefined symbol: {name}")
