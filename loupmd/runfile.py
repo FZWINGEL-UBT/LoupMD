@@ -20,6 +20,7 @@ FORMAT = "loupmd.run/1"
 KEYS = {
     "structure": None, "model": None, "head": None, "checkpoint": None, "sha256": None, "trusted": False,
     "download": False, "charge": None, "spin_multiplicity": None, "ensemble": "NVT", "temperature_K": None,
+    "pressure_GPa": 0.0, "cell_mode": "hydrostatic",
     "profile": None, "timestep_fs": 0.5, "steps": None, "repeat": [1, 1, 1], "seed": None,
     "initial_velocities": "keep", "check": "skip", "capacity": "auto", "device": 0, "skin": "auto",
 }
@@ -34,7 +35,9 @@ _COMMENTS = {
     "download": "download a label's checkpoint if it is missing",
     "charge": "total charge (models with a charge embedding)",
     "spin_multiplicity": "2S + 1 (models with a spin embedding)",
-    "ensemble": '"NVT" or "NVE"; [integrator] chooses the thermostat',
+    "ensemble": '"NVT", "NVE" or "NPT" (Langevin BAOAB, experimental); [integrator] chooses another integrator',
+    "pressure_GPa": 'the target pressure of ensemble "NPT"',
+    "cell_mode": 'ensemble "NPT": "hydrostatic" (the cell keeps its shape) or "full"',
     "temperature_K": "the thermostat's target; not with a schedule or a profile",
     "profile": 'a shipped profile ("slow", "fast", "ultrafast", "anneal") or a profile file; gives the schedule',
     "timestep_fs": "the timestep",

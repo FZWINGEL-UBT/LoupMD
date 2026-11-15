@@ -117,7 +117,8 @@ class NoseHooverChain:
     fixcm: bool | Literal["auto"] = "auto"
 
     def __post_init__(self):
-        if not isinstance(self.temperature_K, bool) and isinstance(self.temperature_K, (int, float))                 and self.temperature_K == 0:
+        if (not isinstance(self.temperature_K, bool) and isinstance(self.temperature_K, (int, float))
+                and self.temperature_K == 0):
             raise InputError(f"NoseHooverChain.temperature_K must be above 0 K (the thermostat masses are made "
                              f"for it), got {self.temperature_K!r}",
                              next_step="For a run that starts at 0 K give the temperature the masses should be "
@@ -247,8 +248,53 @@ class LangevinBAOAB:
         return self._config(seed=seed)
 
 
+@dataclass(frozen=True, kw_only=True)
+class MTK:
+    """Martyna-Tobias-Klein NPT with Nose-Hoover chains on the atoms and on the cell, as ASE's
+    ``IsotropicMTKNPT`` (``cell_mode="hydrostatic"``) and ``MTKNPT`` (``"full"``); experimental:
+    ``lm.integrators.MTK(timestep_fs=1.0, temperature_K=300, pressure_GPa=0.0, tdamp_fs=100, pdamp_fs=1000)``.
+
+    ``tdamp_fs``, ``pdamp_fs``, ``tchain``, ``pchain``, ``tloop`` and ``ploop`` are ASE's ``tdamp``, ``pdamp``,
+    ``tchain``, ``pchain``, ``tloop`` and ``ploop`` (chains of at most 8 links). Deterministic; the conserved
+    quantity is E_pot + E_kin plus both chains' energies, the cell's kinetic energy and P V. The masses of both
+    chains and of the cell are made for ``temperature_K`` and stay when a schedule moves the target. The degrees
+    of freedom stand where ASE counts 3 N: 3 N - 3 with the centre of mass at rest (``fixcm``). FastMACE's record
+    has a ``dof`` field beside ``fixcm``; here the count follows ``fixcm`` alone."""
+
+    timestep_fs: float
+    temperature_K: float
+    pressure_GPa: float
+    tdamp_fs: float
+    pdamp_fs: float
+    tchain: int = 3
+    pchain: int = 3
+    tloop: int = 1
+    ploop: int = 1
+    cell_mode: Literal["hydrostatic", "full"] = "hydrostatic"
+    fixcm: bool | Literal["auto"] = "auto"
+
+    barostat = True
+
+    def __post_init__(self):
+        self._config(seed=0, fixcm=False)                                    # checks the values
+        if not isinstance(self.fixcm, bool) and self.fixcm != "auto":
+            raise InputError(f"MTK.fixcm must be True, False or 'auto', got {self.fixcm!r}")
+
+    def _config(self, *, seed, fixcm) -> IntegratorConfig:
+        return IntegratorConfig(ensemble="npt", scheme="mtk", timestep_fs=self.timestep_fs,
+                                temperature_K=self.temperature_K, pressure_GPa=self.pressure_GPa,
+                                tau_fs=self.tdamp_fs, taup_fs=self.pdamp_fs, tchain=self.tchain, pchain=self.pchain,
+                                tloop=self.tloop, ploop=self.ploop, cell_mode=self.cell_mode, seed=seed, fixcm=fixcm)
+
+    def to_config(self, *, seed: int, fixed_atoms: bool = False) -> IntegratorConfig:
+        if fixed_atoms:
+            raise PlanRefused("MTK with fixed atoms", why="the cell's scaling would move the fixed atoms",
+                              next_step="Free the atoms, or use a thermostat alone (NoseHooverChain).")
+        return self._config(seed=seed, fixcm=resolve_fixcm(self.fixcm, fixed_atoms))
+
+
 RECORDS = {"NVE": NVE, "Langevin": Langevin, "CSVR": CSVR, "NoseHooverChain": NoseHooverChain,
-           "Berendsen": Berendsen, "LangevinBAOAB": LangevinBAOAB}
+           "Berendsen": Berendsen, "LangevinBAOAB": LangevinBAOAB, "MTK": MTK}
 
 
 def to_data(record) -> dict:

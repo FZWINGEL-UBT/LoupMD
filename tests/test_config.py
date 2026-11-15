@@ -77,13 +77,19 @@ def test_integrator_values_are_checked(fields, message):
 
 
 @pytest.mark.parametrize("fields,word", [
-    ({"ensemble": "npt", "scheme": "mtk"}, "mtk"),
+    ({"ensemble": "npt", "scheme": "langevin"}, "langevin"), ({"ensemble": "nvt", "scheme": "mtk"}, "mtk"),
 ])
-def test_schemes_that_are_not_built_are_refused_naming_what_is(fields, word):
+def test_a_scheme_of_another_ensemble_is_refused_naming_the_ensemble_s(fields, word):
+    """Every scheme of the three ensembles is built; one that belongs to another ensemble is still an error."""
+    from loupmd import config
+
+    assert config.BUILT == {name: tuple(schemes) for name, schemes in config.SCHEMES.items()} or \
+        {name: set(schemes) for name, schemes in config.BUILT.items()} == \
+        {name: set(schemes) for name, schemes in config.SCHEMES.items()}
     with pytest.raises(InputError) as caught:
         IntegratorConfig(temperature_K=300.0, friction_per_fs=0.01, **fields)
     text = str(caught.value)
-    assert word in text and "not in this version" in text and "nve, langevin, csvr, nose_hoover, berendsen" in text
+    assert f"scheme {word!r} is not a scheme of ensemble" in text and "Its schemes:" in text
 
 
 def test_the_engine_struct_of_a_record():
@@ -206,7 +212,7 @@ def test_unknown_keys_are_refused_by_name_all_at_once():
     assert text.startswith("unknown keys 'friction', 'timestep' in [integrator]")
     assert ("Next: Keys of [integrator]: ensemble, scheme, timestep_fs, temperature_K, friction_per_fs, tau_fs, "
             "tchain, tloop, mass_temperature_K, pressure_GPa, taup_fs, compressibility_per_GPa, mask, cell_mode, "
-            "seed, fixcm.") in text
+            "pchain, ploop, seed, fixcm.") in text
     with pytest.raises(InputError, match=r"unknown key 'every' in Output"):
         config.from_mapping(Output, {"directory": "run", "every": 5})
     with pytest.raises(InputError, match="is not a table"):

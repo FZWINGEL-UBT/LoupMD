@@ -67,8 +67,10 @@ class CellEngine(SpringEngine):
             self.reference_volume = self._volume()
 
     def run(self, n_steps, it):
-        if it.kind not in (_core.LOUP_BERENDSEN_NPT, _core.LOUP_BAOAB_NPT):
+        if it.kind not in (_core.LOUP_BERENDSEN_NPT, _core.LOUP_BAOAB_NPT, _core.LOUP_MTK_NPT):
             return super().run(n_steps, it)
+        if it.kind == _core.LOUP_MTK_NPT:                # the fake has one barostat: MTK's settings as Berendsen's
+            it.compressibility_per_gpa = 1.0 / BULK_GPA
         if it.kind == _core.LOUP_BAOAB_NPT:              # the fake has one barostat: BAOAB's settings as Berendsen's
             it.tau_p_fs, it.compressibility_per_gpa = it.tau_p_fs or 20.0 / it.friction_per_fs, 1.0 / BULK_GPA
         dt = it.dt_fs * units.fs
@@ -156,7 +158,7 @@ def test_the_record_and_its_struct():
     with pytest.raises(InputError, match="pressure_GPa belongs to a barostat, and the ensemble is 'nvt'"):
         IntegratorConfig(ensemble="nvt", scheme="langevin", temperature_K=300.0, friction_per_fs=0.01,
                          pressure_GPa=1.0)
-    with pytest.raises(InputError, match="npt with scheme 'mtk' is not in this version"):
+    with pytest.raises(InputError, match="MTK NPT needs pressure_GPa, tau_fs, taup_fs"):
         IntegratorConfig(ensemble="npt", scheme="mtk", temperature_K=300.0)
 
 
@@ -328,7 +330,7 @@ def test_the_baoab_record_and_its_struct():
                            (dict(fixcm=True), "fixcm must be False for Langevin BAOAB NPT")):
         with pytest.raises(InputError, match=reason):
             IntegratorConfig(ensemble="npt", temperature_K=300.0, friction_per_fs=0.02, pressure_GPa=0.0, **fields)
-    with pytest.raises(InputError, match="cell_mode belongs to Langevin BAOAB NPT"):
+    with pytest.raises(InputError, match="cell_mode belongs to Langevin BAOAB and MTK NPT"):
         IntegratorConfig(ensemble="npt", scheme="berendsen", temperature_K=300.0, tau_fs=50.0, pressure_GPa=0.0,
                          taup_fs=20.0, compressibility_per_GPa=0.01, cell_mode="full")
     fixed = bulk("NaCl", "rocksalt", a=5.64, cubic=True)
@@ -379,3 +381,98 @@ def test_the_baoab_drop_in_takes_ase_s_arguments(setup):
         with pytest.raises(PlanRefused, match=reason):
             ase_md.LangevinBAOAB(setup.atoms.copy(), units.fs, model=setup.force_field(), **options)
 
+
+# ------------------------------------------------------------------------------------- Martyna-Tobias-Klein NPT
+
+def test_the_mtk_record_its_struct_and_its_drop_ins(setup, tmp_path):
+    from loupmd.ase import md as ase_md
+
+    record = integrators.MTK(timestep_fs=1.0, temperature_K=300.0, pressure_GPa=1.5, tdamp_fs=100.0, pdamp_fs=900.0)
+    config = record.to_config(seed=2)
+    assert (config.ensemble, config.scheme, config.tau_fs, config.taup_fs, config.cell_mode, config.fixcm) == \
+        ("npt", "mtk", 100.0, 900.0, "hydrostatic", True)
+    assert (config.tchain, config.pchain, config.tloop, config.ploop, config.mass_temperature_K) == (3, 3, 1, 1, 300.0)
+    it = config.to_struct(thermo_every=3, temperature_K=250.0, rate_K_per_step=0.1)
+    assert (it.kind, it.tau_t_fs, it.tau_p_fs, it.pressure_gpa, it.mass_temp_k, it.cell_mode, it.fix_com) == \
+        (_core.LOUP_MTK_NPT, 100.0, 900.0, 1.5, 300.0, _core.LOUP_CELL_HYDROSTATIC, 1)
+    assert (it.chain_length, it.chain_loops, it.p_chain_length, it.p_chain_loops) == (3, 1, 3, 1)
+    assert (it.temp_k, it.temp_rate_k_per_step, it.thermo_every) == (250.0, 0.1, 3)
+    full = integrators.MTK(timestep_fs=1.0, temperature_K=300.0, pressure_GPa=0.0, tdamp_fs=100.0, pdamp_fs=900.0,
+                           tchain=2, pchain=4, tloop=2, ploop=3, cell_mode="full", fixcm=False)
+    it = full.to_config(seed=2).to_struct()
+    assert (it.cell_mode, it.chain_length, it.chain_loops, it.p_chain_length, it.p_chain_loops, it.fix_com) == \
+        (_core.LOUP_CELL_FULL, 2, 2, 4, 3, 0)
+    assert integrators.from_data(integrators.to_data(full)) == full and full.barostat
+
+    base = dict(timestep_fs=1.0, temperature_K=300.0, pressure_GPa=0.0, tdamp_fs=100.0, pdamp_fs=900.0)
+    for fields, reason in ((dict(pchain=9), "pchain must be an int from 1 to 8"),
+                           (dict(tchain=0), "tchain must be an int from 1 to 8"),
+                           (dict(ploop=101), "ploop must be an int from 1 to 100"),
+                           (dict(pdamp_fs=0.0), "taup_fs must be positive and finite"),
+                           (dict(temperature_K=0.0), "temperature_K must be positive and finite"),
+                           (dict(cell_mode="cubic"), "cell_mode must be one of"),
+                           (dict(fixcm="yes"), "MTK.fixcm must be True, False or 'auto'")):
+        with pytest.raises(InputError, match=reason):
+            integrators.MTK(**{**base, **fields})
+    with pytest.raises(InputError, match="pchain belongs to the MTK barostat's chain"):
+        IntegratorConfig(scheme="nose_hoover", temperature_K=300.0, tau_fs=100.0, pchain=3)
+    with pytest.raises(PlanRefused, match="MTK with fixed atoms"):
+        record.to_config(seed=1, fixed_atoms=True)
+
+    result = loupmd.md(setup.atoms, model=setup.force_field(), steps=40, integrator=record,
+                       output=str(tmp_path / "mtk"), seed=3)
+    assert "NPT, Martyna-Tobias-Klein with Nose-Hoover chains of 3 and 3 (experimental)" in result.summary
+    assert "time constants 100 fs and 900 fs, pressure 1.5 GPa" in result.summary
+    assert output.read_thermo(tmp_path / "mtk")[0] == list(output.THERMO_HEADER + output.NPT_COLUMNS)
+
+    atoms = setup.atoms.copy()
+    dyn = ase_md.IsotropicMTKNPT(atoms, 2.0 * units.fs, 350.0, 0.5 * units.GPa, 80 * units.fs, 700 * units.fs,
+                                 model=setup.force_field())
+    config = dyn.simulation.config
+    assert (config.scheme, config.cell_mode, config.fixcm, config.temperature_K) == ("mtk", "hydrostatic", False, 350.0)
+    assert (config.timestep_fs, config.tau_fs, config.taup_fs, config.pressure_GPa) == \
+        (pytest.approx(2.0), pytest.approx(80.0), pytest.approx(700.0), pytest.approx(0.5))
+    assert dyn.run(20) is True and np.array_equal(atoms.cell.array, SpringEngine.made[-1].get_cell())
+    full_dyn = ase_md.MTKNPT(setup.atoms.copy(), units.fs, temperature_K=300.0, pressure_au=0.0, tdamp=100 * units.fs,
+                             pdamp=1000 * units.fs, tchain=2, pchain=2, model=setup.force_field())
+    assert (full_dyn.simulation.config.cell_mode, full_dyn.simulation.config.pchain) == ("full", 2)
+
+
+
+# ------------------------------------------------------------------------------- command line and run files
+
+def test_npt_on_the_command_line_and_from_its_metadata(setup, tmp_path, monkeypatch, capsys):
+    """``loupmd md --ensemble NPT --pressure`` is Langevin BAOAB; the run's ``metadata.json`` repeats it."""
+    import json
+
+    from ase.io import write
+
+    from loupmd import quick, simulation
+    from loupmd.cli import main
+
+    write(tmp_path / "salt.cif", bulk("NaCl", "rocksalt", a=5.64, cubic=True))
+    monkeypatch.setattr(quick, "load", lambda model, head=None, **options: setup.force_field())
+    monkeypatch.setattr(simulation, "load", lambda model, head=None, **options: setup.force_field())
+    monkeypatch.chdir(tmp_path)
+    base = ["salt.cif", "--model", "some.model", "--trusted", "--temperature", "300", "--steps", "40", "--timestep",
+            "1", "--seed", "3", "--initial-velocities", "maxwell_boltzmann", "--repeat", "2", "2", "2"]
+
+    assert main(["md", *base, "--ensemble", "NPT", "--pressure", "0.5", "--cell-mode", "full", "--output", "a"]) == 0
+    assert "NPT, Langevin BAOAB with a Langevin-Hoover barostat (experimental)" in capsys.readouterr().out
+    metadata = json.loads((tmp_path / "a" / "metadata.json").read_text())
+    arguments = metadata["arguments"]
+    assert (arguments["ensemble"], arguments["pressure_GPa"], arguments["cell_mode"]) == ("NPT", 0.5, "full")
+    arguments["output"]["directory"] = "b"
+    (tmp_path / "again.json").write_text(json.dumps(metadata))
+    assert main(["run", "again.json"]) == 0
+    assert output.read_thermo(tmp_path / "a")[1] == output.read_thermo(tmp_path / "b")[1]
+    assert output.read_thermo(tmp_path / "b")[0] == list(output.THERMO_HEADER + output.NPT_COLUMNS)
+
+    assert main(["md", *base, "--ensemble", "NPT", "--pressure", "0.5", "--friction", "0.05", "--output", "c"]) == 0
+    assert "friction 0.05/fs, pressure 0.5 GPa" in capsys.readouterr().out
+    record = json.loads((tmp_path / "c" / "metadata.json").read_text())["arguments"]["integrator"]
+    assert (record["type"], record["friction_per_fs"], record["pressure_GPa"]) == ("LangevinBAOAB", 0.05, 0.5)
+
+    assert main(["md", *base, "--pressure", "0.5", "--output", "d"]) == 1
+    assert "belong to ensemble='NPT'" in capsys.readouterr().err
+    assert not (tmp_path / "d").exists()

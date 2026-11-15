@@ -36,7 +36,13 @@ def _physics_lines(metadata) -> list:
         if integrator.get("fixcm"):
             first += ", total momentum removed"
     else:
-        if integrator["scheme"] == "baoab":
+        if integrator["scheme"] == "mtk":
+            first = (f"NPT, Martyna-Tobias-Klein with Nose-Hoover chains of {integrator['tchain']} and "
+                     f"{integrator['pchain']} (experimental), timestep {timestep:g} fs, time constants "
+                     f"{integrator['tau_fs']:g} fs and {integrator['taup_fs']:g} fs, pressure "
+                     f"{integrator['pressure_GPa']:g} GPa, "
+                     f"{'the cell keeps its shape' if integrator.get('cell_mode') != 'full' else 'full cell'}")
+        elif integrator["scheme"] == "baoab":
             tau = integrator.get("taup_fs")
             first = (f"NPT, Langevin BAOAB with a Langevin-Hoover barostat (experimental), timestep {timestep:g} fs, "
                      f"friction {integrator['friction_per_fs']:.4g}/fs, pressure {integrator['pressure_GPa']:g} GPa, "

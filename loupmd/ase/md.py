@@ -33,7 +33,7 @@ from math import gcd
 from ..errors import InputError, PlanRefused
 from ..forcefield import ForceField, load
 
-_NOT_BUILT = ("IsotropicMTKNPT", "MTKNPT")
+_NOT_BUILT = ()
 _LOAD_OPTIONS = ("checkpoint", "sha256", "trusted", "download", "charge", "spin_multiplicity", "device")
 # ASE's arguments that have no meaning here: accepted at None, refused otherwise.
 _ASE_REFUSED = {"rng": "the noise is drawn on the GPU: pass seed=", "comm": "LoupMD runs in one process",
@@ -373,3 +373,31 @@ class LangevinBAOAB(_Dynamics):
             cell_mode="hydrostatic" if hydrostatic else "full",
             barostat_tau_fs=None if P_tau is None else P_tau / units.fs)
         super().__init__(atoms, timestep, record, model, head, seed, output, check, options)
+
+
+class IsotropicMTKNPT(_Dynamics):
+    """``ase.md.nose_hoover_chain.IsotropicMTKNPT`` on LoupMD's engine (experimental): ``timestep``, ``tdamp`` and
+    ``pdamp`` in ASE units, ``temperature_K`` in K, ``pressure_au`` in eV/A^3; ``tchain``, ``pchain``, ``tloop``
+    and ``ploop`` as ASE's (chains of at most 8 links). The centre of mass is not held, as in ASE's class."""
+
+    _cell_mode = "hydrostatic"
+
+    def __init__(self, atoms, timestep, temperature_K, pressure_au, tdamp, pdamp, tchain=3, pchain=3, tloop=1,
+                 ploop=1, *, model=None, head=None, seed=None, output=None, check="skip", **options):
+        from ase import units
+
+        from .. import integrators
+
+        record = integrators.MTK(timestep_fs=timestep / units.fs, temperature_K=temperature_K,
+                                 pressure_GPa=pressure_au / units.GPa, tdamp_fs=tdamp / units.fs,
+                                 pdamp_fs=pdamp / units.fs, tchain=tchain, pchain=pchain, tloop=tloop, ploop=ploop,
+                                 cell_mode=self._cell_mode, fixcm=False)
+        super().__init__(atoms, timestep, record, model, head, seed, output, check, options)
+
+
+class MTKNPT(IsotropicMTKNPT):
+    """``ase.md.nose_hoover_chain.MTKNPT`` on LoupMD's engine (experimental): as ``IsotropicMTKNPT``, with the
+    full cell."""
+
+    _cell_mode = "full"
+

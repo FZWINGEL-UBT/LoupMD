@@ -21,7 +21,12 @@ def _arguments_parser(parser):
     parser.add_argument("--download", action="store_true", help="download a label's checkpoint if it is missing")
     parser.add_argument("--charge", type=int, help="total charge (models with a charge embedding)")
     parser.add_argument("--spin-multiplicity", type=int, help="2S + 1 (models with a spin embedding)")
-    parser.add_argument("--ensemble", default="NVT", help="NVT (default) or NVE")
+    parser.add_argument("--ensemble", default="NVT", help="NVT (default), NVE or NPT (Langevin BAOAB at "
+                                                          "--pressure; experimental)")
+    parser.add_argument("--pressure", type=float, metavar="GPA", dest="pressure_GPa",
+                        help="the target pressure in GPa of --ensemble NPT (default 0)")
+    parser.add_argument("--cell-mode", choices=("hydrostatic", "full"), dest="cell_mode",
+                        help="--ensemble NPT: hydrostatic (default: the cell keeps its shape) or full")
     parser.add_argument("--thermostat", choices=("langevin", "csvr"), help="the NVT thermostat: langevin (default) "
                         "or csvr (Bussi's velocity rescaling, which needs --tau)")
     parser.add_argument("--friction", type=float, metavar="PER_FS", help="Langevin's friction per fs (default about "
@@ -87,7 +92,7 @@ def arguments_of(args) -> dict:
         except ValueError:
             raise InputError(f"--skin {args.skin!r} is not a length in A or auto") from None
     for key in ("head", "checkpoint", "sha256", "charge", "spin_multiplicity", "temperature_K", "profile", "steps",
-                "seed"):
+                "seed", "pressure_GPa", "cell_mode"):
         if getattr(args, key) is not None:
             arguments[key] = getattr(args, key)
     for key, default in (("trusted", False), ("download", False), ("ensemble", "NVT"), ("timestep_fs", 0.5),
@@ -103,6 +108,11 @@ def arguments_of(args) -> dict:
         arguments["integrator"] = {"type": "CSVR", "tau_fs": args.tau_fs}
     elif args.tau_fs is not None:
         raise InputError("--tau is the time constant of --thermostat csvr; Langevin takes --friction")
+    elif args.friction is not None and str(args.ensemble).upper() == "NPT":
+        # the record holds the barostat's settings too: lm.md takes them from one place
+        arguments["integrator"] = {"type": "LangevinBAOAB", "friction_per_fs": args.friction,
+                                   "pressure_GPa": arguments.pop("pressure_GPa", 0.0),
+                                   "cell_mode": arguments.pop("cell_mode", "hydrostatic")}
     elif args.friction is not None:
         arguments["integrator"] = {"type": "Langevin", "friction_per_fs": args.friction}
     if args.schedule:

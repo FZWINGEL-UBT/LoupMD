@@ -234,7 +234,7 @@ def test_langevin_reaches_the_engine_with_its_settings(setup):
                                     "temperature_K": 350.0, "friction_per_fs": 0.02, "tau_fs": None, "tchain": None,
                                     "tloop": None, "mass_temperature_K": None, "pressure_GPa": None,
                                     "taup_fs": None, "compressibility_per_GPa": None, "mask": None,
-                                    "cell_mode": None, "seed": 7, "fixcm": True}
+                                    "cell_mode": None, "pchain": None, "ploop": None, "seed": 7, "fixcm": True}
     assert record["seed"] == 7 and record["model"]["sha256"] == sim.force_field.sha256
 
 
@@ -549,7 +549,8 @@ def test_records_as_tables():
     assert integrators.from_data({"type": "CSVR", "tau_fs": 100.0}, timestep_fs=1.0, temperature_K=300.0) == record
     assert integrators.from_data({"type": "NVE"}, timestep_fs=2.0, temperature_K=300.0) == integrators.NVE(
         timestep_fs=2.0)
-    for data, message in (({"type": "MTK"}, "type 'MTK' is not one of NVE, Langevin, CSVR, NoseHooverChain, Berendsen"),
+    for data, message in (({"type": "Verlet"}, "type 'Verlet' is not one of NVE, Langevin, CSVR, NoseHooverChain, "
+                                               "Berendsen, LangevinBAOAB, MTK"),
                           ({"tau_fs": 1.0}, "type None is not one of"),
                           ({"type": "CSVR", "tau_fs": 100.0, "friction": 1}, "unknown key 'friction' in .integrator. "
                                                                              "of type CSVR"),

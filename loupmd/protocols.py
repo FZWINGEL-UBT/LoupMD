@@ -406,7 +406,8 @@ class Profile:
 
     ``relax_fmax`` 0 means no initial relaxation (eV/A). ``quench`` is ``None`` or a mapping with ``QUENCH_KEYS``
     (frames per ``bin_K`` bin of the target from ``min_K``, quenched to ``fmax`` with ``optimizer``, at most
-    ``max_steps``). ``ensemble`` is ``"NVT"``; ``"NPT"`` and ``pressure_GPa`` are refused until NPT is built, and a
+    ``max_steps``). ``ensemble`` is ``"NVT"``; ``"NPT"`` and ``pressure_GPa`` are refused (a profile runs at
+    constant volume; ``lm.md(ensemble="NPT", schedule=...)`` takes a schedule at constant pressure), and a
     pressure schedule is refused in any case.
     """
 
@@ -436,7 +437,8 @@ class Profile:
         object.__setattr__(self, "ensemble", self.ensemble.upper())
         if self.ensemble == "NPT" or self.pressure_GPa is not None:
             raise InputError(f"profile {self.name!r}: NPT and pressure_GPa are not in this version",
-                             next_step="Use ensemble 'NVT' until the NPT integrators are built (PLAN.md Stage 4).")
+                             next_step="A profile runs at constant volume. For constant pressure give the "
+                                       "profile's schedule to lm.md(ensemble='NPT', schedule=...).")
 
     def __hash__(self):
         return hash((self.name, self.schedule))

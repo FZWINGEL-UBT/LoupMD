@@ -154,3 +154,35 @@ def test_refusals(sto_bundle):
         eng.run(10, _mtk())
     eng.set_fixed_atoms(None)
     assert eng.run(10, _mtk()).final_temperature_k > 100.0           # chain lengths 0: ASE's defaults, 3 and 3
+
+
+def test_the_record_and_the_drop_in_run_the_engine_s_steps(sto_bundle, model_path, tmp_path):
+    """``lm.integrators.MTK`` through ``lm.Simulation`` and ``loupmd.ase.md.IsotropicMTKNPT``: the same 200 steps
+    as one engine call, with volume and pressure in the rows."""
+    from loupmd import integrators, output
+    from loupmd.ase import md as ase_md
+
+    at = _strained()
+    ff = loupmd.load(model_path, trusted=True)
+    record = integrators.MTK(timestep_fs=1.0, temperature_K=300.0, pressure_GPa=0.0, tdamp_fs=100.0, pdamp_fs=1000.0,
+                             fixcm=False)
+    sim = loupmd.Simulation(at, ff, integrator=record, seed=1,
+                            output=loupmd.Output(str(tmp_path / "mtk"), thermo_every=50, trajectory_every=None,
+                                                 restart_every=None))
+    sim.run(steps=200)
+    volume = sim.atoms.get_volume()
+    sim.close()
+    header, rows = output.read_thermo(tmp_path / "mtk")
+
+    eng = LoupEngine(sto_bundle)
+    _start(eng, at)
+    eng.run(200, _mtk())
+    direct = abs(np.linalg.det(eng.get_cell()))
+    atoms = at.copy()
+    ase_md.IsotropicMTKNPT(atoms, 1.0 * units.fs, 300.0, 0.0, 100.0 * units.fs, 1000.0 * units.fs, model=ff).run(200)
+    print(f"lm.integrators.MTK through lm.Simulation, 200 steps: volume {volume:.3f} A^3 (one engine call: relative "
+          f"{abs(volume / direct - 1):.1e}; the IsotropicMTKNPT drop-in: {abs(atoms.get_volume() / direct - 1):.1e}); "
+          f"pressure {float(rows[0][9]):.2f} GPa at step 0, {float(rows[-1][9]):.2f} GPa at step 200")
+    assert header == list(output.THERMO_HEADER + output.NPT_COLUMNS) and [int(r[0]) for r in rows] == [0, 50, 100, 150, 200]
+    assert abs(volume / direct - 1) < 1e-6 and abs(atoms.get_volume() / direct - 1) < 1e-6
+    assert float(rows[-1][8]) * len(at) == pytest.approx(volume, rel=1e-12)
