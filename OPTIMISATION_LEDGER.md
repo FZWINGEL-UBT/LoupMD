@@ -173,6 +173,8 @@ Conventions:
 | [md-langevin-target](#md-langevin-target) | Langevin's target temperature as a device scalar that the step advances (release task S3-T06): ramps move it every step, a changed temperature captures no graph | `LoupIntegrator.temp_rate_k_per_step` | both | DEFAULT on `release/v1` (5060 Ti only) | release Stage 3 | A/B 1.0085 / 0.9989 (old first), 0.9943 / 0.9938 (new first): tie | [§6.2][s62] |
 | [md-fixed-atoms](#md-fixed-atoms) | Fixed atoms as zero inverse masses; the reported temperature counts 3 (N - n_fixed) (release task S4-T02) | `loup_set_fixed_atoms` | both | DEFAULT on `release/v1` (5060 Ti only) | release Stage 4 | A/B mean of four 1.0032 / 0.9995: tie; no step kernel changed | [§6.3][s63] |
 | [md-fix-com](#md-fix-com) | Centre of mass at rest: Langevin's noise in two passes without its mass-weighted mean, NVE's momentum removed at a call's start; noise coefficients formed once per step (release task S4-T01) | `LoupIntegrator.fix_com` | both | DEFAULT on `release/v1` for `lm.md` / `lm.Simulation`; off in `loup_run_langevin` (5060 Ti only) | release Stage 4 | current build against the merge build, four A/B: 0.9999 / 0.9982: tie; `fix_com` on against off 1.0009 at 5,000 atoms | [§6.4][s64] |
+| [md-csvr](#md-csvr) | CSVR (Bussi) as three small nodes before a velocity-Verlet step; the integrator's scalars travel in the state block (release task S4-T03) | `LOUP_CSVR`, `lm.integrators.CSVR` | both | DEFAULT on `release/v1` for CSVR runs (5060 Ti only) | release Stage 4 | CSVR against Langevin 1.0029 at 5,000 atoms; the benchmark's Langevin step unchanged (four A/B: 0.9991 / 1.0032) | [§6.5][s65] |
+| [md-skin-auto](#md-skin-auto) | The neighbour skin chosen from the largest per-step displacement, so that light atoms run in the pipelined loop (owner's decision O17) | `skin="auto"`, `loup_get_step_displacement` | both | DEFAULT on `release/v1` for `lm.md`, `loupmd md` and the ASE drop-ins; the engine's default stays 0.5 A (5060 Ti only) | release Stage 3 | water 216, OFF23 small: 0.676 -> 0.556 ms/step (0.82); 0 -> 799 of 800 steps pipelined | [§6.5][s65] |
 | [md-small-systems](#md-small-systems) | Small-system latency (< ~1,000 atoms) | – | spec | NOT BUILT (open) | – | 135 atoms: GEMM groups 32% of 358 us | [§4.1 #3][s41] |
 | [comp-active-edge-tighten](#comp-active-edge-tighten) | Tighten active-edge compaction (`compute_and_count_active` + `scatter_active_edges`) | – | both | NOT BUILT | – | untried (101 us/step on `SrTiO3` 5060 Ti, `tmp_vec_len` round-trip) | `OMAT0_SPEEDUP_BRIEF.md` |
 | [nl-lane-groups](#nl-lane-groups) | Neighbour count / fill with 8 lanes per atom (neighbouring bins split round-robin; fill keeps the exact row order via per-bin offsets in shared memory) | `kNeighborLanes`, `count/fill_neighbors_kernel`; other GPUs `*_scalar_kernel` | both (`sm_120`) | DEFAULT (5060 Ti only) | S34 | per rebuild `SrTiO3` 433 -> 292 us, `NbCl5` 284 -> 110, water 439 -> 302; ABBA `OFF23-S` water `0.9945` / `0.9856`, `OFF23-M` `0.9961` / `0.9943`, `OMAT-0-S` `0.9961` / `0.9972` | this file |
@@ -1147,6 +1149,25 @@ Each entry has the same fields. Unless stated, the system is OMAT-0 medium on th
 - Not measured: `fix_com`'s cost on the 1,944-atom cell; anything on the RTX 4000 Ada.
 - Sources: [§6.4][s64]; `tests/test_fix_com_gpu.py`.
 
+<a id="md-csvr"></a>
+#### md-csvr: CSVR in the captured step
+- Switch: `LOUP_CSVR` in `LoupIntegrator`; `lm.integrators.CSVR`, `loupmd md --thermostat csvr --tau FS`, `loupmd.ase.md.Bussi`. `src/integrator.cu` (`csvr_draw`, `csvr_alpha_kernel`, `csvr_first_half_kernel`), `src/engine.cu` (`run_md_loop`, kind 2).
+- Status: DEFAULT for CSVR runs. 5060 Ti only.
+- What: ASE 3.27's `Bussi` step. Before the half-kick the kinetic energy is summed, one thread draws a normal and a chi-square variate (Marsaglia-Tsang on Philox, offset by the device step counter), forms alpha of equation A7 and adds (alpha^2 - 1) K to the transferred energy, and the half-kick multiplies the velocities by alpha. The target is the device scalar of `md-langevin-target`, so ramps move it and a changed target captures nothing. The state block's header gained 64 slots for an integrator's scalars (640 bytes instead of 120), so the transferred energy, and with it the conserved quantity, survives a restart.
+- Measured (15 November 2026): with the engine's noise ASE's `Bussi` gives the same positions to 2.5e-7 A after 200 steps; three runs of 20,000 steps on 135 atoms give Kolmogorov-Smirnov p = 0.886, 0.605, 0.639 against the canonical distribution and a conserved-quantity drift of at most 0.0003 meV/atom/ps. Cost against Langevin at 5,000 atoms: 1.0029.
+- Gate: `tools/dev/test_gate.py` PASS, worst force ratio 1.57, stress 1.55.
+- Not measured: the full suite on this build (the crash of 12:32); anything on the RTX 4000 Ada.
+- Sources: [§6.5][s65]; `tests/test_csvr_gpu.py`.
+
+<a id="md-skin-auto"></a>
+#### md-skin-auto: the skin from the largest step
+- Switch: `lm.md(skin="auto")` (the default), `loupmd md --skin`, `lm.Simulation(skin="auto")`; `loupmd/skin.py`; `loup_get_step_displacement` (`src/engine.cu`).
+- Status: DEFAULT for `lm.md`, `loupmd md` and the ASE drop-ins; `lm.Simulation` and the engine keep 0.5 A unless asked. 5060 Ti only.
+- What: the pipelined loop runs while four times the largest per-step displacement is below half the skin, which hydrogen at 300 K and 1 fs misses at 0.5 A (ledger S46). The skin is estimated before the run from the highest target, the lightest atom and the timestep (5 sqrt(kT / m) dt, or the fastest atom now) and corrected once, after 200 steps near that target, from the engine's own displacement tracker: ten times the largest step on a 0.05 A grid within 0.5 to 1.5 A. The correction sets the system again with the new skin and moves the state block across. The skin decides speed only: the engine checks its list against it in every step.
+- Measured (15 November 2026, water 216, MACE-OFF23 small, Langevin 300 K, 1 fs): skin 0.5 A: 0 of 800 steps pipelined, 0.676 ms/step; auto: estimate 0.8 A, measured step 0.079 A, skin 0.8 A, 799 of 800 pipelined, 0.556 ms/step. `SrTiO3` (largest step 0.014 A) keeps 0.5 A.
+- Not measured: other light-atom systems and models; the upper bound of 1.5 A (the only point on file is S46's water at 1.5 A: 2.90 against 3.13 ms/step); anything on the RTX 4000 Ada.
+- Sources: [§6.5][s65]; `tests/test_skin.py`, `tests/test_skin_gpu.py`.
+
 <a id="md-small-systems"></a>
 #### md-small-systems: small-system latency
 - Status: NOT BUILT (open).
@@ -1854,4 +1875,5 @@ POLAR-1 NaCl 3x3x3 (216) and POLAR-1-M `NbCl5` 3x3x3 (1,944).
 [s62]: STATUS_AND_PROFILE.md#62-stage-3-front-end-and-the-thermostat-target-on-the-device-15-november-2026-0520-to-0610
 [s63]: STATUS_AND_PROFILE.md#63-fixed-atoms-and-the-host-side-optimisers-15-november-2026-0615-to-0650
 [s64]: STATUS_AND_PROFILE.md#64-centre-of-mass-at-rest-fix_com-and-the-current-build-against-the-merge-build-15-november-2026-0655-to-0735
+[s65]: STATUS_AND_PROFILE.md#65-csvr-the-layout-move-and-the-skin-chosen-from-the-step-size-15-november-2026-1205-to-1310
 [s55]: STATUS_AND_PROFILE.md#55-known-limitations

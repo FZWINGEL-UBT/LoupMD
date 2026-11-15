@@ -651,3 +651,33 @@ of the second half-kick instead of per atom (the per-atom square root came in wi
   1.0024 and 0.9958 / 0.9982 against the build of §6.3; its full suite: 496 passed and one outdated test.
 - Not measured: `fix_com`'s cost on the 1,944-atom `NbCl5` cell; anything on the RTX 4000 Ada.
 
+### 6.5 CSVR, the layout move and the skin chosen from the step size (15 November 2026, 12:05 to 13:10)
+
+RTX 5060 Ti only. Engine builds: `6437f8e` (CSVR; library sha256 `cebdfa27f1af83de...`) and `705af4c` (the layout
+move, `loup_get_step_displacement`; `885c3f49f6693412...`). Paths below are those after the move: the developer
+scripts are `tools/dev/bench_md.py` and `tools/dev/test_gate.py`.
+
+| Check | Result |
+|---|---|
+| CSVR's noise, 20,000 draws for 2, 3, 4, 405 and 15,000 degrees of freedom | Kolmogorov-Smirnov p = 0.80 against the normal; 0.80, 0.79, 0.90, 0.84, 0.84 against chi-square |
+| CSVR against ASE 3.27's `Bussi` driven by `lm.calc`, the engine's noise fed to ASE, 200 steps, 135 atoms | positions within 2.5e-7 to 2.8e-7 A; transferred energy 2.955326 eV in both |
+| CSVR, 20,000 steps of 1 fs at 300 K, tau 10 fs, 135 atoms, three runs | mean 300.5, 301.0, 300.5 K; Kolmogorov-Smirnov p = 0.886, 0.605, 0.639 against the canonical kinetic-energy distribution (190 samples 100 fs apart); conserved quantity drift 0.0000, 0.0000, +0.0003 meV/atom/ps, range 0.03 meV/atom while the thermostat moved 24 to 26 meV/atom |
+| CSVR target ramp 100 to 500 K in 2 ps, tau 20 fs | 177 K at 0.5 ps, 284 K at 1 ps, 520 K at the end; held at 500 K: mean 527 K over 1 ps |
+| CSVR against Langevin, 5,000 atoms at 300 K, through `lm.Simulation` (a b b a) | 7.988, 8.006 against 7.962, 7.986 ms/step: 1.0029 |
+| `loupmd md NbCl5_R2SCAN.cif --repeat 3 3 3 --thermostat csvr --tau 100 --steps 2000` | 1.926 ms/step with output (1.818 in the engine), 96 rebuilds, 0 dangerous |
+| gate, CSVR build and move build | PASS, worst force 1.57 / stress 1.55; PASS, 1.52 / 1.72 |
+| `bench_md.py`, CSVR build against the build of §6.4, both orders (`NbCl5` / `SrTiO3`, new / old) | 1.0015 / 1.0137 and 0.9910 / 0.9990 |
+| the same, move build against the build of §6.4 | 1.0051 / 1.0005 and 0.9987 / 0.9997; mean of these two 1.0019 / 1.0001 |
+| `pytest tests/test_[a-e]*.py` on the move build | 240 passed |
+| water 216 (MACE-OFF23 small), Langevin 300 K, 1 fs, skin 0.5 A | 0 of 800 steps in the pipelined loop, 0.676 ms/step |
+| the same with `skin="auto"`: estimated 0.8 A, largest step measured 0.079 A, skin 0.8 A | 799 of 800 steps pipelined, 0.556 ms/step (0.82 of the fixed skin) |
+
+- The four CSVR-or-later A/Bs against the build of §6.4 average 0.9991 (`NbCl5`) and 1.0032 (`SrTiO3`); the
+  1.0137 comes from one job whose last `SrTiO3` run of the old build read 7.934 ms. The Langevin step of the
+  benchmark is the same captured graph in all three builds.
+- CSVR against NVE from the same start read 1.0137: NVE loses half its kinetic energy to the lattice and then
+  rebuilds its neighbour list less often, so it is not the comparison for the thermostat's cost.
+- Not run: the full suite on these builds. The run of the CSVR build ended with the crash of 12:32 (bug check
+  0xD1 in `nvlddmkm.sys` while two sessions used the GPU), and the WSL distribution was shut down repeatedly from
+  13:12 to 13:31 (PLAN.md D40). Anything on the RTX 4000 Ada: the workstations are down (O12).
+
