@@ -225,6 +225,32 @@ Design, from reading `GenericModel::record` (generic.cu 1481-1933) and FastMACE'
 
 Files: `src/neighbors.cu`, `src/generic.cu`, `src/domain.hpp`, `tests/test_open_domain.py` (new).
 
+Design notes of 15 November, after S1-T08's first part (`11c5205`); nothing of this is built.
+
+- **Rows.** A domain has `n_local` receivers, grouped by species as today, followed by `n_ghost` ghosts in any
+  order. Receiver-side arrays and kernels keep the count `N = n_local`. Four things run over
+  `Nx = n_local + n_ghost` rows: the embedding gather, each layer's `linear_up` (`x = h_in W_up`), the adjoint
+  `dx`, and `dh_in = dx W_up^T`. `GenericPassInputs` gets `n_ghost`; the species-grouped GEMMs stay on the locals.
+- **Sweeps.** `record` gets a selector (`all`, `forward(t)`, `last`, `backward(t)`), so the per-layer pieces of
+  S1-T08 are reachable one at a time without turning the pass into a class. Each sweep that differentiates
+  (`last`, `backward(t)`) zeroes the edge gradients, runs its layer's backward and assembles its own edge forces
+  into a domain-local force buffer; ZBL is added by `backward(0)` only. The caller owns what crosses sweeps:
+  `hout_t` rows written for locals and gathered for ghosts, `dhout_t` rows scatter-added for both.
+- **Neighbour list.** The periodic builder is reused on a non-periodic box around the domain with a margin above
+  cutoff plus skin, with a receiver limit so that ghosts get no rows. Edges carry no shifts.
+- **Workspace.** The domain needs its own set of per-system buffers sized for (receivers, ghosts, edges): a second
+  handle-like object, not the whole-system handle's arrays. Stage 5's tile driver refills one such workspace per
+  tile. What a tile keeps between steps is its edge list (senders, pair index: about 10 B per edge), not the
+  135 B per edge of the whole-system build.
+- **Test entry point.** `loup_debug_evaluate_domain(h, n_local, n_ghost, positions, ghost_of, ...)` runs all
+  sweeps on one domain whose ghosts are images of locals (`ghost_of[g]` names the local a ghost copies): after
+  each forward sweep the ghost rows are copied from their locals, after each differentiating sweep the ghosts'
+  adjoint rows and forces are added to their locals. With the ghosts of a periodic cell this must give the
+  periodic call's energy and forces.
+- **Order of work.** (1) `n_ghost` and the selector in the generic pass, checked by `LOUP_SWEEP_REPLAY` still
+  passing; (2) the workspace object and the open neighbour build; (3) the debug entry point and the test; (4)
+  three-layer OMOL-0 on the plain path.
+
 1. Test first: a 135-atom periodic `SrTiO3` cell (and the organic and NaCl cells for OFF23 medium and MH-1)
    evaluated as an open domain whose ghosts are its explicit periodic images within cutoff: energy to 1e-7
    eV/atom and forces to 3e-6 eV/A of the periodic call, for OMAT-0 small, OFF23 medium, MH-1 and OMOL-0 extra
