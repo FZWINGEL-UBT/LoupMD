@@ -9,11 +9,12 @@ import argparse
 import sys
 
 from ..errors import LoupError
+from . import bench as _bench
 from . import cache as _cache
 from . import doctor as _doctor
 from . import models as _models
 
-COMMANDS = (_doctor, _models, _cache)
+COMMANDS = (_doctor, _models, _cache, _bench)
 
 
 def build_parser() -> argparse.ArgumentParser:
