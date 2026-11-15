@@ -55,6 +55,9 @@ FastMACE is MIT, © 2026 Fabian Zwingel, the same owner as LoupMD.
 | --- | --- | --- |
 | `loupmd/models.py` | `fastmace/model/labels.py` (the label table: release URLs, SHA-256, licences, heads and training functionals with their sources) and the checkpoint lookup, download and trust functions of `fastmace/model/loading.py` | errors are LoupMD's; the model folder variable is `LOUPMD_MODELS`; nothing is unpickled in this module |
 | `loupmd/errors.py` | the message shape of `fastmace/errors.py` (`what`, `Why:`, `Next:`) | LoupMD's own classes |
+| `loupmd/protocols.py` | `fastmace/protocols/schedule.py` and `profiles.py`: segments, `Schedule`, whole-step resolution (half up), the end-point target, `ScheduleState`, the profiles `slow`, `fast`, `ultrafast`, `anneal` | errors are `InputError`; profile files are TOML only; NPT, `pressure_GPa` and dispersion in a profile are refused; optimiser names are kept as data |
+| `loupmd/output.py` | the chunk scheme, file names and thermo header of `fastmace/io/output.py` and `io/trajectory.py`, and the durable-write helpers of `io/durable.py` | rows and frames come from the engine (device thermo buffer, `get_state`), not from torch tensors; a background thread writes them |
+| `loupmd/quick.py`, `loupmd/integrators.py`, `loupmd/config.py` (`Output`) | the signature, argument rules and defaults of `fastmace/quick.py` (`md`, `RunResult`, initial velocities, default friction and output directory), the record names of `fastmace/integrators/__init__.py`, the `Output` record of `fastmace/io/output.py` | only what LoupMD's engine has (NVE, Langevin); FastMACE's planner arguments are refused by name |
 
 The model files themselves are not part of LoupMD. Each label's licence (MIT or the Academic Software License) is
 in the table and is shown by `loupmd models`.

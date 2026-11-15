@@ -272,6 +272,34 @@ def test_references_are_computed_once_and_then_read_from_the_cache(setup, tmp_pa
     assert setup.calls["reference"] == 2
 
 
+def test_a_reference_that_does_not_fit_the_gpu_goes_to_the_cpu_or_makes_the_gate_unavailable(setup, monkeypatch):
+    devices = []
+
+    def reference(model_path, configs, head, ref_device, charge, spin):
+        devices.append(ref_device)
+        if ref_device.startswith("cuda"):
+            raise RuntimeError("CUDA out of memory. Tried to allocate 9.31 GiB")
+        rng = np.random.default_rng(5)
+        ref64 = [(-float(len(at)), rng.normal(size=(len(at), 3)), rng.normal(size=(3, 3)) * 1e-3) for _, at in configs]
+        GateEngine.truth = {at.positions.tobytes(): ref for (_, at), ref in zip(configs, ref64)}
+        return ref64, [(e, f + F32["df"], s + F32["ds"]) for e, f, s in ref64], [s for _, _, s in ref64]
+
+    monkeypatch.setattr(references, "resolve_device", lambda wanted: "cuda" if wanted == "auto" else wanted)
+    record = setup(reference=reference)
+    assert devices == ["cuda", "cpu"] and record["passed"] and record["reference"]["device"] == "cpu:fake"
+    for gate_config, word in ((config.GateConfig(cpu_float64_time_limit_s=0), "does not fit the GPU"),
+                              (config.GateConfig(reference_device="cuda"), "--ref-device cpu")):
+        with pytest.raises(GateUnavailable) as caught:
+            setup(reference=reference, gate_config=gate_config, use_ref_cache=False)
+        assert word in str(caught.value) and "CUDA out of memory" in str(caught.value)
+
+    def broken(*a):
+        raise RuntimeError("something else")
+
+    with pytest.raises(RuntimeError, match="something else"):
+        setup(reference=broken, use_ref_cache=False)
+
+
 def test_a_user_structure_and_the_unstable_list(setup, tmp_path, monkeypatch):
     path = tmp_path / "my.cif"
     write(path, bulk("NaCl", "rocksalt", a=5.64, cubic=True).repeat((2, 2, 2)))

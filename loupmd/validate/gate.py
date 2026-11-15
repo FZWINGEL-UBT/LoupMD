@@ -13,6 +13,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from .. import config, models
+from ..errors import GateUnavailable
 from . import references, sets
 
 SCHEMA = "loupmd.gate/1"
@@ -126,19 +127,39 @@ def run_gate(model, *, head=None, checkpoint=None, sha256=None, trusted=False, d
     left_out = [] if include_unstable else [name for name, _ in configs if any((s, name) in UNSTABLE for s in stems)]
     configs = [(name, at) for name, at in configs if name not in left_out]
 
-    ref_device = references.resolve_device(gate_config.reference_device)
     charge_spin = (charge, spin_multiplicity)
-    ref_file = references.cache_path(resolved.path.name, digest, use_head, set_label, references.device_tag(ref_device),
-                                     references.versions(), configs, charge_spin, environ)
-    cached = references.load(ref_file, len(configs)) if use_ref_cache else None
-    if cached is None:
+    compute = reference or references.compute
+
+    def references_on(ref_device):
+        ref_file = references.cache_path(resolved.path.name, digest, use_head, set_label,
+                                         references.device_tag(ref_device), references.versions(), configs,
+                                         charge_spin, environ)
+        cached = references.load(ref_file, len(configs)) if use_ref_cache else None
+        if cached is not None:
+            say(f"MACE references from {ref_file}")
+            return ref_file, True, cached
         say(f"computing the MACE float64 and float32 references on {ref_device} ...")
-        ref64, ref32, stress_ref = (reference or references.compute)(resolved.path, configs, use_head, ref_device,
-                                                                     charge, spin_multiplicity)
-        references.save(ref_file, ref64, ref32, stress_ref)
-    else:
-        say(f"MACE references from {ref_file}")
-        ref64, ref32, stress_ref = cached
+        computed = compute(resolved.path, configs, use_head, ref_device, charge, spin_multiplicity)
+        references.save(ref_file, *computed)
+        return ref_file, False, computed
+
+    ref_device = references.resolve_device(gate_config.reference_device)
+    try:
+        ref_file, cached, (ref64, ref32, stress_ref) = references_on(ref_device)
+    except Exception as error:  # noqa: BLE001  (torch's out-of-memory error, without importing torch here)
+        if "out of memory" not in str(error).lower() or not ref_device.startswith("cuda"):
+            raise
+        # MACE float64 on the structure does not fit the GPU. With reference_device="auto" the CPU computes it,
+        # unless the time limit forbids the CPU; an explicit "cuda" is not replaced.
+        if gate_config.reference_device != "auto" or gate_config.cpu_float64_time_limit_s == 0:
+            raise GateUnavailable(
+                f"the MACE float64 reference of {len(configs[0][1])} atoms does not fit the GPU",
+                why=str(error).splitlines()[0][:200],
+                next_step="Compute it on the CPU (--ref-device cpu, GateConfig(reference_device='cpu')), which is "
+                          "slow for large cells, or gate a smaller cell of the same material.") from None
+        say("the float64 reference does not fit the GPU: computing it on the CPU")
+        ref_device = "cpu"
+        ref_file, cached, (ref64, ref32, stress_ref) = references_on(ref_device)
 
     if ensure_bundle is None:
         from .. import bundles
@@ -210,7 +231,7 @@ def run_gate(model, *, head=None, checkpoint=None, sha256=None, trusted=False, d
     return make_record(rows, reorder, passed, set_label,
                        {"label": entry.label if entry is not None else None, "file": resolved.path.name,
                         "sha256": digest, "head": use_head},
-                       {"device": references.device_tag(ref_device), "file": str(ref_file), "cached": cached is not None,
+                       {"device": references.device_tag(ref_device), "file": str(ref_file), "cached": cached,
                         "mace": references.versions()[0], "torch": references.versions()[1]},
                        library, left_out, gpu=gpu, charge=charge, spin_multiplicity=spin_multiplicity,
                        package_version=__version__)
