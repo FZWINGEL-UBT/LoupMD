@@ -2277,23 +2277,76 @@ static int run_md_loop(
     return 0;
 }
 
+// loup_run: every integrator enters here; loup_run_nve and loup_run_langevin fill the struct and call it.
+static const char* integrator_name(int kind) {
+    switch (kind) {
+        case LOUP_NVE: return "LOUP_NVE";
+        case LOUP_LANGEVIN: return "LOUP_LANGEVIN";
+        case LOUP_CSVR: return "LOUP_CSVR";
+        case LOUP_NHC: return "LOUP_NHC";
+        case LOUP_BERENDSEN_NVT: return "LOUP_BERENDSEN_NVT";
+        case LOUP_BERENDSEN_NPT: return "LOUP_BERENDSEN_NPT";
+        case LOUP_BAOAB_NPT: return "LOUP_BAOAB_NPT";
+        case LOUP_MTK_NPT: return "LOUP_MTK_NPT";
+        default: return nullptr;
+    }
+}
+
+static int run_impl(LoupHandle* h, const LoupIntegrator* caller, int n_steps, LoupMDStats* out_stats) {
+    if (!caller) { loup::set_error("the integrator is NULL"); return -1; }
+    // Size-versioned: this is the first released layout, so nothing smaller exists, and a larger struct comes from
+    // a header this library does not know.
+    if (caller->size != sizeof(LoupIntegrator)) {
+        loup::set_error("LoupIntegrator.size is %u, and this library's layout has %zu bytes (set size to "
+                        "sizeof(LoupIntegrator) of the header the library was built from)", caller->size,
+                        sizeof(LoupIntegrator));
+        return -1;
+    }
+    const LoupIntegrator it = *caller;
+    const char* name = integrator_name(it.kind);
+    if (!name) { loup::set_error("unknown integrator kind %d", it.kind); return -1; }
+    if (it.kind != LOUP_NVE && it.kind != LOUP_LANGEVIN) {
+        loup::set_error("integrator %s is not built in this version of the library (LOUP_NVE and LOUP_LANGEVIN are)",
+                        name);
+        return -1;
+    }
+    if (it.fix_com != 0) { loup::set_error("fix_com is not built in this version of the library"); return -1; }
+    if (it.thermo_every != 0) {
+        loup::set_error("thermo_every is not built in this version of the library");
+        return -1;
+    }
+    if (it.kind == LOUP_NVE) return run_md_loop(h, 0, n_steps, it.dt_fs, 0.0, 0.0, 0, out_stats);
+    if (!std::isfinite(it.temp_k) || it.temp_k < 0.0) {
+        loup::set_error("temp_k must be finite and not negative, got %g K", it.temp_k);
+        return -1;
+    }
+    if (!std::isfinite(it.friction_per_fs) || it.friction_per_fs < 0.0) {
+        loup::set_error("friction_per_fs must be finite and not negative, got %g /fs", it.friction_per_fs);
+        return -1;
+    }
+    return run_md_loop(h, 1, n_steps, it.dt_fs, it.temp_k, it.friction_per_fs, it.seed, out_stats);
+}
+
 static int run_nve_impl(LoupHandle* h, int n_steps, double dt_fs, LoupMDStats* out_stats) {
-    return run_md_loop(h, 0, n_steps, dt_fs, 0.0, 0.0, 0, out_stats);
+    LoupIntegrator it{};
+    it.size = sizeof(it);
+    it.kind = LOUP_NVE;
+    it.dt_fs = dt_fs;
+    return run_impl(h, &it, n_steps, out_stats);
 }
 
 static int run_langevin_impl(
     LoupHandle* h, int n_steps, double dt_fs, double temp_k,
     double friction_per_fs, unsigned long long seed, LoupMDStats* out_stats
 ) {
-    if (!std::isfinite(temp_k) || temp_k < 0.0) {
-        loup::set_error("temp_k must be finite and not negative, got %g K", temp_k);
-        return -1;
-    }
-    if (!std::isfinite(friction_per_fs) || friction_per_fs < 0.0) {
-        loup::set_error("friction_per_fs must be finite and not negative, got %g /fs", friction_per_fs);
-        return -1;
-    }
-    return run_md_loop(h, 1, n_steps, dt_fs, temp_k, friction_per_fs, seed, out_stats);
+    LoupIntegrator it{};
+    it.size = sizeof(it);
+    it.kind = LOUP_LANGEVIN;
+    it.dt_fs = dt_fs;
+    it.temp_k = temp_k;
+    it.friction_per_fs = friction_per_fs;
+    it.seed = seed;
+    return run_impl(h, &it, n_steps, out_stats);
 }
 
 static int get_state_impl(LoupHandle* h, double* out_positions, double* out_velocities, double* out_forces, double* out_energy_ev) {
@@ -2397,6 +2450,10 @@ int loup_run_langevin(
     return guarded(h, "loup_run_langevin", [&] {
         return run_langevin_impl(h, n_steps, dt_fs, temp_k, friction_per_fs, seed, out_stats);
     });
+}
+
+int loup_run(LoupHandle* h, const LoupIntegrator* it, int n_steps, LoupMDStats* out_stats) {
+    return guarded(h, "loup_run", [&] { return run_impl(h, it, n_steps, out_stats); });
 }
 
 int loup_get_state(LoupHandle* h, double* out_positions, double* out_velocities, double* out_forces, double* out_energy_ev) {

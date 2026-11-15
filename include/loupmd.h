@@ -105,6 +105,42 @@ int loup_run_langevin(
     LoupMDStats* out_stats
 );
 
+// One run call for every integrator. The caller sets `size` to sizeof(LoupIntegrator), so a library can tell which
+// fields a caller built against another header knows; zero every field it does not use.
+enum {
+    LOUP_NVE = 0,            // velocity Verlet
+    LOUP_LANGEVIN = 1,       // ASE's Vanden-Eijnden-Ciccotti Langevin scheme
+    LOUP_CSVR = 2,           // the kinds from here on are refused by name until their task builds them
+    LOUP_NHC = 3,
+    LOUP_BERENDSEN_NVT = 4,
+    LOUP_BERENDSEN_NPT = 5,
+    LOUP_BAOAB_NPT = 6,
+    LOUP_MTK_NPT = 7
+};
+enum { LOUP_CELL_HYDROSTATIC = 0, LOUP_CELL_FULL = 1 };
+
+typedef struct {
+    unsigned size;                 // sizeof(LoupIntegrator) of the caller
+    int kind;                      // LOUP_NVE ...
+    double dt_fs;                  // timestep in fs
+    double temp_k;                 // thermostat temperature in K
+    double friction_per_fs;        // Langevin friction in 1/fs
+    double tau_t_fs;               // thermostat time constant in fs (CSVR, Nose-Hoover chain, Berendsen)
+    double pressure_gpa;           // barostat pressure in GPa
+    double tau_p_fs;               // barostat time constant in fs
+    double compressibility_per_gpa;// Berendsen NPT
+    int chain_length;              // Nose-Hoover chain
+    int cell_mode;                 // LOUP_CELL_HYDROSTATIC or LOUP_CELL_FULL
+    int cell_mask[3];              // per-axis mask of the barostat
+    int fix_com;                   // remove the centre-of-mass motion (refused until built)
+    int thermo_every;              // write a thermo row every so many steps; 0 = none (refused until built)
+    unsigned long long seed;       // noise stream of the stochastic integrators
+} LoupIntegrator;
+
+// Runs `n_steps` steps of `it`. NVE reads dt_fs; Langevin reads dt_fs, temp_k, friction_per_fs and seed. The rules
+// of loup_run_nve and loup_run_langevin apply: those two calls are this one with the struct filled in.
+int loup_run(LoupHandle* h, const LoupIntegrator* it, int n_steps, LoupMDStats* out_stats);
+
 // Read back state in caller's original atom order (velocities in ASE units, as for loup_set_state).
 int loup_get_state(LoupHandle* h, double* out_positions, double* out_velocities, double* out_forces, double* out_energy_ev);
 

@@ -47,6 +47,48 @@ class LoupInfo(ctypes.Structure):
     ]
 
 
+# Integrator kinds and cell modes of include/loupmd.h.
+LOUP_NVE, LOUP_LANGEVIN, LOUP_CSVR, LOUP_NHC = 0, 1, 2, 3
+LOUP_BERENDSEN_NVT, LOUP_BERENDSEN_NPT, LOUP_BAOAB_NPT, LOUP_MTK_NPT = 4, 5, 6, 7
+LOUP_CELL_HYDROSTATIC, LOUP_CELL_FULL = 0, 1
+
+
+class LoupIntegrator(ctypes.Structure):
+    _fields_ = [
+        ("size", ctypes.c_uint),
+        ("kind", ctypes.c_int),
+        ("dt_fs", ctypes.c_double),
+        ("temp_k", ctypes.c_double),
+        ("friction_per_fs", ctypes.c_double),
+        ("tau_t_fs", ctypes.c_double),
+        ("pressure_gpa", ctypes.c_double),
+        ("tau_p_fs", ctypes.c_double),
+        ("compressibility_per_gpa", ctypes.c_double),
+        ("chain_length", ctypes.c_int),
+        ("cell_mode", ctypes.c_int),
+        ("cell_mask", ctypes.c_int * 3),
+        ("fix_com", ctypes.c_int),
+        ("thermo_every", ctypes.c_int),
+        ("seed", ctypes.c_ulonglong),
+    ]
+
+
+def integrator(kind: int, dt_fs: float = 1.0, **fields) -> LoupIntegrator:
+    """A ``LoupIntegrator`` with ``size`` set and every field not named left at zero."""
+    it = LoupIntegrator()
+    it.size = ctypes.sizeof(LoupIntegrator)
+    it.kind = int(kind)
+    it.dt_fs = float(dt_fs)
+    for name, value in fields.items():
+        if name == "cell_mask":
+            it.cell_mask = (ctypes.c_int * 3)(*[int(v) for v in value])
+        elif name in ("size", "kind", "dt_fs") or name not in {f[0] for f in LoupIntegrator._fields_}:
+            raise InputError(f"LoupIntegrator has no settable field {name!r}")
+        else:
+            setattr(it, name, value)
+    return it
+
+
 @dataclass(frozen=True)
 class EngineInfo:
     """What an engine handle runs (``loup_get_info``)."""
@@ -125,6 +167,8 @@ def _load_lib():
     lib.loup_last_error.argtypes = [ctypes.c_void_p]
     lib.loup_last_error.restype = ctypes.c_char_p
     lib.loup_get_info.argtypes = [ctypes.c_void_p, ctypes.POINTER(LoupInfo)]
+    lib.loup_run.argtypes = [ctypes.c_void_p, ctypes.POINTER(LoupIntegrator), ctypes.c_int,
+                             ctypes.POINTER(LoupMDStats)]
     lib.loup_create.argtypes = [ctypes.c_char_p, ctypes.c_int]
     lib.loup_create.restype = ctypes.c_void_p
     lib.loup_destroy.argtypes = [ctypes.c_void_p]
@@ -139,7 +183,7 @@ def _load_lib():
     lib.loup_get_state.argtypes = [ctypes.c_void_p, _c_double_p, _c_double_p, _c_double_p, _c_double_p]
     lib.loup_profile_force.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_int, _c_double_p]
     for name in ("loup_set_system", "loup_evaluate", "loup_set_state", "loup_run_nve", "loup_run_langevin",
-                 "loup_get_state", "loup_profile_force", "loup_get_info"):
+                 "loup_get_state", "loup_profile_force", "loup_get_info", "loup_run"):
         getattr(lib, name).restype = ctypes.c_int
     _LIB = lib
     return lib
@@ -230,6 +274,12 @@ class LoupEngine:
         vel = _array(velocities, (self._n, 3), "velocities") if velocities is not None else None
         cel = _array(cell, (3, 3), "cell")
         self._check(self._lib.loup_set_state(self._h, _ptr(pos), _ptr(vel), _ptr(cel)), "loup_set_state")
+
+    def run(self, n_steps: int, it: LoupIntegrator) -> LoupMDStats:
+        """``n_steps`` steps of the integrator ``it`` (see ``integrator``)."""
+        st = LoupMDStats()
+        self._check(self._lib.loup_run(self._h, ctypes.byref(it), int(n_steps), ctypes.byref(st)), "loup_run")
+        return st
 
     def run_nve(self, n_steps: int, dt_fs: float = 1.0) -> LoupMDStats:
         st = LoupMDStats()
