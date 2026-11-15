@@ -87,6 +87,10 @@ row; "Undo" says what a different answer costs.
 | D27 | The run file (`loupmd.run/1`, `loupmd init md`, `loupmd run`) and the `--schedule ramp:0:400:3,hold:400:1` syntax are LoupMD's own | keys are `lm.md`'s argument names plus `[output]` and `[[schedule]]`; they were not compared with FastMACE's `init` / `run` files | S3-T08 fixes behaviour, not the file's spelling | rename keys before the documentation stage if FastMACE's files should run unchanged |
 | D28 | The gate's MACE float64 reference may not fit the GPU for a large structure | with `reference_device="auto"` an out-of-memory error moves the reference to the CPU without a time estimate (`cpu_float64_time_limit_s` only switches the CPU off at 0); with an explicit `"cuda"` the gate is unavailable. FastMACE's reduced-cell reference is not built | a gate that silently takes an hour is better than none, and `check="allow_unavailable"` exists; untested on a real large cell | build the time estimate and the reduced cell when a large-cell gate is needed |
 | D29 | Output on a Windows-mounted directory under WSL | measured: rows and frames every 20 steps cost 1.3% on the Linux file system (5,000 atoms) and 5.5% on `/mnt/d` (1,944 atoms) | the documentation should say to write runs to the Linux file system | none |
+| D30 | S4-T10 asks for an optimiser overhead under 2% of the force calls at 5,000 atoms, with the optimisers on the host | FIRE meets it (0.077 ms a step, 0.9%). LBFGS does not: its products with the history of up to 100 pairs cost 1.4 ms a step after 40 steps (17%), and grow with the history; they are in matrix form already (six BLAS calls a step) | the criterion assumed vector algebra that is cheap beside an 8 ms force call; for LBFGS at this size it is not, on the host | move LBFGS's history products to the device (as FastMACE's) when relaxations of cells this large matter; until then FIRE is the cheap optimiser for large cells |
+| D31 | S4-T01's `fix_com` | not built. Design: NVE needs the total momentum removed once at the start (forces sum to zero to rounding); Langevin needs FastMACE's mass-weighted projection of both noise terms, which takes the noise kernel in two passes (draw and sum, then apply) and is used only when `fixcm` is on, so the default step and the standard benchmarks are untouched; the temperature then counts 3N - 3 | FastMACE's `fixcm="auto"` is on, so `lm.md` should follow it once the extra kernel's cost is measured | owner: keep `auto` off if the cost is above what parity is worth |
+| D32 | S4-T13's drop-ins | built for what the engine has: `loupmd.ase.md.Langevin`, `VelocityVerlet`, `loupmd.ase.optimize.LBFGS`, `FIRE`. ASE's default `fixcm=True` is refused until D31; ASE's `trajectory`, `logfile` and `restart` arguments are not taken (`output=` instead); a cell relaxation takes `cell_filter=lm.optimize.FrechetCell()` instead of a filter object. The other eight classes are refused by name | nothing is replaced silently | accept ASE's `trajectory=` and filter objects if FastMACE's example needs them |
+| D33 | Quench settings name FastMACE's optimisers (`gpu-LBFGS`, `ase-LBFGS`, `gpu-FIRE`) | all run LoupMD's host optimisers; `ase-BFGS` is refused | profiles and FastMACE's settings files keep working; the name no longer says where the arithmetic runs | rename in LoupMD's own profiles before the documentation stage |
 
 ---
 
@@ -547,6 +551,19 @@ FastMACE's integrators are ports of ASE 3.27 classes and are the reference imple
 | S4-T13 | `loupmd.ase` drop-ins: `Langevin`, `LangevinBAOAB`, `VelocityVerlet`, `Bussi`, `NoseHooverChainNVT`, `IsotropicMTKNPT`, `MTKNPT`, `NVTBerendsen`, `NPTBerendsen`, `Inhomogeneous_NPTBerendsen`, `LBFGS`, `FIRE`, with ASE's arguments and units plus `model=`, `head=`, `seed=`, `output=`, `check=`; `dyn.attach` supported with a host sync per call | `loupmd/ase/md.py`, `optimize.py` | FastMACE's ASE-port example runs after changing the import line |
 
 **Exit:** every ensemble and optimiser of FastMACE runs natively. Tag `v1.0.0a4`.
+
+**Progress (15 November 2026, 06:50).** The host side of the stage and fixed atoms are built; the integrators that
+need new engine kernels are not. RTX 5060 Ti only; numbers in `STATUS_AND_PROFILE.md` §6.3.
+
+| Task | Commits | State |
+| --- | --- | --- |
+| S4-T01 | | **not built**: integrator slots and `fix_com` (design and recommendation in D31) |
+| S4-T02 | `06230cf` | **done**: `loup_set_fixed_atoms`, `FixAtoms` in `Simulation` and the optimisers, other constraints refused by name. 27 fixed atoms keep their positions bit for bit over 1,000 Langevin steps; the temperature counts 3 (N - n_fixed) |
+| S4-T03 to S4-T09 | | **not started**: CSVR, Nose-Hoover chain, Berendsen, the variable cell in the graph, the three NPT integrators |
+| S4-T10 | `4f20442`, `8c709b9` | **done**, with one criterion missed: LBFGS and FIRE take ASE's step counts on rattled `SrTiO3` 3x3x3 (15 = 15 and 44 = 44, positions within 3e-7 A of ASE's with `lm.calc`). FIRE costs 0.9% of the force calls at 5,000 atoms, LBFGS 17% (D30) |
+| S4-T11 | `4f20442` | **done**: the Frechet cell filter with pressure, hydrostatic, constant-volume and mask options, refused with fixed atoms and for POLAR-1. Strained `SrTiO3` 3x3x3: 157 steps as ASE's `FrechetCellFilter`, lattice constants within 1.0e-5 A (criterion 1e-4) |
+| S4-T12 | `06230cf`, `4f20442` | **done**: `Simulation.relax`, `loupmd relax` (writes extended XYZ equal to the Python call's), `loupmd quench` with FastMACE's selection and files (CPU tests on the fake engine). Not run on the GPU: `loupmd relax` and `loupmd quench` as commands |
+| S4-T13 | `4f20442` | **partly**: four of the twelve classes (D32) |
 
 ### Stage 5: tiled and wavefront capacity mode (6 weeks)
 

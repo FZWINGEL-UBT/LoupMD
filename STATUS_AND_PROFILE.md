@@ -596,3 +596,28 @@ a device scalar that the first half-kick reads and the second advances (ledger `
 - Not measured: anything on the RTX 4000 Ada; a schedule on a model of the generic path; the gate inside a run for
   a structure whose float64 reference does not fit the GPU; `loupmd run --resume` on the GPU.
 
+### 6.3 Fixed atoms and the host-side optimisers (15 November 2026, 06:15 to 06:50)
+
+RTX 5060 Ti only. Engine build of `06230cf` (library sha256 `6c2af2c880580942...`) against the build of §6.2
+(`6bd216e368ca63f0...`). The engine change adds `loup_set_fixed_atoms` and makes the reported temperature count
+3 (N - n_fixed) degrees of freedom; no kernel of the default step changed.
+
+| Check | Result |
+|---|---|
+| `bench_md.py`, old build first, twice (`NbCl5` / `SrTiO3`, new / old) | 1.0124 / 1.0011 and 1.0050 / 1.0008 |
+| `bench_md.py`, new build first, twice | 1.0009 / 0.9986 and 0.9946 / 0.9973 |
+| mean of the four | 1.0032 / 0.9995 |
+| `python/test_gate.py` | PASS, 30 rows and 2 reorder checks, worst force 1.54, stress 1.68 |
+| `pytest -q` at `06230cf` | 458 passed |
+| `pytest -q` at `4f20442` | 491 passed, 1 failed: the optimiser-cost test (FIRE 10.5%, LBFGS 87% of the force calls), fixed in the next commit |
+| fixed atoms (`tests/test_fixed_atoms_gpu.py`) | 27 of 135 atoms fixed: positions bitwise unchanged after 1,000 Langevin steps; NVE with 20 fixed atoms drifts under 2e-5 eV/atom in 0.6 ps |
+| LBFGS and FIRE against ASE's with `lm.calc`, rattled `SrTiO3` 3x3x3, `fmax` 0.05 | 15 steps (ASE 15) and 44 steps (ASE 44); positions within 2.7e-7 and 7.3e-8 A of ASE's |
+| the optimiser's own time at 5,000 atoms, 40 steps | FIRE 0.077 ms a step (0.90% of the 8.4 ms force calls); LBFGS 1.407 ms (17.25%) |
+| cell relaxation of `SrTiO3` 3x3x3 strained by 2%, `fmax` 0.002 | 157 steps (ASE's `FrechetCellFilter` 157); lattice constants within 1.0e-5 A; stress left 8.1e-5 eV/A^3 |
+
+- The first version of the optimisers used `np.dot` / `np.vdot` on 15,000-element vectors, where NumPy's threaded
+  BLAS call cost 0.03 to 0.8 ms each on this machine; plain sums (`einsum`) cost 5 us. LBFGS's two loops are now
+  six matrix-vector products and two small triangular solves a step.
+- Not measured: anything on the RTX 4000 Ada; `loupmd relax` and `loupmd quench` as commands on the GPU; a cell
+  relaxation with a model of the generic path.
+
