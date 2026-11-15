@@ -627,6 +627,9 @@ struct LoupHandle {
     // in the neighbour build as senders and have rows in what senders provide; they receive nothing. 0 for a
     // periodic system, which is all the public calls accept.
     int n_ghost = 0;
+    // The rows (locals and ghosts) the per-system buffers were allocated for: a tile workspace (reshape_domain)
+    // takes any smaller domain without allocating again.
+    int atom_cap = 0;
     double skin = 0.5;
     double e0_total = 0.0;
     std::vector<int> perm;          // device (species-grouped, spatially ordered) index -> caller index
@@ -844,6 +847,7 @@ struct LoupHandle {
         forces_current = false;
         disp_window_steps = 0;
         n_ghost = 0;
+        atom_cap = 0;
         sys_atom_bytes = 0;
         sys_edge_bytes = 0;
         sys_fixed_bytes = 0;
@@ -2228,6 +2232,7 @@ static int set_system_impl(LoupHandle* h, int n_atoms, const int* atomic_numbers
         if (h->E_cap > 0) h->gen->ensure_edges(h->E_cap);
         h->N = n_local;
         h->n_ghost = n_ghost;
+        h->atom_cap = n_atoms;
         return 0;
     }
 
@@ -4284,9 +4289,59 @@ struct TileDomain {        // one tile as an open domain: locals, then the ghost
 };
 }  // namespace
 
+// A tile workspace: the handle holds an open domain whose buffers have room for `atom_cap` rows. Another domain
+// of at most that many rows takes them over: only the species grouping, the per-atom constants and the row counts
+// change. Buffers, the edge capacity, the GEMM plans and the cuBLASLt cache stay (loup_set_system would free and
+// allocate them all, and clear the cache).
+static int reshape_domain(LoupHandle* h, int n_local, int n_ghost, const int* atomic_numbers) {
+    const int n_atoms = n_local + n_ghost;
+    if (!h->gen || h->N <= 0 || n_local <= 0 || n_ghost < 0 || n_atoms > h->atom_cap) {
+        loup::set_error("internal error: a tile of %d rows does not fit the workspace of %d", n_atoms, h->atom_cap);
+        return -1;
+    }
+    const int S = h->n_species();
+    std::vector<int> sp_orig(n_atoms);
+    double e0_total = 0.0;
+    for (int i = 0; i < n_atoms; ++i) {
+        int found = -1;
+        for (int s = 0; s < S; ++s)
+            if (h->species_z(s) == atomic_numbers[i]) { found = s; break; }
+        if (found < 0) {
+            loup::set_error("atomic number %d (atom %d) is not in the bundle", atomic_numbers[i], i);
+            return -1;
+        }
+        sp_orig[i] = found;
+        if (i < n_local) e0_total += h->species_e0(found);
+    }
+    h->perm.resize(n_atoms);
+    h->h_order.resize(n_atoms);
+    h->species_start.assign(S + 1, 0);
+    h->species_count.assign(S, 0);
+    for (int i = 0; i < n_local; ++i) h->species_count[sp_orig[i]]++;
+    for (int s = 0; s < S; ++s) h->species_start[s + 1] = h->species_start[s] + h->species_count[s];
+    std::vector<int> cursor = h->species_start, sp_sorted(n_atoms);
+    for (int i = 0; i < n_atoms; ++i) {
+        const int dst = i < n_local ? cursor[sp_orig[i]]++ : i;
+        h->perm[dst] = i;
+        sp_sorted[dst] = sp_orig[i];
+    }
+    CUDA_CHECK(cudaMemcpyAsync(h->d_species, sp_sorted.data(), (size_t)n_atoms * sizeof(int), cudaMemcpyHostToDevice,
+                               h->stream));
+    CUDA_CHECK(cudaStreamSynchronize(h->stream));  // `sp_sorted` goes out of scope
+    h->e0_total = e0_total;
+    h->N = n_local;
+    h->n_ghost = n_ghost;
+    h->nl_valid = false;
+    h->forces_current = false;
+    h->n_rebuilds = 0;
+    h->invalidate_graphs();
+    return 0;
+}
+
 // Sets the handle up as `t`'s domain and builds its list; row_atom (device, [rows]) maps each device row to its atom.
 static int activate_tile(LoupHandle* h, const TileDomain& t, double skin, int* row_atom) {
-    if (set_domain_impl(h, t.n_local, t.n_ghost(), t.z.data(), skin) != 0) return -1;
+    (void)skin;  // the workspace's
+    if (reshape_domain(h, t.n_local, t.n_ghost(), t.z.data()) != 0) return -1;
     if (upload_positions(h, t.place.data(), t.box) < 0) return -1;
     if (rebuild_neighbors(h) != 0) return -1;
     h->invalidate_graphs();
@@ -4329,10 +4384,11 @@ static int evaluate_tiled_impl(LoupHandle* h, int n_atoms, const int* atomic_num
     if (out_tiles) *out_tiles = T;
 
     // The tiles' domains; the candidates that send along no edge are dropped (S5-T02).
-    std::vector<TileDomain> tiles((size_t)T);
+    std::vector<TileDomain> alls((size_t)T), tiles((size_t)T);
     int max_rows = 0;
+    size_t widest = 0;
     for (int64_t k = 0; k < T; ++k) {
-        TileDomain all;
+        TileDomain& all = alls[(size_t)k];
         const int64_t l0 = plan.local_ptr[k], l1 = plan.local_ptr[k + 1];
         const int64_t g0 = plan.ghost_ptr[k], g1 = plan.ghost_ptr[k + 1];
         all.n_local = (int)(l1 - l0);
@@ -4355,11 +4411,16 @@ static int evaluate_tiled_impl(LoupHandle* h, int n_atoms, const int* atomic_num
         for (size_t r = 0; r < all.atom.size(); ++r)
             for (int c = 0; c < 3; ++c) all.place[r * 3 + c] -= lo[c] - pad;
         for (int c = 0; c < 3; ++c) all.box[c * 4] = hi[c] - lo[c] + 2.0 * pad;
-
+        if (all.atom.size() > alls[widest].atom.size()) widest = (size_t)k;
+    }
+    // One workspace for every tile: the buffers of the widest domain (all its candidates), set up once.
+    if (set_domain_impl(h, alls[widest].n_local, alls[widest].n_ghost(), alls[widest].z.data(), skin) != 0) return -1;
+    for (int64_t k = 0; k < T; ++k) {
+        TileDomain& all = alls[(size_t)k];
         TileDomain& t = tiles[(size_t)k];
         const int G = all.n_ghost();
         if (G == 0) { t = std::move(all); max_rows = std::max(max_rows, t.n_local); continue; }
-        if (set_domain_impl(h, all.n_local, G, all.z.data(), skin) != 0) return -1;
+        if (reshape_domain(h, all.n_local, G, all.z.data()) != 0) return -1;
         if (upload_positions(h, all.place.data(), all.box) < 0) return -1;
         if (rebuild_neighbors(h) != 0) return -1;
         std::vector<unsigned char> used((size_t)G, 0);
@@ -4380,6 +4441,8 @@ static int evaluate_tiled_impl(LoupHandle* h, int n_atoms, const int* atomic_num
             t.place.insert(t.place.end(), &all.place[(size_t)r * 3], &all.place[(size_t)r * 3 + 3]);
         }
         max_rows = std::max(max_rows, (int)t.atom.size());
+        TileDomain().atom.swap(all.atom);  // the candidates' host copy is no longer needed
+        all.place.clear(); all.place.shrink_to_fit();
     }
 
     // The whole system's layer outputs, their gradients and the forces, on the device

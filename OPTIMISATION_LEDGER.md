@@ -280,6 +280,12 @@ Conventions:
 | [meas-family-bench](#meas-family-bench) | MD speed of every family, both GPUs, against FastMACE's documented numbers | MEASUREMENT | POLAR-1 level to 20% slower than FastMACE (11 Nov lines) | [§5][s5] |
 | [meas-plan-variance](#meas-plan-variance) | GEMM plans differ between library builds | MEASUREMENT | POLAR-1-M NaCl 216 S8/S7 b/a 1.013 with each build's cached plans, 0.969 after both retuned | this file |
 
+### Tiled mode (Stage 5)
+
+| ID | Idea | Switch/flag | Path | Status | Stage | Effect | Evidence |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| [tile-workspace](#tile-workspace) | One set of per-system buffers for every tile: the domain of the most rows is set up once, the others reshape it (species grouping, row counts) instead of `loup_set_system`'s free, allocate and cuBLASLt cache clear | none | generic, tiled | ADOPTED | S5 | tiled call 2.5-3.4x faster: `SrTiO3` 40,000 atoms 8 tiles, OMAT-0 medium 67.1 -> 19.7 us/atom, small 75.0 -> 23.2; still 6-27x the whole-system call | [§6.15][s615] |
+
 ## Chronology
 
 Step times are `bench_md.py` OMAT-0 medium MD steps, `NbCl5` / `SrTiO3`, ms. Rows are successive builds of the
@@ -1946,6 +1952,29 @@ POLAR-1 NaCl 3x3x3 (216) and POLAR-1-M `NbCl5` 3x3x3 (1,944).
 - Sources: this file.
 
 [status]: STATUS_AND_PROFILE.md
+### Tiled mode
+
+<a id="tile-workspace"></a>**tile-workspace** (ADOPTED, 16 November 2026, 5060 Ti only). The eager tiled call
+of S5-T03 set the handle up for every tile sweep with `loup_set_system`'s path: every per-system buffer freed and
+allocated again, the cuBLASLt cache cleared, the variant tuning reset; 24 set-ups and 8 list builds per call at
+8 tiles, 0.3-0.5 s per tile. Now the domain with the most rows (all its ghost candidates) is set up once and every
+other tile reshapes it (`reshape_domain`): species grouping, per-atom constants, row counts. The generic model's
+kernels take the row count of the call, so buffers with room for more rows are used as they are. Same results
+(`tests/gpu/test_tiled.py`, `test_tile_lists.py`, `test_open_domain.py`: 15 passed). Time of one tiled call after a
+warm-up (`.tmp_o/probe_tiled_time.py`):
+
+| Model, atoms, tiles | Before (us/atom) | Workspace (us/atom) | Whole system |
+| --- | --- | --- | --- |
+| OMAT-0 small, 24,565, 3 | 55.5 | 15.0 | 0.92 |
+| OMAT-0 small, 40,000, 8 | 75.0 | 23.2 | 0.85 |
+| OMAT-0 small, 40,000, 2 | 30.1 | 9.5 | 0.85 |
+| OMAT-0 medium, 24,565, 3 | 44.4 | 19.1 | 1.64 |
+| OMAT-0 medium, 40,000, 8 | 67.1 | 19.7 | 1.63 |
+| OMAT-0 medium, 40,000, 2 | 25.9 | 10.0 | 1.63 |
+
+Still 50-100 ms per tile: four list builds per tile and call (the candidates' build and one per sweep), each with
+host syncs, and a host round trip after every tile sweep. Next: keep each tile's list across its sweeps.
+
 [s1]: STATUS_AND_PROFILE.md#1-benchmark--verification-summary
 [s2]: STATUS_AND_PROFILE.md#2-detailed-kernel-profile-current-build
 [s31]: STATUS_AND_PROFILE.md#31-implemented-optimisations
@@ -1966,3 +1995,5 @@ POLAR-1 NaCl 3x3x3 (216) and POLAR-1-M `NbCl5` 3x3x3 (1,944).
 [s67]: STATUS_AND_PROFILE.md#67-the-variable-cell-and-berendsen-npt-15-november-2026-1720-to-1845
 [s68]: STATUS_AND_PROFILE.md#68-langevin-baoab-npt-mtk-npt-and-what-two-builds-differ-by-in-the-benchmark-15-november-2026-1845-to-2025
 [s55]: STATUS_AND_PROFILE.md#55-known-limitations
+
+[s615]: STATUS_AND_PROFILE.md#615-the-tile-workspace-16-november-2026-0015

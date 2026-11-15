@@ -958,3 +958,17 @@ the mean of five after a warm-up):
   builds at 8 tiles. This is the eager stage of FastMACE's tiled design; FastMACE's steady tiled call is 1.05 to
   1.2 times its whole-system cost per atom (`FastMACE/docs/validation/tiled/tiled-1m-speed.md`), with a fixed
   workspace, bodies per padded slot size and kept lists (S5-T05, S5-T06, S5-T10).
+
+### 6.15 The tile workspace (16 November 2026, 00:15)
+
+RTX 5060 Ti only; library `045194b7dcd2a738...` (the working tree after `56a3a5d`). One set of buffers for every
+tile instead of a full set-up per tile sweep (ledger `tile-workspace`). `pytest -s tests/gpu/test_tiled.py
+tests/gpu/test_tile_lists.py tests/gpu/test_open_domain.py`: 15 passed, the tiled call's differences as in §6.13
+(without hybrids at most 1.8e-9 eV/atom, 2.1e-6 eV/A).
+
+| Model | Atoms | Tiles | Whole system, us/atom | Tiled before (§6.14) | Tiled now | Tiled / whole now |
+|---|---|---|---|---|---|---|
+| OMAT-0 small | 24,565 | 3; 2 | 0.92 | 55.5; 41.4 | 15.0; 12.8 | 16.4; 14.0 |
+| OMAT-0 small | 40,000 | 8; 2 | 0.85 | 75.0; 30.1 | 23.2; 9.5 | 27.4; 11.2 |
+| OMAT-0 medium | 24,565 | 3; 2 | 1.64 | 44.4; 45.1 | 19.1; 12.9 | 11.6; 7.8 |
+| OMAT-0 medium | 40,000 | 8; 2 | 1.63 | 67.1; 25.9 | 19.7; 10.0 | 12.1; 6.1 |
