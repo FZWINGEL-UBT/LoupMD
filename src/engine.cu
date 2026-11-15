@@ -4184,6 +4184,58 @@ static int evaluate_domain_impl(LoupHandle* h, const double* positions, const do
     return 0;
 }
 
+// ---- A tile's neighbour list (plan task S5-T02), testing only ----
+// The list of cutoff plus skin the handle builds for `positions` (a periodic system, or an open domain whose ghosts
+// are a tile's ghost candidates), copied out in the caller's order: receivers are locals, senders locals or ghosts
+// (n_local + g for ghost g), shifts the Cartesian offsets of the engine's convention (edge vector = receiver -
+// sender + shift). ghost_used[g] (optional) is 1 for each ghost that sends along some edge: the others are candidates
+// the tile can drop. With capacity below the count nothing but the count is written.
+extern "C++" {
+__global__ void mark_ghost_senders_kernel(int E, int n_local, const int* __restrict__ senders,
+                                          unsigned char* __restrict__ used) {
+    const int e = blockIdx.x * blockDim.x + threadIdx.x;
+    if (e < E && senders[e] >= n_local) used[senders[e] - n_local] = 1;
+}
+}  // extern "C++"
+
+static int domain_edges_impl(LoupHandle* h, const double* positions, const double* cell, long long capacity,
+                             int* out_receivers, int* out_senders, double* out_shifts, long long* out_count,
+                             unsigned char* out_ghost_used) {
+    if (!h || h->N <= 0) { loup::set_error("no system is set"); return -1; }
+    if (!out_count) { loup::set_error("out_count is NULL"); return -1; }
+    const int N = h->N, G = h->n_ghost;
+    CUDA_CHECK(cudaSetDevice(h->device_id));
+    if (upload_positions(h, positions, cell) < 0) return -1;
+    if (rebuild_neighbors(h) != 0) return -1;
+    const int E = h->E_skin;
+    *out_count = E;
+    if (out_ghost_used && G > 0) {
+        DeviceBufferGuard used;
+        CUDA_CHECK(cudaMalloc(&used.p, G));
+        CUDA_CHECK(cudaMemsetAsync(used.p, 0, G, h->stream));
+        if (E > 0)
+            mark_ghost_senders_kernel<<<(E + 255) / 256, 256, 0, h->stream>>>(
+                E, N, h->d_senders, static_cast<unsigned char*>(used.p));
+        CUDA_CHECK(cudaMemcpyAsync(out_ghost_used, used.p, G, cudaMemcpyDeviceToHost, h->stream));
+        CUDA_CHECK(cudaStreamSynchronize(h->stream));
+    }
+    if (capacity < E || E == 0) return 0;
+    std::vector<int> rcv(E), snd(E);
+    std::vector<double> sh((size_t)E * 3);
+    CUDA_CHECK(cudaMemcpyAsync(rcv.data(), h->d_receivers, (size_t)E * sizeof(int), cudaMemcpyDeviceToHost, h->stream));
+    CUDA_CHECK(cudaMemcpyAsync(snd.data(), h->d_senders, (size_t)E * sizeof(int), cudaMemcpyDeviceToHost, h->stream));
+    CUDA_CHECK(cudaMemcpyAsync(sh.data(), h->d_shift_cart, (size_t)E * 3 * sizeof(double), cudaMemcpyDeviceToHost,
+                               h->stream));
+    CUDA_CHECK(cudaStreamSynchronize(h->stream));
+    for (int e = 0; e < E; ++e) {
+        if (out_receivers) out_receivers[e] = h->perm[rcv[e]];
+        if (out_senders) out_senders[e] = h->perm[snd[e]];
+        if (out_shifts)
+            for (int k = 0; k < 3; ++k) out_shifts[(size_t)e * 3 + k] = sh[(size_t)e * 3 + k];
+    }
+    return 0;
+}
+
 // loup_plan_memory: the device memory a system of n_atoms would take, scaled from the buffers the handle's current
 // system has. Every per-system buffer is proportional to the atom count or to the edge capacity, so the scaling is
 // exact up to alignment; what it leaves out is small and does not scale (captured graphs, cuBLAS internals).
@@ -4326,6 +4378,15 @@ int loup_debug_evaluate_domain(LoupHandle* h, const double* positions, const dou
                                double* out_energy_ev, double* out_forces, double* out_stress) {
     return guarded(h, "loup_debug_evaluate_domain", [&] {
         return evaluate_domain_impl(h, positions, cell, ghost_of, out_energy_ev, out_forces, out_stress);
+    });
+}
+
+int loup_debug_domain_edges(LoupHandle* h, const double* positions, const double* cell, long long capacity,
+                            int* out_receivers, int* out_senders, double* out_shifts, long long* out_count,
+                            unsigned char* out_ghost_used) {
+    return guarded(h, "loup_debug_domain_edges", [&] {
+        return domain_edges_impl(h, positions, cell, capacity, out_receivers, out_senders, out_shifts, out_count,
+                                 out_ghost_used);
     });
 }
 

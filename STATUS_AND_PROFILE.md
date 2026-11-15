@@ -884,3 +884,21 @@ directory per run, four rounds alternating:
 
 - A tie: each difference is inside the other side's range, as expected for code the step does not run.
 - Not run: the wheel (Docker Desktop does not start, PLAN.md D59), the acceptance tier, anything on another GPU.
+
+### 6.12 Per-tile neighbour lists (15 November 2026, 22:35)
+
+RTX 5060 Ti only; library of the working tree after `40bdf96` with `loup_debug_domain_edges` (sha256
+`d289193f6b995db7...`). `pytest -s tests/gpu/test_tile_lists.py`: `SrTiO3` 20x20x20 (40,000 atoms; rattled by
+0.05 A, sheared by up to 1%), MACE-OMAT-0 medium on the generic path, skin 0.5 A, planner reach = cutoff + skin +
+0.01 A.
+
+| Receiver cap | Tiles (grid) | Edges of the whole system | Edges in one list only | Ghost candidates | Sending along no edge |
+|---|---|---|---|---|---|
+| 12,000 | 4 (1x1x1) | 3,969,958 | 0 | 89,790 | 38,879 (43.3%) |
+| 3,000 | 16 (2x2x2) | 3,969,958 | 0 | 103,230 | 28,654 (27.8%) |
+
+- The candidates without an edge are those of the corners of a tile's bounding box (S5-T01 lists every image
+  within reach of the box, not of the atoms): a tile that keeps them carries up to 43% more ghost rows than it needs.
+- Not measured: the time of a tile's list build, and of a second build without the dropped candidates.
+- `pytest tests/gpu` with no marker filter (fast, full and acceptance tiers, with the two tests above) on this
+  build: 275 passed in 1,458 s. The acceptance tier after the move of S2-T11 thus passes as well.

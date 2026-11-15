@@ -345,6 +345,14 @@ const char* loup_tile_plan_error(void);
 int loup_debug_set_domain(LoupHandle* h, int n_local, int n_ghost, const int* atomic_numbers, double skin);
 int loup_debug_evaluate_domain(LoupHandle* h, const double* positions, const double* cell, const int* ghost_of,
                                double* out_energy_ev, double* out_forces, double* out_stress);
+// Testing only (plan task S5-T02): the neighbour list of cutoff plus skin the handle builds for `positions` and
+// `cell`, on a periodic system or an open domain whose ghosts are a tile's ghost candidates. *out_count is the edge
+// count; with capacity >= it, receivers (local atoms), senders (n_local + g for ghost g) and shifts [count, 3]
+// (Cartesian, edge vector = receiver - sender + shift) are written in the caller's atom order, each optional.
+// out_ghost_used [n_ghost] (optional) marks the ghosts that send along some edge; a tile drops the others.
+int loup_debug_domain_edges(LoupHandle* h, const double* positions, const double* cell, long long capacity,
+                            int* out_receivers, int* out_senders, double* out_shifts, long long* out_count,
+                            unsigned char* out_ghost_used);
 // Testing only: the noise CSVR draws in steps first_step .. first_step + n_steps - 1 (counted by the handle's step
 // counter, which loup_set_system zeroes) with `seed` for `ndof` degrees of freedom: the standard normal R1 and the
 // chi-square variate of ndof - 1 degrees of freedom of each step.
