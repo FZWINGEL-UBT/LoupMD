@@ -308,6 +308,12 @@ static uint64_t library_build_hash() {
     return cached;
 }
 
+static uint64_t fnv1a64(const void* data, size_t n, uint64_t hsh = 1469598103934665603ULL) {
+    const unsigned char* p = static_cast<const unsigned char*>(data);
+    for (size_t i = 0; i < n; ++i) hsh = (hsh ^ p[i]) * 1099511628211ULL;
+    return hsh;
+}
+
 struct LoupHandle {
     std::string last_error;  // text of the last failed call on this handle (loup_last_error); empty after a success
     int device_id = 0;
@@ -441,6 +447,8 @@ struct LoupHandle {
     std::vector<int> species_start; // [S+1]
     std::vector<int> species_count; // [S]
     loup::CellMat64 cell{};
+    double cell_in[9] = {0, 0, 0, 0, 0, 0, 0, 0, 0};  // the cell as the caller last gave it (state blob)
+    uint64_t species_hash = 0;                        // of the atomic numbers in caller order (state blob)
     double cell_vol = 0.0;
     double cell_heights[3] = {0, 0, 0};
 
@@ -1737,6 +1745,7 @@ static int set_system_impl(LoupHandle* h, int n_atoms, const int* atomic_numbers
     h->free_system();  // sets N = 0
     h->skin = skin;
     h->e0_total = e0_total;
+    h->species_hash = fnv1a64(atomic_numbers, (size_t)n_atoms * sizeof(int), fnv1a64(&n_atoms, sizeof(n_atoms)));
 
     // Build stable species-grouping permutation (the spatial order inside each group is set at every rebuild)
     h->perm.resize(n_atoms);
@@ -1941,6 +1950,7 @@ static bool valid_input(int n, const double* positions, const double* cell, cons
 static int upload_positions(LoupHandle* h, const double* positions, const double* cell) {
     if (!valid_input(h->N, positions, cell, nullptr)) return -1;
     h->forces_current = false;
+    memcpy(h->cell_in, cell, sizeof(h->cell_in));
     loup::CellMat64 old_cell = h->cell;
     loup::compute_cell_mat(cell, h->cell, h->cell_vol, h->cell_heights);
     const int cell_changed = memcmp(&old_cell, &h->cell, sizeof(old_cell)) != 0 ? 1 : 0;
@@ -2392,6 +2402,130 @@ static int get_state_impl(LoupHandle* h, double* out_positions, double* out_velo
     return 0;
 }
 
+// The state blob (loup_export_state / loup_import_state): what a restart needs beyond the system itself, in the
+// caller's atom order. Version 1 covers NVE and Langevin, whose only state besides positions and velocities is the
+// step counter (the offset of the noise stream). Forces and the neighbour list are not stored: import rebuilds
+// the list, and the next run starts with a force pass.
+//   StateHeader | positions [N, 3] f64 | velocities [N, 3] f64 | FNV-1a of everything before, u64
+struct StateHeader {
+    char magic[8];            // "LOUPSTA1"
+    uint32_t version;         // 1
+    uint32_t header_bytes;    // sizeof(StateHeader)
+    uint64_t n_atoms;
+    uint64_t species_hash;    // atomic numbers in caller order: a blob only fits the system it was written for
+    uint64_t step_counter;
+    uint32_t max_step_disp2;  // the displacement tracker (float bits)
+    uint32_t reserved;
+    double cell[9];
+};
+static_assert(sizeof(StateHeader) == 120, "StateHeader has padding");
+static const char kStateMagic[8] = {'L', 'O', 'U', 'P', 'S', 'T', 'A', '1'};
+static size_t state_blob_bytes(int n_atoms) {
+    return sizeof(StateHeader) + (size_t)n_atoms * 6 * sizeof(double) + sizeof(uint64_t);
+}
+
+static int export_state_impl(LoupHandle* h, void* buffer, size_t capacity, size_t* written) {
+    if (!has_system(h)) return -1;
+    if (!h->nl_valid) {
+        loup::set_error("no positions to export (call loup_set_state or loup_evaluate first)");
+        return -1;
+    }
+    const size_t need = state_blob_bytes(h->N);
+    if (written) *written = need;
+    if (!buffer && capacity == 0) return 0;  // size query
+    if (!buffer || capacity < need) {
+        loup::set_error("the buffer holds %zu bytes, and the state of %d atoms needs %zu", buffer ? capacity : (size_t)0,
+                        h->N, need);
+        return -1;
+    }
+    CUDA_CHECK(cudaSetDevice(h->device_id));
+    const size_t n3 = (size_t)h->N * 3;
+    std::vector<double> p_sorted(n3), v_sorted(n3);
+    StateHeader hd{};
+    memcpy(hd.magic, kStateMagic, 8);
+    hd.version = 1;
+    hd.header_bytes = sizeof(StateHeader);
+    hd.n_atoms = (uint64_t)h->N;
+    hd.species_hash = h->species_hash;
+    memcpy(hd.cell, h->cell_in, sizeof(hd.cell));
+    CUDA_CHECK(cudaMemcpyAsync(p_sorted.data(), h->d_pos64, n3 * sizeof(double), cudaMemcpyDeviceToHost, h->stream));
+    CUDA_CHECK(cudaMemcpyAsync(v_sorted.data(), h->d_vel64, n3 * sizeof(double), cudaMemcpyDeviceToHost, h->stream));
+    CUDA_CHECK(cudaMemcpyAsync(&hd.step_counter, h->d_step_counter, sizeof(hd.step_counter), cudaMemcpyDeviceToHost, h->stream));
+    CUDA_CHECK(cudaMemcpyAsync(&hd.max_step_disp2, h->d_max_step_disp2, sizeof(hd.max_step_disp2), cudaMemcpyDeviceToHost, h->stream));
+    CUDA_CHECK(cudaStreamSynchronize(h->stream));
+    std::vector<double> body(2 * n3);
+    for (int dst = 0; dst < h->N; ++dst) {
+        const size_t orig = (size_t)h->perm[dst];
+        for (int k = 0; k < 3; ++k) {
+            body[orig * 3 + k] = p_sorted[(size_t)dst * 3 + k];
+            body[n3 + orig * 3 + k] = v_sorted[(size_t)dst * 3 + k];
+        }
+    }
+    unsigned char* out = static_cast<unsigned char*>(buffer);
+    memcpy(out, &hd, sizeof(hd));
+    memcpy(out + sizeof(hd), body.data(), body.size() * sizeof(double));
+    const uint64_t sum = fnv1a64(out, need - sizeof(uint64_t));
+    memcpy(out + need - sizeof(uint64_t), &sum, sizeof(sum));
+    return 0;
+}
+
+static int import_state_impl(LoupHandle* h, const void* buffer, size_t size) {
+    if (!has_system(h)) return -1;
+    if (!buffer) { loup::set_error("the buffer is NULL"); return -1; }
+    StateHeader hd;
+    if (size < sizeof(hd)) {
+        loup::set_error("the state blob has %zu bytes, fewer than its header (%zu)", size, sizeof(hd));
+        return -1;
+    }
+    const unsigned char* in = static_cast<const unsigned char*>(buffer);
+    memcpy(&hd, in, sizeof(hd));
+    if (memcmp(hd.magic, kStateMagic, 8) != 0) { loup::set_error("not a LoupMD state blob"); return -1; }
+    if (hd.version != 1 || hd.header_bytes != sizeof(StateHeader)) {
+        loup::set_error("the state blob has version %u, and this library reads version 1", hd.version);
+        return -1;
+    }
+    if (hd.n_atoms != (uint64_t)h->N) {
+        loup::set_error("the state blob holds %llu atoms, and the handle's system has %d",
+                        (unsigned long long)hd.n_atoms, h->N);
+        return -1;
+    }
+    const size_t need = state_blob_bytes(h->N);
+    if (size != need) {
+        loup::set_error("the state blob has %zu bytes, and %zu are expected for %d atoms (truncated or padded)", size,
+                        need, h->N);
+        return -1;
+    }
+    uint64_t sum = 0;
+    memcpy(&sum, in + need - sizeof(sum), sizeof(sum));
+    if (sum != fnv1a64(in, need - sizeof(sum))) {
+        loup::set_error("the state blob is damaged (its checksum does not match)");
+        return -1;
+    }
+    if (hd.species_hash != h->species_hash) {
+        loup::set_error("the state blob was written for other atomic numbers or another atom order");
+        return -1;
+    }
+    const size_t n3 = (size_t)h->N * 3;
+    std::vector<double> body(2 * n3);  // the caller's buffer need not be aligned
+    memcpy(body.data(), in + sizeof(hd), body.size() * sizeof(double));
+    const double* positions = body.data();
+    const double* velocities = body.data() + n3;
+    CUDA_CHECK(cudaSetDevice(h->device_id));
+    if (!valid_input(h->N, positions, hd.cell, velocities)) return -1;
+    if (upload_positions(h, positions, hd.cell) < 0) return -1;
+    std::vector<double> v_sorted(n3);
+    for (int dst = 0; dst < h->N; ++dst) {
+        const size_t src = (size_t)h->perm[dst];
+        for (int k = 0; k < 3; ++k) v_sorted[(size_t)dst * 3 + k] = velocities[src * 3 + k];
+    }
+    CUDA_CHECK(cudaMemcpyAsync(h->d_vel64, v_sorted.data(), n3 * sizeof(double), cudaMemcpyHostToDevice, h->stream));
+    if (rebuild_neighbors(h) != 0) return -1;
+    CUDA_CHECK(cudaMemcpyAsync(h->d_step_counter, &hd.step_counter, sizeof(hd.step_counter), cudaMemcpyHostToDevice, h->stream));
+    CUDA_CHECK(cudaMemcpyAsync(h->d_max_step_disp2, &hd.max_step_disp2, sizeof(hd.max_step_disp2), cudaMemcpyHostToDevice, h->stream));
+    CUDA_CHECK(cudaStreamSynchronize(h->stream));
+    return 0;
+}
+
 static int profile_force_impl(LoupHandle* h, int warmup, int n_calls, double* out_total_us) {
     if (!has_system(h)) return -1;
     if (!h->nl_valid) {
@@ -2464,6 +2598,14 @@ int loup_get_state(LoupHandle* h, double* out_positions, double* out_velocities,
 
 int loup_profile_force(LoupHandle* h, int warmup, int n_calls, double* out_total_us) {
     return guarded(h, "loup_profile_force", [&] { return profile_force_impl(h, warmup, n_calls, out_total_us); });
+}
+
+int loup_export_state(LoupHandle* h, void* buffer, size_t capacity, size_t* written) {
+    return guarded(h, "loup_export_state", [&] { return export_state_impl(h, buffer, capacity, written); });
+}
+
+int loup_import_state(LoupHandle* h, const void* buffer, size_t size) {
+    return guarded(h, "loup_import_state", [&] { return import_state_impl(h, buffer, size); });
 }
 
 const char* loup_last_error(const LoupHandle* h) {

@@ -1,5 +1,7 @@
 #pragma once
 
+#include <stddef.h>
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -143,6 +145,17 @@ int loup_run(LoupHandle* h, const LoupIntegrator* it, int n_steps, LoupMDStats* 
 
 // Read back state in caller's original atom order (velocities in ASE units, as for loup_set_state).
 int loup_get_state(LoupHandle* h, double* out_positions, double* out_velocities, double* out_forces, double* out_energy_ev);
+
+// The state a restart needs, as one versioned block of bytes: positions, velocities and cell as the caller gave
+// them (caller atom order), the step counter (the offset of the noise stream, so a resumed Langevin run continues
+// its noise) and the displacement tracker. Forces and the neighbour list are not in it.
+//   loup_export_state(h, NULL, 0, &n) sets n to the size in bytes. With a buffer it writes the block; a buffer
+//   smaller than that is refused, and n still holds the size.
+//   loup_import_state needs the same system on the handle (loup_set_system with the same atomic numbers in the
+//   same order) and refuses a block of another atom count, species list, version or length, or a damaged one. It
+//   rebuilds the neighbour list; the next run starts with a force pass.
+int loup_export_state(LoupHandle* h, void* buffer, size_t capacity, size_t* written);
+int loup_import_state(LoupHandle* h, const void* buffer, size_t size);
 
 // Timing breakdown across components for diagnostics (averages over `n_calls` force evaluations).
 int loup_profile_force(LoupHandle* h, int warmup, int n_calls, double* out_total_us);

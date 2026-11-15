@@ -169,6 +169,9 @@ def _load_lib():
     lib.loup_get_info.argtypes = [ctypes.c_void_p, ctypes.POINTER(LoupInfo)]
     lib.loup_run.argtypes = [ctypes.c_void_p, ctypes.POINTER(LoupIntegrator), ctypes.c_int,
                              ctypes.POINTER(LoupMDStats)]
+    lib.loup_export_state.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_size_t,
+                                      ctypes.POINTER(ctypes.c_size_t)]
+    lib.loup_import_state.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_size_t]
     lib.loup_create.argtypes = [ctypes.c_char_p, ctypes.c_int]
     lib.loup_create.restype = ctypes.c_void_p
     lib.loup_destroy.argtypes = [ctypes.c_void_p]
@@ -183,7 +186,8 @@ def _load_lib():
     lib.loup_get_state.argtypes = [ctypes.c_void_p, _c_double_p, _c_double_p, _c_double_p, _c_double_p]
     lib.loup_profile_force.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_int, _c_double_p]
     for name in ("loup_set_system", "loup_evaluate", "loup_set_state", "loup_run_nve", "loup_run_langevin",
-                 "loup_get_state", "loup_profile_force", "loup_get_info", "loup_run"):
+                 "loup_get_state", "loup_profile_force", "loup_get_info", "loup_run", "loup_export_state",
+                 "loup_import_state"):
         getattr(lib, name).restype = ctypes.c_int
     _LIB = lib
     return lib
@@ -302,6 +306,19 @@ class LoupEngine:
         self._check(self._lib.loup_get_state(self._h, _ptr(pos), _ptr(vel), _ptr(frc), ctypes.byref(en)),
                     "loup_get_state")
         return pos, vel, frc, float(en.value)
+
+    def export_state(self) -> bytes:
+        """Positions, velocities, cell, step counter and displacement tracker as one versioned block of bytes."""
+        size = ctypes.c_size_t()
+        self._check(self._lib.loup_export_state(self._h, None, 0, ctypes.byref(size)), "loup_export_state")
+        buf = ctypes.create_string_buffer(size.value)
+        self._check(self._lib.loup_export_state(self._h, buf, size.value, ctypes.byref(size)), "loup_export_state")
+        return buf.raw[: size.value]
+
+    def import_state(self, blob: bytes):
+        """Restore a block from ``export_state`` on a handle that holds the same system."""
+        blob = bytes(blob)
+        self._check(self._lib.loup_import_state(self._h, blob, len(blob)), "loup_import_state")
 
     def profile_force(self, warmup: int = 50, n_calls: int = 200) -> float:
         us = ctypes.c_double()
