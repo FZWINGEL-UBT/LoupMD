@@ -18,10 +18,11 @@ Beyond ASE's arguments: ``model=`` (a label, path or ``lm.load`` result; require
 thermostat's noise seed), ``output=``, ``check=`` and what ``lm.load`` takes. ASE's ``rng``, ``comm`` and ``master``
 are refused when given: the noise is drawn on the GPU from ``seed``.
 
-Built: ``Langevin``, ``VelocityVerlet`` and ``Bussi``. Langevin's ``fixcm=True`` (ASE's default) keeps the centre
+Built: ``Langevin``, ``VelocityVerlet``, ``Bussi``, ``NoseHooverChainNVT`` and ``NVTBerendsen``. Langevin's ``fixcm=True`` (ASE's default) keeps the centre
 of mass at rest with the mass-weighted projection of the noise, which is canonical for unequal masses too; ASE's
-own projection differs from it for unequal masses. ``VelocityVerlet`` and ``Bussi`` remove no centre-of-mass
-motion and count ASE's degrees of freedom, as ASE's classes. The other classes of FastMACE's ``fastmace.ase`` are
+own projection differs from it for unequal masses. ``VelocityVerlet``, ``Bussi`` and ``NoseHooverChainNVT``
+remove no centre-of-mass motion, as ASE's classes, and count 3 N degrees of freedom less three for each fixed
+atom (ASE's chain counts 3 N even with fixed atoms). The other classes of FastMACE's ``fastmace.ase`` are
 refused by name until their integrators are built.
 """
 from __future__ import annotations
@@ -32,8 +33,7 @@ from math import gcd
 from ..errors import InputError, PlanRefused
 from ..forcefield import ForceField, load
 
-_NOT_BUILT = ("LangevinBAOAB", "NoseHooverChainNVT", "IsotropicMTKNPT", "MTKNPT", "NVTBerendsen", "NPTBerendsen",
-              "Inhomogeneous_NPTBerendsen")
+_NOT_BUILT = ("LangevinBAOAB", "IsotropicMTKNPT", "MTKNPT", "NPTBerendsen", "Inhomogeneous_NPTBerendsen")
 _LOAD_OPTIONS = ("checkpoint", "sha256", "trusted", "download", "charge", "spin_multiplicity", "device")
 # ASE's arguments that have no meaning here: accepted at None, refused otherwise.
 _ASE_REFUSED = {"rng": "the noise is drawn on the GPU: pass seed=", "comm": "LoupMD runs in one process",
@@ -44,8 +44,8 @@ def __getattr__(name):
     if name in _NOT_BUILT:
         raise PlanRefused(f"loupmd.ase.md.{name} is not in this version",
                           why="its integrator is not built in the engine yet (PLAN.md Stage 4)",
-                          next_step="Use Langevin, Bussi or VelocityVerlet, or ASE's class with lm.calc as the "
-                                    "calculator.")
+                          next_step="Use Langevin, Bussi, NoseHooverChainNVT or VelocityVerlet, or ASE's class "
+                                    "with lm.calc as the calculator.")
     raise AttributeError(f"module 'loupmd.ase.md' has no attribute {name!r}")
 
 
@@ -237,3 +237,41 @@ class Bussi(_Dynamics):
                                   tau_fs=taut / units.fs, fixcm=False)
         super().__init__(atoms, timestep, record, model, head, seed, output, check, options)
         self.transferred_energy = 0.0                    # ASE's attribute; the engine keeps the running sum
+
+
+class NoseHooverChainNVT(_Dynamics):
+    """``ase.md.nose_hoover_chain.NoseHooverChainNVT`` on LoupMD's engine: ``timestep`` and ``tdamp`` in ASE
+    units, ``temperature_K`` in K, ``tchain`` thermostats, ``tloop`` sub-steps."""
+
+    def __init__(self, atoms, timestep, temperature_K, tdamp, tchain=3, tloop=1, *, model=None, head=None,
+                 seed=None, output=None, check="skip", **options):
+        from ase import units
+
+        from .. import integrators
+
+        record = integrators.NoseHooverChain(timestep_fs=timestep / units.fs, temperature_K=temperature_K,
+                                             tdamp_fs=tdamp / units.fs, tchain=tchain, tloop=tloop, fixcm=False)
+        super().__init__(atoms, timestep, record, model, head, seed, output, check, options)
+
+
+class NVTBerendsen(_Dynamics):
+    """``ase.md.nvtberendsen.NVTBerendsen`` on LoupMD's engine: ``timestep`` and ``taut`` in ASE units,
+    ``temperature_K`` in K (or ASE's older ``temperature`` in eV). ``fixcm=True`` (ASE's default) keeps the
+    centre of mass at rest; the temperature then counts three degrees of freedom fewer than ASE's."""
+
+    def __init__(self, atoms, timestep, temperature=None, taut=None, fixcm=True, *, temperature_K=None, model=None,
+                 head=None, seed=None, output=None, check="skip", **options):
+        from ase import units
+
+        from .. import integrators
+
+        if temperature is not None and temperature_K is not None:
+            raise TypeError("NVTBerendsen takes temperature (in eV) or temperature_K, not both")
+        if temperature is not None:
+            temperature_K = temperature / units.kB
+        if temperature_K is None or taut is None:
+            raise InputError("NVTBerendsen needs temperature_K and taut (in ASE time units, for example "
+                             "100 * units.fs)")
+        record = integrators.Berendsen(timestep_fs=timestep / units.fs, temperature_K=temperature_K,
+                                       taut_fs=taut / units.fs, fixcm=fixcm)
+        super().__init__(atoms, timestep, record, model, head, seed, output, check, options)

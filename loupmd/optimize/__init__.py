@@ -1,11 +1,13 @@
-"""``lm.optimize``: structure relaxation with ASE 3.27's optimisers, run on host arrays around the engine's force
-call.
+"""``lm.optimize``: structure relaxation with ASE 3.27's optimisers.
 
 The records take ASE's arguments and defaults under FastMACE's names (``fm.optimize``); lengths are in A. ``relax``
-runs one: forces from the force field, the optimiser's step on the host, until the largest force on an atom is
-below ``fmax``. Atoms under ASE's ``FixAtoms`` do not move. With ``cell_filter=FrechetCell(...)`` the cell is
-relaxed with the positions (ASE's ``FrechetCellFilter``, pressure in GPa); it is refused with fixed atoms and for
-models with long-range terms (MACE-POLAR-1), as in FastMACE.
+runs one until the largest force on an atom is below ``fmax``. Atoms under ASE's ``FixAtoms`` do not move.
+
+Where the steps are taken: LBFGS at fixed cell runs on the GPU inside the engine (``loup_minimize``: the history
+and its products on the device, so a step costs little more than its force call). FIRE, and every relaxation with
+``cell_filter=FrechetCell(...)``, takes its steps on host arrays around the engine's force call. Both give ASE's
+steps. With the cell filter the cell is relaxed with the positions (ASE's ``FrechetCellFilter``, pressure in
+GPa); it is refused with fixed atoms and for models with long-range terms (MACE-POLAR-1), as in FastMACE.
 """
 from __future__ import annotations
 
@@ -197,6 +199,10 @@ def relax(force_field, atoms, optimizer=None, *, fmax=0.05, steps=100_000_000, s
             raise PlanRefused(f"the cell cannot be relaxed with {force_field.name}: its long-range part has no "
                               "stress the filter can use", next_step="Relax at fixed cell (cell_filter=None).")
         view = optimizer.cell_filter.view(work)
+    if view is None and isinstance(optimizer, LBFGS) and hasattr(force_field, "engine_for"):
+        engine = force_field.engine_for(work, skin)
+        if hasattr(engine, "minimize"):
+            return _relax_on_device(engine, work, fixed, optimizer, fmax, steps, callback, _on_step)
     state = optimizer.state(len(work) + (3 if view is not None else 0))
     timers = {"force": 0.0, "optimizer": 0.0}
     last = {}
@@ -245,3 +251,56 @@ def relax(force_field, atoms, optimizer=None, *, fmax=0.05, steps=100_000_000, s
     work.calc = SinglePointCalculator(work, energy=energy, forces=last["forces"], **results_extra())
     return RelaxResult(atoms=work, steps=taken, converged=bool(largest < fmax), max_force=largest, energy=energy,
                        force_calls=taken + 1, optimizer_s=timers["optimizer"], force_s=timers["force"])
+
+
+def _relax_on_device(engine, work, fixed, optimizer, fmax, steps, callback, on_step) -> RelaxResult:
+    """LBFGS at fixed cell inside the engine (``loup_minimize``). With a callback the engine takes one step per
+    call, so that the caller sees every step; without one it takes them all in one call."""
+    from ase.calculators.singlepoint import SinglePointCalculator
+
+    engine.set_state(work.positions, None, work.cell.array)
+    if fixed is not None:
+        engine.set_fixed_atoms(fixed)              # the force field's shared engine: freed again below
+    settings = dict(fmax=fmax, maxstep_A=optimizer.maxstep_A, memory=optimizer.memory, damping=optimizer.damping,
+                    alpha=optimizer.alpha)
+    watched = callback is not None or on_step is not None
+    force_ms = optimizer_ms = 0.0
+    taken = passes = 0
+
+    def notify(stats):
+        positions, _, forces, energy = engine.get_state()
+        if callback is not None:
+            callback(taken, positions, energy, stats.max_force_ev_a)
+        if on_step is not None:
+            work.set_positions(positions, apply_constraint=False)
+            work.calc = SinglePointCalculator(work, energy=energy, forces=forces)
+            on_step(taken, work, energy, stats.max_force_ev_a)
+
+    try:
+        try:
+            stats = engine.minimize(0, **settings)                        # the starting structure's forces
+            force_ms, optimizer_ms, passes = stats.force_ms, stats.optimizer_ms, stats.force_passes
+            if watched:
+                notify(stats)
+            while not stats.converged and taken < steps:
+                stats = engine.minimize(1 if watched else steps - taken, **settings)
+                taken += stats.steps
+                passes += stats.force_passes
+                force_ms += stats.force_ms
+                optimizer_ms += stats.optimizer_ms
+                if watched:
+                    notify(stats)
+        except Exception as error:
+            if "non-finite" in str(error):
+                raise NonFiniteError("non-finite energy or forces during the relaxation",
+                                     why="the step led to a configuration the model cannot evaluate") from None
+            raise
+        positions, _, forces, energy = engine.get_state()
+    finally:
+        if fixed is not None:
+            engine.set_fixed_atoms(None)
+    work.set_positions(positions, apply_constraint=False)
+    work.calc = SinglePointCalculator(work, energy=energy, forces=forces)
+    return RelaxResult(atoms=work, steps=taken, converged=bool(stats.converged), max_force=stats.max_force_ev_a,
+                       energy=energy, force_calls=max(passes, 1), optimizer_s=optimizer_ms / 1e3,
+                       force_s=force_ms / 1e3)

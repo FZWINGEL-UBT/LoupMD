@@ -174,11 +174,35 @@ __global__ void momentum_remove_kernel(int N, double inv_total_mass, const doubl
                                        double* __restrict__ vel64);
 __global__ void kinetic_energy_kernel(int N, const double* __restrict__ masses,
                                       const double* __restrict__ vel64, double* __restrict__ out_ke);
+__global__ void min_gradient_kernel(
+    int N, int have_previous, const double* __restrict__ forces, const double* __restrict__ inv_masses,
+    const double* __restrict__ pos64, const double* __restrict__ x0, const double* __restrict__ g0,
+    double* __restrict__ g, double* __restrict__ s_row, double* __restrict__ y_row,
+    unsigned long long* __restrict__ out_fmax2);
+__global__ void lbfgs_products_kernel(
+    int n3, int stride, const double* __restrict__ S, const double* __restrict__ Y, const double* __restrict__ g,
+    const double* __restrict__ s_new, const double* __restrict__ y_new, double* __restrict__ out);
+__global__ void lbfgs_direction_kernel(
+    int N, int rows, int stride, double h0, const int* __restrict__ row_index, const double* __restrict__ u,
+    const double* __restrict__ w, const double* __restrict__ S, const double* __restrict__ Y,
+    const double* __restrict__ g, double* __restrict__ p, unsigned long long* __restrict__ out_len2);
+__global__ void lbfgs_move_kernel(
+    int N, double maxstep, double damping, const unsigned long long* __restrict__ len2,
+    const double* __restrict__ p, const double* __restrict__ g, double* __restrict__ pos64,
+    double* __restrict__ x0, double* __restrict__ g0);
+__global__ void max_displacement2_kernel(int N, const double* __restrict__ pos64,
+                                         const double* __restrict__ ref_pos64,
+                                         unsigned long long* __restrict__ out_disp2);
 __global__ void csvr_noise_debug_kernel(unsigned long long seed, unsigned long long first_step, int n, int ndof,
                                         double* __restrict__ normal, double* __restrict__ chi2);
 __global__ void csvr_alpha_kernel(int ndof, double exp_term, double kb, unsigned long long seed,
                                   unsigned long long* __restrict__ step_counter, double* __restrict__ target,
                                   double* __restrict__ work, double* __restrict__ state);
+__global__ void nhc_half_kernel(int ndof, int tchain, int tloop, double delta, double q, double kb, int advance,
+                                double* __restrict__ target, double* __restrict__ work, double* __restrict__ state);
+__global__ void scale_velocities_kernel(int N, const double* __restrict__ work, double* __restrict__ vel64);
+__global__ void berendsen_scale_kernel(int ndof, double dt_over_tau, double kb, double* __restrict__ target,
+                                       double* __restrict__ work);
 __global__ void csvr_first_half_kernel(
     int N, double dt_ase, const double* __restrict__ work, const double* __restrict__ forces,
     const double* __restrict__ inv_masses, double* __restrict__ pos64, double* __restrict__ vel64,
@@ -186,9 +210,53 @@ __global__ void csvr_first_half_kernel(
 }  // namespace loup
 
 // Scalars an integrator carries from step to step and a restart needs (the state block holds all of them):
-// CSVR: [0] the energy the thermostat has transferred. The other slots are for the integrators to come.
+// CSVR: [0] the energy the thermostat has transferred. Nose-Hoover chain: [0] minus the chain's energy, then eta
+// and p_eta of each thermostat (nhc_half_kernel). The other slots are for the integrators to come.
 constexpr int kIntStateSlots = 64;
 constexpr int kIntWorkSlots = 8;  // per-step scratch: CSVR's kinetic energy and alpha
+
+// loup_minimize's LBFGS (src/minimize.cu). The history and the step's vectors are on the device in the handle's
+// atom order; the host keeps what the two triangular solves need. It is valid for the positions the last call
+// left (pos_epoch), with the settings of that call.
+struct MinState {
+    bool valid = false;
+    unsigned long long epoch = 0;   // LoupHandle::pos_epoch the state belongs to
+    double maxstep = 0.0, damping = 0.0, alpha = 0.0;
+    int memory = 0;
+    int n3 = 0;                     // 3 N of the buffers
+    int count = 0;                  // pairs in the history (rows 0 .. count - 1)
+    int head = 0;                   // the row the next pair goes to
+    long long iteration = 0;        // steps taken
+    std::vector<int> order;         // history rows, oldest first
+    std::vector<double> rho;        // [memory]: 1 / (y_i . s_i)
+    std::vector<double> gram;       // [memory, memory]: s_i . y_j
+    std::vector<double> yy;         // [memory, memory]: y_i . y_j
+    double* d_S = nullptr;          // [memory, n3]
+    double* d_Y = nullptr;          // [memory, n3]
+    double* d_vec = nullptr;        // [4, n3]: g, g0, x0, p
+    double* d_small = nullptr;      // [7 memory]: the five products per row, then u and w
+    int* d_rows = nullptr;          // [memory]: the rows of u and w
+    // [3], bits of doubles: the largest squared force, the largest squared length of the last direction, the
+    // largest squared displacement from the neighbour list's reference after the last move
+    unsigned long long* d_max = nullptr;
+    // Pinned host memory, so that no copy waits for the host: d_max's three values, the energy, the five products
+    // per row, then u and w; and the rows of u and w.
+    double* h_pin = nullptr;        // [4 + 7 memory]
+    int* h_rows = nullptr;          // [memory]
+    // What the list check of the next move goes by (minimize_impl): the largest displacement from the list's
+    // reference at the current positions and the longest step of an atom in the last move; -1: not known.
+    double disp_known = -1.0, step_known = -1.0;
+    void release() {
+        auto freep = [](auto*& p) {
+            if (p) { cudaFree(p); p = nullptr; }
+        };
+        freep(d_S); freep(d_Y); freep(d_vec); freep(d_small); freep(d_rows); freep(d_max);
+        if (h_pin) { cudaFreeHost(h_pin); h_pin = nullptr; }
+        if (h_rows) { cudaFreeHost(h_rows); h_rows = nullptr; }
+        valid = false;
+        n3 = 0;
+    }
+};
 
 // FNV-1a over a file's bytes (0 if unreadable).
 static uint64_t fnv1a_file(const char* path) {
@@ -557,6 +625,9 @@ struct LoupHandle {
     double* d_int_state = nullptr;        // [kIntStateSlots]: the integrator's scalars (see kIntStateSlots)
     double* d_int_work = nullptr;         // [kIntWorkSlots]
     int int_state_kind = -1;              // the LOUP_* kind whose scalars d_int_state holds; -1: none (all zero)
+    MinState min_state;                   // loup_minimize
+    unsigned long long pos_epoch = 0;     // counts what moves positions or reorders atoms outside loup_minimize
+    bool suppress_reorder = false;        // loup_minimize: its vectors are in the atom order of its start
     // Fixed atoms (loup_set_fixed_atoms): their inverse masses on the device are zero, so no kernel moves them.
     int n_fixed = 0;
     std::vector<double> masses_caller;        // caller order: restores the inverse mass of an atom set free
@@ -666,6 +737,8 @@ struct LoupHandle {
     double md_graph_dt = 0.0;
     double md_graph_fr = 0.0;
     double md_graph_tau = 0.0;
+    double md_graph_mass_temp = 0.0;
+    int md_graph_chain = 0;   // 1000 chain_length + chain_loops
     unsigned long long md_graph_seed = 0;
     bool md_graph_thermo = false;  // the graphs carry the two thermo kernels
     bool md_graph_fixcom = false;  // the graphs are the fix_com variant (and its degrees of freedom)
@@ -733,6 +806,7 @@ struct LoupHandle {
         freep(d_need_rebuild); freep(d_max_step_disp2); freep(d_step_counter); freep(d_langevin_target);
         freep(d_int_state); freep(d_int_work);
         int_state_kind = -1;
+        min_state.release();
         freep(d_rnd_pos); freep(d_com);
         freep(d_ke_f64);
         freep(d_thermo_ctrl); freep(d_thermo_rows);
@@ -1139,7 +1213,7 @@ static int rebuild_neighbors(LoupHandle* h) {
     // buffer address and every captured graph stays valid; only the host permutation changes.
     const bool reorder = h->n_ghost == 0 &&
                          (h->ovr.reorder >= 0 ? h->ovr.reorder == 1 : (int64_t)N * 4096 > (int64_t)h->l2_bytes);
-    if (reorder && (h->n_rebuilds++ % 16) == 0) {
+    if (reorder && !h->suppress_reorder && (h->n_rebuilds++ % 16) == 0) {
         unsigned long long* keys_in = h->d_ro_keys;
         unsigned long long* keys_out = h->d_ro_keys + N;
         int* vals_in = h->d_ro_vals;
@@ -1172,6 +1246,7 @@ static int rebuild_neighbors(LoupHandle* h) {
                 gather(h->d_rnd_vel, 3)) return -1;
             std::vector<int> old_perm = h->perm;
             for (int i = 0; i < N; ++i) h->perm[i] = old_perm[h->h_order[i]];
+            ++h->pos_epoch;  // per-atom state kept outside this function (loup_minimize's) is in the old order
             CUDA_CHECK(cudaMemsetAsync(h->d_bin_counts, 0, n_bins * sizeof(int), h->stream));
             loup::wrap_and_bin_kernel<<<gridN, blk, 0, h->stream>>>(
                 N, h->cell, nx, ny, nz, h->d_pos64, h->d_pos_wrapped, h->d_atom_wrap, h->d_atom_bin, h->d_bin_counts);
@@ -2179,6 +2254,7 @@ static int upload_positions(LoupHandle* h, const double* positions, const double
     const int NT = h->N + h->n_ghost;
     if (!valid_input(NT, positions, cell, nullptr)) return -1;
     h->forces_current = false;
+    ++h->pos_epoch;
     memcpy(h->cell_in, cell, sizeof(h->cell_in));
     loup::CellMat64 old_cell = h->cell;
     loup::compute_cell_mat(cell, h->cell, h->cell_vol, h->cell_heights);
@@ -2265,6 +2341,7 @@ static int set_fixed_impl(LoupHandle* h, const int* fixed) {
     CUDA_CHECK(cudaMemcpy(h->d_vel64, vel.data(), vel.size() * sizeof(double), cudaMemcpyHostToDevice));
     for (int i = 0; i < N; ++i) h->fixed_caller[i] = fixed && fixed[i] != 0;
     h->n_fixed = n_fixed;
+    ++h->pos_epoch;  // loup_minimize's gradient leaves fixed atoms out
     h->invalidate_md_graphs();  // the thermo row's degrees of freedom are baked into the captured step
     return 0;
 }
@@ -2413,7 +2490,8 @@ static int evaluate2_impl(
 static int run_md_loop(
     LoupHandle* h, int kind, int n_steps, double dt_fs,
     double temp_k, double temp_rate, double friction_per_fs, unsigned long long seed, int thermo_every,
-    bool fix_com, LoupMDStats* out_stats, double tau_fs = 0.0
+    bool fix_com, LoupMDStats* out_stats, double tau_fs = 0.0, int tchain = 0, int tloop = 1,
+    double mass_temp_k = 0.0
 ) {
     // nl_valid: positions and a neighbour list exist (set_state or evaluate ran and its rebuild completed).
     if (!has_system(h)) return -1;
@@ -2493,6 +2571,7 @@ static int run_md_loop(
     // one seed continue the noise sequence instead of replaying it.
     CUDA_CHECK(cudaStreamSynchronize(h->stream));
     h->forces_current = false;  // until this call completes: a failure below leaves positions ahead of the forces
+    ++h->pos_epoch;
 
     // ASE's Langevin coefficients. c3, c4, c5 carry sigma = sqrt(2 gamma kB T), which the first half-kick forms from
     // the target on the device; here are their factors of sigma.
@@ -2526,6 +2605,30 @@ static int run_md_loop(
         }
         CUDA_CHECK(cudaMemsetAsync(h->d_int_work, 0, kIntWorkSlots * sizeof(double), h->stream));
     }
+    // Berendsen (kind 4): the target as for CSVR; it has no state of its own.
+    if (kind == 4) {
+        const double target[5] = {temp_k + temp_rate, temp_rate, 0.0, 0.0, 0.0};
+        CUDA_CHECK(cudaMemcpy(h->d_langevin_target, target, sizeof(target), cudaMemcpyHostToDevice));
+        if (h->int_state_kind != LOUP_BERENDSEN_NVT) {
+            CUDA_CHECK(cudaMemsetAsync(h->d_int_state, 0, kIntStateSlots * sizeof(double), h->stream));
+            h->int_state_kind = LOUP_BERENDSEN_NVT;
+        }
+        CUDA_CHECK(cudaMemsetAsync(h->d_int_work, 0, kIntWorkSlots * sizeof(double), h->stream));
+    }
+    // Nose-Hoover chain (kind 3): the thermostat masses' unit kT_mass tdamp^2 (Q_0 = N_f q, the others q), and the
+    // target as for CSVR. The chain's variables carry on from the last Nose-Hoover call on this trajectory.
+    double nhc_q = 0.0;
+    if (kind == 3) {
+        const double tdamp = tau_fs * loup::ASE_FS;
+        nhc_q = loup::ASE_KB * mass_temp_k * tdamp * tdamp;
+        const double target[5] = {temp_k + temp_rate, temp_rate, 0.0, 0.0, 0.0};
+        CUDA_CHECK(cudaMemcpy(h->d_langevin_target, target, sizeof(target), cudaMemcpyHostToDevice));
+        if (h->int_state_kind != LOUP_NHC) {
+            CUDA_CHECK(cudaMemsetAsync(h->d_int_state, 0, kIntStateSlots * sizeof(double), h->stream));
+            h->int_state_kind = LOUP_NHC;
+        }
+        CUDA_CHECK(cudaMemsetAsync(h->d_int_work, 0, kIntWorkSlots * sizeof(double), h->stream));
+    }
 
     // fix_com: the buffers of the two-pass noise, and for NVE the total momentum removed once (the forces of a
     // periodic system sum to zero to rounding, so it stays removed).
@@ -2555,6 +2658,23 @@ static int run_md_loop(
         } else if (kind == 0) {
             loup::nve_first_half_kernel<<<gridN, 256, 0, h->stream>>>(
                 N, dt_ase, h->d_forces_f64, h->d_inv_masses, h->d_pos64, h->d_vel64, h->d_max_step_disp2);
+        } else if (kind == 4) {
+            // The kinetic temperature, lambda from it, then the half-kick on the scaled velocities.
+            loup::kinetic_energy_kernel<<<gridN, 256, 0, h->stream>>>(N, h->d_masses, h->d_vel64, h->d_int_work);
+            loup::berendsen_scale_kernel<<<1, 1, 0, h->stream>>>(h->kinetic_dof(), dt_fs / tau_fs, loup::ASE_KB,
+                                                                 h->d_langevin_target, h->d_int_work);
+            loup::csvr_first_half_kernel<<<gridN, 256, 0, h->stream>>>(
+                N, dt_ase, h->d_int_work, h->d_forces_f64, h->d_inv_masses, h->d_pos64, h->d_vel64,
+                h->d_max_step_disp2);
+        } else if (kind == 3) {
+            // The chain for half a step from the kinetic energy; the half-kick on the velocities it scales.
+            loup::kinetic_energy_kernel<<<gridN, 256, 0, h->stream>>>(N, h->d_masses, h->d_vel64, h->d_int_work);
+            loup::nhc_half_kernel<<<1, 1, 0, h->stream>>>(h->kinetic_dof(), tchain, tloop, 0.5 * dt_ase, nhc_q,
+                                                          loup::ASE_KB, 0, h->d_langevin_target, h->d_int_work,
+                                                          h->d_int_state);
+            loup::csvr_first_half_kernel<<<gridN, 256, 0, h->stream>>>(
+                N, dt_ase, h->d_int_work, h->d_forces_f64, h->d_inv_masses, h->d_pos64, h->d_vel64,
+                h->d_max_step_disp2);
         } else if (kind == 2) {
             // The kinetic energy, alpha from it and this step's noise, then the half-kick on the scaled velocities.
             loup::kinetic_energy_kernel<<<gridN, 256, 0, h->stream>>>(N, h->d_masses, h->d_vel64, h->d_int_work);
@@ -2587,12 +2707,19 @@ static int run_md_loop(
                 N, c1, c2, h->d_forces_f64, h->d_inv_masses, h->d_rnd_vel, h->d_vel64, h->d_step_counter,
                 h->d_langevin_target, a3, a4, a5, two_fr_kb);
         }
+        if (kind == 3) {  // the chain's second half, which also moves the target on
+            loup::kinetic_energy_kernel<<<gridN, 256, 0, h->stream>>>(N, h->d_masses, h->d_vel64, h->d_int_work);
+            loup::nhc_half_kernel<<<1, 1, 0, h->stream>>>(h->kinetic_dof(), tchain, tloop, 0.5 * dt_ase, nhc_q,
+                                                          loup::ASE_KB, 1, h->d_langevin_target, h->d_int_work,
+                                                          h->d_int_state);
+            loup::scale_velocities_kernel<<<gridN, 256, 0, h->stream>>>(N, h->d_int_work, h->d_vel64);
+        }
         if (thermo_every > 0) {  // the row cadence lives on the device: only on / off is baked into the graph
             loup::thermo_kinetic_kernel<<<gridN, 256, 0, h->stream>>>(N, h->d_masses, h->d_vel64, h->d_thermo_ctrl);
             loup::thermo_row_kernel<<<1, 1, 0, h->stream>>>(h->kinetic_dof(), h->e0_total, loup::ASE_KB,
                                                             h->d_energy_f64,
                                                             h->d_thermo_ctrl, h->d_thermo_rows,
-                                                            kind == 2 ? h->d_int_state : nullptr);
+                                                            kind >= 2 ? h->d_int_state : nullptr);
         }
     };
     auto capture = [&](cudaGraph_t& g, cudaGraphExec_t& ge, auto&& body) -> int {
@@ -2610,6 +2737,8 @@ static int run_md_loop(
         h->md_graph_dt = dt_fs;
         h->md_graph_fr = friction_per_fs;
         h->md_graph_tau = tau_fs;
+        h->md_graph_mass_temp = mass_temp_k;
+        h->md_graph_chain = 1000 * tchain + tloop;
         h->md_graph_seed = seed;
         h->md_graph_thermo = thermo_every > 0;
         h->md_graph_fixcom = fix_com;
@@ -2633,6 +2762,7 @@ static int run_md_loop(
     // variants, the long-range part's cell) drops the graphs where it changes: invalidate_graphs.
     if (h->md_graph_kind != kind || h->md_graph_dt != dt_fs ||
         h->md_graph_fr != friction_per_fs || h->md_graph_tau != tau_fs || h->md_graph_seed != seed ||
+        h->md_graph_mass_temp != mass_temp_k || h->md_graph_chain != 1000 * tchain + tloop ||
         h->md_graph_thermo != (thermo_every > 0) ||
         h->md_graph_fixcom != fix_com) {
         h->invalidate_md_graphs();
@@ -2818,6 +2948,287 @@ static int csvr_noise_impl(LoupHandle* h, unsigned long long seed, unsigned long
     return 0;
 }
 
+// loup_minimize: LBFGS on the device, see src/minimize.cu for the algebra. Per step: one pass over the history
+// for every product the host needs, the two triangular solves on the host, one pass for the direction, the move,
+// the list check and the force pass. The host waits for the device once per step (for the products) and a second
+// time only where the move may have outdated the neighbour list.
+static int minimize_impl(LoupHandle* h, const LoupMinimizer* caller, int max_steps, LoupMinStats* out_stats) {
+    if (!has_system(h)) return -1;
+    if (!caller) { loup::set_error("the minimizer is NULL"); return -1; }
+    if (caller->size != sizeof(LoupMinimizer)) {
+        loup::set_error("LoupMinimizer.size is %u, and this library's layout has %zu bytes (set size to "
+                        "sizeof(LoupMinimizer) of the header the library was built from)", caller->size,
+                        sizeof(LoupMinimizer));
+        return -1;
+    }
+    const LoupMinimizer m = *caller;
+    if (m.kind != LOUP_MIN_LBFGS) { loup::set_error("unknown minimizer kind %d", m.kind); return -1; }
+    if (!h->nl_valid) {
+        loup::set_error("no positions or neighbour list (call loup_set_state or loup_evaluate first)");
+        return -1;
+    }
+    if (max_steps < 0) { loup::set_error("max_steps must not be negative, got %d", max_steps); return -1; }
+    if (!std::isfinite(m.fmax_ev_a) || !(m.fmax_ev_a > 0.0)) {
+        loup::set_error("fmax_ev_a must be finite and positive, got %g eV/A", m.fmax_ev_a);
+        return -1;
+    }
+    if (!std::isfinite(m.maxstep_a) || !(m.maxstep_a > 0.0) || !std::isfinite(m.damping) || !(m.damping > 0.0) ||
+        !std::isfinite(m.alpha) || !(m.alpha > 0.0)) {
+        loup::set_error("maxstep_a, damping and alpha must be finite and positive, got %g A, %g and %g", m.maxstep_a,
+                        m.damping, m.alpha);
+        return -1;
+    }
+    if (m.memory < 1 || m.memory > 1000) {
+        loup::set_error("memory must be from 1 to 1000 history pairs, got %d", m.memory);
+        return -1;
+    }
+    CUDA_CHECK(cudaSetDevice(h->device_id));
+    const int N = h->N;
+    const int n3 = 3 * N;
+    const int gridN = (N + 255) / 256;
+    const int mem = m.memory;
+    MinState& st = h->min_state;
+    // A new relaxation unless this call continues the last one: same settings, and nothing moved the atoms since.
+    if (!st.valid || st.epoch != h->pos_epoch || st.n3 != n3 || st.memory != mem || st.maxstep != m.maxstep_a ||
+        st.damping != m.damping || st.alpha != m.alpha) {
+        if (st.n3 != n3 || st.memory != mem) {
+            st.release();
+            CUDA_CHECK(cudaMalloc(&st.d_S, (size_t)mem * n3 * sizeof(double)));
+            CUDA_CHECK(cudaMalloc(&st.d_Y, (size_t)mem * n3 * sizeof(double)));
+            CUDA_CHECK(cudaMalloc(&st.d_vec, (size_t)4 * n3 * sizeof(double)));
+            CUDA_CHECK(cudaMalloc(&st.d_small, (size_t)7 * mem * sizeof(double)));
+            CUDA_CHECK(cudaMalloc(&st.d_rows, (size_t)mem * sizeof(int)));
+            CUDA_CHECK(cudaMalloc(&st.d_max, 3 * sizeof(unsigned long long)));
+            CUDA_CHECK(cudaMallocHost((void**)&st.h_pin, ((size_t)4 + 7 * (size_t)mem) * sizeof(double)));
+            CUDA_CHECK(cudaMallocHost((void**)&st.h_rows, (size_t)mem * sizeof(int)));
+            st.n3 = n3;
+            st.memory = mem;
+        }
+        st.maxstep = m.maxstep_a;
+        st.damping = m.damping;
+        st.alpha = m.alpha;
+        st.count = 0;
+        st.head = 0;
+        st.iteration = 0;
+        st.order.clear();
+        st.rho.assign((size_t)mem, 0.0);
+        st.gram.assign((size_t)mem * mem, 0.0);
+        st.yy.assign((size_t)mem * mem, 0.0);
+        st.disp_known = st.step_known = -1.0;
+        st.valid = true;
+    }
+    st.epoch = h->pos_epoch;
+    double* d_g = st.d_vec;
+    double* d_g0 = st.d_vec + n3;
+    double* d_x0 = st.d_vec + 2 * (size_t)n3;
+    double* d_p = st.d_vec + 3 * (size_t)n3;
+    double* d_prod = st.d_small;
+    double* d_u = st.d_small + 5 * (size_t)mem;
+    double* d_w = st.d_small + 6 * (size_t)mem;
+    const double h0 = 1.0 / m.alpha;
+    const double half_skin = 0.5 * h->skin;
+
+    struct ReorderOff {  // the optimiser's vectors stay in the atom order of the call
+        LoupHandle* h;
+        explicit ReorderOff(LoupHandle* handle) : h(handle) { h->suppress_reorder = true; }
+        ~ReorderOff() { h->suppress_reorder = false; }
+    } reorder_off(h);
+    // The optimiser's own time is measured between events on the stream: from the end of a force pass to the end of
+    // the history products (ev_products), and from the host's solve to the end of the move (ev_step). Everything
+    // else of the call is the force evaluation: force passes, list checks and rebuilds, graph captures.
+    EventPairGuard ev_products, ev_step;
+    double optimizer_ms = 0.0;
+    int rebuilds = 0, passes = 0, repeated = 0;
+    auto force_pass = [&]() -> int {
+        if (ensure_force_graph(h, 0) != 0) return -1;
+        CUDA_CHECK(cudaGraphLaunch(h->force_graph_exec, h->stream));
+        ++passes;
+        return 0;
+    };
+    auto add_elapsed = [&](const EventPairGuard& ev) -> int {
+        float ms = 0.0f;
+        CUDA_CHECK(cudaEventElapsedTime(&ms, ev.e0, ev.e1));
+        optimizer_ms += (double)ms;
+        return 0;
+    };
+    const auto t_start = std::chrono::steady_clock::now();
+    if (!h->forces_current || h->lt_cache.empty()) {
+        if (force_pass() != 0) return -1;
+    }
+
+    double* pin = st.h_pin;                      // [0..2] d_max's values, [3] the energy
+    double* prod = pin + 4;                      // five products per history row
+    double* u = pin + 4 + 5 * (size_t)mem;       // u, then w: one upload
+    double* w = u + mem;
+    std::vector<double> a((size_t)mem), yz((size_t)mem);
+    int taken = 0;
+    bool converged = false;
+    double fmax = 0.0, energy = 0.0;
+    // The list check of a move, as an evaluation at new positions makes it: a rebuild once an atom is further than
+    // half the skin from where the list was built. Where the displacement before the move plus twice the last
+    // step's length stays inside that, the force pass is launched without waiting, and the displacement after the
+    // move arrives with the next step's downloads (`unchecked`); should the list have been outdated after all,
+    // that force pass is thrown away and run again with a new list. Otherwise (a call's first move of a new
+    // relaxation, or a move that may cross the bound) the host waits for the measurement before the force pass.
+    // LOUP_MIN_AHEAD=0|1 (testing) forces one of the two ways.
+    const char* ahead_env = getenv("LOUP_MIN_AHEAD");
+    const int ahead_forced = (ahead_env && *ahead_env) ? (atoi(ahead_env) != 0 ? 1 : 0) : -1;
+    bool unchecked = false, step_timed = false;
+    for (;;) {
+        // The gradient and the largest force; from the second step on the newest pair goes into its row, and one
+        // pass over the history gives every product with it and with the gradient.
+        const bool have_previous = st.iteration > 0;
+        const int row = st.head;
+        const int n_rows = have_previous ? std::min(st.count + 1, mem) : 0;  // the history with the new pair
+        CUDA_CHECK(cudaEventRecord(ev_products.e0, h->stream));
+        CUDA_CHECK(cudaMemsetAsync(st.d_max, 0, sizeof(unsigned long long), h->stream));
+        loup::min_gradient_kernel<<<gridN, 256, 0, h->stream>>>(
+            N, have_previous ? 1 : 0, h->d_forces_f64, h->d_inv_masses, h->d_pos64, d_x0, d_g0, d_g,
+            st.d_S + (size_t)row * n3, st.d_Y + (size_t)row * n3, st.d_max);
+        if (have_previous) {
+            CUDA_CHECK(cudaMemsetAsync(d_prod, 0, (size_t)5 * mem * sizeof(double), h->stream));
+            const dim3 grid((unsigned)((n3 + 256 * 16 - 1) / (256 * 16)), (unsigned)n_rows);
+            loup::lbfgs_products_kernel<<<grid, 256, 0, h->stream>>>(
+                n3, n3, st.d_S, st.d_Y, d_g, st.d_S + (size_t)row * n3, st.d_Y + (size_t)row * n3, d_prod);
+            CUDA_CHECK(cudaMemcpyAsync(prod, d_prod, (size_t)5 * n_rows * sizeof(double), cudaMemcpyDeviceToHost,
+                                       h->stream));
+        }
+        CUDA_CHECK(cudaMemcpyAsync(pin, st.d_max, 3 * sizeof(double), cudaMemcpyDeviceToHost, h->stream));
+        CUDA_CHECK(cudaMemcpyAsync(pin + 3, h->d_energy_f64, sizeof(double), cudaMemcpyDeviceToHost, h->stream));
+        CUDA_CHECK(cudaEventRecord(ev_products.e1, h->stream));
+        CUDA_CHECK(cudaStreamSynchronize(h->stream));
+        if (add_elapsed(ev_products) != 0) return -1;
+        if (step_timed) {
+            if (add_elapsed(ev_step) != 0) return -1;
+            step_timed = false;
+        }
+        if (taken > 0) st.step_known = m.damping * std::min(std::sqrt(pin[1]), m.maxstep_a);
+        if (unchecked) {
+            unchecked = false;
+            if (pin[2] > half_skin * half_skin) {
+                // The move outdated the list, so the force pass that followed it does not count: again, with a
+                // new list.
+                if (rebuild_neighbors(h) != 0) return -1;
+                ++rebuilds;
+                ++repeated;
+                st.disp_known = 0.0;
+                if (force_pass() != 0) return -1;
+                continue;
+            }
+            st.disp_known = std::sqrt(pin[2]);
+        }
+        h->forces_current = true;
+        const double inter_e = pin[3];
+        if (!std::isfinite(inter_e)) {
+            drop_hybrid(h);
+            loup::set_error("non-finite potential energy during the relaxation: the step led to a configuration "
+                            "the model cannot evaluate");
+            return -1;
+        }
+        fmax = std::sqrt(pin[0]);
+        energy = h->e0_total + inter_e;
+        converged = fmax < m.fmax_ev_a;
+        if (converged || taken >= max_steps) break;
+
+        // The history gains the pair (ASE: from the second step on), the oldest one leaving once it is full.
+        CUDA_CHECK(cudaEventRecord(ev_step.e0, h->stream));
+        int n = 0;
+        if (have_previous) {
+            const double sy = prod[(size_t)5 * row + 2];  // s . y of the new pair
+            if (!std::isfinite(sy) || sy == 0.0) {
+                loup::set_error("the relaxation cannot go on: the last step changed neither positions nor forces "
+                                "(s . y = %g)", sy);
+                return -1;
+            }
+            if (st.count == mem) st.order.erase(st.order.begin());
+            else ++st.count;
+            st.order.push_back(row);
+            st.head = (row + 1) % mem;
+            st.rho[row] = 1.0 / sy;
+            for (int j = 0; j < n_rows; ++j) {
+                st.gram[(size_t)j * mem + row] = prod[(size_t)5 * j + 2];  // s_j . y_new
+                st.gram[(size_t)row * mem + j] = prod[(size_t)5 * j + 3];  // s_new . y_j
+                st.yy[(size_t)j * mem + row] = st.yy[(size_t)row * mem + j] = prod[(size_t)5 * j + 4];
+            }
+            n = st.count;
+            // (I + R triu(G, 1)) a = R S g, newest to oldest; then Y z = H0 (Y g - (Y Y^T) a), and
+            // (I + R tril(G^T, -1)) c = a - R Y z, oldest to newest. u = H0 a and w = -c weigh Y and S in p.
+            for (int k = n - 1; k >= 0; --k) {
+                const int i = st.order[k];
+                double sum = prod[(size_t)5 * i + 0];
+                for (int l = k + 1; l < n; ++l) sum -= st.gram[(size_t)i * mem + st.order[l]] * a[l];
+                a[k] = st.rho[i] * sum;
+            }
+            for (int k = 0; k < n; ++k) {
+                const int i = st.order[k];
+                double sum = prod[(size_t)5 * i + 1];
+                for (int l = 0; l < n; ++l) sum -= st.yy[(size_t)i * mem + st.order[l]] * a[l];
+                yz[k] = h0 * sum;
+            }
+            for (int k = 0; k < n; ++k) {
+                const int i = st.order[k];
+                double sum = yz[k];
+                for (int l = 0; l < k; ++l) sum -= st.gram[(size_t)st.order[l] * mem + i] * w[l];  // w = -c
+                w[k] = -(a[k] - st.rho[i] * sum);
+                u[k] = h0 * a[k];
+                st.h_rows[k] = i;
+            }
+            // The host leaves u, w and the rows alone until the next wait, so the copies may run when they will.
+            CUDA_CHECK(cudaMemcpyAsync(d_u, u, (size_t)(mem + n) * sizeof(double), cudaMemcpyHostToDevice,
+                                       h->stream));
+            CUDA_CHECK(cudaMemcpyAsync(st.d_rows, st.h_rows, (size_t)n * sizeof(int), cudaMemcpyHostToDevice,
+                                       h->stream));
+        }
+        CUDA_CHECK(cudaMemsetAsync(st.d_max + 1, 0, 2 * sizeof(unsigned long long), h->stream));
+        loup::lbfgs_direction_kernel<<<gridN, 256, 0, h->stream>>>(
+            N, n, n3, h0, st.d_rows, d_u, d_w, st.d_S, st.d_Y, d_g, d_p, st.d_max + 1);
+        loup::lbfgs_move_kernel<<<gridN, 256, 0, h->stream>>>(
+            N, m.maxstep_a, m.damping, st.d_max + 1, d_p, d_g, h->d_pos64, d_x0, d_g0);
+        CUDA_CHECK(cudaEventRecord(ev_step.e1, h->stream));
+        step_timed = true;
+        h->forces_current = false;
+        ++st.iteration;
+        ++taken;
+        // The list at the new positions, then their forces.
+        loup::max_displacement2_kernel<<<gridN, 256, 0, h->stream>>>(N, h->d_pos64, h->d_ref_pos64, st.d_max + 2);
+        const bool ahead = half_skin > 0.0 &&
+                           (ahead_forced >= 0 ? ahead_forced == 1
+                                              : st.disp_known >= 0.0 && st.step_known >= 0.0 &&
+                                                    st.disp_known + 2.0 * st.step_known < half_skin);
+        if (ahead) {
+            unchecked = true;
+        } else {
+            CUDA_CHECK(cudaMemcpyAsync(pin + 2, st.d_max + 2, sizeof(double), cudaMemcpyDeviceToHost, h->stream));
+            CUDA_CHECK(cudaStreamSynchronize(h->stream));
+            if (add_elapsed(ev_step) != 0) return -1;
+            step_timed = false;
+            if (!(half_skin > 0.0) || pin[2] > half_skin * half_skin) {
+                if (rebuild_neighbors(h) != 0) return -1;
+                ++rebuilds;
+                st.disp_known = 0.0;
+            } else {
+                st.disp_known = std::sqrt(pin[2]);
+            }
+        }
+        if (force_pass() != 0) return -1;
+    }
+    if (out_stats) {
+        const double total_ms =
+            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t_start).count();
+        out_stats->steps = taken;
+        out_stats->converged = converged ? 1 : 0;
+        out_stats->total_steps = (int)st.iteration;
+        out_stats->rebuilds = rebuilds;
+        out_stats->force_passes = passes;
+        out_stats->repeated_passes = repeated;
+        out_stats->max_force_ev_a = fmax;
+        out_stats->potential_energy_ev = energy;
+        out_stats->force_ms = std::max(0.0, total_ms - optimizer_ms);
+        out_stats->optimizer_ms = optimizer_ms;
+    }
+    return 0;
+}
+
 static int step_displacement_impl(LoupHandle* h, double* out_max_a) {
     if (!has_system(h)) return -1;
     if (!out_max_a) { loup::set_error("out_max_a is NULL"); return -1; }
@@ -2860,9 +3271,10 @@ static int run_impl(LoupHandle* h, const LoupIntegrator* caller, int n_steps, Lo
     const LoupIntegrator it = *caller;
     const char* name = integrator_name(it.kind);
     if (!name) { loup::set_error("unknown integrator kind %d", it.kind); return -1; }
-    if (it.kind != LOUP_NVE && it.kind != LOUP_LANGEVIN && it.kind != LOUP_CSVR) {
-        loup::set_error("integrator %s is not built in this version of the library (LOUP_NVE, LOUP_LANGEVIN and "
-                        "LOUP_CSVR are)", name);
+    if (it.kind != LOUP_NVE && it.kind != LOUP_LANGEVIN && it.kind != LOUP_CSVR && it.kind != LOUP_NHC &&
+        it.kind != LOUP_BERENDSEN_NVT) {
+        loup::set_error("integrator %s is not built in this version of the library (LOUP_NVE, LOUP_LANGEVIN, "
+                        "LOUP_CSVR, LOUP_NHC and LOUP_BERENDSEN_NVT are)", name);
         return -1;
     }
     if (it.fix_com != 0 && h && h->n_fixed > 0) {
@@ -2880,7 +3292,8 @@ static int run_impl(LoupHandle* h, const LoupIntegrator* caller, int n_steps, Lo
         loup::set_error("friction_per_fs must be finite and not negative, got %g /fs", it.friction_per_fs);
         return -1;
     }
-    if (it.kind == LOUP_CSVR && (!std::isfinite(it.tau_t_fs) || !(it.tau_t_fs > 0.0))) {
+    if ((it.kind == LOUP_CSVR || it.kind == LOUP_NHC || it.kind == LOUP_BERENDSEN_NVT) &&
+        (!std::isfinite(it.tau_t_fs) || !(it.tau_t_fs > 0.0))) {
         loup::set_error("tau_t_fs must be finite and positive, got %g fs", it.tau_t_fs);
         return -1;
     }
@@ -2892,6 +3305,34 @@ static int run_impl(LoupHandle* h, const LoupIntegrator* caller, int n_steps, Lo
     if (it.kind == LOUP_CSVR) {
         return run_md_loop(h, 2, n_steps, it.dt_fs, it.temp_k, it.temp_rate_k_per_step, 0.0, it.seed,
                            it.thermo_every, it.fix_com != 0, out_stats, it.tau_t_fs);
+    }
+    if (it.kind == LOUP_BERENDSEN_NVT) {
+        if (it.tau_t_fs < it.dt_fs) {  // sqrt(1 + (T0 / T - 1) dt / taut) needs dt / taut <= 1
+            loup::set_error("tau_t_fs must be at least the timestep for the Berendsen thermostat: %g fs against "
+                            "dt_fs = %g fs", it.tau_t_fs, it.dt_fs);
+            return -1;
+        }
+        return run_md_loop(h, 4, n_steps, it.dt_fs, it.temp_k, it.temp_rate_k_per_step, 0.0, 0, it.thermo_every,
+                           it.fix_com != 0, out_stats, it.tau_t_fs);
+    }
+    if (it.kind == LOUP_NHC) {
+        if (it.chain_length < 1 || it.chain_length > 16) {
+            loup::set_error("chain_length must be from 1 to 16 thermostats, got %d", it.chain_length);
+            return -1;
+        }
+        if (it.chain_loops < 0 || it.chain_loops > 100) {
+            loup::set_error("chain_loops must be from 0 (one) to 100 sub-steps, got %d", it.chain_loops);
+            return -1;
+        }
+        const double mass_temp = it.mass_temp_k != 0.0 ? it.mass_temp_k : it.temp_k;
+        if (!std::isfinite(mass_temp) || !(mass_temp > 0.0)) {
+            loup::set_error("the thermostat masses of the Nose-Hoover chain need a temperature above 0 K: "
+                            "mass_temp_k is %g K and temp_k %g K", it.mass_temp_k, it.temp_k);
+            return -1;
+        }
+        return run_md_loop(h, 3, n_steps, it.dt_fs, it.temp_k, it.temp_rate_k_per_step, 0.0, 0, it.thermo_every,
+                           it.fix_com != 0, out_stats, it.tau_t_fs, it.chain_length,
+                           it.chain_loops > 0 ? it.chain_loops : 1, mass_temp);
     }
     return run_md_loop(h, 1, n_steps, it.dt_fs, it.temp_k, it.temp_rate_k_per_step, it.friction_per_fs, it.seed,
                        it.thermo_every, it.fix_com != 0, out_stats);
@@ -3390,6 +3831,10 @@ int loup_debug_evaluate_domain(LoupHandle* h, const double* positions, const dou
 
 int loup_read_thermo(LoupHandle* h, LoupThermoRow* rows, int max_rows, int* n_rows) {
     return guarded(h, "loup_read_thermo", [&] { return read_thermo_impl(h, rows, max_rows, n_rows); });
+}
+
+int loup_minimize(LoupHandle* h, const LoupMinimizer* minimizer, int max_steps, LoupMinStats* out_stats) {
+    return guarded(h, "loup_minimize", [&] { return minimize_impl(h, minimizer, max_steps, out_stats); });
 }
 
 int loup_get_step_displacement(LoupHandle* h, double* out_max_a) {

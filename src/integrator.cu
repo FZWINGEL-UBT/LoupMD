@@ -358,6 +358,97 @@ __global__ void csvr_first_half_kernel(
     record_step_disp2(d2, max_step_disp2);
 }
 
+// ---- Nose-Hoover chain (Martyna, Klein, Tuckerman 1992; Tuckerman et al. 2006), as ASE 3.27's
+// NoseHooverChainNVT: the chain for dt / 2, a half kick, the drift, a half kick, the chain for dt / 2. ----
+// One half of the chain, by one thread, after kinetic_energy_kernel has summed the kinetic energy into work[0].
+// ASE scales the momenta and sums p^2 / m again after each of its 3 tloop sub-steps; a scaling by s multiplies
+// that sum by s^2, so the sum is carried along and the velocities are scaled once by the product of the s
+// (work[1]), as FastMACE does: the same algebra, different at rounding level.
+//   state[0]: minus the thermostat's energy, N_f kT eta_0 + kT sum_{j>0} eta_j + sum_j p_j^2 / (2 Q_j), so that the
+//             thermo row's conserved quantity is E_pot + E_kin - state[0] (ASE's get_conserved_energy);
+//   state[1 .. tchain]: eta; state[1 + tchain .. 2 tchain]: p_eta.
+// Q_0 = N_f q and Q_j = q with q = kT_mass tdamp^2; `ndof` (N_f) stands where ASE has 3 N. `delta` is dt / 2 in
+// ASE time units. kT is the target of this step (target[0]); with `advance` the target moves on by target[1]
+// afterwards (the second half of a step).
+constexpr int kNhcMaxChain = 16;
+
+__global__ void nhc_half_kernel(int ndof, int tchain, int tloop, double delta, double q, double kb, int advance,
+                                double* __restrict__ target, double* __restrict__ work, double* __restrict__ state) {
+    const double kT = kb * fmax(target[0], 0.0);
+    if (advance) target[0] += target[1];
+    double eta[kNhcMaxChain], p[kNhcMaxChain], Q[kNhcMaxChain];
+    for (int j = 0; j < tchain; ++j) {
+        eta[j] = state[1 + j];
+        p[j] = state[1 + tchain + j];
+        Q[j] = j == 0 ? (double)ndof * q : q;
+    }
+    double k2 = 2.0 * work[0];  // sum of p^2 / m
+    work[0] = 0.0;
+    double scale = 1.0;
+    // The fourth-order Suzuki-Yoshida coefficients, ASE's expressions (Yoshida 1990).
+    const double cbrt2 = cbrt(2.0);
+    const double coeffs[3] = {1.0 / (2.0 - cbrt2), -cbrt2 / (2.0 - cbrt2), 1.0 / (2.0 - cbrt2)};
+    for (int loop = 0; loop < tloop; ++loop) {
+        for (int c = 0; c < 3; ++c) {
+            const double d = coeffs[c] * delta / (double)tloop;
+            const double d2 = 0.5 * d, d4 = 0.25 * d;
+            for (int pass = 0; pass < 2; ++pass) {  // the chain down, the particles, the chain up
+                for (int i = 0; i < tchain; ++i) {
+                    const int j = pass == 0 ? tchain - 1 - i : i;
+                    if (j < tchain - 1) p[j] *= exp(-d4 * p[j + 1] / Q[j + 1]);
+                    const double g = j == 0 ? k2 - (double)ndof * kT : p[j - 1] * p[j - 1] / Q[j - 1] - kT;
+                    p[j] += d2 * g;
+                    if (j < tchain - 1) p[j] *= exp(-d4 * p[j + 1] / Q[j + 1]);
+                }
+                if (pass == 0) {
+                    for (int j = 0; j < tchain; ++j) eta[j] += d * p[j] / Q[j];
+                    const double s = exp(-d * p[0] / Q[0]);
+                    scale *= s;
+                    k2 *= s * s;
+                }
+            }
+        }
+    }
+    double energy = (double)ndof * kT * eta[0];
+    for (int j = 0; j < tchain; ++j) {
+        if (j > 0) energy += kT * eta[j];
+        energy += 0.5 * p[j] * p[j] / Q[j];
+        state[1 + j] = eta[j];
+        state[1 + tchain + j] = p[j];
+    }
+    state[0] = -energy;
+    work[1] = scale;
+}
+
+// ---- Berendsen thermostat (Berendsen et al. 1984), as ASE 3.27's NVTBerendsen: at the start of a step the
+// velocities are scaled by lambda = sqrt(1 + (T0 / T - 1) dt / taut), kept within [0.9, 1.1], then the step is
+// velocity Verlet. Not canonical: for equilibration. ----
+// One thread, after kinetic_energy_kernel has summed the kinetic energy into work[0]: lambda into work[1]; T counts
+// `ndof` degrees of freedom; T0 is the target of this step (target[0]), which then moves on by target[1]. A
+// system at rest has an infinite T0 / T, which ASE's bounds turn into 1.1.
+__global__ void berendsen_scale_kernel(int ndof, double dt_over_tau, double kb, double* __restrict__ target,
+                                       double* __restrict__ work) {
+    const double t0 = fmax(target[0], 0.0);
+    target[0] += target[1];
+    const double kinetic = work[0];
+    work[0] = 0.0;
+    double scale = t0 > 0.0 ? 1.1 : 1.0;
+    if (kinetic > 1e-100) {
+        const double temp = 2.0 * kinetic / ((double)ndof * kb);
+        scale = fmin(fmax(sqrt(1.0 + (t0 / temp - 1.0) * dt_over_tau), 0.9), 1.1);
+    }
+    work[1] = scale;
+}
+
+// v *= work[1]: the second chain half of a Nose-Hoover step.
+__global__ void scale_velocities_kernel(int N, const double* __restrict__ work, double* __restrict__ vel64) {
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= N) return;
+    const double s = work[1];
+    #pragma unroll
+    for (int c = 0; c < 3; ++c) vel64[i * 3 + c] *= s;
+}
+
 __global__ void kinetic_energy_kernel(
     int N,
     const double* __restrict__ masses,

@@ -36,7 +36,13 @@ def _physics_lines(metadata) -> list:
         if integrator.get("fixcm"):
             first += ", total momentum removed"
     else:
-        if integrator["scheme"] == "csvr":
+        if integrator["scheme"] == "berendsen":
+            first = (f"NVT, Berendsen thermostat (not canonical: for equilibration), timestep {timestep:g} fs, "
+                     f"time constant {integrator['tau_fs']:g} fs")
+        elif integrator["scheme"] == "nose_hoover":
+            first = (f"NVT, Nose-Hoover chain of {integrator['tchain']}, timestep {timestep:g} fs, time constant "
+                     f"{integrator['tau_fs']:g} fs")
+        elif integrator["scheme"] == "csvr":
             first = f"NVT, CSVR (Bussi), timestep {timestep:g} fs, time constant {integrator['tau_fs']:g} fs"
         else:
             first = f"NVT, Langevin, timestep {timestep:g} fs, friction {integrator['friction_per_fs']:.4g}/fs"

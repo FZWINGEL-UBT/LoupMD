@@ -77,13 +77,13 @@ def test_integrator_values_are_checked(fields, message):
 
 
 @pytest.mark.parametrize("fields,word", [
-    ({"ensemble": "npt"}, "npt"), ({"scheme": "berendsen"}, "berendsen"), ({"scheme": "nose_hoover"}, "nose_hoover"),
+    ({"ensemble": "npt"}, "npt"), ({"ensemble": "npt", "scheme": "mtk"}, "mtk"),
 ])
 def test_schemes_that_are_not_built_are_refused_naming_what_is(fields, word):
     with pytest.raises(InputError) as caught:
         IntegratorConfig(temperature_K=300.0, friction_per_fs=0.01, **fields)
     text = str(caught.value)
-    assert word in text and "not in this version" in text and "nve, langevin, csvr" in text
+    assert word in text and "not in this version" in text and "nve, langevin, csvr, nose_hoover, berendsen" in text
 
 
 def test_the_engine_struct_of_a_record():
@@ -94,6 +94,39 @@ def test_the_engine_struct_of_a_record():
     assert it.fix_com == 0 and IntegratorConfig(ensemble="nve", fixcm=True).to_struct().fix_com == 1
     nve = IntegratorConfig(ensemble="nve", timestep_fs=1.0).to_struct()
     assert (nve.kind, nve.dt_fs, nve.temp_k, nve.friction_per_fs, nve.thermo_every) == (_core.LOUP_NVE, 1.0, 0.0, 0.0, 0)
+
+
+def test_the_nose_hoover_chain_keeps_the_temperature_of_its_masses():
+    record = IntegratorConfig(scheme="nose_hoover", temperature_K=300, tau_fs=100.0)
+    assert (record.tchain, record.tloop, record.mass_temperature_K, record.friction_per_fs) == (3, 1, 300, None)
+    moved = dataclasses.replace(record, temperature_K=450.0)             # a schedule's last target
+    assert (moved.temperature_K, moved.mass_temperature_K) == (450.0, 300)
+    it = moved.to_struct(thermo_every=10, temperature_K=350.0, rate_K_per_step=0.25)
+    assert (it.kind, it.temp_k, it.temp_rate_k_per_step, it.tau_t_fs, it.mass_temp_k, it.chain_length,
+            it.chain_loops, it.thermo_every, it.fix_com) == (_core.LOUP_NHC, 350.0, 0.25, 100.0, 300.0, 3, 1, 10, 0)
+    for fields, message in (({"temperature_K": 300}, "the Nose-Hoover chain needs temperature_K and tau_fs"),
+                            ({"temperature_K": 300, "tau_fs": 100.0, "tchain": 0}, "tchain must be an int from 1 to 16"),
+                            ({"temperature_K": 300, "tau_fs": 100.0, "tchain": 17}, "tchain must be an int from 1 to 16"),
+                            ({"temperature_K": 300, "tau_fs": 100.0, "tloop": 2.5}, "tloop must be an int from 1 to 100"),
+                            ({"temperature_K": 300, "tau_fs": 100.0, "friction_per_fs": 0.01}, "not a friction"),
+                            ({"temperature_K": 0.0, "tau_fs": 100.0}, "mass_temperature_K must be positive")):
+        with pytest.raises(InputError, match=message):
+            IntegratorConfig(scheme="nose_hoover", **fields)
+    with pytest.raises(InputError, match="tchain belongs to the Nose-Hoover chain .scheme 'nose_hoover'., got 3 with "
+                                         "scheme 'langevin'"):
+        IntegratorConfig(temperature_K=300, friction_per_fs=0.01, tchain=3)
+
+
+def test_the_berendsen_thermostat():
+    record = IntegratorConfig(scheme="berendsen", temperature_K=300, tau_fs=100.0, timestep_fs=2.0)
+    it = record.to_struct(thermo_every=5)
+    assert (it.kind, it.dt_fs, it.temp_k, it.tau_t_fs, it.thermo_every) == (_core.LOUP_BERENDSEN_NVT, 2.0, 300.0,
+                                                                          100.0, 5)
+    for fields, message in (({"temperature_K": 300}, "the Berendsen thermostat needs temperature_K and tau_fs"),
+                            ({"temperature_K": 300, "tau_fs": 0.25}, "tau_fs must be at least the timestep"),
+                            ({"temperature_K": 300, "tau_fs": 100.0, "friction_per_fs": 0.01}, "not a friction")):
+        with pytest.raises(InputError, match=message):
+            IntegratorConfig(scheme="berendsen", **fields)
 
 
 # --------------------------------------------------------------------------------------------------- output
@@ -172,7 +205,7 @@ def test_unknown_keys_are_refused_by_name_all_at_once():
     text = str(caught.value)
     assert text.startswith("unknown keys 'friction', 'timestep' in [integrator]")
     assert ("Next: Keys of [integrator]: ensemble, scheme, timestep_fs, temperature_K, friction_per_fs, tau_fs, "
-            "seed, fixcm.") in text
+            "tchain, tloop, mass_temperature_K, seed, fixcm.") in text
     with pytest.raises(InputError, match=r"unknown key 'every' in Output"):
         config.from_mapping(Output, {"directory": "run", "every": 5})
     with pytest.raises(InputError, match="is not a table"):

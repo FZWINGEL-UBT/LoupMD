@@ -49,7 +49,7 @@ class LoupInfo(ctypes.Structure):
 
 # Integrator kinds and cell modes of include/loupmd.h.
 LOUP_NVE, LOUP_LANGEVIN, LOUP_CSVR, LOUP_NHC = 0, 1, 2, 3
-LOUP_BERENDSEN_NVT, LOUP_BERENDSEN_NPT, LOUP_BAOAB_NPT, LOUP_MTK_NPT = 4, 5, 6, 7
+LOUP_BERENDSEN_NVT, LOUP_BERENDSEN_NPT, LOUP_BAOAB_NPT, LOUP_MTK_NPT = 4, 5, 6, 7  # NPT kinds: not built
 LOUP_CELL_HYDROSTATIC, LOUP_CELL_FULL = 0, 1
 
 
@@ -62,10 +62,12 @@ class LoupIntegrator(ctypes.Structure):
         ("temp_rate_k_per_step", ctypes.c_double),
         ("friction_per_fs", ctypes.c_double),
         ("tau_t_fs", ctypes.c_double),
+        ("mass_temp_k", ctypes.c_double),
         ("pressure_gpa", ctypes.c_double),
         ("tau_p_fs", ctypes.c_double),
         ("compressibility_per_gpa", ctypes.c_double),
         ("chain_length", ctypes.c_int),
+        ("chain_loops", ctypes.c_int),
         ("cell_mode", ctypes.c_int),
         ("cell_mask", ctypes.c_int * 3),
         ("fix_com", ctypes.c_int),
@@ -76,6 +78,37 @@ class LoupIntegrator(ctypes.Structure):
 
 LOUP_EXEC_AUTO, LOUP_EXEC_WHOLE, LOUP_EXEC_TILED, LOUP_EXEC_WAVEFRONT = 0, 1, 2, 3
 LOUP_EVAL_STRESS, LOUP_EVAL_ENERGY_ONLY, LOUP_EVAL_PER_ATOM = 1, 2, 4
+
+
+LOUP_MIN_LBFGS = 0
+
+
+class LoupMinimizer(ctypes.Structure):
+    _fields_ = [
+        ("size", ctypes.c_uint),
+        ("kind", ctypes.c_int),
+        ("fmax_ev_a", ctypes.c_double),
+        ("maxstep_a", ctypes.c_double),
+        ("memory", ctypes.c_int),
+        ("reserved", ctypes.c_int),
+        ("damping", ctypes.c_double),
+        ("alpha", ctypes.c_double),
+    ]
+
+
+class LoupMinStats(ctypes.Structure):
+    _fields_ = [
+        ("steps", ctypes.c_int),
+        ("converged", ctypes.c_int),
+        ("total_steps", ctypes.c_int),
+        ("rebuilds", ctypes.c_int),
+        ("force_passes", ctypes.c_int),
+        ("repeated_passes", ctypes.c_int),
+        ("max_force_ev_a", ctypes.c_double),
+        ("potential_energy_ev", ctypes.c_double),
+        ("force_ms", ctypes.c_double),
+        ("optimizer_ms", ctypes.c_double),
+    ]
 
 
 class LoupThermoRow(ctypes.Structure):
@@ -248,6 +281,9 @@ def _bind(lib):
                                       ctypes.c_double, ctypes.c_ulonglong, ctypes.POINTER(LoupMDStats)]
     lib.loup_get_state.argtypes = [ctypes.c_void_p, _c_double_p, _c_double_p, _c_double_p, _c_double_p]
     lib.loup_profile_force.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_int, _c_double_p]
+    lib.loup_minimize.argtypes = [ctypes.c_void_p, ctypes.POINTER(LoupMinimizer), ctypes.c_int,
+                                  ctypes.POINTER(LoupMinStats)]
+    lib.loup_minimize.restype = ctypes.c_int
     lib.loup_get_step_displacement.argtypes = [ctypes.c_void_p, _c_double_p]
     lib.loup_get_step_displacement.restype = ctypes.c_int
     lib.loup_debug_csvr_noise.argtypes = [ctypes.c_void_p, ctypes.c_ulonglong, ctypes.c_ulonglong, ctypes.c_int,
@@ -403,6 +439,20 @@ class LoupEngine:
         self._check(self._lib.loup_debug_csvr_noise(self._h, int(seed), int(first_step), int(n_steps), int(ndof),
                                                     _ptr(normal), _ptr(chi2)), "loup_debug_csvr_noise")
         return normal, chi2
+
+    def minimize(self, max_steps: int, fmax: float = 0.05, maxstep_A: float = 0.2, memory: int = 100,
+                 damping: float = 1.0, alpha: float = 70.0) -> LoupMinStats:
+        """Up to ``max_steps`` LBFGS steps on the device from the positions on the handle (ASE's LBFGS without
+        line search), stopping when the largest force on a free atom is below ``fmax`` (eV/A). A call with the
+        same settings continues the relaxation of the one before; ``max_steps=0`` only evaluates. ``get_state``
+        reads the positions, forces and energy."""
+        settings = LoupMinimizer(size=ctypes.sizeof(LoupMinimizer), kind=LOUP_MIN_LBFGS, fmax_ev_a=float(fmax),
+                                 maxstep_a=float(maxstep_A), memory=int(memory), damping=float(damping),
+                                 alpha=float(alpha))
+        stats = LoupMinStats()
+        self._check(self._lib.loup_minimize(self._h, ctypes.byref(settings), int(max_steps), ctypes.byref(stats)),
+                    "loup_minimize")
+        return stats
 
     def step_displacement(self) -> float:
         """The largest distance in A an atom moved in one MD step lately (the displacement tracker's two windows):

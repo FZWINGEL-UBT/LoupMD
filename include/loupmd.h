@@ -140,8 +140,9 @@ enum {
     LOUP_NVE = 0,            // velocity Verlet
     LOUP_LANGEVIN = 1,       // ASE's Vanden-Eijnden-Ciccotti Langevin scheme
     LOUP_CSVR = 2,           // canonical sampling through velocity rescaling (Bussi), as ASE's Bussi
-    LOUP_NHC = 3,            // the kinds from here on are refused by name until their task builds them
-    LOUP_BERENDSEN_NVT = 4,
+    LOUP_NHC = 3,            // Nose-Hoover chain, as ASE's NoseHooverChainNVT
+    LOUP_BERENDSEN_NVT = 4,  // Berendsen thermostat, as ASE's NVTBerendsen (not canonical: for equilibration)
+                             // the kinds from here on are refused by name until their task builds them
     LOUP_BERENDSEN_NPT = 5,
     LOUP_BAOAB_NPT = 6,
     LOUP_MTK_NPT = 7
@@ -158,10 +159,14 @@ typedef struct {
                                    // only in temperature reuse the captured step
     double friction_per_fs;        // Langevin friction in 1/fs
     double tau_t_fs;               // thermostat time constant in fs (CSVR, Nose-Hoover chain, Berendsen)
+    double mass_temp_k;            // Nose-Hoover chain: the temperature its thermostat masses are made for (ASE: the
+                                   // temperature the object was made with); 0 takes temp_k. A ramp moves the
+                                   // target, not the masses
     double pressure_gpa;           // barostat pressure in GPa
     double tau_p_fs;               // barostat time constant in fs
     double compressibility_per_gpa;// Berendsen NPT
-    int chain_length;              // Nose-Hoover chain
+    int chain_length;              // Nose-Hoover chain: thermostats in the chain (ASE's tchain), 1 to 16
+    int chain_loops;               // Nose-Hoover chain: sub-steps of the chain per half step (ASE's tloop); 0 is 1
     int cell_mode;                 // LOUP_CELL_HYDROSTATIC or LOUP_CELL_FULL
     int cell_mask[3];              // per-axis mask of the barostat
     int fix_com;                   // keep the centre of mass at rest. Langevin: both noise terms lose their
@@ -180,7 +185,51 @@ typedef struct {
 // A7 (one normal and one chi-square variate per step, from the seed and the step counter), then steps as NVE. Its
 // degrees of freedom are those of the reported temperature. A system at rest is not scaled until the forces have
 // set it in motion.
+// The Nose-Hoover chain reads dt_fs, temp_k, temp_rate_k_per_step, tau_t_fs (ASE's tdamp), mass_temp_k,
+// chain_length and chain_loops: the chain for half a step, a velocity-Verlet step, the chain for half a step, with
+// ASE's fourth-order sub-steps. The chain's variables travel in the state block; the degrees of freedom of the
+// reported temperature stand where ASE has 3 N.
+// The Berendsen thermostat reads dt_fs, temp_k, temp_rate_k_per_step and tau_t_fs (ASE's taut, at least dt_fs):
+// the velocities are scaled by sqrt(1 + (T0 / T - 1) dt / taut) within [0.9, 1.1] at the start of every step.
 int loup_run(LoupHandle* h, const LoupIntegrator* it, int n_steps, LoupMDStats* out_stats);
+
+// Structure relaxation at fixed cell on the device. LOUP_MIN_LBFGS is ASE 3.27's LBFGS without line search: the
+// same steps to rounding (the history's sums are taken in another order). Fixed atoms (loup_set_fixed_atoms) do
+// not move and their forces do not count.
+enum { LOUP_MIN_LBFGS = 0 };
+
+typedef struct {
+    unsigned size;        // sizeof(LoupMinimizer) of the caller
+    int kind;             // LOUP_MIN_LBFGS
+    double fmax_ev_a;     // converged when the largest force on a free atom is below this, in eV/A
+    double maxstep_a;     // the longest step of an atom in A (ASE: 0.2)
+    int memory;           // history pairs kept (ASE: 100)
+    int reserved;
+    double damping;       // step factor (ASE: 1.0)
+    double alpha;         // initial inverse-Hessian guess is 1 / alpha, in eV/A^2 (ASE: 70.0)
+} LoupMinimizer;
+
+typedef struct {
+    int steps;                     // optimiser steps taken in this call
+    int converged;                 // 1 if the largest force is below fmax_ev_a
+    int total_steps;               // steps of this relaxation so far (it continues across calls, see below)
+    int rebuilds;                  // neighbour rebuilds of this call
+    int force_passes;              // force passes of this call, the repeated ones included
+    int repeated_passes;           // force passes run again because the step before had outdated the neighbour
+                                   // list (the list check of a small step comes with the next step's results)
+    double max_force_ev_a;         // the largest force on a free atom at the positions the call ends with
+    double potential_energy_ev;    // at those positions
+    double force_ms;               // this call's force evaluations: force passes, list checks and rebuilds
+    double optimizer_ms;           // the optimiser's own kernels and its host arithmetic
+} LoupMinStats;
+
+// Takes up to `max_steps` optimiser steps from the positions on the handle (loup_set_state, or where a run or an
+// earlier call left them) and stops as soon as the largest force is below fmax_ev_a. max_steps = 0 only evaluates
+// (energy and largest force). Velocities are not touched. A call with the same settings as the one before goes on
+// with that relaxation and its history (so a caller may step one at a time), unless positions were set, a run or
+// an evaluation moved them, the fixed atoms changed or the handle's atom order was renewed: then the history
+// starts empty. loup_get_state reads the result.
+int loup_minimize(LoupHandle* h, const LoupMinimizer* minimizer, int max_steps, LoupMinStats* out_stats);
 
 // Thermodynamic output without a host round trip per row: with LoupIntegrator.thermo_every = k, every k-th step
 // appends a row to a buffer on the device, inside the captured step.
@@ -192,7 +241,8 @@ typedef struct {
     double pressure_gpa;  // 0 until a step carries stress
     double volume_a3;     // 0 until a step carries stress
     double conserved;     // e_pot + e_kin (NVE's conserved quantity); for CSVR minus the energy its thermostat has
-                          // transferred since the last loup_set_state (it travels in the state block)
+                          // transferred since the last loup_set_state (it travels in the state block); for the
+                          // Nose-Hoover chain plus the chain's energy (ASE's get_conserved_energy)
 } LoupThermoRow;
 // Copies up to `max_rows` of the oldest unread rows to `rows`, removes them from the buffer and sets *n_rows to
 // their number. loup_read_thermo(h, NULL, 0, &n) only counts the unread rows. The buffer holds 4096 rows: a run

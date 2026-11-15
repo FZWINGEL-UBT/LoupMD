@@ -6,7 +6,7 @@ OBJDIR = build/$(CUDA_ARCH)
 NVCCFLAGS = -O3 -std=c++17 -arch=$(CUDA_ARCH) -Iinclude -Isrc -diag-suppress=1046 -Xcompiler -fPIC -MMD -MP
 LDFLAGS = -lcublas -lcublasLt -lcudart -ldl
 
-SRCS = src/bundle.cu src/model_loader.cu src/generic.cu src/generated_generic.cu src/polar.cu src/neighbors.cu src/interaction0.cu src/integrator.cu src/thermo.cu src/sgemm.cu src/engine.cu
+SRCS = src/bundle.cu src/model_loader.cu src/generic.cu src/generated_generic.cu src/polar.cu src/neighbors.cu src/interaction0.cu src/integrator.cu src/minimize.cu src/thermo.cu src/sgemm.cu src/engine.cu
 OBJS = $(patsubst src/%.cu,$(OBJDIR)/%.o,$(SRCS))
 DEPS = $(OBJS:.o=.d)
 
@@ -27,7 +27,26 @@ $(OBJDIR):
 $(OBJDIR)/libloupmd.so: $(OBJS)
 	$(NVCC) -shared -arch=$(CUDA_ARCH) $(OBJS) $(LDFLAGS) -o $@
 
+# The library of the wheel (PLAN.md S2-T02): every kernel for each GPU generation the release supports, in one
+# file; a GPU loads the code of its own architecture. `make wheel-lib` writes build/wheel/libloupmd.so and leaves
+# ./libloupmd.so alone. WHEEL_ARCHS narrows the list (for example WHEEL_ARCHS="89 120" for a quick build).
+WHEEL_ARCHS ?= 80 86 89 90 100 120
+WHEEL_GENCODE = $(foreach a,$(WHEEL_ARCHS),-gencode arch=compute_$(a),code=sm_$(a))
+WHEELDIR = build/wheel
+WHEEL_OBJS = $(patsubst src/%.cu,$(WHEELDIR)/%.o,$(SRCS))
+
+.PHONY: wheel-lib
+wheel-lib: $(WHEELDIR)/libloupmd.so
+
+$(WHEELDIR)/%.o: src/%.cu | $(WHEELDIR)
+	$(NVCC) -O3 -std=c++17 $(WHEEL_GENCODE) -Iinclude -Isrc -diag-suppress=1046 -Xcompiler -fPIC -MMD -MP -MF $(@:.o=.d) -c $< -o $@
+$(WHEELDIR):
+	mkdir -p $@
+
+$(WHEELDIR)/libloupmd.so: $(WHEEL_OBJS)
+	$(NVCC) -shared $(WHEEL_OBJS) $(LDFLAGS) -o $@
+
 clean:
 	rm -rf build libloupmd.so
 
--include $(DEPS)
+-include $(DEPS) $(WHEEL_OBJS:.o=.d)

@@ -25,8 +25,10 @@ int main(void) {
     printf("LoupIntegrator %zu\n", sizeof(LoupIntegrator));
     F(LoupIntegrator, size); F(LoupIntegrator, kind); F(LoupIntegrator, dt_fs); F(LoupIntegrator, temp_k);
     F(LoupIntegrator, temp_rate_k_per_step);
-    F(LoupIntegrator, friction_per_fs); F(LoupIntegrator, tau_t_fs); F(LoupIntegrator, pressure_gpa);
+    F(LoupIntegrator, friction_per_fs); F(LoupIntegrator, tau_t_fs); F(LoupIntegrator, mass_temp_k);
+    F(LoupIntegrator, pressure_gpa);
     F(LoupIntegrator, tau_p_fs); F(LoupIntegrator, compressibility_per_gpa); F(LoupIntegrator, chain_length);
+    F(LoupIntegrator, chain_loops);
     F(LoupIntegrator, cell_mode); F(LoupIntegrator, cell_mask); F(LoupIntegrator, fix_com);
     F(LoupIntegrator, thermo_every); F(LoupIntegrator, seed);
     printf("LoupInfo %zu\n", sizeof(LoupInfo));
@@ -43,6 +45,14 @@ int main(void) {
     F(LoupMDStats, step_ms); F(LoupMDStats, rebuilds); F(LoupMDStats, final_potential_energy_ev);
     F(LoupMDStats, final_kinetic_energy_ev); F(LoupMDStats, final_temperature_k); F(LoupMDStats, dangerous_builds);
     F(LoupMDStats, tune_ms); F(LoupMDStats, pipelined_steps);
+    printf("LoupMinimizer %zu\n", sizeof(LoupMinimizer));
+    F(LoupMinimizer, size); F(LoupMinimizer, kind); F(LoupMinimizer, fmax_ev_a); F(LoupMinimizer, maxstep_a);
+    F(LoupMinimizer, memory); F(LoupMinimizer, reserved); F(LoupMinimizer, damping); F(LoupMinimizer, alpha);
+    printf("LoupMinStats %zu\n", sizeof(LoupMinStats));
+    F(LoupMinStats, steps); F(LoupMinStats, converged); F(LoupMinStats, total_steps); F(LoupMinStats, rebuilds);
+    F(LoupMinStats, force_passes); F(LoupMinStats, repeated_passes);
+    F(LoupMinStats, max_force_ev_a); F(LoupMinStats, potential_energy_ev); F(LoupMinStats, force_ms);
+    F(LoupMinStats, optimizer_ms);
     printf("kinds %d %d %d %d %d %d %d %d\n", LOUP_NVE, LOUP_LANGEVIN, LOUP_CSVR, LOUP_NHC, LOUP_BERENDSEN_NVT,
            LOUP_BERENDSEN_NPT, LOUP_BAOAB_NPT, LOUP_MTK_NPT);
     return 0;
@@ -62,7 +72,8 @@ def test_ctypes_structs_have_the_headers_layout(tmp_path):
     lines = subprocess.run([str(exe)], capture_output=True, text=True, check=True).stdout.split("\n")
     seen = dict(line.rsplit(" ", 1) for line in lines if line and not line.startswith("kinds"))
     assert _core.THERMO_DTYPE.itemsize == ctypes.sizeof(_core.LoupThermoRow)
-    for struct in (_core.LoupIntegrator, _core.LoupInfo, _core.LoupMemoryPlan, _core.LoupThermoRow, _core.LoupMDStats):
+    for struct in (_core.LoupIntegrator, _core.LoupInfo, _core.LoupMemoryPlan, _core.LoupThermoRow, _core.LoupMDStats,
+                   _core.LoupMinimizer, _core.LoupMinStats):
         name = struct.__name__
         assert int(seen.pop(name)) == ctypes.sizeof(struct), name
         for field, _ in struct._fields_:
@@ -104,13 +115,15 @@ def _end_state(bundle, how, kind):
 @pytest.mark.parametrize("kind", ["nve", "langevin"])
 def test_loup_run_matches_the_old_entry_point(sto_bundle, kind):
     """Same state, same seed, 60 steps: loup_run may differ from the old entry point by no more than a few times
-    what two runs of the old entry point differ by (force sums use atomics; floor 1e-8 A)."""
+    what two runs of the old entry point differ by (force sums use atomics; floor 1e-8 A). The energy's floor is
+    what two engines' float32 sums differ by: each engine times its own GEMM plans, and another plan rounds the
+    energy differently (1.0e-7 eV/atom seen on the generic path at equal positions)."""
     old_a = _end_state(sto_bundle, "old", kind)
     old_b = _end_state(sto_bundle, "old", kind)
     new = _end_state(sto_bundle, "new", kind)
     spread = np.abs(old_a[0] - old_b[0]).max()
     assert np.abs(new[0] - old_a[0]).max() <= max(5.0 * spread, 1e-8), (np.abs(new[0] - old_a[0]).max(), spread)
-    assert abs(new[1] - old_a[1]) <= max(5.0 * abs(old_a[1] - old_b[1]), 1e-7 * 135)
+    assert abs(new[1] - old_a[1]) <= max(5.0 * abs(old_a[1] - old_b[1]), 3e-7 * 135)
 
 
 def test_loup_run_and_the_old_entry_point_share_their_step_graphs(sto_engine, capfd, monkeypatch):
@@ -139,7 +152,7 @@ REFUSED = [
 ] + [
     (name.lower(), dict(kind=getattr(_core, name)),
      f"loup_run: integrator {name} is not built in this version of the library")
-    for name in ("LOUP_NHC", "LOUP_BERENDSEN_NVT", "LOUP_BERENDSEN_NPT", "LOUP_BAOAB_NPT", "LOUP_MTK_NPT")
+    for name in ("LOUP_BERENDSEN_NPT", "LOUP_BAOAB_NPT", "LOUP_MTK_NPT")
 ]
 
 

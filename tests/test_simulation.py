@@ -231,8 +231,8 @@ def test_langevin_reaches_the_engine_with_its_settings(setup):
     assert rows[-1][3] == "350.0" and float(rows[-1][1]) == pytest.approx(0.04)
     record = json.loads((setup.tmp_path / "run" / "simulation.json").read_text())
     assert record["integrator"] == {"ensemble": "nvt", "scheme": "langevin", "timestep_fs": 2.0,
-                                    "temperature_K": 350.0, "friction_per_fs": 0.02, "tau_fs": None, "seed": 7,
-                                    "fixcm": True}
+                                    "temperature_K": 350.0, "friction_per_fs": 0.02, "tau_fs": None, "tchain": None,
+                                    "tloop": None, "mass_temperature_K": None, "seed": 7, "fixcm": True}
     assert record["seed"] == 7 and record["model"]["sha256"] == sim.force_field.sha256
 
 
@@ -547,7 +547,7 @@ def test_records_as_tables():
     assert integrators.from_data({"type": "CSVR", "tau_fs": 100.0}, timestep_fs=1.0, temperature_K=300.0) == record
     assert integrators.from_data({"type": "NVE"}, timestep_fs=2.0, temperature_K=300.0) == integrators.NVE(
         timestep_fs=2.0)
-    for data, message in (({"type": "MTK"}, "type 'MTK' is not one of NVE, Langevin, CSVR"),
+    for data, message in (({"type": "MTK"}, "type 'MTK' is not one of NVE, Langevin, CSVR, NoseHooverChain, Berendsen"),
                           ({"tau_fs": 1.0}, "type None is not one of"),
                           ({"type": "CSVR", "tau_fs": 100.0, "friction": 1}, "unknown key 'friction' in .integrator. "
                                                                              "of type CSVR"),
@@ -555,3 +555,14 @@ def test_records_as_tables():
                           ("CSVR", "is not a table")):
         with pytest.raises(InputError, match=message):
             integrators.from_data(data)
+
+
+def test_a_schedule_moves_the_chain_s_target_and_leaves_its_masses(setup):
+    record = integrators.NoseHooverChain(timestep_fs=1.0, temperature_K=200.0, tdamp_fs=50.0)
+    sim = loupmd.Simulation(setup.atoms, setup.force_field(), integrator=record, seed=5)
+    sim.run(schedule=protocols.ramp(200, 300, ps=0.04))
+    engine, = SpringEngine.made
+    assert [e for e in engine.log if isinstance(e, tuple) and e[0] == "run"] == [("run", 40, _core.LOUP_NHC, 0)]
+    assert engine.targets == [(40, 200.0, pytest.approx(2.5))]
+    assert (sim.config.temperature_K, sim.config.mass_temperature_K) == (300.0, 200.0)
+    assert sim.config.to_struct().mass_temp_k == 200.0

@@ -2,13 +2,15 @@
 
 Names and arguments are FastMACE's (``fm.integrators``). Units: fs, K, friction per fs. A thermostat's temperature
 and friction have no defaults: physics is not chosen silently. Each record maps onto an ``IntegratorConfig``
-(``to_config``), which is what the engine runs. Built so far: ``NVE``, ``Langevin`` and ``CSVR``; the other
-schemes of FastMACE arrive with the engine's integrators (PLAN.md Stage 4).
+(``to_config``), which is what the engine runs. Built so far: ``NVE``, ``Langevin``, ``CSVR``,
+``NoseHooverChain`` and ``Berendsen`` at constant volume; the constant-pressure schemes of FastMACE arrive with
+the engine's integrators (PLAN.md Stage 4).
 
 ``fixcm`` keeps the centre of mass at rest, as in FastMACE: ``"auto"`` (the default) is on, and off when the
 structure has fixed atoms, which pin the frame already; ``True`` with fixed atoms is refused. Langevin's noise then
-loses its mass-weighted mean every step (FastMACE's ``"mass_weighted"`` projection); the total momentum of NVE and
-CSVR is removed at the start of every run call. The temperature counts three degrees of freedom fewer.
+loses its mass-weighted mean every step (FastMACE's ``"mass_weighted"`` projection); the total momentum of NVE,
+CSVR and the Nose-Hoover chain is removed at the start of every run call. The temperature counts three degrees
+of freedom fewer, and so do the thermostats that count them (CSVR, the Nose-Hoover chain).
 """
 from __future__ import annotations
 
@@ -18,7 +20,7 @@ from typing import Literal
 from .config import IntegratorConfig
 from .errors import InputError, PlanRefused
 
-__all__ = ["CSVR", "Langevin", "NVE"]
+__all__ = ["Berendsen", "CSVR", "Langevin", "NVE", "NoseHooverChain"]
 
 
 def resolve_fixcm(fixcm, fixed_atoms) -> bool:
@@ -96,7 +98,79 @@ class CSVR:
                                 fixcm=resolve_fixcm(self.fixcm, fixed_atoms))
 
 
-RECORDS = {"NVE": NVE, "Langevin": Langevin, "CSVR": CSVR}
+@dataclass(frozen=True, kw_only=True)
+class NoseHooverChain:
+    """Nose-Hoover chains, as ASE's ``NoseHooverChainNVT``:
+    ``lm.integrators.NoseHooverChain(timestep_fs=1.0, temperature_K=300, tdamp_fs=100)``.
+
+    ``tdamp_fs``, ``tchain`` and ``tloop`` are ASE's ``tdamp``, ``tchain`` and ``tloop``. The thermostat masses
+    are made for ``temperature_K`` and stay when a schedule moves the target, as ASE's and FastMACE's. The
+    conserved quantity is E_kin + E_pot plus the chain's energy. The degrees of freedom of the reported
+    temperature stand where ASE counts 3 N: 3 N - 3 with the centre of mass at rest, 3 (N - fixed) with fixed
+    atoms."""
+
+    timestep_fs: float
+    temperature_K: float
+    tdamp_fs: float
+    tchain: int = 3
+    tloop: int = 1
+    fixcm: bool | Literal["auto"] = "auto"
+
+    def __post_init__(self):
+        if not isinstance(self.temperature_K, bool) and isinstance(self.temperature_K, (int, float))                 and self.temperature_K == 0:
+            raise InputError(f"NoseHooverChain.temperature_K must be above 0 K (the thermostat masses are made "
+                             f"for it), got {self.temperature_K!r}",
+                             next_step="For a run that starts at 0 K give the temperature the masses should be "
+                                       "made for here and the targets as a schedule.")
+        IntegratorConfig(scheme="nose_hoover", timestep_fs=self.timestep_fs, temperature_K=self.temperature_K,
+                         tau_fs=self.tdamp_fs, tchain=self.tchain, tloop=self.tloop)       # checks the values
+        if not isinstance(self.fixcm, bool) and self.fixcm != "auto":
+            raise InputError(f"NoseHooverChain.fixcm must be True, False or 'auto', got {self.fixcm!r}")
+
+    def to_config(self, *, seed: int, fixed_atoms: bool = False) -> IntegratorConfig:
+        return IntegratorConfig(ensemble="nvt", scheme="nose_hoover", timestep_fs=float(self.timestep_fs),
+                                temperature_K=float(self.temperature_K), tau_fs=float(self.tdamp_fs),
+                                tchain=self.tchain, tloop=self.tloop, seed=seed,
+                                fixcm=resolve_fixcm(self.fixcm, fixed_atoms))
+
+
+@dataclass(frozen=True, kw_only=True)
+class Berendsen:
+    """Berendsen thermostat, as ASE's ``NVTBerendsen``:
+    ``lm.integrators.Berendsen(timestep_fs=1.0, temperature_K=300, taut_fs=100)``.
+
+    Not canonical: for equilibration only. ``taut_fs`` is ASE's ``taut``. FastMACE's record also takes
+    ``pressure_GPa``, ``taup_fs``, ``compressibility_per_GPa`` and ``mask`` for the Berendsen barostat; that
+    is not in this version, and giving one of them is refused."""
+
+    timestep_fs: float
+    temperature_K: float
+    taut_fs: float
+    pressure_GPa: float | None = None
+    taup_fs: float | None = None
+    compressibility_per_GPa: float | None = None
+    mask: tuple | None = None
+    fixcm: bool | Literal["auto"] = "auto"
+
+    def __post_init__(self):
+        barostat = [name for name in ("pressure_GPa", "taup_fs", "compressibility_per_GPa", "mask")
+                    if getattr(self, name) is not None]
+        if barostat:
+            raise PlanRefused(f"Berendsen with {', '.join(barostat)}: the Berendsen barostat is not in this version",
+                              next_step="Leave these out for the thermostat alone (PLAN.md Stage 4 builds NPT).")
+        IntegratorConfig(scheme="berendsen", timestep_fs=self.timestep_fs, temperature_K=self.temperature_K,
+                         tau_fs=self.taut_fs)                                # checks the values
+        if not isinstance(self.fixcm, bool) and self.fixcm != "auto":
+            raise InputError(f"Berendsen.fixcm must be True, False or 'auto', got {self.fixcm!r}")
+
+    def to_config(self, *, seed: int, fixed_atoms: bool = False) -> IntegratorConfig:
+        return IntegratorConfig(ensemble="nvt", scheme="berendsen", timestep_fs=float(self.timestep_fs),
+                                temperature_K=float(self.temperature_K), tau_fs=float(self.taut_fs), seed=seed,
+                                fixcm=resolve_fixcm(self.fixcm, fixed_atoms))
+
+
+RECORDS = {"NVE": NVE, "Langevin": Langevin, "CSVR": CSVR, "NoseHooverChain": NoseHooverChain,
+           "Berendsen": Berendsen}
 
 
 def to_data(record) -> dict:

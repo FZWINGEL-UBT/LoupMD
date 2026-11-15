@@ -27,7 +27,7 @@ GATE_STRESS_FLOOR_EV_PER_A3 = 1e-7
 # Integrator schemes of each ensemble, the first being its default. BUILT are those the engine has.
 SCHEMES = {"nve": ("nve",), "nvt": ("langevin", "csvr", "nose_hoover", "berendsen"),
            "npt": ("baoab", "mtk", "berendsen")}
-BUILT = {"nve": ("nve",), "nvt": ("langevin", "csvr"), "npt": ()}
+BUILT = {"nve": ("nve",), "nvt": ("langevin", "csvr", "nose_hoover", "berendsen"), "npt": ()}
 
 
 def _name(record, field):
@@ -76,14 +76,20 @@ def _count(record, field, optional=False, what="an int of at least 1", unit=""):
 class IntegratorConfig:
     """What the engine integrates with. ``scheme=None`` takes the ensemble's default (``nve``; ``langevin`` for
     NVT). A thermostat's temperature, friction and time constant have no defaults: physics is not chosen silently.
-    ``tau_fs`` is the time constant of the thermostats that have one (``csvr``: ASE's ``taut``)."""
+    ``tau_fs`` is the time constant of the thermostats that have one (``csvr``: ASE's ``taut``; ``nose_hoover``:
+    ASE's ``tdamp``). The Nose-Hoover chain has ``tchain`` thermostats and ``tloop`` sub-steps per half step
+    (ASE's defaults 3 and 1); its thermostat masses are made for ``mass_temperature_K``, by default the
+    ``temperature_K`` the record is made with, and stay when a schedule moves the target."""
 
     ensemble: Literal["nve", "nvt", "npt"] = "nvt"
     scheme: str | None = None
     timestep_fs: float = 0.5
     temperature_K: float | None = None
     friction_per_fs: float | None = None       # Langevin
-    tau_fs: float | None = None                # CSVR: the thermostat's time constant
+    tau_fs: float | None = None                # CSVR, Nose-Hoover chain: the thermostat's time constant
+    tchain: int | None = None                  # Nose-Hoover chain: thermostats in the chain
+    tloop: int | None = None                   # Nose-Hoover chain: sub-steps per half step
+    mass_temperature_K: float | None = None    # Nose-Hoover chain: the temperature of the thermostat masses
     seed: int = 20261001
     fixcm: bool = False                        # keep the centre of mass at rest (three degrees of freedom fewer)
 
@@ -103,6 +109,11 @@ class IntegratorConfig:
             raise InputError(f"{_name(self, 'fixcm')} must be a bool, got {self.fixcm!r}")
         if isinstance(self.seed, bool) or not isinstance(self.seed, int) or not 0 <= self.seed < 2 ** 64:
             raise InputError(f"{_name(self, 'seed')} must be an int from 0 to 2**64 - 1, got {self.seed!r}")
+        if scheme != "nose_hoover":
+            for field in ("tchain", "tloop", "mass_temperature_K"):
+                if getattr(self, field) is not None:
+                    raise InputError(f"{_name(self, field)} belongs to the Nose-Hoover chain (scheme 'nose_hoover'), "
+                                     f"got {getattr(self, field)!r} with scheme {scheme!r}")
         if scheme == "nve":
             for field in ("temperature_K", "friction_per_fs", "tau_fs"):
                 if getattr(self, field) is not None:
@@ -124,6 +135,36 @@ class IntegratorConfig:
                                  f"friction, got {self.friction_per_fs!r}")
             _not_negative(self, "temperature_K")
             _positive(self, "tau_fs")
+        elif scheme == "berendsen":
+            if self.temperature_K is None or self.tau_fs is None:
+                raise InputError("IntegratorConfig: the Berendsen thermostat needs temperature_K and tau_fs (ASE's "
+                                 "taut)", why="neither has a default")
+            if self.friction_per_fs is not None:
+                raise InputError(f"{_name(self, 'friction_per_fs')}: the Berendsen thermostat has a time constant "
+                                 f"(tau_fs), not a friction, got {self.friction_per_fs!r}")
+            _not_negative(self, "temperature_K")
+            _positive(self, "tau_fs")
+            if self.tau_fs < self.timestep_fs:
+                raise InputError(f"{_name(self, 'tau_fs')} must be at least the timestep for the Berendsen "
+                                 f"thermostat, got {self.tau_fs!r} fs with timestep_fs = {self.timestep_fs!r}")
+        elif scheme == "nose_hoover":
+            if self.temperature_K is None or self.tau_fs is None:
+                raise InputError("IntegratorConfig: the Nose-Hoover chain needs temperature_K and tau_fs (ASE's "
+                                 "tdamp)", why="neither has a default")
+            if self.friction_per_fs is not None:
+                raise InputError(f"{_name(self, 'friction_per_fs')}: the Nose-Hoover chain has a time constant "
+                                 f"(tau_fs), not a friction, got {self.friction_per_fs!r}")
+            _not_negative(self, "temperature_K")
+            _positive(self, "tau_fs")
+            for field, default, most in (("tchain", 3, 16), ("tloop", 1, 100)):
+                if getattr(self, field) is None:
+                    object.__setattr__(self, field, default)
+                value = getattr(self, field)
+                if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= most:
+                    raise InputError(f"{_name(self, field)} must be an int from 1 to {most}, got {value!r}")
+            if self.mass_temperature_K is None:
+                object.__setattr__(self, "mass_temperature_K", self.temperature_K)
+            _positive(self, "mass_temperature_K")
 
     def to_struct(self, thermo_every: int = 0, temperature_K=None, rate_K_per_step: float = 0.0):
         """The ``LoupIntegrator`` of this record for ``loup_run``; ``thermo_every`` is the output's cadence. A
@@ -135,6 +176,16 @@ class IntegratorConfig:
             return _core.integrator(_core.LOUP_NVE, self.timestep_fs, thermo_every=int(thermo_every),
                                     fix_com=int(self.fixcm))
         temperature = self.temperature_K if temperature_K is None else temperature_K
+        if self.scheme == "berendsen":
+            return _core.integrator(_core.LOUP_BERENDSEN_NVT, self.timestep_fs, temp_k=float(temperature),
+                                    temp_rate_k_per_step=float(rate_K_per_step), tau_t_fs=float(self.tau_fs),
+                                    thermo_every=int(thermo_every), fix_com=int(self.fixcm))
+        if self.scheme == "nose_hoover":
+            return _core.integrator(_core.LOUP_NHC, self.timestep_fs, temp_k=float(temperature),
+                                    temp_rate_k_per_step=float(rate_K_per_step), tau_t_fs=float(self.tau_fs),
+                                    mass_temp_k=float(self.mass_temperature_K), chain_length=int(self.tchain),
+                                    chain_loops=int(self.tloop), thermo_every=int(thermo_every),
+                                    fix_com=int(self.fixcm))
         if self.scheme == "csvr":
             return _core.integrator(_core.LOUP_CSVR, self.timestep_fs, temp_k=float(temperature),
                                     temp_rate_k_per_step=float(rate_K_per_step), tau_t_fs=float(self.tau_fs),

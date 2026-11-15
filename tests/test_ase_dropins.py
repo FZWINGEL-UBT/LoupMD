@@ -82,7 +82,7 @@ def test_what_is_refused(ff):
         ase_md.VelocityVerlet(atoms, units.fs, model=ff, rng=np.random.default_rng(1))
     with pytest.raises(TypeError, match="temperature .in eV. or temperature_K, not both"):
         ase_md.Langevin(atoms, units.fs, 0.025, 0.01 / units.fs, temperature_K=300, model=ff)
-    for name in ("LangevinBAOAB", "NoseHooverChainNVT", "MTKNPT", "NVTBerendsen", "NPTBerendsen"):
+    for name in ("LangevinBAOAB", "MTKNPT", "NPTBerendsen", "Inhomogeneous_NPTBerendsen"):
         with pytest.raises(PlanRefused, match=f"loupmd.ase.md.{name} is not in this version"):
             getattr(ase_md, name)
     with pytest.raises(AttributeError):
@@ -235,3 +235,40 @@ def test_ase_s_trajectory_and_logfile_mean_what_they_mean_in_ase(ff, tmp_path):
     assert float(lines[-1].split()[2]) == pytest.approx(atoms.get_potential_energy(), abs=1e-3)
     engine, = SpringEngine.made
     assert [e[1] for e in engine.log if isinstance(e, tuple) and e[0] == "run"] == [5, 5, 5, 5]
+
+
+def test_the_nose_hoover_chain_takes_ase_s_arguments(ff):
+    atoms = _moving()
+    dyn = ase_md.NoseHooverChainNVT(atoms, 2.0 * units.fs, 350, 100 * units.fs, tchain=4, model=ff)
+    config = dyn.simulation.config
+    assert (config.scheme, config.temperature_K, config.mass_temperature_K, config.tchain, config.tloop,
+            config.fixcm) == ("nose_hoover", 350.0, 350.0, 4, 1, False)
+    assert (config.timestep_fs, config.tau_fs) == (pytest.approx(2.0), pytest.approx(100.0))
+    assert dyn.run(20) is True
+    engine, = SpringEngine.made
+    assert [e for e in engine.log if isinstance(e, tuple) and e[0] == "run"] == [("run", 20, _core.LOUP_NHC, 0)]
+    record = integrators.NoseHooverChain(timestep_fs=1.0, temperature_K=300, tdamp_fs=100)
+    assert record.to_config(seed=1).fixcm is True and record.to_config(seed=1, fixed_atoms=True).fixcm is False
+    assert integrators.from_data({"type": "NoseHooverChain", "tdamp_fs": 100.0}, timestep_fs=1.0,
+                                 temperature_K=300) == record
+    with pytest.raises(InputError, match="NoseHooverChain.temperature_K must be above 0 K"):
+        integrators.NoseHooverChain(timestep_fs=1.0, temperature_K=0.0, tdamp_fs=100)
+
+
+def test_the_berendsen_thermostat_takes_ase_s_arguments(ff):
+    atoms = _moving()
+    dyn = ase_md.NVTBerendsen(atoms, 2.0 * units.fs, temperature_K=350, taut=100 * units.fs, model=ff)
+    config = dyn.simulation.config
+    assert (config.scheme, config.temperature_K, config.fixcm) == ("berendsen", 350.0, True)
+    assert (config.timestep_fs, config.tau_fs) == (pytest.approx(2.0), pytest.approx(100.0))
+    assert dyn.run(20) is True
+    engine, = SpringEngine.made
+    assert [e for e in engine.log if isinstance(e, tuple) and e[0] == "run"] == [("run", 20, _core.LOUP_BERENDSEN_NVT, 0)]
+    old = ase_md.NVTBerendsen(atoms, units.fs, 300 * units.kB, 100 * units.fs, False, model=ff)   # ASE's order
+    assert old.simulation.config.temperature_K == pytest.approx(300.0) and old.simulation.config.fixcm is False
+    with pytest.raises(InputError, match="NVTBerendsen needs temperature_K and taut"):
+        ase_md.NVTBerendsen(atoms, units.fs, temperature_K=300, model=ff)
+    with pytest.raises(PlanRefused, match="Berendsen with pressure_GPa, taup_fs: the Berendsen barostat is not in"):
+        integrators.Berendsen(timestep_fs=1.0, temperature_K=300, taut_fs=100, pressure_GPa=0.0, taup_fs=1000.0)
+    assert integrators.from_data({"type": "Berendsen", "taut_fs": 100.0}, timestep_fs=1.0, temperature_K=300) == \
+        integrators.Berendsen(timestep_fs=1.0, temperature_K=300, taut_fs=100.0)
