@@ -145,6 +145,17 @@ def test_the_standard_suite_names_the_missing_structure_and_the_way_out():
     assert "NbCl5_R2SCAN.cif was not found" in text and "LOUPMD_BENCH_STRUCTURES" in text and "--suite quick" in text
 
 
+def test_several_structure_folders_are_searched_in_order(tmp_path):
+    import os
+
+    (tmp_path / "a").mkdir()
+    (tmp_path / "b").mkdir()
+    (tmp_path / "b" / "water_216.extxyz").write_text("")
+    found = suites.find_file("water_216.extxyz", {"LOUPMD_BENCH_STRUCTURES": os.pathsep.join(
+        [str(tmp_path / "a"), str(tmp_path / "b")])})
+    assert found == tmp_path / "b" / "water_216.extxyz"
+
+
 def test_the_standard_suite_reads_the_structure_folder(tmp_path):
     from ase.build import bulk
     from ase.io import write

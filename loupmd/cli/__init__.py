@@ -13,8 +13,9 @@ from . import bench as _bench
 from . import cache as _cache
 from . import doctor as _doctor
 from . import models as _models
+from . import validate as _validate
 
-COMMANDS = (_doctor, _models, _cache, _bench)
+COMMANDS = (_doctor, _models, _cache, _bench, _validate)
 
 
 def build_parser() -> argparse.ArgumentParser:

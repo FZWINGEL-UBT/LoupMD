@@ -36,3 +36,18 @@ ensure_loup_bundle = _source.ensure_loup_bundle
 exporter_fingerprint = _source.exporter_fingerprint
 EXPORTER_SOURCES = _source.EXPORTER_SOURCES
 _model_digest = _source._model_digest
+
+
+def read_bundle_meta(path) -> dict:
+    """The metadata dictionary of a bundle file (``python/bundle.py``'s ``read_bundle``), loaded by path as above."""
+    name = "loupmd._legacy_bundle"
+    module = sys.modules.get(name)
+    if module is None:
+        source = _SOURCE.with_name("bundle.py")
+        spec = importlib.util.spec_from_file_location(name, source)
+        if spec is None or spec.loader is None or not source.is_file():
+            raise ImportError(f"the bundle reader of the source checkout is missing: {source}")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        sys.modules[name] = module
+    return module.read_bundle(path)[0]

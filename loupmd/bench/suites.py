@@ -16,19 +16,23 @@ _SHIPPED = Path(__file__).resolve().parent / "structures"
 FILES = {"nbcl5": "NbCl5_R2SCAN.cif", "water": "water_216.extxyz"}
 
 
-def structure_file(key, environ=None) -> Path:
+def find_file(name, environ=None) -> Path:
+    """A structure file by name: shipped with the package, or in one of the folders of ``$LOUPMD_BENCH_STRUCTURES``
+    (several are separated like ``PATH``)."""
     environ = os.environ if environ is None else environ
-    name = FILES[key]
     places = [_SHIPPED]
-    if environ.get(STRUCTURES_VARIABLE):
-        places.append(Path(os.path.expanduser(environ[STRUCTURES_VARIABLE])))
+    places += [Path(os.path.expanduser(p)) for p in (environ.get(STRUCTURES_VARIABLE) or "").split(os.pathsep) if p]
     for place in places:
         if (place / name).is_file():
             return place / name
-    raise InputError(f"the benchmark structure {name} was not found",
+    raise InputError(f"the structure {name} was not found",
                      why="it is not shipped with this build of LoupMD",
-                     next_step=f"Set {STRUCTURES_VARIABLE} to a folder that holds {name}, or run a suite that needs "
-                               "no file (--suite quick).")
+                     next_step=f"Set {STRUCTURES_VARIABLE} to the folder that holds {name} (several folders are "
+                               "separated like PATH), or run a suite that needs no file (--suite quick).")
+
+
+def structure_file(key, environ=None) -> Path:
+    return find_file(FILES[key], environ)
 
 
 def srtio3(rep: int):
