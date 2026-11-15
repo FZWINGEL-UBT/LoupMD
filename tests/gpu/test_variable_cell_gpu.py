@@ -155,6 +155,7 @@ def test_refusals(sto_bundle, monkeypatch):
         eng.get_cell()
 
 
+@pytest.mark.full
 def test_what_the_variable_cell_step_costs(sto_bundle, monkeypatch):
     """Langevin at 5,000 atoms through the fixed-cell step (pipelined) and through the variable-cell step (stress
     in every step, the Cartesian shifts formed in every step, one host wait per step): a b b a twice."""

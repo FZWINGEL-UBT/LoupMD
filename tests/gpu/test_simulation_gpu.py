@@ -86,6 +86,7 @@ def test_resume_after_half_the_run_ends_where_the_uninterrupted_run_ends(model_p
         loupmd.Simulation.resume(tmp_path / "c", force_field=other)
 
 
+@pytest.mark.full
 def test_output_every_20_steps_costs_at_most_three_percent(model_path, tmp_path):
     """S3-T05: 5,000 atoms, Langevin, wall time of run() with rows and frames every 20 steps against none."""
     at = _moving(10)

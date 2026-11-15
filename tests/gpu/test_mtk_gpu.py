@@ -80,6 +80,7 @@ def test_the_engine_takes_ase_s_steps(sto_bundle, model_path, full, chains):
 
 
 @pytest.mark.parametrize("full", [False, True], ids=["isotropic", "full-cell"])
+@pytest.mark.full
 def test_the_conserved_quantity_holds(sto_bundle, full):
     """The plan's criterion: the conserved quantity drifts by less than 0.05 meV/atom/ps. 20,000 steps of 1 fs."""
     at = _strained(strain=1.0)

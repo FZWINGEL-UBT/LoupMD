@@ -62,6 +62,7 @@ def _evaluate(bundle, at, monkeypatch, env):
 
 
 @pytest.mark.parametrize("model,structure,generic,layers", CASES, ids=[c[0].split(".model")[0] for c in CASES])
+@pytest.mark.full
 def test_sweep_schedule_reproduces_the_ordinary_pass(model, structure, generic, layers, monkeypatch):
     at = structure()
     zs = sorted(set(at.get_atomic_numbers().tolist()))

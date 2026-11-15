@@ -251,6 +251,7 @@ def test_refusals(sto_engine, fields, reason):
     assert np.isfinite(eng.run(10, _csvr()).final_temperature_k)
 
 
+@pytest.mark.full
 def test_what_the_thermostat_costs(model_path):
     """CSVR adds a kinetic-energy sum and one thread's noise to a velocity-Verlet step, and draws no noise per
     atom. Compared with Langevin at the same temperature (NVE from the same start is 150 K colder and rebuilds

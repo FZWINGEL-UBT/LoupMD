@@ -45,6 +45,7 @@ def test_a_ramp_below_zero_kelvin_is_refused(sto_engine):
     eng.run(50, _langevin(100.0, rate=-2.0))                      # exactly to 0 K is allowed
 
 
+@pytest.mark.full
 def test_a_schedule_tracks_its_target_on_5000_atoms(model_path, tmp_path):
     """S3-T06: hold at 200 K, then 200 K -> 400 K at 100 K/ps. The mean kinetic temperature of the ramp's rows is
     within 5% of their mean target, and the ramp's steps cost what the hold's cost (nothing is captured again)."""

@@ -89,6 +89,7 @@ def test_a_run_without_noise_is_ase_s(sto_bundle, model_path, full):
         assert np.allclose(cell, cell[0, 0] * np.eye(3), rtol=0, atol=1e-9 * cell[0, 0])
 
 
+@pytest.mark.full
 def test_temperature_and_pressure_are_the_targets(sto_bundle):
     """The plan's criterion for the ensemble: over 20,000 steps on SrTiO3 5x5x5 the mean pressure is within its
     standard error of the target (three of them here), and so is the mean temperature."""

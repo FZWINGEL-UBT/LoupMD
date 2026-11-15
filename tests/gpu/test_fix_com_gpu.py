@@ -72,6 +72,7 @@ def test_fix_com_is_refused_with_fixed_atoms(sto_engine):
     eng.run(10, _langevin(0))
 
 
+@pytest.mark.full
 def test_what_keeping_the_centre_of_mass_at_rest_costs(model_path, tmp_path):
     """5,000 atoms and 1,944-atom-sized steps are what matter; here 5,000 atoms through lm.Simulation, a b b a."""
     at = srtio3(10)

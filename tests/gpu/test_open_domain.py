@@ -109,6 +109,7 @@ IDS = [c[0].split(".model")[0] for c in CASES]
 
 
 @pytest.mark.parametrize("model,structure,generic,layers", CASES, ids=IDS)
+@pytest.mark.full
 def test_a_cell_as_an_open_domain_with_its_images_as_ghosts(model, structure, generic, layers, monkeypatch):
     if layers == 3:
         monkeypatch.setenv("LOUP_CHAIN_FOLD", "0")   # the fold never forms the layer outputs a sweep hands on

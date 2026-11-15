@@ -183,6 +183,7 @@ def test_degrees_of_freedom_fixed_atoms_and_refusals(sto_engine):
     assert np.isfinite(eng.run(10, _nhc(temp_k=0.0, mass_temp_k=300.0)).final_temperature_k)   # a target of 0 K
 
 
+@pytest.mark.full
 def test_what_the_chain_costs(model_path):
     """Two kinetic-energy sums, two single-thread kernels and one scaling per step beside velocity Verlet; no noise
     per atom. Against Langevin at the same temperature: 5,000 atoms, a b b a twice."""
