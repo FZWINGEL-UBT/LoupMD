@@ -1527,6 +1527,7 @@ void GenericModel::record(const GenericPassInputs& in) {
                L->pair_sym == pg_psym && memcmp(&L->grid, pg, sizeof(SplineGrid)) == 0;
     };
     const int N = in.N;
+    const int Nx = in.N + in.n_ghost;  // rows of what senders provide: h_in, x = h_in W_up, dx, dh_in
     cudaStream_t st = in.stream;
     const auto& start = *in.species_start;
     const auto& count = *in.species_count;
@@ -1558,7 +1559,7 @@ void GenericModel::record(const GenericPassInputs& in) {
     if (has_edges) zero_edge_kernel<<<(3 * in.E_cap + 255) / 256, 256, 0, st>>>(in.E_dev, d_edge_dvec_);
     if (zero_slab_bytes_) CUDA_CHECK_THROW(cudaMemsetAsync(d_zero_slab_, 0, zero_slab_bytes_, st));
 
-    gather_rows_kernel<<<(unsigned)(((int64_t)N * C0_ + 255) / 256), 256, 0, st>>>(N, C0_, in.species, d_embedding_, d_h0_);
+    gather_rows_kernel<<<(unsigned)(((int64_t)Nx * C0_ + 255) / 256), 256, 0, st>>>(Nx, C0_, in.species, d_embedding_, d_h0_);
 
     // ---------------- forward of layer t: everything from its linear_up to its readout. `energy` takes the
     // readout's energy (a sink when a backward sweep replays the layer).
@@ -1572,7 +1573,7 @@ void GenericModel::record(const GenericPassInputs& in) {
             if (L->lmax_x > 0) fork();
             for (int l = 0; l <= L->lmax_x; ++l) {
                 if (L->lmax_x > 0) lane(l);
-                in.gemm(false, N * dimL(l), Cx, L->C_in, 1.0f, L->h_in[l], L->C_in, L->W_up[l], Cx, 0.0f, L->x[l], Cx);
+                in.gemm(false, Nx * dimL(l), Cx, L->C_in, 1.0f, L->h_in[l], L->C_in, L->W_up[l], Cx, 0.0f, L->x[l], Cx);
             }
             if (L->lmax_x > 0) join();
         }
@@ -1938,10 +1939,20 @@ void GenericModel::record(const GenericPassInputs& in) {
             if (L->lmax_x > 0) fork();
             for (int l = 0; l <= L->lmax_x; ++l) {
                 if (L->lmax_x > 0) lane(l);
-                in.gemm(true, N * dimL(l), L->C_in, Cx, 1.0f, L->dx[l], Cx, L->W_up[l], Cx, 1.0f, L->dh_in[l], L->C_in);
+                in.gemm(true, Nx * dimL(l), L->C_in, Cx, 1.0f, L->dx[l], Cx, L->W_up[l], Cx, 1.0f, L->dh_in[l], L->C_in);
             }
             if (L->lmax_x > 0) join();
         }
+    };
+
+    // Per-edge forces and virial from the edge gradients gathered so far, with or without ZBL.
+    auto assemble_edges = [&](bool with_zbl) {
+        if (!has_edges) return;
+        auto kern = (with_zbl && has_zbl_)
+                        ? (in.compute_stress ? assemble_forces_kernel<true, true> : assemble_forces_kernel<true, false>)
+                        : (in.compute_stress ? assemble_forces_kernel<false, true> : assemble_forces_kernel<false, false>);
+        kern<<<(in.E_cap + 255) / 256, 256, 0, st>>>(in.E_dev, S, in.act_vec_len, in.act_senders, in.act_receivers,
+                                                    in.species, zbl_p, d_edge_dvec_, in.forces, in.virial, in.energy);
     };
 
     // ---------------- the pass
@@ -1994,6 +2005,10 @@ void GenericModel::record(const GenericPassInputs& in) {
         }
         backward_layer(n_layers_ - 1);
         for (int t = n_layers_ - 2; t >= 0; --t) {
+            // A sweep that differentiates leaves no edge gradients behind: it assembles its own edge forces (ZBL
+            // comes with layer 0's sweep), and the next one starts from zero.
+            assemble_edges(false);
+            if (has_edges) zero_edge_kernel<<<(3 * in.E_cap + 255) / 256, 256, 0, st>>>(in.E_dev, d_edge_dvec_);
             for (size_t i = 0; i < sys_allocs_.size(); ++i) {
                 bool keep = sys_allocs_[i] == d_h0_;
                 for (const GenericLayer* K : layers_)
@@ -2004,13 +2019,9 @@ void GenericModel::record(const GenericPassInputs& in) {
             backward_layer(t);
         }
     }
+    // Layer 0's edge kernel, where it runs, has assembled the edge forces and ZBL itself.
     const bool edge_done = layers_[0]->first_hidden && layers_[0]->J - 1 <= 96;
-    if (has_edges && !edge_done) {
-        auto kern = has_zbl_ ? (in.compute_stress ? assemble_forces_kernel<true, true> : assemble_forces_kernel<true, false>)
-                             : (in.compute_stress ? assemble_forces_kernel<false, true> : assemble_forces_kernel<false, false>);
-        kern<<<(in.E_cap + 255) / 256, 256, 0, st>>>(in.E_dev, S, in.act_vec_len, in.act_senders, in.act_receivers,
-                                                    in.species, zbl_p, d_edge_dvec_, in.forces, in.virial, in.energy);
-    }
+    if (!edge_done) assemble_edges(true);
 }
 
 }  // namespace loup

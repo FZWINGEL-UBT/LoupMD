@@ -23,7 +23,9 @@ using GemmFn = std::function<void(bool transB, int M, int N, int K, float alpha,
 
 struct GenericPassInputs {
     cudaStream_t stream;
-    int N;
+    int N;                     // receivers: the atoms of a periodic system, the local atoms of a domain
+    int n_ghost = 0;           // a domain's ghost atoms, rows N .. N + n_ghost - 1: they only send. Their rows of a
+                               // layer's input and of its gradient exist; nothing else is computed for them
     const int* E_dev;          // device: number of active edges (act_row_ptr[N])
     int E_cap;                 // capacity of the edge arrays
     const int* act_row_ptr;    // [N + 1], receiver rows
