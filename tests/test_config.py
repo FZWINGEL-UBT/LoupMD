@@ -77,7 +77,7 @@ def test_integrator_values_are_checked(fields, message):
 
 
 @pytest.mark.parametrize("fields,word", [
-    ({"ensemble": "npt"}, "npt"), ({"ensemble": "npt", "scheme": "mtk"}, "mtk"),
+    ({"ensemble": "npt", "scheme": "mtk"}, "mtk"),
 ])
 def test_schemes_that_are_not_built_are_refused_naming_what_is(fields, word):
     with pytest.raises(InputError) as caught:
@@ -205,8 +205,8 @@ def test_unknown_keys_are_refused_by_name_all_at_once():
     text = str(caught.value)
     assert text.startswith("unknown keys 'friction', 'timestep' in [integrator]")
     assert ("Next: Keys of [integrator]: ensemble, scheme, timestep_fs, temperature_K, friction_per_fs, tau_fs, "
-            "tchain, tloop, mass_temperature_K, pressure_GPa, taup_fs, compressibility_per_GPa, mask, seed, "
-            "fixcm.") in text
+            "tchain, tloop, mass_temperature_K, pressure_GPa, taup_fs, compressibility_per_GPa, mask, cell_mode, "
+            "seed, fixcm.") in text
     with pytest.raises(InputError, match=r"unknown key 'every' in Output"):
         config.from_mapping(Output, {"directory": "run", "every": 5})
     with pytest.raises(InputError, match="is not a table"):

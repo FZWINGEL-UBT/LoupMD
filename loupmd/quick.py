@@ -4,8 +4,8 @@
 to a ``Simulation``, which gates (if asked), runs and writes. Every argument error is raised before the model is
 loaded. What ``md`` decides itself:
 
-- the integrator: ``ensemble="NVT"`` is ``lm.integrators.Langevin``, ``"NVE"`` is ``NVE``; ``"NPT"`` is refused
-  until its default integrator is built (a barostat's record passed as ``integrator=`` runs). An explicit
+- the integrator: ``ensemble="NVT"`` is ``lm.integrators.Langevin``, ``"NVE"`` is ``NVE``, ``"NPT"`` is
+  ``LangevinBAOAB`` at ``pressure_GPa`` with ``cell_mode`` (experimental). An explicit
   ``integrator=`` (any ``lm.integrators`` record, for example
   ``CSVR``) wins; a conflicting argument is an error;
 - NVE has no target: the momenta are the structure's, and ``temperature_K=`` and ``schedule=`` are errors;
@@ -222,11 +222,16 @@ def md(structure, *, model, head=None, charge=None, spin_multiplicity=None, sha2
             raise InputError(f"{', '.join(conflicts)} conflicts with the explicit integrator's fields; set them in "
                              "the integrator record only")
         timestep_fs = integrator.timestep_fs
-    if (ensemble == "NPT" and integrator is None) or pressure_GPa != 0.0 or cell_mode != "hydrostatic":
-        raise PlanRefused("ensemble='NPT', pressure_GPa= and cell_mode=: constant-pressure MD is not in this version",
-                          next_step="Use ensemble='NVT' or 'NVE', or pass a barostat's record: "
-                                    "integrator=lm.integrators.Berendsen(..., pressure_GPa=..., taup_fs=..., "
-                                    "compressibility_per_GPa=...) (experimental).")
+    if isinstance(pressure_GPa, bool) or not isinstance(pressure_GPa, (int, float)) or not math.isfinite(pressure_GPa):
+        raise InputError(f"pressure_GPa must be a finite number of GPa, got {pressure_GPa!r}")
+    if cell_mode not in ("hydrostatic", "full"):
+        raise InputError(f"cell_mode={cell_mode!r} is not one of ('hydrostatic', 'full')")
+    if ensemble != "NPT" and (pressure_GPa != 0.0 or cell_mode != "hydrostatic"):
+        raise InputError(f"pressure_GPa= and cell_mode= belong to ensemble='NPT', and the ensemble is {ensemble!r}")
+    if integrator is not None and getattr(integrator, "barostat", False) and (
+            pressure_GPa != 0.0 or cell_mode != "hydrostatic"):
+        raise InputError("pressure_GPa= and cell_mode= conflict with the explicit integrator's fields; set them in "
+                         "the integrator record only")
     nve = ensemble == "NVE"
     if nve:
         named = [name for name, value in (("temperature_K", temperature_K), ("schedule", schedule))
@@ -275,7 +280,11 @@ def md(structure, *, model, head=None, charge=None, spin_multiplicity=None, sha2
             warnings.append(f"starting velocities: the structure's own; initial_velocities={initial_velocities!r} "
                             "draws only for a structure at rest")
     explicit = integrator
-    if integrator is None:
+    if integrator is None and ensemble == "NPT":
+        integrator = integrators.LangevinBAOAB(timestep_fs=timestep_fs, temperature_K=start,
+                                               friction_per_fs=default_friction_per_fs(),
+                                               pressure_GPa=float(pressure_GPa), cell_mode=cell_mode)
+    elif integrator is None:
         integrator = (integrators.NVE(timestep_fs=timestep_fs) if nve else
                       integrators.Langevin(timestep_fs=timestep_fs, temperature_K=start,
                                            friction_per_fs=default_friction_per_fs()))
@@ -283,6 +292,8 @@ def md(structure, *, model, head=None, charge=None, spin_multiplicity=None, sha2
     arguments = {"structure": source, "model": model.label or str(model.path) if isinstance(model, ForceField)
                  else str(model), "head": head, "charge": charge, "spin_multiplicity": spin_multiplicity,
                  "ensemble": ensemble, "temperature_K": temperature_K,
+                 **({"pressure_GPa": float(pressure_GPa), "cell_mode": cell_mode}
+                    if ensemble == "NPT" and explicit is None else {}),
                  "schedule": schedule.to_data() if schedule is not None else None, "timestep_fs": timestep_fs,
                  "steps": steps, "repeat": list(repeat), "seed": seed, "initial_velocities": initial_velocities,
                  "check": check, "capacity": capacity, "device": device, "skin": skin,

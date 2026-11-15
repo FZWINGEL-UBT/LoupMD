@@ -27,8 +27,9 @@ GATE_STRESS_FLOOR_EV_PER_A3 = 1e-7
 # Integrator schemes of each ensemble, the first being its default. BUILT are those the engine has.
 SCHEMES = {"nve": ("nve",), "nvt": ("langevin", "csvr", "nose_hoover", "berendsen"),
            "npt": ("baoab", "mtk", "berendsen")}
-BUILT = {"nve": ("nve",), "nvt": ("langevin", "csvr", "nose_hoover", "berendsen"), "npt": ("berendsen",)}
-BAROSTAT_FIELDS = ("pressure_GPa", "taup_fs", "compressibility_per_GPa", "mask")
+BUILT = {"nve": ("nve",), "nvt": ("langevin", "csvr", "nose_hoover", "berendsen"), "npt": ("baoab", "berendsen")}
+BAROSTAT_FIELDS = ("pressure_GPa", "taup_fs", "compressibility_per_GPa", "mask", "cell_mode")
+CELL_MODES = ("hydrostatic", "full")
 
 
 def _name(record, field):
@@ -82,10 +83,13 @@ class IntegratorConfig:
     (ASE's defaults 3 and 1); its thermostat masses are made for ``mass_temperature_K``, by default the
     ``temperature_K`` the record is made with, and stay when a schedule moves the target.
 
-    Ensemble ``npt`` (scheme ``berendsen``: ASE's ``NPTBerendsen``) takes the barostat's ``pressure_GPa``,
-    ``taup_fs`` and the material's ``compressibility_per_GPa``; none has a default. ``mask`` (three 0 / 1
-    entries) lets each cell vector follow its own stress and leaves the masked ones alone (ASE's
-    ``Inhomogeneous_NPTBerendsen``); without it the cell keeps its shape."""
+    Ensemble ``npt``, scheme ``baoab`` (the default; ASE's ``LangevinBAOAB`` with a barostat): ``temperature_K``,
+    ``friction_per_fs`` (ASE's ``T_tau`` is its inverse) and ``pressure_GPa``; ``taup_fs`` is ASE's ``P_tau``
+    (``None``: 20 ``T_tau``), ``cell_mode`` ``"hydrostatic"`` (the shape is kept) or ``"full"``. Scheme
+    ``berendsen`` (ASE's ``NPTBerendsen``) takes ``pressure_GPa``, ``taup_fs`` and the material's
+    ``compressibility_per_GPa``; none has a default. Its ``mask`` (three 0 / 1 entries) lets each cell vector
+    follow its own stress and leaves the masked ones alone (ASE's ``Inhomogeneous_NPTBerendsen``); without it
+    the cell keeps its shape."""
 
     ensemble: Literal["nve", "nvt", "npt"] = "nvt"
     scheme: str | None = None
@@ -100,6 +104,7 @@ class IntegratorConfig:
     taup_fs: float | None = None               # NPT: the barostat's time constant
     compressibility_per_GPa: float | None = None   # Berendsen NPT: the material's compressibility
     mask: tuple | None = None                  # Berendsen NPT: the cell vectors the barostat scales, each by its own
+    cell_mode: str | None = None               # BAOAB NPT: "hydrostatic" or "full"
     seed: int = 20261001
     fixcm: bool = False                        # keep the centre of mass at rest (three degrees of freedom fewer)
 
@@ -128,6 +133,29 @@ class IntegratorConfig:
             for field in ("temperature_K", "friction_per_fs", "tau_fs"):
                 if getattr(self, field) is not None:
                     raise InputError(f"{_name(self, field)}: NVE has no thermostat, got {getattr(self, field)!r}")
+        elif scheme == "baoab":
+            if self.temperature_K is None or self.friction_per_fs is None or self.pressure_GPa is None:
+                raise InputError("IntegratorConfig: Langevin BAOAB NPT needs temperature_K, friction_per_fs and "
+                                 "pressure_GPa", why="none has a default")
+            for field, owner in (("tau_fs", "the thermostat has a friction, not a time constant"),
+                                 ("compressibility_per_GPa", "it belongs to Berendsen's barostat"),
+                                 ("mask", "it belongs to Berendsen's barostat")):
+                if getattr(self, field) is not None:
+                    raise InputError(f"{_name(self, field)} is not a setting of Langevin BAOAB NPT ({owner}), got "
+                                     f"{getattr(self, field)!r}")
+            _not_negative(self, "temperature_K")
+            _positive(self, "friction_per_fs")
+            if not _is_number(self.pressure_GPa):
+                raise InputError(f"{_name(self, 'pressure_GPa')} must be finite, got {self.pressure_GPa!r}")
+            if self.taup_fs is not None:
+                _positive(self, "taup_fs")
+            if self.cell_mode is None:
+                object.__setattr__(self, "cell_mode", "hydrostatic")
+            if self.cell_mode not in CELL_MODES:
+                raise InputError(f"{_name(self, 'cell_mode')} must be one of {CELL_MODES}, got {self.cell_mode!r}")
+            if self.fixcm:
+                raise InputError(f"{_name(self, 'fixcm')} must be False for Langevin BAOAB NPT",
+                                 why="BAOAB, as ASE's LangevinBAOAB, does not remove the centre of mass's motion")
         elif scheme == "langevin":
             if self.temperature_K is None or self.friction_per_fs is None:
                 raise InputError("IntegratorConfig: Langevin needs temperature_K and friction_per_fs",
@@ -173,6 +201,9 @@ class IntegratorConfig:
                         raise InputError(f"{_name(self, 'mask')} frees no axis: (0, 0, 0) is a run at fixed cell",
                                          next_step="Use ensemble 'nvt' for that.")
                     object.__setattr__(self, "mask", tuple(int(m) for m in mask))
+                if self.cell_mode is not None:
+                    raise InputError(f"{_name(self, 'cell_mode')} belongs to Langevin BAOAB NPT; Berendsen's "
+                                     f"barostat keeps the shape or takes a mask, got {self.cell_mode!r}")
         elif scheme == "nose_hoover":
             if self.temperature_K is None or self.tau_fs is None:
                 raise InputError("IntegratorConfig: the Nose-Hoover chain needs temperature_K and tau_fs (ASE's "
@@ -208,6 +239,15 @@ class IntegratorConfig:
             return _core.integrator(_core.LOUP_NVE, self.timestep_fs, thermo_every=int(thermo_every),
                                     fix_com=int(self.fixcm))
         temperature = self.temperature_K if temperature_K is None else temperature_K
+        if self.scheme == "baoab":
+            return _core.integrator(_core.LOUP_BAOAB_NPT, self.timestep_fs, temp_k=float(temperature),
+                                    temp_rate_k_per_step=float(rate_K_per_step),
+                                    friction_per_fs=float(self.friction_per_fs),
+                                    pressure_gpa=float(self.pressure_GPa),
+                                    tau_p_fs=0.0 if self.taup_fs is None else float(self.taup_fs),
+                                    cell_mode=(_core.LOUP_CELL_FULL if self.cell_mode == "full"
+                                               else _core.LOUP_CELL_HYDROSTATIC),
+                                    seed=self.seed, thermo_every=int(thermo_every))
         if self.scheme == "berendsen" and self.ensemble == "npt":
             cell = ({} if self.mask is None else
                     dict(cell_mode=_core.LOUP_CELL_FULL, cell_mask=tuple(int(m) for m in self.mask)))

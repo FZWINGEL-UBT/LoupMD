@@ -187,8 +187,68 @@ class Berendsen:
         return self._config(seed=seed, fixcm=resolve_fixcm(self.fixcm, fixed_atoms))
 
 
+@dataclass(frozen=True, kw_only=True)
+class LangevinBAOAB:
+    """Langevin BAOAB NPT, as ASE's ``LangevinBAOAB`` with a barostat (experimental):
+    ``lm.integrators.LangevinBAOAB(timestep_fs=1.0, temperature_K=300, friction_per_fs=0.002, pressure_GPa=0.0)``.
+
+    BAOAB Langevin dynamics for the atoms (Leimkuhler and Matthews) and a Langevin-Hoover barostat for the cell
+    (Quigley and Probert). ``friction_per_fs`` is the thermostat's friction (ASE's ``T_tau`` is its inverse);
+    ``cell_mode`` is ``"hydrostatic"`` (the cell keeps its shape; ASE's ``hydrostatic=True``) or ``"full"``;
+    ``barostat_tau_fs`` is ASE's ``P_tau`` (``None``: ASE's default, 20 ``T_tau``). The barostat's mass is ASE's
+    heuristic. In the full-cell mode the barostat's drag on the velocities is Quigley and Probert's; ASE 3.27
+    adds its trace term to all nine elements. ``fixcm`` is ``False`` only, as for ASE's class.
+
+    FastMACE's record also takes ``external_stress_GPa``, ``barostat_mass_factor``,
+    ``disable_cell_langevin``, ``max_volume_ratio`` and ``max_cell_length_A``; here the target is a pressure,
+    the mass factor 1, the cell's thermostat on, and the run stops once the volume leaves a twentieth to
+    twenty times its start (the values FastMACE defaults to); other values are refused by name."""
+
+    timestep_fs: float
+    temperature_K: float
+    friction_per_fs: float
+    pressure_GPa: float = 0.0
+    external_stress_GPa: float | tuple | None = None
+    cell_mode: Literal["hydrostatic", "full"] = "hydrostatic"
+    barostat_tau_fs: float | None = None
+    barostat_mass_factor: float = 1.0
+    disable_cell_langevin: bool = False
+    fixcm: bool = False
+    max_volume_ratio: float | None = 20.0
+    max_cell_length_A: float | None = 1000.0
+
+    barostat = True
+
+    def __post_init__(self):
+        for name, default, why in (
+                ("external_stress_GPa", None, "the target is a pressure (pressure_GPa)"),
+                ("barostat_mass_factor", 1.0, "the barostat's mass is ASE's heuristic"),
+                ("disable_cell_langevin", False, "the cell's thermostat is always on"),
+                ("max_volume_ratio", 20.0, "the run stops outside a twentieth to twenty times its first volume"),
+                ("max_cell_length_A", 1000.0, "there is no limit on a cell vector's length beside the volume's")):
+            if getattr(self, name) != default or isinstance(getattr(self, name), bool) != isinstance(default, bool):
+                raise PlanRefused(f"LangevinBAOAB.{name}={getattr(self, name)!r} is not in this version",
+                                  why=why, next_step=f"Leave {name} at {default!r}.")
+        if self.fixcm is not False:
+            raise InputError(f"LangevinBAOAB.fixcm must be False, got {self.fixcm!r}",
+                             why="BAOAB, as ASE's LangevinBAOAB, does not remove the centre of mass's motion")
+        self._config(seed=0)                                                 # checks the values
+
+    def _config(self, *, seed) -> IntegratorConfig:
+        return IntegratorConfig(ensemble="npt", scheme="baoab", timestep_fs=self.timestep_fs,
+                                temperature_K=self.temperature_K, friction_per_fs=self.friction_per_fs,
+                                pressure_GPa=self.pressure_GPa, taup_fs=self.barostat_tau_fs,
+                                cell_mode=self.cell_mode, seed=seed, fixcm=False)
+
+    def to_config(self, *, seed: int, fixed_atoms: bool = False) -> IntegratorConfig:
+        if fixed_atoms:
+            raise PlanRefused("LangevinBAOAB with fixed atoms", why="the cell's scaling would move the fixed atoms",
+                              next_step="Free the atoms, or use a thermostat alone (Langevin).")
+        return self._config(seed=seed)
+
+
 RECORDS = {"NVE": NVE, "Langevin": Langevin, "CSVR": CSVR, "NoseHooverChain": NoseHooverChain,
-           "Berendsen": Berendsen}
+           "Berendsen": Berendsen, "LangevinBAOAB": LangevinBAOAB}
 
 
 def to_data(record) -> dict:

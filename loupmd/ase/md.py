@@ -33,7 +33,7 @@ from math import gcd
 from ..errors import InputError, PlanRefused
 from ..forcefield import ForceField, load
 
-_NOT_BUILT = ("LangevinBAOAB", "IsotropicMTKNPT", "MTKNPT")
+_NOT_BUILT = ("IsotropicMTKNPT", "MTKNPT")
 _LOAD_OPTIONS = ("checkpoint", "sha256", "trusted", "download", "charge", "spin_multiplicity", "device")
 # ASE's arguments that have no meaning here: accepted at None, refused otherwise.
 _ASE_REFUSED = {"rng": "the noise is drawn on the GPU: pass seed=", "comm": "LoupMD runs in one process",
@@ -44,8 +44,8 @@ def __getattr__(name):
     if name in _NOT_BUILT:
         raise PlanRefused(f"loupmd.ase.md.{name} is not in this version",
                           why="its integrator is not built in the engine yet (PLAN.md Stage 4)",
-                          next_step="Use Langevin, Bussi, NoseHooverChainNVT, NVTBerendsen, NPTBerendsen or "
-                                    "VelocityVerlet, or ASE's class with lm.calc as the calculator.")
+                          next_step="Use LangevinBAOAB or NPTBerendsen for constant pressure, or ASE's class with "
+                                    "lm.calc as the calculator.")
     raise AttributeError(f"module 'loupmd.ase.md' has no attribute {name!r}")
 
 
@@ -329,3 +329,47 @@ class Inhomogeneous_NPTBerendsen(NPTBerendsen):
     def __init__(self, *args, mask=(1, 1, 1), **kwargs):
         self._mask = tuple(int(m) for m in mask)
         super().__init__(*args, **kwargs)
+
+
+class LangevinBAOAB(_Dynamics):
+    """``ase.md.langevinbaoab.LangevinBAOAB`` with a barostat on LoupMD's engine (experimental): ``timestep``,
+    ``T_tau`` and ``P_tau`` in ASE units, ``temperature_K`` in K, ``externalstress`` a scalar in eV/A^3 (minus
+    the target pressure, ASE's sign), ``hydrostatic`` as ASE's (default ``False``: the full cell).
+
+    As ASE's class: ``T_tau`` defaults to 50 timesteps, ``P_tau`` to 20 ``T_tau``, the barostat's mass is ASE's
+    heuristic, and the centre of mass is not held. Differences: the noise is drawn on the GPU (``seed=``, not
+    ``rng=``); with the full cell the barostat's drag on the velocities is Quigley and Probert's, where ASE 3.27
+    adds its trace term to all nine elements. Refused: no ``temperature_K`` or no ``externalstress`` (use
+    ``VelocityVerlet`` or ``Langevin``), a stress tensor as target, ``P_mass``, ``P_mass_factor`` other than 1,
+    ``disable_cell_langevin=True``."""
+
+    def __init__(self, atoms, timestep, *, temperature_K=None, externalstress=None, hydrostatic=False, T_tau=None,
+                 P_tau=None, P_mass=None, P_mass_factor=1.0, disable_cell_langevin=False, model=None, head=None,
+                 seed=None, output=None, check="skip", **options):
+        import numpy as np
+        from ase import units
+
+        from .. import integrators
+
+        if temperature_K is None or externalstress is None:
+            raise PlanRefused("LangevinBAOAB without temperature_K or without externalstress is not in this version",
+                              why="the engine's BAOAB is the NPT integrator: thermostat and barostat together",
+                              next_step="Use Langevin for constant volume, VelocityVerlet for constant energy.")
+        stress = np.asarray(externalstress, dtype=float)
+        if stress.size != 1:
+            raise PlanRefused(f"LangevinBAOAB(externalstress=...) with {stress.size} components is not in this "
+                              "version", why="the target is a pressure",
+                              next_step="Pass a scalar: externalstress=-pressure in eV/A^3.")
+        for name, value, default in (("P_mass", P_mass, None), ("P_mass_factor", P_mass_factor, 1.0),
+                                     ("disable_cell_langevin", disable_cell_langevin, False)):
+            if value != default:
+                raise PlanRefused(f"LangevinBAOAB({name}={value!r}) is not in this version",
+                                  why="the barostat's mass is ASE's heuristic and its thermostat is on")
+        if T_tau is None:
+            T_tau = 50.0 * timestep                                   # ASE's default
+        record = integrators.LangevinBAOAB(
+            timestep_fs=timestep / units.fs, temperature_K=temperature_K, friction_per_fs=units.fs / T_tau,
+            pressure_GPa=-float(stress.reshape(-1)[0]) / units.GPa,
+            cell_mode="hydrostatic" if hydrostatic else "full",
+            barostat_tau_fs=None if P_tau is None else P_tau / units.fs)
+        super().__init__(atoms, timestep, record, model, head, seed, output, check, options)

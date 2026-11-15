@@ -67,8 +67,10 @@ class CellEngine(SpringEngine):
             self.reference_volume = self._volume()
 
     def run(self, n_steps, it):
-        if it.kind != _core.LOUP_BERENDSEN_NPT:
+        if it.kind not in (_core.LOUP_BERENDSEN_NPT, _core.LOUP_BAOAB_NPT):
             return super().run(n_steps, it)
+        if it.kind == _core.LOUP_BAOAB_NPT:              # the fake has one barostat: BAOAB's settings as Berendsen's
+            it.tau_p_fs, it.compressibility_per_gpa = it.tau_p_fs or 20.0 / it.friction_per_fs, 1.0 / BULK_GPA
         dt = it.dt_fs * units.fs
         inverse_mass = self._inverse_mass()
         dof = 3 * self.n - (3 if it.fix_com else 0)
@@ -154,8 +156,8 @@ def test_the_record_and_its_struct():
     with pytest.raises(InputError, match="pressure_GPa belongs to a barostat, and the ensemble is 'nvt'"):
         IntegratorConfig(ensemble="nvt", scheme="langevin", temperature_K=300.0, friction_per_fs=0.01,
                          pressure_GPa=1.0)
-    with pytest.raises(InputError, match="npt with scheme 'baoab' is not in this version"):
-        IntegratorConfig(ensemble="npt", scheme="baoab", temperature_K=300.0)
+    with pytest.raises(InputError, match="npt with scheme 'mtk' is not in this version"):
+        IntegratorConfig(ensemble="npt", scheme="mtk", temperature_K=300.0)
 
 
 def test_an_npt_run_writes_cell_volume_and_pressure(setup):
@@ -286,5 +288,94 @@ def test_lm_md_takes_a_barostat_s_record(setup, tmp_path):
     assert "NPT, Berendsen thermostat and barostat (experimental" in result.summary
     header, rows = output.read_thermo(tmp_path / "quick")
     assert header == list(output.THERMO_HEADER + output.NPT_COLUMNS) and int(rows[-1][0]) == 40
-    with pytest.raises(PlanRefused, match="constant-pressure MD is not in this version"):
-        loupmd.md(setup.atoms, model=setup.force_field(), steps=40, temperature_K=300, ensemble="NPT")
+    with pytest.raises(InputError, match="pressure_GPa= and cell_mode= conflict with the explicit integrator"):
+        loupmd.md(setup.atoms, model=setup.force_field(), steps=40, integrator=record, pressure_GPa=1.0)
+
+
+# ------------------------------------------------------------------------------------------ Langevin BAOAB NPT
+
+def test_the_baoab_record_and_its_struct():
+    record = integrators.LangevinBAOAB(timestep_fs=1.0, temperature_K=300.0, friction_per_fs=0.02, pressure_GPa=2.0)
+    config = record.to_config(seed=5)
+    assert (config.ensemble, config.scheme, config.cell_mode, config.taup_fs, config.fixcm, config.seed) == \
+        ("npt", "baoab", "hydrostatic", None, False, 5)
+    it = config.to_struct(thermo_every=4, temperature_K=250.0, rate_K_per_step=0.5)
+    assert (it.kind, it.friction_per_fs, it.pressure_gpa, it.tau_p_fs, it.cell_mode, it.seed, it.fix_com) == \
+        (_core.LOUP_BAOAB_NPT, 0.02, 2.0, 0.0, _core.LOUP_CELL_HYDROSTATIC, 5, 0)
+    assert (it.temp_k, it.temp_rate_k_per_step, it.thermo_every) == (250.0, 0.5, 4)
+    full = integrators.LangevinBAOAB(timestep_fs=1.0, temperature_K=300.0, friction_per_fs=0.02, cell_mode="full",
+                                     barostat_tau_fs=800.0).to_config(seed=1).to_struct()
+    assert (full.cell_mode, full.tau_p_fs, full.pressure_gpa) == (_core.LOUP_CELL_FULL, 800.0, 0.0)
+    assert integrators.from_data(integrators.to_data(record)) == record and record.barostat
+    assert IntegratorConfig(ensemble="npt", temperature_K=300.0, friction_per_fs=0.02, pressure_GPa=0.0).scheme == "baoab"
+
+    base = dict(timestep_fs=1.0, temperature_K=300.0, friction_per_fs=0.02)
+    for fields, error, reason in (
+            (dict(external_stress_GPa=-1.0), PlanRefused, "LangevinBAOAB.external_stress_GPa=-1.0 is not in this"),
+            (dict(barostat_mass_factor=2.0), PlanRefused, "LangevinBAOAB.barostat_mass_factor=2.0 is not in this"),
+            (dict(disable_cell_langevin=True), PlanRefused, "LangevinBAOAB.disable_cell_langevin=True is not in"),
+            (dict(max_volume_ratio=None), PlanRefused, "LangevinBAOAB.max_volume_ratio=None is not in this"),
+            (dict(max_cell_length_A=50.0), PlanRefused, "LangevinBAOAB.max_cell_length_A=50.0 is not in this"),
+            (dict(fixcm=True), InputError, "LangevinBAOAB.fixcm must be False"),
+            (dict(friction_per_fs=0.0), InputError, "friction_per_fs must be positive and finite"),
+            (dict(cell_mode="cubic"), InputError, "cell_mode must be one of"),
+            (dict(barostat_tau_fs=-5.0), InputError, "taup_fs must be positive and finite"),
+            (dict(pressure_GPa=float("inf")), InputError, "pressure_GPa must be finite")):
+        with pytest.raises(error, match=reason):
+            integrators.LangevinBAOAB(**{**base, **fields})
+    for fields, reason in ((dict(mask=(1, 1, 0)), "mask is not a setting of Langevin BAOAB NPT"),
+                           (dict(tau_fs=50.0), "tau_fs is not a setting of Langevin BAOAB NPT"),
+                           (dict(fixcm=True), "fixcm must be False for Langevin BAOAB NPT")):
+        with pytest.raises(InputError, match=reason):
+            IntegratorConfig(ensemble="npt", temperature_K=300.0, friction_per_fs=0.02, pressure_GPa=0.0, **fields)
+    with pytest.raises(InputError, match="cell_mode belongs to Langevin BAOAB NPT"):
+        IntegratorConfig(ensemble="npt", scheme="berendsen", temperature_K=300.0, tau_fs=50.0, pressure_GPa=0.0,
+                         taup_fs=20.0, compressibility_per_GPa=0.01, cell_mode="full")
+    fixed = bulk("NaCl", "rocksalt", a=5.64, cubic=True)
+    with pytest.raises(PlanRefused, match="LangevinBAOAB with fixed atoms"):
+        record.to_config(seed=1, fixed_atoms=True)
+    assert len(fixed) == 8
+
+
+def test_lm_md_s_npt_is_baoab(setup, tmp_path):
+    result = loupmd.md(setup.atoms, model=setup.force_field(), steps=40, timestep_fs=1.0, temperature_K=300,
+                       ensemble="NPT", pressure_GPa=0.5, cell_mode="full", output=str(tmp_path / "npt"), seed=3)
+    config = result.simulation.config
+    assert (config.scheme, config.pressure_GPa, config.cell_mode, config.fixcm) == ("baoab", 0.5, "full", False)
+    assert config.friction_per_fs == pytest.approx(0.02 * units.fs)
+    arguments = result.metadata["arguments"]
+    assert (arguments["ensemble"], arguments["pressure_GPa"], arguments["cell_mode"]) == ("NPT", 0.5, "full")
+    assert "integrator" not in arguments
+    assert "NPT, Langevin BAOAB with a Langevin-Hoover barostat (experimental)" in result.summary
+    assert "pressure 0.5 GPa" in result.summary and "full cell" in result.summary
+    header, rows = output.read_thermo(tmp_path / "npt")
+    assert header == list(output.THERMO_HEADER + output.NPT_COLUMNS) and int(rows[-1][0]) == 40
+    engine = SpringEngine.made[-1]
+    assert [e for e in engine.log if isinstance(e, tuple) and e[0] == "run"][0][2] == _core.LOUP_BAOAB_NPT
+
+
+def test_the_baoab_drop_in_takes_ase_s_arguments(setup):
+    from loupmd.ase import md as ase_md
+
+    atoms = setup.atoms.copy()
+    dyn = ase_md.LangevinBAOAB(atoms, 2.0 * units.fs, temperature_K=350, externalstress=-1.5 * units.GPa,
+                               hydrostatic=True, T_tau=80 * units.fs, P_tau=900 * units.fs,
+                               model=setup.force_field())
+    config = dyn.simulation.config
+    assert (config.scheme, config.cell_mode, config.temperature_K) == ("baoab", "hydrostatic", 350)
+    assert (config.timestep_fs, config.friction_per_fs, config.taup_fs, config.pressure_GPa) == \
+        (pytest.approx(2.0), pytest.approx(1.0 / 80.0), pytest.approx(900.0), pytest.approx(1.5))
+    assert dyn.run(20) is True and np.array_equal(atoms.cell.array, SpringEngine.made[-1].get_cell())
+    default = ase_md.LangevinBAOAB(setup.atoms.copy(), 1.0 * units.fs, temperature_K=300, externalstress=0.0,
+                                   model=setup.force_field()).simulation.config
+    assert (default.cell_mode, default.taup_fs) == ("full", None)                   # ASE's defaults
+    assert default.friction_per_fs == pytest.approx(1.0 / 50.0)                      # T_tau = 50 timesteps
+    for options, reason in ((dict(temperature_K=None, externalstress=0.0), "without temperature_K or without"),
+                            (dict(temperature_K=300), "without temperature_K or without externalstress"),
+                            (dict(temperature_K=300, externalstress=[0.0, 0.0, 0.0]), "with 3 components"),
+                            (dict(temperature_K=300, externalstress=0.0, P_mass=5.0), "P_mass=5.0"),
+                            (dict(temperature_K=300, externalstress=0.0, disable_cell_langevin=True),
+                             "disable_cell_langevin=True")):
+        with pytest.raises(PlanRefused, match=reason):
+            ase_md.LangevinBAOAB(setup.atoms.copy(), units.fs, model=setup.force_field(), **options)
+

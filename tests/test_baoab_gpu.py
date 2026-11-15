@@ -164,3 +164,44 @@ def test_refusals(sto_bundle):
         eng.run(10, _baoab())
     eng.set_fixed_atoms(None)
     assert eng.run(10, _baoab(p_tau_fs=0.0)).final_temperature_k > 100.0      # 0: ASE's default, 20 T_tau
+
+
+def test_lm_md_runs_npt_and_resumes(model_path, tmp_path):
+    """``lm.md(ensemble="NPT")`` is Langevin BAOAB: rows with volume and pressure, a resumed run that goes on with
+    the barostat's momentum from the restart, and the ASE drop-in."""
+    from loupmd import output
+    from loupmd.ase import md as ase_md
+
+    at = _strained()
+    ff = loupmd.load(model_path, trusted=True)
+    result = loupmd.md(at, model=ff, ensemble="NPT", temperature_K=300.0, pressure_GPa=1.0, timestep_fs=1.0,
+                       steps=400, seed=4, output=loupmd.Output(str(tmp_path / "npt"), thermo_every=20,
+                                                               trajectory_every=200, restart_every=200))
+    sim = result.simulation
+    volume_400 = sim.atoms.get_volume()
+    sim.close()
+    again = loupmd.Simulation.resume(tmp_path / "npt", force_field=ff)
+    again.run(steps=200)
+    final = again.atoms.get_volume()
+    again.close()
+    header, rows = output.read_thermo(tmp_path / "npt")
+    volumes = np.array([float(row[8]) for row in rows]) * len(at)
+    pressures = np.array([float(row[9]) for row in rows])
+    temperatures = np.array([float(row[4]) for row in rows])
+
+    atoms = at.copy()
+    dyn = ase_md.LangevinBAOAB(atoms, 1.0 * units.fs, temperature_K=300.0, externalstress=-1.0 / GPA,
+                               hydrostatic=True, T_tau=50.0 * units.fs, model=ff, seed=4)
+    dyn.run(200)
+    print(f"lm.md(ensemble='NPT') at 300 K and 1 GPa from the compressed SrTiO3 3x3x3: volume {volumes[0]:.2f} -> "
+          f"{volume_400:.2f} A^3 after 400 steps, {final:.2f} after 200 more from the restart; pressure "
+          f"{pressures[0]:.2f} GPa at step 0, mean of steps 300 to 600 {pressures[15:].mean():.2f} GPa; temperature "
+          f"mean of steps 300 to 600 {temperatures[15:].mean():.0f} K; the drop-in after 200 steps: "
+          f"{atoms.get_volume():.2f} A^3")
+    assert "NPT, Langevin BAOAB with a Langevin-Hoover barostat (experimental)" in result.summary
+    assert header == list(output.THERMO_HEADER + output.NPT_COLUMNS)
+    assert [int(row[0]) for row in rows] == list(range(0, 601, 20))
+    assert volumes[20] == pytest.approx(volume_400, rel=1e-12) and volumes[-1] == pytest.approx(final, rel=1e-12)
+    assert volume_400 > at.get_volume() * 1.02 and atoms.get_volume() > at.get_volume() * 1.01
+    assert pressures[0] > 5.0 and abs(pressures[15:].mean() - 1.0) < 1.5
+    assert 240.0 < temperatures[15:].mean() < 360.0

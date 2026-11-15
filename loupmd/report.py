@@ -36,7 +36,13 @@ def _physics_lines(metadata) -> list:
         if integrator.get("fixcm"):
             first += ", total momentum removed"
     else:
-        if integrator["scheme"] == "berendsen" and integrator.get("ensemble") == "npt":
+        if integrator["scheme"] == "baoab":
+            tau = integrator.get("taup_fs")
+            first = (f"NPT, Langevin BAOAB with a Langevin-Hoover barostat (experimental), timestep {timestep:g} fs, "
+                     f"friction {integrator['friction_per_fs']:.4g}/fs, pressure {integrator['pressure_GPa']:g} GPa, "
+                     f"barostat time {'20 / friction' if tau is None else f'{tau:g} fs'}, "
+                     f"{'the cell keeps its shape' if integrator.get('cell_mode') != 'full' else 'full cell'}")
+        elif integrator["scheme"] == "berendsen" and integrator.get("ensemble") == "npt":
             mask = integrator.get("mask")
             cell = "the cell keeps its shape" if mask is None else f"cell vectors scaled singly, mask {tuple(mask)}"
             first = (f"NPT, Berendsen thermostat and barostat (experimental; not canonical: for equilibration), "

@@ -82,7 +82,7 @@ def test_what_is_refused(ff):
         ase_md.VelocityVerlet(atoms, units.fs, model=ff, rng=np.random.default_rng(1))
     with pytest.raises(TypeError, match="temperature .in eV. or temperature_K, not both"):
         ase_md.Langevin(atoms, units.fs, 0.025, 0.01 / units.fs, temperature_K=300, model=ff)
-    for name in ("LangevinBAOAB", "MTKNPT", "IsotropicMTKNPT"):
+    for name in ("MTKNPT", "IsotropicMTKNPT"):
         with pytest.raises(PlanRefused, match=f"loupmd.ase.md.{name} is not in this version"):
             getattr(ase_md, name)
     with pytest.raises(AttributeError):
