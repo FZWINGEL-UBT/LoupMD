@@ -1925,9 +1925,22 @@ static int set_state_impl(LoupHandle* h, const double* positions, const double* 
     return rebuild_neighbors(h);
 }
 
-static int evaluate_impl(
+// The TF32 + FP16 hybrid GEMMs (gemm-hybrid-cubin) overflow to inf when a GEMM operand element reaches 32,752. A
+// non-finite energy, force or stress with the hybrid loaded drops it for this engine: later GEMM plans are re-tuned
+// without it (disk plans that chose it are skipped while it is unloaded) and the captured graphs are re-recorded.
+static bool drop_hybrid(LoupHandle* h) {
+    if (!h->hyb.loaded) return false;
+    fprintf(stderr, "loupmd: non-finite energy / forces with the TF32+FP16 hybrid GEMMs: hybrid disabled for this "
+                    "engine (GEMMs re-tuned without it)\n");
+    h->hyb.loaded = false;
+    h->clear_lt_cache();
+    h->invalidate_graphs();
+    return true;
+}
+
+static int evaluate_once(
     LoupHandle* h, const double* positions, const double* cell, int compute_stress,
-    double* out_energy_ev, double* out_forces, double* out_stress
+    double* out_energy_ev, double* out_forces, double* out_stress, bool* finite
 ) {
     if (!h || h->N <= 0) return -1;
     CUDA_CHECK(cudaSetDevice(h->device_id));
@@ -1960,6 +1973,9 @@ static int evaluate_impl(
     }
     CUDA_CHECK(cudaStreamSynchronize(h->stream));
 
+    *finite = std::isfinite(inter_e);
+    for (size_t i = 0; *finite && i < f_sorted.size(); ++i) *finite = std::isfinite(f_sorted[i]);
+    for (int i = 0; *finite && i < 6; ++i) *finite = std::isfinite(v_grad[i]);
     if (out_energy_ev) *out_energy_ev = h->e0_total + inter_e;
     if (out_forces) {
         for (int dst = 0; dst < h->N; ++dst) {
@@ -1976,6 +1992,22 @@ static int evaluate_impl(
         out_stress[6] = v_grad[2] * inv_v; out_stress[7] = v_grad[4] * inv_v; out_stress[8] = v_grad[5] * inv_v;
     }
     return 0;
+}
+
+static int evaluate_impl(
+    LoupHandle* h, const double* positions, const double* cell, int compute_stress,
+    double* out_energy_ev, double* out_forces, double* out_stress
+) {
+    bool finite = true;
+    int rc = evaluate_once(h, positions, cell, compute_stress, out_energy_ev, out_forces, out_stress, &finite);
+    if (rc == 0 && !finite && drop_hybrid(h)) {
+        rc = evaluate_once(h, positions, cell, compute_stress, out_energy_ev, out_forces, out_stress, &finite);
+    }
+    if (rc == 0 && !finite) {
+        fprintf(stderr, "loupmd: non-finite energy / forces (model output; the configuration may be unphysical)\n");
+        return -1;
+    }
+    return rc;
 }
 
 static int run_md_loop(
@@ -2174,11 +2206,21 @@ static int run_md_loop(
     float ms = 0.0f;
     CUDA_CHECK(cudaEventElapsedTime(&ms, ev0, ev1));
 
+    // The block's last energy (forces feed it every step): non-finite means the run is lost; with the hybrid GEMMs
+    // loaded they are dropped first, so a run restarted from a saved state does not hit the same overflow.
+    double inter_e = 0.0;
+    CUDA_CHECK(cudaMemcpyAsync(&inter_e, h->d_energy_f64, sizeof(double), cudaMemcpyDeviceToHost, h->stream));
+    CUDA_CHECK(cudaStreamSynchronize(h->stream));
+    if (!std::isfinite(inter_e)) {
+        drop_hybrid(h);
+        fprintf(stderr, "loupmd: non-finite potential energy after the MD block: the state is lost; restart from a "
+                        "saved state\n");
+        return -1;
+    }
     if (out_stats) {
-        double inter_e = 0.0, ke = 0.0;
+        double ke = 0.0;
         CUDA_CHECK(cudaMemsetAsync(h->d_ke_f64, 0, sizeof(double), h->stream));
         loup::kinetic_energy_kernel<<<gridN, 256, 0, h->stream>>>(N, h->d_masses, h->d_vel64, h->d_ke_f64);
-        CUDA_CHECK(cudaMemcpyAsync(&inter_e, h->d_energy_f64, sizeof(double), cudaMemcpyDeviceToHost, h->stream));
         CUDA_CHECK(cudaMemcpyAsync(&ke, h->d_ke_f64, sizeof(double), cudaMemcpyDeviceToHost, h->stream));
         CUDA_CHECK(cudaStreamSynchronize(h->stream));
         out_stats->step_ms = std::max(0.0, (double)ms - tune_ms) / n_steps;

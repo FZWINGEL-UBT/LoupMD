@@ -56,9 +56,10 @@ Practical rules, commands, invariants, and hard-won lessons for working on LoupM
   - Reference cache lives in `~/.cache/loupmd/gate_refs/` (`--no-ref-cache` recomputes).
   - **Large models (`OFF23-L`, `OFF23b-M`, `OFF24-M`, `POLAR-1-L`)** exceed 16 GB VRAM alongside two PyTorch models: pass `--ref-device cpu`. Note: computing an uncached `MACE-POLAR-1-L` CPU float64 stress ref on `NbCl5` takes many minutes; for fast smoke checks during iteration compare candidate vs a gate-verified baseline `.so`, then run `test_gate.py` before adoption.
   - `POLAR-1-S NaNbO3_c0` is marked `UNSTABLE` (skipped unless `--include-unstable`) because MACE float32-vs-float64 itself diverges there.
-- **Precision constraints (non-negotiable):**
-  - **NO FP16 / BF16 / FP8 / `1xTF32`** on the force path (and no BF16x9 emulation).
-  - **Long-range `MACE-POLAR-1` models MUST use float32 SIMT GEMMs only** (`3xTF32` hybrid cubins failed `POLAR-1-S/-L` stress gates and produced NaN on `NaNbO3_c0`).
+- **Precision constraints:**
+  - **Accuracy decides, not the number format** (owner, 15 November 2026: "tensor core stuff and fp16 is fine as long as it is accurate"): FP16 / TF32 / tensor-core arithmetic may be used on the force path if every affected family passes the 3x gate (every forced variant) and no input in the model's range can overflow it silently. Single-pass TF32 / BF16 / FP8 GEMMs have failed that gate before (FastMACE: 1xTF32 force error 3,500-5,100x); re-measure before proposing them.
+  - The GEMM hybrid (`cubins/tf32x3_hyb_sm*.cubin`, FastMACE's `FM_HYBRID_F16` build) is TF32 big x big plus the two cross products in **one FP16 MMA**, not pure 3xTF32: any GEMM operand element with |x| >= 32,752 overflows its cross term to `inf`. Keep a non-hybrid path (`LOUP_NO_HYBRID=1`) working and guarded (see the ledger's `gemm-hybrid-cubin`).
+  - **Long-range `MACE-POLAR-1` models MUST use float32 SIMT GEMMs only** (the hybrid cubins failed `POLAR-1-S/-L` stress gates and produced NaN on `NaNbO3_c0`).
 - **Packed-table error guard (`loup::PackErrTracker`):**
   - Both loaders enforce `kPackedTableMaxRelErr = 5e-4` across physical intervals (`r >= 1 A`). Check with `LOUP_DEBUG_PACK=1`.
 - **Variant / path test overrides (`src/engine.cu`):**
