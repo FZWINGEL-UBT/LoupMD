@@ -618,6 +618,11 @@ RTX 5060 Ti only. Engine build of `06230cf` (library sha256 `6c2af2c880580942...
 - The first version of the optimisers used `np.dot` / `np.vdot` on 15,000-element vectors, where NumPy's threaded
   BLAS call cost 0.03 to 0.8 ms each on this machine; plain sums (`einsum`) cost 5 us. LBFGS's two loops are now
   six matrix-vector products and two small triangular solves a step.
-- Not measured: anything on the RTX 4000 Ada; `loupmd relax` and `loupmd quench` as commands on the GPU; a cell
-  relaxation with a model of the generic path.
+- At `1d7380e` the GPU tests of the optimisers and of fixed atoms pass (8 passed; FIRE 0.87%, LBFGS 18.96% of the
+  force calls this time). `loupmd relax` on rattled `SrTiO3` 3x3x3: converged after 25 steps, 26 force calls in
+  1.31 s. `loupmd md --schedule ramp:0:600:0.5,ramp:600:300:0.5` (135 atoms, 0.420 ms/step with output) and then
+  `loupmd quench --min-K 300 --bin-K 150 --per-bin 1`: five frames, 27 to 33 LBFGS steps each, quenched energies
+  -7.989531 to -7.989537 eV/atom.
+- Not measured: anything on the RTX 4000 Ada; a cell relaxation with a model of the generic path; the full suite
+  at `1d7380e` (the last full run, at `4f20442`, had 491 passed and the optimiser-cost test failing).
 

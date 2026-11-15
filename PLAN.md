@@ -562,7 +562,7 @@ need new engine kernels are not. RTX 5060 Ti only; numbers in `STATUS_AND_PROFIL
 | S4-T03 to S4-T09 | | **not started**: CSVR, Nose-Hoover chain, Berendsen, the variable cell in the graph, the three NPT integrators |
 | S4-T10 | `4f20442`, `8c709b9` | **done**, with one criterion missed: LBFGS and FIRE take ASE's step counts on rattled `SrTiO3` 3x3x3 (15 = 15 and 44 = 44, positions within 3e-7 A of ASE's with `lm.calc`). FIRE costs 0.9% of the force calls at 5,000 atoms, LBFGS 17% (D30) |
 | S4-T11 | `4f20442` | **done**: the Frechet cell filter with pressure, hydrostatic, constant-volume and mask options, refused with fixed atoms and for POLAR-1. Strained `SrTiO3` 3x3x3: 157 steps as ASE's `FrechetCellFilter`, lattice constants within 1.0e-5 A (criterion 1e-4) |
-| S4-T12 | `06230cf`, `4f20442` | **done**: `Simulation.relax`, `loupmd relax` (writes extended XYZ equal to the Python call's), `loupmd quench` with FastMACE's selection and files (CPU tests on the fake engine). Not run on the GPU: `loupmd relax` and `loupmd quench` as commands |
+| S4-T12 | `06230cf`, `4f20442` | **done**: `Simulation.relax`, `loupmd relax` (writes extended XYZ equal to the Python call's), `loupmd quench` with FastMACE's selection and files (CPU tests on the fake engine). Both commands ran once on the GPU: `loupmd relax` on rattled `SrTiO3` 3x3x3 converged in 25 steps; a 1,000-step ramp 0 to 600 to 300 K and `loupmd quench` of five picked frames, all to -7.98953 eV/atom |
 | S4-T13 | `4f20442` | **partly**: four of the twelve classes (D32) |
 
 ### Stage 5: tiled and wavefront capacity mode (6 weeks)
