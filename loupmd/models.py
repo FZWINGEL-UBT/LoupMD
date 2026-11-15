@@ -14,7 +14,7 @@ import hashlib
 import os
 import tempfile
 import urllib.request
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from types import MappingProxyType
 
@@ -50,6 +50,10 @@ class Checkpoint:
     embedding_specs: MappingProxyType | None = None
     # Where each head's functional comes from, keyed like head_functionals; "unknown: <why>" for None.
     functional_sources: MappingProxyType = field(default_factory=lambda: MappingProxyType({}))
+    # Read from the released file (python -m loupmd._probe; tests/test_models.py compares when the file is there):
+    elements: tuple = ()             # atomic numbers the model has an embedding for
+    r_max_A: float | None = None     # cutoff radius
+    interactions: int | None = None  # interaction layers
 
     @property
     def file_name(self):
@@ -76,6 +80,10 @@ class ModelLabel:
     @property
     def family(self):
         return self.checkpoint.family
+
+    @property
+    def elements(self):
+        return self.checkpoint.elements
 
     @property
     def functional_source(self):
@@ -196,6 +204,31 @@ CHECKPOINTS = MappingProxyType({c.name: c for c in (
             "e5ccf5837f685899811a68754e7c994393bfd1a81720393b03c643b46c70bc69", ASL, "off", "wb97m-d3bj",
             _OFF_README, head=None),
 )})
+
+
+# What each released file holds: (elements, cutoff in A, interaction layers), read from the files on 15 November
+# 2026 with loupmd._probe. Three element sets: Z 1-83 and 89-94 (the Materials Project models and MH-1), Z 1-83
+# (POLAR-1, OMOL-0) and the ten elements of MACE-OFF.
+_Z89 = tuple(range(1, 84)) + tuple(range(89, 95))
+_Z83 = tuple(range(1, 84))
+_Z_OFF = (1, 6, 7, 8, 9, 15, 16, 17, 35, 53)
+_CONTENTS = {
+    "medium": (_Z89, 6.0, 2), "large": (_Z89, 4.5, 2), "medium-0b3": (_Z89, 6.0, 2), "medium-mpa-0": (_Z89, 6.0, 2),
+    "medium-omat-0": (_Z89, 6.0, 2), "small-omat-0": (_Z89, 6.0, 2), "mace-matpes-pbe-0": (_Z89, 6.0, 2),
+    "mace-matpes-r2scan-0": (_Z89, 6.0, 2), "mh-1": (_Z89, 6.0, 2),
+    "polar-1-s": (_Z83, 6.0, 1), "polar-1-m": (_Z83, 6.0, 2), "polar-1-l": (_Z83, 6.0, 3),
+    "omol-0-xl": (_Z83, 6.0, 3),
+    "off23-small": (_Z_OFF, 4.5, 2), "off23-medium": (_Z_OFF, 5.0, 2), "off23-large": (_Z_OFF, 5.0, 2),
+    "off23b-medium": (_Z_OFF, 6.0, 2), "off24-medium": (_Z_OFF, 6.0, 2),
+}
+CHECKPOINTS = MappingProxyType({
+    name: replace(entry, elements=_CONTENTS[name][0], r_max_A=_CONTENTS[name][1], interactions=_CONTENTS[name][2])
+    for name, entry in CHECKPOINTS.items()})
+
+
+def checkpoint_of_digest(digest):
+    """The table's checkpoint with this SHA-256, or None: what a file given by path is, once it is trusted."""
+    return next((entry for entry in CHECKPOINTS.values() if entry.sha256 == digest), None)
 
 
 def _label(label, checkpoint, head=None):

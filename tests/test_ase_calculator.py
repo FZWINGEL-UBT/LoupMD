@@ -53,6 +53,7 @@ def make(checkpoint):
 
     def build(**options):
         options.setdefault("trusted", True)
+        options.setdefault("probe", lambda path: None)          # a file outside the table, and no torch to read it
         return loupmd.calc(str(checkpoint), engine_factory=SpringEngine, ensure_bundle=ensure_bundle, **options)
 
     build.exported = exported

@@ -14,6 +14,21 @@ from .runtime import GpuInfo, RuntimeInfo, runtime_info  # noqa: E402  (reads __
 from ._legacy import EXPORTER_SOURCES, _model_digest, ensure_loup_bundle, exporter_fingerprint  # noqa: E402
 
 
+def load(model, head=None, **options):
+    """``ff = lm.load("omat0-medium")``: a ``ForceField`` (``loupmd.forcefield.load`` has the arguments)."""
+    from .forcefield import load as make
+
+    return make(model, head, **options)
+
+
+def __getattr__(name):
+    if name == "ForceField":            # resolved at first use: importing loupmd does not import ASE
+        from .forcefield import ForceField
+
+        return ForceField
+    raise AttributeError(f"module 'loupmd' has no attribute {name!r}")
+
+
 def calc(model, **options):
     """``atoms.calc = lm.calc("omat0-medium")``: the ASE calculator (``loupmd.ase.calculator.calc`` has the
     arguments). ASE is imported here, at the first use."""
@@ -24,8 +39,8 @@ def calc(model, **options):
 
 __all__ = [
     "BackendError", "CacheLocationError", "CapacityError", "CellDivergedError", "CheckpointTrustError", "EngineInfo",
-    "GateFailed", "GateUnavailable", "GpuInfo", "InputError", "LoupEngine", "LoupError", "LoupMDStats",
+    "ForceField", "GateFailed", "GateUnavailable", "GpuInfo", "InputError", "LoupEngine", "LoupError", "LoupMDStats",
     "ModelElementError", "NonFiniteError", "PlanRefused", "RestartMismatch", "RuntimeInfo", "UnsupportedModel",
     "__version__", "calc", "ensure_loup_bundle", "exporter_fingerprint", "last_error", "library_path",
-    "library_version", "runtime_info",
+    "library_version", "load", "runtime_info",
 ]
