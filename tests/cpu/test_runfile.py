@@ -101,6 +101,35 @@ def test_a_profile_gives_the_schedule_and_the_cadences(world):
                             "schedule": [{"kind": "hold", "temperature_K": 300.0, "ps": 1.0}]})
 
 
+PRESS = ('name = "press"\nensemble = "NPT"\npressure_GPa = 0.5\nsample_interval = 10\ntrajectory_interval = 20\n'
+         '[[segments]]\nkind = "hold"\ntemperature_K = 300\nps = 0.04\n')
+
+
+def test_an_npt_profile_gives_the_ensemble_and_the_pressure(world):
+    """Owner's decision O23. The run file's own pressure stands before the profile's; an [integrator] table's
+    barostat runs at the profile's pressure unless the table names one."""
+    (world.path / "press.toml").write_text(PRESS)
+    base = {"structure": "salt.cif", "model": "m", "profile": "press.toml"}
+    _, options = runfile.md_options(base)
+    assert (options["ensemble"], options["pressure_GPa"]) == ("NPT", 0.5) and "integrator" not in options
+    _, own = runfile.md_options(dict(base, ensemble="npt", pressure_GPa=1.0, cell_mode="full"))
+    assert (own["ensemble"], own["pressure_GPa"], own["cell_mode"]) == ("NPT", 1.0, "full")
+    with pytest.raises(InputError, match="profile 'press' runs NPT, the run file asks for ensemble='NVE'"):
+        runfile.md_options(dict(base, ensemble="NVE"))
+    mtk = {"type": "MTK", "tdamp_fs": 100.0, "pdamp_fs": 1000.0}
+    _, table = runfile.md_options(dict(base, timestep_fs=1.0, integrator=mtk))
+    assert table["ensemble"] == "NPT" and "pressure_GPa" not in table
+    assert (type(table["integrator"]).__name__, table["integrator"].pressure_GPa) == ("MTK", 0.5)
+    assert table["integrator"].temperature_K == 300.0 and mtk == {"type": "MTK", "tdamp_fs": 100.0, "pdamp_fs": 1000.0}
+    _, named = runfile.md_options(dict(base, timestep_fs=1.0, integrator=dict(mtk, pressure_GPa=2.0)))
+    assert named["integrator"].pressure_GPa == 2.0
+    with pytest.raises(InputError, match="profile 'press' runs NPT, and \\[integrator\\] of type Langevin has no "
+                                         "barostat"):
+        runfile.md_options(dict(base, integrator={"type": "Langevin", "friction_per_fs": 0.01}))
+    _, nvt = runfile.md_options({"structure": "salt.cif", "model": "m", "profile": "fast"})
+    assert "ensemble" not in nvt and "pressure_GPa" not in nvt
+
+
 # ------------------------------------------------------------------------------------------------- commands
 
 def test_md_prints_the_report_and_writes_the_run(world, capsys):

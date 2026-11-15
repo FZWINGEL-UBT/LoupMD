@@ -37,7 +37,8 @@ def _arguments_parser(parser):
     parser.add_argument("--schedule", metavar="SEGMENTS", help="ramps and holds in order, separated by commas: "
                         "ramp:START_K:END_K:PS and hold:K:PS, for example ramp:0:400:3,hold:400:1,ramp:400:0:24")
     parser.add_argument("--profile", metavar="NAME", help="a shipped profile (" + ", ".join(protocols.PROFILES) +
-                        ") or a profile file: its schedule and output cadences")
+                        ") or a profile file: its schedule and output cadences, and for a profile at constant "
+                        "pressure NPT at its pressure")
     parser.add_argument("--timestep", type=float, default=0.5, metavar="FS", dest="timestep_fs",
                         help="the timestep in fs (default 0.5)")
     parser.add_argument("--steps", type=int, help="the number of steps (optional with a schedule or a profile)")
@@ -108,11 +109,12 @@ def arguments_of(args) -> dict:
         arguments["integrator"] = {"type": "CSVR", "tau_fs": args.tau_fs}
     elif args.tau_fs is not None:
         raise InputError("--tau is the time constant of --thermostat csvr; Langevin takes --friction")
-    elif args.friction is not None and str(args.ensemble).upper() == "NPT":
+    elif args.friction is not None and (str(args.ensemble).upper() == "NPT" or _npt_profile(args)):
         # the record holds the barostat's settings too: lm.md takes them from one place
         arguments["integrator"] = {"type": "LangevinBAOAB", "friction_per_fs": args.friction,
-                                   "pressure_GPa": arguments.pop("pressure_GPa", 0.0),
                                    "cell_mode": arguments.pop("cell_mode", "hydrostatic")}
+        if "pressure_GPa" in arguments or not _npt_profile(args):     # else the profile's pressure (runfile)
+            arguments["integrator"]["pressure_GPa"] = arguments.pop("pressure_GPa", 0.0)
     elif args.friction is not None:
         arguments["integrator"] = {"type": "Langevin", "friction_per_fs": args.friction}
     if args.schedule:
@@ -128,6 +130,10 @@ def arguments_of(args) -> dict:
         arguments["output"] = out
     runfile.check(arguments)
     return arguments
+
+
+def _npt_profile(args) -> bool:
+    return args.profile is not None and protocols.find_profile(args.profile).ensemble == "NPT"
 
 
 def add_parser(sub):

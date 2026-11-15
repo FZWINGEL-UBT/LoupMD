@@ -1,4 +1,4 @@
-"""``Simulation`` with a barostat (plan task S4-T07) on the fake engine of tests/test_simulation.py, taught a
+"""``Simulation`` with a barostat (plan task S4-T07) on the fake engine of ``fake_core.py``, taught a
 made-up equation of state: the cell is the engine's, rows carry volume and pressure, frames and the restart carry
 the cell, and the engine's stop at the cell limits becomes ``CellDivergedError``. No GPU needed."""
 from __future__ import annotations
@@ -475,4 +475,50 @@ def test_npt_on_the_command_line_and_from_its_metadata(setup, tmp_path, monkeypa
 
     assert main(["md", *base, "--pressure", "0.5", "--output", "d"]) == 1
     assert "belong to ensemble='NPT'" in capsys.readouterr().err
+    assert not (tmp_path / "d").exists()
+
+
+def test_an_npt_profile_runs_at_its_pressure(setup, tmp_path, monkeypatch, capsys):
+    """Owner's decision O23: ``loupmd md --profile`` with a profile at constant pressure is Langevin BAOAB at the
+    profile's pressure, and ``--friction`` keeps both."""
+    import json
+
+    from ase.io import write
+
+    from loupmd import quick, simulation
+    from loupmd.cli import main
+
+    write(tmp_path / "salt.cif", bulk("NaCl", "rocksalt", a=5.64, cubic=True))
+    (tmp_path / "press.toml").write_text(
+        'name = "press"\nensemble = "NPT"\npressure_GPa = 0.5\nsample_interval = 10\ntrajectory_interval = 20\n'
+        '[[segments]]\nkind = "hold"\ntemperature_K = 300\nps = 0.04\n')
+    monkeypatch.setattr(quick, "load", lambda model, head=None, **options: setup.force_field())
+    monkeypatch.setattr(simulation, "load", lambda model, head=None, **options: setup.force_field())
+    monkeypatch.chdir(tmp_path)
+    base = ["salt.cif", "--model", "some.model", "--trusted", "--timestep", "1", "--seed", "3",
+            "--initial-velocities", "maxwell_boltzmann", "--repeat", "2", "2", "2", "--profile", "press.toml"]
+
+    assert main(["md", *base, "--output", "a"]) == 0
+    out = capsys.readouterr().out
+    assert "NPT, Langevin BAOAB with a Langevin-Hoover barostat (experimental)" in out and "pressure 0.5 GPa" in out
+    arguments = json.loads((tmp_path / "a" / "metadata.json").read_text())["arguments"]
+    assert (arguments["ensemble"], arguments["pressure_GPa"], arguments["cell_mode"]) == ("NPT", 0.5, "hydrostatic")
+    header, rows = output.read_thermo(tmp_path / "a")
+    assert header[:len(output.THERMO_HEADER) + len(output.NPT_COLUMNS)] == list(output.THERMO_HEADER
+                                                                                 + output.NPT_COLUMNS)
+    assert [int(row[0]) for row in rows] == [0, 10, 20, 30, 40]
+    engine = SpringEngine.made[-1]
+    assert [e for e in engine.log if isinstance(e, tuple) and e[0] == "run"][0][2] == _core.LOUP_BAOAB_NPT
+
+    assert main(["md", *base, "--friction", "0.05", "--cell-mode", "full", "--output", "b"]) == 0
+    assert "friction 0.05/fs, pressure 0.5 GPa" in capsys.readouterr().out
+    record = json.loads((tmp_path / "b" / "metadata.json").read_text())["arguments"]["integrator"]
+    assert (record["type"], record["friction_per_fs"], record["pressure_GPa"], record["cell_mode"]) == (
+        "LangevinBAOAB", 0.05, 0.5, "full")
+
+    assert main(["md", *base, "--pressure", "1.5", "--output", "c"]) == 0
+    assert "pressure 1.5 GPa" in capsys.readouterr().out
+
+    assert main(["md", *base, "--ensemble", "NVE", "--output", "d"]) == 1
+    assert "profile 'press' runs NPT, the run file asks for ensemble='NVE'" in capsys.readouterr().err
     assert not (tmp_path / "d").exists()

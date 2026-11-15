@@ -11,7 +11,7 @@ rounding, so a schedule means the same run in both codes:
 - ``PROFILES`` holds the profiles ``slow``, ``fast``, ``ultrafast`` and ``anneal`` as data. Their relaxation and
   quench settings are data only here (PLAN.md Stage 4 runs them).
 
-Pressure schedules are refused: a profile's pressure is a constant, and NPT arrives with its integrators.
+A profile's ensemble is NVT or NPT at a constant pressure; pressure schedules are refused.
 """
 from __future__ import annotations
 
@@ -406,9 +406,10 @@ class Profile:
 
     ``relax_fmax`` 0 means no initial relaxation (eV/A). ``quench`` is ``None`` or a mapping with ``QUENCH_KEYS``
     (frames per ``bin_K`` bin of the target from ``min_K``, quenched to ``fmax`` with ``optimizer``, at most
-    ``max_steps``). ``ensemble`` is ``"NVT"``; ``"NPT"`` and ``pressure_GPa`` are refused (a profile runs at
-    constant volume; ``lm.md(ensemble="NPT", schedule=...)`` takes a schedule at constant pressure), and a
-    pressure schedule is refused in any case.
+    ``max_steps``). ``ensemble`` is ``"NVT"`` or ``"NPT"`` (``lm.md``'s; any case). ``pressure_GPa`` is NPT's
+    constant target: ``None`` for NVT, 0 GPa by default for NPT; a pressure schedule is refused. A run file or
+    ``loupmd md --profile`` runs the profile in its ensemble; ``lm.md(structure, model, **profile.md_options())``
+    does the same from Python.
     """
 
     name: str
@@ -430,18 +431,35 @@ class Profile:
         object.__setattr__(self, "relax_fmax", _nonnegative(self.relax_fmax, "relax_fmax"))
         if self.quench is not None:
             object.__setattr__(self, "quench", MappingProxyType(_quench(self.quench)))
-        if isinstance(self.pressure_GPa, (list, tuple, Mapping)):
-            raise InputError("pressure_GPa takes a constant; pressure schedules are not supported")
         if not isinstance(self.ensemble, str) or self.ensemble.upper() not in ("NVT", "NPT"):
             raise InputError(f"ensemble must be 'NVT' or 'NPT', got {self.ensemble!r}")
         object.__setattr__(self, "ensemble", self.ensemble.upper())
-        if self.ensemble == "NPT" or self.pressure_GPa is not None:
-            raise InputError(f"profile {self.name!r}: NPT and pressure_GPa are not in this version",
-                             next_step="A profile runs at constant volume. For constant pressure give the "
-                                       "profile's schedule to lm.md(ensemble='NPT', schedule=...).")
+        object.__setattr__(self, "pressure_GPa", _pressure(self.pressure_GPa, self.ensemble, self.name))
 
     def __hash__(self):
         return hash((self.name, self.schedule))
+
+    def md_options(self) -> dict:
+        """``lm.md``'s schedule, ensemble and pressure arguments of this profile."""
+        options = {"schedule": self.schedule, "ensemble": self.ensemble}
+        if self.ensemble == "NPT":
+            options["pressure_GPa"] = self.pressure_GPa
+        return options
+
+
+def _pressure(value, ensemble, name):
+    if isinstance(value, (list, tuple, Mapping)):
+        raise InputError("pressure_GPa takes a constant; pressure schedules are not supported")
+    if ensemble != "NPT":
+        if value is not None:
+            raise InputError(f"profile {name!r}: pressure_GPa={value!r} needs ensemble 'NPT', and the ensemble is "
+                             f"{ensemble!r}")
+        return None
+    if value is None:
+        return 0.0
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+        raise InputError(f"profile {name!r}: pressure_GPa must be a finite number of GPa, got {value!r}")
+    return float(value)
 
 
 def _research_profile(name, heat_ps, cool_ps, peak_K=400.0, final_K=0.0, interval=100, relax_fmax=0.0, quench=None):
@@ -474,6 +492,11 @@ def profile_from_data(data) -> Profile:
         raise InputError("a profile needs name and segments")
     options = {key: data[key] for key in data if key not in ("name", "segments")}
     return Profile(data["name"], Schedule.from_data(data["segments"]), **options)
+
+
+def find_profile(name) -> Profile:
+    """A shipped profile by its name, else the profile of a ``.toml`` file."""
+    return PROFILES.get(name) or load_profile(name)
 
 
 def load_profile(path) -> Profile:

@@ -2,9 +2,10 @@
 
 The table of a run file is the ``arguments`` block of ``metadata.json``, so ``loupmd run metadata.json`` repeats a
 finished run. Unknown keys are refused by name. A schedule is a list of segments (``[[schedule]]`` tables); a
-profile (``profile = "fast"`` or a profile file) gives the schedule and the output cadences. ``[integrator]``
-chooses an ``lm.integrators`` record by ``type`` (``Langevin``, ``CSVR``, ``NVE``) with its fields; ``timestep_fs``
-and ``temperature_K`` may be left to the keys above it.
+profile (``profile = "fast"`` or a profile file) gives the schedule and the output cadences, and a profile at
+constant pressure also ``ensemble = "NPT"`` and its pressure. ``[integrator]`` chooses an ``lm.integrators``
+record by ``type`` (``Langevin``, ``CSVR``, ``NVE``, ``MTK``, ...) with its fields; ``timestep_fs`` and
+``temperature_K`` may be left to the keys above it.
 """
 from __future__ import annotations
 
@@ -39,7 +40,8 @@ _COMMENTS = {
     "pressure_GPa": 'the target pressure of ensemble "NPT"',
     "cell_mode": 'ensemble "NPT": "hydrostatic" (the cell keeps its shape) or "full"',
     "temperature_K": "the thermostat's target; not with a schedule or a profile",
-    "profile": 'a shipped profile ("slow", "fast", "ultrafast", "anneal") or a profile file; gives the schedule',
+    "profile": 'a shipped profile ("slow", "fast", "ultrafast", "anneal") or a profile file; gives the schedule '
+               'and, for a profile at constant pressure, ensemble "NPT" and its pressure',
     "timestep_fs": "the timestep",
     "steps": "the number of steps; optional with a schedule (the whole schedule)",
     "repeat": "the supercell",
@@ -144,17 +146,19 @@ def md_options(arguments) -> tuple:
         options["repeat"] = tuple(options["repeat"])
     out = dict(arguments.get("output") or {})
     profile = arguments.get("profile")
+    table = arguments.get("integrator")
     if profile is not None:
-        found = protocols.PROFILES.get(profile) or protocols.load_profile(profile)
+        found = protocols.find_profile(profile)
         options["schedule"] = found.schedule
         out.setdefault("thermo_every", found.sample_interval)
         out.setdefault("trajectory_every", found.trajectory_interval)
+        if found.ensemble == "NPT":
+            table = _npt_profile(found, arguments, options, table)
     elif arguments.get("schedule"):
         options["schedule"] = protocols.Schedule.from_data(arguments["schedule"])
     if out:
         out.setdefault("directory", Path(str(arguments["structure"])).stem + quick.OUTPUT_SUFFIX)
         options["output"] = from_mapping(Output, out, section="output")
-    table = arguments.get("integrator")
     if table:
         timestep = arguments.get("timestep_fs", KEYS["timestep_fs"])
         start = arguments.get("temperature_K")
@@ -162,6 +166,31 @@ def md_options(arguments) -> tuple:
             start = protocols.ScheduleState(options["schedule"], table.get("timestep_fs", timestep)).target_K
         options["integrator"] = integrators.from_data(table, timestep_fs=timestep, temperature_K=start)
     return arguments["structure"], options
+
+
+def _npt_profile(found, arguments, options, table):
+    """A profile at constant pressure: ``ensemble`` and ``pressure_GPa`` for ``lm.md``. The run file's own
+    ``pressure_GPa`` stands before the profile's. With an ``[integrator]`` table the table's barostat runs, at the
+    profile's pressure unless the table names one; the table is returned with it."""
+    import dataclasses
+
+    asked = arguments.get("ensemble")
+    if asked is not None and str(asked).upper() != "NPT":
+        raise InputError(f"profile {found.name!r} runs NPT, the run file asks for ensemble={asked!r}",
+                         next_step="Drop ensemble, or use a profile at constant volume.")
+    options["ensemble"] = "NPT"
+    if not table:
+        options.setdefault("pressure_GPa", found.pressure_GPa)
+        return table
+    kind = table.get("type") if isinstance(table, dict) else None
+    record = integrators.RECORDS.get(kind)
+    if record is not None and "pressure_GPa" not in [field.name for field in dataclasses.fields(record)]:
+        raise InputError(f"profile {found.name!r} runs NPT, and [integrator] of type {kind} has no barostat",
+                         next_step="Use LangevinBAOAB, MTK or Berendsen with a pressure, or a profile at constant "
+                                   "volume.")
+    if record is not None and "pressure_GPa" not in table:
+        table = dict(table, pressure_GPa=options.pop("pressure_GPa", found.pressure_GPa))
+    return table
 
 
 def run(arguments):

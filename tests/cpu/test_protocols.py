@@ -111,11 +111,29 @@ def test_profiles_from_data_and_files(tmp_path):
         protocols.load_profile(tmp_path / "mine.yaml")
 
 
-def test_pressure_schedules_and_npt_are_refused():
+def test_a_profile_s_ensemble_and_pressure(tmp_path):
+    """Owner's decision O23: a profile runs NVT or NPT at a constant pressure (0 GPa unless it names one)."""
     schedule = hold(300, ps=1.0)
+    nvt = protocols.Profile("p", schedule)
+    assert (nvt.ensemble, nvt.pressure_GPa) == ("NVT", None)
+    assert nvt.md_options() == {"schedule": schedule, "ensemble": "NVT"}
+    npt = protocols.Profile("p", schedule, ensemble="npt")
+    assert (npt.ensemble, npt.pressure_GPa) == ("NPT", 0.0)
+    pressed = protocols.Profile("p", schedule, ensemble="NPT", pressure_GPa=2)
+    assert pressed.md_options() == {"schedule": schedule, "ensemble": "NPT", "pressure_GPa": 2.0}
+    assert isinstance(pressed.pressure_GPa, float)
     with pytest.raises(InputError, match="pressure schedules are not supported"):
-        protocols.Profile("p", schedule, pressure_GPa=[0.0, 1.0])
-    with pytest.raises(InputError, match="NPT and pressure_GPa are not in this version"):
-        protocols.Profile("p", schedule, ensemble="NPT")
-    with pytest.raises(InputError, match="NPT and pressure_GPa are not in this version"):
+        protocols.Profile("p", schedule, ensemble="NPT", pressure_GPa=[0.0, 1.0])
+    with pytest.raises(InputError, match="profile 'p': pressure_GPa=1.0 needs ensemble 'NPT'"):
         protocols.Profile("p", schedule, pressure_GPa=1.0)
+    with pytest.raises(InputError, match="pressure_GPa must be a finite number of GPa"):
+        protocols.Profile("p", schedule, ensemble="NPT", pressure_GPa=float("inf"))
+    with pytest.raises(InputError, match="ensemble must be 'NVT' or 'NPT'"):
+        protocols.Profile("p", schedule, ensemble="NVE")
+    file = tmp_path / "press.toml"
+    file.write_text('name = "press"\nensemble = "NPT"\npressure_GPa = 0.5\n[[segments]]\nkind = "hold"\n'
+                    'temperature_K = 300\nps = 1.0\n')
+    found = protocols.find_profile(str(file))
+    assert (found.name, found.ensemble, found.pressure_GPa) == ("press", "NPT", 0.5)
+    assert protocols.find_profile("fast") is protocols.PROFILES["fast"]
+    assert all(profile.ensemble == "NVT" for profile in protocols.PROFILES.values())
