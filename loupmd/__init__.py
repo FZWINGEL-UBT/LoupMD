@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 from ._core import EngineInfo, LoupEngine, LoupMDStats, last_error, library_path, library_version
-from .errors import BackendError, InputError, LoupError
+from .errors import (BackendError, CacheLocationError, CapacityError, CellDivergedError, CheckpointTrustError,
+                     GateFailed, GateUnavailable, InputError, LoupError, ModelElementError, NonFiniteError,
+                     PlanRefused, RestartMismatch, UnsupportedModel)
 
 __version__ = "1.0.0a1"  # LOUP_VERSION of include/loupmd.h (tests/test_abi.py keeps the two equal)
 
@@ -10,6 +12,8 @@ __version__ = "1.0.0a1"  # LOUP_VERSION of include/loupmd.h (tests/test_abi.py k
 from ._legacy import EXPORTER_SOURCES, _model_digest, ensure_loup_bundle, exporter_fingerprint  # noqa: E402
 
 __all__ = [
-    "BackendError", "EngineInfo", "InputError", "LoupEngine", "LoupError", "LoupMDStats", "__version__",
-    "ensure_loup_bundle", "exporter_fingerprint", "last_error", "library_path", "library_version",
+    "BackendError", "CacheLocationError", "CapacityError", "CellDivergedError", "CheckpointTrustError", "EngineInfo",
+    "GateFailed", "GateUnavailable", "InputError", "LoupEngine", "LoupError", "LoupMDStats", "ModelElementError",
+    "NonFiniteError", "PlanRefused", "RestartMismatch", "UnsupportedModel", "__version__", "ensure_loup_bundle",
+    "exporter_fingerprint", "last_error", "library_path", "library_version",
 ]

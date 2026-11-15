@@ -59,3 +59,88 @@ class CheckpointTrustError(LoupError):
 
 class CacheLocationError(LoupError):
     """The cache root is somewhere it must not be (inside the Python installation)."""
+
+
+# --------------------------------------------------------------------------------------------- model and plan
+
+class UnsupportedModel(LoupError):
+    """The library has no compiled kernels for this model's architecture. ``signature`` names the missing kernels."""
+
+    default_next_step = ("Build a library with this model's kernels: loupmd build-kernels MODEL (needs nvcc), or use a "
+                         "model of a supported architecture.")
+
+    def __init__(self, what, why=None, next_step=None, signature=None):
+        super().__init__(what, why, next_step)
+        self.signature = signature
+
+
+class ModelElementError(LoupError):
+    """The structure has an element the model has no embedding for."""
+
+    default_next_step = "Use a model trained on that element, or remove it from the structure."
+
+
+class PlanRefused(LoupError, ValueError):
+    """The run cannot be planned as asked. ``reasons`` lists every reason at once; nothing is replaced silently."""
+
+    default_next_step = "Change the inputs each reason names; a refused setting is never replaced by another."
+
+    def __init__(self, reasons, why=None, next_step=None):
+        self.reasons = (reasons,) if isinstance(reasons, str) else tuple(str(r) for r in reasons)
+        super().__init__("plan refused: " + "; ".join(self.reasons), why, next_step)
+
+
+class CapacityError(LoupError):
+    """The system does not fit the GPU in the execution mode asked for."""
+
+    default_next_step = ("Let LoupMD choose the mode (capacity='auto'), which runs large cells tiled, or use a "
+                         "smaller cell or a GPU with more memory.")
+
+
+# ------------------------------------------------------------------------------------------------- the gate
+
+class _GateError(LoupError):
+    """A gate result that stops the run; ``gate_record`` holds the comparison."""
+
+    def __init__(self, what, why=None, next_step=None, gate_record=None):
+        super().__init__(what, why, next_step)
+        self.gate_record = gate_record
+
+
+class GateFailed(_GateError):
+    """The accuracy gate on the user's structure failed (the 3x rule against MACE float64)."""
+
+    default_next_step = "Read the failed quantities in the gate record, and report the model and structure."
+
+
+class GateUnavailable(_GateError):
+    """The gate's reference could not be computed (the export extra is missing, or no device has the memory)."""
+
+    default_next_step = ("Install the export extra (pip install 'loupmd[export]'), or run without the gate "
+                         "(check=None), which the run then records.")
+
+
+# ------------------------------------------------------------------------------------------ restart, runtime
+
+class RestartMismatch(LoupError):
+    """A restart does not belong to this model, element set or atom count."""
+
+    default_next_step = "Resume with the model and structure the restart was written with."
+
+
+class NonFiniteError(LoupError):
+    """A non-finite energy or force stopped the run; it is never patched over."""
+
+    default_next_step = "Check the structure and the timestep, and resume from the last restart point."
+
+
+class CellDivergedError(LoupError):
+    """An NPT run's cell left the range its integrator allows; ``step`` is the step whose cell was checked."""
+
+    default_next_step = ("The structure left its condensed phase or the barostat diverged: raise the pressure, lower "
+                         "the temperature, or change the integrator's volume limits. The restart at the stop holds "
+                         "the state.")
+
+    def __init__(self, what, why=None, next_step=None, step=None):
+        super().__init__(what, why, next_step)
+        self.step = step
