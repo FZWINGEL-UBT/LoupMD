@@ -390,33 +390,35 @@ The base of everything else. Each task keeps the standard benchmarks within nois
 
 **Exit:** all of the above, the default gate and `pytest`; tag `v1.0.0a1`.
 
-**Progress (15 November 2026).** Step-level plan: `plans/stage-1-core-api.md`. "Tests pass" below means the task's
-own test file and the rest of the fast tier (everything but `tests/test_gate_wrapper.py`) on the RTX 5060 Ti:
-137 passed on the snapshot of `5f40a54`, 154 of 160 on `d0b1fc9`, and the six failures' files again after the
-fixes of `2f56b11` (23 passed). A task is **done** only with its speed criterion measured as well. Still to run at
-the time of writing: the full `pytest` with the family gates, the default gate, the A/B against the baseline in
-both orders, the chunked-run and thermo cost.
-- S1-T01 error channel: `22b5f57`. Tests pass (every refusal of `engine.cu` has its own text; nothing on stderr).
-- S1-T02 versions and `loup_get_info`: `d1eba02`. Tests pass. `loup_version` gives `1.0.0a1+<hash>` (D8).
-- S1-T03 MD graphs kept: `dd5268d`. Tests pass. The 2% cost criterion and the A/B are queued.
-- S1-T04 `loup_run`: `5f40a54`. Tests pass. Step graphs are shared with the old entry points; `nsys` not run
-  (`run_md_loop` is unchanged).
-- S1-T05 thermo buffer: `d0b1fc9`. Tests pass. The step cost at `thermo_every = 20` is queued.
-- S1-T06 state blob: `2cfec6d`. Tests pass (bitwise round trip, resumed Langevin run, seven refusals).
-- S1-T07 `loup_evaluate2`: not started. Per-atom energies need new variants of the generated kernels, whose
-  generators live in `python/` (held by D2); energy-only needs a ZBL-energy kernel per path.
-- S1-T08 sweeps: first part `11c5205` (the pass cut per layer; the replay schedule behind `LOUP_SWEEP_REPLAY=1`).
-  Builds; `tests/test_sweeps.py` queued. Open: the public interface over a `Domain` (with S1-T09), gates, A/B.
-- S1-T09 open domains: not started; design notes in the stage plan.
-- S1-T10 memory plan: `e9b55c5`, fix `2f56b11`. Tests pass. Measured against memory: predicted 487.8 / 1,878.2 /
-  3,631.7 MB for 5,000 / 20,480 / 40,000 `SrTiO3` atoms from a 135-atom probe, measured 513.8 / 1,851.8 / 3,636.5
-  MB (-5.1%, +1.4%, -0.1%); generic path at 5,000 atoms 467.3 against 507.5 MB (-7.9%). It scales the current
-  system's buffers instead of repeating their sizes, so a small system must be set first.
-- S1-T11 displacement decay: `d4d5433`, fix `2f56b11`. Tests pass, water included (pipelines at skin 1.0 A, not at
-  0.5 A: D13). A/B queued.
-- Open observation: `test_polar_energy_follows_a_small_cell_change_on_the_same_engine` failed once (stress
-  difference 3.97e-8 against its 3e-8 eV/A^3 bound) after passing on the baseline and on an earlier snapshot;
-  repeats on both trees are queued.
+**Progress (15 November 2026, 02:30).** Step-level plan: `plans/stage-1-core-api.md`. Everything below was
+measured on the RTX 5060 Ti only; numbers and commands are in `STATUS_AND_PROFILE.md` §6 and the ledger
+(`md-graph-reuse`, `md-disp-decay`, `md-thermo-buffer`, `rel-stage1-api`).
+
+Stage 1 as a whole against the baseline (`plans/baseline-20261115.md`): `pytest` 205 passed at `7bafa23`
+(baseline 71); default gate PASS at `a68cc04` (worst force ratio 1.55, stress 1.71); `bench_md.py` A/B 0.9994 /
+1.0006 baseline first and 0.9986 / 0.9975 head first, a tie.
+
+| Task | Commits | State |
+| --- | --- | --- |
+| S1-T01 | `22b5f57` | **done**: every refusal of `engine.cu` has its own text, tested; nothing on stderr |
+| S1-T02 | `d1eba02` | **done**. `loup_version` gives `1.0.0a1+<hash>` (D8) |
+| S1-T03 | `dd5268d` | **done**: 100 calls of 10 steps cost 1.011 and 1.006 of one call of 1,000 (baseline 1.113); criterion 2% |
+| S1-T04 | `5f40a54` | **done**, except the `nsys` kernel list, which was not run (`run_md_loop` is unchanged; the old entry points share their graphs with `loup_run`, tested) |
+| S1-T05 | `d0b1fc9` | **done**: rows equal the engine's energies; `thermo_every = 20` costs 1.0003 to 1.0041 of the step, inside the block spread |
+| S1-T06 | `2cfec6d` | **done**: bitwise round trip, resumed Langevin run, seven refusals |
+| S1-T07 | `903dabe` | **partly**: `loup_evaluate2` with the energy-only pass on both paths (equal to the full call's energy within 1e-11 relative, five model paths); per-atom energies wait for the layout move (D14) |
+| S1-T08 | `11c5205`, `7bafa23`, `a68cc04` | **built**: the pass per layer, the replay schedule and the sweep selector, any layer count; equal to the ordinary pass for six model paths. Open: the family gates and an A/B on the generic path after the next merge |
+| S1-T09 | `7bafa23`, `a68cc04`, `3477c38` | **built as a test driver**: a cell with its images as ghosts gives the periodic forces to 0.7e-6 to 2.1e-6 eV/A (criterion 3e-6) for five models, OMOL-0's three layers included; the energy is within 3.1e-7 eV/atom, above the criterion's 1e-7 for the two OMAT-0 models (D16). The tile workspace is Stage 5 |
+| S1-T10 | `e9b55c5`, `2f56b11` | **done**: -5.1%, +1.4%, -0.1% against measured memory at 5,000, 20,480 and 40,000 atoms (criterion 10%). It scales the current system's buffers, so a small system must be set first |
+| S1-T11 | `d4d5433`, `2f56b11` | **done** against the changed criterion (D13): one fast step is forgotten after two windows; water pipelines at skin 1.0 A, not at 0.5 A |
+
+Also done ahead of its stage, because it needs no GPU: S2-T04 (`3bdbd39`), the model registry and `loupmd models`.
+
+Not done for the exit of Stage 1: the merge of `round6-hardening` (three commits since `11778cd`: S64 and S65; the
+preview shows conflicts in `src/engine.cu` and `src/generic.cu`), the full suite and gates on the merged code, the
+rest of S1-T07, and the owner's word on D13, D14 and D16. One observation is open:
+`test_polar_energy_follows_a_small_cell_change_on_the_same_engine` failed once inside a full run (stress difference
+3.97e-8 against its 3e-8 eV/A^3 bound) and passed in 12 isolated repeats and in the next full run.
 
 ### Stage 2: installable runtime, benchmark and validation (2.5 weeks)
 

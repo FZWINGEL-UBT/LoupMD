@@ -165,6 +165,10 @@ Conventions:
 | [md-evaluate-reuse](#md-evaluate-reuse) | Non-destructive `evaluate()` reusing the list | – | both | DEFAULT | – | not recorded | [§3.1 #10][s31] |
 | [md-adaptive-pipeline](#md-adaptive-pipeline) | Start unpipelined, pipeline once the step displacement allows | `LoupMDStats::dangerous_builds`, `pipelined_steps` | both | DEFAULT | S6 | MD unchanged; dangerous builds 1 / ~1,600 steps -> 0 with a 3-step margin | [§3.2 M1, S1][s32], [§5.4][s54] |
 | [md-skin](#md-skin) | Larger / adaptive skin (T10) | – | both | PENDING (owner) | – | 0.5-1.5% at 5,000 atoms, ~10% at 135 atoms | [§4.1 #4][s41] |
+| [md-graph-reuse](#md-graph-reuse) | MD step graphs kept across run calls; no force pass at the start of a call whose forces are current (release task S1-T03, review item S4) | `LOUP_DEBUG_GRAPHS` reports captures and initial force passes | both | DEFAULT on `release/v1` (5060 Ti only) | release S1-T03 | 100 calls of 10 steps against one call of 1,000 (`SrTiO3`, wall time): 1.113 -> 1.011 / 1.006; standard A/B tie | [§6][s6] |
+| [md-disp-decay](#md-disp-decay) | Step-displacement maximum kept for two windows instead of from `set_state` on (release task S1-T11, review item S2) | – | both | DEFAULT on `release/v1` (5060 Ti only) | release S1-T11 | one fast step no longer blocks pipelining; water pipelines at skin 1.0 A, not at 0.5 A; standard A/B tie | [§6][s6] |
+| [md-thermo-buffer](#md-thermo-buffer) | Thermo rows written on the device inside the captured step (release task S1-T05) | `LoupIntegrator.thermo_every` | both | DEFAULT on `release/v1`, off unless asked (5060 Ti only) | release S1-T05 | `thermo_every = 20` against off: `NbCl5` 1.0005 / 1.0041, `SrTiO3` 1.0003 / 1.0007 | [§6][s6] |
+| [rel-stage1-api](#rel-stage1-api) | Release branch, Stage 1 as a whole against its baseline (error channel, `loup_run`, state blob, memory plan, `loup_evaluate2`, per-layer sweeps, open domains) | – | both | DEFAULT on `release/v1` (5060 Ti only) | release Stage 1 | A/B 0.9994 / 1.0006 (baseline first), 0.9986 / 0.9975 (head first): tie | [§6][s6] |
 | [md-small-systems](#md-small-systems) | Small-system latency (< ~1,000 atoms) | – | spec | NOT BUILT (open) | – | 135 atoms: GEMM groups 32% of 358 us | [§4.1 #3][s41] |
 | [comp-active-edge-tighten](#comp-active-edge-tighten) | Tighten active-edge compaction (`compute_and_count_active` + `scatter_active_edges`) | – | both | NOT BUILT | – | untried (101 us/step on `SrTiO3` 5060 Ti, `tmp_vec_len` round-trip) | `OMAT0_SPEEDUP_BRIEF.md` |
 | [nl-lane-groups](#nl-lane-groups) | Neighbour count / fill with 8 lanes per atom (neighbouring bins split round-robin; fill keeps the exact row order via per-bin offsets in shared memory) | `kNeighborLanes`, `count/fill_neighbors_kernel`; other GPUs `*_scalar_kernel` | both (`sm_120`) | DEFAULT (5060 Ti only) | S34 | per rebuild `SrTiO3` 433 -> 292 us, `NbCl5` 284 -> 110, water 439 -> 302; ABBA `OFF23-S` water `0.9945` / `0.9856`, `OFF23-M` `0.9961` / `0.9943`, `OMAT-0-S` `0.9961` / `0.9972` | this file |
@@ -301,7 +305,7 @@ Do not retry these unless the stated condition changes.
 | Larger / adaptive skin | owner decision (changes the benchmark configuration) | [md-skin](#md-skin) |
 | Gate fused into the generic path's GEMMs | forward prologue fusion falsified (S36: `0.946` of the chain, stop rule 10%); backward epilogue fusion not built (needs per-atom reductions over the `2l + 1` rows across tiles) | [gen-gate-epilogue](#gen-gate-epilogue) |
 | Generic-path GEMMs (~50% of MH-1) | not screened beyond the shared autotune | [gen-profile](#gen-profile) |
-| Decaying step-displacement maximum | open review item S2: one fast step keeps the loop unpipelined. S46: on water the per-step maximum (always an H) exceeds the pipelining threshold `skin / 8` in every step at skin 0.5 (median 0.081 A vs 0.0625), so a decaying maximum would not change water; it matters only for systems near the threshold | [§4.2][s42], [md-skin](#md-skin) |
+| Decaying step-displacement maximum | built on `release/v1` ([md-disp-decay](#md-disp-decay)); as predicted it does not change water at skin 0.5. Before: open review item S2: one fast step keeps the loop unpipelined. S46: on water the per-step maximum (always an H) exceeds the pipelining threshold `skin / 8` in every step at skin 0.5 (median 0.081 A vs 0.0625), so a decaying maximum would not change water; it matters only for systems near the threshold | [§4.2][s42], [md-skin](#md-skin) |
 | `w'` path order and shared scalars | untried: emit the six `x1` paths before the four `x0` paths (shorter live ranges at the 64-register limit) and add the three `xx / xy / xz` pull terms of paths 1, 4, 7 through one summed scalar (6 FMA per channel). Differs from [wp-x0-hoist](#wp-x0-hoist), which added a live accumulator. Test: SASS count and spill bytes first, then A/B | external suggestion, 13 Nov |
 | Shift-free decode for the forward's PACKED8 table | untried: the layout change of `w'` (S4) applied to `spline_forward_inter1`; the forward is L2-bound on the 5060 Ti, so expect little there | external suggestion, 13 Nov |
 | Exponent field without the add | untried: if all table exponents fall in one 32-wide block, `(c.y & mask) \| prefix` is one LOP3 instead of AND + IADD per path in `w'` | external suggestion, 13 Nov |
@@ -1038,6 +1042,44 @@ Each entry has the same fields. Unless stated, the system is OMAT-0 medium on th
 - Measured (S46, 5060 Ti, single-step Langevin runs at 300 K / 1 fs after 100 steps, 200 steps): per-step maximum atomic displacement, `OFF23-S` water (5,184 atoms): median 0.0814 A, p10 0.0709, p90 0.0878, max 0.1065, always a hydrogen; `OMAT-0-S` `SrTiO3`: median 0.0171, max 0.0213 (oxygen). The pipelined loop needs `4 x max step displacement < skin / 2`, i.e. `< 0.0625 A` at skin 0.5: water fails in every step (it never pipelines, 0 of 256 steps measured in S34), `SrTiO3` passes with a 3x margin. The criterion must hold in every step: the p90 corresponds to skin ~0.7 A, the observed maximum (0.1065 A) to ~0.85 A, both from a 200-step sample and before any margin for rarer, faster steps in long runs; at skin 1.5 `OFF23-S` water ran 2.90 against 3.13 ms/step at 0.5 (S34; more edges per step but no per-step host round trip and fewer rebuilds).
 - Sources: [§4.1 #4][s41].
 
+<a id="md-graph-reuse"></a>
+#### md-graph-reuse: MD step graphs and forces kept across run calls
+- Switch: none (always on); `LOUP_DEBUG_GRAPHS` prints a line per MD graph capture and per force pass a run call makes before its first step.
+- Stage: release task S1-T03 (`release/v1`, `dd5268d`); review item S4.
+- Status: DEFAULT on `release/v1`. 5060 Ti only.
+- What: `run_md_loop` dropped its captured graphs at entry and ran a force pass before its first step on every call. The graphs are now kept while kind, timestep, temperature, friction and seed are the same (everything else a graph bakes in already invalidates it where it changes), and a call that follows a completed run or evaluation at the same positions starts from the forces on the device.
+- Measured (15 November 2026, `SrTiO3` 5,000 atoms, Langevin 300 K, one seed, wall time of 1,000 steps after 300 warm-up steps, median of three repeats in alternating order, `.tmp_o/chunk_cost.py`): baseline library one call 8,082.6 ms, 100 calls of 10 steps 8,997.9 ms, ratio 1.1133 (second run 1.1132); head one call 8,066.2 ms, 100 calls 8,152.0 ms, ratio 1.0106 (second run 8,073.1 / 8,118.2 ms, 1.0056). The release plan's criterion is 2%.
+- Standard A/B: see [rel-stage1-api](#rel-stage1-api).
+- Sources: [§6][s6]; `tests/test_md_graph_reuse.py`.
+
+<a id="md-disp-decay"></a>
+#### md-disp-decay: decaying step-displacement maximum
+- Switch: none.
+- Stage: release task S1-T11 (`release/v1`, `d4d5433`, fix `2f56b11`); review item S2.
+- Status: DEFAULT on `release/v1`. 5060 Ti only.
+- What: the maximum per-step displacement, which decides whether the loop may pipeline and by how much the pipelined skin check lowers its threshold, covers the current and the previous window instead of everything since `set_state`. A window ends at a neighbour rebuild once it holds 32 steps, and after 512 steps without one. Ending a window also clears bit 4 of the skin check's flag word, which otherwise stays set until a rebuild.
+- Measured: no timing of its own; `tests/test_pipeline_decay.py` (a kicked atom at 300 K: 0 pipelined steps in the first 40, more than 200 of 300 after 1,200 further steps; a cold system without rebuilds pipelines again after two 512-step windows; four reheating cycles to 1,500 K without a dangerous build; water 648 atoms at 300 K: more than 1,500 of 2,000 steps pipelined at skin 1.0 A, 0 at skin 0.5 A, as S46 predicts).
+- Standard A/B: see [rel-stage1-api](#rel-stage1-api).
+- Sources: [§6][s6]; [md-skin](#md-skin) for the water data.
+
+<a id="md-thermo-buffer"></a>
+#### md-thermo-buffer: thermo rows on the device
+- Switch: `LoupIntegrator.thermo_every` (0 = off, the default; the old run entry points never ask for rows).
+- Stage: release task S1-T05 (`release/v1`, `d0b1fc9`).
+- Status: DEFAULT on `release/v1`, off unless asked. 5060 Ti only.
+- What: two kernels at the end of the captured step (`src/thermo.cu`): a kinetic-energy sum whose threads return at once on steps that write no row, and a one-thread kernel that counts the step and appends the row. Only on / off is part of the graph key; the cadence is a device value.
+- Measured (15 November 2026, `bench_md.py`'s protocol through `loup_run`, 6 blocks of 256 steps per side in the order a b b a, `.tmp_o/thermo_cost.py`, two runs): `thermo_every = 20` against off, `NbCl5` 1.7969 / 1.7960 ms (1.0005) and 1.8022 / 1.7949 ms (1.0041); `SrTiO3` 8.0563 / 8.0535 ms (1.0003) and 8.0464 / 8.0405 ms (1.0007). Block spread within a side is about 0.4%.
+- Sources: [§6][s6]; `tests/test_thermo.py`.
+
+<a id="rel-stage1-api"></a>
+#### rel-stage1-api: the release branch's Stage 1 against its baseline
+- Stage: release Stage 1 (`release/v1` at `a68cc04`, snapshot library `2e7e904abac64b91`) against the baseline of `plans/baseline-20261115.md` (`bac354c`, sources of `round6-hardening` `11778cd`, library `df58a9bd2623a502`).
+- Status: DEFAULT on `release/v1`. 5060 Ti only.
+- What: everything of release tasks S1-T01 to S1-T11 that is built: the error channel, version calls and `loup_get_info`, kept MD graphs, `loup_run`, the thermo buffer, the state blob, `loup_evaluate2` with the energy-only pass, the generic pass cut into per-layer pieces with the sweep selector, open domains (testing only), the memory plan and the decaying displacement maximum.
+- Measured (15 November 2026, `python/bench_md.py`, both orders, fresh plan cache for each library): baseline first: baseline 1.812 / 8.052 ms, head 1.811 / 8.056 ms (0.9994 / 1.0006); head first: head 1.807 / 8.045 ms, baseline 1.809 / 8.065 ms (head / baseline 0.9986 / 0.9975). A tie in both orders.
+- Gate: `python/test_gate.py` at head PASS, 30 rows, worst force ratio 1.55, worst stress ratio 1.71 (baseline 1.56 / 1.71). `pytest`: 205 passed at `7bafa23` (baseline 71).
+- Sources: [§6][s6].
+
 <a id="md-small-systems"></a>
 #### md-small-systems: small-system latency
 - Status: NOT BUILT (open).
@@ -1719,4 +1761,5 @@ POLAR-1 NaCl 3x3x3 (216) and POLAR-1-M `NbCl5` 3x3x3 (1,944).
 [s5]: STATUS_AND_PROFILE.md#5-model-families-generic-path
 [s51]: STATUS_AND_PROFILE.md#51-pipeline
 [s54]: STATUS_AND_PROFILE.md#54-fixes-found-by-the-family-work
+[s6]: STATUS_AND_PROFILE.md#6-release-branch-releasev1-stage-1-of-the-release-plan
 [s55]: STATUS_AND_PROFILE.md#55-known-limitations

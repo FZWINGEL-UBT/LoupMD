@@ -484,3 +484,39 @@ S59 (`gen-species-tables`, 14 November, 5060 Ti only):
 - Generic-path hot spots (5060 Ti, nsys, SrTiO3 5,000 atoms): MH-1 47 ms/step = SIMT SGEMMs ~50% (cuBLAS CUTLASS
   SIMT and the own SGEMM, chosen by the autotune), conv backward / forward of layer 1 12% / 8%, gate backward /
   forward 10% / 5% (estimated ~1 GB of traffic per backward call: near DRAM bandwidth), first-layer outer sum 5%, products 5%.
+
+---
+
+## 6. Release branch (`release/v1`): Stage 1 of the release plan
+
+Measured on 15 November 2026 on the RTX 5060 Ti only (`sm_120`, WSL2, driver 621.14); the workstations were not
+used. Plan and task ids: `PLAN.md`. Baseline: `plans/baseline-20261115.md` (the tree of `bac354c`, whose sources
+equal `round6-hardening` `11778cd`; library sha256 `df58a9bd2623a502...`). Head: `release/v1` at `a68cc04`
+(library `2e7e904abac64b91...`). Every GPU job ran after the card had been idle and under FastMACE's local GPU
+reservation, with its own plan cache (`LOUP_CACHE_DIR=$HOME/.cache/loupmd-release`).
+
+| Check | Baseline | Head |
+|---|---|---|
+| `pytest -q` | 71 passed | 205 passed (at `7bafa23`) |
+| `python/test_gate.py` (OMAT-0 medium, oxide set, every forced variant) | PASS, worst force 1.56, stress 1.71 | PASS, worst force 1.55, stress 1.71 |
+| `bench_md.py` A/B, baseline first (`NbCl5` / `SrTiO3`, ms/step) | 1.812 / 8.052 | 1.811 / 8.056 (0.9994 / 1.0006) |
+| `bench_md.py` A/B, head first | 1.809 / 8.065 | 1.807 / 8.045 (0.9986 / 0.9975) |
+| 100 run calls of 10 steps against one call of 1,000 (`SrTiO3` 5,000 atoms, wall time) | 1.1133, 1.1132 | 1.0106, 1.0056 |
+| `thermo_every = 20` against off (`NbCl5` / `SrTiO3`) | not applicable | 1.0005, 1.0041 / 1.0003, 1.0007 |
+
+- The standard benchmarks are a tie in both orders: Stage 1 changes no kernel of the default step.
+- A run made of short calls cost 11% more than one long call because every call re-captured its graphs and ran
+  a force pass before its first step; both are gone (ledger `md-graph-reuse`).
+- Memory plan (`loup_plan_memory`, from a 135-atom probe): predicted 487.8 / 1,878.2 / 3,631.7 MB for 5,000 /
+  20,480 / 40,000 `SrTiO3` atoms (OMAT-0 medium) against 513.8 / 1,851.8 / 3,636.5 MB measured (-5.1%, +1.4%,
+  -0.1%); OMAT-0 small on the generic path at 5,000 atoms 467.3 against 507.5 MB (-7.9%).
+- Open domain (testing only, `loup_debug_evaluate_domain`): a periodic cell with its images as ghosts against the
+  periodic call, energy / forces / virial stress: OMAT-0 small 3.1e-7 eV/atom, 2.0e-6 eV/A, 2.9e-8 eV/A^3; OMAT-0
+  medium on the generic path 1.7e-7, 2.1e-6, 3.2e-8; MH-1 1.5e-8, 1.4e-6, 4.2e-9; OFF23 medium 1.0e-8, 7.4e-7,
+  1.1e-9; OMOL-0 extra large (three layers, chain fold off) 7.9e-10, 7.8e-7, 4.3e-10. The periodic call on other
+  GEMM kernels (`LOUP_NO_HYBRID=1`) changes by 3.9e-10 to 6.3e-8 eV/atom and 5.5e-7 to 2.5e-6 eV/A. The energy
+  deviation of the two OMAT-0 models is larger than that and its cause is not isolated (`PLAN.md` §1.3 D16).
+- Energy-only pass (`loup_evaluate2`): equal to the full call's energy within 1e-11 relative on five model paths,
+  relaxed and compressed; its speed was not measured.
+- Not measured: anything on the RTX 4000 Ada; `nsys` kernel lists; the family benchmarks (`bench_family.py`).
+
