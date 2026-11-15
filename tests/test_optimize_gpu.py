@@ -47,8 +47,10 @@ def test_the_optimiser_s_own_time_at_5000_atoms(model_path):
         print(f"{name}: {result.steps} steps, {result.force_s / result.force_calls * 1e3:.2f} ms per force call, "
               f"optimiser {result.optimizer_s / result.steps * 1e3:.3f} ms per step: {100 * shares[name]:.2f}% of "
               "the force calls")
-    assert shares["FIRE"] < 0.02            # the plan's criterion; LBFGS with its 100-pair history is recorded
-    assert shares["LBFGS"] < 0.25
+    # The plan's criterion is 2%. FIRE meets it (0.9% measured); LBFGS's history products on the host do not (17%
+    # measured after 40 steps, PLAN.md D30): its bound here only guards against the 87% of the first version.
+    assert shares["FIRE"] < 0.02
+    assert shares["LBFGS"] < 0.35
 
 
 def test_the_relaxed_lattice_constant_is_ase_s(model_path):

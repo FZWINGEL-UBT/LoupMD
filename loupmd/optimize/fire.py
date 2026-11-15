@@ -17,6 +17,11 @@ from __future__ import annotations
 import numpy as np
 
 
+def _dot(a, b) -> float:
+    """A plain sum over all components (no threaded BLAS call for arrays of this size)."""
+    return float(np.einsum("ij,ij->", a, b))
+
+
 class FIREState:
     """The optimiser's state. ``step(positions, forces)`` returns the next positions."""
 
@@ -32,9 +37,9 @@ class FIREState:
         if self.v is None:
             self.v = np.zeros_like(f)
         else:
-            vf = np.vdot(f, self.v)
+            vf = _dot(f, self.v)
             if vf > 0.0:
-                self.v = (1.0 - self.a) * self.v + self.a * f / np.sqrt(np.vdot(f, f)) * np.sqrt(np.vdot(self.v, self.v))
+                self.v = (1.0 - self.a) * self.v + self.a * f / np.sqrt(_dot(f, f)) * np.sqrt(_dot(self.v, self.v))
                 if self.Nsteps > self.Nmin:
                     self.dt = min(self.dt * self.finc, self.dtmax)
                     self.a *= self.fa
@@ -46,7 +51,7 @@ class FIREState:
                 self.Nsteps = 0
         self.v += self.dt * f
         dr = self.dt * self.v
-        normdr = np.sqrt(np.vdot(dr, dr))
+        normdr = np.sqrt(_dot(dr, dr))
         if normdr > self.maxstep:
             dr = self.maxstep * dr / normdr
         return np.asarray(positions, dtype=float) + dr
