@@ -109,13 +109,17 @@ class IntegratorConfig:
             _not_negative(self, "temperature_K")
             _positive(self, "friction_per_fs")
 
-    def to_struct(self, thermo_every: int = 0):
-        """The ``LoupIntegrator`` of this record for ``loup_run``; ``thermo_every`` is the output's cadence."""
+    def to_struct(self, thermo_every: int = 0, temperature_K=None, rate_K_per_step: float = 0.0):
+        """The ``LoupIntegrator`` of this record for ``loup_run``; ``thermo_every`` is the output's cadence. A
+        schedule passes the call's starting target and its change per step (``temperature_K``,
+        ``rate_K_per_step``): step i of the call runs at ``temperature_K + i * rate_K_per_step``."""
         from . import _core
 
         if self.scheme == "nve":
             return _core.integrator(_core.LOUP_NVE, self.timestep_fs, thermo_every=int(thermo_every))
-        return _core.integrator(_core.LOUP_LANGEVIN, self.timestep_fs, temp_k=float(self.temperature_K),
+        temperature = self.temperature_K if temperature_K is None else temperature_K
+        return _core.integrator(_core.LOUP_LANGEVIN, self.timestep_fs, temp_k=float(temperature),
+                                temp_rate_k_per_step=float(rate_K_per_step),
                                 friction_per_fs=float(self.friction_per_fs), seed=self.seed,
                                 thermo_every=int(thermo_every))
 

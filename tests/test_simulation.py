@@ -12,7 +12,7 @@ from ase import units
 from ase.build import bulk
 
 import loupmd
-from loupmd import _core, integrators, output, simulation
+from loupmd import _core, integrators, output, protocols, simulation
 from loupmd.config import IntegratorConfig, Output
 from loupmd.errors import BackendError, InputError, NonFiniteError, PlanRefused, RestartMismatch
 
@@ -27,7 +27,7 @@ class SpringEngine:
 
     def __init__(self, bundle, device_id=0):
         self.bundle, self.device_id = bundle, device_id
-        self.log, self.rows, self.md_steps, self.forces_current = [], [], 0, False
+        self.log, self.rows, self.md_steps, self.forces_current, self.targets = [], [], 0, False, []
         self.total_steps = 0                       # survives set_state and import_state: for the tests only
         SpringEngine.made.append(self)
 
@@ -77,6 +77,7 @@ class SpringEngine:
                                   e_pot + e_kin))
         self.forces_current = True
         self.log.append(("run", n_steps, it.kind, it.thermo_every))
+        self.targets.append((n_steps, it.temp_k, it.temp_rate_k_per_step))
         return _core.LoupMDStats(step_ms=0.5, rebuilds=1, final_temperature_k=300.0, pipelined_steps=n_steps - 1)
 
     def thermo_pending(self):
@@ -342,3 +343,80 @@ def test_save_restart_without_output_needs_a_path(setup, tmp_path):
     data = np.load(target, allow_pickle=False)
     assert int(data["step"]) == 10 and str(data["format"]) == "loupmd.restart/1"
     assert str(data["model_sha256"]) == sim.force_field.sha256 and int(data["output_chunk"]) == -1
+
+
+# ----------------------------------------------------------------------------------------------- schedules
+
+LANGEVIN = integrators.Langevin(timestep_fs=1.0, temperature_K=100.0, friction_per_fs=0.01)
+
+
+def _columns(directory):
+    return [(int(row[0]), row[2], float(row[3])) for row in output.read_thermo(directory)[1]]
+
+
+def test_a_schedule_moves_the_target_every_step_and_names_the_phase(setup):
+    sim = setup("run", integrator=LANGEVIN)
+    summary = sim.run(schedule=protocols.ramp(100, 300, ps=0.04) + protocols.hold(300, ps=0.02))
+    assert summary.steps == 60 and sim.step == 60
+    # Each call starts at the target of the step before its first and changes it by the ramp's rate per step.
+    assert SpringEngine.made[0].targets == [(20, 100.0, 5.0), (20, 200.0, 5.0), (20, 300.0, 0.0)]
+    assert _columns(setup.tmp_path / "run") == [(0, "heating", 100.0), (20, "heating", 200.0), (40, "heating", 300.0),
+                                                (60, "hold", 300.0)]
+    # The thermostat stays at the last target, and a run after the schedule is at a constant temperature.
+    assert sim.config.temperature_K == 300.0
+    sim.run(steps=20)
+    assert SpringEngine.made[0].targets[-1] == (20, 300.0, 0.0)
+    assert _columns(setup.tmp_path / "run")[-1] == (80, "constant", 300.0)
+
+
+def test_the_end_of_a_segment_gets_a_row_and_a_frame(setup):
+    sim = setup("run", integrator=LANGEVIN)
+    sim.run(schedule=protocols.ramp(100, 400, ps=0.03) + protocols.ramp(400, 100, ps=0.03))
+    directory = setup.tmp_path / "run"
+    assert _columns(directory) == [(0, "heating", 100.0), (20, "heating", 300.0), (30, "heating", 400.0),
+                                   (40, "cooling", 300.0), (60, "cooling", 100.0)]
+    assert len(output.read_frames(directory)) == 5
+    assert SpringEngine.made[0].targets == [(20, 100.0, 10.0), (10, 300.0, 10.0), (10, 400.0, -10.0),
+                                            (20, 300.0, -10.0)]
+    # The row at step 30 is made on the host between two device rows; all are in step order.
+    engine = SpringEngine.made[0]
+    assert [e for e in engine.log if isinstance(e, tuple)] == [("run", 20, 1, 20), ("run", 10, 1, 20),
+                                                               ("run", 10, 1, 20), ("run", 20, 1, 20)]
+
+
+def test_steps_and_schedules_are_checked_before_anything_runs(setup):
+    schedule = protocols.ramp(100, 300, ps=0.04)
+    sim = setup("run", integrator=LANGEVIN)
+    with pytest.raises(InputError, match="steps is needed"):
+        sim.run()
+    with pytest.raises(InputError, match="beyond the schedule: 40 of its 40 steps remain"):
+        sim.run(steps=50, schedule=schedule)
+    with pytest.raises(InputError, match="schedule must be an lm.protocols schedule"):
+        sim.run(schedule=[100, 300])
+    assert SpringEngine.made == [] and sim.step == 0
+    sim.run(steps=10, schedule=schedule)
+    with pytest.raises(InputError, match="a schedule is in progress: 30 of its 40 steps remain"):
+        sim.run(schedule=schedule)
+    sim.run()                                                       # the rest of the schedule
+    assert sim.step == 40 and [t[0] for t in SpringEngine.made[0].targets] == [10, 10, 20]
+    assert SpringEngine.made[0].targets[1] == (10, 150.0, 5.0)
+    sim.run(schedule=protocols.hold(300, ps=0.02))                  # a finished schedule can be followed by another
+    assert sim.step == 60
+    with pytest.raises(InputError, match="NVE has none"):
+        setup("nve").run(schedule=schedule)
+
+
+def test_a_restart_inside_a_schedule_resumes_at_its_position(setup):
+    schedule = protocols.ramp(100, 300, ps=0.04) + protocols.hold(300, ps=0.04)
+    whole = setup("whole", integrator=LANGEVIN, restart_every=None)
+    whole.run(schedule=schedule)
+    part = setup("part", integrator=LANGEVIN, restart_every=None)
+    part.run(steps=20, schedule=schedule)
+    part.save_restart()
+    part.close()
+    resumed = loupmd.Simulation.resume(setup.tmp_path / "part", force_field=setup.force_field())
+    assert resumed.step == 20 and resumed._schedule.step == 20 and resumed._schedule.remaining == 60
+    resumed.run()
+    assert resumed.step == 80 and resumed.config.temperature_K == 300.0
+    assert SpringEngine.made[-1].targets == [(20, 200.0, 5.0), (20, 300.0, 0.0), (20, 300.0, 0.0)]
+    assert output.read_thermo(setup.tmp_path / "part") == output.read_thermo(setup.tmp_path / "whole")

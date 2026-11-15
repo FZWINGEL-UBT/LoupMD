@@ -147,6 +147,9 @@ typedef struct {
     int kind;                      // LOUP_NVE ...
     double dt_fs;                  // timestep in fs
     double temp_k;                 // thermostat temperature in K
+    double temp_rate_k_per_step;   // Langevin: step i of the call (1 .. n_steps) runs at temp_k + i * this (a
+                                   // ramp; 0 = constant). The target lives on the device, so calls that differ
+                                   // only in temperature reuse the captured step
     double friction_per_fs;        // Langevin friction in 1/fs
     double tau_t_fs;               // thermostat time constant in fs (CSVR, Nose-Hoover chain, Berendsen)
     double pressure_gpa;           // barostat pressure in GPa
@@ -160,7 +163,8 @@ typedef struct {
     unsigned long long seed;       // noise stream of the stochastic integrators
 } LoupIntegrator;
 
-// Runs `n_steps` steps of `it`. NVE reads dt_fs; Langevin reads dt_fs, temp_k, friction_per_fs and seed. The rules
+// Runs `n_steps` steps of `it`. NVE reads dt_fs; Langevin reads dt_fs, temp_k, temp_rate_k_per_step, friction_per_fs
+// and seed. The rules
 // of loup_run_nve and loup_run_langevin apply: those two calls are this one with the struct filled in.
 int loup_run(LoupHandle* h, const LoupIntegrator* it, int n_steps, LoupMDStats* out_stats);
 

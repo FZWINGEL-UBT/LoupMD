@@ -15,13 +15,16 @@ import dataclasses
 import json
 import math
 import secrets
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
 from . import output as _output
-from .config import IntegratorConfig, Output
-from .errors import BackendError, InputError, LoupError, NonFiniteError, RestartMismatch
+from .config import GateConfig, IntegratorConfig, Output
+from .errors import (BackendError, GateFailed, GateUnavailable, InputError, LoupError, NonFiniteError,
+                     RestartMismatch)
 from .forcefield import ForceField, load
+from .protocols import Schedule, ScheduleState
 
 RESTART_NAME = "restart.npz"
 SIMULATION_NAME = "simulation.json"
@@ -29,6 +32,10 @@ RESTART_FORMAT = "loupmd.restart/1"
 SIMULATION_FORMAT = "loupmd.simulation/1"
 # Thermo rows one engine call may write: the device buffer holds 4,096 unread rows (src/thermo.hpp).
 THERMO_ROWS_PER_CALL = 4000
+# check="skip": the gate does not run (the default). check="gate": the accuracy gate runs on the structure before
+# the first step; failed -> GateFailed, unavailable -> GateUnavailable. check="allow_unavailable": as "gate", but
+# an unavailable gate is recorded and the run goes on.
+CHECK_MODES = ("skip", "gate", "allow_unavailable")
 
 
 @dataclass(frozen=True)
@@ -53,12 +60,15 @@ class Simulation:
     - ``output``: an ``lm.Output`` (directory and cadences), or ``None`` for no files;
     - ``seed``: the thermostat's noise seed; ``None`` draws one (``Simulation.seed``, written to
       ``simulation.json``);
-    - ``skin``: the neighbour-list skin in A.
+    - ``skin``: the neighbour-list skin in A;
+    - ``check``: ``"skip"`` (default), ``"gate"`` or ``"allow_unavailable"``: the accuracy gate (the 3x rule
+      against MACE float64, ``loupmd.validate``) on rattled copies of the structure before the first step;
+      ``gate`` is its ``GateConfig``. ``Simulation.gate`` holds the status and the record.
 
     Nothing is exported and no engine is made before the first ``run``; argument errors come before that.
     """
 
-    def __init__(self, atoms, force_field, *, integrator, output=None, seed=None, skin=0.5):
+    def __init__(self, atoms, force_field, *, integrator, output=None, seed=None, skin=0.5, check="skip", gate=None):
         from ase import Atoms
 
         if not isinstance(atoms, Atoms):
@@ -80,14 +90,25 @@ class Simulation:
         else:
             raise InputError(f"integrator must be an lm.integrators record, got {type(integrator).__name__}",
                              next_step="integrator=lm.integrators.Langevin(temperature_K=300, friction_per_fs=0.01)")
+        if check not in CHECK_MODES:
+            raise InputError(f"check={check!r} is not one of {CHECK_MODES}")
+        if gate is not None and not isinstance(gate, GateConfig):
+            raise InputError(f"gate must be a GateConfig or None, got {type(gate).__name__}")
+        self.check, self.gate_config = check, gate or GateConfig()
+        self.gate = {"status": "skipped"}  # then "passed", "failed" or "unavailable", with the gate's record
+        self.totals = {"steps": 0, "engine_ms": 0.0, "wall_s": 0.0, "rebuilds": 0, "pipelined_steps": 0,
+                       "dangerous_builds": 0}
+        self.setup_s = None                # export, engine, gate and the first force evaluation
         self.force_field, self.output, self.skin = force_field, output, float(skin)
         self.step = 0
         self.status = "new"                # "new", "running", "idle", "non-finite", "closed"
         self._atoms = atoms.copy()
-        self._engine = None
+        self._engine = self._bundle = None
         self._chunks = self._writer = None
         self._base = 0                     # the step at which the engine's own count was zero
         self._resume = None                # (state block, step, output indices) of a resumed run
+        self._schedule = None              # the ScheduleState of the schedule attached last
+        self._schedule_origin = 0          # the step at which that schedule's position was 0
         self._stopped = None               # the error that ended the run
 
     # ---------------------------------------------------------------------------------------------- start
@@ -100,7 +121,10 @@ class Simulation:
             self._chunks = _output.ChunkedOutput(self.output.directory, atoms,
                                                  resume_from=self._resume[2] if self._resume else None)
             self._writer = _output.AsyncWriter()
+        if self._resume is None and self.check != "skip":
+            self._run_gate()
         engine = self.force_field.new_engine(atoms, self.skin)
+        self._bundle = self.force_field.last_bundle
         self._masses = np.asarray(atoms.get_masses(), dtype=float)
         if self._resume is not None:
             blob, self.step, _ = self._resume
@@ -124,6 +148,31 @@ class Simulation:
                     self._submit_frame(positions.copy(), velocities, forces, energy)
         self.status = "idle"
 
+    def _run_gate(self):
+        """The accuracy gate on rattled copies of the structure; the run does not start when it fails."""
+        from . import validate
+
+        ff = self.force_field
+        options = dict(head=ff.head, sha256=ff.sha256, structures=[self._atoms], gate_config=self.gate_config,
+                       charge=ff.charge, spin_multiplicity=ff.spin_multiplicity, device=ff.device,
+                       environ=ff._environ)
+        try:
+            record = validate.run_gate(str(ff.path), **options)
+        except GateUnavailable as error:
+            if self.check == "gate":
+                raise
+            self.gate = {"status": "unavailable", "why": str(error).splitlines()[0]}
+            return
+        self.gate = dict(record, status="passed" if record["passed"] else "failed")
+        if not record["passed"]:
+            worst = record["worst"]
+            raise GateFailed(
+                f"the accuracy gate failed on this structure: worst ratios energy {worst['energy_ratio']:.2f}, "
+                f"force {worst['force_ratio']:.2f}, stress {worst['stress_ratio']:.2f} (a quantity passes up to "
+                f"{record['rule']['factor']:g})",
+                why="LoupMD's result is further from MACE float64 than three times MACE float32's own deviation",
+                gate_record=record)
+
     def _write_record(self):
         from . import __version__
 
@@ -142,13 +191,21 @@ class Simulation:
 
     # ------------------------------------------------------------------------------------------- output
 
-    def _target(self):
-        return float("nan") if self.config.temperature_K is None else float(self.config.temperature_K)
+    def _phase_target(self, step):
+        """The phase and target columns of a row: the schedule's at that step, else ``constant`` and the
+        thermostat's temperature (``nan`` for NVE)."""
+        state = self._schedule
+        if state is not None and 0 <= step - self._schedule_origin <= state.total_steps:
+            position = step - self._schedule_origin
+            return state.resolved.phase(position), state.resolved.target(position)
+        temperature = self.config.temperature_K
+        return _output.CONSTANT_PHASE, float("nan") if temperature is None else float(temperature)
 
     def _row(self, step, e_pot, e_kin, temperature):
         n = len(self._atoms)
-        return (int(step), step * self.config.timestep_fs / 1000.0, _output.CONSTANT_PHASE, self._target(),
-                float(temperature), e_pot / n, e_kin / n, (e_pot + e_kin) / n)
+        phase, target = self._phase_target(step)
+        return (int(step), step * self.config.timestep_fs / 1000.0, phase, target, float(temperature), e_pot / n,
+                e_kin / n, (e_pot + e_kin) / n)
 
     def _host_row(self, step, e_pot, velocities):
         """A row made from the state on the host, as the device makes its rows: used at step 0 and where the
@@ -173,18 +230,49 @@ class Simulation:
 
     # ---------------------------------------------------------------------------------------------- run
 
-    def run(self, steps) -> RunSummary:
-        """``steps`` more MD steps. Returns what the call did; ``Simulation.step`` counts all steps of the run."""
-        if isinstance(steps, bool) or not isinstance(steps, int) or steps <= 0:
+    def run(self, steps=None, *, schedule=None) -> RunSummary:
+        """``steps`` more MD steps; returns what the call did. ``Simulation.step`` counts all steps of the run.
+
+        ``schedule`` (an ``lm.protocols`` schedule: ramps and holds) moves the thermostat's target: every step of a
+        ramp runs at the target of its end point, as in FastMACE. Without ``steps`` the whole schedule runs (or
+        what remains of it); ``steps`` beyond its end are refused, never cut short. Rows and frames are also
+        written at the end of every segment. When the schedule is finished the thermostat stays at its last target.
+        """
+        if steps is not None and (isinstance(steps, bool) or not isinstance(steps, int) or steps <= 0):
             raise InputError(f"steps must be a positive whole number, got {steps!r}")
         if self._stopped is not None:
             raise self._stopped
         if self.status == "closed":
             raise InputError("this simulation is closed", next_step="Resume it: lm.Simulation.resume(directory).")
+        active = self._schedule if self._schedule is not None and not self._schedule.finished else None
+        if schedule is not None:
+            if not isinstance(schedule, Schedule):
+                raise InputError(f"schedule must be an lm.protocols schedule, got {type(schedule).__name__}",
+                                 next_step="schedule=lm.protocols.ramp(0, 400, ps=3) + lm.protocols.hold(400, ps=1)")
+            if self.config.temperature_K is None:
+                raise InputError("a schedule moves a thermostat's target, and NVE has none",
+                                 next_step="Use lm.integrators.Langevin.")
+            if active is not None:
+                raise InputError(f"a schedule is in progress: {active.remaining} of its {active.total_steps} steps "
+                                 "remain", next_step="Finish it with run() first.")
+            active = ScheduleState(schedule, self.config.timestep_fs)
+        if steps is None:
+            if active is None:
+                raise InputError("steps is needed: there is no schedule to take the number of steps from")
+            steps = active.remaining
+        elif active is not None:
+            active.steps_to_run(steps)             # refuses steps beyond the schedule before anything runs
+        if schedule is not None:
+            self._schedule, self._schedule_origin = active, self.step
         if self._engine is None:
+            started = time.perf_counter()
             self._start()
+            self.setup_s = time.perf_counter() - started
+        started = time.perf_counter()
         try:
-            return self._advance(steps)
+            summary = self._advance(steps)
+            self.totals["wall_s"] += time.perf_counter() - started
+            return summary
         except NonFiniteError as error:
             self.status, self._stopped = "non-finite", error
             self._settle()
@@ -217,8 +305,16 @@ class Simulation:
                 n = min(n, thermo * THERMO_ROWS_PER_CALL)
             elif thermo is not None:
                 n = min(n, thermo - self.step % thermo)          # to the next thermo step, without the buffer
+            schedule = self._schedule if self._schedule is not None and not self._schedule.finished else None
+            target, rate = None, 0.0
+            if schedule is not None:                             # one call stays inside one segment: a linear ramp
+                position = schedule.step
+                n = min(n, schedule.resolved.next_boundary(position) - position)
+                target = schedule.resolved.target(position)
+                rate = (schedule.resolved.target(position + n) - target) / n
             try:
-                stats = engine.run(n, self.config.to_struct(thermo_every=thermo if buffered else 0))
+                stats = engine.run(n, self.config.to_struct(thermo_every=thermo if buffered else 0,
+                                                            temperature_K=target, rate_K_per_step=rate))
             except BackendError as error:
                 if "non-finite" in str(error):
                     raise NonFiniteError(f"non-finite energy between steps {self.step} and {self.step + n}",
@@ -226,10 +322,20 @@ class Simulation:
                                          next_step=NonFiniteError.default_next_step) from None
                 raise
             self.step += n
+            segment_end = False
+            if schedule is not None:
+                schedule.advance(n)
+                segment_end = schedule.step in schedule.resolved.boundaries
+                if schedule.finished:                            # the thermostat stays at the last target
+                    self.config = dataclasses.replace(self.config, temperature_K=schedule.target_K)
             wall_ms += stats.step_ms * n
             pipelined += stats.pipelined_steps
             rebuilds += stats.rebuilds
             dangerous += stats.dangerous_builds
+            for key, value in (("steps", n), ("engine_ms", stats.step_ms * n), ("rebuilds", stats.rebuilds),
+                               ("pipelined_steps", stats.pipelined_steps),
+                               ("dangerous_builds", stats.dangerous_builds)):
+                self.totals[key] += value
             temperature = stats.final_temperature_k
             if buffered:
                 for row in engine.read_thermo():
@@ -241,7 +347,10 @@ class Simulation:
                 self._submit_row(self._host_row(self.step, state[3], state[1]))
                 engine.import_state(engine.export_state())      # the engine's count starts anew on a thermo step
                 self._base = self.step
-            if frames is not None and self.step % frames == 0:
+            elif thermo is not None and segment_end and self.step % thermo != 0:
+                state = engine.get_state()                       # the end of a segment between two thermo steps
+                self._submit_row(self._host_row(self.step, state[3], state[1]))
+            if frames is not None and (self.step % frames == 0 or segment_end):
                 positions, velocities, forces, energy = state or engine.get_state()
                 self._submit_frame(positions, velocities, forces, energy)
             if restarts is not None and self.step % restarts == 0:
@@ -295,6 +404,10 @@ class Simulation:
                       numbers=np.asarray(atoms.numbers, dtype=np.int64), masses=self._masses,
                       pbc=np.asarray(atoms.pbc, dtype=bool), cell=np.asarray(atoms.cell.array, dtype=float),
                       positions=positions, velocities=velocities, potential_energy=np.array(energy),
+                      schedule=np.array(json.dumps(None if self._schedule is None else dict(
+                          self._schedule.to_restart(), origin=self._schedule_origin))),
+                      temperature_K=np.array(float("nan") if self.config.temperature_K is None
+                                             else self.config.temperature_K),
                       **{key: np.array(value, dtype=np.int64) for key, value in indices.items()})
         return _output.write_atomically(path, lambda handle: np.savez(handle, **arrays))
 
@@ -363,6 +476,12 @@ class Simulation:
             out = dataclasses.replace(out, directory=str(directory))     # the directory was moved or is relative
         sim = cls(atoms, force_field, integrator=IntegratorConfig(**record["integrator"]), output=out,
                   seed=int(data["seed"]), skin=float(record["skin"]))
+        stored = json.loads(str(data["schedule"]))
+        if stored is not None:
+            sim._schedule_origin = int(stored.pop("origin"))
+            sim._schedule = ScheduleState.from_restart(stored)
+        if sim.config.temperature_K is not None:                 # a finished schedule left the thermostat there
+            sim.config = dataclasses.replace(sim.config, temperature_K=float(data["temperature_K"]))
         indices = {key: int(data[key]) for key in _output.OUTPUT_KEYS}
         sim._resume = (data["blob"].tobytes(), int(data["step"]), indices if out is not None else None)
         sim._start()

@@ -70,9 +70,12 @@ __global__ void nve_second_half_kernel(
     }
 }
 
+// The noise amplitude sigma = sqrt(2 gamma kB T) is formed here from the target on the device (target[0], in K), so
+// a ramp can move it every step and a changed temperature needs no new graph. a3, a4, a5 are the coefficients of
+// sigma in ASE's c3, c4, c5 (without the mass factor).
 __global__ void langevin_first_half_kernel(
     int N, double dt_ase, double c1, double c2,
-    double k_c3, double k_c4, double k_c5,
+    double a3, double a4, double a5, double two_fr_kb, const double* __restrict__ target,
     unsigned long long seed, const unsigned long long* __restrict__ step_counter,
     const double* __restrict__ forces,
     const double* __restrict__ inv_masses,
@@ -97,10 +100,10 @@ __global__ void langevin_first_half_kernel(
     double eta[3] = {n1.y, n2.x, n2.y};
 
     double im = inv_masses[i];
-    double sim = sqrt_inv_masses[i];
-    double c3 = k_c3 * sim;
-    double c4 = k_c4 * sim;
-    double c5 = k_c5 * sim;
+    double sigma = sqrt(two_fr_kb * fmax(target[0], 0.0)) * sqrt_inv_masses[i];
+    double c3 = a3 * sigma;
+    double c4 = a4 * sigma;
+    double c5 = a5 * sigma;
 
     #pragma unroll
     for (int c = 0; c < 3; ++c) {
@@ -118,17 +121,22 @@ __global__ void langevin_first_half_kernel(
     record_step_disp2(d2, max_step_disp2);
 }
 
-// Also advances the step counter: every first-half read of it for this step has completed.
+// Also advances the step counter and the thermostat's target (target[0] += target[1], the ramp's change per step):
+// every first-half read of them for this step has completed.
 __global__ void langevin_second_half_kernel(
     int N, double c1, double c2,
     const double* __restrict__ forces,
     const double* __restrict__ inv_masses,
     const double* __restrict__ rnd_vel_save,
     double* __restrict__ vel64,
-    unsigned long long* __restrict__ step_counter
+    unsigned long long* __restrict__ step_counter,
+    double* __restrict__ target
 ) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i == 0) (*step_counter) += 1ULL;
+    if (i == 0) {
+        (*step_counter) += 1ULL;
+        target[0] += target[1];
+    }
     if (i >= N) return;
     double im = inv_masses[i];
     #pragma unroll

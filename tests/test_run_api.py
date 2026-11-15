@@ -24,6 +24,7 @@ LAYOUT_C = r"""
 int main(void) {
     printf("LoupIntegrator %zu\n", sizeof(LoupIntegrator));
     F(LoupIntegrator, size); F(LoupIntegrator, kind); F(LoupIntegrator, dt_fs); F(LoupIntegrator, temp_k);
+    F(LoupIntegrator, temp_rate_k_per_step);
     F(LoupIntegrator, friction_per_fs); F(LoupIntegrator, tau_t_fs); F(LoupIntegrator, pressure_gpa);
     F(LoupIntegrator, tau_p_fs); F(LoupIntegrator, compressibility_per_gpa); F(LoupIntegrator, chain_length);
     F(LoupIntegrator, cell_mode); F(LoupIntegrator, cell_mask); F(LoupIntegrator, fix_com);

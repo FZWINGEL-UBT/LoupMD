@@ -10,7 +10,7 @@ import numpy as np
 import pytest
 from conftest import maxwell_velocities, srtio3
 
-from loupmd import LoupEngine
+from loupmd import LoupEngine, _core
 
 CAPTURE = "loupmd: MD graph capture"
 FORCE_PASS = "loupmd: initial force pass"
@@ -64,7 +64,30 @@ def test_a_run_after_evaluate_needs_no_force_pass_and_one_after_new_positions_do
     assert debug_graphs.readouterr().err.count(FORCE_PASS) == 1
 
 
-@pytest.mark.parametrize("change", ["timestep", "kind", "temperature", "friction", "seed"])
+def test_a_changed_temperature_reuses_the_graphs(sto_bundle, debug_graphs):
+    """The thermostat's target lives on the device (plan task S3-T06), so a schedule's calls capture nothing.
+
+    Two engines run the same eight short calls, one at a constant temperature and one whose temperature changes
+    a little with every call (and ramps in the last). A graph is captured the first time its loop variant is
+    used, which both runs do at the same steps; before this change the second run captured every graph again at
+    every call."""
+    def captures(temperatures, rate):
+        eng = LoupEngine(sto_bundle)
+        _start(eng)
+        debug_graphs.readouterr()
+        for temp_k in temperatures:
+            eng.run_langevin(6, 1.0, temp_k=temp_k, friction_per_fs=0.01, seed=3)
+        eng.run(6, _core.integrator(_core.LOUP_LANGEVIN, 1.0, temp_k=300.0, temp_rate_k_per_step=rate,
+                                    friction_per_fs=0.01, seed=3))
+        err = debug_graphs.readouterr().err
+        return err.count(CAPTURE), err.count(FORCE_PASS)
+
+    constant = captures([300.0] * 8, 0.0)
+    varied = captures([300.0, 300.5, 299.5, 300.2, 299.8, 300.4, 299.6, 300.0], 0.05)
+    assert varied == constant and constant[1] == 1, (constant, varied)
+
+
+@pytest.mark.parametrize("change", ["timestep", "kind", "friction", "seed"])
 def test_changed_parameters_are_captured_again(sto_engine, debug_graphs, change):
     eng = sto_engine
     _start(eng)
@@ -75,8 +98,8 @@ def test_changed_parameters_are_captured_again(sto_engine, debug_graphs, change)
     if change == "kind":
         eng.run_nve(6, 1.0)
     else:
-        new = dict(base, **{"timestep": {"dt_fs": 0.5}, "temperature": {"temp_k": 600.0},
-                            "friction": {"friction_per_fs": 0.02}, "seed": {"seed": 4}}[change])
+        new = dict(base, **{"timestep": {"dt_fs": 0.5}, "friction": {"friction_per_fs": 0.02},
+                            "seed": {"seed": 4}}[change])
         eng.run_langevin(6, **new)
     assert debug_graphs.readouterr().err.count(CAPTURE) >= 2
 

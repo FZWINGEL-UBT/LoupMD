@@ -148,15 +148,15 @@ __global__ void nve_second_half_kernel(int N, double dt_ase, const double* __res
                                        const double* __restrict__ inv_masses, double* __restrict__ vel64);
 __global__ void rotate_step_disp_kernel(unsigned int* __restrict__ max_step_disp2, int* __restrict__ need_rebuild);
 __global__ void langevin_first_half_kernel(
-    int N, double dt_ase, double c1, double c2, double k_c3, double k_c4, double k_c5,
-    unsigned long long seed, const unsigned long long* __restrict__ step_counter,
+    int N, double dt_ase, double c1, double c2, double a3, double a4, double a5, double two_fr_kb,
+    const double* __restrict__ target, unsigned long long seed, const unsigned long long* __restrict__ step_counter,
     const double* __restrict__ forces, const double* __restrict__ inv_masses,
     const double* __restrict__ sqrt_inv_masses, double* __restrict__ pos64,
     double* __restrict__ vel64, double* __restrict__ rnd_vel_save, unsigned int* __restrict__ max_step_disp2);
 __global__ void langevin_second_half_kernel(
     int N, double c1, double c2, const double* __restrict__ forces,
     const double* __restrict__ inv_masses, const double* __restrict__ rnd_vel_save,
-    double* __restrict__ vel64, unsigned long long* __restrict__ step_counter);
+    double* __restrict__ vel64, unsigned long long* __restrict__ step_counter, double* __restrict__ target);
 __global__ void kinetic_energy_kernel(int N, const double* __restrict__ masses,
                                       const double* __restrict__ vel64, double* __restrict__ out_ke);
 }  // namespace loup
@@ -523,6 +523,7 @@ struct LoupHandle {
     unsigned int* d_max_step_disp2 = nullptr;
     int disp_window_steps = 0;
     unsigned long long* d_step_counter = nullptr;
+    double* d_langevin_target = nullptr;  // [2]: the thermostat's target of the next step in K, its change per step
     double* d_ke_f64 = nullptr;
 
     // Neighbour build scratch
@@ -620,7 +621,6 @@ struct LoupHandle {
     cudaGraphExec_t md_move_exec = nullptr, md_rest_exec = nullptr;
     int md_graph_kind = -1;  // 0=NVE, 1=Langevin
     double md_graph_dt = 0.0;
-    double md_graph_temp = 0.0;
     double md_graph_fr = 0.0;
     unsigned long long md_graph_seed = 0;
     bool md_graph_thermo = false;  // the graphs carry the two thermo kernels
@@ -685,7 +685,8 @@ struct LoupHandle {
         };
         freep(d_species); freep(d_pos64); freep(d_ref_pos64); freep(d_vel64);
         freep(d_masses); freep(d_inv_masses); freep(d_sqrt_inv_masses); freep(d_rnd_vel);
-        freep(d_need_rebuild); freep(d_max_step_disp2); freep(d_step_counter); freep(d_ke_f64);
+        freep(d_need_rebuild); freep(d_max_step_disp2); freep(d_step_counter); freep(d_langevin_target);
+        freep(d_ke_f64);
         freep(d_thermo_ctrl); freep(d_thermo_rows);
         md_steps = 0;
         thermo_pending = 0;
@@ -1949,6 +1950,8 @@ static int set_system_impl(LoupHandle* h, int n_atoms, const int* atomic_numbers
     CUDA_CHECK(cudaMemsetAsync(h->d_max_step_disp2, 0, 2 * sizeof(unsigned int), h->stream));
     CUDA_CHECK(cudaMalloc(&h->d_step_counter, sizeof(unsigned long long)));
     CUDA_CHECK(cudaMemsetAsync(h->d_step_counter, 0, sizeof(unsigned long long), h->stream));
+    CUDA_CHECK(cudaMalloc(&h->d_langevin_target, 2 * sizeof(double)));
+    CUDA_CHECK(cudaMemsetAsync(h->d_langevin_target, 0, 2 * sizeof(double), h->stream));
     CUDA_CHECK(cudaMalloc(&h->d_ke_f64, sizeof(double)));
 
     // Neighbour scratch
@@ -2312,7 +2315,8 @@ static int evaluate2_impl(
 
 static int run_md_loop(
     LoupHandle* h, int kind, int n_steps, double dt_fs,
-    double temp_k, double friction_per_fs, unsigned long long seed, int thermo_every, LoupMDStats* out_stats
+    double temp_k, double temp_rate, double friction_per_fs, unsigned long long seed, int thermo_every,
+    LoupMDStats* out_stats
 ) {
     // nl_valid: positions and a neighbour list exist (set_state or evaluate ran and its rebuild completed).
     if (!has_system(h)) return -1;
@@ -2393,15 +2397,20 @@ static int run_md_loop(
     CUDA_CHECK(cudaStreamSynchronize(h->stream));
     h->forces_current = false;  // until this call completes: a failure below leaves positions ahead of the forces
 
-    double c1 = 0, c2 = 0, k_c3 = 0, k_c4 = 0, k_c5 = 0;
+    // ASE's Langevin coefficients. c3, c4, c5 carry sigma = sqrt(2 gamma kB T), which the first half-kick forms from
+    // the target on the device; here are their factors of sigma.
+    double c1 = 0, c2 = 0, a3 = 0, a4 = 0, a5 = 0, two_fr_kb = 0;
     if (kind == 1) {
         const double fr = friction_per_fs / loup::ASE_FS;  // 1/fs -> 1/(ASE time unit), as ASE's friction=f/units.fs
         c1 = dt_ase / 2.0 - dt_ase * dt_ase * fr / 8.0;
         c2 = dt_ase * fr / 2.0 - dt_ase * dt_ase * fr * fr / 8.0;
-        double sigma_k = sqrt(2.0 * fr * loup::ASE_KB * temp_k);
-        k_c3 = sqrt(dt_ase) * sigma_k / 2.0 - pow(dt_ase, 1.5) * fr * sigma_k / 8.0;
-        k_c5 = pow(dt_ase, 1.5) * sigma_k / (2.0 * sqrt(3.0));
-        k_c4 = (fr / 2.0) * k_c5;
+        two_fr_kb = 2.0 * fr * loup::ASE_KB;
+        a3 = sqrt(dt_ase) / 2.0 - pow(dt_ase, 1.5) * fr / 8.0;
+        a5 = pow(dt_ase, 1.5) / (2.0 * sqrt(3.0));
+        a4 = (fr / 2.0) * a5;
+        // The target of this call's first step (its end point) and the change per step.
+        const double target[2] = {temp_k + temp_rate, temp_rate};
+        CUDA_CHECK(cudaMemcpy(h->d_langevin_target, target, sizeof(target), cudaMemcpyHostToDevice));
     }
 
     auto record_move = [&](int lag) {
@@ -2412,7 +2421,7 @@ static int run_md_loop(
             // 32-thread blocks: the FP64 Box-Muller (3 curand_normal2_double per atom) is FP64-throughput bound on
             // consumer GPUs, so spread the atoms over every SM instead of N / 256 of them.
             loup::langevin_first_half_kernel<<<(N + 31) / 32, 32, 0, h->stream>>>(
-                N, dt_ase, c1, c2, k_c3, k_c4, k_c5, seed, h->d_step_counter,
+                N, dt_ase, c1, c2, a3, a4, a5, two_fr_kb, h->d_langevin_target, seed, h->d_step_counter,
                 h->d_forces_f64, h->d_inv_masses, h->d_sqrt_inv_masses,
                 h->d_pos64, h->d_vel64, h->d_rnd_vel, h->d_max_step_disp2);
         }
@@ -2428,7 +2437,8 @@ static int run_md_loop(
                 N, dt_ase, h->d_forces_f64, h->d_inv_masses, h->d_vel64);
         } else {
             loup::langevin_second_half_kernel<<<gridN, 256, 0, h->stream>>>(
-                N, c1, c2, h->d_forces_f64, h->d_inv_masses, h->d_rnd_vel, h->d_vel64, h->d_step_counter);
+                N, c1, c2, h->d_forces_f64, h->d_inv_masses, h->d_rnd_vel, h->d_vel64, h->d_step_counter,
+                h->d_langevin_target);
         }
         if (thermo_every > 0) {  // the row cadence lives on the device: only on / off is baked into the graph
             loup::thermo_kinetic_kernel<<<gridN, 256, 0, h->stream>>>(N, h->d_masses, h->d_vel64, h->d_thermo_ctrl);
@@ -2449,7 +2459,6 @@ static int run_md_loop(
     auto note_params = [&] {
         h->md_graph_kind = kind;
         h->md_graph_dt = dt_fs;
-        h->md_graph_temp = temp_k;
         h->md_graph_fr = friction_per_fs;
         h->md_graph_seed = seed;
         h->md_graph_thermo = thermo_every > 0;
@@ -2467,10 +2476,11 @@ static int run_md_loop(
         note_params();
         return 0;
     };
-    // The graphs bake in dt, thermostat and seed: those of an earlier call are kept when all of them are the same
-    // (review item S4) and dropped otherwise. Everything else a graph bakes in (edge bucket, scan workspace, kernel
+    // The graphs bake in dt, friction and seed: those of an earlier call are kept when all of them are the same
+    // (review item S4) and dropped otherwise. The thermostat's temperature is not baked in (d_langevin_target), so a
+    // schedule's calls reuse the graphs. Everything else a graph bakes in (edge bucket, scan workspace, kernel
     // variants, the long-range part's cell) drops the graphs where it changes: invalidate_graphs.
-    if (h->md_graph_kind != kind || h->md_graph_dt != dt_fs || h->md_graph_temp != temp_k ||
+    if (h->md_graph_kind != kind || h->md_graph_dt != dt_fs ||
         h->md_graph_fr != friction_per_fs || h->md_graph_seed != seed || h->md_graph_thermo != (thermo_every > 0)) {
         h->invalidate_md_graphs();
     }
@@ -2665,7 +2675,9 @@ static int run_impl(LoupHandle* h, const LoupIntegrator* caller, int n_steps, Lo
         return -1;
     }
     if (it.fix_com != 0) { loup::set_error("fix_com is not built in this version of the library"); return -1; }
-    if (it.kind == LOUP_NVE) return run_md_loop(h, 0, n_steps, it.dt_fs, 0.0, 0.0, 0, it.thermo_every, out_stats);
+    if (it.kind == LOUP_NVE) {
+        return run_md_loop(h, 0, n_steps, it.dt_fs, 0.0, 0.0, 0.0, 0, it.thermo_every, out_stats);
+    }
     if (!std::isfinite(it.temp_k) || it.temp_k < 0.0) {
         loup::set_error("temp_k must be finite and not negative, got %g K", it.temp_k);
         return -1;
@@ -2674,7 +2686,13 @@ static int run_impl(LoupHandle* h, const LoupIntegrator* caller, int n_steps, Lo
         loup::set_error("friction_per_fs must be finite and not negative, got %g /fs", it.friction_per_fs);
         return -1;
     }
-    return run_md_loop(h, 1, n_steps, it.dt_fs, it.temp_k, it.friction_per_fs, it.seed, it.thermo_every, out_stats);
+    if (!std::isfinite(it.temp_rate_k_per_step) || it.temp_k + it.temp_rate_k_per_step * (double)n_steps < 0.0) {
+        loup::set_error("temp_rate_k_per_step must be finite and must not take the target below 0 K: %g K + %d steps "
+                        "of %g K", it.temp_k, n_steps, it.temp_rate_k_per_step);
+        return -1;
+    }
+    return run_md_loop(h, 1, n_steps, it.dt_fs, it.temp_k, it.temp_rate_k_per_step, it.friction_per_fs, it.seed,
+                       it.thermo_every, out_stats);
 }
 
 static int run_nve_impl(LoupHandle* h, int n_steps, double dt_fs, LoupMDStats* out_stats) {

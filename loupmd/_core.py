@@ -59,6 +59,7 @@ class LoupIntegrator(ctypes.Structure):
         ("kind", ctypes.c_int),
         ("dt_fs", ctypes.c_double),
         ("temp_k", ctypes.c_double),
+        ("temp_rate_k_per_step", ctypes.c_double),
         ("friction_per_fs", ctypes.c_double),
         ("tau_t_fs", ctypes.c_double),
         ("pressure_gpa", ctypes.c_double),
