@@ -693,6 +693,14 @@ Each entry has the same fields. Unless stated, the system is OMAT-0 medium on th
 - Measured (5060 Ti, `.tmp_o/alex64/tc_bench.cu`, hybrid three-tile build): `5000 x 512 x 512` 0.83x `cublasSgemm` (190 us), `1944 x 128 x 512` (transposed B) 1.36x; relative error of the hybrid 3.6e-7 / 4.0e-7 against cuBLAS FP32's 9.8e-7 / 3.5e-7 (float64 reference).
 - Sources: this file.
 
+<a id="fp64-share-bound"></a>
+#### fp64-share-bound: how much a faster FP64 unit (A100: 1/2 rate against 1/64 on the 5060 Ti) could save
+- Stage: S67 (15 November 2026), measurement; 5060 Ti `nsys`, `.tmp_o/fp64_share.py` (every kernel that does float64 arithmetic: integrator, neighbour list, edge compaction, `first_fwd`'s and `ro_linear`'s float64 energy / force sums, POLAR's structure factors and k passes).
+- Measured, share of the summed kernel time per MD step: OFF24-M water 730 of 13,623 us (5.4%; `first_fwd` 279, `fill_neighbors` 221), MH-1 SrTiO3 444 of 38,186 (1.2%), MP-0 medium SrTiO3 409 of 8,795 (4.6%), POLAR-1-M NbCl5 1,960 of 25,777 (7.6%; `sf_kernel_tiled` 995, `grad_pass` 513, `feat_pass` 224).
+- Bound: even if those kernels ran in zero time, 1-8%; their float64 work is already confined to per-tile folds of float32 partial sums (POLAR's 1024-atom chunks, `feat_pass`'s per-k-tile folds) and per-atom reductions, and none of them is FP64-throughput-bound on the 5060 Ti. So no algorithm change (float64 inner loops, DMMA) can pay on the A100: its faster FP64 makes the existing folds cheaper for free. Confirm with the A100 profile (`gemm-tc-own-cubins` session).
+- Status: MEASUREMENT (closes the "faster FP64" direction for the generic path).
+- Sources: this file.
+
 <a id="gemm-autotune"></a>
 #### gemm-autotune: per-shape GEMM autotune
 - Switch: `sgemm_rm`; `LOUP_DEBUG_GEMM=1` prints every choice.
