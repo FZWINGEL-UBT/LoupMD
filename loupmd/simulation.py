@@ -21,7 +21,7 @@ from pathlib import Path
 
 from . import output as _output
 from .config import GateConfig, IntegratorConfig, Output
-from .errors import (BackendError, GateFailed, GateUnavailable, InputError, LoupError, NonFiniteError,
+from .errors import (BackendError, GateFailed, GateUnavailable, InputError, LoupError, NonFiniteError, PlanRefused,
                      RestartMismatch)
 from .forcefield import ForceField, load
 from .protocols import Schedule, ScheduleState
@@ -36,6 +36,24 @@ THERMO_ROWS_PER_CALL = 4000
 # the first step; failed -> GateFailed, unavailable -> GateUnavailable. check="allow_unavailable": as "gate", but
 # an unavailable gate is recorded and the run goes on.
 CHECK_MODES = ("skip", "gate", "allow_unavailable")
+
+
+def fixed_mask(atoms):
+    """The mask of the atoms ASE's ``FixAtoms`` holds in place, or ``None`` without constraints. Any other
+    constraint is refused by name: the engine holds atoms in place and nothing else."""
+    import numpy as np
+    from ase.constraints import FixAtoms
+
+    mask = np.zeros(len(atoms), dtype=bool)
+    for constraint in atoms.constraints:
+        if not isinstance(constraint, FixAtoms):
+            raise PlanRefused(f"the structure has the constraint {type(constraint).__name__}, which is not supported",
+                              why="LoupMD holds atoms in place (ase.constraints.FixAtoms) and nothing else",
+                              next_step="Remove the constraint, or express it with FixAtoms.")
+        mask[constraint.get_indices()] = True
+    if mask.all() and len(atoms):
+        raise PlanRefused("every atom of the structure is fixed, so nothing would move")
+    return mask if mask.any() else None
 
 
 @dataclass(frozen=True)
@@ -54,7 +72,9 @@ class Simulation:
     """``lm.Simulation(atoms, force_field, integrator=lm.integrators.Langevin(...), output=lm.Output("run/"),
     seed=1)``.
 
-    - ``atoms``: the starting structure with its momenta (a structure at rest starts at rest); it is not changed;
+    - ``atoms``: the starting structure with its momenta (a structure at rest starts at rest); it is not changed.
+      Atoms under ASE's ``FixAtoms`` stay where they are and count no degrees of freedom; other constraints are
+      refused;
     - ``force_field``: what ``lm.load`` returned;
     - ``integrator``: an ``lm.integrators`` record;
     - ``output``: an ``lm.Output`` (directory and cadences), or ``None`` for no files;
@@ -99,10 +119,13 @@ class Simulation:
         self.totals = {"steps": 0, "engine_ms": 0.0, "wall_s": 0.0, "rebuilds": 0, "pipelined_steps": 0,
                        "dangerous_builds": 0}
         self.setup_s = None                # export, engine, gate and the first force evaluation
+        self.relaxation = None             # the RelaxResult of relax(), if it was called
         self.force_field, self.output, self.skin = force_field, output, float(skin)
         self.step = 0
         self.status = "new"                # "new", "running", "idle", "non-finite", "closed"
         self._atoms = atoms.copy()
+        self._fixed = fixed_mask(self._atoms)      # refuses other constraints before anything is exported
+        self._dof = 3 * (len(atoms) - (int(self._fixed.sum()) if self._fixed is not None else 0))
         self._engine = self._bundle = None
         self._chunks = self._writer = None
         self._base = 0                     # the step at which the engine's own count was zero
@@ -125,6 +148,8 @@ class Simulation:
             self._run_gate()
         engine = self.force_field.new_engine(atoms, self.skin)
         self._bundle = self.force_field.last_bundle
+        if self._fixed is not None:
+            engine.set_fixed_atoms(self._fixed)
         self._masses = np.asarray(atoms.get_masses(), dtype=float)
         if self._resume is not None:
             blob, self.step, _ = self._resume
@@ -189,6 +214,22 @@ class Simulation:
         _output.write_atomically(Path(self.output.directory) / SIMULATION_NAME,
                                  lambda handle: handle.write(text.encode("utf-8")))
 
+    # -------------------------------------------------------------------------------------------- relax
+
+    def relax(self, optimizer=None, *, fmax=0.05, steps=100_000_000):
+        """Relax the starting structure at fixed cell before the first step (``lm.optimize.relax``): the run then
+        starts from the relaxed positions with the structure's velocities. Returns the ``RelaxResult``. Refused
+        once steps have run."""
+        from . import optimize
+
+        if self._engine is not None or self._resume is not None:
+            raise InputError("relax applies to the starting structure, and this run has started",
+                             next_step="Relax before the first run(), or relax sim.atoms with lm.optimize.relax.")
+        result = optimize.relax(self.force_field, self._atoms, optimizer, fmax=fmax, steps=steps, skin=self.skin)
+        self._atoms.set_positions(result.atoms.positions)
+        self.relaxation = result
+        return result
+
     # ------------------------------------------------------------------------------------------- output
 
     def _phase_target(self, step):
@@ -213,7 +254,7 @@ class Simulation:
         from ase import units
 
         e_kin = 0.5 * float((self._masses[:, None] * velocities ** 2).sum())
-        return self._row(step, e_pot, e_kin, 2 * e_kin / (3 * len(self._atoms) * units.kB))
+        return self._row(step, e_pot, e_kin, 2 * e_kin / (self._dof * units.kB))
 
     def _check_finite(self, row):
         for name, value in zip(_output.THERMO_HEADER, row):
@@ -229,6 +270,15 @@ class Simulation:
         self._writer.submit(self._chunks.write_frame, positions, velocities, forces, energy)
 
     # ---------------------------------------------------------------------------------------------- run
+
+    def start(self):
+        """What the first ``run`` does before its first step: the gate (if asked), the bundle, the engine and the
+        force evaluation of the starting structure, whose row and frame are written. Does nothing when the run
+        has started."""
+        if self._engine is None and self.status != "closed":
+            started = time.perf_counter()
+            self._start()
+            self.setup_s = time.perf_counter() - started
 
     def run(self, steps=None, *, schedule=None) -> RunSummary:
         """``steps`` more MD steps; returns what the call did. ``Simulation.step`` counts all steps of the run.
@@ -264,10 +314,7 @@ class Simulation:
             active.steps_to_run(steps)             # refuses steps beyond the schedule before anything runs
         if schedule is not None:
             self._schedule, self._schedule_origin = active, self.step
-        if self._engine is None:
-            started = time.perf_counter()
-            self._start()
-            self.setup_s = time.perf_counter() - started
+        self.start()
         started = time.perf_counter()
         try:
             summary = self._advance(steps)
@@ -403,6 +450,7 @@ class Simulation:
                       model_sha256=np.array(self.force_field.sha256), seed=np.array(self.seed, dtype=np.int64),
                       numbers=np.asarray(atoms.numbers, dtype=np.int64), masses=self._masses,
                       pbc=np.asarray(atoms.pbc, dtype=bool), cell=np.asarray(atoms.cell.array, dtype=float),
+                      fixed=(self._fixed if self._fixed is not None else np.zeros(len(atoms), dtype=bool)),
                       positions=positions, velocities=velocities, potential_energy=np.array(energy),
                       schedule=np.array(json.dumps(None if self._schedule is None else dict(
                           self._schedule.to_restart(), origin=self._schedule_origin))),
@@ -471,6 +519,10 @@ class Simulation:
         atoms = Atoms(numbers=data["numbers"], positions=data["positions"], cell=data["cell"], pbc=data["pbc"])
         atoms.set_masses(data["masses"])
         atoms.set_velocities(data["velocities"])
+        if data["fixed"].any():
+            from ase.constraints import FixAtoms
+
+            atoms.set_constraint(FixAtoms(mask=data["fixed"]))
         out = Output(**record["output"]) if record.get("output") else None
         if out is not None and Path(out.directory).resolve() != directory.resolve():
             out = dataclasses.replace(out, directory=str(directory))     # the directory was moved or is relative

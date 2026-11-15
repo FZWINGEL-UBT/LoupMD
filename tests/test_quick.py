@@ -97,6 +97,7 @@ def test_one_call_runs_writes_and_reports(ff, atoms, tmp_path):
     assert metadata["schema"] == "loupmd.metadata/1" and metadata["status"] == "idle" and metadata["step"] == 40
     assert metadata["model"]["sha256"] == ff.sha256 and metadata["model"]["file"] == "some.model"
     assert metadata["structure"] == {"source": None, "repeat": [2, 1, 1], "atoms": 16, "elements": {"Cl": 8, "Na": 8},
+                                     "fixed_atoms": 0,
                                      "cell": [[11.28, 0.0, 0.0], [0.0, 5.64, 0.0], [0.0, 0.0, 5.64]],
                                      "pbc": [True, True, True]}
     assert metadata["counters"]["steps"] == 40 and metadata["timing"]["ms_per_step"] > 0

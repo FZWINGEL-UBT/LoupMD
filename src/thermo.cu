@@ -28,7 +28,7 @@ __global__ void thermo_kinetic_kernel(int N, const double* __restrict__ masses, 
     }
 }
 
-__global__ void thermo_row_kernel(int N, double e0_total, double kb, const double* __restrict__ energy,
+__global__ void thermo_row_kernel(int dof, double e0_total, double kb, const double* __restrict__ energy,
                                   ThermoCtrl* __restrict__ ctrl, LoupThermoRow* __restrict__ rows) {
     const unsigned long long step = ctrl->step + 1ULL;
     ctrl->step = step;
@@ -39,7 +39,7 @@ __global__ void thermo_row_kernel(int N, double e0_total, double kb, const doubl
         row.step = (long long)step;
         row.e_pot = e0_total + *energy;
         row.e_kin = ctrl->ke;
-        row.temp_k = 2.0 * row.e_kin / (3.0 * N * kb);
+        row.temp_k = 2.0 * row.e_kin / ((double)dof * kb);
         row.pressure_gpa = 0.0;  // filled once a step carries stress (plan task S4-T06)
         row.volume_a3 = 0.0;
         row.conserved = row.e_pot + row.e_kin;

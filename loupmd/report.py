@@ -24,7 +24,8 @@ def _structure_line(structure) -> str:
     repeat = structure["repeat"]
     if repeat and tuple(repeat) != (1, 1, 1):
         source += " x ({}, {}, {})".format(*repeat)
-    return f"{source}: {structure['atoms']} atoms ({elements}), cell {lengths} A"
+    fixed = f", {structure['fixed_atoms']} fixed" if structure.get("fixed_atoms") else ""
+    return f"{source}: {structure['atoms']} atoms ({elements}{fixed}), cell {lengths} A"
 
 
 def _physics_lines(metadata) -> list:

@@ -25,8 +25,9 @@ struct ThermoCtrl {
 __global__ void thermo_kinetic_kernel(int N, const double* __restrict__ masses, const double* __restrict__ vel64,
                                       ThermoCtrl* __restrict__ ctrl);
 
-// Closes the step: counts it and, on a row step, appends the row. One thread.
-__global__ void thermo_row_kernel(int N, double e0_total, double kb, const double* __restrict__ energy,
+// Closes the step: counts it and, on a row step, appends the row. One thread. `dof`: the kinetic degrees of
+// freedom the temperature counts, 3 (N - n_fixed).
+__global__ void thermo_row_kernel(int dof, double e0_total, double kb, const double* __restrict__ energy,
                                   ThermoCtrl* __restrict__ ctrl, LoupThermoRow* __restrict__ rows);
 
 }  // namespace loup

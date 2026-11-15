@@ -101,6 +101,7 @@ def collect(sim, *, source=None, repeat=None, arguments=None, warnings=()) -> di
         "bundle": Path(sim._bundle).name if getattr(sim, "_bundle", None) else None,
         "structure": {"source": source, "repeat": list(repeat) if repeat else None, "atoms": len(atoms),
                       "elements": dict(sorted(Counter(atoms.get_chemical_symbols()).items())),
+                      "fixed_atoms": int(sim._fixed.sum()) if sim._fixed is not None else 0,
                       "cell": [[float(x) for x in row] for row in atoms.cell.array],
                       "pbc": [bool(p) for p in atoms.pbc]},
         "integrator": dataclasses.asdict(sim.config),

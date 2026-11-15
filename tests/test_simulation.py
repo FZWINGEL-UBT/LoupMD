@@ -43,6 +43,17 @@ class SpringEngine:
         self.md_steps, self.rows, self.forces_current = 0, [], False
         self.log.append("set_state")
 
+    def set_fixed_atoms(self, fixed=None):
+        self.fixed = None if fixed is None else np.asarray(fixed, dtype=bool)
+        self.log.append(("fixed", 0 if fixed is None else int(self.fixed.sum())))
+
+    def _inverse_mass(self):
+        inverse = 1.0 / self.masses[:, None]
+        if getattr(self, "fixed", None) is not None:
+            inverse = np.where(self.fixed[:, None], 0.0, inverse)
+            self.vel[self.fixed] = 0.0
+        return inverse
+
     def _forces(self):
         return -K * (self.pos - self.sites)
 
@@ -61,7 +72,8 @@ class SpringEngine:
         if not self.forces_current:
             self.log.append("force pass")
         dt = it.dt_fs * units.fs
-        inverse_mass = 1.0 / self.masses[:, None]
+        inverse_mass = self._inverse_mass()
+        dof = 3 * (self.n - (int(self.fixed.sum()) if getattr(self, "fixed", None) is not None else 0))
         forces = self._forces()
         for _ in range(n_steps):
             self.vel += 0.5 * dt * forces * inverse_mass
@@ -73,7 +85,7 @@ class SpringEngine:
             if it.thermo_every and self.md_steps % it.thermo_every == 0:
                 e_kin = 0.5 * float((self.masses[:, None] * self.vel ** 2).sum())
                 e_pot = float("nan") if self.md_steps == SpringEngine.poison_at else self._energy()
-                self.rows.append((self.md_steps, e_pot, e_kin, 2 * e_kin / (3 * self.n * units.kB), 0.0, 0.0,
+                self.rows.append((self.md_steps, e_pot, e_kin, 2 * e_kin / (dof * units.kB), 0.0, 0.0,
                                   e_pot + e_kin))
         self.forces_current = True
         self.log.append(("run", n_steps, it.kind, it.thermo_every))
@@ -420,3 +432,59 @@ def test_a_restart_inside_a_schedule_resumes_at_its_position(setup):
     assert resumed.step == 80 and resumed.config.temperature_K == 300.0
     assert SpringEngine.made[-1].targets == [(20, 200.0, 5.0), (20, 300.0, 0.0), (20, 300.0, 0.0)]
     assert output.read_thermo(setup.tmp_path / "part") == output.read_thermo(setup.tmp_path / "whole")
+
+
+# --------------------------------------------------------------------------------------------- fixed atoms
+
+def _with_fixed(setup, indices):
+    from ase.constraints import FixAtoms
+
+    atoms = setup.atoms.copy()
+    atoms.set_constraint(FixAtoms(indices=indices))
+    return atoms
+
+
+def test_fixed_atoms_stay_and_count_no_degrees_of_freedom(setup):
+    atoms = _with_fixed(setup, [0, 3, 5])
+    sim = loupmd.Simulation(atoms, setup.force_field(), integrator=integrators.NVE(timestep_fs=1.0),
+                            output=Output(str(setup.tmp_path / "run")), seed=1)
+    sim.run(steps=40)
+    engine, = SpringEngine.made
+    assert ("fixed", 3) in engine.log and engine.log.index(("fixed", 3)) < engine.log.index("set_state")
+    frames = output.read_frames(setup.tmp_path / "run")
+    for frame in frames:
+        assert np.array_equal(frame.positions[[0, 3, 5]], setup.atoms.positions[[0, 3, 5]])
+        assert not np.abs(frame.get_velocities()[[0, 3, 5]]).any()
+    assert not np.array_equal(frames[-1].positions[1], setup.atoms.positions[1])
+    # Every row's temperature counts 3 (16 - 3) degrees of freedom: the host's row at step 0 and the device's.
+    for row in output.read_thermo(setup.tmp_path / "run")[1]:
+        kinetic = float(row[6]) * 16
+        assert float(row[4]) == pytest.approx(2 * kinetic / (39 * units.kB), rel=1e-12)
+    assert len(sim.atoms.constraints) == 1
+
+
+def test_fixed_atoms_survive_a_restart(setup):
+    atoms = _with_fixed(setup, [2, 4])
+    sim = loupmd.Simulation(atoms, setup.force_field(), integrator=integrators.NVE(timestep_fs=1.0),
+                            output=Output(str(setup.tmp_path / "run")), seed=1)
+    sim.run(steps=20)
+    sim.save_restart()
+    sim.close()
+    resumed = loupmd.Simulation.resume(setup.tmp_path / "run", force_field=setup.force_field())
+    assert resumed._fixed.tolist() == [i in (2, 4) for i in range(16)] and ("fixed", 2) in SpringEngine.made[-1].log
+    resumed.run(steps=20)
+    assert np.array_equal(resumed.atoms.positions[[2, 4]], setup.atoms.positions[[2, 4]])
+
+
+def test_other_constraints_are_refused_by_name_before_anything_is_exported(setup):
+    from ase.constraints import FixAtoms, FixBondLength
+
+    atoms = setup.atoms.copy()
+    atoms.set_constraint([FixAtoms(indices=[0]), FixBondLength(1, 2)])
+    with pytest.raises(PlanRefused, match="the constraint FixBondLengths, which is not supported"):
+        loupmd.Simulation(atoms, setup.force_field(), integrator=integrators.NVE(timestep_fs=1.0))
+    everything = setup.atoms.copy()
+    everything.set_constraint(FixAtoms(mask=[True] * 16))
+    with pytest.raises(PlanRefused, match="every atom of the structure is fixed"):
+        loupmd.Simulation(everything, setup.force_field(), integrator=integrators.NVE(timestep_fs=1.0))
+    assert SpringEngine.made == []

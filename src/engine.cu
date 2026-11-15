@@ -524,6 +524,11 @@ struct LoupHandle {
     int disp_window_steps = 0;
     unsigned long long* d_step_counter = nullptr;
     double* d_langevin_target = nullptr;  // [2]: the thermostat's target of the next step in K, its change per step
+    // Fixed atoms (loup_set_fixed_atoms): their inverse masses on the device are zero, so no kernel moves them.
+    int n_fixed = 0;
+    std::vector<double> masses_caller;        // caller order: restores the inverse mass of an atom set free
+    std::vector<unsigned char> fixed_caller;  // caller order
+    int kinetic_dof() const { return 3 * (N - n_fixed); }
     double* d_ke_f64 = nullptr;
 
     // Neighbour build scratch
@@ -1912,6 +1917,9 @@ static int set_system_impl(LoupHandle* h, int n_atoms, const int* atomic_numbers
     // Build stable species-grouping permutation (the spatial order inside each group is set at every rebuild)
     h->perm.resize(n_atoms);
     h->h_order.resize(n_atoms);
+    h->masses_caller.assign(n_atoms, 1.0);
+    h->fixed_caller.assign(n_atoms, 0);
+    h->n_fixed = 0;
     h->species_start.assign(S + 1, 0);
     h->species_count.assign(S, 0);
     for (int i = 0; i < n_local; ++i) h->species_count[sp_orig[i]]++;
@@ -1924,6 +1932,7 @@ static int set_system_impl(LoupHandle* h, int n_atoms, const int* atomic_numbers
         h->perm[dst] = i;
         sp_sorted[dst] = sp_orig[i];
         double m = masses_amu ? masses_amu[i] : 1.0;
+        h->masses_caller[i] = m;
         m_sorted[dst] = m;
         inv_m_sorted[dst] = 1.0 / m;
         sim_sorted[dst] = 1.0 / sqrt(m);
@@ -2164,12 +2173,48 @@ static int set_state_impl(LoupHandle* h, const double* positions, const double* 
             v_sorted[dst * 3 + 0] = velocities[src * 3 + 0];
             v_sorted[dst * 3 + 1] = velocities[src * 3 + 1];
             v_sorted[dst * 3 + 2] = velocities[src * 3 + 2];
+            if (h->fixed_caller[src]) v_sorted[dst * 3 + 0] = v_sorted[dst * 3 + 1] = v_sorted[dst * 3 + 2] = 0.0;
         }
         CUDA_CHECK(cudaMemcpyAsync(h->d_vel64, v_sorted.data(), (size_t)h->N * 3 * sizeof(double), cudaMemcpyHostToDevice, h->stream));
     } else {
         CUDA_CHECK(cudaMemsetAsync(h->d_vel64, 0, (size_t)h->N * 3 * sizeof(double), h->stream));
     }
     return rebuild_neighbors(h);
+}
+
+// loup_set_fixed_atoms: a fixed atom gets zero inverse mass (and zero 1/sqrt(m), the thermostat's noise factor) and
+// zero velocity, so every integrator leaves it where it is without knowing about it. Masses stay, so the kinetic
+// energy of the others is unchanged.
+static int set_fixed_impl(LoupHandle* h, const int* fixed) {
+    if (!has_system(h)) return -1;
+    CUDA_CHECK(cudaSetDevice(h->device_id));
+    const int N = h->N;
+    int n_fixed = 0;
+    if (fixed) {
+        for (int i = 0; i < N; ++i) n_fixed += fixed[i] != 0;
+    }
+    if (n_fixed == N) {
+        loup::set_error("every atom is fixed (%d atoms): nothing would move", N);
+        return -1;
+    }
+    std::vector<double> inv_m((size_t)N), sim((size_t)N), vel((size_t)N * 3);
+    CUDA_CHECK(cudaStreamSynchronize(h->stream));
+    CUDA_CHECK(cudaMemcpy(vel.data(), h->d_vel64, vel.size() * sizeof(double), cudaMemcpyDeviceToHost));
+    for (int dst = 0; dst < N; ++dst) {
+        const int src = h->perm[dst];
+        const bool held = fixed && fixed[src] != 0;
+        const double m = h->masses_caller[src];
+        inv_m[dst] = held ? 0.0 : 1.0 / m;
+        sim[dst] = held ? 0.0 : 1.0 / sqrt(m);
+        if (held) vel[(size_t)dst * 3 + 0] = vel[(size_t)dst * 3 + 1] = vel[(size_t)dst * 3 + 2] = 0.0;
+    }
+    CUDA_CHECK(cudaMemcpy(h->d_inv_masses, inv_m.data(), inv_m.size() * sizeof(double), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(h->d_sqrt_inv_masses, sim.data(), sim.size() * sizeof(double), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(h->d_vel64, vel.data(), vel.size() * sizeof(double), cudaMemcpyHostToDevice));
+    for (int i = 0; i < N; ++i) h->fixed_caller[i] = fixed && fixed[i] != 0;
+    h->n_fixed = n_fixed;
+    h->invalidate_md_graphs();  // the thermo row's degrees of freedom are baked into the captured step
+    return 0;
 }
 
 // The TF32 + FP16 hybrid GEMMs (gemm-hybrid-cubin) overflow to inf when a GEMM operand element reaches 32,752. A
@@ -2442,7 +2487,8 @@ static int run_md_loop(
         }
         if (thermo_every > 0) {  // the row cadence lives on the device: only on / off is baked into the graph
             loup::thermo_kinetic_kernel<<<gridN, 256, 0, h->stream>>>(N, h->d_masses, h->d_vel64, h->d_thermo_ctrl);
-            loup::thermo_row_kernel<<<1, 1, 0, h->stream>>>(N, h->e0_total, loup::ASE_KB, h->d_energy_f64,
+            loup::thermo_row_kernel<<<1, 1, 0, h->stream>>>(h->kinetic_dof(), h->e0_total, loup::ASE_KB,
+                                                            h->d_energy_f64,
                                                             h->d_thermo_ctrl, h->d_thermo_rows);
         }
     };
@@ -2606,7 +2652,7 @@ static int run_md_loop(
         out_stats->rebuilds = rebuilds;
         out_stats->final_potential_energy_ev = h->e0_total + inter_e;
         out_stats->final_kinetic_energy_ev = ke;
-        out_stats->final_temperature_k = (2.0 * ke) / (3.0 * N * loup::ASE_KB);
+        out_stats->final_temperature_k = (2.0 * ke) / ((double)h->kinetic_dof() * loup::ASE_KB);
         out_stats->dangerous_builds = dangerous;
         out_stats->tune_ms = tune_ms;
         out_stats->pipelined_steps = pipelined_steps;
@@ -2873,7 +2919,7 @@ static int import_state_impl(LoupHandle* h, const void* buffer, size_t size) {
     std::vector<double> v_sorted(n3);
     for (int dst = 0; dst < h->N; ++dst) {
         const size_t src = (size_t)h->perm[dst];
-        for (int k = 0; k < 3; ++k) v_sorted[(size_t)dst * 3 + k] = velocities[src * 3 + k];
+        for (int k = 0; k < 3; ++k) v_sorted[(size_t)dst * 3 + k] = h->fixed_caller[src] ? 0.0 : velocities[src * 3 + k];
     }
     CUDA_CHECK(cudaMemcpyAsync(h->d_vel64, v_sorted.data(), n3 * sizeof(double), cudaMemcpyHostToDevice, h->stream));
     if (rebuild_neighbors(h) != 0) return -1;
@@ -3104,6 +3150,10 @@ int loup_set_system(LoupHandle* h, int n_atoms, const int* atomic_numbers, const
 
 int loup_set_state(LoupHandle* h, const double* positions, const double* velocities, const double* cell) {
     return guarded(h, "loup_set_state", [&] { return set_state_impl(h, positions, velocities, cell); });
+}
+
+int loup_set_fixed_atoms(LoupHandle* h, const int* fixed) {
+    return guarded(h, "loup_set_fixed_atoms", [&] { return set_fixed_impl(h, fixed); });
 }
 
 int loup_evaluate(

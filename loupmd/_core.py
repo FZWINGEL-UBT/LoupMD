@@ -206,6 +206,19 @@ def _load_lib():
             f"{so_path} has C interface version {abi}, and this loupmd package needs version {ABI_VERSION}",
             why="the library and the Python package come from different builds",
             next_step="Rebuild the library from this source tree (`make`), or unset LOUP_LIB.")
+    try:
+        _bind(lib)
+    except AttributeError as exc:  # a symbol of this binding is missing: an older build of the same version
+        raise BackendError(
+            f"{so_path} lacks a call this loupmd package uses ({exc})",
+            why="the library was built from an older source tree than the Python package",
+            next_step="Rebuild the library from this source tree (`make`), or unset LOUP_LIB.") from None
+    _LIB = lib
+    return lib
+
+
+def _bind(lib):
+    """Argument and result types of every call the package uses."""
     lib.loup_version.argtypes = []
     lib.loup_version.restype = ctypes.c_char_p
     lib.loup_last_error.argtypes = [ctypes.c_void_p]
@@ -226,6 +239,8 @@ def _load_lib():
     lib.loup_evaluate.argtypes = [ctypes.c_void_p, _c_double_p, _c_double_p, ctypes.c_int, _c_double_p, _c_double_p,
                                   _c_double_p]
     lib.loup_set_state.argtypes = [ctypes.c_void_p, _c_double_p, _c_double_p, _c_double_p]
+    lib.loup_set_fixed_atoms.argtypes = [ctypes.c_void_p, _c_int_p]
+    lib.loup_set_fixed_atoms.restype = ctypes.c_int
     lib.loup_evaluate2.argtypes = [ctypes.c_void_p, _c_double_p, _c_double_p, ctypes.c_int, _c_double_p, _c_double_p,
                                    _c_double_p, _c_double_p]
     lib.loup_run_nve.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_double, ctypes.POINTER(LoupMDStats)]
@@ -237,8 +252,6 @@ def _load_lib():
                  "loup_get_state", "loup_profile_force", "loup_get_info", "loup_run", "loup_export_state",
                  "loup_import_state", "loup_plan_memory", "loup_read_thermo", "loup_evaluate2"):
         getattr(lib, name).restype = ctypes.c_int
-    _LIB = lib
-    return lib
 
 
 def library_version() -> str:
@@ -336,6 +349,18 @@ class LoupEngine:
         vel = _array(velocities, (self._n, 3), "velocities") if velocities is not None else None
         cel = _array(cell, (3, 3), "cell")
         self._check(self._lib.loup_set_state(self._h, _ptr(pos), _ptr(vel), _ptr(cel)), "loup_set_state")
+
+    def set_fixed_atoms(self, fixed=None):
+        """Hold atoms in place (ASE's ``FixAtoms``): ``fixed`` is a mask of length ``n_atoms`` or ``None`` to free
+        all. Fixed atoms keep their positions, have zero velocity and get no thermostat noise; the temperatures the
+        engine reports count ``3 (N - n_fixed)`` degrees of freedom."""
+        if fixed is None:
+            self._check(self._lib.loup_set_fixed_atoms(self._h, None), "loup_set_fixed_atoms")
+            return
+        mask = np.ascontiguousarray(np.asarray(fixed, dtype=bool), dtype=np.int32)
+        if mask.shape != (self._n,):
+            raise InputError(f"fixed has shape {mask.shape}, expected ({self._n},)")
+        self._check(self._lib.loup_set_fixed_atoms(self._h, mask.ctypes.data_as(_c_int_p)), "loup_set_fixed_atoms")
 
     def run(self, n_steps: int, it: LoupIntegrator) -> LoupMDStats:
         """``n_steps`` steps of the integrator ``it`` (see ``integrator``)."""

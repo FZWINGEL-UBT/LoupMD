@@ -108,6 +108,12 @@ int loup_evaluate2(
 // this call sets them (a run after only loup_evaluate starts from rest).
 int loup_set_state(LoupHandle* h, const double* positions, const double* velocities, const double* cell);
 
+// Holds atoms in place (ASE's FixAtoms). `fixed` [n_atoms] in caller order, nonzero = fixed; NULL frees all. A
+// fixed atom keeps its position in every integrator, has zero velocity and gets no thermostat noise; the
+// temperatures the engine reports count 3 (N - n_fixed) degrees of freedom. Energies and forces are unchanged
+// (the caller ignores the forces on fixed atoms). Fixing every atom is refused. loup_set_system frees all.
+int loup_set_fixed_atoms(LoupHandle* h, const int* fixed);
+
 // The run and profile calls return -1 unless positions and a neighbour list exist (loup_set_state or loup_evaluate
 // after loup_set_system, with the last rebuild completed).
 // A run may be split into calls of any length at no extra cost: the captured step graphs are kept while the
