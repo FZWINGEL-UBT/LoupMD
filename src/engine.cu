@@ -139,6 +139,7 @@ __global__ void nve_first_half_kernel(int N, double dt_ase, const double* __rest
                                       unsigned int* __restrict__ max_step_disp2);
 __global__ void nve_second_half_kernel(int N, double dt_ase, const double* __restrict__ forces,
                                        const double* __restrict__ inv_masses, double* __restrict__ vel64);
+__global__ void rotate_step_disp_kernel(unsigned int* __restrict__ max_step_disp2);
 __global__ void langevin_first_half_kernel(
     int N, double dt_ase, double c1, double c2, double k_c3, double k_c4, double k_c5,
     unsigned long long seed, const unsigned long long* __restrict__ step_counter,
@@ -462,7 +463,10 @@ struct LoupHandle {
     double* d_sqrt_inv_masses = nullptr;
     double* d_rnd_vel = nullptr;
     int* d_need_rebuild = nullptr;
-    unsigned int* d_max_step_disp2 = nullptr;  // running max of squared per-step displacements (float bits)
+    // Maximum of the squared per-step displacements (float bits) in two windows, [0] current and [1] previous;
+    // readers take the larger. disp_window_steps: steps since the current window began.
+    unsigned int* d_max_step_disp2 = nullptr;
+    int disp_window_steps = 0;
     unsigned long long* d_step_counter = nullptr;
     double* d_ke_f64 = nullptr;
 
@@ -595,6 +599,7 @@ struct LoupHandle {
         variants_tuned = false;
         nl_valid = false;
         forces_current = false;
+        disp_window_steps = 0;
         n_rebuilds = 0;
         N = 0;
         auto freep = [](auto*& p) {
@@ -1646,7 +1651,7 @@ LoupHandle* loup_create(const char* loup_path, int device_id) {
         CUBLAS_CHECK_THROW(cublasLtCreate(&h->cublas_lt));
         CUDA_CHECK_THROW(cudaMalloc(&h->d_cublas_ws, h->cublas_ws_bytes));
         cublas_bind(h, h->stream, h->d_cublas_ws);
-        CUDA_CHECK_THROW(cudaMallocHost(&h->h_reb_pinned, 4 * sizeof(int)));  // [0..1] flags, [2] step-disp bits
+        CUDA_CHECK_THROW(cudaMallocHost(&h->h_reb_pinned, 4 * sizeof(int)));  // [0..1] flags, [2..3] step-disp bits
         CUDA_CHECK_THROW(cudaEventCreateWithFlags(&h->ev_reb[0], cudaEventDisableTiming));
         CUDA_CHECK_THROW(cudaEventCreateWithFlags(&h->ev_reb[1], cudaEventDisableTiming));
         CUDA_CHECK_THROW(cudaEventCreateWithFlags(&h->ev_fork, cudaEventDisableTiming));
@@ -1784,8 +1789,8 @@ static int set_system_impl(LoupHandle* h, int n_atoms, const int* atomic_numbers
     CUDA_CHECK(cudaMemsetAsync(h->d_vel64, 0, (size_t)n_atoms * 3 * sizeof(double), h->stream));
     CUDA_CHECK(cudaMemsetAsync(h->d_rnd_vel, 0, (size_t)n_atoms * 3 * sizeof(double), h->stream));
     CUDA_CHECK(cudaMalloc(&h->d_need_rebuild, sizeof(int)));
-    CUDA_CHECK(cudaMalloc(&h->d_max_step_disp2, sizeof(unsigned int)));
-    CUDA_CHECK(cudaMemsetAsync(h->d_max_step_disp2, 0, sizeof(unsigned int), h->stream));
+    CUDA_CHECK(cudaMalloc(&h->d_max_step_disp2, 2 * sizeof(unsigned int)));
+    CUDA_CHECK(cudaMemsetAsync(h->d_max_step_disp2, 0, 2 * sizeof(unsigned int), h->stream));
     CUDA_CHECK(cudaMalloc(&h->d_step_counter, sizeof(unsigned long long)));
     CUDA_CHECK(cudaMemsetAsync(h->d_step_counter, 0, sizeof(unsigned long long), h->stream));
     CUDA_CHECK(cudaMalloc(&h->d_ke_f64, sizeof(double)));
@@ -1979,7 +1984,8 @@ static int set_state_impl(LoupHandle* h, const double* positions, const double* 
     CUDA_CHECK(cudaSetDevice(h->device_id));
     if (!valid_input(h->N, positions, cell, velocities)) return -1;
     if (upload_positions(h, positions, cell) < 0) return -1;
-    CUDA_CHECK(cudaMemsetAsync(h->d_max_step_disp2, 0, sizeof(unsigned int), h->stream));
+    CUDA_CHECK(cudaMemsetAsync(h->d_max_step_disp2, 0, 2 * sizeof(unsigned int), h->stream));
+    h->disp_window_steps = 0;
     if (velocities) {
         std::vector<double> v_sorted((size_t)h->N * 3);
         for (int dst = 0; dst < h->N; ++dst) {
@@ -2084,6 +2090,17 @@ static int run_md_loop(
         memcpy(&d2, &bits, sizeof(d2));
         return std::sqrt((double)d2);
     };
+    // The step-displacement maximum decays in two windows (integrator.cu). A window ends at a neighbour rebuild once
+    // it holds kDispWindowMin steps, so the previous window always stands for that many steps of every atom, and
+    // after kDispWindowMax steps without a rebuild, so a system too cold to rebuild forgets a fast start as well.
+    constexpr int kDispWindowMin = 32, kDispWindowMax = 512;
+    auto rotate_disp = [&] {
+        loup::rotate_step_disp_kernel<<<1, 1, 0, h->stream>>>(h->d_max_step_disp2);
+        h->disp_window_steps = 0;
+    };
+    auto note_step = [&] {
+        if (++h->disp_window_steps >= kDispWindowMax) rotate_disp();
+    };
 
     // Forces at step 0. They are already on the device when the last call on this handle was a force evaluation or
     // a completed run at these positions, so a run made of many short calls pays one force pass per step and none
@@ -2186,12 +2203,17 @@ static int run_md_loop(
             tune_rebuild_variants(h);
             tune_ms += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
         }
-        return rebuild_neighbors(h);
+        if (rebuild_neighbors(h) != 0) return -1;
+        if (h->disp_window_steps >= kDispWindowMin) rotate_disp();
+        return 0;
     };
     int* flags = h->h_reb_pinned;
     auto copy_disp = [&] {
-        CUDA_CHECK(cudaMemcpyAsync(&flags[2], h->d_max_step_disp2, sizeof(int), cudaMemcpyDeviceToHost, h->stream));
+        CUDA_CHECK(cudaMemcpyAsync(&flags[2], h->d_max_step_disp2, 2 * sizeof(int), cudaMemcpyDeviceToHost, h->stream));
         return 0;
+    };
+    auto step_disp = [&] {  // of the last copy_disp: the larger of the two windows
+        return bits_to_disp((unsigned)flags[2] > (unsigned)flags[3] ? flags[2] : flags[3]);
     };
 
     EventPairGuard evg;
@@ -2215,12 +2237,13 @@ static int run_md_loop(
             }
             CUDA_CHECK(cudaGraphLaunch(h->md_rest_exec, h->stream));
             ++launched;
+            note_step();
             // The first pipelined force calls run on the current list before any flag is read. They are covered
             // only if the list was rebuilt in this step or no atom is beyond the pipelined (lowered) threshold
             // (bit 4). Without this, a list aged by unpipelined steps (single-step calls, evaluate()) was used up to
             // two steps past skin/2: 9 such steps in 60 switches of tests/test_engine.py's switch test.
             const bool list_young = (flags[0] & 1) || !(flags[0] & 4);
-            piped = allow_pipeline && n_steps - launched >= 2 && 4.0 * bits_to_disp(flags[2]) < half_skin && list_young;
+            piped = allow_pipeline && n_steps - launched >= 2 && 4.0 * step_disp() < half_skin && list_young;
             continue;
         }
         if (ensure_piped() != 0) return -1;
@@ -2231,6 +2254,7 @@ static int run_md_loop(
         CUDA_CHECK(cudaEventRecord(h->ev_reb[0], h->stream));
         ++launched;
         ++pipelined_steps;
+        note_step();
         bool leave = false;
         while (launched < n_steps && !leave) {
             const int cur = prev ^ 1;
@@ -2240,6 +2264,7 @@ static int run_md_loop(
             CUDA_CHECK(cudaEventRecord(h->ev_reb[cur], h->stream));
             ++launched;
             ++pipelined_steps;
+            note_step();
             CUDA_CHECK(cudaEventSynchronize(h->ev_reb[prev]));
             if (flags[prev] & 1) {
                 const int before = dangerous;
@@ -2250,7 +2275,7 @@ static int run_md_loop(
                 flags[cur] = 0;
                 copy_disp();
                 CUDA_CHECK(cudaStreamSynchronize(h->stream));
-                leave = dangerous != before || 4.0 * bits_to_disp(flags[2]) >= half_skin;
+                leave = dangerous != before || 4.0 * step_disp() >= half_skin;
                 if (!leave && ensure_piped() != 0) return -1;
             }
             prev = cur;
@@ -2414,8 +2439,7 @@ struct StateHeader {
     uint64_t n_atoms;
     uint64_t species_hash;    // atomic numbers in caller order: a blob only fits the system it was written for
     uint64_t step_counter;
-    uint32_t max_step_disp2;  // the displacement tracker (float bits)
-    uint32_t reserved;
+    uint32_t max_step_disp2[2];  // the displacement tracker: current and previous window (float bits)
     double cell[9];
 };
 static_assert(sizeof(StateHeader) == 120, "StateHeader has padding");
@@ -2451,7 +2475,7 @@ static int export_state_impl(LoupHandle* h, void* buffer, size_t capacity, size_
     CUDA_CHECK(cudaMemcpyAsync(p_sorted.data(), h->d_pos64, n3 * sizeof(double), cudaMemcpyDeviceToHost, h->stream));
     CUDA_CHECK(cudaMemcpyAsync(v_sorted.data(), h->d_vel64, n3 * sizeof(double), cudaMemcpyDeviceToHost, h->stream));
     CUDA_CHECK(cudaMemcpyAsync(&hd.step_counter, h->d_step_counter, sizeof(hd.step_counter), cudaMemcpyDeviceToHost, h->stream));
-    CUDA_CHECK(cudaMemcpyAsync(&hd.max_step_disp2, h->d_max_step_disp2, sizeof(hd.max_step_disp2), cudaMemcpyDeviceToHost, h->stream));
+    CUDA_CHECK(cudaMemcpyAsync(hd.max_step_disp2, h->d_max_step_disp2, sizeof(hd.max_step_disp2), cudaMemcpyDeviceToHost, h->stream));
     CUDA_CHECK(cudaStreamSynchronize(h->stream));
     std::vector<double> body(2 * n3);
     for (int dst = 0; dst < h->N; ++dst) {
@@ -2521,7 +2545,8 @@ static int import_state_impl(LoupHandle* h, const void* buffer, size_t size) {
     CUDA_CHECK(cudaMemcpyAsync(h->d_vel64, v_sorted.data(), n3 * sizeof(double), cudaMemcpyHostToDevice, h->stream));
     if (rebuild_neighbors(h) != 0) return -1;
     CUDA_CHECK(cudaMemcpyAsync(h->d_step_counter, &hd.step_counter, sizeof(hd.step_counter), cudaMemcpyHostToDevice, h->stream));
-    CUDA_CHECK(cudaMemcpyAsync(h->d_max_step_disp2, &hd.max_step_disp2, sizeof(hd.max_step_disp2), cudaMemcpyHostToDevice, h->stream));
+    CUDA_CHECK(cudaMemcpyAsync(h->d_max_step_disp2, hd.max_step_disp2, sizeof(hd.max_step_disp2), cudaMemcpyHostToDevice, h->stream));
+    h->disp_window_steps = 0;
     CUDA_CHECK(cudaStreamSynchronize(h->stream));
     return 0;
 }

@@ -634,7 +634,9 @@ __global__ void check_skin_kernel(
     double dy = pos64[i * 3 + 1] - ref_pos64[i * 3 + 1];
     double dz = pos64[i * 3 + 2] - ref_pos64[i * 3 + 2];
     const double d2 = dx * dx + dy * dy + dz * dz;
-    const double step = sqrt((double)__uint_as_float(*max_step_disp2));
+    // current and previous window of the step-displacement maximum (integrator.cu)
+    const unsigned int step_bits = max_step_disp2[0] > max_step_disp2[1] ? max_step_disp2[0] : max_step_disp2[1];
+    const double step = sqrt((double)__uint_as_float(step_bits));
     const double thr = half_skin - lag * step;
     int flag = 0;
     if (thr <= 0.0 || d2 > thr * thr) flag |= 1;

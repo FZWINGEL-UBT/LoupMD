@@ -8,12 +8,20 @@ namespace loup {
 constexpr double ASE_FS = 0.09822694788464063;
 constexpr double ASE_KB = 8.617330337217213e-5;
 
-// Running maximum over atoms (and steps, until reset) of the squared per-step displacement, as float bits (ordered
-// like the floats themselves for non-negative values). check_skin_kernel lowers the rebuild threshold by it.
+// Maximum over atoms and steps of the squared per-step displacement, as float bits (ordered like the floats
+// themselves for non-negative values). check_skin_kernel lowers the rebuild threshold by it. It decays in windows:
+// max_step_disp2[0] is the maximum of the current window, [1] that of the previous one, and readers take the larger,
+// so one fast step is forgotten two windows later (review item S2) while the value never falls below what the
+// current window has seen. rotate_step_disp_kernel ends a window (run_md_loop decides when).
 __device__ __forceinline__ void record_step_disp2(double d2, unsigned int* max_step_disp2) {
     const unsigned int bits = __float_as_uint((float)d2);
     const unsigned int m = __reduce_max_sync(0xffffffffu, bits);
     if ((threadIdx.x & 31) == 0 && m != 0u) atomicMax(max_step_disp2, m);
+}
+
+__global__ void rotate_step_disp_kernel(unsigned int* __restrict__ max_step_disp2) {
+    max_step_disp2[1] = max_step_disp2[0];
+    max_step_disp2[0] = 0u;
 }
 
 __global__ void nve_first_half_kernel(
