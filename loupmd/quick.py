@@ -164,6 +164,12 @@ def md(structure, *, model, head=None, charge=None, spin_multiplicity=None, sha2
     given = {"mode": mode, "allow_reference": allow_reference, "fallback": fallback, "runner": runner,
              "engine": engine, "neighbours": neighbours, "calibrate": calibrate}
     set_internals = [name for name, value in given.items() if value != _FASTMACE_INTERNALS[name]]
+    if allow_reference or fallback is not None:
+        raise PlanRefused("allow_reference= and fallback=: the fallback to the MACE calculator is not in LoupMD",
+                          why="it was cut from the release (PLAN.md decision A3): a model LoupMD cannot run is "
+                              "refused with the reason instead of running slowly through PyTorch",
+                          next_step="Run the model with MACE itself: atoms.calc = mace.calculators.MACECalculator("
+                                    "model_paths=...), then ASE's MD drivers. loupmd models lists what LoupMD runs.")
     if set_internals:
         raise PlanRefused([f"{name}= selects FastMACE's internals and has no meaning in LoupMD" for name in
                            set_internals], next_step="Drop these arguments: LoupMD has one execution path.")

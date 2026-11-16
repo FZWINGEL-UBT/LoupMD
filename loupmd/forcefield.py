@@ -230,7 +230,7 @@ class ForceField:
 
 
 def load(model, head=None, *, checkpoint=None, sha256=None, trusted=False, download=False, charge=None,
-         spin_multiplicity=None, device=0, engine_factory=None, ensure_bundle=None, probe=None,
+         spin_multiplicity=None, device=0, precision="float32", engine_factory=None, ensure_bundle=None, probe=None,
          environ=None) -> ForceField:
     """``ff = lm.load("omat0-medium")``: find the model's file, apply the trust rule and return its ``ForceField``.
 
@@ -241,11 +241,22 @@ def load(model, head=None, *, checkpoint=None, sha256=None, trusted=False, downl
     - ``sha256`` or ``trusted=True``: needed for a file that is not in the label table, because a checkpoint is a
       pickle and runs code when it is exported;
     - ``charge``, ``spin_multiplicity``: total charge and spin of the cell for models that take them (OMOL-0);
-    - ``device``: the GPU index.
+    - ``device``: the GPU index;
+    - ``precision``: ``"float32"``, the only one: float64 forces are cut (PLAN.md A3) and refused.
 
     Nothing is exported and no engine is made here. ``engine_factory``, ``ensure_bundle`` and ``probe`` replace the
     engine, the exporter and the checkpoint reader (tests).
     """
+    if precision == "float64":
+        raise PlanRefused("precision='float64': float64 forces are not in LoupMD",
+                          why="they were cut from the release (PLAN.md decision A3); LoupMD computes forces in "
+                              "float32 with float64 accumulation, checked against MACE float64",
+                          next_step="Use precision='float32' (the default): every supported model passes the 3x "
+                                    "float32-vs-float64 gate (loupmd validate --model LABEL). For float64 reference "
+                                    "values run MACE itself: mace.calculators.MACECalculator(..., "
+                                    "default_dtype='float64').")
+    if precision != "float32":
+        raise InputError(f"precision={precision!r} is not 'float32'")
     resolved, digest, _ = models.trusted_checkpoint(model, head, checkpoint=checkpoint, sha256=sha256,
                                                     trusted=trusted, download=download, environ=environ)
     return ForceField(resolved, digest, head=head, charge=charge, spin_multiplicity=spin_multiplicity, device=device,

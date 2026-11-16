@@ -712,6 +712,12 @@ with the generic path.
 | S6-T09 | The refusals of decision A3 in code and docs: `precision="float64"`, `allow_reference=True`, `Workload(reproducible=True)` | `loupmd/quick.py`, docs | each raises `PlanRefused` with the alternative named |
 | S6-T10 | Checkpoint on A2: measure generic against specialised OMAT-0 medium on both GPUs and put the keep-or-retire question to the owner with the numbers | ledger | a recorded decision |
 
+**Progress (16 November 2026, 07:00).**
+
+| Task | Commits | State |
+| --- | --- | --- |
+| S6-T09 | (this commit) | **done**: `lm.load(..., precision="float64")` (the new `precision` argument, `"float32"` the only value), `lm.md(allow_reference=True)` and `fallback=`, and `lm.config.Workload(reproducible=True)` (a record with that one field, for code that passes FastMACE's) each raise `PlanRefused` with the reason (A3) and the alternative, before any model file is read; `docs/guide/not-in-loupmd.md`; `tests/cpu/test_cut_features.py` |
+
 #### Stage 6D: dispersion (about 11.5 weeks; research done and approved on 14 November 2026)
 
 Owner decision O3: LoupMD should offer the newer dispersion implementations and let the user choose the variant,

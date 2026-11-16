@@ -14,7 +14,7 @@ import typing
 from dataclasses import dataclass
 from typing import Literal
 
-from .errors import InputError
+from .errors import InputError, PlanRefused
 
 # The 3x accuracy rule of the gate (PLAN.md section 2). These are the rule, so they are not settings: a quantity
 # passes when LoupMD's deviation from MACE float64 is at most GATE_FACTOR times MACE's own float32 deviation, or
@@ -417,3 +417,19 @@ def from_mapping(record_class, mapping, section=None):
     if missing:
         raise InputError(f"{where} lacks {', '.join(missing)}")
     return record_class(**mapping)
+
+
+@dataclass(frozen=True)
+class Workload:
+    """FastMACE's planner workload, for code that passes one: LoupMD has one execution plan, so only
+    ``reproducible`` is kept, and only ``False``. The bitwise-reproducible mode was cut (PLAN.md decision A3)."""
+
+    reproducible: bool = False
+
+    def __post_init__(self):
+        if self.reproducible:
+            raise PlanRefused("Workload(reproducible=True): the bitwise-reproducible mode is not in LoupMD",
+                              why="it was cut from the release (PLAN.md decision A3): float32 atomic sums on the GPU "
+                                  "differ in their last bits from run to run",
+                              next_step="Leave reproducible at False. The seed fixes the thermostat's noise, and a "
+                                        "restart (Simulation.resume) continues a run from its saved state.")
