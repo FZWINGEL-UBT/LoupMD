@@ -54,7 +54,8 @@ MISSING = "/nowhere/missing.model"
     ({"temperature_K": 300, "steps": 10, "capacity": "tiles"}, InputError, "capacity='tiles' is not one of"),
     ({"temperature_K": 300, "steps": 10, "mode": "graph", "calibrate": True}, PlanRefused,
      "mode= selects FastMACE's internals and has no meaning in LoupMD; calibrate= selects"),
-    ({"temperature_K": 300, "steps": 10, "mc": object()}, PlanRefused, "Monte Carlo moves are not in this version"),
+    ({"temperature_K": 300, "steps": 10, "mc": object()}, InputError, "a Monte Carlo move record names its move"),
+    ({"temperature_K": 300, "steps": 10, "min_mc_temperature_K": 200}, PlanRefused, "a temperature floor"),
     ({"temperature_K": 300, "steps": 10, "dispersion": "d3bj"}, PlanRefused, "dispersion corrections are not"),
     ({"temperature_K": 300, "schedule": protocols.hold(300, ps=0.01)}, InputError, "exclude each other"),
     ({"schedule": protocols.hold(300, ps=0.01), "steps": 50, "timestep_fs": 1.0}, InputError, "beyond the schedule"),
@@ -149,6 +150,21 @@ def test_a_structure_that_moves_keeps_its_momenta(ff, atoms, tmp_path):
                                            "initial_velocities='maxwell_boltzmann' draws only for a structure at rest"]
     assert np.array_equal(output.read_frames(tmp_path / "run")[0].get_velocities(), atoms.get_velocities())
     assert isinstance(result.metadata["seed"], int)                     # drawn and recorded
+
+
+def test_mc_moves_run_and_are_recorded_so_the_run_file_repeats_them(ff, atoms, tmp_path):
+    """S6-T04: lm.md(mc=...) passes the moves to the run; metadata.json holds them and their counters, and the
+    record's arguments give the same moves back (``loupmd run metadata.json``)."""
+    from loupmd import mc, runfile
+
+    moves = [mc.Displace(delta_A=0.05, every=5, attempts=2), mc.Swap(pairs=[("Na", "Cl")], every=10, attempts=3)]
+    result = loupmd.md(atoms, model=ff, temperature_K=300, steps=20, output=str(tmp_path / "run"), seed=4, mc=moves)
+    counters = result.metadata["mc"]["counters"]
+    assert counters["displace"]["attempted"] == 4 * 2 and counters["swap"]["attempted"] == 2 * 3
+    recorded = result.metadata["arguments"]["mc"]
+    assert [mc.from_record(r) for r in recorded] == moves
+    _, options = runfile.md_options(dict(result.metadata["arguments"], structure="salt.cif"))
+    assert [mc.from_record(r) for r in options["mc"]] == moves
 
 
 def test_a_schedule_runs_whole_and_is_reported(ff, atoms, tmp_path):

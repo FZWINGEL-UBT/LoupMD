@@ -250,6 +250,15 @@ class ChunkedOutput:
         self._trajectory.write(atoms)
         self.frames += 1
 
+    def set_composition(self, numbers, masses):
+        """The atoms' elements and masses from the next frame on (``Simulation.update``); the trajectory writes
+        them with that frame."""
+        import numpy as np
+
+        self.atoms.numbers = np.asarray(numbers)
+        self.atoms.set_masses(np.asarray(masses, dtype=float))
+        self._masses = self.atoms.get_masses()[:, None]
+
     def restart_point(self) -> dict:
         """Close the current chunk durably and open the next; returns the indices for the restart file. Call it
         after the background writer was drained."""

@@ -14,8 +14,8 @@ loaded. What ``md`` decides itself:
   ``repeat=(1, 1, 1)``.
 
 Arguments that select FastMACE internals (``mode``, ``allow_reference``, ``fallback``, ``runner``, ``engine``,
-``neighbours``, ``calibrate``) are accepted at their defaults and refused by name otherwise. ``mc=`` and
-``dispersion=`` are refused until they are built.
+``neighbours``, ``calibrate``) are accepted at their defaults and refused by name otherwise. ``mc=`` takes
+``lm.mc`` moves (S6-T04); ``min_mc_temperature_K=`` and ``dispersion=`` are refused until they are built.
 """
 from __future__ import annotations
 
@@ -173,9 +173,13 @@ def md(structure, *, model, head=None, charge=None, spin_multiplicity=None, sha2
     if set_internals:
         raise PlanRefused([f"{name}= selects FastMACE's internals and has no meaning in LoupMD" for name in
                            set_internals], next_step="Drop these arguments: LoupMD has one execution path.")
-    if mc is not None or min_mc_temperature_K is not None:
-        raise PlanRefused("mc= and min_mc_temperature_K=: Monte Carlo moves are not in this version",
-                          next_step="Run plain MD, or use FastMACE for hybrid MC/MD (PLAN.md Stage 6).")
+    if min_mc_temperature_K is not None:
+        raise PlanRefused("min_mc_temperature_K=: a temperature floor for Monte Carlo moves is not in this version",
+                          next_step="Run the moves with mc= over the whole run, or split the schedule into runs "
+                                    "with and without mc= (Simulation.run).")
+    from . import mc as _mc
+
+    moves = [] if mc is None else [_mc.from_record(m) for m in (mc if isinstance(mc, (list, tuple)) else [mc])]
     if dispersion is not None:
         raise PlanRefused("dispersion=: dispersion corrections are not in this version",
                           next_step="Run without dispersion=, or use FastMACE's D3 (PLAN.md Stage 6D).")
@@ -302,6 +306,7 @@ def md(structure, *, model, head=None, charge=None, spin_multiplicity=None, sha2
                  "schedule": schedule.to_data() if schedule is not None else None, "timestep_fs": timestep_fs,
                  "steps": steps, "repeat": list(repeat), "seed": seed, "initial_velocities": initial_velocities,
                  "check": check, "capacity": capacity, "device": device, "skin": skin,
+                 "mc": [_mc.record(m) for m in moves] or None,
                  "output": {"directory": out.directory, "trajectory_every": out.trajectory_every,
                             "thermo_every": out.thermo_every, "restart_every": out.restart_every}}
     if explicit is not None:                    # so that the record repeats the run: `loupmd run metadata.json`
@@ -313,9 +318,10 @@ def md(structure, *, model, head=None, charge=None, spin_multiplicity=None, sha2
         spin_multiplicity=spin_multiplicity, device=device)
     if force_field.label is None:              # a file outside the table: its hash, so the record can load it again
         arguments.update(model=str(force_field.path), sha256=force_field.sha256)
+    transmuted = sorted({z for m in moves if isinstance(m, _mc.Transmute) for z in m.species})
     sim = Simulation(atoms, force_field, integrator=integrator, output=out, seed=seed, check=check, gate=gate,
-                     skin=skin, capacity=capacity)
-    sim.run(steps=steps, schedule=schedule)
+                     skin=skin, capacity=capacity, elements=transmuted or None)
+    sim.run(steps=steps, schedule=schedule, mc=moves or None)
     sim.save_restart()
     metadata = provenance.collect(sim, source=source, repeat=repeat, arguments=arguments, warnings=warnings)
     provenance.write(metadata, out.directory)

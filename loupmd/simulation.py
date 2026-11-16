@@ -96,11 +96,14 @@ class Simulation:
       S5-T08). The tiled modes run NVE and Langevin, with the integrator on the host (PLAN.md D65); other
       integrators are refused in them.
 
+    - ``elements``: more elements (symbols or atomic numbers) for the run's bundle than the structure has, for
+      species events (``set_species``) and transmute moves that bring them in.
+
     Nothing is exported and no engine is made before the first ``run``; argument errors come before that.
     """
 
     def __init__(self, atoms, force_field, *, integrator, output=None, seed=None, skin=0.5, check="skip", gate=None,
-                 capacity="auto"):
+                 capacity="auto", elements=None):
         from ase import Atoms
 
         if not isinstance(atoms, Atoms):
@@ -169,6 +172,13 @@ class Simulation:
         self.step = 0
         self.status = "new"                # "new", "running", "idle", "non-finite", "closed"
         self._atoms = atoms.copy()
+        from .mc import species_number
+
+        extra = {species_number(e) for e in (elements or ())}
+        if extra:
+            force_field.check_elements(sorted(extra))
+        self._extra_elements = tuple(sorted(extra))
+        self._elements = set(int(z) for z in atoms.numbers) | extra   # the bundle's elements, once it is made
         self._fixed = fixed
         self._dof = (3 * (len(atoms) - (int(fixed.sum()) if fixed is not None else 0))
                      - (3 if self.config.fixcm else 0))
@@ -183,6 +193,8 @@ class Simulation:
         self._schedule = None              # the ScheduleState of the schedule attached last
         self._schedule_origin = 0          # the step at which that schedule's position was 0
         self._stopped = None               # the error that ended the run
+        self.mc_counters = {}              # Monte Carlo counters by move kind (loupmd.mc.Counters)
+        self.mc_moves = None               # the moves of the last run(mc=...), as records
         if capacity.mode in ("tiled", "wavefront"):
             self._check_tiled_scheme()
 
@@ -215,7 +227,8 @@ class Simulation:
                     atoms, self.config.timestep_fs, hottest, self._fixed)))
                 self.skin_record.update(estimated_A=self.skin, skin_A=self.skin)
             self._skin_probe = {"from": self._resume[1] if self._resume else 0, "hottest_K": hottest}
-        engine = self.force_field.new_engine(atoms, self.skin, capacity=self.capacity)
+        engine = self.force_field.new_engine(atoms, self.skin, capacity=self.capacity,
+                                             extra_elements=self._extra_elements)
         self._bundle = self.force_field.last_bundle
         self.execution = dict(self.force_field.last_execution or {"mode": "whole", "receivers": 0, "plan": None})
         if self.execution["mode"] in ("tiled", "wavefront"):
@@ -286,6 +299,7 @@ class Simulation:
             "integrator": dataclasses.asdict(self.config),
             "output": dataclasses.asdict(self.output),
             "seed": self.seed, "skin": self.skin, "atoms": len(self._atoms),
+            "elements": sorted(self._elements),       # the bundle's: a resume exports the same
             # the execution the run took, so that a resume takes it again (the state blocks of the two differ)
             "capacity": {"mode": self.execution["mode"], "receivers": self.execution["receivers"] or None,
                          "memory_fraction": self.capacity.memory_fraction},
@@ -378,16 +392,22 @@ class Simulation:
             self._start()
             self.setup_s = time.perf_counter() - started
 
-    def run(self, steps=None, *, schedule=None) -> RunSummary:
+    def run(self, steps=None, *, schedule=None, mc=None) -> RunSummary:
         """``steps`` more MD steps; returns what the call did. ``Simulation.step`` counts all steps of the run.
 
         ``schedule`` (an ``lm.protocols`` schedule: ramps and holds) moves the thermostat's target: every step of a
         ramp runs at the target of its end point, as in FastMACE. Without ``steps`` the whole schedule runs (or
         what remains of it); ``steps`` beyond its end are refused, never cut short. Rows and frames are also
         written at the end of every segment. When the schedule is finished the thermostat stays at its last target.
+
+        ``mc``: Monte Carlo moves (an ``lm.mc.Swap``, ``Transmute`` or ``Displace``, or a list of them) for this
+        call: after every ``move.every``-th step of the run (counted by ``Simulation.step``) the move makes
+        ``move.attempts`` attempts at the thermostat's target temperature. The counters are in
+        ``Simulation.mc_counters``, ``metadata.json`` and the restart file.
         """
         if steps is not None and (isinstance(steps, bool) or not isinstance(steps, int) or steps <= 0):
             raise InputError(f"steps must be a positive whole number, got {steps!r}")
+        moves = self._mc_moves(mc)
         if self._stopped is not None:
             raise self._stopped
         if self.status == "closed":
@@ -415,7 +435,7 @@ class Simulation:
         self.start()
         started = time.perf_counter()
         try:
-            summary = self._advance(steps)
+            summary = self._advance(steps, moves)
             self.totals["wall_s"] += time.perf_counter() - started
             return summary
         except NonFiniteError as error:
@@ -432,7 +452,34 @@ class Simulation:
                 pass
             self._chunks.flush()
 
-    def _advance(self, steps) -> RunSummary:
+    def _mc_moves(self, mc):
+        from . import mc as _mc
+
+        if mc is None:
+            return ()
+        moves = tuple(mc) if isinstance(mc, (list, tuple)) else (mc,)
+        for move in moves:
+            _mc.kind(move)                                     # refuses anything else
+        if moves and self.config.temperature_K is None:
+            raise InputError("Monte Carlo moves need a temperature, and NVE has none",
+                             next_step="Use a thermostat (lm.integrators.Langevin, CSVR, ...) with mc=.")
+        self.mc_moves = [_mc.record(move) for move in moves]
+        return moves
+
+    def _mc_after_steps(self, moves):
+        """The moves due at this step, in their order; each block's random stream follows from the seed, the
+        step and the move's place, so a resumed run makes the same attempts."""
+        import numpy as np
+        from ase import units
+
+        for index, move in enumerate(moves):
+            if self.step % move.every:
+                continue
+            kT = units.kB * float(self._phase_target(self.step)[1])
+            rng = np.random.default_rng([self.seed, self.step, index])
+            self._mc_apply(move, kT, rng)
+
+    def _advance(self, steps, moves=()) -> RunSummary:
         engine, out = self._engine, self.output
         thermo = out.thermo_every if out is not None else None
         frames = out.trajectory_every if out is not None else None
@@ -442,7 +489,7 @@ class Simulation:
         self.status = "running"
         while self.step < end:
             n = end - self.step
-            for every in (frames, restarts):
+            for every in (frames, restarts) + tuple(move.every for move in moves):
                 if every is not None:
                     n = min(n, every - self.step % every)
             buffered = thermo is not None and self._base % thermo == 0
@@ -491,6 +538,9 @@ class Simulation:
                     self._submit_row(self._row(self._base + int(row["step"]), float(row["e_pot"]),
                                                float(row["e_kin"]), float(row["temp_k"]),
                                                float(row["volume_a3"]), float(row["pressure_gpa"])))
+            if moves:
+                self._mc_after_steps(moves)                      # before this step's frame and restart
+                engine = self._engine
             state = None
             if thermo is not None and not buffered and self.step % thermo == 0:
                 state = engine.get_state()
@@ -539,7 +589,318 @@ class Simulation:
         self.skin = wanted
         self.skin_record["skin_A"] = wanted
 
-    # ------------------------------------------------------------------------------------------ the state
+    # --------------------------------------------------------------------------------------------- events
+
+    def update(self, *, positions=None, momenta=None, masses=None, species=None, charges=None, total_charge=None,
+               spin_multiplicity=None, friction_per_fs=None):
+        """Any combination of host changes between two ``run`` calls, as one transaction (plan task S6-T01):
+        everything is checked first, then applied and the new state evaluated once; if any part fails, the run is
+        left as it was before the call and the error is raised.
+
+        - ``positions`` (A) and ``momenta`` (ASE units), ``(N, 3)``; momenta are taken with the new masses;
+        - ``masses`` (amu, ``(N,)``): the momenta stay (as in ASE), so the velocities change, v' = v m / m';
+        - ``species`` (atomic numbers or symbols, ``(N,)``): within the elements of the run's bundle (the starting
+          structure's), so nothing is exported; an atom whose element changes takes the new element's standard
+          mass unless ``masses`` is given too, and keeps its momentum;
+        - ``total_charge``, ``spin_multiplicity``: for models that take them (OMOL-0). They are export arguments
+          (PLAN.md O7), so the model is loaded again with them and a new bundle and engine are made;
+        - ``charges``: per-atom charges are an input of no model LoupMD runs, and are refused;
+        - ``friction_per_fs``: the Langevin (or BAOAB) friction in 1/fs.
+
+        Every change but the friction sets the engine's state anew: its step count restarts (the thermo rows stay
+        on their cadence) and a barostat's own momentum starts from zero.
+        """
+        import numpy as np
+        from ase.data import atomic_masses, atomic_numbers
+
+        if self._stopped is not None:
+            raise self._stopped
+        if self.status in ("closed", "running"):
+            raise InputError(f"this simulation is {self.status}; events apply between two run() calls")
+        if charges is not None:
+            raise PlanRefused("per-atom charges as an input",
+                              why="no model LoupMD runs takes per-atom charges; OMOL-0 takes the cell's total charge "
+                                  "and spin multiplicity (PLAN.md O7)",
+                              next_step="Use update(total_charge=..., spin_multiplicity=...) for OMOL-0.")
+        n = len(self._atoms)
+
+        def per_atom(value, name, shape):
+            array = np.array(value, dtype=float)
+            if array.shape != shape or not np.isfinite(array).all():
+                raise InputError(f"{name} must be finite numbers of shape {shape}, got shape {array.shape}")
+            return array
+
+        # Check everything on the host; nothing has changed yet.
+        new_positions = per_atom(positions, "positions", (n, 3)) if positions is not None else None
+        new_momenta = per_atom(momenta, "momenta", (n, 3)) if momenta is not None else None
+        numbers = np.array(self._atoms.numbers)
+        new_masses = np.array(self._atoms.get_masses(), dtype=float)
+        if species is not None:
+            raw = list(np.atleast_1d(species))
+            if len(raw) != n:
+                raise InputError(f"species must name {n} atoms, got {len(raw)}")
+            try:
+                new_numbers = np.array([atomic_numbers[str(s)] if isinstance(s, (str, np.str_)) else int(s)
+                                        for s in raw])
+            except (KeyError, TypeError, ValueError):
+                raise InputError("species must be atomic numbers or element symbols") from None
+            if not ((new_numbers >= 1) & (new_numbers < len(atomic_masses))).all():
+                raise InputError("species must be atomic numbers of elements")
+            outside = sorted(set(new_numbers.tolist()) - self._elements)
+            if outside and self._engine is not None:   # before the start the bundle is not made yet
+                raise PlanRefused(f"species {outside}, which the run's bundle does not have",
+                                  why="the bundle is exported for the starting structure's elements; another would "
+                                      "need a new engine",
+                                  next_step="Start the run from a structure that holds every element it will take, "
+                                            "or save_restart and start a new Simulation from sim.atoms.")
+            changed = new_numbers != numbers
+            new_masses[changed] = atomic_masses[new_numbers[changed]]
+            numbers = new_numbers
+        if masses is not None:
+            new_masses = per_atom(masses, "masses", (n,))
+            if not (new_masses > 0).all():
+                raise InputError("masses must be positive")
+        config = self.config
+        if friction_per_fs is not None:
+            if config.friction_per_fs is None:
+                raise InputError(f"the {config.scheme} integrator has no friction to change",
+                                 next_step="Friction applies to Langevin and BAOAB NPT.")
+            config = dataclasses.replace(config, friction_per_fs=float(friction_per_fs))   # checks it
+        force_field = self.force_field
+        if total_charge is not None or spin_multiplicity is not None:
+            ff = self.force_field
+            force_field = load(ff.label if ff.label is not None else str(ff.path), ff.head,
+                               sha256=None if ff.label is not None else ff.sha256,
+                               charge=ff.charge if total_charge is None else total_charge,
+                               spin_multiplicity=ff.spin_multiplicity if spin_multiplicity is None else spin_multiplicity,
+                               device=ff.device, engine_factory=ff._engine_factory, ensure_bundle=ff._ensure_bundle,
+                               probe=ff._probe, environ=ff._environ)
+        state_change = (new_positions is not None or new_momenta is not None or species is not None
+                        or masses is not None or force_field is not self.force_field)
+        if self._engine is None:              # before the first step: the starting structure takes the change
+            atoms = self._atoms
+            momenta_now = atoms.get_momenta()
+            atoms.numbers = numbers
+            atoms.set_masses(new_masses)
+            atoms.set_momenta(new_momenta if new_momenta is not None else momenta_now)
+            if new_positions is not None:
+                atoms.set_positions(new_positions)
+            self._elements |= set(numbers.tolist())
+            self.config, self.force_field = config, force_field
+            return
+        if state_change:
+            self._apply_state_event(new_positions, new_momenta, numbers, new_masses, force_field)
+        if config is not self.config:
+            self.config = config
+            if self.output is not None:
+                self._write_record()
+
+    def set_positions(self, positions):
+        """Set every atom's position (A, ``(N, 3)``), one event (``update``); the momenta stay."""
+        self.update(positions=positions)
+
+    def set_momenta(self, momenta):
+        """Set every atom's momentum (ASE units, ``(N, 3)``), one event (``update``)."""
+        self.update(momenta=momenta)
+
+    def set_masses(self, masses):
+        """Set every atom's mass (amu, ``(N,)``), one event (``update``); the momenta stay, as in ASE."""
+        self.update(masses=masses)
+
+    def set_species(self, species):
+        """Set every atom's element (atomic numbers or symbols, ``(N,)``), one event (``update``): within the
+        run's bundle, with no export; atoms whose element changes take its standard mass."""
+        self.update(species=species)
+
+    def set_charges(self, charges=None, *, total_charge=None, spin_multiplicity=None):
+        """The cell's total charge and spin multiplicity (OMOL-0), one event (``update``): the model is loaded
+        again with them. Per-atom ``charges`` are refused."""
+        if charges is None and total_charge is None and spin_multiplicity is None:
+            raise InputError("set_charges needs total_charge or spin_multiplicity")
+        self.update(charges=charges, total_charge=total_charge, spin_multiplicity=spin_multiplicity)
+
+    def set_friction(self, friction_per_fs):
+        """Set the Langevin (or BAOAB) friction in 1/fs, one event (``update``)."""
+        self.update(friction_per_fs=friction_per_fs)
+
+    def _mc_block(self, move, kT, rng, attempts=None):
+        """One block of Monte Carlo attempts on the engine's state (``loupmd.mc``). The chain's last state is set
+        on the engine (or, with nothing accepted, the state block put back); the engine's step count restarts."""
+        if self._stopped is not None:
+            raise self._stopped
+        if self.status in ("closed", "running"):
+            raise InputError(f"this simulation is {self.status}; Monte Carlo moves apply between two run() calls")
+        self.start()
+        return self._mc_apply(move, kT, rng, attempts)
+
+    def _mc_apply(self, move, kT, rng, attempts=None):
+        import numpy as np
+
+        from . import mc
+
+        engine = self._engine
+        positions, velocities, _, energy = engine.get_state()
+        cell = engine.get_cell() if self._npt else np.asarray(self._atoms.cell.array, dtype=float)
+        if isinstance(move, mc.Transmute):
+            return self._transmute_block(move, kT, rng, attempts, positions, velocities, cell, float(energy))
+        numbers = np.array(self._atoms.numbers)
+        if self._fixed is not None:
+            numbers[self._fixed] = 0                      # fixed atoms stay where they are: never chosen
+        blob = engine.export_state()
+        try:
+            if isinstance(move, mc.Displace):
+                positions, energy, counters = mc.displace_block(engine, move, positions, np.flatnonzero(numbers),
+                                                                cell, float(energy), kT, rng, attempts)
+            else:
+                positions, velocities, energy, counters = mc.swap_block(engine, move, positions, velocities,
+                                                                         numbers, cell, float(energy), kT, rng,
+                                                                         attempts)
+            if counters.accepted:
+                engine.set_state(positions, velocities, cell)
+                if self._npt:
+                    engine.set_reference_volume(self._reference_volume)
+            else:
+                engine.import_state(blob)
+        except BaseException:
+            engine.import_state(blob)
+            raise
+        self._base = self.step
+        self.mc_counters.setdefault(mc.kind(move), mc.Counters()).add(counters)
+        return mc.SwapResult(counters, float(energy))
+
+    def _transmute_block(self, move, kT, rng, attempts, positions, velocities, cell, energy):
+        """Transmute attempts: each sets the engine's system for the trial composition and runs the energy-only
+        pass; the chain's last composition and state are set on the engine at the end (D72)."""
+        import numpy as np
+        from ase.data import atomic_masses
+
+        from . import mc
+
+        outside = sorted(set(move.species) - self._elements)
+        if outside:
+            raise PlanRefused(f"Transmute to element(s) {outside}, which the run's bundle does not have",
+                              next_step="Name them when the run is made: lm.Simulation(..., elements=[...]).")
+        engine = self._engine
+        numbers, masses = np.array(self._atoms.numbers), np.array(self._masses, dtype=float)
+        eligible = np.flatnonzero(np.isin(numbers, move.species)
+                                  & (~self._fixed if self._fixed is not None else True))
+        if not len(eligible):
+            raise InputError(f"no atom of the structure is one of Transmute.species {move.species}")
+        blob = engine.export_state()
+        counters = mc.Counters()
+        held = numbers                                    # the composition the engine holds
+
+        def put(nums, ms, vel):
+            started = time.perf_counter()
+            engine.set_system(nums, ms, skin=self.skin)
+            if self._fixed is not None:
+                engine.set_fixed_atoms(self._fixed)
+            engine.set_state(positions, vel, cell)
+            if self._npt:
+                engine.set_reference_volume(self._reference_volume)
+            counters.setup_s += time.perf_counter() - started
+
+        try:
+            for _ in range(move.attempts if attempts is None else attempts):
+                i = int(rng.choice(eligible))
+                old = int(numbers[i])
+                new = int(rng.choice([s for s in move.species if s != old]))
+                trial_numbers, trial_masses, trial_velocities = numbers.copy(), masses.copy(), velocities.copy()
+                trial_numbers[i], trial_masses[i] = new, atomic_masses[new]
+                trial_velocities[i] *= math.sqrt(masses[i] / trial_masses[i])    # its kinetic energy kept
+                put(trial_numbers, trial_masses, trial_velocities)
+                held = trial_numbers
+                trial_energy = mc._energy(engine, positions, cell)
+                counters.attempted += 1
+                if not math.isfinite(trial_energy):
+                    counters.rejected_nonfinite += 1
+                    continue
+                excess = (trial_energy - energy) - (move.mu_of(new) - move.mu_of(old))
+                if excess <= 0.0 or rng.random() < math.exp(-excess / kT):
+                    numbers, masses, velocities, energy = trial_numbers, trial_masses, trial_velocities, trial_energy
+                    counters.accepted += 1
+            if counters.accepted:
+                if not np.array_equal(held, numbers):
+                    put(numbers, masses, velocities)
+            elif not np.array_equal(held, numbers):
+                put(numbers, masses, velocities)
+                engine.import_state(blob)
+        except BaseException:
+            put(np.array(self._atoms.numbers), np.array(self._masses, dtype=float), velocities)
+            engine.import_state(blob)
+            raise
+        if counters.accepted:
+            self._atoms.numbers = numbers
+            self._atoms.set_masses(masses)
+            self._masses = masses
+            if self._chunks is not None:
+                self._writer.submit(self._chunks.set_composition, numbers, masses)
+        self._base = self.step
+        self.mc_counters.setdefault("transmute", mc.Counters()).add(counters)
+        return mc.SwapResult(counters, float(energy))
+
+    def _apply_state_event(self, new_positions, new_momenta, numbers, new_masses, force_field):
+        """The engine part of an event: the state read back, changed and set, then one evaluation. Any failure
+        puts the engine back where it was (its state block) and raises."""
+        import numpy as np
+
+        engine = self._engine
+        positions, velocities, _, _ = engine.get_state()
+        cell = engine.get_cell() if self._npt else np.asarray(self._atoms.cell.array, dtype=float)
+        momenta = new_momenta if new_momenta is not None else velocities * self._masses[:, None]
+        positions = new_positions if new_positions is not None else positions
+        velocities = momenta / new_masses[:, None]
+        blob = engine.export_state()
+        recomposed = (not np.array_equal(numbers, self._atoms.numbers)
+                      or not np.array_equal(new_masses, self._masses))
+        new_engine = None
+        try:
+            if force_field is not self.force_field:
+                atoms = self._atoms.copy()
+                atoms.numbers = numbers
+                atoms.set_masses(new_masses)
+                new_engine = force_field.new_engine(atoms, self.skin, capacity=self.capacity,
+                                                    extra_elements=self._extra_elements)
+                target = new_engine
+                if self._fixed is not None:
+                    target.set_fixed_atoms(self._fixed)
+            else:
+                target = engine
+                if recomposed:
+                    target.set_system(numbers, new_masses, skin=self.skin)
+                    if self._fixed is not None:
+                        target.set_fixed_atoms(self._fixed)
+            target.set_state(positions, velocities, cell)
+            if self._npt:
+                target.set_reference_volume(self._reference_volume)
+            energy, forces, _ = target.evaluate(positions, cell, compute_stress=self._npt)
+            if not (np.isfinite(energy) and np.isfinite(forces).all()):
+                raise NonFiniteError("the event's state has a non-finite energy or forces",
+                                     why="an event is applied only when its state evaluates to finite numbers")
+        except BaseException:
+            new_engine = None
+            if recomposed and force_field is self.force_field:
+                engine.set_system(self._atoms.numbers, self._masses, skin=self.skin)
+                if self._fixed is not None:
+                    engine.set_fixed_atoms(self._fixed)
+                if self._npt:
+                    engine.set_reference_volume(self._reference_volume)
+            engine.import_state(blob)
+            raise
+        # Commit.
+        if new_engine is not None:
+            self._engine = new_engine
+            self._bundle = force_field.last_bundle
+            self.force_field = force_field
+        if recomposed:
+            self._atoms.numbers = numbers
+            self._atoms.set_masses(new_masses)
+            self._masses = np.array(new_masses, dtype=float)
+            if self._chunks is not None:
+                self._writer.submit(self._chunks.set_composition, numbers, new_masses)
+        self._base = self.step
+        if self.output is not None:       # simulation.json names the model's charge: a resume takes the new one
+            self._write_record()
 
     @property
     def atoms(self):
@@ -587,6 +948,7 @@ class Simulation:
                       pbc=np.asarray(atoms.pbc, dtype=bool), cell=cell, **extra,
                       fixed=(self._fixed if self._fixed is not None else np.zeros(len(atoms), dtype=bool)),
                       positions=positions, velocities=velocities, potential_energy=np.array(energy),
+                      mc_counters=np.array(json.dumps({k: c.as_dict() for k, c in self.mc_counters.items()})),
                       schedule=np.array(json.dumps(None if self._schedule is None else dict(
                           self._schedule.to_restart(), origin=self._schedule_origin))),
                       temperature_K=np.array(float("nan") if self.config.temperature_K is None
@@ -663,7 +1025,8 @@ class Simulation:
             out = dataclasses.replace(out, directory=str(directory))     # the directory was moved or is relative
         capacity = CapacityConfig(**record["capacity"]) if record.get("capacity") else "whole"   # older records
         sim = cls(atoms, force_field, integrator=IntegratorConfig(**record["integrator"]), output=out,
-                  seed=int(data["seed"]), skin=float(record["skin"]), capacity=capacity)
+                  seed=int(data["seed"]), skin=float(record["skin"]), capacity=capacity,
+                  elements=record.get("elements"))
         stored = json.loads(str(data["schedule"]))
         if stored is not None:
             sim._schedule_origin = int(stored.pop("origin"))
@@ -672,6 +1035,10 @@ class Simulation:
             sim.config = dataclasses.replace(sim.config, temperature_K=float(data["temperature_K"]))
         if sim._npt and "reference_volume_A3" in data:
             sim._reference_volume = float(data["reference_volume_A3"])
+        if "mc_counters" in data:
+            from .mc import Counters
+
+            sim.mc_counters = {k: Counters(**v) for k, v in json.loads(str(data["mc_counters"])).items()}
         indices = {key: int(data[key]) for key in _output.OUTPUT_KEYS}
         sim._resume = (data["blob"].tobytes(), int(data["step"]), indices if out is not None else None)
         sim._start()

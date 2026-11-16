@@ -123,6 +123,9 @@ def collect(sim, *, source=None, repeat=None, arguments=None, warnings=()) -> di
         "gate": sim.gate,
         "step": sim.step,
         "counters": {key: totals[key] for key in ("steps", "rebuilds", "pipelined_steps", "dangerous_builds")},
+        "mc": ({"moves": getattr(sim, "mc_moves", None),
+                "counters": {k: c.as_dict() for k, c in sim.mc_counters.items()}}
+               if getattr(sim, "mc_counters", None) else None),
         "timing": {"setup_s": sim.setup_s, "wall_s": totals["wall_s"], "ms_per_step": wall_ms,
                    "engine_ms_per_step": totals["engine_ms"] / steps if steps else None,
                    "ns_per_day": 86.4 * timestep / wall_ms if wall_ms else None,

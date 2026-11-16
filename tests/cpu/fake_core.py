@@ -69,6 +69,14 @@ class SpringEngine:
         self.log.append("evaluate")
         return self._energy(), self._forces(), None
 
+    def evaluate_energy(self, positions, cell):
+        """The energy-only call: as the real engine's, the device positions are these afterwards and the forces
+        are stale."""
+        self.pos = np.array(positions, dtype=float)
+        self.forces_current = False
+        self.log.append("evaluate_energy")
+        return self._energy()
+
     # --- dynamics
     def run(self, n_steps, it):
         assert n_steps > 0

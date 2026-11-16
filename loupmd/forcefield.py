@@ -130,7 +130,7 @@ class ForceField:
                 next_step="Put a molecule or a slab in a box with vacuum (at least the model's cutoff on each open "
                           "side) and set pbc=True.")
 
-    def new_engine(self, atoms, skin=0.5, capacity=None):
+    def new_engine(self, atoms, skin=0.5, capacity=None, extra_elements=()):
         """An engine of its own for ``atoms`` with the system set: what a ``Simulation`` runs on, so that
         evaluating other structures with this force field does not disturb the run.
 
@@ -138,7 +138,8 @@ class ForceField:
         engine plans the execution first (``loup_plan_execution``) and a system that does not fit the GPU whole gets
         a :class:`~loupmd.tiled_engine.TiledEngine`; ``"tiled"`` always does, and ``"wavefront"`` with the wavefront
         schedule forced (two-layer models, S5-T08). ``last_execution`` then holds ``{"mode", "receivers", "plan"}``
-        (mode ``"whole"``, ``"tiled"`` or ``"wavefront"``)."""
+        (mode ``"whole"``, ``"tiled"`` or ``"wavefront"``). ``extra_elements``: atomic numbers the bundle
+        carries beyond the structure's (species events and transmute moves, S6-T01 and S6-T03)."""
         from . import _core
         from .config import CapacityConfig
 
@@ -155,7 +156,7 @@ class ForceField:
                                "model need the whole cell")
             if reasons:
                 raise PlanRefused(reasons, next_step="Use capacity 'auto' or 'whole' with state 'auto' or 'device'.")
-        numbers = sorted({int(z) for z in atoms.numbers})
+        numbers = sorted({int(z) for z in atoms.numbers} | {int(z) for z in extra_elements})
         self.check_elements(numbers)
         ensure_bundle = self._ensure_bundle
         if ensure_bundle is None:
