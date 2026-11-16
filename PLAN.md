@@ -716,7 +716,8 @@ with the generic path.
 
 | Task | Commits | State |
 | --- | --- | --- |
-| S6-T09 | (this commit) | **done**: `lm.load(..., precision="float64")` (the new `precision` argument, `"float32"` the only value), `lm.md(allow_reference=True)` and `fallback=`, and `lm.config.Workload(reproducible=True)` (a record with that one field, for code that passes FastMACE's) each raise `PlanRefused` with the reason (A3) and the alternative, before any model file is read; `docs/guide/not-in-loupmd.md`; `tests/cpu/test_cut_features.py` |
+| S6-T06 | (this commit) | **done**: every label of the task passes its gate on the generic path (the default, library `90a30122`, RTX 5060 Ti): newly gated `mp0b3-medium` (oxide: 0.07, 1.14, 0.78), `mp0-large` (`MACE_MPtrj_2022.9.model`, oxide: 0.14, 1.33, 1.10) and `matpes-r2scan` (crystals: 0.12, 1.43, 0.98); `mp0-medium`, `mpa0-medium` and `matpes-pbe` were in S2-T04's 20 labels and pass the tiled and wavefront gates too (status §6.24). No export or codegen change was needed; none is unsupported, so the README (S7) lists no exclusion |
+| S6-T09 | `2c4f75f` | **done**: `lm.load(..., precision="float64")` (the new `precision` argument, `"float32"` the only value), `lm.md(allow_reference=True)` and `fallback=`, and `lm.config.Workload(reproducible=True)` (a record with that one field, for code that passes FastMACE's) each raise `PlanRefused` with the reason (A3) and the alternative, before any model file is read; `docs/guide/not-in-loupmd.md`; `tests/cpu/test_cut_features.py` |
 
 #### Stage 6D: dispersion (about 11.5 weeks; research done and approved on 14 November 2026)
 

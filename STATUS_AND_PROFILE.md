@@ -1185,3 +1185,10 @@ ratios energy, force, stress:
 All PASS. `tests/gpu/test_tiled_md.py::test_a_wavefront_simulation_follows_the_whole_systems_nve_trajectory`
 (`SrTiO3` 64x6x6, 11,520 atoms, 600 receivers, 26 tiles, no hybrids): after 20 NVE steps of 1 fs from 300 K,
 positions 3.8e-8 A and energy 6.9e-9 eV/atom from the whole-system device loop (the tiled engine: 3.5e-8 A).
+
+### 6.25 Model coverage of S6-T06 (16 November 2026, 07:30)
+
+RTX 5060 Ti only; library `90a30122589e77bd`, generic path (the default). `loupmd validate --model LABEL`, worst
+ratios energy, force, stress: `mp0b3-medium` (oxide, 18 rows) 0.07, 1.14, 0.78; `mp0-large` (`MACE_MPtrj_2022.9.model`,
+oxide, 6 rows) 0.14, 1.33, 1.10; `matpes-r2scan` (crystals, 18 rows) 0.12, 1.43, 0.98. All PASS.
+
