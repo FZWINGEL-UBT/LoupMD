@@ -103,11 +103,12 @@ def test_the_tiled_call_gives_the_whole_system_result(model, structure, receiver
           f"eV/A, dS {default[2]:.2e} eV/A^3; no hybrids dE {plain[0]:.2e}, dF {plain[1]:.2e}, dS {plain[2]:.2e}; "
           f"whole system between the two kernel sets {kernels[0]:.1e}, {kernels[1]:.1e}, {kernels[2]:.1e}")
     # Without hybrids: the plan's bounds (1e-7 eV/atom, 1e-5 eV/A; stress a tenth of the gate's floor). With the
-    # default GEMMs: forces as the plan; energy and stress at the open domain's bounds (D16, D60): a tenth of the
-    # gate's energy floor (0.01 meV/atom) and its stress floor (1e-7 eV/A^3).
+    # default GEMMs: forces as the plan; energy at a fifth of the gate's energy floor (0.01 meV/atom) and stress at
+    # its floor (1e-7 eV/A^3): which tile shapes get the hybrid depends on the plan picks, and fresh picks gave up to
+    # 1.03e-6 eV/atom before the tile GEMM buckets and 1.42e-6 with them (PLAN.md D16, D60, D66).
     for name, d, bound in zip(("energy", "forces", "stress"), plain, (1e-7, 1e-5, 1e-8)):
         assert d <= bound, f"{name}, no hybrids: the tiled call differs by {d:.3e}"
-    for name, d, bound in zip(("energy", "forces", "stress"), default, (1e-6, 1e-5, 1e-7)):
+    for name, d, bound in zip(("energy", "forces", "stress"), default, (2e-6, 1e-5, 1e-7)):
         assert d <= bound, f"{name}, default GEMMs: the tiled call differs by {d:.3e}"
 
 
@@ -150,3 +151,49 @@ def test_the_tiled_call_is_refused_for_long_range_models():
     bundle = ensure_loup_bundle(find_model("MACE-POLAR-1-S.model"), [8, 22, 38])
     with pytest.raises(BackendError, match="the tiled call needs a bundle of the generic path without long range"):
         _tiled(bundle, at, 100)
+
+
+_COUNT_TIMINGS = r"""
+import sys, numpy as np
+sys.path.insert(0, "tests/gpu")
+from gpu_support import find_model, srtio3
+from loupmd import LoupEngine, ensure_loup_bundle
+at = srtio3(20)
+at.positions += np.random.default_rng(11).normal(scale=0.03, size=at.positions.shape)
+eng = LoupEngine(ensure_loup_bundle(find_model("mace-omat-0-medium.model"), [8, 22, 38]))
+e, f, _, tiles = eng.evaluate_tiled(at.numbers, at.positions, at.cell.array, 5000, skin=0.5)
+print("RESULT", repr(e / len(at)), tiles)
+np.save(sys.argv[1], f)
+"""
+
+
+@pytest.mark.full
+def test_tile_gemm_buckets_time_fewer_shapes_and_keep_the_result(tmp_path):
+    """S5-T10: in the tiled call a GEMM decision timed for one row count serves its size bucket (four per octave),
+    so the first call on a new workspace times far fewer shapes. LOUP_TILE_GEMM_BUCKETS=0 times every row count.
+    Each side runs in a process of its own with an empty plan cache and without hybrids (the same kernels either
+    way, so the bound is float32 rounding of other GEMM tilings)."""
+    import os
+    import pathlib
+    import subprocess
+    import sys
+    import time
+
+    runs = {}
+    for buckets in ("1", "0"):
+        env = dict(os.environ, LOUP_TILE_GEMM_BUCKETS=buckets, LOUP_DEBUG_GEMM="1", LOUP_NO_HYBRID="1",
+                   LOUP_CACHE_DIR=str(tmp_path / f"plans{buckets}"))
+        start = time.perf_counter()
+        done = subprocess.run([sys.executable, "-c", _COUNT_TIMINGS, str(tmp_path / f"f{buckets}.npy")], env=env,
+                              capture_output=True, text=True, cwd=pathlib.Path(__file__).resolve().parents[2])
+        wall = time.perf_counter() - start
+        assert done.returncode == 0, done.stderr[-2000:]
+        result = [line.split() for line in done.stdout.splitlines() if line.startswith("RESULT")][0]
+        timed = sum(line.startswith("gemm M=") for line in done.stderr.splitlines())
+        runs[buckets] = (float(result[1]), int(result[2]), timed, wall, np.load(tmp_path / f"f{buckets}.npy"))
+    (e1, t1, n1, w1, f1), (e0, t0, n0, w0, f0) = runs["1"], runs["0"]
+    print(f"tile GEMM buckets: {t1} tiles; shapes timed {n1} with buckets, {n0} without; process wall {w1:.1f} s "
+          f"and {w0:.1f} s; dE {abs(e1 - e0):.2e} eV/atom, dF {np.abs(f1 - f0).max():.2e} eV/A")
+    assert t1 == t0 >= 4
+    assert n1 <= 0.6 * n0
+    assert abs(e1 - e0) <= 1e-7 and np.abs(f1 - f0).max() <= 1e-5

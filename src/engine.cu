@@ -555,6 +555,12 @@ struct LoupHandle {
     };
     std::string plan_cache_path;
     std::map<std::tuple<int, int, int, bool, bool>, DiskPlan> disk_plans;
+    // The tiled call (plan task S5-T10): each tile's row count is a GEMM M of its own and changes with every list
+    // build, so a decision timed for one M is taken for every M of its size bucket (four per octave, m_bucket) while
+    // the handle holds a tile workspace. Kept in memory for the handle's life (not written to the plan file);
+    // LOUP_TILE_GEMM_BUCKETS=0 turns it off (every M timed, as the whole-system path).
+    std::map<std::tuple<int, int, int, bool, bool>, DiskPlan> bucket_plans;
+    bool gemm_buckets = true;
     bool disk_dirty = false;
     void load_disk_plans(int device_id) {
         const char* cdir = std::getenv("LOUP_CACHE_DIR");
@@ -972,6 +978,14 @@ static void cublas_bind(LoupHandle* h, cudaStream_t s, void* ws) {
     CUBLAS_CHECK_THROW(cublasSetWorkspace(h->cublas, ws, h->cublas_ws_bytes));
 }
 
+// The size bucket of a GEMM's M in the tiled call: four per octave (M in [2^e, 2^e * 5/4) is one bucket, and so on),
+// so a bucket spans at most 25% of its smallest M. Below 64 rows every M is its own bucket.
+static inline int m_bucket(int M) {
+    if (M < 64) return -M;
+    const int e = 31 - __builtin_clz((unsigned)M);
+    return e * 4 + (int)(((unsigned)M >> (e - 2)) & 3u);
+}
+
 static inline void sgemm_rm(
     LoupHandle* h, bool transA, bool transB,
     int M, int N, int K,
@@ -1032,9 +1046,18 @@ static inline void sgemm_rm(
         }
         plan.algo = res[0].algo;
         bool hit_disk = false;
+        const bool bucketed = h->tile_workspace && h->gemm_buckets;
+        const auto bkey = std::make_tuple(m_bucket(M), N, K, transB, beta != 0.0f);
+        const LoupHandle::DiskPlan* found = nullptr;
         auto dit = h->disk_plans.find(key);
         if (dit != h->disk_plans.end()) {
-            const auto& dp = dit->second;
+            found = &dit->second;
+        } else if (bucketed) {
+            auto bit = h->bucket_plans.find(bkey);
+            if (bit != h->bucket_plans.end()) found = &bit->second;
+        }
+        if (found) {
+            const auto& dp = *found;
             auto splitk_ok = [&](uint8_t m) {
                 if (m <= 2) return true;
                 if (m > 5) return false;
@@ -1173,6 +1196,9 @@ static inline void sgemm_rm(
                     h->disk_plans[key] = dp;
                     h->disk_dirty = true;
                 }
+                if (bucketed) h->bucket_plans[bkey] = dp;   // the bucket takes this decision, noise or not
+                if (bucketed && getenv("LOUP_DEBUG_GEMM_BUCKETS"))
+                    fprintf(stderr, "gemm timed M=%d N=%d K=%d (bucket %d)\n", M, N, K, m_bucket(M));
             }
         }
         it = h->lt_cache.emplace(key, plan).first;
@@ -2072,6 +2098,7 @@ LoupHandle* loup_create(const char* loup_path, int device_id) {
         const char* lr_hyb = std::getenv("LOUP_LR_HYBRID");
         if (!(h->gen && h->gen->has_lr()) || (lr_hyb && lr_hyb[0] == '1')) h->hyb.init(device_id);
         h->load_disk_plans(device_id);
+        if (const char* b = std::getenv("LOUP_TILE_GEMM_BUCKETS")) h->gemm_buckets = std::atoi(b) != 0;
         tune_l1(device_id);
         loup::sgemm128_init();
         h->spline_rpb_occ = h->spline_rpb = choose_spline_rpb();
@@ -2507,6 +2534,7 @@ static bool drop_hybrid(LoupHandle* h) {
     // The plans in memory and the file were timed with the hybrid: drop them and save nothing from this engine, so a
     // later process (hybrid loaded) still times the hybrid for these shapes.
     h->disk_plans.clear();
+    h->bucket_plans.clear();
     h->disk_dirty = false;
     h->plan_cache_path.clear();
     h->invalidate_graphs();

@@ -1068,3 +1068,42 @@ RTX 5060 Ti only; library `91fb0fdfb9026c7f...` (no C change since §6.19; Pytho
 - `pytest tests/cpu`: 358 passed, 1 skipped.
 - Not measured: the setup time the plan adds to a whole-system run (one 4,096-atom list build and its
   allocations; estimate well under a second); the step path is unchanged, so no step A/B was run.
+
+### 6.21 Tile GEMM size buckets (16 November 2026, 04:10)
+
+RTX 5060 Ti only; library `d2f9b371d1e43994...` (the working tree after `3f02afc`), against `91fb0fdf` (§6.19).
+PLAN.md S5-T10, D66; ledger `tile-gemm-buckets`.
+
+First tiled call on a new engine, the second call, and a call after a move that rebuilds the lists (new tile row
+counts); `SrTiO3` 20^3 rattled, an empty plan cache per process (`.tmp_o/probe_first_call.py`):
+
+| Model, tiles | Before (s): first, second, after a rebuild | Buckets (s) | Buckets off on the new build (s) |
+|---|---|---|---|
+| OMAT-0 medium, 12 of 5,000 | 5.95, 0.094, 4.36 | 2.21, 0.095, 0.86 | 5.56, 0.095, 4.39 |
+| OMAT-0 medium, 2 of 20,000 | 1.80, 0.088, 0.38 | 1.74, 0.087, 0.13 | 1.70, 0.086, 0.35 |
+| OMAT-0 small, 12 of 5,000 | 4.19, 0.056, 3.23 | 1.66, 0.056, 0.51 | 4.44, 0.056, 3.02 |
+
+- `pytest -s tests/gpu/test_tiled.py -k buckets`: 114 GEMM shapes timed with buckets, 358 without (40,000 atoms,
+  11 tiles of 5,000, no hybrids); results 3.7e-10 eV/atom and 1.9e-6 eV/A apart.
+- Tiled MD, one run each (not an A/B): 5,000-atom NVE 18.9 -> 16.3 ms per step; Langevin 30.7 -> 17.9 ms per step.
+- The tiled 3x gate (`loupmd validate --capacity tiled`) on this build: omat0-medium 0.57, 1.81, 1.23; omat0-small
+  0.34, 1.31, 1.50; mp0-medium 0.02, 0.60, 0.52; mpa0-medium 0.33, 2.05, 2.23; matpes-pbe (crystals) 0.19, 1.04,
+  1.00; mh1-omat (crystals) 0.10, 0.88, 0.29; off23-medium (organic) 0.01, 0.33, 0.54. All PASS (§6.14: the same
+  labels before).
+- `test_the_tiled_call_gives_the_whole_system_result` with the default GEMMs, fresh plans, three runs per build:
+  before 0.48, 1.03, 0.72e-6 eV/atom; buckets 0.87, 0.12, 1.42e-6 (and 1.35e-6, 1.26e-6 in the suite runs);
+  without hybrids at most 1.6e-9 on both. The bound is now 2e-6 (D66).
+- Step A/B (whole-system path; four rounds alternating, a fresh plan directory per run), ms per step:
+
+| Round | NbCl5, before | NbCl5, buckets | SrTiO3, before | SrTiO3, buckets |
+|---|---|---|---|---|
+| 1 | 1.895 | 1.897 | 8.215 | 8.227 |
+| 2 | 1.896 | 1.903 | 8.228 | 8.246 |
+| 3 | 1.899 | 1.915 | 8.221 | 8.230 |
+| 4 | 1.916 | 1.910 | 8.221 | 8.221 |
+| Mean | 1.902 | 1.906 (+0.2%) | 8.221 | 8.231 (+0.1%) |
+
+  A tie: the whole-system path only reads one more flag on a plan-cache miss.
+- `pytest tests/gpu -m "not acceptance"` on this build: 284 passed, 1 failed (the default-GEMM bound above, before
+  D66). After the change `pytest tests/gpu/test_tiled.py`: 8 passed (default-GEMM dE 1.26e-6); the full
+  tier not rerun.
