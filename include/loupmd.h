@@ -457,6 +457,17 @@ const char* loup_d3_last_error(void);
 // variable-cell step): added to every whole-system evaluation from the next positions on. settings NULL removes it.
 // Needs a periodic cell; refused for open domains and the tiled call (PLAN.md S6-D09). The tables are copied.
 int loup_set_dispersion(LoupHandle* h, const LoupD3Settings* settings, const LoupD3Tables* tables);
+// A D3 term kept across calls, outside a handle (the tiled execution, S6-D09): made for the atomic numbers and the
+// cell (the cell may change later; the grid's bin counts are fixed here), then computed at each call as
+// loup_d3_evaluate does but without a graph (outputs as there; NULL: not computed). NULL / nonzero on failure, with
+// loup_d3_last_error() saying why. loup_d3_device_bytes: what the term holds on the GPU.
+typedef struct LoupD3 LoupD3;
+LoupD3* loup_d3_create(const LoupD3Settings* settings, const LoupD3Tables* tables, int n_atoms,
+                       const int* atomic_numbers, const double* cell);
+int loup_d3_compute(LoupD3* term, const double* positions, const double* cell, double* out_energy_ev,
+                    double* out_forces, double* out_virial, double* out_atom_energies);
+size_t loup_d3_device_bytes(const LoupD3* term);
+void loup_d3_destroy(LoupD3* term);
 
 // Environment:
 //   LOUP_CACHE_DIR  directory for the per-GPU GEMM plan cache (default $HOME/.cache/loupmd). Files are keyed by GPU

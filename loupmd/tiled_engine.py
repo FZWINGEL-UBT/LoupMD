@@ -7,6 +7,10 @@ loop does. Thermostats other than Langevin and every barostat are refused in til
 run on the tiled state (D65). The Langevin noise follows ASE's formulas with its own random stream (seeded from the
 run's seed and the step), so a tiled run does not repeat a whole-system run's trajectory; a restart continues the
 stream.
+
+A dispersion term (``set_dispersion``, PLAN.md S6-D09, D76) is computed for the whole system by the library's D3
+term kept across calls (``loupmd._d3.Term``): it needs no neighbour list and holds about 200 bytes per atom, so it
+fits where the model has to be tiled. Its energy, forces and stress are added to the tiled call's.
 """
 from __future__ import annotations
 
@@ -36,6 +40,8 @@ class TiledEngine:
         self._n = 0
         if hasattr(engine, "info"):            # what callers ask with hasattr (the record's kernel path)
             self.info = engine.info
+        self.dispersion = None
+        self._d3 = None
 
     # ------------------------------------------------------------------------------------------------- system
     def set_system(self, numbers, masses, skin=0.5):
@@ -50,7 +56,19 @@ class TiledEngine:
         self._noise_step = 0                     # the Langevin stream's position: kept by restarts, as the device's
         self._rows = []
         self._step_disp = 0.0
+        self._close_d3()
         self._eng.set_execution(self.mode, self.receivers, self.memory_fraction)
+
+    def set_dispersion(self, record=None):
+        """The D3 term of a resolved record added to every force call (``None``: removed)."""
+        self._close_d3()
+        self.dispersion = record
+        self._forces = self._energy = None
+
+    def _close_d3(self):
+        if self._d3 is not None:
+            self._d3.close()
+            self._d3 = None
 
     def set_fixed_atoms(self, fixed=None):
         self._fixed = None if fixed is None else np.asarray(fixed, dtype=bool).copy()
@@ -84,6 +102,15 @@ class TiledEngine:
         self.tiles = int(tiles)
         if not np.isfinite(e):
             raise BackendError(f"loup_run: non-finite energy ({e}) in the tiled call", call="loup_run")
+        if self.dispersion is not None:
+            from . import _d3
+
+            if self._d3 is None:
+                self._d3 = _d3.Term(self.dispersion, self._numbers, self._cell)
+            de, df, ds = self._d3.compute(self._pos, self._cell, stress=s is not None)
+            e, f = e + de, f + df
+            if s is not None:
+                s = s + ds
         self._energy, self._forces, self._stress = float(e), f, s
         return self._energy, f, s
 

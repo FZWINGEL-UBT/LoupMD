@@ -434,3 +434,35 @@ def test_swap_monte_carlo_with_the_term(model_path):
         sim.close()
         del sim
         gc.collect()
+
+
+def test_the_tiled_execution_carries_the_term(model_path):
+    """S6-D09 / D76: a tiled Simulation (SrTiO3 10x10x10, 5,000 atoms in tiles of 2,000 receivers) with d3bj runs the
+    whole-system term beside the tiled model; 20 NVE steps follow the whole-system run with the term."""
+    import gc
+
+    import loupmd
+    from loupmd import integrators
+    from loupmd.config import CapacityConfig
+
+    _lib_or_skip()
+    ff = loupmd.load(model_path, trusted=True)
+    base = suites.srtio3(10)
+    base.positions += np.random.default_rng(7).normal(scale=0.03, size=base.positions.shape)
+    out = {}
+    for mode, cap in (("whole", "whole"), ("tiled", CapacityConfig(mode="tiled", receivers=2000))):
+        at = base.copy()
+        sim = loupmd.Simulation(at, ff, integrator=integrators.NVE(timestep_fs=1.0), seed=1, capacity=cap,
+                                dispersion="d3bj")
+        try:
+            sim.run(steps=20)
+            out[mode] = (sim.atoms.positions.copy(), sim.atoms.get_potential_energy(),
+                         getattr(sim._engine, "tiles", 0), sim.dispersion_cost)
+        finally:
+            sim.close()
+            del sim
+            gc.collect()
+    (pw, ew, _, _), (pt, et, tiles, cost) = out["whole"], out["tiled"]
+    dx, de = np.abs(pt - pw).max(), abs(et - ew) / len(base)
+    print(f"tiled with d3bj: {tiles} tiles, vs whole after 20 NVE steps dx {dx:.2e} A, dE {de:.2e} eV/atom; {cost}")
+    assert tiles >= 3 and dx <= 1e-5 and de <= 1e-5          # the gate's energy floor; float32 rounding of the total

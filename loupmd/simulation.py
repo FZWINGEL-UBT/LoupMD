@@ -204,10 +204,6 @@ class Simulation:
         self.dispersion = _dispersion.resolve(dispersion, functional=force_field.functional,
                                               family=force_field.family, model=force_field.name)
         self.dispersion_method = _dispersion.runnable(self.dispersion) if self.dispersion is not None else None
-        if self.dispersion is not None and capacity.mode in ("tiled", "wavefront"):
-            raise PlanRefused(f"dispersion with capacity mode {capacity.mode!r}",
-                              why="the tiled execution has no dispersion term in this version (PLAN.md S6-D09)",
-                              next_step="Use capacity 'auto' or 'whole' on a cell that fits the GPU.")
 
     def _check_tiled_scheme(self):
         if self.config.scheme not in TILED_SCHEMES:
@@ -280,10 +276,8 @@ class Simulation:
         if self.dispersion is None:
             return
         if not hasattr(engine, "set_dispersion"):
-            raise PlanRefused("dispersion with the tiled execution",
-                              why="the cell does not fit the GPU whole, and the tiled execution has no dispersion "
-                                  "term in this version (PLAN.md S6-D09)",
-                              next_step="Run a smaller cell, or without dispersion.")
+            raise PlanRefused("dispersion with this engine", why="it has no set_dispersion",
+                              next_step="Run without dispersion.")
         engine.set_dispersion(self.dispersion)
 
     def _time_dispersion(self, engine, atoms):
@@ -291,8 +285,9 @@ class Simulation:
         and the three-body term's share of it, for the record and the report (PLAN.md S6-D08). Only with the library's
         engine; None otherwise."""
         from . import _core
+        from .tiled_engine import TiledEngine
 
-        if self.dispersion is None or not isinstance(engine, _core.LoupEngine):
+        if self.dispersion is None or not isinstance(engine, (_core.LoupEngine, TiledEngine)):
             return None
         from dataclasses import replace
 

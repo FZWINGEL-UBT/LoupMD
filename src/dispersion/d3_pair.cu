@@ -978,4 +978,101 @@ int loup_d3_evaluate(const LoupD3Settings* settings, const LoupD3Tables* tables,
     return rc;
 }
 
+// A term kept across calls (the tiled execution, S6-D09): prepared once for the atoms and the cell's bin counts,
+// recorded on its own stream at each call (not captured: one call per host step).
+struct LoupD3 {
+    std::unique_ptr<loup::dispersion::Term> term;
+    cudaStream_t stream = nullptr;
+    int n = 0;
+    double *pos = nullptr, *cell = nullptr, *e = nullptr, *f = nullptr, *v = nullptr, *ae = nullptr;
+};
+
+LoupD3* loup_d3_create(const LoupD3Settings* settings, const LoupD3Tables* tables, int n_atoms,
+                       const int* atomic_numbers, const double* cell) {
+    using namespace loup::dispersion;
+    tl_d3_error.clear();
+    LoupD3* ctx = new LoupD3();
+    try {
+        if (!settings || !tables || !atomic_numbers || !cell || n_atoms < 1)
+            throw std::invalid_argument("a required pointer is NULL, or no atoms");
+        if (settings->damping < 0 || settings->damping > 3) throw std::invalid_argument("damping must be 0..3");
+        Settings s;
+        s.damping = static_cast<Damping>(settings->damping);
+        s.s6 = settings->s6; s.s8 = settings->s8; s.a1 = settings->a1; s.a2 = settings->a2;
+        s.rs6 = settings->rs6; s.rs8 = settings->rs8; s.alpha = settings->alpha; s.beta = settings->beta;
+        s.pair_cutoff_bohr = settings->pair_cutoff_bohr;
+        s.cn_cutoff_bohr = settings->cn_cutoff_bohr;
+        s.smoothing_bohr = settings->smoothing_bohr;
+        s.three_body = settings->three_body != 0;
+        s.three_body_cutoff_bohr = settings->three_body_cutoff_bohr;
+        Tables t{tables->nref, tables->cnref, tables->rcov, tables->r2r4, tables->c6ref, tables->r0ab};
+        const char* why = nullptr;
+        ctx->term.reset(make_term(s, t, &why));
+        if (!ctx->term) throw std::invalid_argument(why);
+        CK(cudaStreamCreateWithFlags(&ctx->stream, cudaStreamNonBlocking));
+        std::vector<int32_t> z(atomic_numbers, atomic_numbers + n_atoms);
+        ctx->term->prepare(n_atoms, z.data(), cell, ctx->stream);
+        const size_t n = (size_t)n_atoms;
+        ctx->n = n_atoms;
+        CK(cudaMalloc(&ctx->pos, 3 * n * sizeof(double)));
+        CK(cudaMalloc(&ctx->cell, 9 * sizeof(double)));
+        CK(cudaMalloc(&ctx->e, sizeof(double)));
+        CK(cudaMalloc(&ctx->f, 3 * n * sizeof(double)));
+        CK(cudaMalloc(&ctx->v, 6 * sizeof(double)));
+        CK(cudaMalloc(&ctx->ae, n * sizeof(double)));
+        return ctx;
+    } catch (const std::exception& e) {
+        tl_d3_error = std::string("loup_d3_create: ") + e.what();
+        loup_d3_destroy(ctx);
+        return nullptr;
+    }
+}
+
+int loup_d3_compute(LoupD3* ctx, const double* positions, const double* cell, double* out_energy_ev,
+                    double* out_forces, double* out_virial, double* out_atom_energies) {
+    using namespace loup::dispersion;
+    tl_d3_error.clear();
+    try {
+        if (!ctx || !ctx->term || !positions || !cell || !out_energy_ev)
+            throw std::invalid_argument("a required pointer is NULL");
+        cudaStream_t st = ctx->stream;
+        const size_t n = (size_t)ctx->n;
+        CK(cudaMemcpyAsync(ctx->pos, positions, 3 * n * sizeof(double), cudaMemcpyHostToDevice, st));
+        CK(cudaMemcpyAsync(ctx->cell, cell, 9 * sizeof(double), cudaMemcpyHostToDevice, st));
+        CK(cudaMemsetAsync(ctx->e, 0, sizeof(double), st));
+        CK(cudaMemsetAsync(ctx->f, 0, 3 * n * sizeof(double), st));
+        CK(cudaMemsetAsync(ctx->v, 0, 6 * sizeof(double), st));
+        CK(cudaMemsetAsync(ctx->ae, 0, n * sizeof(double), st));
+        const bool forces = out_forces || out_virial;
+        Inputs in{st, ctx->pos, ctx->cell, forces, out_virial != nullptr};
+        Outputs out{ctx->e, out_atom_energies ? ctx->ae : nullptr, forces ? ctx->f : nullptr,
+                    out_virial ? ctx->v : nullptr};
+        ctx->term->record(in, out);
+        CK(cudaMemcpyAsync(out_energy_ev, ctx->e, sizeof(double), cudaMemcpyDeviceToHost, st));
+        if (out_forces) CK(cudaMemcpyAsync(out_forces, ctx->f, 3 * n * sizeof(double), cudaMemcpyDeviceToHost, st));
+        if (out_virial) CK(cudaMemcpyAsync(out_virial, ctx->v, 6 * sizeof(double), cudaMemcpyDeviceToHost, st));
+        if (out_atom_energies)
+            CK(cudaMemcpyAsync(out_atom_energies, ctx->ae, n * sizeof(double), cudaMemcpyDeviceToHost, st));
+        CK(cudaStreamSynchronize(st));
+        return 0;
+    } catch (const std::exception& e) {
+        tl_d3_error = std::string("loup_d3_compute: ") + e.what();
+        return -1;
+    }
+}
+
+size_t loup_d3_device_bytes(const LoupD3* ctx) {
+    if (!ctx || !ctx->term) return 0;
+    return ctx->term->device_bytes() + (size_t)ctx->n * 8 * sizeof(double) + 16 * sizeof(double);
+}
+
+void loup_d3_destroy(LoupD3* ctx) {
+    if (!ctx) return;
+    if (ctx->stream) cudaStreamSynchronize(ctx->stream);
+    ctx->term.reset();
+    for (double* p : {ctx->pos, ctx->cell, ctx->e, ctx->f, ctx->v, ctx->ae}) if (p) cudaFree(p);
+    if (ctx->stream) cudaStreamDestroy(ctx->stream);
+    delete ctx;
+}
+
 }  // extern "C"

@@ -78,6 +78,10 @@ pair term's tolerances (`tests/gpu/test_d3.py`). With `smoothing=w` each side of
 last `w` bohr before the three-body cutoff too; without it the cutoff is hard, as in simple-dftd3. Its cost grows with
 the square of the neighbours within its cutoff: at 40 bohr it is many times the pair term.
 
+## The ASE calculator
+
+`lm.calc("omat0-medium", dispersion="d3bj")` adds the term to every calculation (energy, forces, stress).
+
 ## Cost
 
 The term walks every pair within 40 bohr (21 A), which is far more pairs than the model's 6 A cutoff: on small cells
@@ -87,10 +91,8 @@ lists the time per evaluation on the RTX 5060 Ti.
 ## Not in this version
 
 - The tail correction, the split sum and the mesh sum (S6-D05, S6-D06): `long_range="auto"` uses the plain sum.
-- Dispersion with the tiled execution and open domains (S6-D09): a cell that does not fit the GPU whole is refused
-  with dispersion.
-- `dispersion=` on the ASE calculator `lm.calc` (S6-D09); use simple-dftd3's or torch-dftd's ASE calculator with a
-  `SumCalculator` meanwhile.
+- Dispersion with open domains. (A cell that does not fit the GPU whole runs the model tiled and the D3 term for
+  the whole system beside it: the term needs no neighbour list and about 200 bytes per atom.)
 - D4. Its own ASE calculator (`dftd4.ase.DFTD4`) adds it to `lm.calc` through ASE's `SumCalculator`:
 
 ```python

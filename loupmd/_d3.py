@@ -107,3 +107,63 @@ def evaluate(atoms, record, *, forces=True, stress=True, per_atom=False, repeat=
     if repeat:
         out["ms"] = float(ms[0])
     return out
+
+
+class Term:
+    """A D3 term kept across calls (``loup_d3_create``; the tiled execution, PLAN.md S6-D09): made for the atomic
+    numbers and a cell, then ``compute(positions, cell)`` -> ``(energy eV, forces eV/A, stress eV/A^3 3x3)``."""
+
+    def __init__(self, record, numbers, cell, *, lib=None):
+        lib = _lib(lib)
+        if not hasattr(lib, "loup_d3_create"):
+            raise BackendError("the library has no persistent D3 term", why="it was built before PLAN.md S6-D09",
+                               next_step="Rebuild the library from this source tree (`make`).")
+        lib.loup_d3_create.argtypes = [ctypes.POINTER(LoupD3Settings), ctypes.POINTER(LoupD3Tables), ctypes.c_int,
+                                       ctypes.POINTER(ctypes.c_int), _D]
+        lib.loup_d3_create.restype = ctypes.c_void_p
+        lib.loup_d3_compute.argtypes = [ctypes.c_void_p, _D, _D, _D, _D, _D, _D]
+        lib.loup_d3_compute.restype = ctypes.c_int
+        lib.loup_d3_device_bytes.argtypes = [ctypes.c_void_p]
+        lib.loup_d3_device_bytes.restype = ctypes.c_size_t
+        lib.loup_d3_destroy.argtypes = [ctypes.c_void_p]
+        lib.loup_d3_destroy.restype = None
+        self._lib, self.record = lib, record
+        t = tables()
+        tab = LoupD3Tables(t["nref"].ctypes.data_as(ctypes.POINTER(ctypes.c_int)), _ptr(t["cnref"]), _ptr(t["rcov"]),
+                           _ptr(t["r2r4"]), _ptr(t["c6ref"]), _ptr(t["r0ab"]))
+        z = np.ascontiguousarray(numbers, dtype=np.int32)
+        self.n = len(z)
+        c = np.ascontiguousarray(cell, dtype=np.float64)
+        s = settings(record)
+        self._h = lib.loup_d3_create(ctypes.byref(s), ctypes.byref(tab), self.n,
+                                     z.ctypes.data_as(ctypes.POINTER(ctypes.c_int)), _ptr(c))
+        if not self._h:
+            raise BackendError((lib.loup_d3_last_error() or b"loup_d3_create failed").decode())
+
+    def device_bytes(self) -> int:
+        return int(self._lib.loup_d3_device_bytes(self._h))
+
+    def compute(self, positions, cell, *, stress=True):
+        pos = np.ascontiguousarray(positions, dtype=np.float64)
+        c = np.ascontiguousarray(cell, dtype=np.float64)
+        e, f, v = np.zeros(1), np.zeros((self.n, 3)), np.zeros(6)
+        rc = self._lib.loup_d3_compute(self._h, _ptr(pos), _ptr(c), _ptr(e), _ptr(f), _ptr(v) if stress else None,
+                                       None)
+        if rc != 0:
+            raise BackendError((self._lib.loup_d3_last_error() or b"loup_d3_compute failed").decode())
+        out_stress = None
+        if stress:
+            xx, xy, xz, yy, yz, zz = v
+            out_stress = np.array([[xx, xy, xz], [xy, yy, yz], [xz, yz, zz]]) / abs(float(np.linalg.det(c)))
+        return float(e[0]), f, out_stress
+
+    def close(self):
+        if getattr(self, "_h", None):
+            self._lib.loup_d3_destroy(self._h)
+            self._h = None
+
+    def __del__(self):
+        try:
+            self.close()
+        except Exception:
+            pass

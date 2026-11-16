@@ -347,8 +347,8 @@ def listing() -> str:
               "without functional= or parameters=, a damping without a parameter set for the functional.",
               "", "Built in this version: the plain real-space pair sum with every damping and the switch "
               "(PLAN.md S6-D04) and the three-body term (S6-D08). Not yet: the tail, split and mesh methods "
-              "(S6-D05, S6-D06); runs that ask for them are refused. Whole-system execution only (the tiled "
-              "execution: S6-D09)."]
+              "(S6-D05, S6-D06); runs that ask for them are refused. In the tiled execution the term runs for the "
+              "whole system beside the tiled model (S6-D09)."]
     return "\n".join(lines)
 
 
