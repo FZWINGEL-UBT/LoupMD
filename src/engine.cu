@@ -4737,6 +4737,29 @@ static int build_tile_list(LoupHandle* h, const TileDomain& t, const double* pos
 }
 
 // Puts a kept tile list back into the workspace: device-to-device copies on the stream, no host sync.
+// The handle's own list buffers, saved while restore_tile_list points it at tiles' buffers, and given back at scope
+// exit (also on an error path), before anything that rebuilds a list or frees the handle's buffers can run.
+struct TileListBorrow {
+    LoupHandle* h;
+    int *species, *row_ptr, *senders, *receivers, *pairs;
+    double *pos64, *shift_cart;
+    explicit TileListBorrow(LoupHandle* h_)
+        : h(h_), species(h_->d_species), row_ptr(h_->d_row_ptr), senders(h_->d_senders),
+          receivers(h_->d_receivers), pairs(h_->d_pairs), pos64(h_->d_pos64), shift_cart(h_->d_shift_cart) {}
+    ~TileListBorrow() {
+        h->d_species = species;
+        h->d_row_ptr = row_ptr;
+        h->d_senders = senders;
+        h->d_receivers = receivers;
+        h->d_pairs = pairs;
+        h->d_pos64 = pos64;
+        h->d_shift_cart = shift_cart;
+        h->nl_valid = false;  // the handle's own buffers hold whatever list was built last, not the last tile's
+    }
+    TileListBorrow(const TileListBorrow&) = delete;
+    TileListBorrow& operator=(const TileListBorrow&) = delete;
+};
+
 static int restore_tile_list(LoupHandle* h, const TileList& t) {
     h->N = t.n_local;
     h->n_ghost = t.rows - t.n_local;
@@ -4746,18 +4769,16 @@ static int restore_tile_list(LoupHandle* h, const TileList& t) {
     h->e0_total = t.e0;
     loup::compute_cell_mat(t.box, h->cell, h->cell_vol, h->cell_heights);
     memcpy(h->cell_in, t.box, sizeof(h->cell_in));
-    auto put = [&](void* dst, const DeviceBufferGuard& g, size_t bytes) -> int {
-        if (bytes) CUDA_CHECK(cudaMemcpyAsync(dst, g.p, bytes, cudaMemcpyDeviceToDevice, h->stream));
-        return 0;
-    };
-    if (put(h->d_species, t.species, (size_t)t.rows * sizeof(int)) ||
-        put(h->d_pos64, t.pos, (size_t)t.rows * 3 * sizeof(double)) ||
-        put(h->d_row_ptr, t.row_ptr, (size_t)(t.n_local + 1) * sizeof(int)) ||
-        put(h->d_senders, t.senders, (size_t)t.E * sizeof(int)) ||
-        put(h->d_receivers, t.receivers, (size_t)t.E * sizeof(int)) ||
-        put(h->d_pairs, t.pairs, (size_t)t.E * sizeof(int)) ||
-        put(h->d_shift_cart, t.shift, (size_t)t.E * 3 * sizeof(double)))
-        return -1;
+    // The sweeps only read the list, so the handle points at the tile's own buffers (TileListBorrow gives the
+    // handle its buffers back when the tiled call ends) instead of copying them in: about 170 MB per sweep and tile
+    // at 65,536 receivers (O31 profile).
+    h->d_species = static_cast<int*>(t.species.p);
+    h->d_pos64 = static_cast<double*>(t.pos.p);
+    h->d_row_ptr = static_cast<int*>(t.row_ptr.p);
+    h->d_senders = static_cast<int*>(t.senders.p);
+    h->d_receivers = static_cast<int*>(t.receivers.p);
+    h->d_pairs = static_cast<int*>(t.pairs.p);
+    h->d_shift_cart = static_cast<double*>(t.shift.p);
     h->E_skin = t.E;
     h->nl_valid = true;
     h->forces_current = false;
@@ -5238,6 +5259,7 @@ static int evaluate_tiled_impl(LoupHandle* h, int n_atoms, const int* atomic_num
     // Energy and virial accumulate on the device over every tile sweep; each tile's forces are folded after it.
     CUDA_CHECK(cudaMemsetAsync(static_cast<char*>(h->d_zero_slab) + h->zero_tail_off, 0,
                                h->zero_slab_bytes - h->zero_tail_off, h->stream));
+    TileListBorrow borrow(h);  // the sweeps point the handle at each tile's list (restore_tile_list)
     auto row_atom = [](const TileList& t) { return static_cast<const int*>(t.row_atom.p); };
     // The rows of x and dx: the atoms' own rows, or with the wavefront their rows in the pool
     auto row_x = [&](const TileList& t) { return static_cast<const int*>(wave ? t.row_slot.p : t.row_atom.p); };

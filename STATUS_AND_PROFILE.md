@@ -1511,3 +1511,34 @@ three-body tests with `LOUP_D3_ATM_PROJ=0`. So the C6 table was not the three-bo
 per-triangle arithmetic (a square root, a power, the angle term and its derivatives) is.
 
 GPU suite (`-m "not acceptance"`) on d3m: 353 passed (not rerun on d3n, which changes only the three-body kernel).
+
+### 6.34 Tiled MD on the device and where the tiled call's time goes (16 November 2026, PLAN.md O31)
+
+RTX 5060 Ti, OMAT-0 medium, `SrTiO3`. The integrator of a tiled run ran on the host in numpy (S5-T12); it now runs
+on the device (`loup_tiled_run`, `ae341cc`). Per MD step, 20 steps after a warm-up, separate processes:
+
+| System | Integrator | Host loop (ms) | Device loop (ms) |
+| --- | --- | --- | --- |
+| 320,000 atoms, 8 tiles of 65,536 | NVE | 712.5 (tiled call 704.4, rest 8.1) | 697.6 |
+| 320,000 atoms, 8 tiles of 65,536 | Langevin | 744.4 and 806.9 (two runs; rest 41) | 706.5 |
+| 1,081,600 atoms, wavefront, 32 tiles | Langevin | (NVE 2,536.5) | 2,382.2 |
+
+So the integrator was 1-5% of a tiled step; the tiled call is the rest. Where that call's time goes, by `nsys`
+(`.tmp_o/kern_cmp.py`): one kept tiled call on 320,000 atoms against eight whole-system calls on 40,000 (the same
+number of atoms), no stress: kernels 627.0 against 526.5 ms, GPU span 677.6 against 533.8 ms, the GPU idle only
+4.5 ms of the tiled span (so CUDA graphs or fewer host syncs would not help). The extra GPU work per call:
+
+| Item | ms | Note |
+| --- | --- | --- |
+| Device copies of each tile's list into the handle before each sweep (4.1 GB) | 23.5 | `tile-list-borrow` below |
+| Memsets: the pass's zero slab, 270 MB per sweep and tile (7.2 GB against 1.3 GB) | ~17 | the other branch's S99 (each forward conv kernel zeroes its own rows) removes most of it after the merge |
+| Layer 0's forward again in the backward sweep (`first_fwd`, `gprod_fwd`, `ro_linear`, gathers) | ~26 | open: store it per tile if memory allows |
+| Active-edge compaction in each of the three sweeps (`compute_and_count_active`, `scatter_active_edges`) | ~19 | open: once per tile and call |
+| Row gathers / scatters between tile and whole-cell arrays | ~23 | inherent to the layout |
+| More GEMM launches (`sgemm128`, CUTLASS) | ~22 | the recomputation and the tile shapes |
+
+`tile-list-borrow`: the sweeps only read the tile's list, so `restore_tile_list` points the handle's list pointers
+at the tile's buffers, and a scope guard gives the handle its own back when the call ends. A B B A, separate
+processes, median of five kept calls (`.tmp_o/tiled_ab.py`): 672.1 / 668.4 / 659.6 / 673.3 ms (a b b a), b / a
+0.987; forces against the copy build 1.8e-6 eV/A (run-to-run atomics), `test_kept_lists...` and the wavefront
+Simulation test pass. Less than the 23.5 ms of copies: they partly overlapped other work.
