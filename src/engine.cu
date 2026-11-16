@@ -109,46 +109,82 @@ __global__ void scatter_active_edges_kernel(
     int* __restrict__ act_slab, float2* __restrict__ act_t_sx);
 __global__ void check_skin_kernel(int N, double half_skin, const double* __restrict__ pos64,
                                   const double* __restrict__ ref_pos64, int* __restrict__ need_rebuild);
-// Publishes up to three device ints into mapped pinned host memory (pub[1..3]), then the next value of a device
-// counter (pub[0]), so the host can poll for this stream position instead of calling cudaStreamSynchronize, whose
-// wake-up leaves the GPU idle for 0.1-0.2 ms under WSL2. One thread; a stream-ordered (or graph-ordered) launch sees
-// every earlier write of the stream.
+// Publications to mapped pinned host memory: the next value of a device counter selects one of four slots (so two
+// publications of one MD step cannot overwrite each other before the host reads them), the slot gets the three
+// values and then the counter value, which the host polls (wait_published) instead of calling cudaStreamSynchronize,
+// whose wake-up leaves the GPU idle for 0.1-0.2 ms under WSL2. One thread; a stream-ordered (or graph-ordered)
+// launch sees every earlier write of the stream.
+__device__ __forceinline__ void publish3(unsigned int* counter, int* pub, int a, int b, int c) {
+    const unsigned int seq = *counter + 1u;
+    *counter = seq;
+    volatile int* p = pub + 4 * (seq & 3u);
+    p[1] = a;
+    p[2] = b;
+    p[3] = c;
+    __threadfence_system();
+    reinterpret_cast<volatile unsigned int*>(p)[0] = seq;
+}
+
 __global__ void publish_kernel(const int* __restrict__ a, const int* __restrict__ b, const int* __restrict__ c,
                                unsigned int* __restrict__ counter, int* __restrict__ pub) {
-    volatile int* p = pub;
-    p[1] = a ? *a : 0;
-    p[2] = b ? *b : 0;
-    p[3] = c ? *c : 0;
-    const unsigned int seq = *counter + 1u;
-    *counter = seq;
-    __threadfence_system();
-    reinterpret_cast<volatile unsigned int*>(pub)[0] = seq;
+    publish3(counter, pub, a ? *a : 0, b ? *b : 0, c ? *c : 0);
 }
 
-// The MD step's hinge (run_md_loop): publishes the skin-check flag and the last rebuild's row-order flag as
-// publish_kernel does, and lets the step's force pass (the IF node's body) run only if no rebuild is needed and the
-// rows are valid, so the host can queue the next step while this one's forces run instead of reading the flag at an
-// idle GPU.
-__global__ void guard_step_kernel(cudaGraphConditionalHandle cond, const int* __restrict__ need_rebuild,
-                                  const int* __restrict__ order_err, unsigned int* __restrict__ counter,
-                                  int* __restrict__ pub) {
+// The MD step's hinge (run_md_loop): publishes the skin-check flag and the last rebuild's row-order flag, and lets
+// the step's force pass (IF node on rest) run only if no rebuild is needed and the rows are valid, so the host can
+// queue the next step while this one's forces run instead of reading the flag at an idle GPU. With has_rebuild, the
+// step graph's rebuild branch (IF node on rebuild) runs when a rebuild is needed and the rows are valid.
+__global__ void guard_step_kernel(cudaGraphConditionalHandle rest, cudaGraphConditionalHandle rebuild, int has_rebuild,
+                                  const int* __restrict__ need_rebuild, const int* __restrict__ order_err,
+                                  unsigned int* __restrict__ counter, int* __restrict__ pub) {
     const int flag = *need_rebuild;
     const int bad_rows = *order_err;
-    volatile int* p = pub;
-    p[1] = flag;
-    p[2] = bad_rows;
-    p[3] = 0;
-    const unsigned int seq = *counter + 1u;
-    *counter = seq;
-    __threadfence_system();
-    reinterpret_cast<volatile unsigned int*>(pub)[0] = seq;
-    cudaGraphSetConditional(cond, (flag || bad_rows) ? 0u : 1u);
+    publish3(counter, pub, flag, bad_rows, 0);
+    cudaGraphSetConditional(rest, (flag || bad_rows) ? 0u : 1u);
+    if (has_rebuild) cudaGraphSetConditional(rebuild, (flag && !bad_rows) ? 1u : 0u);
 }
 
-// After a rebuild in the guarded loop: the force pass (the IF node's body) runs only if the rebuild's rows passed the
-// order check, which the host reads with the next guarded step's publication.
+// The step graph's rebuild branch after nl_count: publishes the edge count, the longest row and whether the new list
+// fits what the graph was captured for (edge capacity / bucket, row-sort width), and lets the branch's fill, commit
+// and checked rest (IF node) run only then; otherwise the host finishes the rebuild.
+__global__ void rebuild_gate_kernel(cudaGraphConditionalHandle fill, const int* __restrict__ row_ptr_end,
+                                    const int* __restrict__ max_deg, int E_lim, int P_cap,
+                                    unsigned int* __restrict__ counter, int* __restrict__ pub) {
+    const int E = *row_ptr_end;
+    const int m = *max_deg;
+    const int fits = E > 0 && E <= E_lim && m <= P_cap;
+    publish3(counter, pub, E, m, fits);
+    cudaGraphSetConditional(fill, fits ? 1u : 0u);
+}
+
+// After a rebuild in MD: the force pass (the IF node's body) runs only if the rebuild's rows passed the order check,
+// which the host reads with the next step's publication.
 __global__ void rest_guard_kernel(cudaGraphConditionalHandle cond, const int* __restrict__ order_err) {
     cudaGraphSetConditional(cond, *order_err ? 0u : 1u);
+}
+
+// Neighbour-rebuild bookkeeping (nl_bin, nl_count, nl_commit) as kernels rather than memset / memcpy nodes.
+__global__ void nl_reset_kernel(int n_bins, int* __restrict__ bin_counts, int* __restrict__ deg_end,
+                                int* __restrict__ order_err, int* __restrict__ max_deg) {
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i <= n_bins) bin_counts[i] = 0;  // [n_bins] too: the bin scan's total
+    if (i == 0) {
+        *deg_end = 0;  // the row scan's total
+        *order_err = 0;
+        *max_deg = 0;
+    }
+}
+
+__global__ void copy_ints_kernel(int n, const int* __restrict__ src, int* __restrict__ dst) {
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) dst[i] = src[i];
+}
+
+__global__ void nl_commit_kernel(int n, const double* __restrict__ pos, double* __restrict__ ref_pos,
+                                 int* __restrict__ need_rebuild) {
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) ref_pos[i] = pos[i];
+    if (i == 0) *need_rebuild = 0;
 }
 
 __global__ void tabled_outer_sum0_forward_kernel(
@@ -368,15 +404,16 @@ struct HybCubin {
 // FNV-1a over this library's own file: GEMM plans are keyed by it, so a rebuilt library (new kernels, other tile
 // code) never reuses plans timed against an older build.
 // Test overrides (LOUP_SPLINE_VARIANT=R1|R1p|R4|R4p|R5, LOUP_WPRIME_THREADS=256|512, LOUP_WPRIME_RCV=0|1,
-// LOUP_REORDER=0|1, LOUP_ROW_SORT=global): pin a kernel variant or path that tuning or a size threshold would
-// otherwise pick, so the gate can cover every one. Parsed by hand (no strtol: the library must link against older
-// glibc).
+// LOUP_REORDER=0|1, LOUP_ROW_SORT=global, LOUP_MD_REBUILD=host|fallback): pin a kernel variant or path that tuning or
+// a size threshold would otherwise pick, so the gate and the tests can cover every one. Parsed by hand (no strtol: the
+// library must link against older glibc).
 struct VariantOverrides {
     int spline_var = -1;  // index into tune_rebuild_variants' table
     int wp_threads = 0;
     int wprime_rcv = -1;
     int reorder = -1;
     bool row_sort_global = false;  // neighbour rows sorted in global scratch (else only rows over 4096 edges)
+    int md_rebuild = 0;  // MD rebuilds: 0 on the GPU in the step graph, 1 host-driven, 2 counted on the GPU, finished on the host
     VariantOverrides() {
         static const char* const names[5] = {"R1", "R1p", "R4", "R4p", "R5"};
         if (const char* s = std::getenv("LOUP_SPLINE_VARIANT"))
@@ -389,6 +426,7 @@ struct VariantOverrides {
         if (const char* s = std::getenv("LOUP_WPRIME_RCV")) wprime_rcv = (s[0] == '1') ? 1 : (s[0] == '0') ? 0 : -1;
         if (const char* s = std::getenv("LOUP_REORDER")) reorder = (s[0] == '1') ? 1 : (s[0] == '0') ? 0 : -1;
         if (const char* s = std::getenv("LOUP_ROW_SORT")) row_sort_global = strcmp(s, "global") == 0;
+        if (const char* s = std::getenv("LOUP_MD_REBUILD")) md_rebuild = strcmp(s, "host") == 0 ? 1 : strcmp(s, "fallback") == 0 ? 2 : 0;
     }
 };
 static constexpr int kSplineVar = 5;
@@ -654,10 +692,13 @@ struct LoupHandle {
     cudaGraphExec_t force_graph_exec = nullptr;
     int force_graph_stress = -1;
 
-    // MD step: first half + skin check + guard_step_kernel + IF (no rebuild, valid rows) {forces + second half}.
+    // MD step: first half + skin check + guard_step_kernel + IF (no rebuild, valid rows) {forces + second half}, and
+    // when md_dev_rebuild, IF (rebuild, valid rows) {count + rebuild_gate_kernel + IF (fits) {fill + commit + checked
+    // rest}}: the rebuild runs on the GPU without a host round trip unless the new list outgrows the captured sizes.
     cudaGraph_t md_step_graph = nullptr;
     cudaGraphExec_t md_step_exec = nullptr;
-    // Checked rest, launched after a step's rebuild: rest_guard_kernel + IF (valid rows) {forces + second half}.
+    bool md_dev_rebuild = false;
+    // Checked rest, launched after a host-driven rebuild: rest_guard_kernel + IF (valid rows) {forces + second half}.
     cudaGraph_t md_checked_graph = nullptr;
     cudaGraphExec_t md_checked_exec = nullptr;
 
@@ -672,11 +713,13 @@ struct LoupHandle {
         if (md_step_graph) { cudaGraphDestroy(md_step_graph); md_step_graph = nullptr; }
         if (md_checked_exec) { cudaGraphExecDestroy(md_checked_exec); md_checked_exec = nullptr; }
         if (md_checked_graph) { cudaGraphDestroy(md_checked_graph); md_checked_graph = nullptr; }
+        md_dev_rebuild = false;
     }
 
     int n_rebuilds = 0;     // rebuilds since set_system (atom reorder cadence)
     int* d_order_err = nullptr;  // set by sort_gather_rows_kernel when a row breaks the species-run contract
     int* d_max_deg = nullptr;    // longest neighbour row of the current rebuild (sizes the row sort)
+    int max_deg_last = 0;        // ... of the last rebuild (sizes the MD step graph's row sort)
     bool nl_valid = false;  // neighbour list built for the current system (ref positions and shifts are set)
 
     void free_system() {
@@ -1062,15 +1105,16 @@ static unsigned int publish(LoupHandle* h, const int* a, const int* b, const int
     return ++h->pub_count;
 }
 
-// Polls the mapped publish words until the publication `want` has landed, then copies its values to out[0..2]. The
+// Polls the mapped publish slot of publication `want` until it has landed, then copies its values to out[0..2]. The
 // stream is queried every few thousand polls so a failed kernel or an emptied queue cannot hang the host.
 static int wait_published(LoupHandle* h, unsigned int want, int out[3]) {
-    volatile unsigned int* seq = reinterpret_cast<volatile unsigned int*>(h->h_pub);
+    volatile int* p = h->h_pub + 4 * (want & 3u);
+    volatile unsigned int* seq = reinterpret_cast<volatile unsigned int*>(p);
     for (unsigned int spins = 1; *seq != want; ++spins) {
         if ((spins & 4095) == 0) {
             const cudaError_t e = cudaStreamQuery(h->stream);
             if (e == cudaSuccess && *seq != want) {
-                fprintf(stderr, "loupmd: publish %u never landed (have %u)\n", want, *seq);
+                fprintf(stderr, "loupmd: publish %u never landed (slot has %u)\n", want, *seq);
                 return -1;
             }
             if (e != cudaSuccess && e != cudaErrorNotReady) CUDA_CHECK(e);
@@ -1078,7 +1122,6 @@ static int wait_published(LoupHandle* h, unsigned int want, int out[3]) {
         __builtin_ia32_pause();
     }
     __atomic_thread_fence(__ATOMIC_ACQUIRE);
-    volatile int* p = h->h_pub;
     out[0] = p[1];
     out[1] = p[2];
     out[2] = p[3];
@@ -1095,34 +1138,184 @@ static int order_error() {
     return -1;
 }
 
+// Geometry of one neighbour-list build for the current cell, skin and N: bin grid, scan ranges, kernel shapes.
+struct NlGeom {
+    int nx, ny, nz, n_bins, rx, ry, rz, gridN, blkN, gridNb;
+    bool nb_groups;
+    size_t nb_smem;
+    double r_list2;
+    float r_lo2_f32, r_hi2_f32;
+};
+static constexpr int kNlBlk = 128;
+
+static NlGeom nl_geom(const LoupHandle* h) {
+    NlGeom g;
+    const int N = h->N;
+    const double r_list = (double)h->cutoff() + h->skin;
+    g.r_list2 = r_list * r_list;
+    g.nx = std::max(1, (int)std::floor(h->cell_heights[0] / 3.25));
+    g.ny = std::max(1, (int)std::floor(h->cell_heights[1] / 3.25));
+    g.nz = std::max(1, (int)std::floor(h->cell_heights[2] / 3.25));
+    while ((int64_t)g.nx * g.ny * g.nz > h->max_bins) {
+        if (g.nx >= g.ny && g.nx >= g.nz && g.nx > 1) --g.nx;
+        else if (g.ny >= g.nx && g.ny >= g.nz && g.ny > 1) --g.ny;
+        else if (g.nz > 1) --g.nz;
+        else break;
+    }
+    g.n_bins = g.nx * g.ny * g.nz;
+    g.rx = (int)std::ceil(r_list * g.nx / h->cell_heights[0]);
+    g.ry = (int)std::ceil(r_list * g.ny / h->cell_heights[1]);
+    g.rz = (int)std::ceil(r_list * g.nz / h->cell_heights[2]);
+    g.gridN = (N + kNlBlk - 1) / kNlBlk;
+    const double max_h = std::max({h->cell_heights[0], h->cell_heights[1], h->cell_heights[2]});
+    const float margin = std::max(0.01f, 1e-4f * (float)max_h);
+    const float r_lo_f = std::max(0.0f, (float)r_list - margin);
+    const float r_hi_f = (float)r_list + margin;
+    g.r_lo2_f32 = r_lo_f * r_lo_f;
+    g.r_hi2_f32 = r_hi_f * r_hi_f;
+    // count / fill: on sm_120 kNeighborLanes lanes per atom (128-thread blocks hold whole lane groups; fill keeps one
+    // nscan-int bin-offset table per atom in shared memory); elsewhere, or when that table would exceed 48 KB, the
+    // one-thread-per-atom kernels (32-thread blocks), which the lane-group kernels were not measured against.
+    const int nscan = (2 * g.rx + 1) * (2 * g.ry + 1) * (2 * g.rz + 1);
+    g.nb_smem = (size_t)(128 / loup::kNeighborLanes) * nscan * sizeof(int);
+    g.nb_groups = h->nb_groups_ok && g.nb_smem <= 48 * 1024;
+    g.blkN = g.nb_groups ? 128 : 32;
+    g.gridNb = (int)(((int64_t)N * (g.nb_groups ? loup::kNeighborLanes : 1) + g.blkN - 1) / g.blkN);
+    return g;
+}
+
+// Scratch of nl_count's two scans.
+static size_t nl_cub_bytes(LoupHandle* h, const NlGeom& g) {
+    size_t scan_bytes = 0, scanN_bytes = 0;
+    cub::DeviceScan::ExclusiveSum(nullptr, scan_bytes, h->d_bin_counts, h->d_bin_offsets, g.n_bins + 1, h->stream);
+    cub::DeviceScan::ExclusiveSum(nullptr, scanN_bytes, h->d_deg, h->d_row_ptr, h->N + 1, h->stream);
+    return std::max(scan_bytes, scanN_bytes);
+}
+
+// Wrapped positions and per-bin atom counts; zeroes the scans' totals, the row-order flag and the longest-row slot
+// (kernels, not memset / memcpy nodes: the MD step graph launches this branch from the device, where copy nodes cost
+// tens of microseconds each under WSL2).
+static int nl_bin(LoupHandle* h, const NlGeom& g) {
+    loup::nl_reset_kernel<<<(g.n_bins + 1 + 255) / 256, 256, 0, h->stream>>>(
+        g.n_bins, h->d_bin_counts, h->d_deg + h->N, h->d_order_err, h->d_max_deg);
+    loup::wrap_and_bin_kernel<<<g.gridN, kNlBlk, 0, h->stream>>>(
+        h->N, h->cell, g.nx, g.ny, g.nz, h->d_pos64, h->d_pos_wrapped, h->d_atom_wrap, h->d_atom_bin, h->d_bin_counts);
+    return 0;
+}
+
+// Bin offsets and slots, neighbour counts, row_ptr (edge count in row_ptr[N]) and the longest row. No host round
+// trip (d_cub_tmp must hold nl_cub_bytes), so run_md_loop captures it.
+static int nl_count(LoupHandle* h, const NlGeom& g) {
+    const int N = h->N;
+    size_t scan_bytes = h->cub_tmp_bytes;
+    cub::DeviceScan::ExclusiveSum(h->d_cub_tmp, scan_bytes, h->d_bin_counts, h->d_bin_offsets, g.n_bins + 1, h->stream);
+    loup::copy_ints_kernel<<<(g.n_bins + 255) / 256, 256, 0, h->stream>>>(g.n_bins, h->d_bin_offsets, h->d_bin_cursor);
+    loup::scatter_bins_kernel<<<g.gridN, kNlBlk, 0, h->stream>>>(
+        N, h->d_pos_wrapped, h->d_atom_wrap, h->d_species, h->d_atom_bin, h->d_bin_cursor,
+        h->d_bin_atom_id, h->d_bin_pos, h->d_bin_pos_f32, h->d_bin_wrap, h->d_bin_sp);
+    if (g.nb_groups)
+        loup::count_neighbors_kernel<<<g.gridNb, g.blkN, 0, h->stream>>>(
+            N, h->cell, g.nx, g.ny, g.nz, g.rx, g.ry, g.rz, g.r_list2, g.r_lo2_f32, g.r_hi2_f32, h->d_pos_wrapped,
+            h->d_atom_bin, h->d_bin_offsets, h->d_bin_atom_id, h->d_bin_pos, h->d_bin_pos_f32, h->d_deg);
+    else
+        loup::count_neighbors_scalar_kernel<<<g.gridNb, g.blkN, 0, h->stream>>>(
+            N, h->cell, g.nx, g.ny, g.nz, g.rx, g.ry, g.rz, g.r_list2, g.r_lo2_f32, g.r_hi2_f32, h->d_pos_wrapped,
+            h->d_atom_bin, h->d_bin_offsets, h->d_bin_atom_id, h->d_bin_pos, h->d_bin_pos_f32, h->d_deg);
+    size_t scanN_bytes = h->cub_tmp_bytes;
+    cub::DeviceScan::ExclusiveSum(h->d_cub_tmp, scanN_bytes, h->d_deg, h->d_row_ptr, N + 1, h->stream);
+    loup::max_degree_kernel<<<(N + 255) / 256, 256, 0, h->stream>>>(N, h->d_deg, h->d_max_deg);
+    return 0;
+}
+
+// Smallest power of two >= n (the row sort's width).
+static int pow2_at_least(int n) {
+    int p = 1;
+    while (p < n) p <<= 1;
+    return p;
+}
+
+// Fills the rows into the edge arrays (capacity >= the edge count), then sorts each receiver's row by key
+// (sym_pair << 19 | length bits), ties in fill order, and gathers it. Contract: for a fixed receiver sym_pair grows
+// with the sender species, so every row ends up grouped by ascending sender species, which the receiver-owned
+// tabled_outer_sum0_forward_kernel relies on (it stores one slot per species run); the sort kernel flags a row that
+// breaks it (a changed key or sym_pair would otherwise corrupt S0 silently). P: the sort width, a power of two >= the
+// longest row; rows of P <= 4096 sort in shared memory.
+static int nl_fill(LoupHandle* h, const NlGeom& g, int P) {
+    const int N = h->N;
+    const int S = h->n_species();
+    if (g.nb_groups)
+        loup::fill_neighbors_kernel<<<g.gridNb, g.blkN, g.nb_smem, h->stream>>>(
+            N, S, h->cell, g.nx, g.ny, g.nz, g.rx, g.ry, g.rz, g.r_list2, g.r_lo2_f32, g.r_hi2_f32,
+            h->d_pos_wrapped, h->d_atom_wrap, h->d_species, h->d_atom_bin,
+            h->d_bin_offsets, h->d_bin_atom_id, h->d_bin_pos, h->d_bin_pos_f32, h->d_bin_wrap, h->d_bin_sp,
+            h->d_row_ptr, h->d_tmp_snd, h->d_tmp_rcv, h->d_tmp_shifts, h->d_tmp_pairs, h->d_sort_keys);
+    else
+        loup::fill_neighbors_scalar_kernel<<<g.gridNb, g.blkN, 0, h->stream>>>(
+            N, S, h->cell, g.nx, g.ny, g.nz, g.rx, g.ry, g.rz, g.r_list2, g.r_lo2_f32, g.r_hi2_f32,
+            h->d_pos_wrapped, h->d_atom_wrap, h->d_species, h->d_atom_bin,
+            h->d_bin_offsets, h->d_bin_atom_id, h->d_bin_pos, h->d_bin_pos_f32, h->d_bin_wrap, h->d_bin_sp,
+            h->d_row_ptr, h->d_tmp_snd, h->d_tmp_rcv, h->d_tmp_shifts, h->d_tmp_pairs, h->d_sort_keys);
+    const int threads = std::min(256, std::max(32, P / 2));
+    if (P <= 4096 && !h->ovr.row_sort_global)
+        loup::sort_gather_rows_kernel<<<N, threads, P * sizeof(unsigned long long), h->stream>>>(
+            h->cell, h->d_row_ptr, h->d_sort_keys, h->d_tmp_snd, h->d_tmp_rcv, h->d_tmp_shifts, h->d_tmp_pairs,
+            h->d_species, h->d_senders, h->d_receivers, h->d_shift_cart, h->d_pairs, h->d_order_err);
+    else  // scratch: act_vec_len (16 B per edge) is per-step data, free during a rebuild
+        loup::sort_gather_rows_global_kernel<<<N, threads, 0, h->stream>>>(
+            h->cell, h->d_row_ptr, h->d_sort_keys, h->d_tmp_snd, h->d_tmp_rcv, h->d_tmp_shifts, h->d_tmp_pairs,
+            h->d_species, h->d_senders, h->d_receivers, h->d_shift_cart, h->d_pairs, h->d_order_err,
+            reinterpret_cast<unsigned long long*>(h->d_act_vec_len));
+    return 0;
+}
+
+// The list is now the one built at the current positions: they become the reference, and the skin flag clears.
+static int nl_commit(LoupHandle* h) {
+    loup::nl_commit_kernel<<<(h->N * 3 + 255) / 256, 256, 0, h->stream>>>(h->N * 3, h->d_pos64, h->d_ref_pos64,
+                                                                         h->d_need_rebuild);
+    return 0;
+}
+
+// Host decisions after nl_count (edge capacity, the graphs' edge bucket), then fill, sort and commit.
+static int nl_finish(LoupHandle* h, const NlGeom& g, int E_new, int max_deg, bool check_order) {
+    h->E_skin = E_new;
+    h->max_deg_last = max_deg;
+    if (E_new > 0) {
+        if (ensure_edge_capacity(h, E_new) != 0) return -1;
+        if (E_new > h->E_graph || h->E_graph > E_new + 32768) {
+            h->E_graph = std::min(h->E_cap, ((E_new + 8191) & ~8191));
+            if (h->E_graph < E_new) h->E_graph = E_new;
+            h->invalidate_graphs();
+        }
+        if (nl_fill(h, g, pow2_at_least(max_deg)) != 0) return -1;
+        if (check_order) {
+            int vals[3];
+            if (read_device_ints(h, h->d_order_err, nullptr, nullptr, vals) != 0) return -1;
+            if (vals[0]) return order_error();
+        }
+    } else if (h->E_graph != 0) {
+        h->E_graph = 0;
+        h->invalidate_graphs();
+    }
+    if (nl_commit(h) != 0) return -1;
+    CUDA_CHECK(cudaGetLastError());
+    h->nl_valid = true;
+    return 0;
+}
+
+// Whether rebuilds reorder the atoms spatially (see rebuild_neighbors): a host round trip, so such systems keep the
+// host-driven rebuild in MD.
+static bool reorder_atoms(const LoupHandle* h) {
+    return h->ovr.reorder >= 0 ? h->ovr.reorder == 1 : (int64_t)h->N * 4096 > (int64_t)h->l2_bytes;
+}
+
 // check_order = false (run_md_loop) leaves the sort's contract flag in d_order_err for the caller's next read.
 static int rebuild_neighbors(LoupHandle* h, bool check_order = true) {
     h->nl_valid = false;  // set again only when the rebuild completes
     const int N = h->N;
     const int S = h->n_species();
-    const double r_list = (double)h->cutoff() + h->skin;
-    const double r_list2 = r_list * r_list;
-
-    int nx = std::max(1, (int)std::floor(h->cell_heights[0] / 3.25));
-    int ny = std::max(1, (int)std::floor(h->cell_heights[1] / 3.25));
-    int nz = std::max(1, (int)std::floor(h->cell_heights[2] / 3.25));
-    while ((int64_t)nx * ny * nz > h->max_bins) {
-        if (nx >= ny && nx >= nz && nx > 1) --nx;
-        else if (ny >= nx && ny >= nz && ny > 1) --ny;
-        else if (nz > 1) --nz;
-        else break;
-    }
-    const int n_bins = nx * ny * nz;
-    const int rx = (int)std::ceil(r_list * nx / h->cell_heights[0]);
-    const int ry = (int)std::ceil(r_list * ny / h->cell_heights[1]);
-    const int rz = (int)std::ceil(r_list * nz / h->cell_heights[2]);
-
-    const int blk = 128;
-    const int gridN = (N + blk - 1) / blk;
-
-    CUDA_CHECK(cudaMemsetAsync(h->d_bin_counts, 0, n_bins * sizeof(int), h->stream));
-    loup::wrap_and_bin_kernel<<<gridN, blk, 0, h->stream>>>(
-        N, h->cell, nx, ny, nz, h->d_pos64, h->d_pos_wrapped, h->d_atom_wrap, h->d_atom_bin, h->d_bin_counts);
+    const NlGeom g = nl_geom(h);
+    if (ensure_cub_tmp(h, nl_cub_bytes(h, g)) != 0) return -1;
+    if (nl_bin(h, g) != 0) return -1;
 
     // Reorder atoms inside each species group by the Morton code of their bin, once the per-atom sender working set
     // (x0/x1 rows and their gradients, ~4 KB per atom) outgrows L2: then sender rows and sender-gradient atomics stay
@@ -1131,14 +1324,13 @@ static int rebuild_neighbors(LoupHandle* h, bool check_order = true) {
     // Atoms near a bin boundary flip bins thermally, so the order is refreshed only on every 16th rebuild (diffusion
     // is slow on that scale). Per-atom state (positions, velocities, forces, masses) is gathered in place, so every
     // buffer address and every captured graph stays valid; only the host permutation changes.
-    const bool reorder = h->ovr.reorder >= 0 ? h->ovr.reorder == 1 : (int64_t)N * 4096 > (int64_t)h->l2_bytes;
-    if (reorder && (h->n_rebuilds++ % 16) == 0) {
+    if (reorder_atoms(h) && (h->n_rebuilds++ % 16) == 0) {
         unsigned long long* keys_in = h->d_ro_keys;
         unsigned long long* keys_out = h->d_ro_keys + N;
         int* vals_in = h->d_ro_vals;
         int* vals_out = h->d_ro_vals + N;
-        loup::atom_order_keys_kernel<<<gridN, blk, 0, h->stream>>>(
-            N, nx, ny, nz, h->d_species, h->d_atom_bin, keys_in, vals_in);
+        loup::atom_order_keys_kernel<<<g.gridN, kNlBlk, 0, h->stream>>>(
+            N, g.nx, g.ny, g.nz, h->d_species, h->d_atom_bin, keys_in, vals_in);
         int species_bits = 0;
         while ((1 << species_bits) < S) ++species_bits;
         const int end_bit = 48 + species_bits;  // Morton code in bits 0..47, species above
@@ -1165,114 +1357,14 @@ static int rebuild_neighbors(LoupHandle* h, bool check_order = true) {
                 gather(h->d_rnd_vel, 3)) return -1;
             std::vector<int> old_perm = h->perm;
             for (int i = 0; i < N; ++i) h->perm[i] = old_perm[h->h_order[i]];
-            CUDA_CHECK(cudaMemsetAsync(h->d_bin_counts, 0, n_bins * sizeof(int), h->stream));
-            loup::wrap_and_bin_kernel<<<gridN, blk, 0, h->stream>>>(
-                N, h->cell, nx, ny, nz, h->d_pos64, h->d_pos_wrapped, h->d_atom_wrap, h->d_atom_bin, h->d_bin_counts);
+            if (nl_bin(h, g) != 0) return -1;
         }
     }
 
-    size_t scan_bytes = 0;
-    cub::DeviceScan::ExclusiveSum(nullptr, scan_bytes, h->d_bin_counts, h->d_bin_offsets, n_bins + 1, h->stream);
-    if (ensure_cub_tmp(h, scan_bytes) != 0) return -1;
-    // Set bin_counts[n_bins] = 0 so exclusive sum gives total N in bin_offsets[n_bins]
-    CUDA_CHECK(cudaMemsetAsync(h->d_bin_counts + n_bins, 0, sizeof(int), h->stream));
-    cub::DeviceScan::ExclusiveSum(h->d_cub_tmp, scan_bytes, h->d_bin_counts, h->d_bin_offsets, n_bins + 1, h->stream);
-    CUDA_CHECK(cudaMemcpyAsync(h->d_bin_cursor, h->d_bin_offsets, n_bins * sizeof(int), cudaMemcpyDeviceToDevice, h->stream));
-
-    const double max_h = std::max({h->cell_heights[0], h->cell_heights[1], h->cell_heights[2]});
-    const float margin = std::max(0.01f, 1e-4f * (float)max_h);
-    const float r_lo_f = std::max(0.0f, (float)r_list - margin);
-    const float r_hi_f = (float)r_list + margin;
-    const float r_lo2_f32 = r_lo_f * r_lo_f;
-    const float r_hi2_f32 = r_hi_f * r_hi_f;
-    // count / fill: on sm_120 kNeighborLanes lanes per atom (128-thread blocks hold whole lane groups; fill keeps one
-    // nscan-int bin-offset table per atom in shared memory); elsewhere, or when that table would exceed 48 KB, the
-    // one-thread-per-atom kernels (32-thread blocks), which the lane-group kernels were not measured against.
-    const int nscan = (2 * rx + 1) * (2 * ry + 1) * (2 * rz + 1);
-    const size_t nb_smem = (size_t)(128 / loup::kNeighborLanes) * nscan * sizeof(int);
-    const bool nb_groups = h->nb_groups_ok && nb_smem <= 48 * 1024;
-    const int blkN = nb_groups ? 128 : 32;
-    const int gridNb = (int)(((int64_t)N * (nb_groups ? loup::kNeighborLanes : 1) + blkN - 1) / blkN);
-    loup::scatter_bins_kernel<<<gridN, blk, 0, h->stream>>>(
-        N, h->d_pos_wrapped, h->d_atom_wrap, h->d_species, h->d_atom_bin, h->d_bin_cursor,
-        h->d_bin_atom_id, h->d_bin_pos, h->d_bin_pos_f32, h->d_bin_wrap, h->d_bin_sp);
-
-    if (nb_groups)
-        loup::count_neighbors_kernel<<<gridNb, blkN, 0, h->stream>>>(
-            N, h->cell, nx, ny, nz, rx, ry, rz, r_list2, r_lo2_f32, r_hi2_f32, h->d_pos_wrapped, h->d_atom_bin,
-            h->d_bin_offsets, h->d_bin_atom_id, h->d_bin_pos, h->d_bin_pos_f32, h->d_deg);
-    else
-        loup::count_neighbors_scalar_kernel<<<gridNb, blkN, 0, h->stream>>>(
-            N, h->cell, nx, ny, nz, rx, ry, rz, r_list2, r_lo2_f32, r_hi2_f32, h->d_pos_wrapped, h->d_atom_bin,
-            h->d_bin_offsets, h->d_bin_atom_id, h->d_bin_pos, h->d_bin_pos_f32, h->d_deg);
-
-    CUDA_CHECK(cudaMemsetAsync(h->d_deg + N, 0, sizeof(int), h->stream));
-    size_t scanN_bytes = 0;
-    cub::DeviceScan::ExclusiveSum(nullptr, scanN_bytes, h->d_deg, h->d_row_ptr, N + 1, h->stream);
-    if (ensure_cub_tmp(h, scanN_bytes) != 0) return -1;
-    cub::DeviceScan::ExclusiveSum(h->d_cub_tmp, scanN_bytes, h->d_deg, h->d_row_ptr, N + 1, h->stream);
-
-    // Zeroed every rebuild, so a deferred check (run_md_loop) reads this rebuild's flag even when no sort runs.
-    CUDA_CHECK(cudaMemsetAsync(h->d_order_err, 0, sizeof(int), h->stream));
-    CUDA_CHECK(cudaMemsetAsync(h->d_max_deg, 0, sizeof(int), h->stream));
-    loup::max_degree_kernel<<<(N + 255) / 256, 256, 0, h->stream>>>(N, h->d_deg, h->d_max_deg);
+    if (nl_count(h, g) != 0) return -1;
     int vals[3];
     if (read_device_ints(h, h->d_row_ptr + N, h->d_max_deg, nullptr, vals) != 0) return -1;
-    const int E_new = vals[0];
-    const int max_deg = vals[1];
-
-    h->E_skin = E_new;
-    if (E_new > 0) {
-        if (ensure_edge_capacity(h, E_new) != 0) return -1;
-        if (E_new > h->E_graph || h->E_graph > E_new + 32768) {
-            h->E_graph = std::min(h->E_cap, ((E_new + 8191) & ~8191));
-            if (h->E_graph < E_new) h->E_graph = E_new;
-            h->invalidate_graphs();
-        }
-        if (nb_groups)
-            loup::fill_neighbors_kernel<<<gridNb, blkN, nb_smem, h->stream>>>(
-                N, S, h->cell, nx, ny, nz, rx, ry, rz, r_list2, r_lo2_f32, r_hi2_f32,
-                h->d_pos_wrapped, h->d_atom_wrap, h->d_species, h->d_atom_bin,
-                h->d_bin_offsets, h->d_bin_atom_id, h->d_bin_pos, h->d_bin_pos_f32, h->d_bin_wrap, h->d_bin_sp,
-                h->d_row_ptr, h->d_tmp_snd, h->d_tmp_rcv, h->d_tmp_shifts, h->d_tmp_pairs,
-                h->d_sort_keys);
-        else
-            loup::fill_neighbors_scalar_kernel<<<gridNb, blkN, 0, h->stream>>>(
-                N, S, h->cell, nx, ny, nz, rx, ry, rz, r_list2, r_lo2_f32, r_hi2_f32,
-                h->d_pos_wrapped, h->d_atom_wrap, h->d_species, h->d_atom_bin,
-                h->d_bin_offsets, h->d_bin_atom_id, h->d_bin_pos, h->d_bin_pos_f32, h->d_bin_wrap, h->d_bin_sp,
-                h->d_row_ptr, h->d_tmp_snd, h->d_tmp_rcv, h->d_tmp_shifts, h->d_tmp_pairs,
-                h->d_sort_keys);
-
-        // Sort each receiver's row by key (sym_pair << 19 | length bits), ties in fill order. Contract: for a fixed
-        // receiver sym_pair grows with the sender species, so every row ends up grouped by ascending sender species,
-        // which the receiver-owned tabled_outer_sum0_forward_kernel relies on (it stores one slot per species run);
-        // the sort kernel flags a row that breaks it (a changed key or sym_pair would otherwise corrupt S0 silently).
-        int P = 1;
-        while (P < max_deg) P <<= 1;
-        const int threads = std::min(256, std::max(32, P / 2));
-        if (P <= 4096 && !h->ovr.row_sort_global)
-            loup::sort_gather_rows_kernel<<<N, threads, P * sizeof(unsigned long long), h->stream>>>(
-                h->cell, h->d_row_ptr, h->d_sort_keys, h->d_tmp_snd, h->d_tmp_rcv, h->d_tmp_shifts, h->d_tmp_pairs,
-                h->d_species, h->d_senders, h->d_receivers, h->d_shift_cart, h->d_pairs, h->d_order_err);
-        else  // scratch: act_vec_len (16 B per edge) is per-step data, free during a rebuild
-            loup::sort_gather_rows_global_kernel<<<N, threads, 0, h->stream>>>(
-                h->cell, h->d_row_ptr, h->d_sort_keys, h->d_tmp_snd, h->d_tmp_rcv, h->d_tmp_shifts, h->d_tmp_pairs,
-                h->d_species, h->d_senders, h->d_receivers, h->d_shift_cart, h->d_pairs, h->d_order_err,
-                reinterpret_cast<unsigned long long*>(h->d_act_vec_len));
-        if (check_order) {
-            if (read_device_ints(h, h->d_order_err, nullptr, nullptr, vals) != 0) return -1;
-            if (vals[0]) return order_error();
-        }
-    } else if (h->E_graph != 0) {
-        h->E_graph = 0;
-        h->invalidate_graphs();
-    }
-    CUDA_CHECK(cudaMemcpyAsync(h->d_ref_pos64, h->d_pos64, (size_t)N * 3 * sizeof(double), cudaMemcpyDeviceToDevice, h->stream));
-    CUDA_CHECK(cudaMemsetAsync(h->d_need_rebuild, 0, sizeof(int), h->stream));
-    CUDA_CHECK(cudaGetLastError());
-    h->nl_valid = true;
-    return 0;
+    return nl_finish(h, g, vals[0], vals[1], check_order);
 }
 
 // Fork: side streams wait for everything queued on the main stream so far.
@@ -2230,50 +2322,105 @@ static int run_md_loop(
                 N, c1, c2, h->d_forces_f64, h->d_inv_masses, h->d_rnd_vel, h->d_vel64, h->d_step_counter);
         }
     };
-    // `prologue(cond)` captured into a new graph, then an IF node on cond whose body is the rest: the GPU skips the
-    // force pass when the prologue's kernel clears cond, so the host can queue work behind a decision it has not read.
-    auto capture_if_rest = [&](cudaGraph_t& g, cudaGraphExec_t& ge, auto&& prologue) -> int {
-        if (ge) { cudaGraphExecDestroy(ge); ge = nullptr; }
-        if (g) { cudaGraphDestroy(g); g = nullptr; }
-        CUDA_CHECK(cudaGraphCreate(&g, 0));
-        cudaGraphConditionalHandle cond;
-        CUDA_CHECK(cudaGraphConditionalHandleCreate(&cond, g, 0, 0));
+    // Captures into graph g: prologue(conds) with one new conditional handle per body, then one IF node per handle
+    // after the prologue, then each body into its IF node's graph (a body may nest this call). Each level's capture
+    // ends before its bodies are captured, as the force pass records on h->stream.
+    using Prologue = std::function<void(const cudaGraphConditionalHandle*)>;
+    using Body = std::function<int(cudaGraph_t)>;
+    std::function<int(cudaGraph_t, const Prologue&, const std::vector<Body>&)> capture_ifs =
+        [&](cudaGraph_t g, const Prologue& prologue, const std::vector<Body>& bodies) -> int {
+        const size_t n = bodies.size();
+        std::vector<cudaGraphConditionalHandle> conds(n);
+        for (size_t i = 0; i < n; ++i) CUDA_CHECK(cudaGraphConditionalHandleCreate(&conds[i], g, 0, 0));
         CUDA_CHECK(cudaStreamBeginCaptureToGraph(h->stream, g, nullptr, nullptr, 0, cudaStreamCaptureModeGlobal));
-        prologue(cond);
+        prologue(conds.data());
         cudaStreamCaptureStatus status;
-        const cudaGraphNode_t* deps = nullptr;
+        const cudaGraphNode_t* deps_p = nullptr;
         size_t n_deps = 0;
-        CUDA_CHECK(cudaStreamGetCaptureInfo(h->stream, &status, nullptr, nullptr, &deps, nullptr, &n_deps));
-        cudaGraphNodeParams cp = {};
-        cp.type = cudaGraphNodeTypeConditional;
-        cp.conditional.handle = cond;
-        cp.conditional.type = cudaGraphCondTypeIf;
-        cp.conditional.size = 1;
-        cudaGraphNode_t cond_node;
-        CUDA_CHECK(cudaGraphAddNode(&cond_node, g, deps, nullptr, n_deps, &cp));
-        CUDA_CHECK(cudaStreamUpdateCaptureDependencies(h->stream, &cond_node, nullptr, 1,
+        CUDA_CHECK(cudaStreamGetCaptureInfo(h->stream, &status, nullptr, nullptr, &deps_p, nullptr, &n_deps));
+        const std::vector<cudaGraphNode_t> deps(deps_p, deps_p + n_deps);
+        std::vector<cudaGraphNode_t> nodes(n);
+        std::vector<cudaGraph_t> body_graphs(n);
+        for (size_t i = 0; i < n; ++i) {
+            cudaGraphNodeParams cp = {};
+            cp.type = cudaGraphNodeTypeConditional;
+            cp.conditional.handle = conds[i];
+            cp.conditional.type = cudaGraphCondTypeIf;
+            cp.conditional.size = 1;
+            CUDA_CHECK(cudaGraphAddNode(&nodes[i], g, deps.data(), nullptr, deps.size(), &cp));
+            body_graphs[i] = cp.conditional.phGraph_out[0];
+        }
+        CUDA_CHECK(cudaStreamUpdateCaptureDependencies(h->stream, nodes.data(), nullptr, n,
                                                        cudaStreamSetCaptureDependencies));
         cudaGraph_t captured = nullptr;
         CUDA_CHECK(cudaStreamEndCapture(h->stream, &captured));
-        CUDA_CHECK(cudaStreamBeginCaptureToGraph(h->stream, cp.conditional.phGraph_out[0], nullptr, nullptr, 0,
-                                                 cudaStreamCaptureModeGlobal));
+        for (size_t i = 0; i < n; ++i)
+            if (bodies[i](body_graphs[i]) != 0) return -1;
+        return 0;
+    };
+    const Body rest_body = [&](cudaGraph_t g) -> int {
+        CUDA_CHECK(cudaStreamBeginCaptureToGraph(h->stream, g, nullptr, nullptr, 0, cudaStreamCaptureModeGlobal));
         record_rest();
+        cudaGraph_t captured = nullptr;
         CUDA_CHECK(cudaStreamEndCapture(h->stream, &captured));
+        return 0;
+    };
+    // The checked rest: rest_guard_kernel + IF (valid rows) rest.
+    const Body checked_rest_body = [&](cudaGraph_t g) -> int {
+        return capture_ifs(g, [&](const cudaGraphConditionalHandle* c) {
+            loup::rest_guard_kernel<<<1, 1, 0, h->stream>>>(c[0], h->d_order_err);
+        }, {rest_body});
+    };
+    auto instantiate = [&](cudaGraph_t& g, cudaGraphExec_t& ge, const Body& body) -> int {
+        if (ge) { cudaGraphExecDestroy(ge); ge = nullptr; }
+        if (g) { cudaGraphDestroy(g); g = nullptr; }
+        CUDA_CHECK(cudaGraphCreate(&g, 0));
+        if (body(g) != 0) return -1;
         CUDA_CHECK(cudaGraphInstantiate(&ge, g, nullptr, nullptr, 0));
         return 0;
     };
+    // The step graph's rebuild branch needs fixed sizes: the edge bucket and a row-sort width with a quarter of headroom
+    // over the last rebuild's longest row. Systems whose rebuilds reorder the atoms (a host round trip) or sort rows in
+    // global scratch keep the host-driven rebuild, as does a system's first rebuild (it times kernel variants).
+    const NlGeom nl_g = nl_geom(h);
+    auto rebuild_width = [&] { return pow2_at_least(std::max(32, h->max_deg_last + h->max_deg_last / 4 + 1)); };
+    auto device_rebuild_ok = [&] {
+        return h->ovr.md_rebuild != 1 && h->variants_tuned && h->E_graph > 0 && !reorder_atoms(h) &&
+               !h->ovr.row_sort_global && rebuild_width() <= 4096;
+    };
     auto ensure_graphs = [&]() -> int {
         if (h->md_step_exec && h->md_checked_exec) return 0;
-        if (capture_if_rest(h->md_step_graph, h->md_step_exec, [&](cudaGraphConditionalHandle c) {
+        const bool dev = device_rebuild_ok();
+        if (dev && ensure_cub_tmp(h, nl_cub_bytes(h, nl_g)) != 0) return -1;
+        const int E_lim = h->ovr.md_rebuild == 2 ? 0 : h->E_graph;  // fallback (tests): never fits
+        const int P_cap = rebuild_width();
+        const Body fill_body = [&](cudaGraph_t g) -> int {
+            return capture_ifs(g, [&](const cudaGraphConditionalHandle* c) {
+                nl_fill(h, nl_g, P_cap);
+                nl_commit(h);
+                loup::rest_guard_kernel<<<1, 1, 0, h->stream>>>(c[0], h->d_order_err);
+            }, {rest_body});
+        };
+        const Body rebuild_body = [&](cudaGraph_t g) -> int {
+            return capture_ifs(g, [&](const cudaGraphConditionalHandle* c) {
+                nl_bin(h, nl_g);
+                nl_count(h, nl_g);
+                loup::rebuild_gate_kernel<<<1, 1, 0, h->stream>>>(c[0], h->d_row_ptr + N, h->d_max_deg, E_lim, P_cap,
+                                                                   h->d_pub_counter, h->d_pub);
+            }, {fill_body});
+        };
+        const Body step_body = [&](cudaGraph_t g) -> int {
+            std::vector<Body> bodies{rest_body};
+            if (dev) bodies.push_back(rebuild_body);
+            return capture_ifs(g, [&](const cudaGraphConditionalHandle* c) {
                 record_move();
-                loup::guard_step_kernel<<<1, 1, 0, h->stream>>>(c, h->d_need_rebuild, h->d_order_err,
-                                                                 h->d_pub_counter, h->d_pub);
-            }) != 0)
-            return -1;
-        if (capture_if_rest(h->md_checked_graph, h->md_checked_exec, [&](cudaGraphConditionalHandle c) {
-                loup::rest_guard_kernel<<<1, 1, 0, h->stream>>>(c, h->d_order_err);
-            }) != 0)
-            return -1;
+                loup::guard_step_kernel<<<1, 1, 0, h->stream>>>(c[0], dev ? c[1] : c[0], dev ? 1 : 0, h->d_need_rebuild,
+                                                                 h->d_order_err, h->d_pub_counter, h->d_pub);
+            }, bodies);
+        };
+        if (instantiate(h->md_step_graph, h->md_step_exec, step_body) != 0) return -1;
+        if (instantiate(h->md_checked_graph, h->md_checked_exec, checked_rest_body) != 0) return -1;
+        h->md_dev_rebuild = dev;
         return 0;
     };
     // The graphs bake in this call's dt, thermostat and seed: drop any from an earlier call.
@@ -2291,8 +2438,24 @@ static int run_md_loop(
         int v[3];
         if (wait_published(h, ++h->pub_count, v) != 0) return -1;
         if (v[1]) return order_error();
-        if (v[0]) {
-            ++rebuilds;
+        if (!v[0]) continue;
+        ++rebuilds;
+        if (h->md_dev_rebuild) {
+            // The step graph's rebuild branch has counted the new rows; it went on to fill them and run the checked
+            // rest on the GPU if they fit its captured sizes.
+            int w[3];
+            if (wait_published(h, ++h->pub_count, w) != 0) return -1;
+            h->E_skin = w[0];
+            h->max_deg_last = w[1];
+            if (w[2]) continue;
+            // They did not: once the step graph has drained, finish the rebuild on the host from the counted rows and
+            // recapture the graphs for the new sizes.
+            int z[3];
+            if (read_device_ints(h, nullptr, nullptr, nullptr, z) != 0) return -1;
+            h->nl_valid = false;
+            if (nl_finish(h, nl_g, w[0], w[1], false) != 0) return -1;
+            h->invalidate_md_graphs();
+        } else {
             // The per-system variant timing (first rebuild only) is not part of the steps: it is timed and excluded.
             if (!h->variants_tuned) {
                 const auto t0 = std::chrono::steady_clock::now();
@@ -2302,9 +2465,10 @@ static int run_md_loop(
             // The row-order flag is read with the next step's publication (or at the end of the block); until then
             // the checked rest's guard keeps the force pass off rows that failed it.
             if (rebuild_neighbors(h, false) != 0) return -1;
-            if (ensure_graphs() != 0) return -1;
-            CUDA_CHECK(cudaGraphLaunch(h->md_checked_exec, h->stream));
+            if (device_rebuild_ok()) h->invalidate_md_graphs();  // the step graph gains its rebuild branch
         }
+        if (ensure_graphs() != 0) return -1;
+        CUDA_CHECK(cudaGraphLaunch(h->md_checked_exec, h->stream));
     }
     CUDA_CHECK(cudaEventRecord(ev1, h->stream));
     CUDA_CHECK(cudaEventSynchronize(ev1));

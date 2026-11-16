@@ -52,9 +52,14 @@ def test_skin_list_matches_rebuild_every_step(sto_bundle):
     assert abs(e_a - e_b) / len(at) < 1e-5
 
 
-def test_langevin_skin_list_matches_rebuild_every_step(sto_bundle):
-    """Langevin with a small skin (a rebuild every few steps: the step's force pass skipped on the GPU, the list
-    rebuilt, the checked rest run) vs a list rebuilt before every force call: same noise sequence, same trajectory."""
+@pytest.mark.parametrize("rebuild", ["device", "host", "fallback"])
+def test_langevin_skin_list_matches_rebuild_every_step(sto_bundle, monkeypatch, rebuild):
+    """Langevin with a small skin (a rebuild every few steps) vs a list rebuilt before every force call, with the
+    rebuilds on the GPU inside the step graph, host-driven (the step's force pass skipped, the list rebuilt, the
+    checked rest run), or counted on the GPU and finished on the host (LOUP_MD_REBUILD): same noise sequence, same
+    trajectory."""
+    if rebuild != "device":
+        monkeypatch.setenv("LOUP_MD_REBUILD", rebuild)
     at = _rattled(srtio3(3), 0.03, 5)
     v0 = maxwell_velocities(at, 1500.0, 6)
     finals = []
