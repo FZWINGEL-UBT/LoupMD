@@ -89,7 +89,9 @@ Measured on an RTX 5060 Ti (16 GB) with OMAT-0 medium; µs per atom per force ca
 | Atoms | Whole cell | 2 tiles | 8 tiles |
 |---|---|---|---|
 | 40,000 | 1.65 | 2.97 | 4.33 |
-| 320,000 (`SrTiO3`, NVE with the host integrator) | does not fit | | 3.50 (8 tiles of 65,536; 1.12 s per step) |
+| 320,000 (`SrTiO3`, MD step, NVE / Langevin) | does not fit | | 1.95 / 1.97 (8 tiles of 65,536; 624 / 630 ms per step) |
+| 1,081,600 (`SrTiO3`, MD step, Langevin, wavefront) | does not fit | | 2.11 (32 tiles of 49,152; 2.28 s per step) |
 
-The tiled mode costs about two to three times the whole-cell call per atom. The first step of a tiled run tunes the
+The 40,000-atom row is older (before the November 2026 tiled-call work); at 320,000 atoms and more the tiled MD
+step costs about 1.2 to 1.3 times the whole-cell call per atom (1.65 us). The first step of a tiled run tunes the
 GEMMs for the tile shapes, which takes 1.5 to 5 s. STATUS_AND_PROFILE.md §6.16 to §6.18 has the measurements.

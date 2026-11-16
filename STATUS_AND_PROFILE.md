@@ -1582,3 +1582,8 @@ second stream, ahead of its first sweep, would hide most of the read time (not b
   320,000 atoms (2.6 GB kept, 5.0 GB free): A B B A 642.2 / 598.9 / 596.3 / 644.1 ms, b / a 0.929; forces 1.8e-6
   eV/A apart. More than the replay's 26 ms of kernels in the profile: the replay also re-gathered and re-launched.
   Not in the wavefront (its tiles in flight would need it; memory is short there). Tiled label gates with it: the 8 oxide labels and mh1-omat passed; it engages for mp0b3-medium, mpa0-medium, omat0-small / -medium, matpes-pbe / -r2scan (not MP-0, MH-1, OFF, OMOL-0).
+
+Tiled MD at the end of the O31 speed work (library `7be62d11b15db9ec`, commit `be75b89`; `.tmp_o/tiled_prof.py`,
+device integrator, per step with the list rebuilds of the run): 320,000 atoms NVE 624.0 ms (1.95 us/atom; 697.6 at
+`ae341cc`), Langevin 630.1 ms (1.97; 706.5); 1,081,600 atoms wavefront Langevin 2,283.5 ms (2.11; 2,382.2). The
+whole-system call is 1.65 us/atom at 5,000-40,000 atoms.
