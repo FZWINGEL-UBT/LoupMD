@@ -18,6 +18,7 @@ _c_double_p = ctypes.POINTER(ctypes.c_double)
 _c_int_p = ctypes.POINTER(ctypes.c_int)
 
 ABI_VERSION = 1  # LOUP_ABI_VERSION of include/loupmd.h this binding is written against
+TILED_STATE_SLOTS = 64  # the integrator state block of loup_tiled_set_state / loup_tiled_get_state
 
 
 class LoupMDStats(ctypes.Structure):
@@ -439,10 +440,12 @@ class LoupEngine:
                                             ctypes.byref(energy), _ptr(forces), _ptr(stress)), "loup_evaluate")
         return float(energy.value), forces, stress
 
-    def evaluate_tiled(self, atomic_numbers, positions, cell, receivers: int, skin: float = 0.5):
+    def evaluate_tiled(self, atomic_numbers, positions, cell, receivers: int, skin: float = 0.5,
+                       compute_stress: bool = True):
         """Energy, forces and stress of a periodic system evaluated tile by tile (plan task S5-T03; testing until
         the front end of S5-T12): at most ``receivers`` local atoms per tile, 0 for the cap of the memory plan. Returns ``(energy, forces,
-        stress, tiles)``. The handle then holds the last tile's domain: call ``set_system`` before other calls."""
+        stress, tiles)``; stress is ``None`` without ``compute_stress`` (the sweeps then skip the virial). The
+        handle then holds the last tile's domain: call ``set_system`` before other calls."""
         lib = self._lib
         n = len(atomic_numbers)
         lib.loup_debug_evaluate_tiled.argtypes = [ctypes.c_void_p, ctypes.c_int, _c_int_p, _c_double_p, _c_double_p,
@@ -453,11 +456,74 @@ class LoupEngine:
         cel = _array(cell, (3, 3), "cell")
         energy, tiles = ctypes.c_double(), ctypes.c_longlong()
         forces = np.empty((n, 3), dtype=np.float64)
-        stress = np.empty((3, 3), dtype=np.float64)
+        stress = np.empty((3, 3), dtype=np.float64) if compute_stress else None
         self._check(lib.loup_debug_evaluate_tiled(self._h, n, z.ctypes.data_as(_c_int_p), _ptr(pos), _ptr(cel),
                                                   int(receivers), float(skin), ctypes.byref(energy), _ptr(forces),
                                                   _ptr(stress), ctypes.byref(tiles)), "loup_debug_evaluate_tiled")
         return float(energy.value), forces, stress, int(tiles.value)
+
+    def has_tiled_md(self) -> bool:
+        """Whether the library has the tiled MD loop on the device (``loup_tiled_run``, PLAN.md O31)."""
+        return hasattr(self._lib, "loup_tiled_run")
+
+    def tiled_set_state(self, atomic_numbers, masses_amu, positions, velocities, cell, fixed=None, receivers: int = 0,
+                        skin: float = 0.5, noise_step: int = 0, int_state=None, int_state_kind: int = -1):
+        """``loup_tiled_set_state``: the tiled trajectory's system and state on the device (velocities in A per
+        ASE time unit). ``int_state`` (64 doubles) restores an integrator's state block. With ``positions`` and
+        ``velocities`` both ``None`` the device state stays and only its thermo step count starts anew."""
+        lib = self._lib
+        lib.loup_tiled_set_state.argtypes = [ctypes.c_void_p, ctypes.c_int, _c_int_p, _c_double_p, _c_double_p,
+                                             _c_double_p, _c_double_p, ctypes.c_void_p, ctypes.c_int, ctypes.c_double,
+                                             ctypes.c_ulonglong, _c_double_p, ctypes.c_int]
+        z = np.ascontiguousarray(atomic_numbers, dtype=np.int32)
+        n = int(z.shape[0])
+        m = _array(masses_amu, (n,), "masses_amu")
+        pos = _array(positions, (n, 3), "positions") if positions is not None else None
+        vel = _array(velocities, (n, 3), "velocities") if velocities is not None else None
+        cel = _array(cell, (3, 3), "cell")
+        fx = None
+        if fixed is not None:
+            fx = np.ascontiguousarray(np.asarray(fixed, dtype=bool), dtype=np.uint8)
+            if fx.shape != (n,):
+                raise InputError(f"fixed has shape {fx.shape}, expected ({n},)")
+        ist = _array(int_state, (TILED_STATE_SLOTS,), "int_state") if int_state is not None else None
+        self._check(lib.loup_tiled_set_state(self._h, n, z.ctypes.data_as(_c_int_p), _ptr(m), _ptr(pos), _ptr(vel),
+                                             _ptr(cel), fx.ctypes.data if fx is not None else None, int(receivers),
+                                             float(skin), int(noise_step), _ptr(ist), int(int_state_kind)),
+                    "loup_tiled_set_state")
+        self._tiled_n = n
+
+    def tiled_run(self, n_steps: int, it: LoupIntegrator, max_rows: int = 0):
+        """``loup_tiled_run``: ``n_steps`` steps on the device. Returns ``(stats, rows, max_step_A)``, rows a
+        ``THERMO_DTYPE`` array (empty unless ``it.thermo_every`` and ``max_rows`` are set), max_step_A the longest
+        step an atom took."""
+        lib = self._lib
+        lib.loup_tiled_run.argtypes = [ctypes.c_void_p, ctypes.POINTER(LoupIntegrator), ctypes.c_int,
+                                       ctypes.POINTER(LoupMDStats), ctypes.c_void_p, ctypes.c_int,
+                                       ctypes.POINTER(ctypes.c_int), _c_double_p]
+        st = LoupMDStats()
+        rows = np.zeros(max(int(max_rows), 0), dtype=THERMO_DTYPE)
+        n, step = ctypes.c_int(), ctypes.c_double()
+        self._check(lib.loup_tiled_run(self._h, ctypes.byref(it), int(n_steps), ctypes.byref(st),
+                                       rows.ctypes.data if len(rows) else None, len(rows), ctypes.byref(n),
+                                       ctypes.byref(step)), "loup_tiled_run")
+        return st, rows[: n.value], float(step.value)
+
+    def tiled_get_state(self):
+        """``loup_tiled_get_state``: ``(positions, velocities, forces, energy, noise_step, int_state,
+        int_state_kind)``."""
+        lib = self._lib
+        lib.loup_tiled_get_state.argtypes = [ctypes.c_void_p, _c_double_p, _c_double_p, _c_double_p, _c_double_p,
+                                             ctypes.POINTER(ctypes.c_ulonglong), _c_double_p,
+                                             ctypes.POINTER(ctypes.c_int)]
+        n = self._tiled_n
+        pos, vel, frc = (np.empty((n, 3), dtype=np.float64) for _ in range(3))
+        ist = np.empty(TILED_STATE_SLOTS, dtype=np.float64)
+        en, step, kind = ctypes.c_double(), ctypes.c_ulonglong(), ctypes.c_int()
+        self._check(lib.loup_tiled_get_state(self._h, _ptr(pos), _ptr(vel), _ptr(frc), ctypes.byref(en),
+                                             ctypes.byref(step), _ptr(ist), ctypes.byref(kind)),
+                    "loup_tiled_get_state")
+        return pos, vel, frc, float(en.value), int(step.value), ist, int(kind.value)
 
     def set_execution(self, mode: int, receivers: int = 0, memory_fraction: float = 0.9):
         """``loup_set_execution``: the mode (``LOUP_EXEC_*``), a receiver cap (0: from the memory plan) and the

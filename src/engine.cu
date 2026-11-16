@@ -494,9 +494,11 @@ static uint64_t fnv1a64(const void* data, size_t n, uint64_t hsh = 1469598103934
 
 namespace {
 struct TiledState;
+struct TiledMD;
 }
 struct LoupHandle;
 static void release_tiled_state(LoupHandle* h);
+static void release_tiled_md(LoupHandle* h);
 
 struct LoupHandle {
     std::string last_error;  // text of the last failed call on this handle (loup_last_error); empty after a success
@@ -651,6 +653,10 @@ struct LoupHandle {
     double exec_fraction = 0.9;
     LoupExecution last_exec{};
     TiledState* tiled_state = nullptr;  // the tiled call's plan, kept lists and state buffers (S5-T06)
+    // The state of tiled MD on the device (loup_tiled_set_state, PLAN.md O31): positions, velocities, masses, forces
+    // and the integrator's scalars of a system run tile by tile. It outlives the tiled state (rebuilt at a list
+    // rebuild) and the workspace (each tile's domain); loup_set_system and loup_destroy free it.
+    TiledMD* tiled_md = nullptr;
     long long tile_list_builds = 0;     // tiled calls that built their lists, since the handle was created
     double skin = 0.5;
     double e0_total = 0.0;
@@ -2187,6 +2193,7 @@ LoupHandle* loup_create(const char* loup_path, int device_id) {
 void loup_destroy(LoupHandle* h) {
     if (!h) return;
     cudaSetDevice(h->device_id);
+    release_tiled_md(h);
     h->free_system();
     h->model.free_gpu();
     if (h->ev_reb[0]) cudaEventDestroy(h->ev_reb[0]);
@@ -4659,9 +4666,30 @@ struct TiledState {
     int64_t pool_rows = 0;
     std::vector<loup::SweepStep> steps;
 };
+
+// Tiled MD on the device (loup_tiled_set_state / loup_tiled_run, PLAN.md O31). The integrator kernels of the
+// whole-system loop (integrator.cu) run on these whole-system arrays; each force call is the tiled call on the device
+// positions, so a step moves nothing to the host except at a list rebuild, whose planner reads the positions there.
+// Fixed atoms have inverse masses 0 (they neither move nor feel the thermostat's noise) and zero velocities.
+struct TiledMD {
+    int n = 0, receivers = 0, n_fixed = 0;
+    double skin = 0.5, cell[9] = {0, 0, 0, 0, 0, 0, 0, 0, 0}, total_mass = 0.0;
+    std::vector<int> z;
+    DeviceBufferGuard pos, vel, forces, masses, inv_m, sqrt_inv_m, rnd_vel, rnd_pos;  // [n, 3] or [n]
+    DeviceBufferGuard com, target, step, int_state, int_work, disp, ke;                // scalars
+    bool forces_current = false;
+    double energy = 0.0;
+    int state_kind = -1;          // the integrator whose scalars int_state holds
+    long long md_steps = 0;       // steps since loup_tiled_set_state (the thermo rows' step)
+};
 }  // namespace
 
 extern "C++" {
+static void release_tiled_md(LoupHandle* h) {
+    delete h->tiled_md;
+    h->tiled_md = nullptr;
+}
+
 static void release_tiled_state(LoupHandle* h) {
     delete h->tiled_state;
     h->tiled_state = nullptr;
@@ -4906,13 +4934,17 @@ static int plan_execution_impl(LoupHandle* h, int n_atoms, const int* atomic_num
 
 static int evaluate_tiled_impl(LoupHandle* h, int n_atoms, const int* atomic_numbers, const double* positions,
                                const double* cell, int receivers, double skin, double* out_energy_ev,
-                               double* out_forces, double* out_stress, long long* out_tiles) {
+                               double* out_forces, double* out_stress, long long* out_tiles,
+                               const double* d_positions = nullptr, double* d_out_forces = nullptr) {
+    // d_positions / d_out_forces (tiled MD, PLAN.md O31): the positions on the device instead of `positions`, and
+    // the forces left on the device. The positions are copied to the host only when the lists are built.
     if (!h) return -1;
     if (h->disp) {
         loup::set_error("the tiled call has no dispersion term yet (PLAN.md S6-D09)");
         return -1;
     }
-    if (n_atoms <= 0 || !atomic_numbers || !positions || !cell) {
+    std::vector<double> host_positions;
+    if (n_atoms <= 0 || !atomic_numbers || !(positions || d_positions) || !cell) {
         loup::set_error("n_atoms must be positive and atomic_numbers, positions and cell given");
         return -1;
     }
@@ -4940,8 +4972,9 @@ static int evaluate_tiled_impl(LoupHandle* h, int n_atoms, const int* atomic_num
     if (same_system && receivers <= 0) receivers = st->receivers;  // a rebuild of the same system keeps its cap
     bool keep = same_system && receivers == st->receivers;
     if (keep) {
-        CUDA_CHECK(cudaMemcpyAsync(st->whole_pos.p, positions, (size_t)n_atoms * 3 * sizeof(double),
-                                   cudaMemcpyHostToDevice, h->stream));
+        CUDA_CHECK(cudaMemcpyAsync(st->whole_pos.p, d_positions ? d_positions : positions,
+                                   (size_t)n_atoms * 3 * sizeof(double),
+                                   d_positions ? cudaMemcpyDeviceToDevice : cudaMemcpyHostToDevice, h->stream));
         CUDA_CHECK(cudaMemsetAsync(st->disp2.p, 0, sizeof(unsigned long long), h->stream));
         max_disp2_kernel<<<blocks(n_atoms), 256, 0, h->stream>>>(n_atoms, static_cast<const double*>(st->whole_pos.p),
                                                                  static_cast<const double*>(st->ref_pos.p),
@@ -4956,6 +4989,13 @@ static int evaluate_tiled_impl(LoupHandle* h, int n_atoms, const int* atomic_num
     if (!keep) {
         release_tiled_state(h);
         st = nullptr;
+        if (!positions) {  // the planner and the list builds read the positions on the host
+            host_positions.resize((size_t)n_atoms * 3);
+            CUDA_CHECK(cudaMemcpyAsync(host_positions.data(), d_positions, host_positions.size() * sizeof(double),
+                                       cudaMemcpyDeviceToHost, h->stream));
+            CUDA_CHECK(cudaStreamSynchronize(h->stream));
+            positions = host_positions.data();
+        }
     }
     if (!keep && receivers <= 0) {  // the memory plan's cap, the mode taken as tiled
         struct Mode {
@@ -5299,6 +5339,9 @@ static int evaluate_tiled_impl(LoupHandle* h, int n_atoms, const int* atomic_num
     if (out_forces)
         CUDA_CHECK(cudaMemcpyAsync(out_forces, d_forces.p, (size_t)n_atoms * 3 * sizeof(double),
                                    cudaMemcpyDeviceToHost, h->stream));
+    if (d_out_forces)
+        CUDA_CHECK(cudaMemcpyAsync(d_out_forces, d_forces.p, (size_t)n_atoms * 3 * sizeof(double),
+                                   cudaMemcpyDeviceToDevice, h->stream));
     CUDA_CHECK(cudaStreamSynchronize(h->stream));
     if (out_stress) {
         const double vol = std::fabs(cell[0] * (cell[4] * cell[8] - cell[5] * cell[7]) -
@@ -5311,6 +5354,310 @@ static int evaluate_tiled_impl(LoupHandle* h, int n_atoms, const int* atomic_num
         out_stress[6] = v[2] * inv_v; out_stress[7] = v[4] * inv_v; out_stress[8] = v[5] * inv_v;
     }
     h->save_disk_plans();
+    return 0;
+}
+
+// ---- Tiled MD on the device (PLAN.md O31) ----
+static int tiled_set_state_impl(LoupHandle* h, int n_atoms, const int* atomic_numbers, const double* masses_amu,
+                                const double* positions, const double* velocities, const double* cell,
+                                const unsigned char* fixed, int receivers, double skin, unsigned long long noise_step,
+                                const double* int_state, int int_state_kind) {
+    if (!h) return -1;
+    if (!positions && !velocities && h->tiled_md && h->tiled_md->n == n_atoms) {
+        // The state stays; only the step count of the thermo rows starts anew (a restart at the same state).
+        h->tiled_md->md_steps = 0;
+        return 0;
+    }
+    if (n_atoms <= 0 || !atomic_numbers || !masses_amu || !positions || !velocities || !cell) {
+        loup::set_error("n_atoms must be positive and atomic_numbers, masses, positions, velocities and cell given");
+        return -1;
+    }
+    if (receivers < 0) { loup::set_error("receivers must not be negative, got %d", receivers); return -1; }
+    if (!(skin >= 0.0) || !std::isfinite(skin)) { loup::set_error("skin must be finite and not negative"); return -1; }
+    CUDA_CHECK(cudaSetDevice(h->device_id));
+    const int n = n_atoms;
+    TiledMD* md = h->tiled_md;
+    if (!md || md->n != n) {
+        release_tiled_md(h);
+        md = h->tiled_md = new TiledMD();
+        const size_t v3 = (size_t)n * 3 * sizeof(double), v1 = (size_t)n * sizeof(double);
+        DeviceBufferGuard* vec3[] = {&md->pos, &md->vel, &md->forces, &md->rnd_vel, &md->rnd_pos};
+        DeviceBufferGuard* vec1[] = {&md->masses, &md->inv_m, &md->sqrt_inv_m};
+        for (DeviceBufferGuard* g : vec3) CUDA_CHECK(cudaMalloc(&g->p, v3));
+        for (DeviceBufferGuard* g : vec1) CUDA_CHECK(cudaMalloc(&g->p, v1));
+        CUDA_CHECK(cudaMalloc(&md->com.p, 6 * sizeof(double)));
+        CUDA_CHECK(cudaMalloc(&md->target.p, 5 * sizeof(double)));
+        CUDA_CHECK(cudaMalloc(&md->step.p, sizeof(unsigned long long)));
+        CUDA_CHECK(cudaMalloc(&md->int_state.p, kIntStateSlots * sizeof(double)));
+        CUDA_CHECK(cudaMalloc(&md->int_work.p, kIntWorkSlots * sizeof(double)));
+        CUDA_CHECK(cudaMalloc(&md->disp.p, 2 * sizeof(unsigned int)));
+        CUDA_CHECK(cudaMalloc(&md->ke.p, sizeof(double)));
+        md->n = n;
+    }
+    std::vector<double> m((size_t)n), im((size_t)n), sim((size_t)n), v(velocities, velocities + (size_t)n * 3);
+    md->n_fixed = 0;
+    md->total_mass = 0.0;
+    for (int i = 0; i < n; ++i) {
+        const double mi = masses_amu[i];
+        if (!(mi > 0.0) || !std::isfinite(mi)) { loup::set_error("atom %d has mass %g", i, mi); return -1; }
+        const bool f = fixed && fixed[i];
+        m[(size_t)i] = mi;
+        im[(size_t)i] = f ? 0.0 : 1.0 / mi;
+        sim[(size_t)i] = f ? 0.0 : std::sqrt(1.0 / mi);
+        if (f) { ++md->n_fixed; v[(size_t)i * 3] = v[(size_t)i * 3 + 1] = v[(size_t)i * 3 + 2] = 0.0; }
+        md->total_mass += mi;
+    }
+    const size_t v3 = (size_t)n * 3 * sizeof(double), v1 = (size_t)n * sizeof(double);
+    CUDA_CHECK(cudaMemcpyAsync(md->pos.p, positions, v3, cudaMemcpyHostToDevice, h->stream));
+    CUDA_CHECK(cudaMemcpyAsync(md->vel.p, v.data(), v3, cudaMemcpyHostToDevice, h->stream));
+    CUDA_CHECK(cudaMemcpyAsync(md->masses.p, m.data(), v1, cudaMemcpyHostToDevice, h->stream));
+    CUDA_CHECK(cudaMemcpyAsync(md->inv_m.p, im.data(), v1, cudaMemcpyHostToDevice, h->stream));
+    CUDA_CHECK(cudaMemcpyAsync(md->sqrt_inv_m.p, sim.data(), v1, cudaMemcpyHostToDevice, h->stream));
+    CUDA_CHECK(cudaMemcpyAsync(md->step.p, &noise_step, sizeof(noise_step), cudaMemcpyHostToDevice, h->stream));
+    if (int_state) {
+        CUDA_CHECK(cudaMemcpyAsync(md->int_state.p, int_state, kIntStateSlots * sizeof(double),
+                                   cudaMemcpyHostToDevice, h->stream));
+        md->state_kind = int_state_kind;
+    } else {
+        CUDA_CHECK(cudaMemsetAsync(md->int_state.p, 0, kIntStateSlots * sizeof(double), h->stream));
+        md->state_kind = -1;
+    }
+    CUDA_CHECK(cudaStreamSynchronize(h->stream));  // the host vectors go out of scope
+    md->z.assign(atomic_numbers, atomic_numbers + n);
+    std::copy(cell, cell + 9, md->cell);
+    md->receivers = receivers;
+    md->skin = skin;
+    md->forces_current = false;
+    md->md_steps = 0;
+    return 0;
+}
+
+// The tiled call on the device positions; the forces stay in md->forces.
+static int tiled_md_forces(LoupHandle* h, TiledMD* md, long long* tiles) {
+    double e = 0.0;
+    if (evaluate_tiled_impl(h, md->n, md->z.data(), nullptr, md->cell, md->receivers, md->skin, &e, nullptr, nullptr,
+                            tiles, static_cast<const double*>(md->pos.p), static_cast<double*>(md->forces.p)) != 0)
+        return -1;
+    if (!std::isfinite(e)) { loup::set_error("non-finite energy (%g) in the tiled call", e); return -1; }
+    if (!md->receivers) md->receivers = h->last_exec.receivers;  // the plan's cap, kept for the next call
+    md->energy = e;
+    md->forces_current = true;
+    return 0;
+}
+
+static int tiled_run_impl(LoupHandle* h, const LoupIntegrator* it, int n_steps, LoupMDStats* out_stats,
+                          LoupThermoRow* rows, int max_rows, int* out_rows, double* out_max_step_a) {
+    if (!h) return -1;
+    if (out_rows) *out_rows = 0;
+    if (out_max_step_a) *out_max_step_a = 0.0;
+    TiledMD* md = h->tiled_md;
+    if (!md) { loup::set_error("no tiled MD state: call loup_tiled_set_state first"); return -1; }
+    if (!it || it->size < sizeof(unsigned) + sizeof(int)) { loup::set_error("integrator is NULL or too small"); return -1; }
+    if (n_steps <= 0) { loup::set_error("n_steps must be positive, got %d", n_steps); return -1; }
+    const int kind = it->kind;
+    if (kind != LOUP_NVE && kind != LOUP_LANGEVIN && kind != LOUP_CSVR && kind != LOUP_NHC &&
+        kind != LOUP_BERENDSEN_NVT) {
+        loup::set_error("integrator kind %d in tiled mode: the tiled mode runs NVE, Langevin, CSVR, the Nose-Hoover "
+                        "chain and Berendsen NVT (no barostat: the cell is fixed)", kind);
+        return -1;
+    }
+    const bool fix_com = it->fix_com != 0;
+    if (fix_com && md->n_fixed) { loup::set_error("fix_com together with fixed atoms is refused"); return -1; }
+    const double dt_fs = it->dt_fs;
+    if (!(dt_fs > 0.0) || !std::isfinite(dt_fs)) { loup::set_error("dt_fs must be positive, got %g", dt_fs); return -1; }
+    const double temp_k = it->temp_k, temp_rate = it->temp_rate_k_per_step;
+    const double tau_fs = it->tau_t_fs;
+    if ((kind == LOUP_CSVR || kind == LOUP_NHC || kind == LOUP_BERENDSEN_NVT) && !(tau_fs > 0.0)) {
+        loup::set_error("tau_t_fs must be positive for this thermostat, got %g", tau_fs);
+        return -1;
+    }
+    if (kind == LOUP_BERENDSEN_NVT && tau_fs < dt_fs) {
+        loup::set_error("Berendsen's tau_t_fs (%g) must be at least dt_fs (%g), as in ASE", tau_fs, dt_fs);
+        return -1;
+    }
+    if (kind == LOUP_LANGEVIN && !(it->friction_per_fs >= 0.0)) {
+        loup::set_error("friction_per_fs must not be negative, got %g", it->friction_per_fs);
+        return -1;
+    }
+    const int tchain = it->chain_length > 0 ? it->chain_length : 3;
+    const int tloop = it->chain_loops > 0 ? it->chain_loops : 1;
+    if (kind == LOUP_NHC && tchain > 16) { loup::set_error("chain_length must be at most 16"); return -1; }
+    const double mass_temp_k = it->mass_temp_k > 0.0 ? it->mass_temp_k : temp_k;
+    const int thermo_every = it->thermo_every > 0 ? it->thermo_every : 0;
+    CUDA_CHECK(cudaSetDevice(h->device_id));
+    const int N = md->n;
+    const unsigned gridN = (unsigned)((N + 255) / 256), grid32 = (unsigned)((N + 31) / 32);
+    const double dt_ase = dt_fs * loup::ASE_FS;
+    const int dof = 3 * (N - md->n_fixed) - (fix_com ? 3 : 0);
+    const unsigned long long seed = it->seed;
+    double* pos = static_cast<double*>(md->pos.p);
+    double* vel = static_cast<double*>(md->vel.p);
+    double* frc = static_cast<double*>(md->forces.p);
+    const double* masses = static_cast<const double*>(md->masses.p);
+    const double* inv_m = static_cast<const double*>(md->inv_m.p);
+    const double* sqrt_inv_m = static_cast<const double*>(md->sqrt_inv_m.p);
+    double* rnd_vel = static_cast<double*>(md->rnd_vel.p);
+    double* rnd_pos = static_cast<double*>(md->rnd_pos.p);
+    double* com = static_cast<double*>(md->com.p);
+    double* target = static_cast<double*>(md->target.p);
+    unsigned long long* step = static_cast<unsigned long long*>(md->step.p);
+    double* ist = static_cast<double*>(md->int_state.p);
+    double* work = static_cast<double*>(md->int_work.p);
+    unsigned int* disp = static_cast<unsigned int*>(md->disp.p);
+    double* ke = static_cast<double*>(md->ke.p);
+
+    const long long builds0 = h->tile_list_builds;
+    long long tiles = 0;
+    if (!md->forces_current && tiled_md_forces(h, md, &tiles) != 0) return -1;
+
+    // The coefficients and targets as loup_run sets them (run_md_loop).
+    double c1 = 0, c2 = 0, a3 = 0, a4 = 0, a5 = 0, two_fr_kb = 0, csvr_exp = 0, nhc_q = 0;
+    const double first = temp_k + temp_rate;
+    if (kind == LOUP_LANGEVIN) {
+        const double fr = it->friction_per_fs / loup::ASE_FS;
+        c1 = dt_ase / 2.0 - dt_ase * dt_ase * fr / 8.0;
+        c2 = dt_ase * fr / 2.0 - dt_ase * dt_ase * fr * fr / 8.0;
+        two_fr_kb = 2.0 * fr * loup::ASE_KB;
+        a3 = sqrt(dt_ase) / 2.0 - pow(dt_ase, 1.5) * fr / 8.0;
+        a5 = pow(dt_ase, 1.5) / (2.0 * sqrt(3.0));
+        a4 = (fr / 2.0) * a5;
+        const double sigma = sqrt(two_fr_kb * (first > 0.0 ? first : 0.0));
+        const double t[5] = {first, temp_rate, a3 * sigma, a4 * sigma, a5 * sigma};
+        CUDA_CHECK(cudaMemcpyAsync(target, t, sizeof(t), cudaMemcpyHostToDevice, h->stream));
+    } else if (kind != LOUP_NVE) {
+        const double t[5] = {first, temp_rate, 0.0, 0.0, 0.0};
+        CUDA_CHECK(cudaMemcpyAsync(target, t, sizeof(t), cudaMemcpyHostToDevice, h->stream));
+        if (kind == LOUP_CSVR) csvr_exp = exp(-dt_fs / tau_fs);
+        if (kind == LOUP_NHC) {
+            const double tdamp = tau_fs * loup::ASE_FS;
+            nhc_q = loup::ASE_KB * mass_temp_k * tdamp * tdamp;
+        }
+        if (md->state_kind != kind) {
+            CUDA_CHECK(cudaMemsetAsync(ist, 0, kIntStateSlots * sizeof(double), h->stream));
+            md->state_kind = kind;
+        }
+        CUDA_CHECK(cudaMemsetAsync(work, 0, kIntWorkSlots * sizeof(double), h->stream));
+    }
+    const double inv_total_mass = fix_com ? 1.0 / md->total_mass : 0.0;
+    if (fix_com && kind != LOUP_LANGEVIN) {  // the total momentum removed once (the forces sum to zero)
+        CUDA_CHECK(cudaMemsetAsync(com, 0, 6 * sizeof(double), h->stream));
+        loup::momentum_sum_kernel<<<gridN, 256, 0, h->stream>>>(N, masses, vel, com);
+        loup::momentum_remove_kernel<<<gridN, 256, 0, h->stream>>>(N, inv_total_mass, com, vel);
+    }
+    CUDA_CHECK(cudaMemsetAsync(disp, 0, 2 * sizeof(unsigned int), h->stream));
+    const double volume = std::fabs(md->cell[0] * (md->cell[4] * md->cell[8] - md->cell[5] * md->cell[7]) -
+                                    md->cell[1] * (md->cell[3] * md->cell[8] - md->cell[5] * md->cell[6]) +
+                                    md->cell[2] * (md->cell[3] * md->cell[7] - md->cell[4] * md->cell[6]));
+    auto kinetic = [&](double* out) -> int {
+        CUDA_CHECK(cudaMemsetAsync(ke, 0, sizeof(double), h->stream));
+        loup::kinetic_energy_kernel<<<gridN, 256, 0, h->stream>>>(N, masses, vel, ke);
+        CUDA_CHECK(cudaMemcpyAsync(out, ke, sizeof(double), cudaMemcpyDeviceToHost, h->stream));
+        return 0;
+    };
+    int n_rows = 0;
+    const auto t0 = std::chrono::steady_clock::now();
+    for (int s = 0; s < n_steps; ++s) {
+        // first half: as record_move of run_md_loop
+        if (kind == LOUP_LANGEVIN && fix_com) {
+            CUDA_CHECK(cudaMemsetAsync(com, 0, 6 * sizeof(double), h->stream));
+            loup::langevin_noise_kernel<<<grid32, 32, 0, h->stream>>>(N, target, seed, step, masses, sqrt_inv_m,
+                                                                      rnd_pos, rnd_vel, com);
+            loup::langevin_first_half_fixcom_kernel<<<gridN, 256, 0, h->stream>>>(
+                N, dt_ase, c1, c2, inv_total_mass, com, frc, inv_m, rnd_pos, rnd_vel, pos, vel, disp);
+        } else if (kind == LOUP_LANGEVIN) {
+            loup::langevin_first_half_kernel<<<grid32, 32, 0, h->stream>>>(
+                N, dt_ase, c1, c2, target, seed, step, frc, inv_m, sqrt_inv_m, pos, vel, rnd_vel, disp);
+        } else if (kind == LOUP_NVE) {
+            loup::nve_first_half_kernel<<<gridN, 256, 0, h->stream>>>(N, dt_ase, frc, inv_m, pos, vel, disp);
+        } else {
+            loup::kinetic_energy_kernel<<<gridN, 256, 0, h->stream>>>(N, masses, vel, work);
+            if (kind == LOUP_BERENDSEN_NVT)
+                loup::berendsen_scale_kernel<<<1, 1, 0, h->stream>>>(dof, dt_fs / tau_fs, loup::ASE_KB, target, work);
+            else if (kind == LOUP_NHC)
+                loup::nhc_half_kernel<<<1, 1, 0, h->stream>>>(dof, tchain, tloop, 0.5 * dt_ase, nhc_q, loup::ASE_KB,
+                                                              0, target, work, ist);
+            else
+                loup::csvr_alpha_kernel<<<1, 1, 0, h->stream>>>(dof, csvr_exp, loup::ASE_KB, seed, step, target, work,
+                                                                ist);
+            loup::csvr_first_half_kernel<<<gridN, 256, 0, h->stream>>>(N, dt_ase, work, frc, inv_m, pos, vel, disp);
+        }
+        if (tiled_md_forces(h, md, &tiles) != 0) return -1;
+        // second half: as record_rest
+        if (kind == LOUP_LANGEVIN) {
+            loup::langevin_second_half_kernel<<<gridN, 256, 0, h->stream>>>(N, c1, c2, frc, inv_m, rnd_vel, vel, step,
+                                                                            target, a3, a4, a5, two_fr_kb);
+        } else {
+            loup::nve_second_half_kernel<<<gridN, 256, 0, h->stream>>>(N, dt_ase, frc, inv_m, vel);
+        }
+        if (kind == LOUP_NHC) {
+            loup::kinetic_energy_kernel<<<gridN, 256, 0, h->stream>>>(N, masses, vel, work);
+            loup::nhc_half_kernel<<<1, 1, 0, h->stream>>>(dof, tchain, tloop, 0.5 * dt_ase, nhc_q, loup::ASE_KB, 1,
+                                                          target, work, ist);
+            loup::scale_velocities_kernel<<<gridN, 256, 0, h->stream>>>(N, work, vel);
+        }
+        ++md->md_steps;
+        if (thermo_every && md->md_steps % thermo_every == 0 && rows && n_rows < max_rows) {
+            double e_kin = 0.0, transferred = 0.0;
+            if (kinetic(&e_kin) != 0) return -1;
+            if (kind != LOUP_NVE && kind != LOUP_LANGEVIN)
+                CUDA_CHECK(cudaMemcpyAsync(&transferred, ist, sizeof(double), cudaMemcpyDeviceToHost, h->stream));
+            CUDA_CHECK(cudaStreamSynchronize(h->stream));
+            LoupThermoRow& r = rows[n_rows++];
+            r.step = md->md_steps;
+            r.e_pot = md->energy;
+            r.e_kin = e_kin;
+            r.temp_k = dof > 0 ? 2.0 * e_kin / (dof * loup::ASE_KB) : 0.0;
+            r.pressure_gpa = 0.0;
+            r.volume_a3 = volume;
+            r.conserved = md->energy + e_kin - transferred;
+        }
+    }
+    double e_kin = 0.0;
+    unsigned int disp_bits = 0u;
+    if (kinetic(&e_kin) != 0) return -1;
+    CUDA_CHECK(cudaMemcpyAsync(&disp_bits, disp, sizeof(disp_bits), cudaMemcpyDeviceToHost, h->stream));
+    CUDA_CHECK(cudaStreamSynchronize(h->stream));
+    if (out_max_step_a) {
+        float d2 = 0.0f;
+        memcpy(&d2, &disp_bits, sizeof(d2));
+        *out_max_step_a = std::sqrt((double)d2);
+    }
+    CUDA_CHECK(cudaGetLastError());
+    const double wall = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+    if (out_rows) *out_rows = n_rows;
+    if (out_stats) {
+        *out_stats = LoupMDStats{};
+        out_stats->step_ms = wall / n_steps;
+        out_stats->rebuilds = (int)(h->tile_list_builds - builds0);
+        out_stats->final_potential_energy_ev = md->energy;
+        out_stats->final_kinetic_energy_ev = e_kin;
+        out_stats->final_temperature_k = dof > 0 ? 2.0 * e_kin / (dof * loup::ASE_KB) : 0.0;
+        out_stats->pipelined_steps = 0;
+    }
+    return 0;
+}
+
+static int tiled_get_state_impl(LoupHandle* h, double* positions, double* velocities, double* forces,
+                                double* energy, unsigned long long* noise_step, double* int_state) {
+    if (!h) return -1;
+    TiledMD* md = h->tiled_md;
+    if (!md) { loup::set_error("no tiled MD state: call loup_tiled_set_state first"); return -1; }
+    CUDA_CHECK(cudaSetDevice(h->device_id));
+    if (forces && !md->forces_current) {
+        long long tiles = 0;
+        if (tiled_md_forces(h, md, &tiles) != 0) return -1;
+    }
+    const size_t v3 = (size_t)md->n * 3 * sizeof(double);
+    if (positions) CUDA_CHECK(cudaMemcpyAsync(positions, md->pos.p, v3, cudaMemcpyDeviceToHost, h->stream));
+    if (velocities) CUDA_CHECK(cudaMemcpyAsync(velocities, md->vel.p, v3, cudaMemcpyDeviceToHost, h->stream));
+    if (forces) CUDA_CHECK(cudaMemcpyAsync(forces, md->forces.p, v3, cudaMemcpyDeviceToHost, h->stream));
+    if (noise_step)
+        CUDA_CHECK(cudaMemcpyAsync(noise_step, md->step.p, sizeof(*noise_step), cudaMemcpyDeviceToHost, h->stream));
+    if (int_state)
+        CUDA_CHECK(cudaMemcpyAsync(int_state, md->int_state.p, kIntStateSlots * sizeof(double),
+                                   cudaMemcpyDeviceToHost, h->stream));
+    CUDA_CHECK(cudaStreamSynchronize(h->stream));
+    if (energy) *energy = md->forces_current ? md->energy : std::nan("");
     return 0;
 }
 
@@ -5420,7 +5767,10 @@ int loup_set_dispersion(LoupHandle* h, const LoupD3Settings* settings, const Lou
 }
 
 int loup_set_system(LoupHandle* h, int n_atoms, const int* atomic_numbers, const double* masses_amu, double skin) {
-    return guarded(h, "loup_set_system", [&] { return set_system_impl(h, n_atoms, atomic_numbers, masses_amu, skin); });
+    return guarded(h, "loup_set_system", [&] {
+        if (h) release_tiled_md(h);
+        return set_system_impl(h, n_atoms, atomic_numbers, masses_amu, skin);
+    });
 }
 
 int loup_set_state(LoupHandle* h, const double* positions, const double* velocities, const double* cell) {
@@ -5510,6 +5860,33 @@ int loup_debug_evaluate_tiled(LoupHandle* h, int n_atoms, const int* atomic_numb
     return guarded(h, "loup_debug_evaluate_tiled", [&] {
         return evaluate_tiled_impl(h, n_atoms, atomic_numbers, positions, cell, receivers, skin, out_energy_ev,
                                    out_forces, out_stress, out_tiles);
+    });
+}
+
+int loup_tiled_set_state(LoupHandle* h, int n_atoms, const int* atomic_numbers, const double* masses_amu,
+                         const double* positions, const double* velocities, const double* cell,
+                         const unsigned char* fixed, int receivers, double skin, unsigned long long noise_step,
+                         const double* int_state, int int_state_kind) {
+    return guarded(h, "loup_tiled_set_state", [&] {
+        return tiled_set_state_impl(h, n_atoms, atomic_numbers, masses_amu, positions, velocities, cell, fixed,
+                                    receivers, skin, noise_step, int_state, int_state_kind);
+    });
+}
+
+int loup_tiled_run(LoupHandle* h, const LoupIntegrator* integrator, int n_steps, LoupMDStats* out_stats,
+                   LoupThermoRow* rows, int max_rows, int* out_rows, double* out_max_step_a) {
+    return guarded(h, "loup_tiled_run", [&] {
+        return tiled_run_impl(h, integrator, n_steps, out_stats, rows, max_rows, out_rows, out_max_step_a);
+    });
+}
+
+int loup_tiled_get_state(LoupHandle* h, double* positions, double* velocities, double* forces, double* out_energy_ev,
+                         unsigned long long* noise_step, double* int_state, int* int_state_kind) {
+    return guarded(h, "loup_tiled_get_state", [&] {
+        if (tiled_get_state_impl(h, positions, velocities, forces, out_energy_ev, noise_step, int_state) != 0)
+            return -1;
+        if (int_state_kind) *int_state_kind = h->tiled_md->state_kind;
+        return 0;
     });
 }
 

@@ -64,7 +64,7 @@ def _plan(sim):
     if execution.get("mode") in ("tiled", "wavefront"):   # tiles of at most `receivers` atoms (PLAN.md S5-T12)
         requested = getattr(getattr(sim, "capacity", None), "mode", "auto")
         plan.update(execution="tiled", receivers=int(getattr(engine, "receivers", 0) or execution["receivers"]),
-                    tiles=int(getattr(engine, "tiles", 0)) or None, integrator_on="host",
+                    tiles=int(getattr(engine, "tiles", 0)) or None, integrator_on=getattr(engine, "integrator_on", "host"),
                     wavefront=bool(getattr(engine, "wavefront", False)),
                     requested=requested, tiled_because="asked" if requested in ("tiled", "wavefront") else "memory")
     found = execution.get("plan")

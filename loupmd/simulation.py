@@ -38,7 +38,9 @@ THERMO_ROWS_PER_CALL = 4000
 # an unavailable gate is recorded and the run goes on.
 CHECK_MODES = ("skip", "gate", "allow_unavailable")
 CAPACITY_MODES = ("auto", "whole", "tiled", "wavefront")
-TILED_SCHEMES = ("nve", "langevin")        # what the tiled mode integrates (on the host, PLAN.md D65)
+# what the tiled mode integrates: fixed-cell schemes (PLAN.md D65, O31). On the host loop (a dispersion term or a
+# library without loup_tiled_run) only NVE and Langevin; TiledEngine refuses the others there.
+TILED_SCHEMES = ("nve", "langevin", "csvr", "nose_hoover", "berendsen")
 
 
 def fixed_mask(atoms):
@@ -93,8 +95,9 @@ class Simulation:
       ``"auto"`` plans the execution before the first step and runs a system that does not fit the GPU whole in
       tiles of at most ``receivers`` atoms (``Simulation.execution`` says which); from 2^20 atoms in a cell long
       enough for 12 layers of tiles it uses the wavefront schedule, which ``"wavefront"`` forces (two-layer models;
-      S5-T08). The tiled modes run NVE and Langevin, with the integrator on the host (PLAN.md D65); other
-      integrators are refused in them.
+      S5-T08). The tiled modes run the fixed-cell integrators (NVE, Langevin, CSVR, Nose-Hoover chain,
+      Berendsen NVT) on the device (PLAN.md O31); barostats are refused in them. With a dispersion term the
+      integrator runs on the host, NVE and Langevin only.
 
     - ``elements``: more elements (symbols or atomic numbers) for the run's bundle than the structure has, for
       species events (``set_species``) and transmute moves that bring them in.
@@ -209,11 +212,11 @@ class Simulation:
         self.dispersion_used, self.dispersion_choice = self.dispersion, None
 
     def _check_tiled_scheme(self):
-        if self.config.scheme not in TILED_SCHEMES:
-            raise PlanRefused(f"the {self.config.scheme} integrator in tiled mode",
-                              why="the tiled mode integrates NVE and Langevin on the host; the other thermostats and "
-                                  "the barostats wait for the device integrators on the tiled state (PLAN.md D65)",
-                              next_step="Use lm.integrators.NVE or Langevin, or a cell that fits the GPU whole.")
+        if self.config.scheme not in TILED_SCHEMES or self.config.ensemble == "npt":
+            raise PlanRefused(f"the {self.config.scheme} {self.config.ensemble} integrator in tiled mode",
+                              why="the tiled mode keeps the cell fixed: barostats need a cell that fits the GPU whole "
+                                  "(PLAN.md D65)",
+                              next_step="Use an NVE or NVT integrator, or a cell that fits the GPU whole.")
 
     # ---------------------------------------------------------------------------------------------- start
 

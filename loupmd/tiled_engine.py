@@ -1,12 +1,15 @@
 """The engine of a ``Simulation`` whose system does not fit the GPU whole (plan task S5-T12, PLAN.md D65).
 
 :class:`TiledEngine` has the interface ``Simulation`` uses of ``LoupEngine`` and gets its forces from the tiled call,
-which keeps its tile lists across steps until an atom has moved skin/2 (S5-T06). The integrator runs on the host:
-velocity Verlet (NVE) and ASE's Langevin step, with fixed atoms and the centre of mass held at rest as the device
-loop does. Thermostats other than Langevin and every barostat are refused in tiled mode until the device integrators
-run on the tiled state (D65). The Langevin noise follows ASE's formulas with its own random stream (seeded from the
-run's seed and the step), so a tiled run does not repeat a whole-system run's trajectory; a restart continues the
-stream.
+which keeps its tile lists across steps until an atom has moved skin/2 (S5-T06).
+
+The integrator runs on the device when the library has it (``loup_tiled_run``, PLAN.md O31): positions, velocities
+and forces stay on the GPU between steps, and NVE, Langevin, CSVR, the Nose-Hoover chain and Berendsen NVT run with
+the whole-system loop's kernels (the same noise streams). Without it, with a dispersion term, or with
+``LOUP_TILED_HOST_MD=1``, the host loop runs: velocity Verlet (NVE) and ASE's Langevin step, with fixed atoms and the
+centre of mass held at rest as the device loop does; its Langevin noise is its own random stream (seeded from the
+run's seed and the step), so a host run does not repeat a device run's trajectory. A restart continues either
+stream. Barostats are refused in tiled mode (the cell is fixed, D65).
 
 A dispersion term (``set_dispersion``, PLAN.md S6-D09, D76) is computed for the whole system by the library's D3
 term kept across calls (``loupmd._d3.Term``): it needs no neighbour list and holds about 200 bytes per atom, so it
@@ -14,6 +17,7 @@ fits where the model has to be tiled. Its energy, forces and stress are added to
 """
 from __future__ import annotations
 
+import os
 import struct
 import time
 
@@ -23,8 +27,11 @@ from . import _core
 from .errors import BackendError, PlanRefused
 
 _MAGIC = b"LOUPTILE"
-_VERSION = 1
+_VERSION = 2                                 # 2: the integrator state block and its kind follow the cell
+_HEAD = "<8sIqq"
 _SUPPORTED = {_core.LOUP_NVE: "NVE", _core.LOUP_LANGEVIN: "Langevin"}
+_DEVICE_KINDS = {_core.LOUP_NVE, _core.LOUP_LANGEVIN, _core.LOUP_CSVR, _core.LOUP_NHC, _core.LOUP_BERENDSEN_NVT}
+_SLOTS = _core.TILED_STATE_SLOTS
 
 
 class TiledEngine:
@@ -42,6 +49,8 @@ class TiledEngine:
             self.info = engine.info
         self.dispersion = None
         self._d3 = None
+        self._dev = False                        # the device's tiled MD state is the current one
+        self._host = True                        # the host arrays are the current state
 
     # ------------------------------------------------------------------------------------------------- system
     def set_system(self, numbers, masses, skin=0.5):
@@ -56,14 +65,19 @@ class TiledEngine:
         self._noise_step = 0                     # the Langevin stream's position: kept by restarts, as the device's
         self._rows = []
         self._step_disp = 0.0
+        self._int_state = np.zeros(_SLOTS)
+        self._int_kind = -1
+        self._dev, self._host = False, True
         self._close_d3()
         self._eng.set_execution(self.mode, self.receivers, self.memory_fraction)
 
     def set_dispersion(self, record=None):
         """The D3 term of a resolved record added to every force call (``None``: removed)."""
         self._close_d3()
+        self._pull()
         self.dispersion = record
         self._forces = self._energy = None
+        self._dev = False
 
     def _close_d3(self):
         if self._d3 is not None:
@@ -71,6 +85,8 @@ class TiledEngine:
             self._d3 = None
 
     def set_fixed_atoms(self, fixed=None):
+        self._pull()
+        self._dev = False
         self._fixed = None if fixed is None else np.asarray(fixed, dtype=bool).copy()
         if self._fixed is not None and self._vel is not None:
             self._vel[self._fixed] = 0.0
@@ -87,14 +103,49 @@ class TiledEngine:
             self._vel[self._fixed] = 0.0
         self._forces = self._energy = None
         self._md_steps = 0
+        self._dev, self._host = False, True
 
     def get_cell(self):
         return self._cell.copy()
 
+    # ------------------------------------------------------------------------------------------------- device state
+    def _device_md(self, kind=None) -> bool:
+        """Whether this run goes to the device loop."""
+        if os.environ.get("LOUP_TILED_HOST_MD") == "1" or self.dispersion is not None:
+            return False
+        if not (hasattr(self._eng, "has_tiled_md") and self._eng.has_tiled_md()):
+            return False
+        return kind is None or kind in _DEVICE_KINDS
+
+    @property
+    def integrator_on(self) -> str:
+        """Where the run's integrator runs: ``"device"`` (``loup_tiled_run``) or ``"host"``."""
+        return "device" if self._device_md() else "host"
+
+    def _pull(self):
+        """The device's state into the host arrays (when the device holds a newer one)."""
+        if self._host:
+            return
+        pos, vel, frc, e, step, ist, kind = self._eng.tiled_get_state()
+        self._pos, self._vel, self._forces, self._energy = pos, vel, frc, e
+        self._stress = None
+        self._noise_step, self._int_state, self._int_kind = step, ist, kind
+        self._host = True
+
+    def _push(self):
+        """The host state onto the device (when the device's is not current)."""
+        if self._dev:
+            return
+        self._eng.tiled_set_state(self._numbers, self._masses, self._pos, self._vel, self._cell, fixed=self._fixed,
+                                  receivers=self.receivers, skin=self.skin, noise_step=self._noise_step,
+                                  int_state=self._int_state if self._int_kind >= 0 else None,
+                                  int_state_kind=self._int_kind)
+        self._dev = True
+
     # ------------------------------------------------------------------------------------------------- forces
-    def _force_call(self):
+    def _force_call(self, stress=True):
         e, f, s, tiles = self._eng.evaluate_tiled(self._numbers, self._pos, self._cell, self.receivers,
-                                                  skin=self.skin)
+                                                  skin=self.skin, compute_stress=stress)
         done = self._eng.last_execution()
         if not self.receivers:
             self.receivers = int(done.receivers)
@@ -115,9 +166,11 @@ class TiledEngine:
         return self._energy, f, s
 
     def evaluate(self, positions, cell, compute_stress=True):
+        self._pull()
         self._pos = np.array(positions, dtype=np.float64)
         self._cell = np.array(cell, dtype=np.float64)
-        e, f, s = self._force_call()
+        self._dev = False
+        e, f, s = self._force_call(stress=bool(compute_stress))
         return e, f.copy(), (s.copy() if compute_stress else None)
 
     def last_execution(self):
@@ -133,14 +186,23 @@ class TiledEngine:
 
         if n_steps <= 0:
             raise BackendError(f"loup_run: n_steps must be positive, got {n_steps}", call="loup_run")
-        if it.kind not in _SUPPORTED:
+        if it.kind not in _DEVICE_KINDS:
             raise PlanRefused(f"integrator kind {it.kind} in tiled mode",
-                              why="the tiled mode integrates NVE and Langevin on the host; the other thermostats "
-                                  "and the barostats wait for the device integrators on the tiled state (PLAN.md "
-                                  "D65)",
+                              why="the tiled mode runs NVE, Langevin, CSVR, the Nose-Hoover chain and Berendsen NVT "
+                                  "on a fixed cell (the host loop without the device integrator: NVE and Langevin); "
+                                  "barostats need a cell that fits the GPU whole (PLAN.md D65)",
+                              next_step="Use one of those integrators, or a cell that fits the GPU whole.")
+        if self._device_md(it.kind):
+            return self._run_device(n_steps, it)
+        if it.kind not in _SUPPORTED:
+            raise PlanRefused(f"integrator kind {it.kind} in tiled mode on the host loop",
+                              why="the host loop (with a dispersion term, LOUP_TILED_HOST_MD=1, or a library without "
+                                  "loup_tiled_run) integrates NVE and Langevin only",
                               next_step="Use NVE or Langevin, or a cell that fits the GPU whole.")
+        self._pull()
+        self._dev = False
         if self._forces is None:
-            self._force_call()
+            self._force_call(stress=False)
         dt = it.dt_fs * units.fs
         m = self._masses[:, None]
         inv_m = 1.0 / m
@@ -183,7 +245,7 @@ class TiledEngine:
                     step[self._fixed] = 0.0
                     v[self._fixed] = 0.0
                 x += step
-                e, f, _ = self._force_call()
+                e, f, _ = self._force_call(stress=False)
                 v += c1 * f * inv_m - c2 * v + rnd_vel
                 if fix_com:
                     v -= (m * v).sum(axis=0) / total_mass
@@ -192,7 +254,7 @@ class TiledEngine:
                 v += 0.5 * dt * f * inv_m
                 step = dt * v
                 x += step
-                e, f, _ = self._force_call()
+                e, f, _ = self._force_call(stress=False)
                 v += 0.5 * dt * f * inv_m
             largest = max(largest, float(np.sqrt((step * step).sum(axis=1).max())))
             self._md_steps += 1
@@ -213,6 +275,27 @@ class TiledEngine:
         stats.dangerous_builds = 0
         return stats
 
+    def _run_device(self, n_steps, it):
+        if it.fix_com and self._fixed is not None and self._fixed.any():
+            raise PlanRefused("fix_com with fixed atoms in tiled mode", why="the tiled device loop refuses both",
+                              next_step="Drop fix_com: fixed atoms already hold the system in place.")
+        self._push()
+        every = int(it.thermo_every)
+        stats, rows, step = self._eng.tiled_run(n_steps, it, max_rows=n_steps // every if every > 0 else 0)
+        self._host = False
+        done = self._eng.last_execution()
+        if not self.receivers:
+            self.receivers = int(done.receivers)
+        self.wavefront = done.mode == _core.LOUP_EXEC_WAVEFRONT
+        self.tiles = int(done.tiles)
+        self._step_disp = step
+        self._energy = stats.final_potential_energy_ev
+        for r in rows:                           # the device counts as this engine does (both restart together)
+            self._rows.append((int(r["step"]), float(r["e_pot"]), float(r["e_kin"]), float(r["temp_k"]), 0.0,
+                               float(r["volume_a3"]), float(r["conserved"])))
+        self._md_steps += n_steps
+        return stats
+
     def step_displacement(self):
         return self._step_disp
 
@@ -224,38 +307,54 @@ class TiledEngine:
         return np.array(rows, dtype=_core.THERMO_DTYPE)
 
     def get_state(self):
+        self._pull()
         if self._forces is None:
             self._force_call()
         return self._pos.copy(), self._vel.copy(), self._forces.copy(), self._energy
 
     # ------------------------------------------------------------------------------------------------- restarts
     def export_state(self) -> bytes:
-        head = struct.pack("<8sIqq", _MAGIC, _VERSION, self._n, self._noise_step)
-        return head + self._pos.tobytes() + self._vel.tobytes() + self._cell.tobytes()
+        self._pull()
+        head = struct.pack(_HEAD, _MAGIC, _VERSION, self._n, self._noise_step)
+        ist = np.ascontiguousarray(self._int_state, dtype=np.float64)
+        return (head + self._pos.tobytes() + self._vel.tobytes() + self._cell.tobytes() + ist.tobytes()
+                + struct.pack("<i", int(self._int_kind)))
 
     def import_state(self, blob):
         blob = bytes(blob)
-        size = struct.calcsize("<8sIqq")
+        size = struct.calcsize(_HEAD)
         if len(blob) < size:
             raise BackendError("loup_import_state: the state block is too short for the tiled mode",
                                call="loup_import_state")
-        magic, version, n, noise = struct.unpack("<8sIqq", blob[:size])
-        if magic != _MAGIC or version != _VERSION:
+        magic, version, n, noise = struct.unpack(_HEAD, blob[:size])
+        if magic != _MAGIC or version not in (1, _VERSION):
             raise BackendError("loup_import_state: not a tiled-mode state block (written by the whole-system "
                                "engine, or another version)", call="loup_import_state")
-        if n != self._n or len(blob) != size + 8 * (6 * n + 9):
+        tail = 8 * _SLOTS + 4 if version == 2 else 0
+        if n != self._n or len(blob) != size + 8 * (6 * n + 9) + tail:
             raise BackendError(f"loup_import_state: the state block holds {n} atoms, the system {self._n}",
                                call="loup_import_state")
-        a = np.frombuffer(blob[size:], dtype=np.float64)
-        pos, cell = a[:3 * n].reshape(n, 3), a[6 * n:].reshape(3, 3)
-        # The same positions and cell (a Simulation restarts the step count this way on a thermo step): the forces
-        # stay, so no tiled call is repeated.
+        a = np.frombuffer(blob[size:size + 8 * (6 * n + 9)], dtype=np.float64)
+        pos, vel, cell = a[:3 * n].reshape(n, 3), a[3 * n:6 * n].reshape(n, 3), a[6 * n:].reshape(3, 3)
+        if version == 2:
+            ist = np.frombuffer(blob[size + 8 * (6 * n + 9):-4], dtype=np.float64).copy()
+            kind = struct.unpack("<i", blob[-4:])[0]
+        else:
+            ist, kind = np.zeros(_SLOTS), -1
+        # The engine's own state again (a Simulation restarts the step count this way on a thermo step): the forces
+        # stay, and the device keeps its state, so no tiled call is repeated.
+        self._pull()
         same = (self._forces is not None and self._pos is not None and np.array_equal(pos, self._pos)
                 and np.array_equal(cell, self._cell))
-        self._pos, self._cell = pos.copy(), cell.copy()
-        self._vel = a[3 * n:6 * n].reshape(n, 3).copy()
-        self._noise_step = int(noise)
+        unchanged = (same and np.array_equal(vel, self._vel) and int(noise) == self._noise_step
+                     and kind == self._int_kind and np.array_equal(ist, self._int_state))
+        self._pos, self._cell, self._vel = pos.copy(), cell.copy(), vel.copy()
+        self._noise_step, self._int_state, self._int_kind = int(noise), ist, int(kind)
         if not same:
             self._forces = self._energy = None
+        if not unchanged:
+            self._dev = False
+        elif self._dev:                          # the device keeps its state; its step count starts anew too
+            self._eng.tiled_set_state(self._numbers, self._masses, None, None, self._cell)
         self._md_steps = 0
         self._rows = []

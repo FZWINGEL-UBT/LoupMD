@@ -31,7 +31,7 @@ The report says which mode the run took (here 320,000 atoms on a 16 GB card):
 ```
 Plan
   8 tiles of at most 65,536 atoms on GPU 0 (NVIDIA GeForce RTX 5060 Ti, ...) (the cell does not fit the card
-  whole); the integrator runs on the host
+  whole); the integrator runs on the device
   memory: the whole system would need 32.12 GiB; tiled 10.45 GiB planned, 14.00 GiB free on the card
 ```
 
@@ -62,12 +62,14 @@ Measured on an RTX 5060 Ti with OMAT-0 medium (STATUS_AND_PROFILE.md §6.22):
 
 ## What the tiled mode runs
 
-- **Integrators:** `NVE` and `Langevin` (ASE's formulas). Every other thermostat and every barostat is refused in
-  tiled mode, with a message. In this version the integrator runs on the host in numpy, and only the forces come
-  from the GPU (PLAN.md D65). Moving the integrators onto the device is a later step.
-- **Random stream:** the Langevin noise of a tiled run comes from its own stream, seeded by the run's seed and the
-  step. A tiled run does not repeat a whole-cell run's trajectory step for step, but a resumed tiled run continues
-  its own stream exactly.
+- **Integrators:** the fixed-cell ones: `NVE`, `Langevin`, `CSVR`, `NoseHooverChain` and `Berendsen` without a
+  pressure. They run on the GPU with the whole-cell run's kernels; positions, velocities and forces stay on the card
+  between steps. Barostats are refused in tiled mode, with a message: the cell stays fixed (PLAN.md D65).
+- **Random stream:** the noise is the whole-cell run's, so a tiled Langevin or CSVR run follows the whole-cell
+  trajectory to float32 force rounding, and a resumed run continues the stream and the thermostat's state.
+- **With a dispersion term** the D3 energy is added on the host each step, so the integrator runs on the host in
+  numpy, `NVE` and `Langevin` only, with its own Langevin noise stream (`LOUP_TILED_HOST_MD=1` forces this loop).
+  The report says where the integrator ran.
 - **Fixed atoms and centre of mass:** both are handled as in the whole-cell run (`FixAtoms`, `fixcm`).
 - **Neighbour lists:** each tile keeps its list across steps. All lists are rebuilt once any atom has moved half the
   skin.

@@ -89,7 +89,7 @@ def _plan_lines(metadata) -> list:
         why = (f"capacity={plan.get('requested', 'tiled')!r} asked for tiles" if plan.get("tiled_because") == "asked"
                else "the cell does not fit the card whole")
         lines = [f"{tiles}tiles of at most {plan['receivers']:,} atoms on {where} ({why}); the integrator runs on "
-                 "the host"]
+                 f"the {plan.get('integrator_on', 'host')}"]
         if plan.get("wavefront"):
             lines.append("the tiles run in the wavefront order: the layer states of a moving band of tiles are "
                          "held, not the whole cell's")

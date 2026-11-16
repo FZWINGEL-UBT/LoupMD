@@ -85,7 +85,7 @@ def test_a_tiled_constant_energy_run_conserves_energy():
 
 @pytest.mark.full
 def test_a_tiled_simulation_follows_the_whole_systems_nve_trajectory(monkeypatch):
-    """lm.Simulation with capacity 'tiled' (TiledEngine, host velocity Verlet) against the device loop on the whole
+    """lm.Simulation with capacity 'tiled' (TiledEngine, its device loop) against the device loop on the whole
     system, without hybrids: 20 steps of 1 fs from 300 K stay together to float32 force rounding."""
     import loupmd
     from loupmd import integrators
@@ -185,4 +185,125 @@ def test_loupmd_md_capacity_auto_tiles_a_cell_that_does_not_fit_and_says_so(tmp_
         pytest.skip("this GPU runs 320,000 atoms whole")
     assert code == 0
     assert plan["execution"] == "tiled" and 4096 <= plan["receivers"] <= 65536
-    assert "tiles of at most" in out and "the integrator runs on the host" in out
+    assert "tiles of at most" in out and "the integrator runs on the device" in out
+
+
+# ------------------------------------------------------------------------- the device loop (PLAN.md O31)
+
+def _pair(at, integrator, steps, caps, env=None, monkeypatch=None):
+    """The same run under each capacity of ``caps`` (name -> (capacity, environment)); positions, velocities,
+    potential energy and the engine's integrator place of each."""
+    import loupmd
+
+    ff = loupmd.load(find_model("mace-omat-0-medium.model"), trusted=True)
+    out = {}
+    for name, (cap, extra) in caps.items():
+        for k, v in (extra or {}).items():
+            monkeypatch.setenv(k, v)
+        sim = loupmd.Simulation(at, ff, integrator=integrator, seed=5, skin=SKIN, capacity=cap)
+        sim.run(steps=steps)
+        out[name] = (sim.atoms.positions.copy(), sim.atoms.get_velocities().copy(),
+                     sim.atoms.get_potential_energy(), getattr(sim._engine, "integrator_on", "whole"))
+        sim.close()
+        del sim
+        gc.collect()
+        for k in (extra or {}):
+            monkeypatch.delenv(k)
+    return out
+
+
+@pytest.mark.full
+def test_the_tiled_device_loop_follows_the_whole_systems_thermostat_trajectories(monkeypatch):
+    """The device loop of the tiled mode runs the whole-system kernels. CSVR (one global noise draw per step, the
+    same stream), the Nose-Hoover chain and Berendsen follow the whole system's trajectory to float32 force rounding.
+    (Langevin draws per device row, and the whole system's rows are sorted by species: same statistics, another
+    trajectory; see the next test.)"""
+    from loupmd import integrators
+
+    monkeypatch.setenv("LOUP_NO_HYBRID", "1")
+    at = srtio3(10)
+    at.set_velocities(maxwell_velocities(at, 300.0, seed=6))
+    tiled = CapacityConfig(mode="tiled", receivers=2000)
+    for it in (integrators.CSVR(timestep_fs=1.0, temperature_K=300.0, tau_fs=50.0),
+               integrators.NoseHooverChain(timestep_fs=1.0, temperature_K=300.0, tdamp_fs=50.0),
+               integrators.Berendsen(timestep_fs=1.0, temperature_K=300.0, taut_fs=50.0)):
+        runs = _pair(at, it, 20, {"whole": ("whole", None), "tiled": (tiled, None)}, monkeypatch=monkeypatch)
+        (xw, vw, ew, _), (xt, vt, et, on) = runs["whole"], runs["tiled"]
+        dx, dv = np.abs(xt - xw).max(), np.abs(vt - vw).max()
+        de = abs(et - ew) / len(at)
+        print(f"tiled device loop vs whole, {type(it).__name__} 20 steps: dx {dx:.2e} A, dv {dv:.2e}, "
+              f"dE {de:.2e} eV/atom")
+        assert on == "device"
+        assert dx <= 1e-5 and de <= 1e-6
+
+
+@pytest.mark.full
+def test_the_tiled_device_loop_and_the_host_loop_agree_on_nve(monkeypatch):
+    from loupmd import integrators
+
+    monkeypatch.setenv("LOUP_NO_HYBRID", "1")
+    at = srtio3(10)
+    at.set_velocities(maxwell_velocities(at, 300.0, seed=8))
+    tiled = CapacityConfig(mode="tiled", receivers=2000)
+    runs = _pair(at, integrators.NVE(timestep_fs=1.0, fixcm=False), 20,
+                 {"device": (tiled, None), "host": (tiled, {"LOUP_TILED_HOST_MD": "1"})}, monkeypatch=monkeypatch)
+    (xd, _, ed, on_d), (xh, _, eh, on_h) = runs["device"], runs["host"]
+    print(f"tiled NVE device vs host loop, 20 steps: dx {np.abs(xd - xh).max():.2e} A")
+    assert (on_d, on_h) == ("device", "host")
+    assert np.abs(xd - xh).max() <= 1e-6 and abs(ed - eh) / len(at) <= 1e-7     # summation order only
+
+
+@pytest.mark.full
+def test_tiled_device_langevin_holds_the_centre_of_mass_and_its_target():
+    import loupmd
+    from loupmd import integrators
+
+    at = srtio3(10)
+    at.set_velocities(maxwell_velocities(at, 300.0, seed=3))
+    ff = loupmd.load(find_model("mace-omat-0-medium.model"), trusted=True)
+    lang = integrators.Langevin(timestep_fs=2.0, temperature_K=300.0, friction_per_fs=0.05, fixcm=True)
+    sim = loupmd.Simulation(at, ff, integrator=lang, seed=4, skin=SKIN,
+                            capacity=CapacityConfig(mode="tiled", receivers=2000))
+    try:
+        sim.run(steps=100)
+        temps = [sim.run(steps=20).final_temperature_K for _ in range(10)]
+        p = (sim.atoms.get_masses()[:, None] * sim.atoms.get_velocities()).sum(axis=0)
+        on = sim._engine.integrator_on
+    finally:
+        sim.close()
+        del sim
+        gc.collect()
+    print(f"tiled device Langevin: mean {np.mean(temps):.1f} K, total momentum {np.abs(p).max():.2e}")
+    assert on == "device"
+    assert abs(np.mean(temps) / 300.0 - 1.0) < 0.05 and np.abs(p).max() < 1e-8
+
+
+@pytest.mark.full
+def test_a_tiled_device_run_resumes_where_it_stopped(tmp_path):
+    """A CSVR run in tiles stopped and resumed (state block v2: the thermostat's energy and the noise step) ends
+    where the unbroken run ends."""
+    import loupmd
+    from loupmd import integrators
+
+    at = srtio3(10)
+    at.set_velocities(maxwell_velocities(at, 300.0, seed=9))
+    ff = loupmd.load(find_model("mace-omat-0-medium.model"), trusted=True)
+    csvr = integrators.CSVR(timestep_fs=1.0, temperature_K=300.0, tau_fs=50.0)
+    tiled = CapacityConfig(mode="tiled", receivers=2000)
+    full = loupmd.Simulation(at, ff, integrator=csvr, seed=2, skin=SKIN, capacity=tiled,
+                             output=loupmd.Output(str(tmp_path / "full")))
+    full.run(steps=30)
+    x_full = full.atoms.positions.copy()
+    full.close()
+    half = loupmd.Simulation(at, ff, integrator=csvr, seed=2, skin=SKIN, capacity=tiled,
+                             output=loupmd.Output(str(tmp_path / "half")))
+    half.run(steps=15)
+    half.save_restart()
+    half.close()
+    again = loupmd.Simulation.resume(tmp_path / "half", force_field=ff)
+    again.run(steps=15)
+    dx = np.abs(again.atoms.positions - x_full).max()
+    again.close()
+    gc.collect()
+    print(f"tiled CSVR resumed vs unbroken: dx {dx:.2e} A")
+    assert dx <= 1e-6        # the resumed engine rebuilds its tile lists: float32 summation order only

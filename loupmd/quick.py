@@ -159,7 +159,7 @@ def md(structure, *, model, head=None, charge=None, spin_multiplicity=None, sha2
     - ``skin``: the neighbour-list skin in A, or ``"auto"`` (default): chosen from how far the atoms move per
       step (``loupmd.skin``). It decides speed only;
     - ``capacity``: ``"auto"`` (default): the whole system when it fits the GPU, else tiles of up to 65,536 atoms
-      (NVE and Langevin only, PLAN.md D65), from 2^20 atoms with the wavefront schedule where the cell is long
+      (fixed-cell integrators only, PLAN.md D65), from 2^20 atoms with the wavefront schedule where the cell is long
       enough; ``"whole"``, ``"tiled"`` or ``"wavefront"`` force one;
     - ``device``: the GPU index.
     """

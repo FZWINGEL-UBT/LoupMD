@@ -1,7 +1,8 @@
 """The tiled mode in ``lm.Simulation`` and ``lm.md`` (plan task S5-T12): ``capacity="auto"`` plans the execution and
-runs a cell that does not fit in tiles through ``TiledEngine``, whose integrator runs on the host. On a fake engine
-whose tiled call is the spring potential of ``fake_core``, so the tiled run can be compared with the whole one.
-Needs neither a GPU nor the library."""
+runs a cell that does not fit in tiles through ``TiledEngine``. On a fake engine whose tiled call is the spring
+potential of ``fake_core``, so the tiled run can be compared with the whole one: ``TileSpringEngine`` has no device
+loop (the host integrator runs), ``DeviceTileSpringEngine`` fakes ``loup_tiled_run`` (PLAN.md O31) with the same
+arithmetic. Needs neither a GPU nor the library."""
 from __future__ import annotations
 
 import json
@@ -35,7 +36,7 @@ class TileSpringEngine(SpringEngine):
         return _core.MemoryPlan(1000 * n, 100 * n, 10 ** 6, 2 ** 34, 64 if tiled else 0,
                                 _core.LOUP_EXEC_TILED if tiled else _core.LOUP_EXEC_WHOLE)
 
-    def evaluate_tiled(self, numbers, positions, cell, receivers, skin=0.5):
+    def evaluate_tiled(self, numbers, positions, cell, receivers, skin=0.5, compute_stress=True):
         pos = np.asarray(positions, dtype=float)
         # the springs' sites: the first positions seen for this atom count, by any engine (a resumed run too)
         sites = TileSpringEngine.shared_sites.setdefault(len(numbers), pos.copy())
@@ -58,6 +59,88 @@ def ff(tmp_path):
     SpringEngine.made, SpringEngine.poison_at = [], None
     TileSpringEngine.shared_sites = {}
     return loupmd.load(str(checkpoint), trusted=True, engine_factory=TileSpringEngine,
+                       ensure_bundle=lambda path, numbers, **kw: path.with_name("bundle.loup"), probe=lambda p: None)
+
+
+class DeviceTileSpringEngine(TileSpringEngine):
+    """TileSpringEngine with a fake device loop: velocity Verlet on the springs (every fixed-cell kind integrates as
+    NVE here, and counts its steps in the state block's slot 0, so a restart's block can be checked)."""
+
+    def has_tiled_md(self):
+        return True
+
+    def tiled_set_state(self, numbers, masses, positions, velocities, cell, fixed=None, receivers=0, skin=0.5,
+                        noise_step=0, int_state=None, int_state_kind=-1):
+        self.log.append("tiled_set_state" if positions is not None else "tiled_restart_count")
+        if positions is None:
+            self.dev["md_steps"] = 0
+            return
+        self.dev = {"z": np.array(numbers), "m": np.array(masses, dtype=float), "x": np.array(positions, dtype=float),
+                    "v": np.array(velocities, dtype=float), "cell": np.array(cell, dtype=float), "f": None,
+                    "fixed": None if fixed is None else np.asarray(fixed, dtype=bool), "receivers": receivers,
+                    "step": int(noise_step), "md_steps": 0, "e": float("nan"),
+                    "ist": np.zeros(64) if int_state is None else np.array(int_state, dtype=float),
+                    "kind": int(int_state_kind)}
+        if self.dev["fixed"] is not None:
+            self.dev["v"][self.dev["fixed"]] = 0.0
+
+    def _dev_forces(self):
+        d = self.dev
+        d["e"], d["f"], _, _ = self.evaluate_tiled(d["z"], d["x"], d["cell"], d["receivers"])
+
+    def tiled_run(self, n_steps, it, max_rows=0):
+        from ase import units
+
+        d = self.dev
+        if d["f"] is None:
+            self._dev_forces()
+        inv_m = 1.0 / d["m"][:, None]
+        if d["fixed"] is not None:
+            inv_m = np.where(d["fixed"][:, None], 0.0, inv_m)
+        dt = it.dt_fs * units.fs
+        if d["kind"] != it.kind and it.kind != _core.LOUP_NVE:
+            d["ist"][:] = 0.0
+            d["kind"] = it.kind
+        rows, largest = [], 0.0
+        for _ in range(n_steps):
+            d["v"] += 0.5 * dt * d["f"] * inv_m
+            step = dt * d["v"]
+            d["x"] += step
+            self._dev_forces()
+            d["v"] += 0.5 * dt * d["f"] * inv_m
+            d["md_steps"] += 1
+            d["step"] += 1
+            if it.kind != _core.LOUP_NVE:
+                d["ist"][0] += 1.0
+            largest = max(largest, float(np.sqrt((step * step).sum(axis=1).max())))
+            if it.thermo_every and d["md_steps"] % it.thermo_every == 0 and len(rows) < max_rows:
+                e_kin = 0.5 * float((d["m"][:, None] * d["v"] ** 2).sum())
+                dof = 3 * len(d["m"])
+                rows.append((d["md_steps"], d["e"], e_kin, 2 * e_kin / (dof * units.kB), 0.0,
+                             abs(float(np.linalg.det(d["cell"]))), d["e"] + e_kin - d["ist"][0] * 0.0))
+        e_kin = 0.5 * float((d["m"][:, None] * d["v"] ** 2).sum())
+        st = _core.LoupMDStats()
+        st.final_potential_energy_ev = d["e"]
+        st.final_kinetic_energy_ev = e_kin
+        st.final_temperature_k = 2 * e_kin / (3 * len(d["m"]) * units.kB)
+        self.device_steps = getattr(self, "device_steps", 0) + n_steps
+        return st, np.array(rows, dtype=_core.THERMO_DTYPE), largest
+
+    def tiled_get_state(self):
+        d = self.dev
+        if d["f"] is None:
+            self._dev_forces()
+        self.log.append("tiled_get_state")
+        return d["x"].copy(), d["v"].copy(), d["f"].copy(), d["e"], d["step"], d["ist"].copy(), d["kind"]
+
+
+@pytest.fixture
+def ff_dev(tmp_path):
+    checkpoint = tmp_path / "dev.model"
+    checkpoint.write_bytes(b"never unpickled here")
+    SpringEngine.made, SpringEngine.poison_at = [], None
+    TileSpringEngine.shared_sites = {}
+    return loupmd.load(str(checkpoint), trusted=True, engine_factory=DeviceTileSpringEngine,
                        ensure_bundle=lambda path, numbers, **kw: path.with_name("bundle.loup"), probe=lambda p: None)
 
 
@@ -105,17 +188,87 @@ def test_auto_keeps_a_cell_that_fits_whole(ff, tmp_path):
 
 
 def test_the_tiled_mode_refuses_the_integrators_it_does_not_run(ff, tmp_path):
+    npt = integrators.Berendsen(timestep_fs=1.0, temperature_K=300, taut_fs=100.0, pressure_GPa=0.0, taup_fs=1000.0, compressibility_per_GPa=0.01)
+    at = _big()
+    quick.draw_initial_velocities(at, 300.0, 1)
+    with pytest.raises(PlanRefused, match="berendsen npt integrator in tiled mode"):
+        loupmd.Simulation(at, ff, integrator=npt, capacity="tiled")         # before anything is exported
+    with pytest.raises(PlanRefused, match="berendsen npt integrator in tiled mode"):
+        loupmd.Simulation(at, ff, integrator=npt, capacity="wavefront")
+    assert SpringEngine.made == []
+    # the host loop (a library without loup_tiled_run) runs NVE and Langevin only
+    csvr = integrators.CSVR(timestep_fs=1.0, temperature_K=300, tau_fs=100.0)
+    sim = loupmd.Simulation(at, ff, integrator=csvr)                         # auto: the plan says tiled
+    with pytest.raises(PlanRefused, match="on the host loop"):
+        sim.run(steps=5)
+
+
+def test_the_device_loop_runs_the_host_loops_nve_trajectory(ff, ff_dev, tmp_path):
+    """O31: the same NVE run through the fake device loop and the host loop: the same thermo rows, positions and
+    velocities, one tiled call per step plus the first, and the state crosses to the host only where it is read."""
+    nve = integrators.NVE(timestep_fs=1.0, fixcm=False)
+    runs = {}
+    for name, model in (("host", ff), ("device", ff_dev)):
+        TileSpringEngine.shared_sites = {}
+        runs[name] = loupmd.md(_big(), model=model, integrator=nve, steps=60, output=str(tmp_path / name), seed=2,
+                               initial_velocities=300.0, capacity="tiled")
+    host, dev = runs["host"].simulation, runs["device"].simulation
+    eng = dev._engine._eng
+    assert dev._engine.integrator_on == "device" and host._engine.integrator_on == "host"
+    assert eng.device_steps == 60 and not hasattr(host._engine._eng, "device_steps")
+    rows_h = output.read_thermo(tmp_path / "host")[1]
+    rows_d = output.read_thermo(tmp_path / "device")[1]
+    assert [int(r[0]) for r in rows_h] == [int(r[0]) for r in rows_d] and len(rows_d) >= 3
+    assert [r[4:8] for r in rows_h] == [r[4:8] for r in rows_d]
+    assert np.allclose(dev.atoms.positions, host.atoms.positions, rtol=0, atol=1e-12)
+    assert np.allclose(dev.atoms.get_velocities(), host.atoms.get_velocities(), rtol=0, atol=1e-12)
+    assert eng.tiled_calls == 61 + 1        # the start's evaluate, then the device's own first force call
+    assert eng.log.count("tiled_set_state") == 1                     # the thermo steps' round trips keep the state
+    assert runs["device"].metadata["plan"]["integrator_on"] == "device"
+    assert "the integrator runs on the device" in runs["device"].summary
+
+
+def test_the_device_loop_runs_the_thermostats_and_restarts_carry_their_state(ff_dev, tmp_path):
     csvr = integrators.CSVR(timestep_fs=1.0, temperature_K=300, tau_fs=100.0)
     at = _big()
     quick.draw_initial_velocities(at, 300.0, 1)
-    with pytest.raises(PlanRefused, match="the csvr integrator in tiled mode"):
-        loupmd.Simulation(at, ff, integrator=csvr, capacity="tiled")        # before anything is exported
-    assert SpringEngine.made == []
-    sim = loupmd.Simulation(at, ff, integrator=csvr)                         # auto: the plan says tiled
-    with pytest.raises(PlanRefused, match="PLAN.md D65"):
-        sim.run(steps=5)
-    with pytest.raises(PlanRefused, match="the csvr integrator in tiled mode"):
-        loupmd.Simulation(at, ff, integrator=csvr, capacity="wavefront")
+    sim = loupmd.Simulation(at, ff_dev, integrator=csvr, seed=4, output=loupmd.Output(str(tmp_path / "c")),
+                            capacity="tiled")
+    sim.run(steps=30)
+    blob = sim._engine.export_state()
+    pos, vel, frc, e, step, ist, kind = sim._engine._eng.tiled_get_state()
+    assert kind == _core.LOUP_CSVR and ist[0] == 30 and step == 30
+    sim.save_restart()
+    sim.close()
+    again = loupmd.Simulation.resume(tmp_path / "c", force_field=ff_dev)
+    again.run(steps=10)
+    _, _, _, _, step2, ist2, kind2 = again._engine._eng.tiled_get_state()
+    assert kind2 == _core.LOUP_CSVR and ist2[0] == 40 and step2 == 40      # the block went through the restart
+    eng = TiledEngine(DeviceTileSpringEngine("bundle"))
+    eng.set_system(np.asarray(at.numbers), at.get_masses())
+    eng.import_state(blob)                                              # version 2 with the block
+    assert eng._int_kind == _core.LOUP_CSVR and eng._int_state[0] == 30
+
+
+def test_a_version_1_state_block_is_still_read(ff):
+    eng = TiledEngine(TileSpringEngine("bundle"))
+    n = 4
+    eng.set_system(np.full(n, 11), np.full(n, 23.0))
+    import struct
+
+    pos, vel, cell = np.arange(3 * n, dtype=float), np.ones(3 * n), np.eye(3).ravel() * 10
+    eng.import_state(struct.pack("<8sIqq", b"LOUPTILE", 1, n, 7) + pos.tobytes() + vel.tobytes() + cell.tobytes())
+    assert eng._noise_step == 7 and eng._int_kind == -1 and np.array_equal(eng._pos.ravel(), pos)
+
+
+def test_dispersion_or_the_environment_sends_the_tiled_run_to_the_host_loop(ff_dev, monkeypatch):
+    eng = TiledEngine(DeviceTileSpringEngine("bundle"))
+    assert eng.integrator_on == "device"
+    monkeypatch.setenv("LOUP_TILED_HOST_MD", "1")
+    assert eng.integrator_on == "host"
+    monkeypatch.delenv("LOUP_TILED_HOST_MD")
+    eng.dispersion = object()
+    assert eng.integrator_on == "host"
 
 
 def test_the_wavefront_mode_runs_the_tiled_engine_and_the_report_says_so(ff, tmp_path):

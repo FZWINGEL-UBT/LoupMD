@@ -416,6 +416,30 @@ int loup_debug_domain_edges(LoupHandle* h, const double* positions, const double
 int loup_debug_evaluate_tiled(LoupHandle* h, int n_atoms, const int* atomic_numbers, const double* positions,
                               const double* cell, int receivers, double skin, double* out_energy_ev, double* out_forces,
                               double* out_stress, long long* out_tiles);
+
+// Tiled MD on the device (PLAN.md O31): the trajectory of a system in the tiled mode, with positions, velocities and
+// forces kept on the GPU between steps, so a step costs one tiled force call and a few small kernels. Fixed cell.
+// loup_tiled_set_state: the system (n_atoms, atomic_numbers, masses in amu, positions and velocities in A and
+// A/(ASE time unit) [n_atoms, 3], cell rows), optional `fixed` flags [n_atoms] (velocities of fixed atoms are
+// zeroed), the receiver cap (0: the plan's) and skin as loup_debug_evaluate_tiled takes them, the noise step counter
+// of the stochastic integrators, and optionally the integrator state block [64] with its kind (a restart; NULL: zero).
+// With positions and velocities both NULL on a handle that holds n_atoms atoms, the state stays and only the step
+// count of the thermo rows starts anew.
+// loup_tiled_run: n_steps steps of `integrator` (LOUP_NVE, LOUP_LANGEVIN, LOUP_CSVR, LOUP_NHC, LOUP_BERENDSEN_NVT; no
+// barostat; fix_com refused with fixed atoms). With integrator->thermo_every > 0 and `rows`, up to max_rows thermo
+// rows (pressure 0) are written and *out_rows counts them. out_stats: step_ms the wall time per step, rebuilds the
+// tiled calls that built their lists; dangerous_builds, tune_ms and pipelined_steps are 0. *out_max_step_a
+// (optional): the longest distance an atom moved in one step of the call, in A.
+// loup_tiled_get_state: any of positions, velocities, forces [n_atoms, 3], the energy of the last force call (eV),
+// the noise step counter and the integrator state block [64] with its kind (-1: none); NULL skips an output.
+int loup_tiled_set_state(LoupHandle* h, int n_atoms, const int* atomic_numbers, const double* masses_amu,
+                         const double* positions, const double* velocities, const double* cell,
+                         const unsigned char* fixed, int receivers, double skin, unsigned long long noise_step,
+                         const double* int_state, int int_state_kind);
+int loup_tiled_run(LoupHandle* h, const LoupIntegrator* integrator, int n_steps, LoupMDStats* out_stats,
+                   LoupThermoRow* rows, int max_rows, int* out_rows, double* out_max_step_a);
+int loup_tiled_get_state(LoupHandle* h, double* positions, double* velocities, double* forces, double* out_energy_ev,
+                         unsigned long long* noise_step, double* int_state, int* int_state_kind);
 // Testing only: the noise CSVR draws in steps first_step .. first_step + n_steps - 1 (counted by the handle's step
 // counter, which loup_set_system zeroes) with `seed` for `ndof` degrees of freedom: the standard normal R1 and the
 // chi-square variate of ndof - 1 degrees of freedom of each step.
