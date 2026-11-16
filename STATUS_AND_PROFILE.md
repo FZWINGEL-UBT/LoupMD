@@ -1305,3 +1305,29 @@ memory (25 FMA and 25 loads), and the neighbour walk covers the pair cutoff's bi
 projections of the weights in shared memory (as the pair kernel does), a walk sized to the three-body cutoff, and
 a triangle loop that keeps side jk's C6 per (j, k) chunk pair. `lm.md` measures the term's time on the starting
 structure at setup and the report shows it with the three-body share (`metadata.json` dispersion.cost).
+
+### 6.30 S6-D06 groundwork: an Ewald split of the D3 pair sum (16 November 2026, CPU prototype)
+
+Not built yet; numbers from numpy prototypes on the CPU (`.tmp_o` scratch, to move to `tools/dev` with the kernel).
+The owner chose D74 (a): the split sum and the reciprocal-space sum are one method, S6-D06.
+
+- **The C6 matrix is exactly separable.** C6_ij = u_i^T M u_j, u_i the atom's Gaussian weights placed at its
+  (species, reference) slots and M the reference C6 table over those slots. With M = sum_c lam_c v_c v_c^T,
+  C6_ij = sum_c lam_c q_ic q_jc, q_ic = v_c . u_i: one "charge" per atom and channel, at most 5 channels per species
+  (NbCl5: 5 nonzero). C8 = 3 Q_i Q_j C6 is separable with the same channels scaled by sqrt(3) Q_i. No combination
+  rule is assumed, so nothing is approximated.
+- **The r^-6 and r^-8 Ewald splits** (h_long = (1 - e^-x sum_{m<p} x^m/m!) / r^2p, x = (beta r)^2; transform
+  pi^{3/2} beta^{2p-3} / (p-1)! b^{2p-3} Gamma(3/2 - p, b^2), b = k / 2 beta; self term beta^2p / (2 p!) per C_ii)
+  agree with radial quadrature to 1e-8 and with a direct lattice sum of a random separable C to 6e-9 relative.
+- **Accuracy, NbCl5 3x3x3, energy against the 150 bohr sum** (CN to 40 bohr in both): the plain 40 bohr sum is off
+  by 0.583 meV/atom. With the C6 part split and C8 summed to 40 bohr in real space: 0.002 to 0.007 meV/atom at a
+  20 bohr real-space cutoff (beta 0.15 to 0.25 per bohr), 0.0004 at 30 bohr; 166 neighbours per atom within 20 bohr
+  against about 1,300 within 40. With C8 also cut at the short cutoff and not split: 0.35 / 0.10 / 0.034 meV/atom
+  at 20 / 25 / 30 bohr, so C8 needs its own Ewald part (formula checked; the accuracy run did not finish, below).
+- **Cost model:** a direct k-space sum is N x (number of k-vectors) x channels, about as expensive as the plain sum at
+  5,000 atoms (NbCl5 needs 16,000 to 73,000 k-vectors at beta 0.15 to 0.25). The gain needs a mesh (smooth PME):
+  the k cutoff 2 beta x 4.5 at beta 0.15 implies a mesh spacing near 2.3 bohr (1.2 A, FourierD3's default).
+  Forces and stress are not prototyped yet; the CN chain rule needs dE/dq_ic from the k-space part.
+- **Not finished:** the C6+C8 split on NbCl5, and SrTiO3 and water. WSL stopped twice with Wsl/Service/E_UNEXPECTED
+  (09:10, and during the NbCl5 rerun) while the other session held the GPU; the SrTiO3 run (16 million pairs in an
+  ASE neighbour list) may have caused the first.
