@@ -283,6 +283,7 @@ Conventions:
 | [meas-ada-counters](#meas-ada-counters) | Ada performance counters | BLOCKED | `ERR_NVGPUCTRPERM`, needs admin | [§4.1 #2][s41] |
 | [meas-family-bench](#meas-family-bench) | MD speed of every family, both GPUs, against FastMACE's documented numbers | MEASUREMENT | POLAR-1 level to 20% slower than FastMACE (11 Nov lines) | [§5][s5] |
 | [meas-plan-variance](#meas-plan-variance) | GEMM plans differ between library builds | MEASUREMENT | POLAR-1-M NaCl 216 S8/S7 b/a 1.013 with each build's cached plans, 0.969 after both retuned | this file |
+| [meas-temperature-cost](#meas-temperature-cost) | Where a thermalised (300 K) `SrTiO3` force pass loses time against one at rest, per kernel, 5060 Ti | MEASUREMENT | the four tabled kernels lose L1 slab reuse (spline 1.58 -> 1.79 ms, i0 backward 497 -> 552 us); the dense contractions are DRAM-bound and do not change | this file |
 
 ## Chronology
 
@@ -2224,6 +2225,17 @@ POLAR-1 NaCl 3x3x3 (216) and POLAR-1-M `NbCl5` 3x3x3 (1,944).
 - Measured (5060 Ti, S8 against S7): POLAR-1-S NaCl 216 1.019 and POLAR-1-M NaCl 216 1.013 with each build's existing plans; after moving all plan files aside 0.998 / 1.006 (S) and 0.969 (M). nsys of one POLAR-1-S evaluate: every non-GEMM kernel identical, one shape at 80 us (`sgemm128`, S7's plan) against 54 us (cuBLAS, S8's).
 - Why it matters: A/B rows of GEMM-bound cells need fresh plans on both sides; and a tuner that times candidates inside the captured graph (rather than isolated) could recover the spread for users. Not built.
 - S51, forced alternatives inside the captured graph (5060 Ti, `POLAR-1-M` `NaCl216`; GEMM kernels are 73-84% of the summed `nsys` kernel durations on the small POLAR / MH-1 cells, a sum that overlapping side-stream launches inflate, not a share of wall time). Baseline: one fresh tuning with `LOUP_DEBUG_GEMM`, every own-kernel pick of the log pinned into the plan file (61 shapes; cuBLAS picks that tied stay re-timed); variants force one shape group (all its `transB` / `beta` keys) to a candidate the isolated tuner lost with, full-step ABBA with one library and two plan directories (b/a = forced / tuned): M=648 N=512 K=512 `sgemm64` -> `sgemm32` `1.0852`, M=216 N=2048 K=512 -> `sgemm64` `1.0186`, M=1080 N=512 K=512 (pinned `sgemm128` / `sgemm64` near-tie) both -> `sgemm128` `0.9753`, both -> `sgemm64` `0.9892`. Earlier variants that changed two of four keys: M=648 -> `sgemm32` `1.0464`, -> `sgemm128` `1.0276`; M=1512 -> `sgemm128` `1.0113`; M=216 N=512 -> `sgemm32` `1.0132`. The M=1080 results were provisional (one ABBA each); repeated after S52 with a fresh pinned set (same mixed pair `sgemm128` / `sgemm64`), both orders, forced / tuned: both -> `sgemm128` `1.0439` and `0.996`, both -> `sgemm64` `1.0061` and `1.016`. No win in both orders, so the provisional result was noise; the `sgemm128` pair also shows a paired ratio moving by ~4% between runs. Every forced alternative lost or tied. Forcing other cuBLAS algorithms was not tried. In-graph tuning not built. `ncu` of the same `sgemm64` launches (serialised): 101 registers, 4 blocks per SM (16 warps), SM active 80-87% (M=648: 88 blocks for 144 slots), issue active 65-70%, FMA pipe 55-60%, all stall reasons below 1.6 per issue.
+- Sources: this file.
+
+<a id="meas-temperature-cost"></a>
+#### meas-temperature-cost: what a thermalised configuration costs, per kernel
+- What: S108 / S109 search for work that grows with temperature. `SrTiO3` 10x10x10 (5,000 atoms), a configuration at rest against ones after Langevin equilibration to 160 K and 296.5 K, `ncu` per kernel (5060 Ti, default variants unless named).
+- Measured:
+  - Force pass 7.46-7.52 ms at rest, 8.06-8.12 ms at 160 K. Edges within 6 A change by only +0.4%, so the work is the same.
+  - `spline_forward_inter1` (R5): 1.58 -> 1.79 ms, L1 hit 78.7% -> 48.9%, L2 throughput 28.6% -> 59.7%. `w'`: L1 hit 32% -> 8%.
+  - `tabled_outer_sum0_forward`: 217 -> 250 us, L1 hit 85% -> 50%. `tabled_outer_sum0_backward`: 497 -> 552 us, L1 hit 64% -> 29%.
+  - `sc0_forward` 114-116 us, `sc0_backward` 201-227 us, `sc1_fused` 206-214 us at both temperatures: DRAM-bound (82-91% of DRAM throughput).
+  - The cause is the spread of each receiver's edges over table slabs (0.30 distinct slabs per edge at rest, 0.75 at 300 K); see [s108-wide-table](#s108-wide-table) for what wider intervals would recover and [spl-receiver-order](#spl-receiver-order) for why the order of receivers does not.
 - Sources: this file.
 
 [status]: STATUS_AND_PROFILE.md
