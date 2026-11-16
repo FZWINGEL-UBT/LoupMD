@@ -61,9 +61,8 @@ __global__ void fill_neighbors_kernel(int N, int S, CellMat64 cell, int nx, int 
                                       const double* __restrict__ bin_pos, const float4* __restrict__ bin_pos_f32,
                                       const int* __restrict__ bin_wrap,
                                       const int* __restrict__ bin_sp, const int* __restrict__ row_ptr,
-                                      int* __restrict__ tmp_snd, int* __restrict__ tmp_rcv,
-                                      int* __restrict__ tmp_shifts, int* __restrict__ tmp_pairs,
-                                     uint32_t* __restrict__ sort_keys, const int* __restrict__ go);
+                                      int* __restrict__ tmp_snd, int* __restrict__ tmp_shifts,
+                                      uint32_t* __restrict__ sort_keys, const int* __restrict__ go);
 __global__ void count_neighbors_scalar_kernel(int N, CellMat64 cell, int nx, int ny, int nz,
                                               int rx, int ry, int rz, double r_list2, float r_lo2_f32, float r_hi2_f32,
                                               const double* __restrict__ pos_wrapped, const int* __restrict__ atom_bin,
@@ -78,32 +77,27 @@ __global__ void fill_neighbors_scalar_kernel(int N, int S, CellMat64 cell, int n
                                              const double* __restrict__ bin_pos, const float4* __restrict__ bin_pos_f32,
                                              const int* __restrict__ bin_wrap,
                                              const int* __restrict__ bin_sp, const int* __restrict__ row_ptr,
-                                             int* __restrict__ tmp_snd, int* __restrict__ tmp_rcv,
-                                             int* __restrict__ tmp_shifts, int* __restrict__ tmp_pairs,
+                                             int* __restrict__ tmp_snd, int* __restrict__ tmp_shifts,
                                              uint32_t* __restrict__ sort_keys, const int* __restrict__ go);
 __global__ void max_degree_kernel(int N, const int* __restrict__ deg, int* __restrict__ out);
 __global__ void sort_gather_rows_kernel(
     CellMat64 cell, const int* __restrict__ row_ptr, const uint32_t* __restrict__ sort_keys,
-    const int* __restrict__ tmp_snd, const int* __restrict__ tmp_rcv, const int* __restrict__ tmp_shifts,
-    const int* __restrict__ tmp_pairs, const int* __restrict__ species,
-    int* __restrict__ senders, int* __restrict__ receivers, double* __restrict__ shift_cart, int* __restrict__ pairs,
+    const int* __restrict__ tmp_snd, const int* __restrict__ tmp_shifts, const int* __restrict__ species,
+    int* __restrict__ senders, double* __restrict__ shift_cart,
     int* __restrict__ order_err, const int* __restrict__ go);
 __global__ void sort_gather_rows_global_kernel(
     CellMat64 cell, const int* __restrict__ row_ptr, const uint32_t* __restrict__ sort_keys,
-    const int* __restrict__ tmp_snd, const int* __restrict__ tmp_rcv, const int* __restrict__ tmp_shifts,
-    const int* __restrict__ tmp_pairs, const int* __restrict__ species,
-    int* __restrict__ senders, int* __restrict__ receivers, double* __restrict__ shift_cart, int* __restrict__ pairs,
+    const int* __restrict__ tmp_snd, const int* __restrict__ tmp_shifts, const int* __restrict__ species,
+    int* __restrict__ senders, double* __restrict__ shift_cart,
     int* __restrict__ order_err, unsigned long long* __restrict__ scratch);
 __global__ void compute_and_count_active_kernel(
     int N, float r_max, const double* __restrict__ pos64,
-    const int* __restrict__ row_ptr, const int* __restrict__ senders,
-    const int* __restrict__ receivers, const double* __restrict__ shift_cart,
+    const int* __restrict__ row_ptr, const int* __restrict__ senders, const double* __restrict__ shift_cart,
     float4* __restrict__ tmp_vec_len, int* __restrict__ act_deg);
 __global__ void scatter_active_edges_kernel(
     int N, float r_max, SplineGrid grid, int S, int pair_sym, const int* __restrict__ species,
     const int* __restrict__ row_ptr, const int* __restrict__ act_row_ptr,
-    const int* __restrict__ senders, const int* __restrict__ receivers, const int* __restrict__ pairs,
-    const float4* __restrict__ tmp_vec_len,
+    const int* __restrict__ senders, const float4* __restrict__ tmp_vec_len,
     int* __restrict__ act_senders, int* __restrict__ act_receivers, int* __restrict__ act_pairs,
     float4* __restrict__ act_vec_len,
     int* __restrict__ act_slab, float2* __restrict__ act_t_sx);
@@ -655,14 +649,12 @@ struct LoupHandle {
     int E_skin = 0;
     int E_graph = 0;
     int E_cap = 0;
+    // Candidate edges (within r_max + skin), row i holding the edges whose receiver is i (S113: no per-edge receiver
+    // or pair index)
     int* d_senders = nullptr;
-    int* d_receivers = nullptr;
     double* d_shift_cart = nullptr;  // [E, 3] shift @ cell of each skin edge (float64), set at rebuild
-    int* d_pairs = nullptr;
     int* d_tmp_snd = nullptr;
-    int* d_tmp_rcv = nullptr;
     int* d_tmp_shifts = nullptr;
-    int* d_tmp_pairs = nullptr;
     uint32_t* d_sort_keys = nullptr;
     float4* d_act_vec_len = nullptr;
     int* d_act_senders = nullptr;
@@ -766,9 +758,9 @@ struct LoupHandle {
         freep(d_deg); freep(d_row_ptr); freep(d_cub_tmp); cub_tmp_bytes = 0;
         freep(d_act_deg); freep(d_act_row_ptr);
 
-        freep(d_senders); freep(d_receivers); freep(d_shift_cart); freep(d_pairs);
+        freep(d_senders); freep(d_shift_cart);
         // views into d_tmp_vec_len / d_edge_force_1 (ensure_edge_capacity), freed with them
-        d_tmp_snd = d_tmp_rcv = d_tmp_shifts = d_tmp_pairs = nullptr;
+        d_tmp_snd = d_tmp_shifts = nullptr;
         d_sort_keys = nullptr;
         freep(d_act_vec_len);
         freep(d_act_senders); freep(d_act_receivers); freep(d_act_pairs);
@@ -1087,12 +1079,11 @@ static int ensure_edge_capacity(LoupHandle* h, int needed) {
         return cudaMalloc(&p, (size_t)cap * elem_sz);
     };
     CUDA_CHECK(reallocp(h->d_senders, sizeof(int)));
-    CUDA_CHECK(reallocp(h->d_receivers, sizeof(int)));
     CUDA_CHECK(reallocp(h->d_shift_cart, 3 * sizeof(double)));
-    CUDA_CHECK(reallocp(h->d_pairs, sizeof(int)));
     // The rebuild's fill / sort temporaries are views into arrays a force pass rewrites before reading and that are
-    // dead during a rebuild: the four 4-byte arrays in d_tmp_vec_len (16 B per edge), the shifts in d_edge_force_1.
-    h->d_tmp_snd = h->d_tmp_rcv = h->d_tmp_shifts = h->d_tmp_pairs = nullptr;
+    // dead during a rebuild: senders and sort keys in d_tmp_vec_len (8 of its 16 B per edge), the shifts in
+    // d_edge_force_1.
+    h->d_tmp_snd = h->d_tmp_shifts = nullptr;
     h->d_sort_keys = nullptr;
     CUDA_CHECK(reallocp(h->d_act_vec_len, sizeof(float4)));
     CUDA_CHECK(reallocp(h->d_act_senders, sizeof(int)));
@@ -1104,9 +1095,7 @@ static int ensure_edge_capacity(LoupHandle* h, int needed) {
     CUDA_CHECK(reallocp(h->d_edge_force_1, 3 * sizeof(float)));
     int* tmp4 = reinterpret_cast<int*>(h->d_tmp_vec_len);
     h->d_tmp_snd = tmp4;
-    h->d_tmp_rcv = tmp4 + (size_t)cap;
-    h->d_tmp_pairs = tmp4 + 2 * (size_t)cap;
-    h->d_sort_keys = reinterpret_cast<uint32_t*>(tmp4 + 3 * (size_t)cap);
+    h->d_sort_keys = reinterpret_cast<uint32_t*>(tmp4 + (size_t)cap);
     h->d_tmp_shifts = reinterpret_cast<int*>(h->d_edge_force_1);
     if (h->gen) h->gen->ensure_edges(cap);
     h->E_cap = cap;
@@ -1276,22 +1265,22 @@ static int nl_fill(LoupHandle* h, const NlGeom& g, int P, const int* go = nullpt
             N, S, h->cell, g.nx, g.ny, g.nz, g.rx, g.ry, g.rz, g.r_list2, g.r_lo2_f32, g.r_hi2_f32,
             h->d_pos_wrapped, h->d_atom_wrap, h->d_species, h->d_atom_bin,
             h->d_bin_offsets, h->d_bin_atom_id, h->d_bin_pos, h->d_bin_pos_f32, h->d_bin_wrap, h->d_bin_sp,
-            h->d_row_ptr, h->d_tmp_snd, h->d_tmp_rcv, h->d_tmp_shifts, h->d_tmp_pairs, h->d_sort_keys, go);
+            h->d_row_ptr, h->d_tmp_snd, h->d_tmp_shifts, h->d_sort_keys, go);
     else
         loup::fill_neighbors_scalar_kernel<<<g.gridNb, g.blkN, 0, h->stream>>>(
             N, S, h->cell, g.nx, g.ny, g.nz, g.rx, g.ry, g.rz, g.r_list2, g.r_lo2_f32, g.r_hi2_f32,
             h->d_pos_wrapped, h->d_atom_wrap, h->d_species, h->d_atom_bin,
             h->d_bin_offsets, h->d_bin_atom_id, h->d_bin_pos, h->d_bin_pos_f32, h->d_bin_wrap, h->d_bin_sp,
-            h->d_row_ptr, h->d_tmp_snd, h->d_tmp_rcv, h->d_tmp_shifts, h->d_tmp_pairs, h->d_sort_keys, go);
+            h->d_row_ptr, h->d_tmp_snd, h->d_tmp_shifts, h->d_sort_keys, go);
     const int threads = std::min(256, std::max(32, P / 2));
     if (P <= 4096 && !h->ovr.row_sort_global)
         loup::sort_gather_rows_kernel<<<N, threads, P * sizeof(unsigned long long), h->stream>>>(
-            h->cell, h->d_row_ptr, h->d_sort_keys, h->d_tmp_snd, h->d_tmp_rcv, h->d_tmp_shifts, h->d_tmp_pairs,
-            h->d_species, h->d_senders, h->d_receivers, h->d_shift_cart, h->d_pairs, h->d_order_err, go);
+            h->cell, h->d_row_ptr, h->d_sort_keys, h->d_tmp_snd, h->d_tmp_shifts, h->d_species, h->d_senders,
+            h->d_shift_cart, h->d_order_err, go);
     else  // scratch: act_vec_len (16 B per edge) is per-step data, free during a rebuild
         loup::sort_gather_rows_global_kernel<<<N, threads, 0, h->stream>>>(
-            h->cell, h->d_row_ptr, h->d_sort_keys, h->d_tmp_snd, h->d_tmp_rcv, h->d_tmp_shifts, h->d_tmp_pairs,
-            h->d_species, h->d_senders, h->d_receivers, h->d_shift_cart, h->d_pairs, h->d_order_err,
+            h->cell, h->d_row_ptr, h->d_sort_keys, h->d_tmp_snd, h->d_tmp_shifts, h->d_species, h->d_senders,
+            h->d_shift_cart, h->d_order_err,
             reinterpret_cast<unsigned long long*>(h->d_act_vec_len));
     return 0;
 }
@@ -1591,14 +1580,14 @@ static void record_force_pass(LoupHandle* h, int compute_stress) {
     // 1. Compute edge vectors, compact active edges (r < r_max) with their spline locator
     const int warpGridN = (N + 3) / 4;  // 4 warps per 128-thread block (1 warp per atom)
     loup::compute_and_count_active_kernel<<<warpGridN, 128, 0, h->stream>>>(
-        N, r_max, h->d_pos64, h->d_row_ptr, h->d_senders, h->d_receivers, h->d_shift_cart,
+        N, r_max, h->d_pos64, h->d_row_ptr, h->d_senders, h->d_shift_cart,
         h->d_tmp_vec_len, h->d_act_deg);
     size_t act_scan_bytes = h->cub_tmp_bytes;
     cub::DeviceScan::ExclusiveSum(
         h->d_cub_tmp, act_scan_bytes, h->d_act_deg, h->d_act_row_ptr, N + 1, h->stream);
     loup::scatter_active_edges_kernel<<<warpGridN, 128, 0, h->stream>>>(
-        N, r_max, sg, S, sg_psym, h->d_species, h->d_row_ptr, h->d_act_row_ptr, h->d_senders, h->d_receivers,
-        h->d_pairs, h->d_tmp_vec_len, h->d_act_senders, h->d_act_receivers, h->d_act_pairs, h->d_act_vec_len,
+        N, r_max, sg, S, sg_psym, h->d_species, h->d_row_ptr, h->d_act_row_ptr, h->d_senders,
+        h->d_tmp_vec_len, h->d_act_senders, h->d_act_receivers, h->d_act_pairs, h->d_act_vec_len,
         h->d_act_slab, h->d_act_t_sx);
 
     const int* d_E_act = h->d_act_row_ptr + N;

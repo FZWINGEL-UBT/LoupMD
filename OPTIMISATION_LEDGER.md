@@ -158,6 +158,7 @@ Conventions:
 | [edge-packed](#edge-packed) | Packed edge arrays (`float4` x, y, z, r; `float2`) | `act_vec_len`, `act_t_sx` | both | DEFAULT | S3 | not recorded alone | [§3.1 #13][s31] |
 | [edge-sh-coalesced](#edge-sh-coalesced) | Coalesced SH stores in `scatter_active_edges` | – | spec | SUPERSEDED | S3 | superseded by edge-sh-recompute | [§3.1 #19][s31] |
 | [edge-sh-recompute](#edge-sh-recompute) | SH computed where staged, never stored | `edge_sh16` | spec | DEFAULT | S3 | -24 MB of stores per step; `scatter_active_edges` 0.11-0.16 -> 0.05 ms | [§3.1 #24][s31], [§2.5][s2] |
+| [edge-row-receiver](#edge-row-receiver) | Candidate-edge list without per-edge receiver and pair index: row i holds receiver i's edges, `scatter_active_edges` takes the receiver from the row and recomputes `sym_pair` | – | both | DEFAULT (5060 Ti only) | S113 | -8 B per edge slot: VRAM `SrTiO3` 5,000 atoms 498 -> 490 MiB, 40,000 atoms 2,060 -> 2,020 MiB; MD a-b-b-a `NbCl5` 0.9993, `SrTiO3` 0.9978 | this file |
 | [edge-compaction-1pass](#edge-compaction-1pass) | Single-pass active-edge compaction (decoupled look-back) | – | spec | REJECTED | – | kernel 96 -> 80 us; MD tie | [§3.3][s33] |
 | [mem-reorder](#mem-reorder) | Morton reorder within species groups every 16th rebuild, above L2 | `LOUP_REORDER` | both | DEFAULT (scoped: N x 4 KB > L2) | S2 | part of S1 -> S2 | [§3.1 #8][s31] |
 | [mem-reorder-small](#mem-reorder-small) | Morton reorder below L2 size | – | spec | REJECTED | – | not recorded | [§3.3][s33] |
@@ -1161,6 +1162,18 @@ Each entry has the same fields. Unless stated, the system is OMAT-0 medium on th
 <a id="edge-packed"></a>
 #### edge-packed: packed edge arrays
 - Stage: S3 (item 13). What: `act_vec_len` (`float4` x, y, z, r), `act_t_sx` (`float2`). Status: DEFAULT. Measured: not recorded alone. Sources: [§3.1 #13][s31].
+
+<a id="edge-row-receiver"></a>
+#### edge-row-receiver: no per-edge receiver or pair index in the candidate list
+- Stage: S113 (16 November 2026), 5060 Ti. The arithmetic is unchanged.
+- What: the fill kernels write row i with the edges whose receiver is i, so the candidate list's `receivers` array only repeated the row index, and `pairs` was `sym_pair(species[sender], species[i])`. `d_receivers` and `d_pairs` (8 B per edge slot) and the rebuild temporaries `tmp_rcv` / `tmp_pairs` are gone; `scatter_active_edges` writes `act_receivers` from the row and recomputes the pair index (the sort key in the fill kernels still uses it). The candidate list keeps `senders` (4 B) and `shift_cart` (24 B); the rebuild's sender and sort-key temporaries take 8 of `tmp_vec_len`'s 16 B per slot. Both the specialised and the generic paths use these kernels.
+- Measured (`SrTiO3`):
+  - VRAM: 5,000 atoms 498 -> 490 MiB (100.4 KiB/atom), 40,000 atoms 2,060 -> 2,020 MiB (51.7 KiB/atom); the edge buffers of the first evaluate 522 -> 482 MiB at 40,000 atoms.
+  - Results at equal GEMM plans vs s106a: dE 3.7-4.0e-6 eV, max dF 0.9-1.0e-6 eV/A, max dS 2.1-6.0e-10, the run-to-run spread.
+  - MD a-b-b-a vs S112: `NbCl5` 1.773 -> 1.772 ms (0.9993; +0.28% / -0.45%), `SrTiO3` 7.995 -> 7.977 ms (0.9978; -0.01% / -0.44%).
+  - `tests/test_engine.py` 31 passed, also with `LOUP_M1_CHUNK=40` (the S112 chunks under NVE, Langevin and every MD rebuild mode); gate 42 / 42.
+- Status: DEFAULT (5060 Ti only).
+- Sources: this file.
 
 <a id="edge-sh-coalesced"></a>
 #### edge-sh-coalesced: coalesced SH stores
