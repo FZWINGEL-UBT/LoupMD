@@ -1715,3 +1715,22 @@ came first and overwrote the buffer; the tile is now always first. Host state fo
 641.6, 651.5 -> 629.6, 631.2, 633.5, 631.4 ms (first build, b / a 0.974); the fixed build 638.8, 641.0 -> 621.6,
 631.1 (b / a 0.98). The boundary gaps 9.4 and 15.6 ms (from 15.9 and 21.1). Host state about 630 ms against the
 device state's 601 (+5%), 1.97 us per atom, 1.19 times the whole-system call.
+
+Tiled capacity on the RTX 5060 Ti 16 GB after O32's host state, compact lists and alias (planner only,
+`loup_plan_execution`, library `0add58dbf6d08b0c`, OMAT-0 medium, rattled SrTiO3 cubes, memory fraction 0.9,
+`MemAvailable` 38.2 GiB; `.tmp_o/plan_sizes2.py`, no force call run at these sizes; `tiled` and `auto` plan alike):
+
+| Atoms | Plan | Cap | Device (GiB) | Pinned host (GiB) |
+| --- | --- | --- | --- | --- |
+| 2,560,000 | host lists, layer state on the device | 16,384 | 12.63 | 2.09 |
+| 5,000,000 | host lists and host state (plain order) | 65,536 | 11.02 | 15.30 |
+| 8,640,000 | host lists, layer state on the device (the wavefront's pool) | 6,144 | 9.69 | 7.05 |
+| 13,720,000 | host lists, layer state on the device (the wavefront's pool) | 6,144 | 12.41 | 11.20 |
+| 20,480,000 | refused: the pool does not fit the device, the host state not 60% of `MemAvailable` | - | - | - |
+
+- The plain order's host state carries a 5M cube in 65,536-receiver tiles (refused before O32; the wavefront does
+  not apply there: the cube has fewer than 12 layers of tiles along its first axis at any cap).
+- The host lists take 8 B per edge: 13.7M atoms need 11.2 GiB of them (36 B: about 50 GiB, refused).
+- The limit on this PC is now between 13.7M and 20.5M atoms: the wavefront's row pool on the device at 6,144
+  receivers, or the plain host state's `x` (about 2 KB per atom with the alias) within 60% of `MemAvailable`. The
+  wavefront's pool in host memory (O32, not built) would move it to the host RAM for lists and pool together.
