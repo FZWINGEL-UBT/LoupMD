@@ -291,6 +291,15 @@ Conventions:
 | [tile-overhead-screen](#tile-overhead-screen) | Receiver cap below the plan's; CUDA graphs per tile bucket; list builds without host round trips | - | generic, tiled | REJECTED | S5 | cap: 0.68-0.73 s at 320,000 atoms for 8,192-65,536, the largest fastest; graphs and device list builds bounded at 1.5% and 1% of a step (estimated from measured phases) | [§6.23][s623] |
 | tile-lists-across-steps | The tiled state (plan, kept lists, whole-system buffers) stays between tiled calls until an atom moves skin/2; a kept call refreshes the tiles' positions on the device | none | generic, tiled | ADOPTED | S5 | NVE 320,000 atoms: 1.120 s per step (3.50 us/atom, 2.1x the whole-system call per atom), 55 list builds in 1,000 steps | [§6.18][s618] |
 
+### Dispersion (Stage 6D)
+
+| ID | Idea | Switch/flag | Path | Status | Stage | Effect | Evidence |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| [d3-rows-projections](#d3-rows-projections) | Real-space D3: atoms in bin order, a walk over rows of bins contiguous in memory, per-receiver C6 projections in shared memory | prototype `variant` 1 | `src/dispersion/d3_proto.cu` | ADOPTED for S6-D04 | S6-D02 | 40 bohr sum 1.7-2.2x faster than the per-bin walk (three passes: NbCl5 5.35 -> 2.44 ms, SrTiO3 14.2 -> 8.6 ms) | [bakeoff][d3bo] |
+| [d3-tail-shorter-cutoff](#d3-tail-shorter-cutoff) | Shorter real-space cutoff (20-30 bohr) plus the uniform-density tail correction | - | prototype | REJECTED as default | S6-D02 | energy and pressure far inside the contract, forces outside it at every cutoff below 40 bohr | [bakeoff][d3bo] |
+| [d3-shell-every-k](#d3-shell-every-k) | Short part every step, the 20/25-40 bohr shell every k steps | - | prototype | REJECTED | S6-D02 | stale forces above the 40 bohr sum's error on all three systems even at k = 2 (ballistic estimate) | [bakeoff][d3bo] |
+| [d3-cn-cutoff](#d3-cn-cutoff) | Coordination-number cutoff 20-35 bohr with the 40 bohr pair sum | `cn_cutoff_bohr` | prototype | OPEN (D73) | S6-D02 | CN 30: -19 to -21%; passes on SrTiO3 and water, misses on NbCl5 pressure by 1.7e-6 GPa | [bakeoff][d3bo] |
+
 ## Chronology
 
 Step times are `bench_md.py` OMAT-0 medium MD steps, `NbCl5` / `SrTiO3`, ms. Rows are successive builds of the
@@ -2042,3 +2051,38 @@ workspace (5.3 s of sweeps at 8 tiles: every distinct tile row count is a new GE
 [s615]: STATUS_AND_PROFILE.md#615-the-tile-workspace-16-november-2026-0015
 [s616]: STATUS_AND_PROFILE.md#616-tile-lists-kept-and-the-workspace-kept-between-calls-16-november-2026-0040
 [s618]: STATUS_AND_PROFILE.md#618-tiled-md-lists-kept-across-steps-16-november-2026-0220
+
+### Dispersion
+
+<a id="d3-rows-projections"></a>**d3-rows-projections** (ADOPTED for S6-D04, 16 November 2026, 5060 Ti only). The
+bake-off prototype's first layout gave each receiving atom one warp that walked one bin at a time in atom order
+and contracted the 5x5 C6 reference table per pair. With bins of a quarter of the cutoff a bin holds a few atoms,
+so most lanes idled. Variant 1 sorts the atoms by bin (a radix sort, bin starts on the device), walks rows of bins
+along the fastest axis as one contiguous range, and precomputes per receiver u_i(s) = w_i C6ref(s_i, s) and its CN
+derivative for every species s in shared memory, so a pair costs a 5-term dot product. Same results (5e-7 eV,
+4e-7 eV/A). CN, pairs, CN forces: NbCl5 0.71/2.53/2.11 -> 0.33/1.14/0.97 ms, SrTiO3 1.66/6.77/5.79 ->
+0.64/4.22/3.69, water 1.75/7.83/6.69 -> 0.70/4.86/4.24. Untried: a half list (each pair once, atomics on the
+sender), splitting rows across lanes of several receivers.
+
+<a id="d3-tail-shorter-cutoff"></a>**d3-tail-shorter-cutoff** (REJECTED as the default, 16 November 2026, 5060 Ti
+only). The tail correction (C6 per atom pair from each atom's coordination number, summed per species, integrated
+from the cutoff for a uniform density) brings energy and pressure far inside the contract at 20-30 bohr (NbCl5 at
+30 bohr: 0.037 meV/atom against 0.583 for the 40 bohr sum), but it does not correct forces, and the force error of
+a shorter real-space sum is larger than the 40 bohr sum's on every system (NbCl5 0.024 against 0.0066 meV/A at
+30 bohr, water 0.95 against 0.39). Added to the 40 bohr sum it costs nothing measurable and cuts the energy error
+40-fold: kept as a selectable option for S6-D05, not as a speed-up.
+
+<a id="d3-shell-every-k"></a>**d3-shell-every-k** (REJECTED, 16 November 2026, 5060 Ti only). The short part to
+20 or 25 bohr every step and the shell to 40 bohr every k steps. Stale-force error estimated by moving the atoms as
+far as they travel ballistically in k steps at 300 K against a fresh 40 bohr sum: at k = 2 already 0.035 (NbCl5),
+0.028 (SrTiO3) and 0.64 meV/A (water, shell from 25 bohr), above the 40 bohr sum's own error of 0.0066, 0.0066 and
+0.39. A fresh shell also repeats the coordination-number passes, so small k is slower than the plain sum.
+
+<a id="d3-cn-cutoff"></a>**d3-cn-cutoff** (OPEN, owner decision D73, 16 November 2026, 5060 Ti only). The
+coordination-number force pass grows with the cube of its cutoff: with 40 bohr pairs, CN 30 takes 2.01 / 6.68 /
+7.76 ms against 2.48 / 8.42 / 9.88 (NbCl5, SrTiO3, water). On NbCl5 and SrTiO3 the errors move by 1e-6 to 1e-4 of
+the units in the table; on water the force error moves non-monotonically (0.18 at 35 bohr, 0.21 at 30, 0.39 at
+25, 0.57 at 20 against 0.39). Literally CN 30 fails on NbCl5 pressure by 1.7e-6 GPa; with a relative tolerance it
+would be the default candidate, to be checked on the full validation set (graphite first).
+
+[d3bo]: docs/validation/dispersion-bakeoff.md

@@ -1,0 +1,851 @@
+{
+ "systems": {
+  "NbCl5 3x3x3": {
+   "atoms": 1944,
+   "reference_energy_meV_atom": -191.73315038053937,
+   "reference_pressure_GPa": -1.2012056737344035,
+   "reference_cpu_s": 1.835919778997777,
+   "candidates": {
+    "plain 40 (cn 40)": {
+     "energy_meV_atom": 0.5830106454160359,
+     "pressure_GPa": 0.006534865829710356,
+     "force_meV_A": 0.00657738556969628,
+     "stress_GPa": 0.00656827491570001,
+     "ms": 2.4848144039511677,
+     "times_ms": [
+      0.05817600013688207,
+      0.33078399747610093,
+      1.129555207490921,
+      1.024475198984146
+     ]
+    },
+    "tail 40 (cn 40)": {
+     "energy_meV_atom": 0.014959794389243946,
+     "pressure_GPa": 0.00016811400009048212,
+     "force_meV_A": 0.00657738556969628,
+     "stress_GPa": 0.00019544188773649293,
+     "ms": 2.4848144039511677,
+     "times_ms": [
+      0.05817600013688207,
+      0.33078399747610093,
+      1.129555207490921,
+      1.024475198984146
+     ],
+     "tail_meV_atom": -0.5979704398052704
+    },
+    "plain 40 (cn 35)": {
+     "energy_meV_atom": 0.5829754205874327,
+     "pressure_GPa": 0.00653572256240349,
+     "force_meV_A": 0.0065339582687131015,
+     "stress_GPa": 0.006569101706112641,
+     "ms": 2.1918576031923296,
+     "times_ms": [
+      0.02926399987190962,
+      0.3270224004983902,
+      1.1216208040714264,
+      0.7432143986225128
+     ]
+    },
+    "plain 40 (cn 30)": {
+     "energy_meV_atom": 0.5829402552468125,
+     "pressure_GPa": 0.006536557759050891,
+     "force_meV_A": 0.006489733636100994,
+     "stress_GPa": 0.006569903086037228,
+     "ms": 2.0076079994440077,
+     "times_ms": [
+      0.036687999684363606,
+      0.315323194861412,
+      1.1225856065750122,
+      0.5696991980075836
+     ]
+    },
+    "plain 40 (cn 25)": {
+     "energy_meV_atom": 0.5828975959983368,
+     "pressure_GPa": 0.006537530271894901,
+     "force_meV_A": 0.006435387869746786,
+     "stress_GPa": 0.006570834140022019,
+     "ms": 1.870352004468441,
+     "times_ms": [
+      0.04003520039841533,
+      0.31303519755601883,
+      1.1291200041770935,
+      0.4281968027353287
+     ]
+    },
+    "plain 40 (cn 20)": {
+     "energy_meV_atom": 0.5828396892381488,
+     "pressure_GPa": 0.006538772687942239,
+     "force_meV_A": 0.0063638615727507255,
+     "stress_GPa": 0.006572027038739182,
+     "ms": 1.7775376006960868,
+     "times_ms": [
+      0.030559999868273735,
+      0.30907679796218873,
+      1.1256319999694824,
+      0.34282880276441574
+     ]
+    },
+    "plain 30 (cn 40)": {
+     "energy_meV_atom": 1.4015795032761607,
+     "pressure_GPa": 0.015779091680254313,
+     "force_meV_A": 0.023600284170201966,
+     "stress_GPa": 0.015985923737559773,
+     "ms": 1.9640943974256515,
+     "times_ms": [
+      0.036523199547082184,
+      0.33482399880886077,
+      0.6371199995279312,
+      0.9921503990888596
+     ]
+    },
+    "tail 30 (cn 40)": {
+     "energy_meV_atom": 0.036510854001013365,
+     "pressure_GPa": 0.00041353905170259174,
+     "force_meV_A": 0.023600284170201966,
+     "stress_GPa": 0.0005386991479533218,
+     "ms": 1.9640943974256515,
+     "times_ms": [
+      0.036523199547082184,
+      0.33482399880886077,
+      0.6371199995279312,
+      0.9921503990888596
+     ],
+     "tail_meV_atom": -1.4380903572771877
+    },
+    "plain 25 (cn 40)": {
+     "energy_meV_atom": 2.4919370150355884,
+     "pressure_GPa": 0.0281764344605922,
+     "force_meV_A": 0.10317029981323667,
+     "stress_GPa": 0.02836251112741402,
+     "ms": 1.7877824008464813,
+     "times_ms": [
+      0.052521600108593705,
+      0.33166240006685255,
+      0.4780992016196251,
+      0.9780207991600036
+     ]
+    },
+    "tail 25 (cn 40)": {
+     "energy_meV_atom": 0.02802845827923305,
+     "pressure_GPa": 0.000318214870649708,
+     "force_meV_A": 0.10317029981323667,
+     "stress_GPa": 0.0004906770826103191,
+     "ms": 1.7877824008464813,
+     "times_ms": [
+      0.052521600108593705,
+      0.33166240006685255,
+      0.4780992016196251,
+      0.9780207991600036
+     ],
+     "tail_meV_atom": -2.5199654733148162
+    },
+    "plain 20 (cn 40)": {
+     "energy_meV_atom": 5.1874143341736145,
+     "pressure_GPa": 0.05908569607050449,
+     "force_meV_A": 0.4110853459061052,
+     "stress_GPa": 0.06073719909705483,
+     "ms": 1.6838992044329641,
+     "times_ms": [
+      0.0624528001062572,
+      0.334094400703907,
+      0.3723471999168396,
+      0.9774576038122177
+     ]
+    },
+    "tail 20 (cn 40)": {
+     "energy_meV_atom": 0.14331115476507442,
+     "pressure_GPa": 0.0016517935619319672,
+     "force_meV_A": 0.4110853459061052,
+     "stress_GPa": 0.0033032965884824436,
+     "ms": 1.6838992044329641,
+     "times_ms": [
+      0.0624528001062572,
+      0.334094400703907,
+      0.3723471999168396,
+      0.9774576038122177
+     ],
+     "tail_meV_atom": -5.0441031794085305
+    },
+    "shell 20-40 every 2": {
+     "energy_meV_atom": 0.5830106454155972,
+     "pressure_GPa": 0.0065348658296436515,
+     "force_meV_A": 0.006577386504800403,
+     "stress_GPa": 0.0065682749159187434,
+     "ms": 2.9090767994523046,
+     "stale_vs_plain40": {
+      "energy_meV_atom": 0.0003586442564091094,
+      "pressure_GPa": 4.152748029405157e-06,
+      "force_meV_A": 0.13782469372650596,
+      "stress_GPa": 7.448555902724584e-06
+     },
+     "note": "error columns: the fresh split sum against the reference; stale_vs_plain40: after 2 steps of thermal motion (300 K, ballistic estimate) against a fresh 40 bohr sum"
+    },
+    "shell 20-40 every 5": {
+     "energy_meV_atom": 0.5830106454155972,
+     "pressure_GPa": 0.0065348658296436515,
+     "force_meV_A": 0.006577386504800403,
+     "stress_GPa": 0.0065682749159187434,
+     "ms": 2.172512958049774,
+     "stale_vs_plain40": {
+      "energy_meV_atom": 0.00024327223141107587,
+      "pressure_GPa": 2.77819119426705e-06,
+      "force_meV_A": 0.1687612851263584,
+      "stress_GPa": 7.48947933498336e-06
+     },
+     "note": "error columns: the fresh split sum against the reference; stale_vs_plain40: after 5 steps of thermal motion (300 K, ballistic estimate) against a fresh 40 bohr sum"
+    },
+    "shell 20-40 every 10": {
+     "energy_meV_atom": 0.5830106454155972,
+     "pressure_GPa": 0.0065348658296436515,
+     "force_meV_A": 0.006577386504800403,
+     "stress_GPa": 0.0065682749159187434,
+     "ms": 1.9269916775822638,
+     "stale_vs_plain40": {
+      "energy_meV_atom": 0.0019999971036556,
+      "pressure_GPa": 2.2920064897919606e-05,
+      "force_meV_A": 0.1580297460771196,
+      "stress_GPa": 4.4227740890943026e-05
+     },
+     "note": "error columns: the fresh split sum against the reference; stale_vs_plain40: after 10 steps of thermal motion (300 K, ballistic estimate) against a fresh 40 bohr sum"
+    },
+    "shell 20-40 every 20": {
+     "energy_meV_atom": 0.5830106454155972,
+     "pressure_GPa": 0.0065348658296436515,
+     "force_meV_A": 0.006577386504800403,
+     "stress_GPa": 0.0065682749159187434,
+     "ms": 1.8042310373485086,
+     "stale_vs_plain40": {
+      "energy_meV_atom": 0.008314837204281332,
+      "pressure_GPa": 9.585427197002257e-05,
+      "force_meV_A": 0.20150366966661967,
+      "stress_GPa": 0.0001776071335508138
+     },
+     "note": "error columns: the fresh split sum against the reference; stale_vs_plain40: after 20 steps of thermal motion (300 K, ballistic estimate) against a fresh 40 bohr sum"
+    },
+    "shell 25-40 every 2": {
+     "energy_meV_atom": 0.5830106454155972,
+     "pressure_GPa": 0.006534865829769695,
+     "force_meV_A": 0.00657738643489257,
+     "stress_GPa": 0.006568274916222247,
+     "ms": 3.011058389395475,
+     "stale_vs_plain40": {
+      "energy_meV_atom": 5.881396159116932e-05,
+      "pressure_GPa": 6.646630696854951e-07,
+      "force_meV_A": 0.035210030007183424,
+      "stress_GPa": 3.4363755417787222e-06
+     },
+     "note": "error columns: the fresh split sum against the reference; stale_vs_plain40: after 2 steps of thermal motion (300 K, ballistic estimate) against a fresh 40 bohr sum"
+    },
+    "shell 25-40 every 5": {
+     "energy_meV_atom": 0.5830106454155972,
+     "pressure_GPa": 0.006534865829769695,
+     "force_meV_A": 0.00657738643489257,
+     "stress_GPa": 0.006568274916222247,
+     "ms": 2.273897916972637,
+     "stale_vs_plain40": {
+      "energy_meV_atom": 0.00041032000117149377,
+      "pressure_GPa": 4.638088297102168e-06,
+      "force_meV_A": 0.04814407193286685,
+      "stress_GPa": 9.9483982838259e-06
+     },
+     "note": "error columns: the fresh split sum against the reference; stale_vs_plain40: after 5 steps of thermal motion (300 K, ballistic estimate) against a fresh 40 bohr sum"
+    },
+    "shell 25-40 every 10": {
+     "energy_meV_atom": 0.5830106454155972,
+     "pressure_GPa": 0.006534865829769695,
+     "force_meV_A": 0.00657738643489257,
+     "stress_GPa": 0.006568274916222247,
+     "ms": 2.028177759498358,
+     "stale_vs_plain40": {
+      "energy_meV_atom": 0.0009154332959672879,
+      "pressure_GPa": 1.0379691809248497e-05,
+      "force_meV_A": 0.06752316130882952,
+      "stress_GPa": 3.0041947195055292e-05
+     },
+     "note": "error columns: the fresh split sum against the reference; stale_vs_plain40: after 10 steps of thermal motion (300 K, ballistic estimate) against a fresh 40 bohr sum"
+    },
+    "shell 25-40 every 20": {
+     "energy_meV_atom": 0.5830106454155972,
+     "pressure_GPa": 0.006534865829769695,
+     "force_meV_A": 0.00657738643489257,
+     "stress_GPa": 0.006568274916222247,
+     "ms": 1.905317680761218,
+     "stale_vs_plain40": {
+      "energy_meV_atom": 0.002548944606389244,
+      "pressure_GPa": 2.9049233904388038e-05,
+      "force_meV_A": 0.08371031419862916,
+      "stress_GPa": 8.503897952170288e-05
+     },
+     "note": "error columns: the fresh split sum against the reference; stale_vs_plain40: after 20 steps of thermal motion (300 K, ballistic estimate) against a fresh 40 bohr sum"
+    }
+   }
+  },
+  "SrTiO3 10x10x10": {
+   "atoms": 5000,
+   "reference_energy_meV_atom": -265.59865530173573,
+   "reference_pressure_GPa": -3.6591955482326872,
+   "reference_cpu_s": 12.320416661998024,
+   "candidates": {
+    "plain 40 (cn 40)": {
+     "energy_meV_atom": 1.0597755920937288,
+     "pressure_GPa": 0.02887661936147178,
+     "force_meV_A": 0.006644976636304725,
+     "stress_GPa": 0.028877282830914074,
+     "ms": 8.422382390499115,
+     "times_ms": [
+      0.10185119919478894,
+      0.6355759978294373,
+      4.217092776298523,
+      3.5697136163711547
+     ]
+    },
+    "tail 40 (cn 40)": {
+     "energy_meV_atom": 0.03559124632429303,
+     "pressure_GPa": 0.0009700828726615826,
+     "force_meV_A": 0.006644976636304725,
+     "stress_GPa": 0.0009712705252135283,
+     "ms": 8.422382390499115,
+     "times_ms": [
+      0.10185119919478894,
+      0.6355759978294373,
+      4.217092776298523,
+      3.5697136163711547
+     ],
+     "tail_meV_atom": -1.095366838418002
+    },
+    "plain 40 (cn 35)": {
+     "energy_meV_atom": 1.059775592093638,
+     "pressure_GPa": 0.02887661936147067,
+     "force_meV_A": 0.006644976636319106,
+     "stress_GPa": 0.028877282830915188,
+     "ms": 7.50670248568058,
+     "times_ms": [
+      0.20218399725854397,
+      0.6038224011659622,
+      4.213284850120544,
+      2.6895952343940737
+     ]
+    },
+    "plain 40 (cn 30)": {
+     "energy_meV_atom": 1.0597755920937744,
+     "pressure_GPa": 0.02887661936147067,
+     "force_meV_A": 0.0066449766362831775,
+     "stress_GPa": 0.028877282830914633,
+     "ms": 6.684812822937966,
+     "times_ms": [
+      0.11972479987889528,
+      0.5694096058607101,
+      4.272206401824951,
+      1.8431968152523042
+     ]
+    },
+    "plain 40 (cn 25)": {
+     "energy_meV_atom": 1.0597755920938652,
+     "pressure_GPa": 0.028876619361470113,
+     "force_meV_A": 0.006644976635939134,
+     "stress_GPa": 0.028877282830911854,
+     "ms": 5.989414384961128,
+     "times_ms": [
+      0.12814880050718785,
+      0.5507216066122055,
+      4.194785571098327,
+      1.243907207250595
+     ]
+    },
+    "plain 40 (cn 20)": {
+     "energy_meV_atom": 1.0597755920936833,
+     "pressure_GPa": 0.028876619361472892,
+     "force_meV_A": 0.00664497663465347,
+     "stress_GPa": 0.028877282830915188,
+     "ms": 5.62408957183361,
+     "times_ms": [
+      0.1326639998704195,
+      0.5339776009321213,
+      4.2248863697052,
+      0.8652256011962891
+     ]
+    },
+    "plain 30 (cn 40)": {
+     "energy_meV_atom": 2.7225387347822565,
+     "pressure_GPa": 0.07490088872856154,
+     "force_meV_A": 0.02968354297438667,
+     "stress_GPa": 0.07490287657903122,
+     "ms": 6.4222128123044975,
+     "times_ms": [
+      0.11913440003991127,
+      0.6374720066785813,
+      2.2220352053642274,
+      3.562705600261688
+     ]
+    },
+    "tail 30 (cn 40)": {
+     "energy_meV_atom": 0.04840248586492635,
+     "pressure_GPa": 0.001388447399277213,
+     "force_meV_A": 0.02968354297438667,
+     "stress_GPa": 0.001390435249747443,
+     "ms": 6.4222128123044975,
+     "times_ms": [
+      0.11913440003991127,
+      0.6374720066785813,
+      2.2220352053642274,
+      3.562705600261688
+     ],
+     "tail_meV_atom": -2.6741362489173097
+    },
+    "plain 25 (cn 40)": {
+     "energy_meV_atom": 4.622454011101673,
+     "pressure_GPa": 0.1280266284318709,
+     "force_meV_A": 0.12992640639391767,
+     "stress_GPa": 0.12803043943151207,
+     "ms": 5.702052786946297,
+     "times_ms": [
+      0.15166399925947188,
+      0.642179200053215,
+      1.5020832002162934,
+      3.557790386676788
+     ]
+    },
+    "tail 25 (cn 40)": {
+     "energy_meV_atom": 0.1303868035641699,
+     "pressure_GPa": 0.003670788250433298,
+     "force_meV_A": 0.12992640639391767,
+     "stress_GPa": 0.003678324998817654,
+     "ms": 5.702052786946297,
+     "times_ms": [
+      0.15166399925947188,
+      0.642179200053215,
+      1.5020832002162934,
+      3.557790386676788
+     ],
+     "tail_meV_atom": -4.752840814665854
+    },
+    "plain 20 (cn 40)": {
+     "energy_meV_atom": 9.463827688058245,
+     "pressure_GPa": 0.26517487961574693,
+     "force_meV_A": 0.4331784178787256,
+     "stress_GPa": 0.2651922991038651,
+     "ms": 5.229107221961021,
+     "times_ms": [
+      0.1117311991751194,
+      0.6369568020105362,
+      1.0043584048748015,
+      3.5877920150756837
+     ]
+    },
+    "tail 20 (cn 40)": {
+     "energy_meV_atom": 0.2760400348594885,
+     "pressure_GPa": 0.007908094578010378,
+     "force_meV_A": 0.4331784178787256,
+     "stress_GPa": 0.007918364906912626,
+     "ms": 5.229107221961021,
+     "times_ms": [
+      0.1117311991751194,
+      0.6369568020105362,
+      1.0043584048748015,
+      3.5877920150756837
+     ],
+     "tail_meV_atom": -9.739867722917715
+    },
+    "shell 20-40 every 2": {
+     "energy_meV_atom": 1.0597755920937288,
+     "pressure_GPa": 0.028876619361461773,
+     "force_meV_A": 0.006644976636304904,
+     "stress_GPa": 0.028877282830900734,
+     "ms": 9.460776816308499,
+     "stale_vs_plain40": {
+      "energy_meV_atom": 0.0006115697695349808,
+      "pressure_GPa": 1.6851898083283754e-05,
+      "force_meV_A": 0.06308599677055202,
+      "stress_GPa": 2.3768021663112175e-05
+     },
+     "note": "error columns: the fresh split sum against the reference; stale_vs_plain40: after 2 steps of thermal motion (300 K, ballistic estimate) against a fresh 40 bohr sum"
+    },
+    "shell 20-40 every 5": {
+     "energy_meV_atom": 1.0597755920937288,
+     "pressure_GPa": 0.028876619361461773,
+     "force_meV_A": 0.006644976636304904,
+     "stress_GPa": 0.028877282830900734,
+     "ms": 6.953250578641892,
+     "stale_vs_plain40": {
+      "energy_meV_atom": 0.0013851269176029745,
+      "pressure_GPa": 3.8109954222915125e-05,
+      "force_meV_A": 0.09282214673876037,
+      "stress_GPa": 4.544182340723777e-05
+     },
+     "note": "error columns: the fresh split sum against the reference; stale_vs_plain40: after 5 steps of thermal motion (300 K, ballistic estimate) against a fresh 40 bohr sum"
+    },
+    "shell 20-40 every 10": {
+     "energy_meV_atom": 1.0597755920937288,
+     "pressure_GPa": 0.028876619361461773,
+     "force_meV_A": 0.006644976636304904,
+     "stress_GPa": 0.028877282830900734,
+     "ms": 6.11740849941969,
+     "stale_vs_plain40": {
+      "energy_meV_atom": 0.003678874044226177,
+      "pressure_GPa": 0.0001010360562155161,
+      "force_meV_A": 0.1843541637491799,
+      "stress_GPa": 0.00010816835546144912
+     },
+     "note": "error columns: the fresh split sum against the reference; stale_vs_plain40: after 10 steps of thermal motion (300 K, ballistic estimate) against a fresh 40 bohr sum"
+    },
+    "shell 20-40 every 20": {
+     "energy_meV_atom": 1.0597755920937288,
+     "pressure_GPa": 0.028876619361461773,
+     "force_meV_A": 0.006644976636304904,
+     "stress_GPa": 0.028877282830900734,
+     "ms": 5.699487459808588,
+     "stale_vs_plain40": {
+      "energy_meV_atom": 0.004260325249788366,
+      "pressure_GPa": 0.00011619670764106269,
+      "force_meV_A": 0.3321334406112912,
+      "stress_GPa": 0.00013402539433320874
+     },
+     "note": "error columns: the fresh split sum against the reference; stale_vs_plain40: after 20 steps of thermal motion (300 K, ballistic estimate) against a fresh 40 bohr sum"
+    },
+    "shell 25-40 every 2": {
+     "energy_meV_atom": 1.0597755920931378,
+     "pressure_GPa": 0.028876619361460663,
+     "force_meV_A": 0.006644976636304746,
+     "stress_GPa": 0.02887728283090796,
+     "ms": 9.863372823596,
+     "stale_vs_plain40": {
+      "energy_meV_atom": 3.864985847030767e-05,
+      "pressure_GPa": 1.0733391068598845e-06,
+      "force_meV_A": 0.02815801202472779,
+      "stress_GPa": 4.349858560547023e-06
+     },
+     "note": "error columns: the fresh split sum against the reference; stale_vs_plain40: after 2 steps of thermal motion (300 K, ballistic estimate) against a fresh 40 bohr sum"
+    },
+    "shell 25-40 every 5": {
+     "energy_meV_atom": 1.0597755920931378,
+     "pressure_GPa": 0.028876619361460663,
+     "force_meV_A": 0.006644976636304746,
+     "stress_GPa": 0.02887728283090796,
+     "ms": 7.375237137675285,
+     "stale_vs_plain40": {
+      "energy_meV_atom": 0.00010141767879758846,
+      "pressure_GPa": 2.7640138811751973e-06,
+      "force_meV_A": 0.027252328847925774,
+      "stress_GPa": 6.9007773654081894e-06
+     },
+     "note": "error columns: the fresh split sum against the reference; stale_vs_plain40: after 5 steps of thermal motion (300 K, ballistic estimate) against a fresh 40 bohr sum"
+    },
+    "shell 25-40 every 10": {
+     "energy_meV_atom": 1.0597755920931378,
+     "pressure_GPa": 0.028876619361460663,
+     "force_meV_A": 0.006644976636304746,
+     "stress_GPa": 0.02887728283090796,
+     "ms": 6.545858575701713,
+     "stale_vs_plain40": {
+      "energy_meV_atom": 0.0009759083782228117,
+      "pressure_GPa": 2.6797163950255432e-05,
+      "force_meV_A": 0.05257839499234022,
+      "stress_GPa": 3.201143738525323e-05
+     },
+     "note": "error columns: the fresh split sum against the reference; stale_vs_plain40: after 10 steps of thermal motion (300 K, ballistic estimate) against a fresh 40 bohr sum"
+    },
+    "shell 25-40 every 20": {
+     "energy_meV_atom": 1.0597755920931378,
+     "pressure_GPa": 0.028876619361460663,
+     "force_meV_A": 0.006644976636304746,
+     "stress_GPa": 0.02887728283090796,
+     "ms": 6.131169294714927,
+     "stale_vs_plain40": {
+      "energy_meV_atom": 0.004746114005138225,
+      "pressure_GPa": 0.00013050854725144833,
+      "force_meV_A": 0.09715794271632322,
+      "stress_GPa": 0.0001362605193703345
+     },
+     "note": "error columns: the fresh split sum against the reference; stale_vs_plain40: after 20 steps of thermal motion (300 K, ballistic estimate) against a fresh 40 bohr sum"
+    }
+   }
+  },
+  "water 216 2x2x2": {
+   "atoms": 5184,
+   "reference_energy_meV_atom": -33.39559152992336,
+   "reference_pressure_GPa": -0.5934359066165275,
+   "reference_cpu_s": 13.77661652900133,
+   "candidates": {
+    "plain 40 (cn 40)": {
+     "energy_meV_atom": 0.06410112450003122,
+     "pressure_GPa": 0.002037079779416716,
+     "force_meV_A": 0.39180588726989846,
+     "stress_GPa": 0.002038632418385957,
+     "ms": 9.878756812214853,
+     "times_ms": [
+      0.12317440062761306,
+      0.6938848048448563,
+      4.975566411018372,
+      4.209305596351624
+     ]
+    },
+    "tail 40 (cn 40)": {
+     "energy_meV_atom": 0.0015286041381321368,
+     "pressure_GPa": 6.883296220873929e-05,
+     "force_meV_A": 0.39180588726989846,
+     "stress_GPa": 7.081171898914585e-05,
+     "ms": 9.878756812214853,
+     "times_ms": [
+      0.12317440062761306,
+      0.6938848048448563,
+      4.975566411018372,
+      4.209305596351624
+     ],
+     "tail_meV_atom": -0.06562972863816427
+    },
+    "plain 40 (cn 35)": {
+     "energy_meV_atom": 0.06283694799281826,
+     "pressure_GPa": 0.0020358451225730412,
+     "force_meV_A": 0.17617223902086168,
+     "stress_GPa": 0.002036191558424772,
+     "ms": 8.739646419882774,
+     "times_ms": [
+      0.10160800032317638,
+      0.6303855985403061,
+      4.9854512214660645,
+      3.1238095998764037
+     ]
+    },
+    "plain 40 (cn 30)": {
+     "energy_meV_atom": 0.061747778541662066,
+     "pressure_GPa": 0.002034038518639101,
+     "force_meV_A": 0.2088877759660913,
+     "stress_GPa": 0.002035620529176426,
+     "ms": 7.762395188212395,
+     "times_ms": [
+      0.09527519904077053,
+      0.604292806982994,
+      4.96100800037384,
+      2.1970943808555603
+     ]
+    },
+    "plain 40 (cn 25)": {
+     "energy_meV_atom": 0.06081327807743532,
+     "pressure_GPa": 0.002031672974073761,
+     "force_meV_A": 0.3932573433531105,
+     "stress_GPa": 0.00203467155980874,
+     "ms": 7.0156335651874535,
+     "times_ms": [
+      0.12612479962408543,
+      0.579422402381897,
+      4.9971839666366575,
+      1.4390271961688996
+     ]
+    },
+    "plain 40 (cn 20)": {
+     "energy_meV_atom": 0.05998886825009512,
+     "pressure_GPa": 0.0020285648082313226,
+     "force_meV_A": 0.566935177965068,
+     "stress_GPa": 0.002032834611004867,
+     "ms": 6.527980798482894,
+     "times_ms": [
+      0.1361327987164259,
+      0.5653552025556564,
+      4.996286392211914,
+      0.9663392037153244
+     ]
+    },
+    "plain 30 (cn 40)": {
+     "energy_meV_atom": 0.156000458243151,
+     "pressure_GPa": 0.004963348353937451,
+     "force_meV_A": 0.9477976973411596,
+     "stress_GPa": 0.0049667521055608435,
+     "ms": 7.484942463040351,
+     "times_ms": [
+      0.11761760078370571,
+      0.6889951974153519,
+      2.5495743989944457,
+      4.246372866630554
+     ]
+    },
+    "tail 30 (cn 40)": {
+     "energy_meV_atom": 0.00018591860164976186,
+     "pressure_GPa": 5.4165204234380175e-05,
+     "force_meV_A": 0.9477976973411596,
+     "stress_GPa": 5.966127561190041e-05,
+     "ms": 7.484942463040351,
+     "times_ms": [
+      0.11761760078370571,
+      0.6889951974153519,
+      2.5495743989944457,
+      4.246372866630554
+     ],
+     "tail_meV_atom": -0.15618637684479963
+    },
+    "plain 25 (cn 40)": {
+     "energy_meV_atom": 0.2702773267220018,
+     "pressure_GPa": 0.008608697488166034,
+     "force_meV_A": 1.6598761679276777,
+     "stress_GPa": 0.008616538888969986,
+     "ms": 6.643129619956016,
+     "times_ms": [
+      0.11558720022439957,
+      0.678475198149681,
+      1.7006623983383178,
+      4.263992023468018
+     ]
+    },
+    "tail 25 (cn 40)": {
+     "energy_meV_atom": 0.0006074517028262399,
+     "pressure_GPa": 0.00010338979525993155,
+     "force_meV_A": 1.6598761679276777,
+     "stress_GPa": 0.00011167351075941675,
+     "ms": 6.643129619956016,
+     "times_ms": [
+      0.11558720022439957,
+      0.678475198149681,
+      1.7006623983383178,
+      4.263992023468018
+     ],
+     "tail_meV_atom": -0.2708847784248278
+    },
+    "plain 20 (cn 40)": {
+     "energy_meV_atom": 0.5250943186520372,
+     "pressure_GPa": 0.016756641150296632,
+     "force_meV_A": 3.219570736858622,
+     "stress_GPa": 0.016772325531429096,
+     "ms": 6.089022386074066,
+     "times_ms": [
+      0.12327039986848831,
+      0.6839024007320404,
+      1.1450256049633025,
+      4.260094380378723
+     ]
+    },
+    "tail 20 (cn 40)": {
+     "energy_meV_atom": 0.0074118455756702175,
+     "pressure_GPa": 0.00040301359349388265,
+     "force_meV_A": 3.219570736858622,
+     "stress_GPa": 0.000413350394745981,
+     "ms": 6.089022386074066,
+     "times_ms": [
+      0.12327039986848831,
+      0.6839024007320404,
+      1.1450256049633025,
+      4.260094380378723
+     ],
+     "tail_meV_atom": -0.5325061642277084
+    },
+    "shell 20-40 every 2": {
+     "energy_meV_atom": 0.0641011245000093,
+     "pressure_GPa": 0.002037079779204097,
+     "force_meV_A": 0.39183788532482033,
+     "stress_GPa": 0.0020386324094178124,
+     "ms": 10.955613596737384,
+     "stale_vs_plain40": {
+      "energy_meV_atom": 0.00027208094004416833,
+      "pressure_GPa": 3.053988038043206e-05,
+      "force_meV_A": 1.410782289655688,
+      "stress_GPa": 3.662573966236067e-05
+     },
+     "note": "error columns: the fresh split sum against the reference; stale_vs_plain40: after 2 steps of thermal motion (300 K, ballistic estimate) against a fresh 40 bohr sum"
+    },
+    "shell 20-40 every 5": {
+     "energy_meV_atom": 0.0641011245000093,
+     "pressure_GPa": 0.002037079779204097,
+     "force_meV_A": 0.39183788532482033,
+     "stress_GPa": 0.0020386324094178124,
+     "ms": 8.01420191168785,
+     "stale_vs_plain40": {
+      "energy_meV_atom": 0.003029242003208354,
+      "pressure_GPa": 0.000262432147072419,
+      "force_meV_A": 3.133976192739722,
+      "stress_GPa": 0.000280701911966285
+     },
+     "note": "error columns: the fresh split sum against the reference; stale_vs_plain40: after 5 steps of thermal motion (300 K, ballistic estimate) against a fresh 40 bohr sum"
+    },
+    "shell 20-40 every 10": {
+     "energy_meV_atom": 0.0641011245000093,
+     "pressure_GPa": 0.002037079779204097,
+     "force_meV_A": 0.39183788532482033,
+     "stress_GPa": 0.0020386324094178124,
+     "ms": 7.033731350004673,
+     "stale_vs_plain40": {
+      "energy_meV_atom": 0.022115857077763548,
+      "pressure_GPa": 0.0007759550961777124,
+      "force_meV_A": 3.37568631573925,
+      "stress_GPa": 0.0008196171379362644
+     },
+     "note": "error columns: the fresh split sum against the reference; stale_vs_plain40: after 10 steps of thermal motion (300 K, ballistic estimate) against a fresh 40 bohr sum"
+    },
+    "shell 20-40 every 20": {
+     "energy_meV_atom": 0.0641011245000093,
+     "pressure_GPa": 0.002037079779204097,
+     "force_meV_A": 0.39183788532482033,
+     "stress_GPa": 0.0020386324094178124,
+     "ms": 6.543496069163084,
+     "stale_vs_plain40": {
+      "energy_meV_atom": 0.0906672187167954,
+      "pressure_GPa": 0.0003170273539860425,
+      "force_meV_A": 6.395316801981832,
+      "stress_GPa": 0.0003661400135163745
+     },
+     "note": "error columns: the fresh split sum against the reference; stale_vs_plain40: after 20 steps of thermal motion (300 K, ballistic estimate) against a fresh 40 bohr sum"
+    },
+    "shell 25-40 every 2": {
+     "energy_meV_atom": 0.06410112450006411,
+     "pressure_GPa": 0.002037079705813992,
+     "force_meV_A": 0.39183755740534515,
+     "stress_GPa": 0.002038632310084506,
+     "ms": 11.534988771378995,
+     "stale_vs_plain40": {
+      "energy_meV_atom": 0.0001167393389363743,
+      "pressure_GPa": 1.3802956350177001e-05,
+      "force_meV_A": 0.6347958942196561,
+      "stress_GPa": 1.6771946367933355e-05
+     },
+     "note": "error columns: the fresh split sum against the reference; stale_vs_plain40: after 2 steps of thermal motion (300 K, ballistic estimate) against a fresh 40 bohr sum"
+    },
+    "shell 25-40 every 5": {
+     "energy_meV_atom": 0.06410112450006411,
+     "pressure_GPa": 0.002037079705813992,
+     "force_meV_A": 0.39183755740534515,
+     "stress_GPa": 0.002038632310084506,
+     "ms": 8.629371170997619,
+     "stale_vs_plain40": {
+      "energy_meV_atom": 0.0014245780520714428,
+      "pressure_GPa": 0.00011479998184893187,
+      "force_meV_A": 1.4032953747432764,
+      "stress_GPa": 0.00012289929082720375
+     },
+     "note": "error columns: the fresh split sum against the reference; stale_vs_plain40: after 5 steps of thermal motion (300 K, ballistic estimate) against a fresh 40 bohr sum"
+    },
+    "shell 25-40 every 10": {
+     "energy_meV_atom": 0.06410112450006411,
+     "pressure_GPa": 0.002037079705813992,
+     "force_meV_A": 0.39183755740534515,
+     "stress_GPa": 0.002038632310084506,
+     "ms": 7.660831970870494,
+     "stale_vs_plain40": {
+      "energy_meV_atom": 0.010060245164039625,
+      "pressure_GPa": 0.00033974624149739644,
+      "force_meV_A": 1.5112983835828866,
+      "stress_GPa": 0.0003595472490606268
+     },
+     "note": "error columns: the fresh split sum against the reference; stale_vs_plain40: after 10 steps of thermal motion (300 K, ballistic estimate) against a fresh 40 bohr sum"
+    },
+    "shell 25-40 every 20": {
+     "energy_meV_atom": 0.06410112450006411,
+     "pressure_GPa": 0.002037079705813992,
+     "force_meV_A": 0.39183755740534515,
+     "stress_GPa": 0.002038632310084506,
+     "ms": 7.176562370806932,
+     "stale_vs_plain40": {
+      "energy_meV_atom": 0.040357384985050475,
+      "pressure_GPa": 0.0001396783439345125,
+      "force_meV_A": 2.8627660338500487,
+      "stress_GPa": 0.00015923329331430738
+     },
+     "note": "error columns: the fresh split sum against the reference; stale_vs_plain40: after 20 steps of thermal motion (300 K, ballistic estimate) against a fresh 40 bohr sum"
+    }
+   }
+  }
+ },
+ "param": {
+  "s6": 1.0,
+  "s8": 0.7875,
+  "a1": 0.4289,
+  "a2": 4.4407
+ },
+ "reference": "simple-dftd3 150 bohr pairs, 40 bohr CN, no ATM"
+}

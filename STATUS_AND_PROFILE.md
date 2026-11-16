@@ -1192,3 +1192,44 @@ RTX 5060 Ti only; library `90a30122589e77bd`, generic path (the default). `loupm
 ratios energy, force, stress: `mp0b3-medium` (oxide, 18 rows) 0.07, 1.14, 0.78; `mp0-large` (`MACE_MPtrj_2022.9.model`,
 oxide, 6 rows) 0.14, 1.33, 1.10; `matpes-r2scan` (crystals, 18 rows) 0.12, 1.43, 0.98. All PASS.
 
+### 6.26 Events, Monte Carlo and OMOL-0 XL charge (16 November 2026)
+
+RTX 5060 Ti only. Measured with `tests/gpu/test_events_gpu.py` (library `af0d248587b5703f`, OMAT-0 medium, generic
+path) and `loupmd validate` (library `90a30122589e77bd`):
+
+| What | Measured |
+| --- | --- |
+| `Simulation.set_species` on SrTiO3 6x6x6 (1,080 atoms) | 170 to 207 ms per event (two runs: a full `loup_set_system`, the state put back); the next 10 steps 26.5 to 28.9 ms with the re-capture; energy against a fresh engine within 4e-6 eV |
+| `lm.mc.Swap` on 256 atoms | 1.11 to 1.28 ms per attempt (two energy-only passes and the host's Metropolis test); move energies within 6.8e-13 eV of the full call |
+| `lm.mc.Transmute` on 256 atoms | 7.4 ms per attempt in the counted setup (`loup_set_system`, fixed atoms, state); 67 ms wall time per attempt in all (the energy-only pass on the new system includes its first graph capture and list build, and a rejected attempt sets the system back) |
+| OMOL-0 XL `organic` gate, neutral singlet | worst ratios 0.00, 0.85, 0.61; PASS (878 s) |
+| OMOL-0 XL `organic` gate, charge +1, doublet | worst ratios 0.00, 0.31, 0.21; PASS (929 s) |
+
+Per-atom energies (S6-T08, `tests/gpu/test_evaluate2.py`, SrTiO3 3x3x3 rattled, against MACE float64's per-atom
+`energies`): relaxed, within 1.4e-5 eV per atom (MACE float32: 9.8e-6) on OMAT-0 medium, small and MH-1. **Open
+finding, not of the per-atom split:** on the same cell compressed to 0.78 (47% of the volume, every atom in ZBL
+range) the plain path's total energy is 7.5e-3 eV (5.5e-5 eV/atom) from MACE float64 on OMAT-0 medium, against
+1.4e-4 eV for MACE float32, and per atom 1.8e-4 eV (MACE float32: 1.2e-5); MH-1 1.5e-5 eV/atom in total, 1.7e-4
+per atom; OMAT-0 small 7.5e-6 eV/atom, 4.8e-5 per atom. The mean deviation is per species (Ti -1.0e-4, Sr -7.8e-5,
+O -3.3e-5 eV on OMAT-0 medium), so it looks like an accuracy limit of the forward at very short distances, not
+noise. No gate set covers this compression; forces were not compared. Not investigated further in this session.
+
+The transmute cost is a full system setup per attempt (D71): a `loup_set_species` that keeps the buffers is the item
+to build if that matters to the owner. Speed of plain MD is unchanged (no change to the step).
+
+### 6.27 Dispersion kernel bake-off, S6-D02 (16 November 2026)
+
+RTX 5060 Ti only; prototype `src/dispersion/d3_proto.cu` (not in `libloupmd.so`), details and every row in
+`docs/validation/dispersion-bakeoff.md`. D3(BJ) two-body, PBE, against simple-dftd3 at 150 bohr:
+
+| System | Plain 40 bohr sum (default) | Its error: energy, pressure, largest force | 40 bohr pairs, CN 30 (D73) |
+| --- | ---: | --- | ---: |
+| NbCl5 3x3x3 (1,944) | 2.48 ms | 0.58 meV/atom, 0.0065 GPa, 0.0066 meV/A | 2.01 ms |
+| SrTiO3 10x10x10 (5,000) | 8.42 ms | 1.06 meV/atom, 0.029 GPa, 0.0066 meV/A | 6.68 ms |
+| water 216 2x2x2 (5,184) | 9.88 ms | 0.064 meV/atom, 0.0020 GPa, 0.39 meV/A | 7.76 ms |
+
+No candidate faster than the plain 40 bohr sum meets the accuracy contract literally on all three systems, so the
+default is that sum. Shorter cutoffs with the tail correction fail on forces, and so does the long-range part
+updated every k steps. The split sum was not prototyped. With the model's step on record (about 1.85 and 8.3 ms),
+dispersion would cost 1.3 times the model on NbCl5 and 1.0 times on SrTiO3 at this kernel's speed.
+
