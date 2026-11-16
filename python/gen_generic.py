@@ -379,8 +379,8 @@ __global__ void __launch_bounds__(MAX_T) {name}(
 # Per-edge force-vector update at the end of the backward convs (one lane per edge, so each element has one writer in
 # the kernel). EDGE_DVEC_RED: on sm_120 a fire-and-forget atomic add, which rounds like the read-add-store (except
 # that it flushes subnormals, ~1e-38, which these per-edge forces never reach) without a load to wait on: the
-# read-modify-write's load was ~4% of gconv_bwd_L0's stall samples and the atomics made it 8-16% faster (S40). Used
-# only for lx 0, where that was measured; lx 1 / 2 (1-2%) and other GPUs keep the read-add-store.
+# read-modify-write's load was ~4% of gconv_bwd_L0's stall samples and the atomics made it 8-16% faster (S40). S101:
+# every accumulating update on sm_120 (the lower conv layers' and gconv_bwd_L2's); other GPUs keep the read-add-store.
 EDGE_DVEC_RMW = """\
       edge_dvec[(int64_t)e * 3 + 0] += fx;
       edge_dvec[(int64_t)e * 3 + 1] += fy;
@@ -619,7 +619,7 @@ __global__ void __launch_bounds__(512) {name}(
       if (dvec_assign) {{
 {EDGE_DVEC_SET}
       }} else {{
-{EDGE_DVEC_RED if lx == 0 else EDGE_DVEC_RMW}
+{EDGE_DVEC_RED}
       }}
     }}
   }}
@@ -811,7 +811,7 @@ __global__ void __launch_bounds__(128) gconv_bwd_L2(
       float fy = fmaf(ny, rad - dot * inv_d, gy * inv_d);
       float fz = fmaf(nz, rad - dot * inv_d, gz * inv_d);
       if (sh_perm) {{ const float tx = fx, ty = fy, tz = fz; fx = tz; fy = tx; fz = ty; }}
-{EDGE_DVEC_RMW}
+{EDGE_DVEC_RED}
     }}
   }}
 }}
