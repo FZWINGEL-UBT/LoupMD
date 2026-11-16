@@ -209,7 +209,7 @@ loupmd md [-h] --model MODEL [--head HEAD] [--checkpoint PATH] [--sha256 HEX] [-
 | `--profile` `NAME` | a shipped profile (slow, fast, ultrafast, anneal) or a profile file: its schedule and output cadences, and for a profile at constant pressure NPT at its pressure |
 | `--timestep` `FS` | the timestep in fs (default 0.5) |
 | `--steps` `STEPS` | the number of steps (optional with a schedule or a profile) |
-| `--repeat` `('A', 'B', 'C')` | the supercell |
+| `--repeat` `A B C` | the supercell |
 | `--seed` `SEED` | the noise seed (default: drawn and recorded) |
 | `--initial-velocities` `HOW` | keep (default), maxwell_boltzmann or a temperature in K: what a structure at rest starts with |
 | `--check` `CHECK` | skip (default), gate or allow_unavailable: the accuracy gate before the first step |
@@ -270,7 +270,7 @@ loupmd init md [-h] --model MODEL [--head HEAD] [--checkpoint PATH] [--sha256 HE
 | `--profile` `NAME` | a shipped profile (slow, fast, ultrafast, anneal) or a profile file: its schedule and output cadences, and for a profile at constant pressure NPT at its pressure |
 | `--timestep` `FS` | the timestep in fs (default 0.5) |
 | `--steps` `STEPS` | the number of steps (optional with a schedule or a profile) |
-| `--repeat` `('A', 'B', 'C')` | the supercell |
+| `--repeat` `A B C` | the supercell |
 | `--seed` `SEED` | the noise seed (default: drawn and recorded) |
 | `--initial-velocities` `HOW` | keep (default), maxwell_boltzmann or a temperature in K: what a structure at rest starts with |
 | `--check` `CHECK` | skip (default), gate or allow_unavailable: the accuracy gate before the first step |
@@ -325,7 +325,7 @@ loupmd relax [-h] --model MODEL [--head HEAD] [--checkpoint PATH] [--sha256 HEX]
 | `--fmax` `EV_PER_A` | default 0.05 eV/A |
 | `--steps` `STEPS` | at most this many optimiser steps |
 | `--maxstep` `A` | the longest step (default 0.2 A) |
-| `--repeat` `('A', 'B', 'C')` | the supercell |
+| `--repeat` `A B C` | the supercell |
 | `--device` `N` | the GPU index (default 0) |
 | `--output` `FILE` | the relaxed structure (default <structure stem>.relaxed.extxyz) |
 

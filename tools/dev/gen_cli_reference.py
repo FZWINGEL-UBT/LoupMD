@@ -40,7 +40,8 @@ def _option_rows(parser):
         if action.option_strings:
             names = ", ".join(f"`{s}`" for s in action.option_strings)
             if action.nargs != 0 and action.metavar is not None:
-                names += f" `{action.metavar}`"
+                meta = " ".join(action.metavar) if isinstance(action.metavar, tuple) else action.metavar
+                names += f" `{meta}`"
             elif action.nargs != 0 and not isinstance(action, (argparse._StoreTrueAction,
                                                                 argparse._StoreFalseAction,
                                                                 argparse._VersionAction)):
