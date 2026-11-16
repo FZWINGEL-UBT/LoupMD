@@ -63,7 +63,7 @@ __global__ void fill_neighbors_kernel(int N, int S, CellMat64 cell, int nx, int 
                                       const int* __restrict__ bin_sp, const int* __restrict__ row_ptr,
                                       int* __restrict__ tmp_snd, int* __restrict__ tmp_rcv,
                                       int* __restrict__ tmp_shifts, int* __restrict__ tmp_pairs,
-                                     uint32_t* __restrict__ sort_keys);
+                                     uint32_t* __restrict__ sort_keys, const int* __restrict__ go);
 __global__ void count_neighbors_scalar_kernel(int N, CellMat64 cell, int nx, int ny, int nz,
                                               int rx, int ry, int rz, double r_list2, float r_lo2_f32, float r_hi2_f32,
                                               const double* __restrict__ pos_wrapped, const int* __restrict__ atom_bin,
@@ -80,14 +80,14 @@ __global__ void fill_neighbors_scalar_kernel(int N, int S, CellMat64 cell, int n
                                              const int* __restrict__ bin_sp, const int* __restrict__ row_ptr,
                                              int* __restrict__ tmp_snd, int* __restrict__ tmp_rcv,
                                              int* __restrict__ tmp_shifts, int* __restrict__ tmp_pairs,
-                                             uint32_t* __restrict__ sort_keys);
+                                             uint32_t* __restrict__ sort_keys, const int* __restrict__ go);
 __global__ void max_degree_kernel(int N, const int* __restrict__ deg, int* __restrict__ out);
 __global__ void sort_gather_rows_kernel(
     CellMat64 cell, const int* __restrict__ row_ptr, const uint32_t* __restrict__ sort_keys,
     const int* __restrict__ tmp_snd, const int* __restrict__ tmp_rcv, const int* __restrict__ tmp_shifts,
     const int* __restrict__ tmp_pairs, const int* __restrict__ species,
     int* __restrict__ senders, int* __restrict__ receivers, double* __restrict__ shift_cart, int* __restrict__ pairs,
-    int* __restrict__ order_err);
+    int* __restrict__ order_err, const int* __restrict__ go);
 __global__ void sort_gather_rows_global_kernel(
     CellMat64 cell, const int* __restrict__ row_ptr, const uint32_t* __restrict__ sort_keys,
     const int* __restrict__ tmp_snd, const int* __restrict__ tmp_rcv, const int* __restrict__ tmp_shifts,
@@ -145,22 +145,24 @@ __global__ void guard_step_kernel(cudaGraphConditionalHandle cond, int has_rebui
 }
 
 // The step graph's rebuild branch after nl_count: publishes the edge count, the longest row and whether the new list
-// fits what the graph was captured for (edge capacity / bucket, row-sort width), and lets the branch's fill, commit
-// and checked rest (IF node) run only then; otherwise the host finishes the rebuild.
-__global__ void rebuild_gate_kernel(cudaGraphConditionalHandle fill, const int* __restrict__ row_ptr_end,
-                                    const int* __restrict__ max_deg, int E_lim, int P_cap,
-                                    unsigned int* __restrict__ counter, int* __restrict__ pub) {
+// fits what the graph was captured for (edge capacity / bucket, row-sort width), and stores that verdict in *go: the
+// branch's fill, sort and commit kernels run only then (one nesting level less than an IF node around them);
+// otherwise the host finishes the rebuild.
+__global__ void rebuild_gate_kernel(const int* __restrict__ row_ptr_end, const int* __restrict__ max_deg, int E_lim,
+                                    int P_cap, int* __restrict__ go, unsigned int* __restrict__ counter,
+                                    int* __restrict__ pub) {
     const int E = *row_ptr_end;
     const int m = *max_deg;
     const int fits = E > 0 && E <= E_lim && m <= P_cap;
+    *go = fits;
     publish3(counter, pub, E, m, fits);
-    cudaGraphSetConditional(fill, fits ? 1u : 0u);
 }
 
 // After a rebuild in MD: the force pass (the IF node's body) runs only if the rebuild's rows passed the order check,
-// which the host reads with the next step's publication.
-__global__ void rest_guard_kernel(cudaGraphConditionalHandle cond, const int* __restrict__ order_err) {
-    cudaGraphSetConditional(cond, *order_err ? 0u : 1u);
+// which the host reads with the next step's publication, and (go, the step graph's rebuild branch) were built.
+__global__ void rest_guard_kernel(cudaGraphConditionalHandle cond, const int* __restrict__ order_err,
+                                  const int* __restrict__ go) {
+    cudaGraphSetConditional(cond, (*order_err || (go && !*go)) ? 0u : 1u);
 }
 
 // Neighbour-rebuild bookkeeping (nl_bin, nl_count, nl_commit) as kernels rather than memset / memcpy nodes.
@@ -181,7 +183,8 @@ __global__ void copy_ints_kernel(int n, const int* __restrict__ src, int* __rest
 }
 
 __global__ void nl_commit_kernel(int n, const double* __restrict__ pos, double* __restrict__ ref_pos,
-                                 int* __restrict__ need_rebuild) {
+                                 int* __restrict__ need_rebuild, const int* __restrict__ go) {
+    if (go && !*go) return;
     const int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i < n) ref_pos[i] = pos[i];
     if (i == 0) *need_rebuild = 0;
@@ -718,8 +721,8 @@ struct LoupHandle {
 
     int n_rebuilds = 0;     // rebuilds since set_system (atom reorder cadence)
     int* d_order_err = nullptr;  // set by sort_gather_rows_kernel when a row breaks the species-run contract
-    int* d_max_deg = nullptr;    // longest neighbour row of the current rebuild (sizes the row sort)
-    int max_deg_last = 0;        // ... of the last rebuild (sizes the MD step graph's row sort)
+    int* d_max_deg = nullptr;    // [0] longest neighbour row of the current rebuild, [1] the MD rebuild gate's verdict
+    int max_deg_last = 0;        // longest row of the last rebuild (sizes the MD step graph's row sort)
     bool nl_valid = false;  // neighbour list built for the current system (ref positions and shifts are set)
 
     void free_system() {
@@ -1239,8 +1242,8 @@ static int pow2_at_least(int n) {
 // with the sender species, so every row ends up grouped by ascending sender species, which the receiver-owned
 // tabled_outer_sum0_forward_kernel relies on (it stores one slot per species run); the sort kernel flags a row that
 // breaks it (a changed key or sym_pair would otherwise corrupt S0 silently). P: the sort width, a power of two >= the
-// longest row; rows of P <= 4096 sort in shared memory.
-static int nl_fill(LoupHandle* h, const NlGeom& g, int P) {
+// longest row; rows of P <= 4096 sort in shared memory. go: the MD step graph's rebuild verdict (nullptr: always).
+static int nl_fill(LoupHandle* h, const NlGeom& g, int P, const int* go = nullptr) {
     const int N = h->N;
     const int S = h->n_species();
     if (g.nb_groups)
@@ -1248,18 +1251,18 @@ static int nl_fill(LoupHandle* h, const NlGeom& g, int P) {
             N, S, h->cell, g.nx, g.ny, g.nz, g.rx, g.ry, g.rz, g.r_list2, g.r_lo2_f32, g.r_hi2_f32,
             h->d_pos_wrapped, h->d_atom_wrap, h->d_species, h->d_atom_bin,
             h->d_bin_offsets, h->d_bin_atom_id, h->d_bin_pos, h->d_bin_pos_f32, h->d_bin_wrap, h->d_bin_sp,
-            h->d_row_ptr, h->d_tmp_snd, h->d_tmp_rcv, h->d_tmp_shifts, h->d_tmp_pairs, h->d_sort_keys);
+            h->d_row_ptr, h->d_tmp_snd, h->d_tmp_rcv, h->d_tmp_shifts, h->d_tmp_pairs, h->d_sort_keys, go);
     else
         loup::fill_neighbors_scalar_kernel<<<g.gridNb, g.blkN, 0, h->stream>>>(
             N, S, h->cell, g.nx, g.ny, g.nz, g.rx, g.ry, g.rz, g.r_list2, g.r_lo2_f32, g.r_hi2_f32,
             h->d_pos_wrapped, h->d_atom_wrap, h->d_species, h->d_atom_bin,
             h->d_bin_offsets, h->d_bin_atom_id, h->d_bin_pos, h->d_bin_pos_f32, h->d_bin_wrap, h->d_bin_sp,
-            h->d_row_ptr, h->d_tmp_snd, h->d_tmp_rcv, h->d_tmp_shifts, h->d_tmp_pairs, h->d_sort_keys);
+            h->d_row_ptr, h->d_tmp_snd, h->d_tmp_rcv, h->d_tmp_shifts, h->d_tmp_pairs, h->d_sort_keys, go);
     const int threads = std::min(256, std::max(32, P / 2));
     if (P <= 4096 && !h->ovr.row_sort_global)
         loup::sort_gather_rows_kernel<<<N, threads, P * sizeof(unsigned long long), h->stream>>>(
             h->cell, h->d_row_ptr, h->d_sort_keys, h->d_tmp_snd, h->d_tmp_rcv, h->d_tmp_shifts, h->d_tmp_pairs,
-            h->d_species, h->d_senders, h->d_receivers, h->d_shift_cart, h->d_pairs, h->d_order_err);
+            h->d_species, h->d_senders, h->d_receivers, h->d_shift_cart, h->d_pairs, h->d_order_err, go);
     else  // scratch: act_vec_len (16 B per edge) is per-step data, free during a rebuild
         loup::sort_gather_rows_global_kernel<<<N, threads, 0, h->stream>>>(
             h->cell, h->d_row_ptr, h->d_sort_keys, h->d_tmp_snd, h->d_tmp_rcv, h->d_tmp_shifts, h->d_tmp_pairs,
@@ -1269,9 +1272,9 @@ static int nl_fill(LoupHandle* h, const NlGeom& g, int P) {
 }
 
 // The list is now the one built at the current positions: they become the reference, and the skin flag clears.
-static int nl_commit(LoupHandle* h) {
+static int nl_commit(LoupHandle* h, const int* go = nullptr) {
     loup::nl_commit_kernel<<<(h->N * 3 + 255) / 256, 256, 0, h->stream>>>(h->N * 3, h->d_pos64, h->d_ref_pos64,
-                                                                         h->d_need_rebuild);
+                                                                         h->d_need_rebuild, go);
     return 0;
 }
 
@@ -1994,7 +1997,7 @@ static int set_system_impl(LoupHandle* h, int n_atoms, const int* atomic_numbers
     CUDA_CHECK(cudaMalloc(&h->d_ro_vals, (size_t)n_atoms * 2 * sizeof(int)));
     CUDA_CHECK(cudaMalloc(&h->d_ro_tmp, (size_t)n_atoms * 3 * sizeof(double)));
     CUDA_CHECK(cudaMalloc(&h->d_order_err, sizeof(int)));
-    CUDA_CHECK(cudaMalloc(&h->d_max_deg, sizeof(int)));
+    CUDA_CHECK(cudaMalloc(&h->d_max_deg, 2 * sizeof(int)));
     CUDA_CHECK(cudaMalloc(&h->d_bin_counts, (h->max_bins + 1) * sizeof(int)));
     CUDA_CHECK(cudaMalloc(&h->d_bin_offsets, (h->max_bins + 1) * sizeof(int)));
     CUDA_CHECK(cudaMalloc(&h->d_bin_cursor, (h->max_bins + 1) * sizeof(int)));
@@ -2368,7 +2371,7 @@ static int run_md_loop(
     // The checked rest: rest_guard_kernel + IF (valid rows) rest.
     const Body checked_rest_body = [&](cudaGraph_t g) -> int {
         return capture_ifs(g, [&](const cudaGraphConditionalHandle* c) {
-            loup::rest_guard_kernel<<<1, 1, 0, h->stream>>>(c[0], h->d_order_err);
+            loup::rest_guard_kernel<<<1, 1, 0, h->stream>>>(c[0], h->d_order_err, nullptr);
         }, {rest_body});
     };
     auto instantiate = [&](cudaGraph_t& g, cudaGraphExec_t& ge, const Body& body) -> int {
@@ -2394,20 +2397,19 @@ static int run_md_loop(
         if (dev && ensure_cub_tmp(h, nl_cub_bytes(h, nl_g)) != 0) return -1;
         const int E_lim = h->ovr.md_rebuild == 2 ? 0 : h->E_graph;  // fallback (tests): never fits
         const int P_cap = rebuild_width();
-        const Body fill_body = [&](cudaGraph_t g) -> int {
-            return capture_ifs(g, [&](const cudaGraphConditionalHandle* c) {
-                nl_fill(h, nl_g, P_cap);
-                nl_commit(h);
-                loup::rest_guard_kernel<<<1, 1, 0, h->stream>>>(c[0], h->d_order_err);
-            }, {rest_body});
-        };
+        // The rebuild branch: count, gate (its verdict in go = d_max_deg + 1), then fill, sort and commit, which skip
+        // themselves on a negative verdict, and the checked rest, also gated by the verdict.
+        const int* go = h->d_max_deg + 1;
         const Body rebuild_body = [&](cudaGraph_t g) -> int {
             return capture_ifs(g, [&](const cudaGraphConditionalHandle* c) {
                 nl_bin(h, nl_g);
                 nl_count(h, nl_g);
-                loup::rebuild_gate_kernel<<<1, 1, 0, h->stream>>>(c[0], h->d_row_ptr + N, h->d_max_deg, E_lim, P_cap,
-                                                                   h->d_pub_counter, h->d_pub);
-            }, {fill_body});
+                loup::rebuild_gate_kernel<<<1, 1, 0, h->stream>>>(h->d_row_ptr + N, h->d_max_deg, E_lim, P_cap,
+                                                                   h->d_max_deg + 1, h->d_pub_counter, h->d_pub);
+                nl_fill(h, nl_g, P_cap, go);
+                nl_commit(h, go);
+                loup::rest_guard_kernel<<<1, 1, 0, h->stream>>>(c[0], h->d_order_err, go);
+            }, {rest_body});
         };
         // The step graph: move + check + guard_step_kernel, then one SWITCH node (body 0 the rest, body 1 the rebuild
         // branch when dev).

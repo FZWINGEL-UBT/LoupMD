@@ -248,8 +248,10 @@ __global__ void fill_neighbors_kernel(
     int* __restrict__ tmp_rcv,
     int* __restrict__ tmp_shifts,
     int* __restrict__ tmp_pairs,
-    uint32_t* __restrict__ sort_keys
+    uint32_t* __restrict__ sort_keys,
+    const int* __restrict__ go  // MD step graph: run only if *go (the rebuild gate's verdict); nullptr = always
 ) {
+    if (go && !*go) return;
     extern __shared__ int s_bin_off[];
     constexpr int G = kNeighborLanes;
     const int t = blockIdx.x * blockDim.x + threadIdx.x;
@@ -389,8 +391,10 @@ __global__ void fill_neighbors_scalar_kernel(
     int* __restrict__ tmp_rcv,
     int* __restrict__ tmp_shifts,
     int* __restrict__ tmp_pairs,
-    uint32_t* __restrict__ sort_keys
+    uint32_t* __restrict__ sort_keys,
+    const int* __restrict__ go  // as fill_neighbors_kernel
 ) {
+    if (go && !*go) return;
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= N) return;
     double xi = pos_wrapped[i * 3 + 0];
@@ -545,8 +549,9 @@ __global__ void sort_gather_rows_kernel(
     const int* __restrict__ tmp_snd, const int* __restrict__ tmp_rcv, const int* __restrict__ tmp_shifts,
     const int* __restrict__ tmp_pairs, const int* __restrict__ species,
     int* __restrict__ senders, int* __restrict__ receivers, double* __restrict__ shift_cart, int* __restrict__ pairs,
-    int* __restrict__ order_err
+    int* __restrict__ order_err, const int* __restrict__ go  // as fill_neighbors_kernel
 ) {
+    if (go && !*go) return;
     sort_gather_row<false>(cell, row_ptr, sort_keys, tmp_snd, tmp_rcv, tmp_shifts, tmp_pairs, species, senders,
                            receivers, shift_cart, pairs, order_err, nullptr);
 }
