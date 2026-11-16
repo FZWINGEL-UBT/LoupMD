@@ -1492,3 +1492,11 @@ Second step (`libloupmd_d3l.so`, da03339207d63d16): the chain rule read dE/dCN o
 it for every pair. A float32 copy made once per atom (`to_float_kernel`) gives bit-identical forces and saves 1 to
 5%: d3bj NbCl5 1.35 -> 1.33 ms, SrTiO3 3.67 -> 3.53, water 4.45 -> 4.21 (A B B A); the three-body term unchanged.
 `tests/gpu/test_d3.py` 52 passed on d3l.
+
+Third step (`libloupmd_d3m.so`, f907577c30169234): the walks visited every bin of a (2 reach + 1)^3 box, about
+2.7 times the cutoff sphere's volume with bins of a quarter cutoff. Each column of bins is now skipped when its
+axis lies farther than the cutoff plus the column's cross-section radius, and its z range is cut to the chord
+(any triclinic cell; only bins that cannot hold a pair are skipped). Gains are small, because the distance test is
+cheap next to the pair's work: d3bj NbCl5 1.33 -> 1.22 ms, SrTiO3 3.54 -> 3.46, water 4.20 -> 4.16; split 25
+2 to 3%; three-body 1 to 2% (A B B A, both orders agree). Results equal within 4e-8 eV/A (summation order).
+`tests/gpu/test_d3.py` 52 passed on d3m.

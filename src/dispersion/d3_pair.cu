@@ -152,16 +152,37 @@ __device__ __forceinline__ void walk_rows(int k, int home, const float4* __restr
     const int nb0 = g.nb[0], nb1 = g.nb[1], nb2 = g.nb[2];
     const int bz = home % nb2, by = (home / nb2) % nb1, bx = home / (nb1 * nb2);
     int rc_[3];
+    const float rcut = sqrtf(cut2);
     for (int a = 0; a < 3; ++a)
-        rc_[a] = min(g.reach[a], (int)ceilf(sqrtf(cut2) / g.hb[a] * (1.0f + 1e-5f)));
+        rc_[a] = min(g.reach[a], (int)ceilf(rcut / g.hb[a] * (1.0f + 1e-5f)));
+    // The column of bins (tx, ty, *) is the line C + u e2 thickened by its cross-section (radius rx); a bin tz holds
+    // u in [tz, tz + 1]. Columns whose line is farther than rcut + rx are skipped, and each column's z range is cut to
+    // the chord |u - u0| <= sqrt((rcut + rx)^2 - d_perp^2) / |e2|, one bin of margin each side (status 6.33).
+    const float e0x = g.cell[0] / nb0, e0y = g.cell[1] / nb0, e0z = g.cell[2] / nb0;
+    const float e1x = g.cell[3] / nb1, e1y = g.cell[4] / nb1, e1z = g.cell[5] / nb1;
+    const float e2x = g.cell[6] / nb2, e2y = g.cell[7] / nb2, e2z = g.cell[8] / nb2;
+    const float e2n2 = e2x * e2x + e2y * e2y + e2z * e2z, ie2n = rsqrtf(e2n2);
+    const float pxp = e0x + e1x, pyp = e0y + e1y, pzp = e0z + e1z, pxm = e0x - e1x, pym = e0y - e1y, pzm = e0z - e1z;
+    const float rx = 0.5f * sqrtf(fmaxf(pxp * pxp + pyp * pyp + pzp * pzp, pxm * pxm + pym * pym + pzm * pzm));
+    const float R = (rcut + rx) * (1.0f + 1e-4f) + 1e-3f, R2 = R * R;
     for (int ox = -rc_[0]; ox <= rc_[0]; ++ox) {
         const int tx = bx + ox, ix = (tx % nb0 + nb0) % nb0, sx = (tx - ix) / nb0;
         for (int oy = -rc_[1]; oy <= rc_[1]; ++oy) {
             const int ty = by + oy, iy = (ty % nb1 + nb1) % nb1, sy = (ty - iy) / nb1;
-            int tz = bz - rc_[2];
-            while (tz <= bz + rc_[2]) {
+            const float cx = (tx + 0.5f) * e0x + (ty + 0.5f) * e1x - pi.x;
+            const float cy = (tx + 0.5f) * e0y + (ty + 0.5f) * e1y - pi.y;
+            const float cz = (tx + 0.5f) * e0z + (ty + 0.5f) * e1z - pi.z;
+            const float u0 = -(cx * e2x + cy * e2y + cz * e2z) / e2n2;       // the atom's parameter on the line
+            const float px = cx + u0 * e2x, py = cy + u0 * e2y, pz = cz + u0 * e2z;
+            const float dp2 = px * px + py * py + pz * pz;
+            if (dp2 > R2) continue;
+            const float half = sqrtf(R2 - dp2) * ie2n;
+            const int zlo = max(bz - rc_[2], (int)floorf(u0 - half) - 1);
+            const int zhi = min(bz + rc_[2], (int)floorf(u0 + half) + 1);
+            int tz = zlo;
+            while (tz <= zhi) {
                 const int iz = (tz % nb2 + nb2) % nb2, sz = (tz - iz) / nb2;
-                const int len = min(bz + rc_[2] - tz, nb2 - 1 - iz) + 1;
+                const int len = min(zhi - tz, nb2 - 1 - iz) + 1;
                 const float shx = sx * g.cell[0] + sy * g.cell[3] + sz * g.cell[6];
                 const float shy = sx * g.cell[1] + sy * g.cell[4] + sz * g.cell[7];
                 const float shz = sx * g.cell[2] + sy * g.cell[5] + sz * g.cell[8];
@@ -488,16 +509,37 @@ __device__ __forceinline__ int walk_list(int k, int home, const float4* __restri
     const int bz = home % nb2, by = (home / nb2) % nb1, bx = home / (nb1 * nb2);
     int base = 0;
     int rc_[3];
+    const float rcut = sqrtf(cut2);
     for (int a = 0; a < 3; ++a)
-        rc_[a] = min(g.reach[a], (int)ceilf(sqrtf(cut2) / g.hb[a] * (1.0f + 1e-5f)));
+        rc_[a] = min(g.reach[a], (int)ceilf(rcut / g.hb[a] * (1.0f + 1e-5f)));
+    // The column of bins (tx, ty, *) is the line C + u e2 thickened by its cross-section (radius rx); a bin tz holds
+    // u in [tz, tz + 1]. Columns whose line is farther than rcut + rx are skipped, and each column's z range is cut to
+    // the chord |u - u0| <= sqrt((rcut + rx)^2 - d_perp^2) / |e2|, one bin of margin each side (status 6.33).
+    const float e0x = g.cell[0] / nb0, e0y = g.cell[1] / nb0, e0z = g.cell[2] / nb0;
+    const float e1x = g.cell[3] / nb1, e1y = g.cell[4] / nb1, e1z = g.cell[5] / nb1;
+    const float e2x = g.cell[6] / nb2, e2y = g.cell[7] / nb2, e2z = g.cell[8] / nb2;
+    const float e2n2 = e2x * e2x + e2y * e2y + e2z * e2z, ie2n = rsqrtf(e2n2);
+    const float pxp = e0x + e1x, pyp = e0y + e1y, pzp = e0z + e1z, pxm = e0x - e1x, pym = e0y - e1y, pzm = e0z - e1z;
+    const float rx = 0.5f * sqrtf(fmaxf(pxp * pxp + pyp * pyp + pzp * pzp, pxm * pxm + pym * pym + pzm * pzm));
+    const float R = (rcut + rx) * (1.0f + 1e-4f) + 1e-3f, R2 = R * R;
     for (int ox = -rc_[0]; ox <= rc_[0]; ++ox) {
         const int tx = bx + ox, ix = (tx % nb0 + nb0) % nb0, sx = (tx - ix) / nb0;
         for (int oy = -rc_[1]; oy <= rc_[1]; ++oy) {
             const int ty = by + oy, iy = (ty % nb1 + nb1) % nb1, sy = (ty - iy) / nb1;
-            int tz = bz - rc_[2];
-            while (tz <= bz + rc_[2]) {
+            const float cx = (tx + 0.5f) * e0x + (ty + 0.5f) * e1x - pi.x;
+            const float cy = (tx + 0.5f) * e0y + (ty + 0.5f) * e1y - pi.y;
+            const float cz = (tx + 0.5f) * e0z + (ty + 0.5f) * e1z - pi.z;
+            const float u0 = -(cx * e2x + cy * e2y + cz * e2z) / e2n2;       // the atom's parameter on the line
+            const float px = cx + u0 * e2x, py = cy + u0 * e2y, pz = cz + u0 * e2z;
+            const float dp2 = px * px + py * py + pz * pz;
+            if (dp2 > R2) continue;
+            const float half = sqrtf(R2 - dp2) * ie2n;
+            const int zlo = max(bz - rc_[2], (int)floorf(u0 - half) - 1);
+            const int zhi = min(bz + rc_[2], (int)floorf(u0 + half) + 1);
+            int tz = zlo;
+            while (tz <= zhi) {
                 const int iz = (tz % nb2 + nb2) % nb2, sz = (tz - iz) / nb2;
-                const int len = min(bz + rc_[2] - tz, nb2 - 1 - iz) + 1;
+                const int len = min(zhi - tz, nb2 - 1 - iz) + 1;
                 const float shx = sx * g.cell[0] + sy * g.cell[3] + sz * g.cell[6];
                 const float shy = sx * g.cell[1] + sy * g.cell[4] + sz * g.cell[7];
                 const float shz = sx * g.cell[2] + sy * g.cell[5] + sz * g.cell[8];
