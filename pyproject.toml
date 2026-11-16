@@ -6,6 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "loupmd"
 dynamic = ["version"]
 description = "Molecular dynamics with MACE potentials on a C++/CUDA engine"
+readme = "README.md"
 requires-python = ">=3.10"
 # MIT for LoupMD; BSD-3-Clause for the tensor-core GEMM kernels compiled from CUTLASS headers; LGPL-2.1-or-later
 # for the modules ported from ASE (PLAN.md decision O6). NOTICE.md lists the files of each.
