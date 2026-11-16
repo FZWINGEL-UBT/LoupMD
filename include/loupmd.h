@@ -330,12 +330,17 @@ int loup_plan_memory(LoupHandle* h, int n_atoms, double edges_per_atom, LoupMemo
 // afterwards holds the probe tile: call loup_set_system before other calls.
 // loup_get_execution: how the last tiled call (loup_debug_evaluate_tiled) ran. budget_bytes is the device memory
 // free when it began plus the handle's own buffers; peak_bytes that budget less the least memory free during it.
+// A tiled call keeps the plan, the tile lists and the whole-system state of the previous one while the atomic
+// numbers, the cell, the skin and the cap are the same (receivers 0 takes the kept cap) and no atom has moved more
+// than skin/2 since the lists were built; loup_set_system and loup_plan_execution drop them (plan task S5-T06).
 typedef struct {
     int mode;
     int receivers;
     long long tiles;
     size_t budget_bytes;
     size_t peak_bytes;
+    int lists_kept;          // 1: the call kept the tile lists of an earlier call and refreshed their positions
+    long long list_builds;   // tiled calls of this handle that built their tile lists
 } LoupExecution;
 int loup_set_execution(LoupHandle* h, int mode, int receivers, double memory_fraction);
 int loup_plan_execution(LoupHandle* h, int n_atoms, const int* atomic_numbers, const double* positions,

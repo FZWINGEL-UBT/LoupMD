@@ -286,6 +286,7 @@ Conventions:
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | [tile-workspace](#tile-workspace) | One set of per-system buffers for every tile: the domain of the most rows is set up once, the others reshape it (species grouping, row counts) instead of `loup_set_system`'s free, allocate and cuBLASLt cache clear | none | generic, tiled | ADOPTED | S5 | tiled call 2.5-3.4x faster: `SrTiO3` 40,000 atoms 8 tiles, OMAT-0 medium 67.1 -> 19.7 us/atom, small 75.0 -> 23.2; still 6-27x the whole-system call | [§6.15][s615] |
 | [tile-kept-lists](#tile-kept-lists) | Each tile's list built once per call and kept on the device; the sweeps restore it with device copies; energy and virial summed on the device, read once; the workspace kept between calls when it is large enough (no `loup_set_system` path, so the cuBLASLt cache survives) | none | generic, tiled | ADOPTED | S5 | `SrTiO3` 40,000 atoms, OMAT-0 medium 8 tiles 19.7 -> 4.33 us/atom (2.6x whole), 2 tiles 10.0 -> 2.97 (1.8x); small 23.2 -> 2.55 (2.9x) | [§6.16][s616] |
+| tile-lists-across-steps | The tiled state (plan, kept lists, whole-system buffers) stays between tiled calls until an atom moves skin/2; a kept call refreshes the tiles' positions on the device | none | generic, tiled | ADOPTED | S5 | NVE 320,000 atoms: 1.120 s per step (3.50 us/atom, 2.1x the whole-system call per atom), 55 list builds in 1,000 steps | [§6.18][s618] |
 
 ## Chronology
 
@@ -2028,3 +2029,4 @@ workspace (5.3 s of sweeps at 8 tiles: every distinct tile row count is a new GE
 
 [s615]: STATUS_AND_PROFILE.md#615-the-tile-workspace-16-november-2026-0015
 [s616]: STATUS_AND_PROFILE.md#616-tile-lists-kept-and-the-workspace-kept-between-calls-16-november-2026-0040
+[s618]: STATUS_AND_PROFILE.md#618-tiled-md-lists-kept-across-steps-16-november-2026-0220

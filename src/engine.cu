@@ -491,6 +491,12 @@ static uint64_t fnv1a64(const void* data, size_t n, uint64_t hsh = 1469598103934
     return hsh;
 }
 
+namespace {
+struct TiledState;
+}
+struct LoupHandle;
+static void release_tiled_state(LoupHandle* h);
+
 struct LoupHandle {
     std::string last_error;  // text of the last failed call on this handle (loup_last_error); empty after a success
     int device_id = 0;
@@ -637,6 +643,8 @@ struct LoupHandle {
     int exec_receivers = 0;
     double exec_fraction = 0.9;
     LoupExecution last_exec{};
+    TiledState* tiled_state = nullptr;  // the tiled call's plan, kept lists and state buffers (S5-T06)
+    long long tile_list_builds = 0;     // tiled calls that built their lists, since the handle was created
     double skin = 0.5;
     double e0_total = 0.0;
     std::vector<int> perm;          // device (species-grouped, spatially ordered) index -> caller index
@@ -842,6 +850,7 @@ struct LoupHandle {
     size_t sys_fixed_bytes = 0;  // buffers of set_system_impl whose size does not depend on the atom count
 
     void free_system() {
+        release_tiled_state(this);
         if (gen) gen->free_system();
         invalidate_graphs();
         clear_lt_cache();
@@ -4286,6 +4295,32 @@ __global__ void tile_scatter_add_rows_kernel(int rows, int width, const int* __r
 }
 }  // extern "C++"
 
+extern "C++" {
+// A kept tile's device positions from the whole system's: row r is atom row_atom[r] moved by its fixed image offset.
+__global__ void tile_place_rows_kernel(int rows, const int* __restrict__ row_atom, const double* __restrict__ offset,
+                                       const double* __restrict__ whole, double* __restrict__ pos) {
+    const int64_t k = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
+    if (k >= (int64_t)rows * 3) return;
+    const int r = (int)(k / 3), c = (int)(k % 3);
+    pos[k] = whole[(int64_t)row_atom[r] * 3 + c] + offset[k];
+}
+
+// The largest squared displacement of `pos` from `ref` [n, 3], as the bits of a non-negative double (which order
+// as unsigned integers).
+__global__ void max_disp2_kernel(int n, const double* __restrict__ pos, const double* __restrict__ ref,
+                                 unsigned long long* __restrict__ out) {
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    double d2 = 0.0;
+    if (i < n) {
+        const double dx = pos[i * 3] - ref[i * 3], dy = pos[i * 3 + 1] - ref[i * 3 + 1],
+                     dz = pos[i * 3 + 2] - ref[i * 3 + 2];
+        d2 = dx * dx + dy * dy + dz * dz;
+    }
+    for (int o = 16; o > 0; o >>= 1) d2 = fmax(d2, __shfl_down_sync(0xffffffffu, d2, o));
+    if ((threadIdx.x & 31) == 0) atomicMax(out, (unsigned long long)__double_as_longlong(d2));
+}
+}  // extern "C++"
+
 namespace {
 struct TileDomain {        // one tile as an open domain: locals, then the ghosts it keeps
     int n_local = 0;
@@ -4387,11 +4422,32 @@ struct TileList {
     double e0 = 0.0, box[9] = {0, 0, 0, 0, 0, 0, 0, 0, 0};
     std::vector<int> perm, species_start, species_count;
     DeviceBufferGuard species, pos, row_ptr, senders, receivers, pairs, shift, row_atom;
+    DeviceBufferGuard offset;  // [rows, 3] a row's place in the tile less its atom's position at the build
+};
+
+// The tiled call's state kept on the handle between calls (S5-T06). Never copied: its buffers free themselves.
+struct TiledState {
+    int n = 0, receivers = 0, max_rows = 0, max_edges = 0;
+    int64_t T = 0;
+    double skin = 0.0, cell[9] = {0, 0, 0, 0, 0, 0, 0, 0, 0};
+    double bytes = 0.0;  // device bytes of everything below
+    std::vector<int> z;
+    std::vector<TileList> lists;
+    DeviceBufferGuard whole_pos, ref_pos, disp2;  // [n, 3] this call's and the build's positions; one 64-bit word
+    std::vector<DeviceBufferGuard> x, dx;         // [(L - 1) * 4] layer outputs and their gradients, whole system
+    DeviceBufferGuard forces, adj[4];
 };
 }  // namespace
 
+extern "C++" {
+static void release_tiled_state(LoupHandle* h) {
+    delete h->tiled_state;
+    h->tiled_state = nullptr;
+}
+}  // extern "C++"
+
 // Sets the workspace up as `t`'s domain, builds its list and keeps a copy of it in `out`.
-static int build_tile_list(LoupHandle* h, const TileDomain& t, TileList& out) {
+static int build_tile_list(LoupHandle* h, const TileDomain& t, const double* positions, TileList& out) {
     if (reshape_domain(h, t.n_local, t.n_ghost(), t.z.data()) != 0) return -1;
     if (upload_positions(h, t.place.data(), t.box) < 0) return -1;
     if (rebuild_neighbors(h) != 0) return -1;
@@ -4413,11 +4469,20 @@ static int build_tile_list(LoupHandle* h, const TileDomain& t, TileList& out) {
         keep(out.shift, h->d_shift_cart, (size_t)E * 3 * sizeof(double)))
         return -1;
     std::vector<int> map(rows);
-    for (int dst = 0; dst < rows; ++dst) map[dst] = t.atom[h->perm[dst]];
+    std::vector<double> offset((size_t)rows * 3);
+    for (int dst = 0; dst < rows; ++dst) {
+        const int src = h->perm[dst];
+        map[dst] = t.atom[src];
+        for (int c = 0; c < 3; ++c)
+            offset[(size_t)dst * 3 + c] = t.place[(size_t)src * 3 + c] - positions[(int64_t)map[dst] * 3 + c];
+    }
     CUDA_CHECK(cudaMalloc(&out.row_atom.p, (size_t)rows * sizeof(int)));
     CUDA_CHECK(cudaMemcpyAsync(out.row_atom.p, map.data(), (size_t)rows * sizeof(int), cudaMemcpyHostToDevice,
                                h->stream));
-    CUDA_CHECK(cudaStreamSynchronize(h->stream));  // `map` goes out of scope
+    CUDA_CHECK(cudaMalloc(&out.offset.p, offset.size() * sizeof(double)));
+    CUDA_CHECK(cudaMemcpyAsync(out.offset.p, offset.data(), offset.size() * sizeof(double), cudaMemcpyHostToDevice,
+                               h->stream));
+    CUDA_CHECK(cudaStreamSynchronize(h->stream));  // `map` and `offset` go out of scope
     return 0;
 }
 
@@ -4584,7 +4649,35 @@ static int evaluate_tiled_impl(LoupHandle* h, int n_atoms, const int* atomic_num
     if (L < 2) { loup::set_error("the tiled call needs a model of two or more layers, this one has %d", L); return -1; }
     if (!(skin >= 0.0) || !std::isfinite(skin)) { loup::set_error("skin must be finite and not negative"); return -1; }
     CUDA_CHECK(cudaSetDevice(h->device_id));
-    if (receivers <= 0) {  // the memory plan's cap, the mode taken as tiled
+    auto blocks = [](int64_t n) { return (unsigned)((n + 255) / 256); };
+    auto width = [&](int t, int l) { return (2 * l + 1) * h->gen->out_width(t); };
+    // The tiled state of an earlier call stays while the system, cell, skin and cap are the same and no atom has
+    // moved skin/2 since its lists were built (S5-T06): only the tiles' positions are refreshed then.
+    TiledState* st = h->tiled_state;
+    const bool same_system = st && h->tile_workspace && st->n == n_atoms && st->skin == skin &&
+                             memcmp(st->cell, cell, sizeof(st->cell)) == 0 &&
+                             std::equal(st->z.begin(), st->z.end(), atomic_numbers);
+    if (same_system && receivers <= 0) receivers = st->receivers;  // a rebuild of the same system keeps its cap
+    bool keep = same_system && receivers == st->receivers;
+    if (keep) {
+        CUDA_CHECK(cudaMemcpyAsync(st->whole_pos.p, positions, (size_t)n_atoms * 3 * sizeof(double),
+                                   cudaMemcpyHostToDevice, h->stream));
+        CUDA_CHECK(cudaMemsetAsync(st->disp2.p, 0, sizeof(unsigned long long), h->stream));
+        max_disp2_kernel<<<blocks(n_atoms), 256, 0, h->stream>>>(n_atoms, static_cast<const double*>(st->whole_pos.p),
+                                                                 static_cast<const double*>(st->ref_pos.p),
+                                                                 static_cast<unsigned long long*>(st->disp2.p));
+        unsigned long long bits = 0;
+        CUDA_CHECK(cudaMemcpyAsync(&bits, st->disp2.p, sizeof(bits), cudaMemcpyDeviceToHost, h->stream));
+        CUDA_CHECK(cudaStreamSynchronize(h->stream));
+        double d2 = 0.0;
+        memcpy(&d2, &bits, sizeof(d2));
+        keep = std::isfinite(d2) && d2 <= 0.25 * skin * skin;
+    }
+    if (!keep) {
+        release_tiled_state(h);
+        st = nullptr;
+    }
+    if (!keep && receivers <= 0) {  // the memory plan's cap, the mode taken as tiled
         struct Mode {
             LoupHandle* h;
             int saved;
@@ -4597,7 +4690,7 @@ static int evaluate_tiled_impl(LoupHandle* h, int n_atoms, const int* atomic_num
     }
     size_t free_b = 0, total_b = 0, least_free = 0;
     CUDA_CHECK(cudaMemGetInfo(&free_b, &total_b));
-    const double budget = (double)free_b + handle_system_bytes(h);
+    const double budget = (double)free_b + handle_system_bytes(h) + (st ? st->bytes : 0.0);
     least_free = free_b;
     auto note_free = [&]() -> int {
         size_t f = 0, t = 0;
@@ -4616,97 +4709,131 @@ static int evaluate_tiled_impl(LoupHandle* h, int n_atoms, const int* atomic_num
                      std::chrono::duration<double, std::milli>(now - tick_last).count());
         tick_last = now;
     };
-    loup::TilePlan plan;
-    try {
-        plan = loup::plan_tiles(positions, n_atoms, cell, receivers, 0, nullptr, r_list + 1e-3, nullptr);
-    } catch (const std::exception& e) {
-        loup::set_error("tile plan: %s", e.what());
-        return -1;
-    }
-    const int64_t T = plan.tiles();
-    if (out_tiles) *out_tiles = T;
-
-    // The tiles' domains; the candidates that send along no edge are dropped (S5-T02).
-    std::vector<TileDomain> alls((size_t)T), tiles((size_t)T);
-    int max_rows = 0;
-    size_t widest = 0;
-    for (int64_t k = 0; k < T; ++k) {
-        host_domain(plan, k, atomic_numbers, positions, cell, r_list, alls[(size_t)k]);
-        if (alls[(size_t)k].atom.size() > alls[widest].atom.size()) widest = (size_t)k;
-    }
-    tick("plan and host domains");
-    // One workspace for every tile: the buffers of the widest domain (all its candidates), set up once.
-    // A workspace of an earlier call stays when it is large enough and has the same skin: loup_set_system's path
-    // would also empty the cuBLASLt cache, and every tile's GEMM shapes would be looked up again.
-    const bool reuse = h->tile_workspace && h->skin == skin && (int)alls[widest].atom.size() <= h->atom_cap;
-    if (!reuse) {
-        if (set_domain_impl(h, alls[widest].n_local, alls[widest].n_ghost(), alls[widest].z.data(), skin) != 0)
+    if (!keep) {
+        loup::TilePlan plan;
+        try {
+            plan = loup::plan_tiles(positions, n_atoms, cell, receivers, 0, nullptr, r_list + 1e-3, nullptr);
+        } catch (const std::exception& e) {
+            loup::set_error("tile plan: %s", e.what());
             return -1;
-        h->tile_workspace = true;
-    }
-    tick("workspace set-up");
-    for (int64_t k = 0; k < T; ++k) {
-        TileDomain& all = alls[(size_t)k];
-        TileDomain& t = tiles[(size_t)k];
-        const int G = all.n_ghost();
-        if (G == 0) { t = std::move(all); max_rows = std::max(max_rows, t.n_local); continue; }
-        if (reshape_domain(h, all.n_local, G, all.z.data()) != 0) return -1;
-        if (upload_positions(h, all.place.data(), all.box) < 0) return -1;
-        if (rebuild_neighbors(h) != 0) return -1;
-        std::vector<unsigned char> used((size_t)G, 0);
-        DeviceBufferGuard dm;
-        CUDA_CHECK(cudaMalloc(&dm.p, G));
-        CUDA_CHECK(cudaMemsetAsync(dm.p, 0, G, h->stream));
-        if (h->E_skin > 0)
-            mark_ghost_senders_kernel<<<(h->E_skin + 255) / 256, 256, 0, h->stream>>>(
-                h->E_skin, h->N, h->d_senders, static_cast<unsigned char*>(dm.p));
-        CUDA_CHECK(cudaMemcpyAsync(used.data(), dm.p, G, cudaMemcpyDeviceToHost, h->stream));
-        CUDA_CHECK(cudaStreamSynchronize(h->stream));
-        t.n_local = all.n_local;
-        std::copy(all.box, all.box + 9, t.box);
-        for (int r = 0; r < (int)all.atom.size(); ++r) {
-            if (r >= all.n_local && !used[(size_t)(r - all.n_local)]) continue;
-            t.atom.push_back(all.atom[r]);
-            t.z.push_back(all.z[r]);
-            t.place.insert(t.place.end(), &all.place[(size_t)r * 3], &all.place[(size_t)r * 3 + 3]);
         }
-        max_rows = std::max(max_rows, (int)t.atom.size());
-        TileDomain().atom.swap(all.atom);  // the candidates' host copy is no longer needed
-        all.place.clear(); all.place.shrink_to_fit();
-    }
-
-    tick("candidate builds");
-    // Every tile's list, built once for this call and kept on the device
-    std::vector<TileList> lists((size_t)T);
-    int max_edges = 0;
-    for (int64_t k = 0; k < T; ++k) {
-        if (build_tile_list(h, tiles[(size_t)k], lists[(size_t)k]) != 0) return -1;
-        max_edges = std::max(max_edges, lists[(size_t)k].E);
-    }
-    if (max_edges > h->E_cap) { loup::set_error("internal error: a kept tile list outgrew the edge capacity"); return -1; }
-    h->E_graph = max_edges;  // the edge kernels' grid: every tile's edges
-    h->invalidate_graphs();
-
-    tick("kept list builds");
-    // The whole system's layer outputs, their gradients and the forces, on the device
-    std::vector<DeviceBufferGuard> x((size_t)(L - 1) * 4), dx((size_t)(L - 1) * 4);
-    auto width = [&](int t, int l) { return (2 * l + 1) * h->gen->out_width(t); };
-    for (int t = 0; t + 1 < L; ++t)
-        for (int l = 0; l <= h->gen->out_lmax(t); ++l) {
-            const size_t bytes = (size_t)n_atoms * width(t, l) * sizeof(float);
-            CUDA_CHECK(cudaMalloc(&x[(size_t)t * 4 + l].p, bytes));
-            CUDA_CHECK(cudaMalloc(&dx[(size_t)t * 4 + l].p, bytes));
-            CUDA_CHECK(cudaMemset(dx[(size_t)t * 4 + l].p, 0, bytes));
+        const int64_t T = plan.tiles();
+        // The tiles' domains; the candidates that send along no edge are dropped (S5-T02).
+        std::vector<TileDomain> alls((size_t)T), tiles((size_t)T);
+        int max_rows = 0;
+        size_t widest = 0;
+        for (int64_t k = 0; k < T; ++k) {
+            host_domain(plan, k, atomic_numbers, positions, cell, r_list, alls[(size_t)k]);
+            if (alls[(size_t)k].atom.size() > alls[widest].atom.size()) widest = (size_t)k;
         }
-    DeviceBufferGuard d_forces, adj[4];
-    CUDA_CHECK(cudaMalloc(&d_forces.p, (size_t)n_atoms * 3 * sizeof(double)));
-    CUDA_CHECK(cudaMemset(d_forces.p, 0, (size_t)n_atoms * 3 * sizeof(double)));
-    for (int l = 0; l < 4; ++l) {
-        size_t floats = 0;
+        tick("plan and host domains");
+        // One workspace for every tile: the buffers of the widest domain (all its candidates), set up once. A
+        // workspace of an earlier call stays when it is large enough and has the same skin: loup_set_system's path
+        // would also empty the cuBLASLt cache, and every tile's GEMM shapes would be looked up again.
+        const bool reuse = h->tile_workspace && h->skin == skin && (int)alls[widest].atom.size() <= h->atom_cap;
+        if (!reuse) {
+            if (set_domain_impl(h, alls[widest].n_local, alls[widest].n_ghost(), alls[widest].z.data(), skin) != 0)
+                return -1;
+            h->tile_workspace = true;
+        }
+        tick("workspace set-up");
+        for (int64_t k = 0; k < T; ++k) {
+            TileDomain& all = alls[(size_t)k];
+            TileDomain& t = tiles[(size_t)k];
+            const int G = all.n_ghost();
+            if (G == 0) { t = std::move(all); max_rows = std::max(max_rows, t.n_local); continue; }
+            if (reshape_domain(h, all.n_local, G, all.z.data()) != 0) return -1;
+            if (upload_positions(h, all.place.data(), all.box) < 0) return -1;
+            if (rebuild_neighbors(h) != 0) return -1;
+            std::vector<unsigned char> used((size_t)G, 0);
+            DeviceBufferGuard dm;
+            CUDA_CHECK(cudaMalloc(&dm.p, G));
+            CUDA_CHECK(cudaMemsetAsync(dm.p, 0, G, h->stream));
+            if (h->E_skin > 0)
+                mark_ghost_senders_kernel<<<(h->E_skin + 255) / 256, 256, 0, h->stream>>>(
+                    h->E_skin, h->N, h->d_senders, static_cast<unsigned char*>(dm.p));
+            CUDA_CHECK(cudaMemcpyAsync(used.data(), dm.p, G, cudaMemcpyDeviceToHost, h->stream));
+            CUDA_CHECK(cudaStreamSynchronize(h->stream));
+            t.n_local = all.n_local;
+            std::copy(all.box, all.box + 9, t.box);
+            for (int r = 0; r < (int)all.atom.size(); ++r) {
+                if (r >= all.n_local && !used[(size_t)(r - all.n_local)]) continue;
+                t.atom.push_back(all.atom[r]);
+                t.z.push_back(all.z[r]);
+                t.place.insert(t.place.end(), &all.place[(size_t)r * 3], &all.place[(size_t)r * 3 + 3]);
+            }
+            max_rows = std::max(max_rows, (int)t.atom.size());
+            TileDomain().atom.swap(all.atom);  // the candidates' host copy is no longer needed
+            all.place.clear(); all.place.shrink_to_fit();
+        }
+        tick("candidate builds");
+        // Every tile's list, built once and kept on the device with the rest of the state
+        st = h->tiled_state = new TiledState();
+        st->lists = std::vector<TileList>((size_t)T);
+        int max_edges = 0;
+        for (int64_t k = 0; k < T; ++k) {
+            TileList& tl = st->lists[(size_t)k];
+            if (build_tile_list(h, tiles[(size_t)k], positions, tl) != 0) { release_tiled_state(h); return -1; }
+            max_edges = std::max(max_edges, tl.E);
+            st->bytes += (double)tl.rows * (4 + 24 + 4 + 24) + (double)(tl.n_local + 1) * 4 + (double)tl.E * 36;
+        }
+        if (max_edges > h->E_cap) {
+            release_tiled_state(h);
+            loup::set_error("internal error: a kept tile list outgrew the edge capacity");
+            return -1;
+        }
+        tick("kept list builds");
+        st->n = n_atoms; st->receivers = receivers; st->T = T; st->skin = skin;
+        st->max_rows = max_rows; st->max_edges = max_edges;
+        std::copy(cell, cell + 9, st->cell);
+        st->z.assign(atomic_numbers, atomic_numbers + n_atoms);
+        auto alloc = [&](DeviceBufferGuard& g, size_t bytes) -> int {
+            CUDA_CHECK(cudaMalloc(&g.p, std::max<size_t>(bytes, 1)));
+            st->bytes += (double)bytes;
+            return 0;
+        };
+        const size_t pos_bytes = (size_t)n_atoms * 3 * sizeof(double);
+        // The whole system's positions, layer outputs, their gradients and the forces, on the device
+        st->x = std::vector<DeviceBufferGuard>((size_t)(L - 1) * 4);
+        st->dx = std::vector<DeviceBufferGuard>((size_t)(L - 1) * 4);
+        int fail = alloc(st->whole_pos, pos_bytes) | alloc(st->ref_pos, pos_bytes) |
+                   alloc(st->disp2, sizeof(unsigned long long)) | alloc(st->forces, pos_bytes);
         for (int t = 0; t + 1 < L; ++t)
-            if (l <= h->gen->out_lmax(t)) floats = std::max(floats, (size_t)max_rows * width(t, l));
-        if (floats) CUDA_CHECK(cudaMalloc(&adj[l].p, floats * sizeof(float)));
+            for (int l = 0; l <= h->gen->out_lmax(t); ++l) {
+                const size_t bytes = (size_t)n_atoms * width(t, l) * sizeof(float);
+                fail |= alloc(st->x[(size_t)t * 4 + l], bytes) | alloc(st->dx[(size_t)t * 4 + l], bytes);
+            }
+        for (int l = 0; l < 4; ++l) {
+            size_t floats = 0;
+            for (int t = 0; t + 1 < L; ++t)
+                if (l <= h->gen->out_lmax(t)) floats = std::max(floats, (size_t)max_rows * width(t, l));
+            if (floats) fail |= alloc(st->adj[l], floats * sizeof(float));
+        }
+        if (fail) { release_tiled_state(h); return -1; }
+        CUDA_CHECK(cudaMemcpyAsync(st->whole_pos.p, positions, pos_bytes, cudaMemcpyHostToDevice, h->stream));
+        CUDA_CHECK(cudaMemcpyAsync(st->ref_pos.p, st->whole_pos.p, pos_bytes, cudaMemcpyDeviceToDevice, h->stream));
+        ++h->tile_list_builds;
+    } else {
+        for (TileList& t : st->lists)
+            tile_place_rows_kernel<<<blocks((int64_t)t.rows * 3), 256, 0, h->stream>>>(
+                t.rows, static_cast<const int*>(t.row_atom.p), static_cast<const double*>(t.offset.p),
+                static_cast<const double*>(st->whole_pos.p), static_cast<double*>(t.pos.p));
+        tick("kept lists refreshed");
     }
+    h->E_graph = st->max_edges;  // the edge kernels' grid: every tile's edges
+    h->invalidate_graphs();
+    const int64_t T = st->T;
+    if (out_tiles) *out_tiles = T;
+    std::vector<TileList>& lists = st->lists;
+    std::vector<DeviceBufferGuard>& x = st->x;
+    std::vector<DeviceBufferGuard>& dx = st->dx;
+    DeviceBufferGuard& d_forces = st->forces;
+    DeviceBufferGuard* adj = st->adj;
+    for (int t = 0; t + 1 < L; ++t)
+        for (int l = 0; l <= h->gen->out_lmax(t); ++l)
+            CUDA_CHECK(cudaMemsetAsync(dx[(size_t)t * 4 + l].p, 0, (size_t)n_atoms * width(t, l) * sizeof(float),
+                                       h->stream));
+    CUDA_CHECK(cudaMemsetAsync(d_forces.p, 0, (size_t)n_atoms * 3 * sizeof(double), h->stream));
     auto fx = [&](int t, int l) { return static_cast<float*>(x[(size_t)t * 4 + l].p); };
     auto fdx = [&](int t, int l) { return static_cast<float*>(dx[(size_t)t * 4 + l].p); };
     auto grid = [](int64_t n) { return (unsigned)((n + 255) / 256); };
@@ -4783,7 +4910,8 @@ static int evaluate_tiled_impl(LoupHandle* h, int n_atoms, const int* atomic_num
     tick("backward sweeps");
     if (note_free() != 0) return -1;
     h->last_exec = LoupExecution{LOUP_EXEC_TILED, receivers, (long long)T, (size_t)budget,
-                                 (size_t)std::max(0.0, budget - (double)least_free)};
+                                 (size_t)std::max(0.0, budget - (double)least_free), keep ? 1 : 0,
+                                 h->tile_list_builds};
     {
         double e = 0.0;
         CUDA_CHECK(cudaMemcpyAsync(&e, h->d_energy_f64, sizeof(double), cudaMemcpyDeviceToHost, h->stream));
@@ -4796,7 +4924,9 @@ static int evaluate_tiled_impl(LoupHandle* h, int n_atoms, const int* atomic_num
 
     if (out_energy_ev) *out_energy_ev = energy;
     if (out_forces)
-        CUDA_CHECK(cudaMemcpy(out_forces, d_forces.p, (size_t)n_atoms * 3 * sizeof(double), cudaMemcpyDeviceToHost));
+        CUDA_CHECK(cudaMemcpyAsync(out_forces, d_forces.p, (size_t)n_atoms * 3 * sizeof(double),
+                                   cudaMemcpyDeviceToHost, h->stream));
+    CUDA_CHECK(cudaStreamSynchronize(h->stream));
     if (out_stress) {
         const double vol = std::fabs(cell[0] * (cell[4] * cell[8] - cell[5] * cell[7]) -
                                      cell[1] * (cell[3] * cell[8] - cell[5] * cell[6]) +

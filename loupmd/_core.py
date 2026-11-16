@@ -159,6 +159,8 @@ class LoupExecution(ctypes.Structure):
         ("tiles", ctypes.c_longlong),
         ("budget_bytes", ctypes.c_size_t),
         ("peak_bytes", ctypes.c_size_t),
+        ("lists_kept", ctypes.c_int),
+        ("list_builds", ctypes.c_longlong),
     ]
 
 
@@ -171,6 +173,8 @@ class Execution:
     tiles: int
     budget_bytes: int       # device memory free for the call when it began (the handle's own buffers included)
     peak_bytes: int         # the call's device peak: budget less the least memory free during the call
+    lists_kept: bool = False  # the call kept the previous call's tile lists (no atom moved skin/2 since they were built)
+    list_builds: int = 0      # tiled calls of this engine that built their tile lists
 
 
 def integrator(kind: int, dt_fs: float = 1.0, **fields) -> LoupIntegrator:
@@ -458,7 +462,8 @@ class LoupEngine:
         lib.loup_get_execution.argtypes = [ctypes.c_void_p, ctypes.POINTER(LoupExecution)]
         raw = LoupExecution()
         self._check(lib.loup_get_execution(self._h, ctypes.byref(raw)), "loup_get_execution")
-        return Execution(raw.mode, raw.receivers, raw.tiles, raw.budget_bytes, raw.peak_bytes)
+        return Execution(raw.mode, raw.receivers, raw.tiles, raw.budget_bytes, raw.peak_bytes, bool(raw.lists_kept),
+                         raw.list_builds)
 
     def evaluate_energy(self, positions, cell) -> float:
         """The energy alone, from a pass without gradients (``LOUP_EVAL_ENERGY_ONLY``). The forces on the device

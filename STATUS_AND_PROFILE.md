@@ -1008,3 +1008,22 @@ RTX 5060 Ti only; library `6b30910ad0011307...` (the working tree after `4c93637
 - Tests on this build: `pytest tests/gpu` (all tiers) 286 passed in 760 s, `tests/gpu/test_capacity.py` among them; `pytest tests/cpu` 347 passed, 1 skipped.
 - Not measured: the time per call at 320,000 atoms (the first call on a new workspace tunes every tile shape;
   S5-T10), other models, the A/B of the step path (the step path is not changed).
+
+### 6.18 Tiled MD: lists kept across steps (16 November 2026, 02:20)
+
+RTX 5060 Ti only; library `cc8832915e8d60fa...` (the working tree after `8afe99f`). PLAN.md S5-T06, D63.
+`pytest -s tests/gpu/test_tiled_md.py`: 2 passed. Kept lists against the whole-system call without hybrids, 2,560
+atoms in 3 tiles: within 1e-7 eV/atom and 1e-5 eV/A after moves under skin/2 (kept) and after a 0.28 A move
+(rebuilt, same cap). Constant-energy runs, OMAT-0 medium, `SrTiO3`, 1 fs, skin 0.5 A, from 300 K:
+
+| Atoms | Mode, cap, tiles | Steps | List builds | Time per step | Drift, meV/atom/ps | Total energy spread, meV/atom |
+|---|---|---|---|---|---|---|
+| 5,000 | tiled (set), 2,000, 3 | 400 | 18 | 22.8 ms | 0.0014 | 0.026 |
+| 320,000 | tiled (plan), 65,536, 8 | 1,000 | 55 | 1.120 s = 3.50 us/atom | 0.0002 | 0.027 |
+
+- 320,000 atoms: device peak 8.58 GiB of a 14.51 GiB budget; the whole-system call at 40,000 atoms takes
+  1.65 us/atom, so the tiled step is 2.1 times as long per atom (`.tmp_o/probe_nve_320k.py`; 1,123 s wall).
+- The step time includes the host integrator, the transfers and the 55 list builds (a build re-plans and lists
+  every tile; one per 18 steps here).
+- `pytest tests/cpu`: 350 passed, 1 skipped.
+- Not measured: thermostatted tiled MD (not built, D63); other models; the step path's A/B (not changed).

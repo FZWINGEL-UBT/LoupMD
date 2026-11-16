@@ -77,3 +77,50 @@ def test_what_is_not_built_is_refused_before_the_engine_is_asked(config, words):
     with pytest.raises(PlanRefused, match=words):
         capacity.evaluate(eng, ATOMS, config)
     assert eng.calls == []
+
+
+class SpringPlanEngine(PlanEngine):
+    """A plan engine whose forces are springs to the starting sites (K eV/A^2): velocity Verlet must conserve."""
+
+    K = 2.0
+
+    def set_sites(self, atoms):
+        self.sites = np.array(atoms.positions)
+
+    def _spring(self, positions):
+        d = np.asarray(positions) - self.sites
+        return 0.5 * self.K * float(np.sum(d * d)), -self.K * d
+
+    def evaluate(self, positions, cell, compute_stress=True):
+        e, f = self._spring(positions)
+        return e, f, np.zeros((3, 3))
+
+    def evaluate_tiled(self, numbers, positions, cell, receivers, skin=0.5):
+        self.tiled_calls = getattr(self, "tiled_calls", 0) + 1
+        e, f = self._spring(positions)
+        return e, f, np.zeros((3, 3)), 2
+
+    def last_execution(self):
+        return _core.Execution(_core.LOUP_EXEC_TILED, self.receivers, 2, 900, 700, True,
+                               getattr(self, "tiled_calls", 0))
+
+
+@pytest.mark.parametrize("mode", [_core.LOUP_EXEC_WHOLE, _core.LOUP_EXEC_TILED])
+def test_run_nve_conserves_energy_on_springs(mode):
+    at = ATOMS.copy()
+    at.set_velocities(np.random.default_rng(2).normal(scale=0.01, size=(len(at), 3)))
+    eng = SpringPlanEngine(mode, receivers=16)
+    eng.set_sites(at)
+    res = capacity.run_nve(eng, at, n_steps=400, dt_fs=1.0, every=20)
+    assert res.mode == ("whole" if mode == _core.LOUP_EXEC_WHOLE else "tiled")
+    assert len(res.times_ps) == 21 and res.times_ps[-1] == pytest.approx(0.4)
+    assert np.ptp(res.total) <= 1e-3 * res.kinetic[0]
+    assert abs(res.drift_mev_per_atom_ps(len(at))) < 1e-2
+    if mode == _core.LOUP_EXEC_TILED:
+        assert eng.tiled_calls == 401                  # the plan's first call and one per step
+        assert res.receivers == 16 and res.tiles == 2
+
+
+def test_run_nve_refuses_a_negative_step_count():
+    with pytest.raises(PlanRefused):
+        capacity.run_nve(PlanEngine(_core.LOUP_EXEC_WHOLE), ATOMS, n_steps=-1)
