@@ -1551,3 +1551,18 @@ against the borrow build: 656.1 / 649.7 / 641.6 / 658.5 ms (a b b a), b / a 0.98
 (run-to-run atomics). The wavefront at 1,081,600 atoms has 5 tiles in flight but 1.3 GB free, so one slot: 2,256.7 /
 2,257.5 / 2,268.0 / 2,287.1 ms, a tie (it helps the wavefront only where memory is to spare). `tests/gpu/
 test_tiled_md.py` 10 passed; the kept-list and wavefront tests also with `LOUP_TILE_KEEP_ACTIVE=1` and `=0`.
+
+Tile lists in host memory (O31, S5-T07 step 1, `7d74863`): with `LOUP_TILE_HOST_LISTS=1` the lists' edge
+arrays are in mapped pinned host memory and the active-edge compaction reads them over the bus (44 B per edge per
+call: shifts, senders and receivers in the count, senders, receivers and pairs in the scatter). Separate processes,
+order 0 1 1 0, median of five kept calls:
+
+| System | Device lists (ms) | Host lists (ms) | List build, device / host (ms) |
+| --- | --- | --- | --- |
+| 320,000 atoms, 8 tiles | 653.6, 655.3 | 753.6, 749.4 | 95, 77 / 657, 630 |
+| 1,081,600 atoms, wavefront | 2,270.1, 2,289.2 (32 tiles, 1 active slot) | 2,744.8, 2,748.6 (19 tiles, 4 slots) | 302, 430 / 2,163, 1,918 |
+
+The wavefront's host-list plan took 19 larger tiles (its device budget no longer holds the lists). The bus reads
+cost about 100 ms per 320,000 atoms (about 14 GB/s); the builds pay for pinning. A fallback for cells that do not
+fit otherwise, so the default path is unchanged; the copy of each tile's list into a device staging buffer on a
+second stream, ahead of its first sweep, would hide most of the read time (not built).

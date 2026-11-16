@@ -14,6 +14,10 @@ plans the run:
 2. It uses the whole-cell call when that fits in 90% of the free GPU memory and the neighbour list stays under
    536,870,911 edges.
 3. Otherwise it uses the largest tile size from 65,536 down to 4,096 atoms that fits.
+4. When no tile size fits, it keeps the tiles' neighbour lists in the computer's memory (pinned, at most half of
+   what is free) and the GPU reads them over the bus. The run is then 15-20% slower, and larger cells fit: the
+   lists are about a third of what the tiles keep on the GPU (an estimate; most of it with the wavefront). The
+   report says so on its memory line.
 
 ```python
 import loupmd as lm
