@@ -217,6 +217,42 @@ def test_tile_lists_in_host_memory_give_the_device_lists_result(wavefront, keep_
         assert abs(e1 - e0) / len(at) <= 1e-8 and np.abs(f1 - f0).max() <= 1e-5 and np.abs(s1 - s0).max() <= 1e-8
 
 
+@pytest.mark.parametrize("model", ["mace-omat-0-small.model", "mace-mp-0b3-medium.model"])
+@pytest.mark.parametrize("host_lists", ["0", "1"])
+@pytest.mark.parametrize("pipe", ["1", "0"])
+def test_layer_state_in_host_memory_gives_the_device_state_result(model, host_lists, pipe, monkeypatch):
+    """O32 (S5-T07 step 2): LOUP_TILE_HOST_STATE=1 keeps the plain order's layer outputs and their gradients in
+    pinned host memory, each atom's row in its tile's block of locals; a tile's own rows move as one copy, its ghost
+    rows are gathered and its gradient rows added on the host (in row order instead of the device's atomics). Same
+    tiles and kernels otherwise: the device state's numbers up to the order of the float32 sums, in the call that
+    builds the lists and in a later call that keeps them, with the lists on the device or in host memory, with the
+    copies and host work overlapped with the sweeps (LOUP_TILE_HOST_PIPE=1, the default) or not."""
+    at = srtio3(1).repeat((32, 6, 6))                  # 5,760 atoms in a rod: several tiles along it
+    at.positions += np.random.default_rng(11).normal(scale=0.04, size=at.positions.shape)
+    moved = at.positions + np.random.default_rng(12).normal(scale=0.01, size=at.positions.shape)
+    bundle = ensure_loup_bundle(find_model(model), [8, 22, 38])
+    monkeypatch.setenv("LOUP_NO_HYBRID", "1")         # two engines: no hybrid-or-not plan pick between them (D16)
+    monkeypatch.setenv("LOUP_TILE_WAVEFRONT", "0")
+    monkeypatch.setenv("LOUP_TILE_HOST_LISTS", host_lists)
+    monkeypatch.setenv("LOUP_TILE_HOST_PIPE", pipe)
+
+    def run(state):
+        monkeypatch.setenv("LOUP_TILE_HOST_STATE", state)
+        eng = LoupEngine(bundle)
+        try:
+            out = [eng.evaluate_tiled(at.numbers, x, at.cell.array, 400, skin=SKIN) for x in (at.positions, moved)]
+            return out, eng.last_execution()
+        finally:
+            del eng
+            gc.collect()
+
+    (dev, ex_d), (host, ex_h) = run("0"), run("1")
+    assert ex_h.lists_kept
+    for (e0, f0, s0, t0), (e1, f1, s1, t1) in zip(dev, host):
+        assert t0 == t1 >= 4
+        assert abs(e1 - e0) / len(at) <= 1e-8 and np.abs(f1 - f0).max() <= 1e-5 and np.abs(s1 - s0).max() <= 1e-8
+
+
 def test_kept_layer0_results_give_the_replay_result(monkeypatch, capfd):
     """O31: in the plain order each tile keeps layer 0's msgf and D from its forward sweep of layer 0, and its
     backward sweep of layer 0 reads them instead of replaying the forward (density layer 0 with the hidden table:
@@ -255,6 +291,7 @@ def test_the_plan_moves_the_tile_lists_to_host_memory_only_when_they_do_not_fit(
     of refusing the system."""
     at = _oxide(20)                                    # 40,000 atoms
     bundle = ensure_loup_bundle(find_model("mace-omat-0-small.model"), [8, 22, 38])
+    monkeypatch.setenv("LOUP_TILE_HOST_STATE", "0")    # the lists only (the layer state: the next test)
     eng = LoupEngine(bundle)
     try:
         def plan(fraction, host=None):
@@ -287,6 +324,57 @@ def test_the_plan_moves_the_tile_lists_to_host_memory_only_when_they_do_not_fit(
     finally:
         del eng
         gc.collect()
+
+
+def test_the_plan_moves_the_layer_state_to_host_memory_only_when_the_lists_there_are_not_enough(monkeypatch):
+    """O32 (S5-T07 step 2): below the smallest memory fraction at which a cap fits with the tile lists in host
+    memory, the plan also moves the layer outputs and their gradients there (host_state) instead of refusing the
+    system; refused with LOUP_TILE_HOST_STATE=0. The call it plans runs with the layer state in host memory and
+    gives the device state's numbers."""
+    at = _oxide(20)                                    # 40,000 atoms
+    bundle = ensure_loup_bundle(find_model("mace-omat-0-small.model"), [8, 22, 38])
+    monkeypatch.setenv("LOUP_NO_HYBRID", "1")
+    monkeypatch.setenv("LOUP_TILE_WAVEFRONT", "0")
+    eng = LoupEngine(bundle)
+    try:
+        def plan(fraction, state=None):
+            if state is None:
+                monkeypatch.delenv("LOUP_TILE_HOST_STATE", raising=False)
+            else:
+                monkeypatch.setenv("LOUP_TILE_HOST_STATE", state)
+            eng.set_execution(_core.LOUP_EXEC_TILED, 0, fraction)
+            try:
+                return eng.plan_execution(at.numbers, at.positions, at.cell.array, skin=SKIN)
+            except BackendError:
+                return None
+
+        lo, hi = 1e-4, 0.9                             # the smallest fraction with the state on the device
+        while hi - lo > 1e-3 * hi:
+            mid = 0.5 * (lo + hi)
+            lo, hi = (lo, mid) if plan(mid, "0") is not None else (mid, hi)
+        at_hi = plan(hi)
+        assert at_hi is not None and not at_hi.host_state
+        below = plan(lo * 0.999)
+        assert below is not None and below.host_state and below.host_lists and below.receivers >= 4096
+        assert below.host_bytes > at_hi.host_bytes
+        assert plan(lo * 0.999, "0") is None
+        # the planned call: host state, the device state's numbers
+        assert plan(lo * 0.999) is not None
+        e1, f1, s1, _ = eng.evaluate_tiled(at.numbers, at.positions, at.cell.array, 0, skin=SKIN)
+        assert eng.last_execution().host_state
+    finally:
+        del eng
+        gc.collect()
+    monkeypatch.setenv("LOUP_TILE_HOST_STATE", "0")
+    ref = LoupEngine(bundle)
+    try:
+        ref.set_execution(_core.LOUP_EXEC_TILED, below.receivers, 0.9)
+        e0, f0, s0, _ = ref.evaluate_tiled(at.numbers, at.positions, at.cell.array, below.receivers, skin=SKIN)
+        assert not ref.last_execution().host_state
+    finally:
+        del ref
+        gc.collect()
+    assert abs(e1 - e0) / len(at) <= 1e-8 and np.abs(f1 - f0).max() <= 1e-5 and np.abs(s1 - s0).max() <= 1e-8
 
 
 def test_the_tiled_call_is_refused_for_long_range_models():

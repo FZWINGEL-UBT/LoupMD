@@ -1645,3 +1645,30 @@ list in `set_state`), FastMACE 84-87 kB in all (75.7 kB reserved by PyTorch at 1
 about 135,000-150,000 atoms here against FastMACE's 163,840. The per-atom buffers are the generic model's forward and
 gradient buffers per layer and angular order (`GenericModel::alloc_system`), none shared between layers or reused
 after their last use; sharing them by lifetime is the lead (not measured yet).
+
+`tile-host-state` (O32, S5-T07 step 2, first part): the plain order's whole-system layer outputs `x` and their
+gradients `dx` in pinned host memory, as FastMACE's host state. Each atom's host row sits in its tile's block of
+locals (tile row order), so a tile's own rows go in and out as one copy; ghost rows are gathered and gradient rows
+added on host threads (up to 8). The device holds four ring slots of a layer's rows (two in, two out). The copies run
+on two streams (host to device, device to host) and the host work in tasks chained in tile order, overlapped with the
+sweeps; the device-to-device copies into the ring are kernels so they do not wait behind the host copies on the copy
+engines. The memory plan takes it only when no cap fits with the lists in host memory alone, within 60% of
+`MemAvailable` with the lists (`host_state` in `LoupMemoryPlan` and `LoupExecution`); `LOUP_TILE_HOST_STATE=1|0`
+forces it, `LOUP_TILE_HOST_PIPE=0` runs it without the overlap. The wavefront is off with it (plain order only).
+
+320,000 atoms, OMAT-0 medium, 8 tiles, host lists, forced, separate processes, kept calls (`.tmp_o/pipe_check.py`):
+
+| Layer state | Call (ms) | us / atom | Against the whole-system call (1.65 us / atom) |
+| --- | --- | --- | --- |
+| Device | 611 | 1.91 | 1.16x |
+| Host, synchronous (`LOUP_TILE_HOST_PIPE=0`) | 902 | 2.82 | 1.71x |
+| Host, overlapped | 750-780 | 2.34-2.44 | 1.42-1.48x |
+
+FastMACE on this card (its records, 975,560 atoms): whole system 4.79 us / atom, tiled with the device state 6.42
+(1.34x), with the host state 6.70 (1.40x). The host work itself is small (ghost gathers 20 ms, gradient adds 53 ms
+per call); an nsys trace shows the host-to-device and device-to-host copies at 13-14 GB/s each but never at the same
+time, and about four idle gaps of about 20 ms at the phase boundaries (each phase waits for the last tile's copies before
+the next starts): the open cost. Energies: with the same GEMM plans host and device state agree to 1.4e-5 eV in all
+and repeat to 6e-8 eV (no hybrids); the tests bound forces at 1e-5 eV/A. Not done yet: `dx` aliased onto `x`
+(FastMACE's window, half the host memory), compact host lists, the wavefront's row pool on the host, and a force call
+above the device-state limit (estimated, from the plan: plain order to the host RAM's limit, not run).
