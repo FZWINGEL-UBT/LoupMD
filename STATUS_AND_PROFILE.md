@@ -1626,3 +1626,22 @@ Forces 1.5e-6 / 2.2e-6 eV/A apart (run-to-run atomics). With device lists the sa
 no longer 15-20% slower. Two buffers of 36 B per edge of the longest list (2 x 144 MB at 320,000 atoms), taken
 before the slots within the same reserve. `test_tile_lists_in_host_memory...` (plain and wavefront, 0 / 1 / all
 slots, staged and over the bus) 12 passed.
+
+Whole-system memory against FastMACE (O32), RTX 5060 Ti 16 GB, OMAT-0 medium, rattled SrTiO3, Langevin MD. LoupMD
+(`tmd8`, `.tmp_o/whole_mem2.py`): GPU memory in use from Windows `nvidia-smi` less the reading before the engine;
+FastMACE (`9b801229`, its `tools/bench/capacity_scan.py point`, 20 + 50 steps, caches outside its checkout): free
+memory at the start less the least free memory of its phases.
+
+| Atoms | LoupMD: engine / after `set_system` / after `set_state` (lists) / after MD (GiB) | FastMACE (GiB) |
+| --- | --- | --- |
+| 13,720 | 0.28 / 1.47 / 1.73 / 1.73 | – |
+| 40,000 | 0.28 / 3.62 / 4.33 / 4.33 | – |
+| 87,880 | 0.28 / 7.61 / 9.13 / 9.13 (peak sampled at 20 Hz: 9.97) | 6.84 (reserved 6.78) |
+| 135,000 | peak 12.93 | – |
+| 163,840 | out of memory in `set_state` | 13.24 (reserved 11.55) |
+
+LoupMD holds about 100-107 kB per atom (about 89 kB of per-atom buffers in `set_system`, about 18 kB of neighbour
+list in `set_state`), FastMACE 84-87 kB in all (75.7 kB reserved by PyTorch at 163,840): the whole-system limit is
+about 135,000-150,000 atoms here against FastMACE's 163,840. The per-atom buffers are the generic model's forward and
+gradient buffers per layer and angular order (`GenericModel::alloc_system`), none shared between layers or reused
+after their last use; sharing them by lifetime is the lead (not measured yet).
