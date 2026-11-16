@@ -686,7 +686,6 @@ struct LoupHandle {
     float* d_m1_0 = nullptr; float* d_m1_1 = nullptr; float* d_m1_2 = nullptr; float* d_m1_3 = nullptr;
     float* d_D1 = nullptr;
     float* d_b0 = nullptr;   float* d_b1 = nullptr;   float* d_b2 = nullptr;   float* d_b3 = nullptr;
-    float* d_y1 = nullptr;
     float* d_hidden16 = nullptr;  // d(energy)/d(hidden16) [N, 16], written by sc1_fused for the skip backward
     float* d_db0 = nullptr;  float* d_db1 = nullptr;  float* d_db2 = nullptr;  float* d_db3 = nullptr;
     float* d_dD1 = nullptr;
@@ -757,8 +756,9 @@ struct LoupHandle {
         freep(d_act_deg); freep(d_act_row_ptr);
 
         freep(d_senders); freep(d_receivers); freep(d_shift_cart); freep(d_pairs);
-        freep(d_tmp_snd); freep(d_tmp_rcv); freep(d_tmp_shifts); freep(d_tmp_pairs);
-        freep(d_sort_keys);
+        // views into d_tmp_vec_len / d_edge_force_1 (ensure_edge_capacity), freed with them
+        d_tmp_snd = d_tmp_rcv = d_tmp_shifts = d_tmp_pairs = nullptr;
+        d_sort_keys = nullptr;
         freep(d_act_vec_len);
         freep(d_act_senders); freep(d_act_receivers); freep(d_act_pairs);
         freep(d_act_slab); freep(d_act_t_sx);
@@ -772,11 +772,13 @@ struct LoupHandle {
         freep(d_x0); freep(d_x1);
         freep(d_m1_0); freep(d_m1_1); freep(d_m1_2); freep(d_m1_3); freep(d_D1);
         freep(d_b0); freep(d_b1); freep(d_b2); freep(d_b3);
-        freep(d_y1); freep(d_hidden16);
-        freep(d_db0); freep(d_db1); freep(d_db2); freep(d_db3); freep(d_dD1);
+        freep(d_hidden16);
+        d_db0 = d_db1 = d_db2 = d_db3 = nullptr;          // aliased onto d_b_*
+        freep(d_dD1);
         d_dm1_0 = d_dm1_1 = d_dm1_2 = d_dm1_3 = nullptr;  // aliased onto d_m1_*
         d_dh0_0 = d_dh0_1 = nullptr;                      // aliased onto d_h0_*
-        freep(d_dm0_0); freep(d_dm0_1); freep(d_dm0_2); freep(d_dm0_3); freep(d_dD0);
+        d_dm0_0 = d_dm0_1 = d_dm0_2 = d_dm0_3 = nullptr;  // aliased onto d_m0_*
+        freep(d_dD0);
         d_dS0_0 = d_dS0_1 = d_dS0_2 = d_dS0_3 = nullptr;  // aliased onto d_S0_*
     }
 };
@@ -1076,11 +1078,10 @@ static int ensure_edge_capacity(LoupHandle* h, int needed) {
     CUDA_CHECK(reallocp(h->d_receivers, sizeof(int)));
     CUDA_CHECK(reallocp(h->d_shift_cart, 3 * sizeof(double)));
     CUDA_CHECK(reallocp(h->d_pairs, sizeof(int)));
-    CUDA_CHECK(reallocp(h->d_tmp_snd, sizeof(int)));
-    CUDA_CHECK(reallocp(h->d_tmp_rcv, sizeof(int)));
-    CUDA_CHECK(reallocp(h->d_tmp_shifts, 3 * sizeof(int)));
-    CUDA_CHECK(reallocp(h->d_tmp_pairs, sizeof(int)));
-    CUDA_CHECK(reallocp(h->d_sort_keys, sizeof(uint32_t)));
+    // The rebuild's fill / sort temporaries are views into arrays a force pass rewrites before reading and that are
+    // dead during a rebuild: the four 4-byte arrays in d_tmp_vec_len (16 B per edge), the shifts in d_edge_force_1.
+    h->d_tmp_snd = h->d_tmp_rcv = h->d_tmp_shifts = h->d_tmp_pairs = nullptr;
+    h->d_sort_keys = nullptr;
     CUDA_CHECK(reallocp(h->d_act_vec_len, sizeof(float4)));
     CUDA_CHECK(reallocp(h->d_act_senders, sizeof(int)));
     CUDA_CHECK(reallocp(h->d_act_receivers, sizeof(int)));
@@ -1089,6 +1090,12 @@ static int ensure_edge_capacity(LoupHandle* h, int needed) {
     CUDA_CHECK(reallocp(h->d_act_t_sx, sizeof(float2)));
     CUDA_CHECK(reallocp(h->d_tmp_vec_len, sizeof(float4)));
     CUDA_CHECK(reallocp(h->d_edge_force_1, 3 * sizeof(float)));
+    int* tmp4 = reinterpret_cast<int*>(h->d_tmp_vec_len);
+    h->d_tmp_snd = tmp4;
+    h->d_tmp_rcv = tmp4 + (size_t)cap;
+    h->d_tmp_pairs = tmp4 + 2 * (size_t)cap;
+    h->d_sort_keys = reinterpret_cast<uint32_t*>(tmp4 + 3 * (size_t)cap);
+    h->d_tmp_shifts = reinterpret_cast<int*>(h->d_edge_force_1);
     if (h->gen) h->gen->ensure_edges(cap);
     h->E_cap = cap;
     return 0;
@@ -1653,7 +1660,7 @@ static void record_force_pass(LoupHandle* h, int compute_stress) {
         N, h->d_b0, h->d_b1, h->d_b2, h->d_b3, h->d_D1,
         h->model.d_w1_factored, h->d_species,
         h->d_sc_skip16, h->model.d_W_p1_ro1, h->model.d_W_ro1_2,
-        h->d_y1, h->d_hidden16, h->d_energy_f64,
+        h->d_hidden16, h->d_energy_f64,
         h->d_db0, h->d_db1, h->d_db2, h->d_db3, h->d_dD1);
 
     // 7. Backward: Interaction 1
@@ -2095,12 +2102,7 @@ static int set_system_impl(LoupHandle* h, int n_atoms, const int* atomic_numbers
     CUDA_CHECK(allocf(h->d_b1, nN * 3 * 128));
     CUDA_CHECK(allocf(h->d_b2, nN * 5 * 128));
     CUDA_CHECK(allocf(h->d_b3, nN * 7 * 128));
-    CUDA_CHECK(allocf(h->d_y1, nN * 128));
     CUDA_CHECK(allocf(h->d_hidden16, nN * 16));
-    CUDA_CHECK(allocf(h->d_db0, nN * 1 * 128));
-    CUDA_CHECK(allocf(h->d_db1, nN * 3 * 128));
-    CUDA_CHECK(allocf(h->d_db2, nN * 5 * 128));
-    CUDA_CHECK(allocf(h->d_db3, nN * 7 * 128));
     CUDA_CHECK(allocf(h->d_dD1, nN));
     // Alias backward buffers whose forward counterparts are dead before backward writes them (~34 KB/atom saved).
     h->d_dm1_0 = h->d_m1_0;
@@ -2109,10 +2111,16 @@ static int set_system_impl(LoupHandle* h, int n_atoms, const int* atomic_numbers
     h->d_dm1_3 = h->d_m1_3;
     h->d_dh0_0 = h->d_h0_0;
     h->d_dh0_1 = h->d_h0_1;
-    CUDA_CHECK(allocf(h->d_dm0_0, nN * 1 * 128));
-    CUDA_CHECK(allocf(h->d_dm0_1, nN * 3 * 128));
-    CUDA_CHECK(allocf(h->d_dm0_2, nN * 5 * 128));
-    CUDA_CHECK(allocf(h->d_dm0_3, nN * 7 * 128));
+    // In place (S110, 16 KB/atom): sc1_fused writes db over its own inputs b and sc0_backward dm0 over m0, each thread
+    // over the 16 values of its channel it has just read; b and m0 are dead after those kernels.
+    h->d_db0 = h->d_b0;
+    h->d_db1 = h->d_b1;
+    h->d_db2 = h->d_b2;
+    h->d_db3 = h->d_b3;
+    h->d_dm0_0 = h->d_m0_0;
+    h->d_dm0_1 = h->d_m0_1;
+    h->d_dm0_2 = h->d_m0_2;
+    h->d_dm0_3 = h->d_m0_3;
     CUDA_CHECK(allocf(h->d_dD0, nN));
     h->d_dS0_0 = h->d_S0_0;
     h->d_dS0_1 = h->d_S0_1;

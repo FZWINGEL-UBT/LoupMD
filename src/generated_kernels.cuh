@@ -399,33 +399,33 @@ extern "C" __global__ void __launch_bounds__(128) sc0_forward(
 }
 
 extern "C" __global__ void __launch_bounds__(128, 4) sc0_backward(
-    int N, const float* __restrict__ m0_0, const float* __restrict__ m0_1,
-    const float* __restrict__ m0_2, const float* __restrict__ m0_3,
+    int N, const float* m0_0, const float* m0_1,
+    const float* m0_2, const float* m0_3,
     const float* __restrict__ d0, const float* __restrict__ w0_ptr,
     const int* __restrict__ sp, const float* __restrict__ w_ro0,
     const float* __restrict__ dh0_0, const float* __restrict__ dh0_1,
-    float* __restrict__ dm0_0, float* __restrict__ dm0_1,
-    float* __restrict__ dm0_2, float* __restrict__ dm0_3, float* __restrict__ dd0) {
+    float* dm0_0, float* dm0_1,
+    float* dm0_2, float* dm0_3, float* __restrict__ dd0) {
   const int a = blockIdx.x, ch = threadIdx.x;
   if (a >= N) return;
   const float* wr = w0_ptr + (int64_t)sp[a] * 3712 + ch;
   const float s = 1.0f / (d0[a] + 1.0f);
-  const float x0 = __ldg(m0_0 + (int64_t)a * 128 + ch) * s;
-  const float x1 = __ldg(m0_1 + ((int64_t)a * 3 + 0) * 128 + ch) * s;
-  const float x2 = __ldg(m0_1 + ((int64_t)a * 3 + 1) * 128 + ch) * s;
-  const float x3 = __ldg(m0_1 + ((int64_t)a * 3 + 2) * 128 + ch) * s;
-  const float x4 = __ldg(m0_2 + ((int64_t)a * 5 + 0) * 128 + ch) * s;
-  const float x5 = __ldg(m0_2 + ((int64_t)a * 5 + 1) * 128 + ch) * s;
-  const float x6 = __ldg(m0_2 + ((int64_t)a * 5 + 2) * 128 + ch) * s;
-  const float x7 = __ldg(m0_2 + ((int64_t)a * 5 + 3) * 128 + ch) * s;
-  const float x8 = __ldg(m0_2 + ((int64_t)a * 5 + 4) * 128 + ch) * s;
-  const float x9 = __ldg(m0_3 + ((int64_t)a * 7 + 0) * 128 + ch) * s;
-  const float x10 = __ldg(m0_3 + ((int64_t)a * 7 + 1) * 128 + ch) * s;
-  const float x11 = __ldg(m0_3 + ((int64_t)a * 7 + 2) * 128 + ch) * s;
-  const float x12 = __ldg(m0_3 + ((int64_t)a * 7 + 3) * 128 + ch) * s;
-  const float x13 = __ldg(m0_3 + ((int64_t)a * 7 + 4) * 128 + ch) * s;
-  const float x14 = __ldg(m0_3 + ((int64_t)a * 7 + 5) * 128 + ch) * s;
-  const float x15 = __ldg(m0_3 + ((int64_t)a * 7 + 6) * 128 + ch) * s;
+  const float x0 = *(m0_0 + (int64_t)a * 128 + ch) * s;
+  const float x1 = *(m0_1 + ((int64_t)a * 3 + 0) * 128 + ch) * s;
+  const float x2 = *(m0_1 + ((int64_t)a * 3 + 1) * 128 + ch) * s;
+  const float x3 = *(m0_1 + ((int64_t)a * 3 + 2) * 128 + ch) * s;
+  const float x4 = *(m0_2 + ((int64_t)a * 5 + 0) * 128 + ch) * s;
+  const float x5 = *(m0_2 + ((int64_t)a * 5 + 1) * 128 + ch) * s;
+  const float x6 = *(m0_2 + ((int64_t)a * 5 + 2) * 128 + ch) * s;
+  const float x7 = *(m0_2 + ((int64_t)a * 5 + 3) * 128 + ch) * s;
+  const float x8 = *(m0_2 + ((int64_t)a * 5 + 4) * 128 + ch) * s;
+  const float x9 = *(m0_3 + ((int64_t)a * 7 + 0) * 128 + ch) * s;
+  const float x10 = *(m0_3 + ((int64_t)a * 7 + 1) * 128 + ch) * s;
+  const float x11 = *(m0_3 + ((int64_t)a * 7 + 2) * 128 + ch) * s;
+  const float x12 = *(m0_3 + ((int64_t)a * 7 + 3) * 128 + ch) * s;
+  const float x13 = *(m0_3 + ((int64_t)a * 7 + 4) * 128 + ch) * s;
+  const float x14 = *(m0_3 + ((int64_t)a * 7 + 5) * 128 + ch) * s;
+  const float x15 = *(m0_3 + ((int64_t)a * 7 + 6) * 128 + ch) * s;
   const float g0 = __ldg(dh0_0 + (int64_t)a * 128 + ch) + __ldg(w_ro0 + ch);
   const float g1 = __ldg(dh0_1 + ((int64_t)a * 3 + 0) * 128 + ch);
   const float g2 = __ldg(dh0_1 + ((int64_t)a * 3 + 1) * 128 + ch);
@@ -1439,33 +1439,33 @@ extern "C" __global__ void __launch_bounds__(128, 4) sc0_backward(
 }
 
 extern "C" __global__ void __launch_bounds__(128, 4) sc1_fused(
-    int N, const float* __restrict__ b0, const float* __restrict__ b1,
-    const float* __restrict__ b2, const float* __restrict__ b3,
+    int N, const float* b0, const float* b1,
+    const float* b2, const float* b3,
     const float* __restrict__ d1, const float* __restrict__ w1_ptr, const int* __restrict__ sp,
     const float* __restrict__ sc_skip16, const float* __restrict__ w_ro_a, const float* __restrict__ w_ro_b,
-    float* __restrict__ y1, float* __restrict__ d_hidden16, double* __restrict__ out_energy,
-    float* __restrict__ db0, float* __restrict__ db1,
-    float* __restrict__ db2, float* __restrict__ db3, float* __restrict__ dd1) {
+    float* __restrict__ d_hidden16, double* __restrict__ out_energy,
+    float* db0, float* db1,
+    float* db2, float* db3, float* __restrict__ dd1) {
   const int a = blockIdx.x, ch = threadIdx.x;
   if (a >= N) return;
   const float* wr = w1_ptr + (int64_t)sp[a] * 1664 + ch;
   const float s = 1.0f / (d1[a] + 1.0f);
-  const float x0 = __ldg(b0 + (int64_t)a * 128 + ch) * s;
-  const float x1 = __ldg(b1 + ((int64_t)a * 3 + 0) * 128 + ch) * s;
-  const float x2 = __ldg(b1 + ((int64_t)a * 3 + 1) * 128 + ch) * s;
-  const float x3 = __ldg(b1 + ((int64_t)a * 3 + 2) * 128 + ch) * s;
-  const float x4 = __ldg(b2 + ((int64_t)a * 5 + 0) * 128 + ch) * s;
-  const float x5 = __ldg(b2 + ((int64_t)a * 5 + 1) * 128 + ch) * s;
-  const float x6 = __ldg(b2 + ((int64_t)a * 5 + 2) * 128 + ch) * s;
-  const float x7 = __ldg(b2 + ((int64_t)a * 5 + 3) * 128 + ch) * s;
-  const float x8 = __ldg(b2 + ((int64_t)a * 5 + 4) * 128 + ch) * s;
-  const float x9 = __ldg(b3 + ((int64_t)a * 7 + 0) * 128 + ch) * s;
-  const float x10 = __ldg(b3 + ((int64_t)a * 7 + 1) * 128 + ch) * s;
-  const float x11 = __ldg(b3 + ((int64_t)a * 7 + 2) * 128 + ch) * s;
-  const float x12 = __ldg(b3 + ((int64_t)a * 7 + 3) * 128 + ch) * s;
-  const float x13 = __ldg(b3 + ((int64_t)a * 7 + 4) * 128 + ch) * s;
-  const float x14 = __ldg(b3 + ((int64_t)a * 7 + 5) * 128 + ch) * s;
-  const float x15 = __ldg(b3 + ((int64_t)a * 7 + 6) * 128 + ch) * s;
+  const float x0 = b0[(int64_t)a * 128 + ch] * s;
+  const float x1 = b1[((int64_t)a * 3 + 0) * 128 + ch] * s;
+  const float x2 = b1[((int64_t)a * 3 + 1) * 128 + ch] * s;
+  const float x3 = b1[((int64_t)a * 3 + 2) * 128 + ch] * s;
+  const float x4 = b2[((int64_t)a * 5 + 0) * 128 + ch] * s;
+  const float x5 = b2[((int64_t)a * 5 + 1) * 128 + ch] * s;
+  const float x6 = b2[((int64_t)a * 5 + 2) * 128 + ch] * s;
+  const float x7 = b2[((int64_t)a * 5 + 3) * 128 + ch] * s;
+  const float x8 = b2[((int64_t)a * 5 + 4) * 128 + ch] * s;
+  const float x9 = b3[((int64_t)a * 7 + 0) * 128 + ch] * s;
+  const float x10 = b3[((int64_t)a * 7 + 1) * 128 + ch] * s;
+  const float x11 = b3[((int64_t)a * 7 + 2) * 128 + ch] * s;
+  const float x12 = b3[((int64_t)a * 7 + 3) * 128 + ch] * s;
+  const float x13 = b3[((int64_t)a * 7 + 4) * 128 + ch] * s;
+  const float x14 = b3[((int64_t)a * 7 + 5) * 128 + ch] * s;
+  const float x15 = b3[((int64_t)a * 7 + 6) * 128 + ch] * s;
   const float v0 = x0 * x0;
   const float v1 = x0 * v0;
   const float v2 = x1 * x1;
@@ -1593,7 +1593,6 @@ extern "C" __global__ void __launch_bounds__(128, 4) sc1_fused(
   y0 = fmaf(w11, v76, y0);
   const float w12 = __ldg(wr + 1536);
   y0 = fmaf(w12, v99, y0);
-  y1[(int64_t)a * 128 + ch] = y0;
   __shared__ float s_y[128];
   __shared__ float s_part[8][16];
   __shared__ float s_dh[16];

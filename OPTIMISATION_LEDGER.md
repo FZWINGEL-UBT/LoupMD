@@ -51,9 +51,10 @@ Conventions:
 | [spl-unroll2](#spl-unroll2) | 2-edge unroll (before pairing) | – | spec | REJECTED | – | not recorded | [§3.3][s33] |
 | [spl-cubic-forward](#spl-cubic-forward) | The 8-byte cubic table in the forward too | – | spec | REJECTED | – | not recorded | [§3.3][s33] |
 | [tab-far-edge-4byte](#tab-far-edge-4byte) | 4-byte table rows for far edges (T2) | – | spec | REJECTED | – | `w'` +0.9% / +1.9%, spline +1.4% / +3.4% (5060 Ti / Ada) | [§3.3][s33] |
-| [spl-receiver-order](#spl-receiver-order) | Receiver / sublattice ordering in `spline` and `w'` for L1/L2 slab locality | – | spec | NOT BUILT | – | untried (`SrTiO3` O sublattices interleaved; Morton off < L2) | `OMAT0_SPEEDUP_BRIEF.md` |
+| [spl-receiver-order](#spl-receiver-order) | Receiver / sublattice ordering in `spline` and `w'` for L1/L2 slab locality | – | spec | REJECTED (S108, measured by reordered input) | S108 | species-major + Morton order: forward L1 hit 48.9% -> 48.6% at 300 K, force pass +4% | this file |
 | [spl-r6-r8](#spl-r6-r8) | Unpaired `R=6` or `R=8` spline blocks if register pressure drops <= 80 | – | spec | REJECTED (`R=6`, 5060 Ti only); `R=8` not built | S32 | `R=6` as compiled (80 registers, 8 B stack): MD spline `1796 / 1801 -> 1830 / 1863 us` (`+3%`, `OMAT-0-M` `SrTiO3`) | this file |
 | [spl-v6-cubic-cg-fold](#spl-v6-cubic-cg-fold) | `w'` cubic decode (`d_cubic_packed8_1`) + staged per-edge CG linear forms in `s_sh` (`ED = 36`, `TILE = 16`) | `_emit_spline_forward1` | spec | DEFAULT (5060 Ti only) | S15 | 5060 Ti `SrTiO3` 8.40 -> 8.28 ms (`0.985`, `R1p` 1,403 -> 1,306 us), `NbCl5` 1.863 -> 1.853 (`0.994`); all `LOUP_SPLINE_VARIANT` gates pass | this file |
+| [s108-wide-table](#s108-wide-table) | Wider interaction-1 intervals so thermalised shells keep reusing slabs: 2-8x coarser cubic grid (ceiling), 8-byte quintic / Chebyshev formats | branch `s108-quintic-proto` (`LOUP_GEN_SPLINE1`) | spec | REJECTED (5060 Ti) | S108 | ceiling with accuracy ignored: 300 K -4.5% (8x); accurate 8-byte quintic (4x): +5% to +11% | this file |
 
 ### Interaction-1 chain as a whole
 
@@ -63,6 +64,7 @@ Conventions:
 | [int1-l2-chunks](#int1-l2-chunks) | Whole chain per L2-sized receiver chunk so `m1` / `dm1` stay in L2 | – | spec | REJECTED | – | +0.2% to +2.8% at 650-1,700-atom chunks | [§3.3][s33] |
 | [int1-lin1-fusion](#int1-lin1-fusion) | Fuse `lin1` into the spline / `w'` kernels | – | spec | NOT BUILT | – | ceiling: `lin1` groups 529 + 597 us (`SrTiO3`) | [§4.1 #1][s41] |
 | [int1-radial-low-rank](#int1-radial-low-rank) | Tabulate fewer radial functions: the 64 hidden activations, or a few basis functions per channel | – | spec | NOT BUILT (closed by measurement) | – | rank 64 of 64; per channel 10 of 10 paths | this file |
+| [s109-exponent-or](#s109-exponent-or) | Table exponents shifted by 2^k (exact) to a 32-aligned base so the decode ORs it in; 2^-k folded into the forward's stores and `w'`'s staged q | – | spec | REJECTED (5060 Ti) | S109 | MD a-b-b-a `NbCl5` 1.0100, `SrTiO3` 1.0067; gate passes | this file |
 
 ### Interaction-1 backward (`w'`, `wprime_backward_inter1`)
 
@@ -149,6 +151,7 @@ Conventions:
 | [sched-serialised](#sched-serialised) | GEMM groups serialised (check of the above) | – | spec | REJECTED | – | 5060 Ti +5.7% / +5.0%, +2.1% / +2.0% | [§3.3][s33] |
 | [sched-reversed-order](#sched-reversed-order) | Kernels between GEMMs walk receivers from the top (L2 reuse) | – | spec | REJECTED | – | step span 8,274 -> 8,285 us | [§3.3][s33] |
 | [mem-aliasing](#mem-aliasing) | Gradient buffers alias forward ones (`dm1 -> m1`, `dh0 -> h0`, `dS0 -> S0`) | – | spec | DEFAULT | S3 | not recorded alone | [§3.1 #16][s31] |
+| [mem-inplace-s110](#mem-inplace-s110) | `db` written over `b` (`sc1_fused`), `dm0` over `m0` (`sc0_backward`); rebuild temporaries as views of `tmp_vec_len` / `edge_force_1`; dead `y1` dropped | – | spec | DEFAULT (5060 Ti only) | S110 | VRAM `SrTiO3` 5,000 atoms 658 -> 542 MiB, 40,000 atoms 3,632 -> 2,840 MiB (93.0 -> 72.7 KiB/atom); MD a-b-b-a 1.0001 / 0.9968; gate passes | this file |
 | [mem-l1-carveout](#mem-l1-carveout) | Per-arch smallest carveout keeping occupancy | `tune_l1` | both | DEFAULT | S3 | i0 forward 305 -> ~250 us at 64 KB (5060 Ti) | [§3.1 #17][s31], [§2.5][s2] |
 | [edge-packed](#edge-packed) | Packed edge arrays (`float4` x, y, z, r; `float2`) | `act_vec_len`, `act_t_sx` | both | DEFAULT | S3 | not recorded alone | [§3.1 #13][s31] |
 | [edge-sh-coalesced](#edge-sh-coalesced) | Coalesced SH stores in `scatter_active_edges` | – | spec | SUPERSEDED | S3 | superseded by edge-sh-recompute | [§3.1 #19][s31] |
@@ -308,6 +311,7 @@ Do not retry these unless the stated condition changes.
 | Split-K cuBLASLt algorithms | [gemm-no-split-k](#gemm-no-split-k): captured memset nodes idle the GPU, non-deterministic | never |
 | 3xTF32 GEMMs for MACE-POLAR-1 | [gemm-simt-for-lr](#gemm-simt-for-lr): Ada stress ratios 3.4-6.3 and a NaN | a different arithmetic implementation or a demonstrated reference defect; never relax the accuracy gate |
 | Atomics replaced by extra reduction launches | [frc-per-atom-energy](#frc-per-atom-energy) +0.5%, [i0-bwd-receiver-owned](#i0-bwd-receiver-owned) +1.8%, [frc-segmented-f64](#frc-segmented-f64) | a reproducibility (bitwise) mode is required |
+| Wider interaction-1 intervals in 8-byte entries | [s108-wide-table](#s108-wide-table): no 8-byte format with 4x wider intervals keeps the current accuracy, and the six-field decode costs more (+5-11%) than the slab reuse saves (at most 4.5% at 300 K) | a decode costing no more than CUBIC_PACKED8's with >= 4x wider intervals at the current accuracy |
 
 ## Open or untried
 
@@ -322,9 +326,9 @@ Do not retry these unless the stated condition changes.
 | Decaying step-displacement maximum | closed by S75: the MD loop no longer pipelines or tracks the maximum; every step checks its own list exactly and the force pass waits behind a conditional node ([md-guarded-loop](#md-guarded-loop)). S46 had found water above the pipelining threshold in every step at skin 0.5 | [md-guarded-loop](#md-guarded-loop) |
 | `w'` path order and shared scalars | untried: emit the six `x1` paths before the four `x0` paths (shorter live ranges at the 64-register limit) and add the three `xx / xy / xz` pull terms of paths 1, 4, 7 through one summed scalar (6 FMA per channel). Differs from [wp-x0-hoist](#wp-x0-hoist), which added a live accumulator. Test: SASS count and spill bytes first, then A/B | external suggestion, 13 Nov |
 | Shift-free decode for the forward's PACKED8 table | untried: the layout change of `w'` (S4) applied to `spline_forward_inter1`; the forward is L2-bound on the 5060 Ti, so expect little there | external suggestion, 13 Nov |
-| Exponent field without the add | untried: if all table exponents fall in one 32-wide block, `(c.y & mask) \| prefix` is one LOP3 instead of AND + IADD per path in `w'` | external suggestion, 13 Nov |
-| Dead `y1` store in `sc1_fused` | untried; confirmed still dead (S32: `engine.cu` passes `d_y1`, `gen_kernels.py` stores it, nothing reads it). Sized at 2.56 MB of writes per step on 5,000 atoms, ~6 us (~0.07% of `OMAT-0-M`), below ABBA resolution; removal is cleanup (generator, `engine.cu` argument and allocation) rather than a measurable speedup | external suggestion, 13 Nov |
-| Receiver / sublattice ordering in `spline` and `w'` | untried: group receivers by species / oxygen sublattice / spatial cell so co-resident SMs share table slabs (`Morton` is off at `N=5,000`) | [spl-receiver-order](#spl-receiver-order) |
+| Exponent field without the add | tried, S109: a 2^k rescale makes every table's exponent base 32-aligned, but the compiler had no IADD to remove (static SASS IADD3 count 0 before and after) and the staged-q scaling added FMULs: MD +0.7-1.0% | [s109-exponent-or](#s109-exponent-or) |
+| Dead `y1` store in `sc1_fused` | done (S110): store, argument and allocation removed | [mem-inplace-s110](#mem-inplace-s110) |
+| Receiver / sublattice ordering in `spline` and `w'` | falsified (S108): the slab reuse that matters is within each receiver's own edge list, not across receivers | [spl-receiver-order](#spl-receiver-order) |
 | Unpaired `R=8` spline blocks | `R=6` at 80 registers spilled and lost 3% (S32). S47 tried the register cut from the other side (each receiver's 10 paths split over two 128-thread parts: 64 registers, 32 warps / SM): 9-12% slower than R5. More warps do not pay for the duplicated per-edge work | [spl-r6-r8](#spl-r6-r8) |
 | CUDA Graph L2 persistence (`AccessPolicyWindow`) on `x0+x1` | untried: ~10-12 MiB persistent window (`SrTiO3` `x0+x1` = 9.77 MiB), check `ncu` eviction first | [mem-l2-persist-x](#mem-l2-persist-x) |
 | Cold-L2 rule for Ada `lin1_fwd l=1` + wider 3xTF32 `mma` tiles | untried: `22.0 MiB < 24 MiB` (`L2/2`) times `lin1_fwd l=1` hot on Ada; check `LOUP_DEBUG_GEMM=1` and `128x64`/`64x128` 3xTF32 tiles on 5060 Ti | [gemm-cold-l2-ada-fix](#gemm-cold-l2-ada-fix) |
@@ -409,9 +413,10 @@ Each entry has the same fields. Unless stated, the system is OMAT-0 medium on th
 
 <a id="spl-receiver-order"></a>
 #### spl-receiver-order: receiver / sublattice ordering for slab locality
-- Status: NOT BUILT.
+- Status: REJECTED (S108).
 - What: at `N = 5,000`, `mem-reorder` is off (`N * 4 KB < L2`). In `SrTiO3`, the 3,000 oxygen atoms sit in three interleaved sublattices `(0.5,0.5,0)`, `(0.5,0,0.5)`, `(0,0.5,0.5)` in caller order, so consecutive receivers in `R=4/5` blocks mix sublattices. Ordering receivers (or block walk order) by species/sublattice or spatial cell keeps co-resident SMs on the same `(pair, r)` slabs (cf. FastMACE `BLOCK_ORDER`). Do **not** replace the `(sym_pair, r)` edge sort with `sender_idx` (that breaks `PAIR` and slab reuse).
-- Sources: `OMAT0_SPEEDUP_BRIEF.md`.
+- Measured (S108, 5060 Ti, `SrTiO3` 5,000 atoms after Langevin equilibration to 296.5 K): the input reordered species-major with Morton order within each species (the engine keeps the caller order at this size). The distinct-slab proxy per 5-receiver block fell 0.483 -> 0.357, but `ncu` R5 `spline_forward_inter1` L1 hit stayed at 48.9% -> 48.6% (1.74 ms both) and the force pass got slower (R5 8.02 -> 8.34 ms, +4%). The slab reuse that counts comes from each receiver's own edges (0.30 distinct slabs per edge at rest, 0.75 at 300 K), which the order of receivers does not change; see [s108-wide-table](#s108-wide-table).
+- Sources: `OMAT0_SPEEDUP_BRIEF.md`; this file.
 
 <a id="spl-r6-r8"></a>
 #### spl-r6-r8: unpaired `R=6` / `R=8` spline blocks
@@ -1091,6 +1096,25 @@ Each entry has the same fields. Unless stated, the system is OMAT-0 medium on th
 #### mem-aliasing: gradient buffers aliased onto forward buffers
 - Stage: S3 (item 16). What: `dm1 -> m1`, `dh0 -> h0`, `dS0 -> S0`. Status: DEFAULT. Measured: not recorded alone. Sources: [§3.1 #16][s31].
 
+<a id="mem-inplace-s110"></a>
+#### mem-inplace-s110: in-place `db` / `dm0`, rebuild temporaries as views, no `y1`
+- Stage: S110 (16 November 2026), 5060 Ti. The arithmetic is unchanged.
+- What:
+  - `sc1_fused` writes `db` over its inputs `b`, and `sc0_backward` writes `dm0` over `m0` (16 KB/atom). Each thread reads its channel's 16 inputs before it writes the same 16 addresses, and no thread reads another channel. The aliased pointers therefore lose `__restrict__` and `__ldg`. `b` and `m0` are dead after those kernels.
+  - The dead `y1` output of `sc1_fused` is removed (512 B/atom).
+  - The neighbour rebuild's fill and sort temporaries are views into arrays that the force pass rewrites before reading and that are dead during a rebuild. `tmp_snd`, `tmp_rcv`, `tmp_pairs` and `sort_keys` (16 B per edge slot) live in `d_tmp_vec_len`; `tmp_shifts` (12 B) lives in `d_edge_force_1`.
+- Measured (`cudaMemGetInfo` deltas over the engine's lifetime, `SrTiO3`):
+
+  | Atoms | Before (MiB) | After (MiB) | Per atom (KiB) |
+  | --- | --- | --- | --- |
+  | 5,000 | 658 | 542 | 134.8 -> 111.0 |
+  | 40,000 | 3,632 | 2,840 | 93.0 -> 72.7 |
+
+  - Results at equal GEMM plans (the s106a plan file copied to the new build's key) differ by dE 2.4-3.5e-6 eV, max dF 0.9-1.2e-6 eV/A and max dS 1.7-5.5e-10. That is the installed build's own run-to-run spread (2.9-4.7e-6 eV, 0.9-1.3e-6 eV/A, 3.1e-10). With freshly tuned plans the difference is dE 1.6-3.0e-4 eV, max dF 3.3-3.6e-6 eV/A.
+  - MD a-b-b-a vs s106a: `NbCl5` 1.779 -> 1.779 ms (1.0001), `SrTiO3` 8.016 -> 7.990 ms (0.9968), faster or tied in both orders. The gate passes on every variant.
+- Status: DEFAULT (5060 Ti only).
+- Sources: this file.
+
 <a id="mem-l1-carveout"></a>
 #### mem-l1-carveout: per-arch L1 carveouts
 - Switch: `tune_l1`.
@@ -1621,6 +1645,56 @@ POLAR-1 NaCl 3x3x3 (216) and POLAR-1-M `NbCl5` 3x3x3 (1,944).
   - cp.async staging of R5's slab rows. 60 KB of shared memory forces the 100 KB carveout, leaving 28 KB of L1 and losing the slab sharing that makes R5 faster than R1p.
   - A register cap for the generic R1 / R1p forward (104 registers against the specialised kernel's 96). These variants run only in `evaluate()` before tuning, and in systems where they win.
 - Sources: this file; `results/symmetrix-main-20261116` (README rounds 2 and 3, `ncu/`, `ncu_full/`).
+
+<a id="s108-wide-table"></a>
+#### s108-wide-table: wider interaction-1 intervals for thermalised slab reuse (rejected)
+- Stage: S108 (16 November 2026), 5060 Ti, OMAT-0 medium, `SrTiO3` 10x10x10 (5,000 atoms), configurations at rest and after Langevin equilibration to 160 K and 296.5 K.
+- Cause of the temperature penalty (force pass 7.46-7.52 ms at rest, 8.06-8.12 ms at 160 K, default variants):
+  - Edges within 6 A change by only +0.4%, so the work is the same.
+  - Table slab reuse collapses. Within one receiver there are 0.30 distinct slabs per edge at rest and 0.75 at 300 K.
+  - `ncu` R5 `spline_forward_inter1`: 1.58 -> 1.79 ms, L1 hit 78.7% -> 48.9%, L2 throughput 28.6% -> 59.7%. `w'` L1 hit 32% -> 8%.
+  - The variant tuner already follows it. At 300 K R5 is best (8.03 ms; R4 8.08, R4p 8.11, R1p 8.22, R1 8.27); at rest R1p and R4p are best (7.53).
+- Stage 1, the ceiling with accuracy ignored: the cubic grid coarsened k-fold on the bands from 1.5 A (scratch export), force pass with the best variant:
+
+  | Grid | 300 K (ms) | Rest (ms) |
+  | --- | --- | --- |
+  | k = 1 (current) | 8.035 | 7.562 |
+  | k = 2 | 7.913 | 7.481 |
+  | k = 4 | 7.799 | 7.390 |
+  | k = 8 | 7.676 | 7.372 |
+
+  At k = 8 the 300 K forward L1 hit recovers to 78.8%. The whole reachable gain is 4.5% at 300 K.
+- Accuracy of candidate formats (per-column error relative to the column maximum, r >= 1 A):
+
+  | Representation | Value | Slope |
+  | --- | --- | --- |
+  | float32 MACE network (reference) | 1.7e-4 | 1.35e-4 |
+  | current CUBIC_PACKED8 | 1.44e-4 | 5.0e-5 |
+  | cubic spline (float), k = 2 | 5.9e-6 | 1.05e-4 |
+  | quintic Hermite (float), k = 4 | 3.5e-7 | 4.7e-6 |
+  | quintic Hermite (float), k = 8 | 1.95e-5 | 1.06e-4 |
+  | 8-byte quintic, k = 4 (monomial fields of 17 / 14 / 13 / 9 / 5 / 1 bits) | 3.1e-4 | 3.1e-4 (all r: 6.3e-4) |
+  | 8-byte Chebyshev, k = 4 (local search) | 9.6e-4 | – |
+  | 8-byte Chebyshev, 4 fields, k = 2 | 1.5e-4 | 1.8e-4 |
+  | 8-byte Chebyshev, 4 fields, k = 1 | 2.4e-4 | 1.5e-4 |
+
+  Intervals 4x wider need degree 5 to keep the current accuracy, and six coefficients do not fit 64 bits at the precision a cubic's four get. The 8-byte quintic misses the current slope error by 6x.
+- Prototype (branch `s108-quintic-proto`; generator `LOUP_GEN_SPLINE1=wide:NB/SH`, loader `spline1_degree = 5`): k = 4 on all bands (186 intervals), six monomial fields.
+  - Registers: forward R5 96, R1p / R4p 128. `w'` (64-register cap) spills: receiver-owned kernel 48 B of stack, edge-tiled kernel 32 B.
+  - Force pass: rest 7.39-7.54 -> 8.09-8.39 ms (+9-11%), 300 K 7.86-8.08 -> 8.44-8.63 ms (+5-9%). `nsys` at 300 K: `w'` +445 us, forward +76 us.
+  - VRAM: layer-1 packed table 43 MB -> 10.9 MB; engine total 658 -> 626 MiB at 5,000 atoms.
+- Status: REJECTED. Any wider 8-byte format costs more in decode than it gains in locality, and the formats that fit 8 bytes lose accuracy.
+- Sources: this file; branch `s108-quintic-proto`.
+
+<a id="s109-exponent-or"></a>
+#### s109-exponent-or: OR-ed exponent base in the cubic decode (rejected)
+- Stage: S109 (16 November 2026), 5060 Ti.
+- What: the CUBIC_PACKED8 decode adds the table's exponent base to each 5-bit exponent field. Scaling a table by 2^k (exact) moves the base to a multiple of 32, so the decode becomes `(c.y & 0x0F800000u) | bias_shift`. The 2^-k goes into the forward's output stores and into `w'`'s staged q.
+- Measured:
+  - Static SASS: forward R5 728 -> 712 instructions. `w'` receiver-owned FMUL 118 -> 147 (the q scaling). Neither build has an IADD3, so there was no separate add to remove.
+  - MD a-b-b-a vs s106a: `NbCl5` 1.781 -> 1.798 ms (1.0100), `SrTiO3` 8.005 -> 8.058 ms (1.0067). The gate passes.
+- Status: REJECTED, reverted.
+- Sources: this file.
 
 <a id="s26-fwd-pair-c96"></a>
 #### s26-fwd-pair-c96: paired-edge forward with `C_FIX` for `C = 96 / 224` (rejected)

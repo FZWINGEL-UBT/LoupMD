@@ -69,15 +69,17 @@ def _emit_sc0(prog, features, segments_w, mul=128):
     used = prog.used(roots)
     warps = mul // 32
 
-    def load_x(lines):
+    def load_x(lines, ldg=True):
+        # ldg=False: plain loads for the backward, whose outputs may alias these inputs (S110)
+        ld = (lambda p: f"__ldg({p})") if ldg else (lambda p: f"*({p})")
         lines.append("  const float s = 1.0f / (d0[a] + 1.0f);")
-        lines.append(f"  const float x0 = __ldg(m0_0 + (int64_t)a * {mul} + ch) * s;")
+        lines.append(f"  const float x0 = {ld(f'm0_0 + (int64_t)a * {mul} + ch')} * s;")
         for m in range(3):
-            lines.append(f"  const float x{1 + m} = __ldg(m0_1 + ((int64_t)a * 3 + {m}) * {mul} + ch) * s;")
+            lines.append(f"  const float x{1 + m} = {ld(f'm0_1 + ((int64_t)a * 3 + {m}) * {mul} + ch')} * s;")
         for m in range(5):
-            lines.append(f"  const float x{4 + m} = __ldg(m0_2 + ((int64_t)a * 5 + {m}) * {mul} + ch) * s;")
+            lines.append(f"  const float x{4 + m} = {ld(f'm0_2 + ((int64_t)a * 5 + {m}) * {mul} + ch')} * s;")
         for m in range(7):
-            lines.append(f"  const float x{9 + m} = __ldg(m0_3 + ((int64_t)a * 7 + {m}) * {mul} + ch) * s;")
+            lines.append(f"  const float x{9 + m} = {ld(f'm0_3 + ((int64_t)a * 7 + {m}) * {mul} + ch')} * s;")
 
     # Forward
     fwd = [
@@ -120,21 +122,23 @@ def _emit_sc0(prog, features, segments_w, mul=128):
         "}",
     ]
 
-    # Backward
+    # Backward. dm0 may alias m0 (the engine stores dm0 in place of m0, S110): each thread loads its channel's 16
+    # inputs before it writes the same 16 outputs and no thread reads another channel, so the two are not
+    # restrict-qualified and the inputs are plain loads (no reload after a store, no read-only cache).
     bwd = [
         f'extern "C" __global__ void __launch_bounds__({mul}, 4) sc0_backward(',
-        "    int N, const float* __restrict__ m0_0, const float* __restrict__ m0_1,",
-        "    const float* __restrict__ m0_2, const float* __restrict__ m0_3,",
+        "    int N, const float* m0_0, const float* m0_1,",
+        "    const float* m0_2, const float* m0_3,",
         "    const float* __restrict__ d0, const float* __restrict__ w0_ptr,",
         "    const int* __restrict__ sp, const float* __restrict__ w_ro0,",
         "    const float* __restrict__ dh0_0, const float* __restrict__ dh0_1,",
-        "    float* __restrict__ dm0_0, float* __restrict__ dm0_1,",
-        "    float* __restrict__ dm0_2, float* __restrict__ dm0_3, float* __restrict__ dd0) {",
+        "    float* dm0_0, float* dm0_1,",
+        "    float* dm0_2, float* dm0_3, float* __restrict__ dd0) {",
         "  const int a = blockIdx.x, ch = threadIdx.x;",
         "  if (a >= N) return;",
         f"  const float* wr = w0_ptr + (int64_t)sp[a] * {segments_w * mul} + ch;",
     ]
-    load_x(bwd)
+    load_x(bwd, ldg=False)
     bwd.append(f"  const float g0 = __ldg(dh0_0 + (int64_t)a * {mul} + ch) + __ldg(w_ro0 + ch);")
     for m in range(3):
         bwd.append(f"  const float g{1 + m} = __ldg(dh0_1 + ((int64_t)a * 3 + {m}) * {mul} + ch);")
@@ -211,7 +215,9 @@ def _emit_sc1(prog, features, segments_w, mul=128):
     # 16->1, energy), readout backward and product 1 backward in one kernel. The forward monomials stay in registers
     # for the backward, and y1 / hidden16 never round-trip through memory except for the outputs below.
     # Input: b0 [N, 128], b1 [N, 3*128], b2 [N, 5*128], b3 [N, 7*128], d1 [N], sc_skip16 [N, 16]
-    # Output: y1 [N, 128] (debug readback), d_hidden16 [N, 16] (skip backward), energy, db0..db3, dd1
+    # Output: d_hidden16 [N, 16] (skip backward), energy, db0..db3, dd1. db may alias b (the engine stores db in
+    # place of b, S110): each thread loads its channel's 16 inputs before it writes the same 16 outputs and no thread
+    # reads another channel, so the two are not restrict-qualified and the inputs are plain loads.
     assert mul == 128
     roots = [u for f in features for u in f.values() if u is not None]
     used = prog.used(roots)
@@ -219,25 +225,25 @@ def _emit_sc1(prog, features, segments_w, mul=128):
 
     lines = [
         f'extern "C" __global__ void __launch_bounds__({mul}, 4) sc1_fused(',
-        "    int N, const float* __restrict__ b0, const float* __restrict__ b1,",
-        "    const float* __restrict__ b2, const float* __restrict__ b3,",
+        "    int N, const float* b0, const float* b1,",
+        "    const float* b2, const float* b3,",
         "    const float* __restrict__ d1, const float* __restrict__ w1_ptr, const int* __restrict__ sp,",
         "    const float* __restrict__ sc_skip16, const float* __restrict__ w_ro_a, const float* __restrict__ w_ro_b,",
-        "    float* __restrict__ y1, float* __restrict__ d_hidden16, double* __restrict__ out_energy,",
-        "    float* __restrict__ db0, float* __restrict__ db1,",
-        "    float* __restrict__ db2, float* __restrict__ db3, float* __restrict__ dd1) {",
+        "    float* __restrict__ d_hidden16, double* __restrict__ out_energy,",
+        "    float* db0, float* db1,",
+        "    float* db2, float* db3, float* __restrict__ dd1) {",
         "  const int a = blockIdx.x, ch = threadIdx.x;",
         "  if (a >= N) return;",
         f"  const float* wr = w1_ptr + (int64_t)sp[a] * {segments_w * mul} + ch;",
         "  const float s = 1.0f / (d1[a] + 1.0f);",
-        f"  const float x0 = __ldg(b0 + (int64_t)a * {mul} + ch) * s;",
+        f"  const float x0 = b0[(int64_t)a * {mul} + ch] * s;",
     ]
     for m in range(3):
-        lines.append(f"  const float x{1 + m} = __ldg(b1 + ((int64_t)a * 3 + {m}) * {mul} + ch) * s;")
+        lines.append(f"  const float x{1 + m} = b1[((int64_t)a * 3 + {m}) * {mul} + ch] * s;")
     for m in range(5):
-        lines.append(f"  const float x{4 + m} = __ldg(b2 + ((int64_t)a * 5 + {m}) * {mul} + ch) * s;")
+        lines.append(f"  const float x{4 + m} = b2[((int64_t)a * 5 + {m}) * {mul} + ch] * s;")
     for m in range(7):
-        lines.append(f"  const float x{9 + m} = __ldg(b3 + ((int64_t)a * 7 + {m}) * {mul} + ch) * s;")
+        lines.append(f"  const float x{9 + m} = b3[((int64_t)a * 7 + {m}) * {mul} + ch] * s;")
     for i in used:
         _emit_ssa_node(lines, i, prog.nodes[i])
 
@@ -253,7 +259,6 @@ def _emit_sc1(prog, features, segments_w, mul=128):
     # Readout 1 forward + backward: hidden = y1 @ w_ro_a [128, 16] + skip; E += silu(hidden) . w_ro_b;
     # g0 = dE/dy1 = (silu'(hidden) * w_ro_b) @ w_ro_a^T
     lines += [
-        f"  y1[(int64_t)a * {mul} + ch] = y0;",
         f"  __shared__ float s_y[{mul}];",
         f"  __shared__ float s_part[{mul // 16}][16];",
         "  __shared__ float s_dh[16];",
