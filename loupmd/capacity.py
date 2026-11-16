@@ -24,7 +24,7 @@ class CapacityResult:
     energy: float
     forces: np.ndarray
     stress: np.ndarray
-    mode: str               # "whole" or "tiled"
+    mode: str               # "whole", "tiled" or "wavefront" (the tiled call with the wavefront schedule, S5-T08)
     receivers: int          # receiver cap of the tiled call; 0 for the whole-system call
     tiles: int
     plan: _core.MemoryPlan
@@ -38,13 +38,10 @@ def evaluate(engine, atoms, config: CapacityConfig | None = None, skin: float = 
     calls."""
     config = config or CapacityConfig()
     reasons = []
-    if config.mode == "wavefront":
-        reasons.append("capacity mode 'wavefront' is not in this version")
     if config.state == "host":
         reasons.append("state='host' (the tiled state in pinned host memory) is not in this version (plan task S5-T07)")
     if reasons:
-        raise PlanRefused(reasons, next_step="Use capacity mode 'auto', 'whole' or 'tiled' with state 'auto' or "
-                                             "'device'.")
+        raise PlanRefused(reasons, next_step="Use state 'auto' or 'device'.")
     numbers = np.asarray(atoms.get_atomic_numbers())
     positions, cell = np.asarray(atoms.positions), np.asarray(atoms.cell.array)
     engine.set_execution(config.exec_mode, config.receivers or 0, config.memory_fraction)
@@ -55,7 +52,8 @@ def evaluate(engine, atoms, config: CapacityConfig | None = None, skin: float = 
         return CapacityResult(energy, forces, stress, "whole", 0, 1, plan, plan.free_bytes, plan.whole_bytes)
     energy, forces, stress, tiles = engine.evaluate_tiled(numbers, positions, cell, plan.receivers, skin=skin)
     done = engine.last_execution()
-    return CapacityResult(energy, forces, stress, "tiled", plan.receivers, tiles, plan, done.budget_bytes,
+    mode = "wavefront" if done.mode == _core.LOUP_EXEC_WAVEFRONT else "tiled"
+    return CapacityResult(energy, forces, stress, mode, plan.receivers, tiles, plan, done.budget_bytes,
                           done.peak_bytes)
 
 
@@ -96,7 +94,7 @@ def run_nve(engine, atoms, n_steps: int, dt_fs: float = 1.0, config: CapacityCon
     numbers = np.asarray(atoms.get_atomic_numbers())
     cell = np.asarray(atoms.cell.array)
     first = evaluate(engine, atoms, config, skin=skin)
-    builds0 = engine.last_execution().list_builds if first.mode == "tiled" else 0
+    builds0 = engine.last_execution().list_builds if first.mode != "whole" else 0
     if first.mode == "whole":
         def force(x):
             e, f, _ = engine.evaluate(x, cell, compute_stress=False)
@@ -124,6 +122,6 @@ def run_nve(engine, atoms, n_steps: int, dt_fs: float = 1.0, config: CapacityCon
             pot.append(e)
             kin.append(0.5 * float(np.sum(m * v * v)))
     wall = (time.perf_counter() - t0) / max(n_steps, 1)
-    builds = engine.last_execution().list_builds - builds0 + 1 if first.mode == "tiled" else 0
+    builds = engine.last_execution().list_builds - builds0 + 1 if first.mode != "whole" else 0
     return NVEResult(np.array(times), np.array(pot), np.array(kin), x, v, first.mode, first.receivers, first.tiles,
                      builds, wall)

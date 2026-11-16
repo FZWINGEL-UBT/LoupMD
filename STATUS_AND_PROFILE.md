@@ -1107,3 +1107,34 @@ counts); `SrTiO3` 20^3 rattled, an empty plan cache per process (`.tmp_o/probe_f
 - `pytest tests/gpu -m "not acceptance"` on this build: 284 passed, 1 failed (the default-GEMM bound above, before
   D66). After the change `pytest tests/gpu/test_tiled.py`: 8 passed (default-GEMM dE 1.26e-6); the full
   tier not rerun.
+
+### 6.22 The tiled wavefront (16 November 2026, 05:00)
+
+RTX 5060 Ti only; library `695d6873c09336bc` (the working tree after `cd1a620`). PLAN.md S5-T08, D66, D67;
+ledger `tile-wavefront`. OMAT-0 medium, `SrTiO3` rods rattled by 0.04 A, default GEMMs, skin 0.5 A
+(`.tmp_o/wave_time.py`; one process per row, four calls each: the first builds the lists, the rest keep them).
+
+| Atoms, receivers | Sweeps | Tiles | First call (s) | Kept call (s) | Device peak (GiB) |
+|---|---|---|---|---|---|
+| 368,640 (128x24x24), 20,000 | plain | 32 | 2.53, 2.28 | 0.808, 0.798 | 4.91 |
+| 368,640, 20,000 | wavefront (forced) | 40 | 3.58, 3.31 | 0.809, 0.805 | 4.05 |
+| 1,081,600 (320x26x26), 40,000 | wavefront (`auto`) | 34 | 7.17 | 2.354 | 10.84 |
+| 1,081,600, the plan's cap (49,152; library `90a30122`) | wavefront (`auto`) | 32 | 8.99 | 2.357 | 11.83 |
+
+- Measured: two runs per side at 368,640 atoms (not an A/B); kept calls tie. The first call is slower with the
+  wavefront because the boundary skins make 8 more tiles (more GEMM row counts to time). Forces of the two
+  sides 5.5e-6 eV/A apart with the default GEMMs (hybrid picks per tile shape, D66).
+- The row pool: 119,833 of 1,081,600 atoms (11.1%) at 16 layers; 3,048 of 11,520 (26%) at 13 layers.
+- Not measured: the plain call at 1,081,600 atoms (it would need about 30 GiB on this 16 GiB card; not tried,
+  since WSL oversubscription has crashed this PC before).
+- `pytest -s tests/gpu/test_tiled.py`: the wavefront against the plain call without hybrids, energy 9.8e-11
+  relative, forces 1.3e-6 eV/A, stress 3.8e-10 eV/A^3. OMAT-0 small's tiled-vs-whole stress with the default
+  GEMMs reached 1.09e-7 and 1.10e-7 with fresh plans (bound 1e-7); with fresh plans per run the library before
+  S5-T08 gave 7.3e-8 and 5.1e-8, this one 9.2e-9 and 4.8e-8, so the bound is now 2e-7 (D66).
+- The memory plan with the row pool (library `90a30122`): 1,081,600 atoms with no cap set get 49,152 receivers,
+  15 layers, a pool of 134,328 atoms (12.4%), peak 11.83 GiB of a 13.38 GiB budget (88%). The capacity mode
+  `wavefront` on 11,520 atoms (600 receivers): planned state 52 MiB against 85 MiB tiled, peak 585 against
+  621 MiB, results as the plain call's without hybrids.
+- Suites: `pytest tests/cpu` 365 passed, 1 skipped; `pytest tests/gpu -m "not acceptance"` on `695d6873` 286
+  passed, on `90a30122` 287 passed and 1 failed (`test_output_every_20_steps_costs_at_most_three_percent`, 3.8%
+  against 3%; passed three reruns alone on both libraries).

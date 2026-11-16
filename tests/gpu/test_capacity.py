@@ -99,9 +99,51 @@ def test_the_capacity_mode_refuses_what_is_not_built():
     eng = LoupEngine(_bundle())
     try:
         with pytest.raises(PlanRefused):
-            capacity.evaluate(eng, srtio3(2), CapacityConfig(mode="wavefront"))
-        with pytest.raises(PlanRefused):
             capacity.evaluate(eng, srtio3(2), CapacityConfig(state="host"))
+    finally:
+        del eng
+        gc.collect()
+
+
+@pytest.mark.full
+def test_the_wavefront_mode_plans_a_smaller_state_and_gives_the_tiled_result(monkeypatch):
+    """S5-T08: capacity mode 'wavefront' runs the tiled call in the wavefront order; the plan counts the row pool
+    instead of the whole system's layer outputs. Without hybrids the plain tiled call's bounds apply."""
+    monkeypatch.setenv("LOUP_NO_HYBRID", "1")
+    at = srtio3(1).repeat((64, 6, 6))                  # 11,520 atoms in a rod: 13 layers of tiles at 600
+    at.positions += np.random.default_rng(7).normal(scale=0.04, size=at.positions.shape)
+    bundle = _bundle()
+    runs = {}
+    for mode in ("tiled", "wavefront"):
+        eng = LoupEngine(bundle)
+        try:
+            runs[mode] = capacity.evaluate(eng, at, CapacityConfig(mode=mode, receivers=600), skin=SKIN)
+        finally:
+            del eng
+            gc.collect()
+    tiled, wave = runs["tiled"], runs["wavefront"]
+    print(f"wavefront mode: plan state {wave.plan.tiled_global_bytes / 2**20:.0f} MiB against "
+          f"{tiled.plan.tiled_global_bytes / 2**20:.0f} MiB tiled; peak {wave.peak_bytes / 2**20:.0f} MiB against "
+          f"{tiled.peak_bytes / 2**20:.0f} MiB")
+    assert tiled.mode == "tiled" and wave.mode == "wavefront" and wave.receivers == 600
+    # the pool holds 26% of the atoms (test_tiled.py); the kept lists and the forces stay whole (measured 0.61)
+    assert wave.plan.tiled_global_bytes < 0.7 * tiled.plan.tiled_global_bytes
+    assert abs(wave.energy - tiled.energy) <= 1e-9 * abs(tiled.energy)
+    assert np.abs(wave.forces - tiled.forces).max() <= 1e-5
+
+
+def test_the_wavefront_mode_refuses_a_three_layer_model(monkeypatch):
+    from gpu_support import water_box
+
+    from loupmd import BackendError
+
+    monkeypatch.setenv("LOUP_CHAIN_FOLD", "0")
+    at = water_box()
+    eng = LoupEngine(ensure_loup_bundle(find_model("MACE-omol-0-extra-large-1024.model"),
+                                        sorted(set(at.numbers.tolist()))))
+    try:
+        with pytest.raises(BackendError, match="the wavefront mode needs a model of two layers"):
+            capacity.evaluate(eng, at, CapacityConfig(mode="wavefront", receivers=200), skin=SKIN)
     finally:
         del eng
         gc.collect()

@@ -89,10 +89,12 @@ class Simulation:
     - ``check``: ``"skip"`` (default), ``"gate"`` or ``"allow_unavailable"``: the accuracy gate (the 3x rule
       against MACE float64, ``loupmd.validate``) on rattled copies of the structure before the first step;
       ``gate`` is its ``GateConfig``. ``Simulation.gate`` holds the status and the record;
-    - ``capacity``: ``"auto"`` (default), ``"whole"``, ``"tiled"`` or a ``CapacityConfig``. ``"auto"`` plans the
-      execution before the first step and runs a system that does not fit the GPU whole in tiles of at most
-      ``receivers`` atoms (``Simulation.execution`` says which). The tiled mode runs NVE and Langevin, with the
-      integrator on the host (PLAN.md D65); other integrators are refused in it.
+    - ``capacity``: ``"auto"`` (default), ``"whole"``, ``"tiled"``, ``"wavefront"`` or a ``CapacityConfig``.
+      ``"auto"`` plans the execution before the first step and runs a system that does not fit the GPU whole in
+      tiles of at most ``receivers`` atoms (``Simulation.execution`` says which); from 2^20 atoms in a cell long
+      enough for 12 layers of tiles it uses the wavefront schedule, which ``"wavefront"`` forces (two-layer models;
+      S5-T08). The tiled modes run NVE and Langevin, with the integrator on the host (PLAN.md D65); other
+      integrators are refused in them.
 
     Nothing is exported and no engine is made before the first ``run``; argument errors come before that.
     """
@@ -142,12 +144,10 @@ class Simulation:
             raise InputError(f"capacity must be one of {CAPACITY_MODES} or a CapacityConfig, got "
                              f"{type(capacity).__name__}")
         self.capacity = capacity
-        if capacity.mode == "wavefront" or capacity.state == "host":
-            raise PlanRefused([r for r, bad in (
-                ("capacity mode 'wavefront' is not in this version (plan task S5-T08)", capacity.mode == "wavefront"),
-                ("state='host' is not in this version (plan task S5-T07)", capacity.state == "host")) if bad],
-                next_step="Use capacity 'auto', 'whole' or 'tiled'.")
-        self.execution = None             # {"mode": "whole" or "tiled", "receivers", "plan"} once the engine is made
+        if capacity.state == "host":
+            raise PlanRefused("state='host' is not in this version (plan task S5-T07)",
+                              next_step="Use state 'auto' or 'device'.")
+        self.execution = None             # {"mode": "whole", "tiled" or "wavefront", "receivers", "plan"} once made
         self.check, self.gate_config = check, gate or GateConfig()
         self.gate = {"status": "skipped"}  # then "passed", "failed" or "unavailable", with the gate's record
         self.totals = {"steps": 0, "engine_ms": 0.0, "wall_s": 0.0, "rebuilds": 0, "pipelined_steps": 0,
@@ -183,7 +183,7 @@ class Simulation:
         self._schedule = None              # the ScheduleState of the schedule attached last
         self._schedule_origin = 0          # the step at which that schedule's position was 0
         self._stopped = None               # the error that ended the run
-        if capacity.mode == "tiled":
+        if capacity.mode in ("tiled", "wavefront"):
             self._check_tiled_scheme()
 
     def _check_tiled_scheme(self):
@@ -218,7 +218,7 @@ class Simulation:
         engine = self.force_field.new_engine(atoms, self.skin, capacity=self.capacity)
         self._bundle = self.force_field.last_bundle
         self.execution = dict(self.force_field.last_execution or {"mode": "whole", "receivers": 0, "plan": None})
-        if self.execution["mode"] == "tiled":
+        if self.execution["mode"] in ("tiled", "wavefront"):
             self._check_tiled_scheme()
         if self._npt and getattr(getattr(engine, "info", lambda: None)(), "has_long_range", False):
             raise PlanRefused("a barostat with a long-range model (MACE-POLAR-1)",

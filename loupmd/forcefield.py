@@ -136,8 +136,9 @@ class ForceField:
 
         ``capacity`` (a ``CapacityConfig``; ``None`` is the whole-system engine without a plan): with ``"auto"`` the
         engine plans the execution first (``loup_plan_execution``) and a system that does not fit the GPU whole gets
-        a :class:`~loupmd.tiled_engine.TiledEngine`; ``"tiled"`` always does. ``last_execution`` then holds
-        ``{"mode", "receivers", "plan"}``."""
+        a :class:`~loupmd.tiled_engine.TiledEngine`; ``"tiled"`` always does, and ``"wavefront"`` with the wavefront
+        schedule forced (two-layer models, S5-T08). ``last_execution`` then holds ``{"mode", "receivers", "plan"}``
+        (mode ``"whole"``, ``"tiled"`` or ``"wavefront"``)."""
         from . import _core
         from .config import CapacityConfig
 
@@ -146,14 +147,12 @@ class ForceField:
             raise InputError(f"capacity must be a CapacityConfig or None, got {type(capacity).__name__}")
         if capacity is not None:
             reasons = []
-            if capacity.mode == "wavefront":
-                reasons.append("capacity mode 'wavefront' is not in this version (plan task S5-T08)")
             if capacity.state == "host":
                 reasons.append("state='host' (the tiled state in pinned host memory) is not in this version (plan "
                                "task S5-T07)")
-            if capacity.mode == "tiled" and self.long_range:
-                reasons.append(f"capacity mode 'tiled' with {self.name}: the k-space terms of a long-range model "
-                               "need the whole cell")
+            if capacity.mode in ("tiled", "wavefront") and self.long_range:
+                reasons.append(f"capacity mode {capacity.mode!r} with {self.name}: the k-space terms of a long-range "
+                               "model need the whole cell")
             if reasons:
                 raise PlanRefused(reasons, next_step="Use capacity 'auto' or 'whole' with state 'auto' or 'device'.")
         numbers = sorted({int(z) for z in atoms.numbers})
@@ -179,13 +178,13 @@ class ForceField:
             engine.set_execution(capacity.exec_mode, capacity.receivers or 0, capacity.memory_fraction)
             plan = engine.plan_execution(atoms.numbers, atoms.positions, atoms.cell.array, float(skin))
             mode = "tiled" if plan.mode == _core.LOUP_EXEC_TILED else "whole"
-        if mode == "tiled":
+        if mode in ("tiled", "wavefront"):
             from .tiled_engine import TiledEngine
 
             receivers = capacity.receivers or (plan.receivers if plan is not None else 0)
-            tiled = TiledEngine(engine, receivers, capacity.memory_fraction)
+            tiled = TiledEngine(engine, receivers, capacity.memory_fraction, wavefront=mode == "wavefront")
             tiled.set_system(atoms.numbers, atoms.get_masses(), skin=float(skin))
-            self.last_execution = {"mode": "tiled", "receivers": receivers, "plan": plan}
+            self.last_execution = {"mode": mode, "receivers": receivers, "plan": plan}
             return tiled
         self.last_execution["plan"] = plan
         engine.set_system(atoms.numbers, atoms.get_masses(), skin=float(skin))

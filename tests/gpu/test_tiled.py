@@ -104,11 +104,12 @@ def test_the_tiled_call_gives_the_whole_system_result(model, structure, receiver
           f"whole system between the two kernel sets {kernels[0]:.1e}, {kernels[1]:.1e}, {kernels[2]:.1e}")
     # Without hybrids: the plan's bounds (1e-7 eV/atom, 1e-5 eV/A; stress a tenth of the gate's floor). With the
     # default GEMMs: forces as the plan; energy at a fifth of the gate's energy floor (0.01 meV/atom) and stress at
-    # its floor (1e-7 eV/A^3): which tile shapes get the hybrid depends on the plan picks, and fresh picks gave up to
-    # 1.03e-6 eV/atom before the tile GEMM buckets and 1.42e-6 with them (PLAN.md D16, D60, D66).
+    # twice its floor (1e-7 eV/A^3): which tile shapes get the hybrid depends on the plan picks, and fresh picks gave
+    # up to 1.03e-6 eV/atom before the tile GEMM buckets and 1.42e-6 with them, and stress from 9e-9 to 1.10e-7 on
+    # OMAT-0 small with either library of S5-T08 (PLAN.md D16, D60, D66).
     for name, d, bound in zip(("energy", "forces", "stress"), plain, (1e-7, 1e-5, 1e-8)):
         assert d <= bound, f"{name}, no hybrids: the tiled call differs by {d:.3e}"
-    for name, d, bound in zip(("energy", "forces", "stress"), default, (2e-6, 1e-5, 1e-7)):
+    for name, d, bound in zip(("energy", "forces", "stress"), default, (2e-6, 1e-5, 2e-7)):
         assert d <= bound, f"{name}, default GEMMs: the tiled call differs by {d:.3e}"
 
 
@@ -144,6 +145,34 @@ def test_a_tiled_call_on_a_kept_workspace_gives_a_fresh_engines_result():
     # Same engine, tiles and plans: the same numbers up to the order of the float32 atomic sums (measured up to
     # 3.5e-9 eV/atom and 1.03e-6 eV/A); stale state from an earlier call would be far larger.
     assert abs(e4 - e1) / len(big) <= 1e-8 and np.abs(f4 - f1).max() <= 1e-5
+
+
+@pytest.mark.full
+def test_the_wavefront_gives_the_plain_tiled_result_from_a_smaller_row_pool(monkeypatch, capfd):
+    """S5-T08: LOUP_TILE_WAVEFRONT=1 runs the three sweeps of a two-layer model in the wavefront's order, with the
+    layer outputs and their gradients in a pool of rows taken and given back during the call. Its plan splits the
+    first and last layer of tiles at the faces, so its tiles differ from the plain call's; without hybrids the
+    two agree to float32 rounding of other GEMM row counts (energy 1e-9 relative, forces 1e-5 eV/A)."""
+    at = srtio3(1).repeat((64, 6, 6))                  # 11,520 atoms in a rod 250 A long: tiles in layers along it
+    at.positions += np.random.default_rng(7).normal(scale=0.04, size=at.positions.shape)
+    n = len(at)
+    bundle = ensure_loup_bundle(find_model("mace-omat-0-medium.model"), [8, 22, 38])
+    monkeypatch.setenv("LOUP_NO_HYBRID", "1")
+    monkeypatch.setenv("LOUP_TILE_WAVEFRONT", "0")
+    e_p, f_p, s_p, tiles_p = _tiled(bundle, at, 600)
+    monkeypatch.setenv("LOUP_TILE_WAVEFRONT", "1")
+    monkeypatch.setenv("LOUP_DEBUG_TILE_TIMES", "1")
+    capfd.readouterr()
+    e_w, f_w, s_w, tiles_w = _tiled(bundle, at, 600)
+    lines = [line for line in capfd.readouterr().err.splitlines() if line.startswith("tile wavefront:")]
+    assert len(lines) == 1, "the wavefront did not run"
+    pool = int(lines[0].split("row pool ")[1].split()[0])
+    print(f"wavefront: {lines[0]}; plain call {tiles_p} tiles; dE {abs(e_w - e_p) / abs(e_p):.2e} relative, "
+          f"dF {np.abs(f_w - f_p).max():.2e} eV/A, dS {np.abs(s_w - s_p).max():.2e} eV/A^3")
+    assert tiles_w >= tiles_p >= 4
+    assert pool < 0.5 * n
+    assert abs(e_w - e_p) <= 1e-9 * abs(e_p)
+    assert np.abs(f_w - f_p).max() <= 1e-5 and np.abs(s_w - s_p).max() <= 1e-8
 
 
 def test_the_tiled_call_is_refused_for_long_range_models():

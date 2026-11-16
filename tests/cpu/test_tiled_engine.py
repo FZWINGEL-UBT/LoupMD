@@ -30,7 +30,7 @@ class TileSpringEngine(SpringEngine):
 
     def plan_execution(self, numbers, positions, cell, skin=0.5):
         n = len(numbers)
-        tiled = n > self.tile_from or self.execution[0] == _core.LOUP_EXEC_TILED
+        tiled = n > self.tile_from or self.execution[0] in (_core.LOUP_EXEC_TILED, _core.LOUP_EXEC_WAVEFRONT)
         self.log.append("plan")
         return _core.MemoryPlan(1000 * n, 100 * n, 10 ** 6, 2 ** 34, 64 if tiled else 0,
                                 _core.LOUP_EXEC_TILED if tiled else _core.LOUP_EXEC_WHOLE)
@@ -47,8 +47,8 @@ class TileSpringEngine(SpringEngine):
         return 0.5 * K * float((d ** 2).sum()) - 3.0 * len(numbers), -K * d, np.zeros((3, 3)), self.tiles
 
     def last_execution(self):
-        return _core.Execution(_core.LOUP_EXEC_TILED, self.receivers_seen or 64, self.tiles, 2 ** 34, 10 ** 6,
-                               True, 1)
+        mode = _core.LOUP_EXEC_WAVEFRONT if self.execution[0] == _core.LOUP_EXEC_WAVEFRONT else _core.LOUP_EXEC_TILED
+        return _core.Execution(mode, self.receivers_seen or 64, self.tiles, 2 ** 34, 10 ** 6, True, 1)
 
 
 @pytest.fixture
@@ -113,8 +113,21 @@ def test_the_tiled_mode_refuses_the_integrators_it_does_not_run(ff, tmp_path):
     sim = loupmd.Simulation(at, ff, integrator=csvr)                         # auto: the plan says tiled
     with pytest.raises(PlanRefused, match="PLAN.md D65"):
         sim.run(steps=5)
-    with pytest.raises(PlanRefused, match="'wavefront' is not in this version"):
-        loupmd.Simulation(_big(), ff, integrator=integrators.NVE(timestep_fs=1.0), capacity="wavefront")
+    with pytest.raises(PlanRefused, match="the csvr integrator in tiled mode"):
+        loupmd.Simulation(at, ff, integrator=csvr, capacity="wavefront")
+
+
+def test_the_wavefront_mode_runs_the_tiled_engine_and_the_report_says_so(ff, tmp_path):
+    """S5-T08: capacity='wavefront' asks the engine for LOUP_EXEC_WAVEFRONT; the record and the report name it."""
+    res = loupmd.md(_big(), model=ff, temperature_K=300, steps=10, output=str(tmp_path / "w"), seed=1,
+                    initial_velocities="maxwell_boltzmann", capacity="wavefront")
+    sim = res.simulation
+    assert isinstance(sim._engine, TiledEngine) and sim._engine._eng.execution[0] == _core.LOUP_EXEC_WAVEFRONT
+    assert sim.execution["mode"] == "wavefront" and sim._engine.wavefront
+    plan = res.metadata["plan"]
+    assert plan["execution"] == "tiled" and plan["wavefront"] is True
+    assert "wavefront order" in res.summary
+    assert provenance.validate(res.metadata) == []
 
 
 def test_langevin_in_tiles_holds_its_target_and_its_fixed_atoms(ff):

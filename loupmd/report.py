@@ -88,6 +88,9 @@ def _plan_lines(metadata) -> list:
         tiles = f"{plan['tiles']} " if plan.get("tiles") else ""
         lines = [f"{tiles}tiles of at most {plan['receivers']:,} atoms on {where} (the cell does not fit the card "
                  "whole); the integrator runs on the host"]
+        if plan.get("wavefront"):
+            lines.append("the tiles run in the wavefront order: the layer states of a moving band of tiles are "
+                         "held, not the whole cell's")
     else:
         lines = [f"the whole system on {where}"]
     if plan["kernels"]:

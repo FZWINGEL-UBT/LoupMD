@@ -39,6 +39,27 @@ Plan
 `capacity="tiled"` forces tiles, and `lm.config.CapacityConfig(mode="tiled", receivers=8192)` also fixes their
 size. `memory_fraction` (default 0.9) is the share of the free memory the plan may use.
 
+## The wavefront
+
+The plain tiled call keeps every layer's output for the whole cell on the GPU. At a million atoms that alone needs
+about 30 GB for OMAT-0 medium. For two-layer models the tiles can run in the wavefront order instead. The tiles lie
+in layers along the first cell axis, and each tile's first pass runs just before the first tile that needs its
+output. Its last pass runs just after the last tile that adds to it. Only a moving band of tiles is held, in a pool
+of rows.
+
+`capacity="auto"` uses the wavefront from 2^20 atoms when the plan has 12 or more layers of tiles along the first
+axis. `capacity="wavefront"` forces it. A model with three layers (OMOL-0) is refused in that mode and uses the
+plain tiled call. The forces are those of the plain tiled call to float32 rounding. The report then adds "the tiles
+run in the wavefront order".
+
+Measured on an RTX 5060 Ti with OMAT-0 medium (STATUS_AND_PROFILE.md §6.22):
+
+| Atoms | Mode | Tiles | GPU peak | Seconds per force call |
+|---|---|---|---|---|
+| 368,640 | tiled | 32 | 4.91 GiB | 0.80 |
+| 368,640 | wavefront | 40 | 4.05 GiB | 0.80 |
+| 1,081,600 | wavefront (`auto`; 11% of the atoms' rows held) | 34 | 10.84 GiB | 2.35 |
+
 ## What the tiled mode runs
 
 - **Integrators:** `NVE` and `Langevin` (ASE's formulas). Every other thermostat and every barostat is refused in

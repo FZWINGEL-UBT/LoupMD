@@ -37,8 +37,9 @@ class PlanEngine:
         return -2.0 * n, np.ones((n, 3)), np.eye(3), 3
 
     def last_execution(self):
-        return _core.Execution(mode=_core.LOUP_EXEC_TILED, receivers=self.receivers, tiles=3, budget_bytes=900,
-                               peak_bytes=700)
+        asked = next((c[1] for c in self.calls if c[0] == "set_execution"), _core.LOUP_EXEC_AUTO)
+        mode = _core.LOUP_EXEC_WAVEFRONT if asked == _core.LOUP_EXEC_WAVEFRONT else _core.LOUP_EXEC_TILED
+        return _core.Execution(mode=mode, receivers=self.receivers, tiles=3, budget_bytes=900, peak_bytes=700)
 
 
 ATOMS = bulk("Cu", cubic=True).repeat(2)
@@ -70,8 +71,15 @@ def test_a_set_mode_and_cap_reach_the_engine():
     assert eng.calls[0] == ("set_execution", _core.LOUP_EXEC_TILED, 2000, 0.9)
 
 
-@pytest.mark.parametrize("config,words", [(CapacityConfig(mode="wavefront"), "wavefront"),
-                                          (CapacityConfig(state="host"), "S5-T07")])
+def test_the_wavefront_mode_reaches_the_engine_and_says_it_ran():
+    """S5-T08: the engine runs the tiled call with the wavefront schedule and reports LOUP_EXEC_WAVEFRONT."""
+    eng = PlanEngine(_core.LOUP_EXEC_TILED, receivers=3000)
+    res = capacity.evaluate(eng, ATOMS, CapacityConfig(mode="wavefront"))
+    assert eng.calls[0] == ("set_execution", _core.LOUP_EXEC_WAVEFRONT, 0, 0.9)
+    assert res.mode == "wavefront" and res.receivers == 3000 and eng.calls[-1] == ("evaluate_tiled", 3000, 0.5)
+
+
+@pytest.mark.parametrize("config,words", [(CapacityConfig(state="host"), "S5-T07")])
 def test_what_is_not_built_is_refused_before_the_engine_is_asked(config, words):
     eng = PlanEngine(_core.LOUP_EXEC_WHOLE)
     with pytest.raises(PlanRefused, match=words):

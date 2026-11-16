@@ -51,8 +51,6 @@ MISSING = "/nowhere/missing.model"
     ({"temperature_K": 300, "steps": 10, "seed": -3}, InputError, "seed must be a nonnegative int"),
     ({"temperature_K": 300, "steps": 10, "initial_velocities": "hot"}, InputError, "initial_velocities='hot'"),
     ({"temperature_K": 300, "steps": 10, "check": "maybe"}, InputError, "check='maybe' is not one of"),
-    ({"temperature_K": 300, "steps": 10, "capacity": "wavefront"}, PlanRefused,
-     "capacity='wavefront' is not in this version"),
     ({"temperature_K": 300, "steps": 10, "capacity": "tiles"}, InputError, "capacity='tiles' is not one of"),
     ({"temperature_K": 300, "steps": 10, "mode": "graph", "calibrate": True}, PlanRefused,
      "mode= selects FastMACE's internals and has no meaning in LoupMD; calibrate= selects"),

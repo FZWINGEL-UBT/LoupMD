@@ -48,7 +48,8 @@ _COMMENTS = {
     "seed": "the noise seed; left out: one is drawn and recorded",
     "initial_velocities": '"keep", "maxwell_boltzmann" or a temperature in K, for a structure at rest',
     "check": '"skip", "gate" or "allow_unavailable": the accuracy gate before the first step',
-    "capacity": '"auto" (tiles when the cell does not fit the GPU whole; NVE and Langevin), "whole" or "tiled"',
+    "capacity": '"auto" (tiles when the cell does not fit the GPU whole; NVE and Langevin), "whole", "tiled" or '
+                '"wavefront"',
     "device": "the GPU index",
     "skin": 'the neighbour-list skin in A, or "auto": chosen from how far the atoms move per step',
 }

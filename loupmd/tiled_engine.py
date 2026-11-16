@@ -26,10 +26,12 @@ _SUPPORTED = {_core.LOUP_NVE: "NVE", _core.LOUP_LANGEVIN: "Langevin"}
 class TiledEngine:
     """Engine interface over ``engine.evaluate_tiled``: ``engine`` is a ``LoupEngine`` with no system set."""
 
-    def __init__(self, engine, receivers: int = 0, memory_fraction: float = 0.9):
+    def __init__(self, engine, receivers: int = 0, memory_fraction: float = 0.9, wavefront: bool = False):
         self._eng = engine
         self.receivers = int(receivers)          # 0 until the first call takes the plan's cap
         self.memory_fraction = float(memory_fraction)
+        self.mode = _core.LOUP_EXEC_WAVEFRONT if wavefront else _core.LOUP_EXEC_TILED
+        self.wavefront = False                   # whether the last call ran the wavefront schedule (S5-T08)
         self.tiles = 0
         self._n = 0
         if hasattr(engine, "info"):            # what callers ask with hasattr (the record's kernel path)
@@ -48,7 +50,7 @@ class TiledEngine:
         self._noise_step = 0                     # the Langevin stream's position: kept by restarts, as the device's
         self._rows = []
         self._step_disp = 0.0
-        self._eng.set_execution(_core.LOUP_EXEC_TILED, self.receivers, self.memory_fraction)
+        self._eng.set_execution(self.mode, self.receivers, self.memory_fraction)
 
     def set_fixed_atoms(self, fixed=None):
         self._fixed = None if fixed is None else np.asarray(fixed, dtype=bool).copy()
@@ -75,8 +77,10 @@ class TiledEngine:
     def _force_call(self):
         e, f, s, tiles = self._eng.evaluate_tiled(self._numbers, self._pos, self._cell, self.receivers,
                                                   skin=self.skin)
+        done = self._eng.last_execution()
         if not self.receivers:
-            self.receivers = int(self._eng.last_execution().receivers)
+            self.receivers = int(done.receivers)
+        self.wavefront = done.mode == _core.LOUP_EXEC_WAVEFRONT
         self.tiles = int(tiles)
         if not np.isfinite(e):
             raise BackendError(f"loup_run: non-finite energy ({e}) in the tiled call", call="loup_run")

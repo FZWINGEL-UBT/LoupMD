@@ -299,7 +299,7 @@ int loup_get_state(LoupHandle* h, double* out_positions, double* out_velocities,
 int loup_export_state(LoupHandle* h, void* buffer, size_t capacity, size_t* written);
 int loup_import_state(LoupHandle* h, const void* buffer, size_t size);
 
-// How a force call is executed. LOUP_EXEC_WAVEFRONT is not built.
+// How a force call is executed. LOUP_EXEC_WAVEFRONT is the tiled call with the wavefront schedule forced (S5-T08).
 enum { LOUP_EXEC_AUTO = 0, LOUP_EXEC_WHOLE = 1, LOUP_EXEC_TILED = 2, LOUP_EXEC_WAVEFRONT = 3 };
 
 // The device memory a system of `n_atoms` with `edges_per_atom` neighbours per atom inside cutoff + skin would
@@ -319,7 +319,7 @@ typedef struct {
 int loup_plan_memory(LoupHandle* h, int n_atoms, double edges_per_atom, LoupMemoryPlan* out);
 
 // The execution of the capacity mode (plan task S5-T05). loup_set_execution sets the mode (LOUP_EXEC_AUTO,
-// LOUP_EXEC_WHOLE or LOUP_EXEC_TILED), a receiver cap (0: the plan's) and the fraction of free device memory a
+// LOUP_EXEC_WHOLE, LOUP_EXEC_TILED or LOUP_EXEC_WAVEFRONT), a receiver cap (0: the plan's) and the fraction of free device memory a
 // plan may use (above 0, at most 1; default 0.9); loup_set_system keeps them. loup_plan_execution plans the
 // periodic system `positions` in `cell` under them: with AUTO or TILED on a bundle that can tile (generic path,
 // no long range, two or more layers) one probe tile of at most 4,096 receivers is set up on the handle and its
@@ -328,7 +328,13 @@ int loup_plan_memory(LoupHandle* h, int n_atoms, double edges_per_atom, LoupMemo
 // tile_workspace_bytes) fit, or the cap set. mode: WHOLE when asked, when the bundle cannot tile, or (AUTO) when
 // the whole-system call fits; else TILED. A system that does not fit at 4,096 receivers is refused. The handle
 // afterwards holds the probe tile: call loup_set_system before other calls.
-// loup_get_execution: how the last tiled call (loup_debug_evaluate_tiled) ran. budget_bytes is the device memory
+// The wavefront (S5-T08; two-layer models): the tiled call runs its three sweeps in loup_wavefront_schedule's order
+// and keeps the layer outputs and their gradients in a row pool instead of whole-system arrays. LOUP_EXEC_WAVEFRONT
+// forces it (refused for models of other layer counts); under AUTO or TILED it is on from 2^20 atoms when the plan
+// has 12 or more layers of tiles along the first cell axis. The plan's tiled_global_bytes then counts the pool, and
+// its mode stays TILED. The environment variable LOUP_TILE_WAVEFRONT=1|0 overrides both (tests).
+// loup_get_execution: how the last tiled call (loup_debug_evaluate_tiled) ran; mode is LOUP_EXEC_WAVEFRONT when it
+// ran the wavefront, else LOUP_EXEC_TILED. budget_bytes is the device memory
 // free when it began plus the handle's own buffers; peak_bytes that budget less the least memory free during it.
 // A tiled call keeps the plan, the tile lists and the whole-system state of the previous one while the atomic
 // numbers, the cell, the skin and the cap are the same (receivers 0 takes the kept cap) and no atom has moved more

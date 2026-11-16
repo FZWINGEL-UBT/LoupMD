@@ -156,7 +156,8 @@ def md(structure, *, model, head=None, charge=None, spin_multiplicity=None, sha2
     - ``skin``: the neighbour-list skin in A, or ``"auto"`` (default): chosen from how far the atoms move per
       step (``loupmd.skin``). It decides speed only;
     - ``capacity``: ``"auto"`` (default): the whole system when it fits the GPU, else tiles of up to 65,536 atoms
-      (NVE and Langevin only, PLAN.md D65); ``"whole"`` or ``"tiled"`` force one;
+      (NVE and Langevin only, PLAN.md D65), from 2^20 atoms with the wavefront schedule where the cell is long
+      enough; ``"whole"``, ``"tiled"`` or ``"wavefront"`` force one;
     - ``device``: the GPU index.
     """
     # ---- everything below up to "load" needs no model file ----
@@ -174,9 +175,6 @@ def md(structure, *, model, head=None, charge=None, spin_multiplicity=None, sha2
                           next_step="Run without dispersion=, or use FastMACE's D3 (PLAN.md Stage 6D).")
     if capacity not in CAPACITIES:
         raise InputError(f"capacity={capacity!r} is not one of {CAPACITIES}")
-    if capacity == "wavefront":
-        raise PlanRefused("capacity='wavefront' is not in this version (plan task S5-T08)",
-                          next_step="Use capacity='auto', which runs a cell that does not fit the GPU whole in tiles.")
     repeat = _repeat(repeat)
     if not isinstance(ensemble, str) or ensemble.upper() not in ENSEMBLES:
         raise InputError(f"ensemble={ensemble!r} is not one of {ENSEMBLES}")
