@@ -475,6 +475,8 @@ S80-S84 A100 (`a100-own-ext-nb-groups`, `pol-dot-fold`, 16 November, NHR Alex A1
 - Lane-group neighbour kernels on cc 8.0 (S80; they build the same lists): library ABBA on shared GEMM plans OFF23-S water216 `0.830`, OFF23-M water216 `0.914`, OFF24-M water `0.982`; oxide gates unchanged (`loup-s83g`).
 - POLAR on cc 8.0 (float32 SIMT GEMMs there): the S52 dot fold, and the own-SGEMM extensions whenever no GEMM cubin is loaded. In-process A/B (`loup-s82a`), fold / extensions / both: POLAR-1-S NaCl216 `0.922` / `0.870` / `0.801`, POLAR-1-M NaCl216 `0.892` / `0.959` / `0.840`, POLAR-1-L NaCl216 `0.887` / `0.926` / `0.842`, POLAR-1-M NbCl5 `0.885` / `0.996` / `0.880`. Crystal gates with both (`loup-s82g`): POLAR-1-S worst 0.47 / 0.72, POLAR-1-M 1.28 / 1.49, POLAR-1-L 1.20 / 0.61, none failing.
 - Not adopted on cc 8.0: the own-SGEMM extensions with the GEMM cubin loaded (OFF23-S water216 `1.034`, OMOL-0 `1.008`; they also move the oxide stress row, one forced variant at 3.02).
+S85 / S86 (`pol-bias-ln-fuse`, 16 November, 5060 Ti):
+- POLAR's small cells run 300+ kernels per step (`POLAR-1-M` `NaCl216`: about 5% of the step idles between them). The MLPs' bias add now runs inside the LayerNorm-SiLU forward and the SCF `q` copy + add as one kernel, with the same float sums: library ABBA on shared GEMM plans, S84 -> S86, `POLAR-1-S` / `-M` / `-L` `NaCl216` `0.990` / `0.995` / `0.994`; crystal gates pass. Three further backward node trims (S87) tied and an in-kernel split-K reduction (S88) was slower; both reverted.
 
 ### 5.4 Fixes Found by the Family Work
 - **POLAR LayerNorm-MLP reverse wrote its GEMM output over its own input** (`mlp_bwd`: after the first hidden layer
