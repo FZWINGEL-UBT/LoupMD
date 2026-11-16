@@ -119,6 +119,7 @@ private:
     void* d_zero_slab_ = nullptr;
     size_t zero_slab_bytes_ = 0;
     float* d_h0_ = nullptr;         // [N, C0] layer-0 node features
+    bool h0_read_ = true;           // S97: some consumer reads d_h0_ (else record skips its gather)
     float* d_scratch_ = nullptr;    // gradient scratch
     size_t scratch_floats_ = 0;
 };

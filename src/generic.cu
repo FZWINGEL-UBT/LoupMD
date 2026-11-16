@@ -200,16 +200,20 @@ __global__ void species_energy_kernel(int N, const int* __restrict__ sp, const f
     if ((threadIdx.x & 31) == 0) atomicAdd(energy, e);
 }
 
-// Linear readout: E += sum_a h0[a] . w (double accumulation); its gradient dh0 += w.
+// Linear readout: E += sum_a h0[a] . w (double accumulation); its gradient dh0 = w (assign: the pass's first write of
+// dh0) or dh0 += w.
 __global__ void ro_linear_kernel(int N, int C, const float* __restrict__ h0, const float* __restrict__ w,
-                                 float* __restrict__ dh0, double* __restrict__ energy) {
+                                 float* __restrict__ dh0, double* __restrict__ energy, bool assign) {
     const int a = blockIdx.x * (blockDim.x >> 5) + (threadIdx.x >> 5), lane = threadIdx.x & 31;
     if (a >= N) return;
     double e = 0.0;
     for (int c = lane; c < C; c += 32) {
         const float wc = w[c];
         e += (double)h0[(int64_t)a * C + c] * (double)wc;
-        dh0[(int64_t)a * C + c] += wc;
+        if (assign)
+            dh0[(int64_t)a * C + c] = wc;
+        else
+            dh0[(int64_t)a * C + c] += wc;
     }
     #pragma unroll
     for (int off = 16; off > 0; off >>= 1) e += __shfl_xor_sync(0xffffffffu, e, off);
@@ -1283,6 +1287,19 @@ void GenericModel::load(const Bundle& b) {
     conv_tune_env_ = -1;
     if (const char* e = std::getenv("LOUP_CONV_TUNE"); e && (e[0] == '0' || e[0] == '1')) conv_tune_env_ = e[0] - '0';
     setup_chain_fold(b);
+    // S97: whether a pass reads layer 0's input rows h_in[0] (the species embedding gathered per atom): the x products
+    // of a hidden-table layer 0 without the S59 residual table, the skip / readout terms of an unfolded layer 0, and
+    // the S57 fold's skip terms without the S59 tables (Wh). With the fold and the tables every consumer reads a
+    // species table instead, and the gather is skipped.
+    {
+        const GenericLayer* L0 = layers_[0];
+        h0_read_ = n_layers_ == 1 || ((!L0->first_hidden || L0->kind == 4) && !L0->res0_table);
+        if (chain_fold_) {
+            for (const auto& ft : L0->fold[0]) h0_read_ = h0_read_ || ft.Wh != nullptr;
+        } else {
+            h0_read_ = h0_read_ || L0->sc_has[0];
+        }
+    }
 }
 
 // S59 species tables. Layer 0's input h_in[0] is the species embedding row, so every product of it alone is a
@@ -1500,18 +1517,13 @@ void GenericModel::alloc_system(int N) {
     const size_t n = (size_t)N;
     auto align256 = [](size_t b) { return (b + 255) & ~size_t(255); };
     // Pack every zero-initialized per-step gradient accumulator into one contiguous slab (1 cudaMemsetAsync/step).
-    // S73: a folded linear readout seeds dy[0] (+=) in the forward, so that dy[0] is one of them.
-    auto energy_fold = [](const GenericLayer* L) {
-        for (const auto& ft : L->fold[0])
-            if (ft.dest_layer == -2) return true;
-        return false;
-    };
+    // S97: a folded linear readout (S73) assigns dy[0] in the forward, the pass's first write of it, so dy[0] is not
+    // one of them.
     size_t zbytes = 0;
     for (int t = 0; t < n_layers_; ++t) {
         GenericLayer* L = layers_[t];
         if (!L->ro_folded && !(chain_fold_ && t < n_layers_ - 1))
             for (int l = 0; l <= L->lmax_out; ++l) zbytes += align256(n * dimL(l) * L->C_out * sizeof(float));
-        if (energy_fold(L)) zbytes += align256(n * L->C_out * sizeof(float));
         if (t > 0)
             for (int l = 0; l <= L->lmax_x; ++l) zbytes += align256(n * dimL(l) * L->C_x * sizeof(float));
         if (L->kind >= 2) zbytes += align256(n * sizeof(float));
@@ -1561,7 +1573,7 @@ void GenericModel::alloc_system(int N) {
         L->dD = (L->kind >= 2) ? zalloc(n) : nullptr;
         for (int l = 0; l <= L->lmax_out; ++l) {
             L->y[l] = alloc(n * dimL(l) * L->C_out);
-            L->dy[l] = (l == 0 && energy_fold(L)) ? zalloc(n * L->C_out) : alloc(n * dimL(l) * L->C_out);
+            L->dy[l] = alloc(n * dimL(l) * L->C_out);
             const bool no_hout = L->ro_folded || (chain_fold_ && t < n_layers_ - 1);  // S57: never formed
             L->hout[l] = no_hout ? nullptr : alloc(n * dimL(l) * L->C_out);
             L->dhout[l] = no_hout ? nullptr : zalloc(n * dimL(l) * L->C_out);
@@ -1655,7 +1667,9 @@ void GenericModel::record(const GenericPassInputs& in) {
     if (has_edges) zero_edge_kernel<<<(3 * in.E_cap + 255) / 256, 256, 0, st>>>(in.E_dev, d_edge_dvec_);
     if (zero_slab_bytes_) CUDA_CHECK_THROW(cudaMemsetAsync(d_zero_slab_, 0, zero_slab_bytes_, st));
 
-    gather_rows_kernel<<<(unsigned)(((int64_t)N * C0_ + 255) / 256), 256, 0, st>>>(N, C0_, in.species, d_embedding_, d_h0_);
+    if (h0_read_)
+        gather_rows_kernel<<<(unsigned)(((int64_t)N * C0_ + 255) / 256), 256, 0, st>>>(N, C0_, in.species, d_embedding_,
+                                                                                      d_h0_);
 
     // ---------------- forward
     std::vector<const float*> written;  // S57 fold destinations already assigned in this pass
@@ -1777,7 +1791,7 @@ void GenericModel::record(const GenericPassInputs& in) {
             // constant of the layer-0 skip.
             for (const auto& ft : L->fold[0]) {
                 if (ft.dest_layer == -2) {
-                    ro_linear_kernel<<<(N + 7) / 8, 256, 0, st>>>(N, Co, L->y[0], ft.Wy, L->dy[0], in.energy);
+                    ro_linear_kernel<<<(N + 7) / 8, 256, 0, st>>>(N, Co, L->y[0], ft.Wy, L->dy[0], in.energy, true);
                     if (ft.Th) species_energy_kernel<<<(N + 255) / 256, 256, 0, st>>>(N, in.species, ft.Th, in.energy);
                     continue;
                 }
@@ -1833,7 +1847,8 @@ void GenericModel::record(const GenericPassInputs& in) {
         // layer's linear readout ran with its fold targets
         if (L->readout == 0) {
             if (!(chain_fold_ && t < n_layers_ - 1))
-                ro_linear_kernel<<<(N + 7) / 8, 256, 0, st>>>(N, Co, L->hout[0], L->ro_w, L->dhout[0], in.energy);
+                ro_linear_kernel<<<(N + 7) / 8, 256, 0, st>>>(N, Co, L->hout[0], L->ro_w, L->dhout[0], in.energy,
+                                                              false);
         } else if (L->readout > 0) {
             const int H = L->ro_H;
             const unsigned gH = (unsigned)(((int64_t)N * H + 255) / 256);
