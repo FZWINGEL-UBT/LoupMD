@@ -515,7 +515,7 @@ Each entry has the same fields. Unless stated, the system is OMAT-0 medium on th
 - Stage: S3 (item 12); S96 (16 November 2026).
 - Status: DEFAULT.
 - Measured: -170 us on both GPUs. S96 (5060 Ti): the threshold dated from S3, before the receiver-owned kernel's later tuning (shift-free decode, per-system block size, decode bias fold). Small SrTiO3 cells, `LOUP_WPRIME_RCV=1` against the default in separate processes, 3 ABBA rounds: 40 / 135 / 320 atoms `0.984` / `0.953` / `0.967` (both orders below 1). Library ABBA on shared GEMM plans, S86 -> S96: 135 atoms `0.974` (`0.975` / `0.973`), 320 atoms `0.963` (`0.967` / `0.959`), NbCl5 and the 5,000-atom SrTiO3 (already receiver-owned) `1.000` / `1.000`. Gates (oxide set, OMAT-0 medium and MPA-0 medium specialised): the small cells now run the receiver-owned kernel by default and the edge-tiled one forced (`test_gate.py` `SMALL_VARIANTS` gate both kernels on any GPU), all PASS; 77 tests pass.
-- Why: the receiver's q is staged once per block. At 320 atoms the edge-tiled `w'` took 208 us against the generic path's receiver-owned `gconv_bwd_L1` at 186 us (`nsys`), which made the generic path 5.5% faster than the specialised one there (`ab_libs.py`, both orders).
+- Why: the receiver's q is staged once per block. At 320 atoms the edge-tiled `w'` took 208 us against the generic path's receiver-owned `gconv_bwd_L1` at 186 us (`nsys`), which made the generic path 5.5% faster than the specialised one there (`ab_libs.py`, both orders); after S96 the paths are within 2% at every size (generic / specialised, 3 ABBA rounds: 135 atoms `1.017`, 320 atoms `0.983`, 1,080 atoms `1.006`, 5,000 atoms `1.001`).
 - Sources: [§3.1 #12][s31], this file.
 
 <a id="wp-channel-major-q"></a>
