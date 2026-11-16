@@ -141,11 +141,14 @@ def test_the_command(tmp_path, monkeypatch, capsys):
         return [("bbbbbbbbbbbbbbbb", tmp_path / "x.so", True), ("aaaaaaaaaaaaaaaa", None, False)]
 
     monkeypatch.setattr(kernels, "build_plugins", build)
-    assert main(["build-kernels", str(model), "--arch", "sm_120", "--force"]) == 0
+    assert main(["build-kernels", str(model), "--arch", "sm_120", "--force"]) == 1    # untrusted: never unpickled
+    assert seen == {}
+    capsys.readouterr()
+    assert main(["build-kernels", str(model), "--trusted", "--arch", "sm_120", "--force"]) == 0
     assert seen == {"path": model, "arch": "sm_120", "force": True}
     assert "built 1 kernel plugin in" in capsys.readouterr().out
     monkeypatch.setattr(kernels, "build_plugins", lambda path, arch=None, force=False: [("a" * 16, None, False)])
-    assert main(["build-kernels", str(model)]) == 0
+    assert main(["build-kernels", str(model), "--trusted"]) == 0
     assert "nothing to build: every kernel of new.model is there" in capsys.readouterr().out
     assert main(["build-kernels", str(tmp_path / "absent.model")]) == 1
     assert json.loads(json.dumps({"ok": True}))["ok"]

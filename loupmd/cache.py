@@ -38,6 +38,27 @@ def cache_root(environ=None) -> Path:
     return root
 
 
+_plan_dir_set = None    # the value this module last put into the process's LOUP_CACHE_DIR
+
+
+def engine_plan_environment(environ=None):
+    """Point the engine's GEMM plan files (``LOUP_CACHE_DIR``, which ``src/engine.cu`` reads) at the cache root when
+    ``LOUPMD_CACHE`` names one, so plans live where ``loupmd cache`` looks. A ``LOUP_CACHE_DIR`` the caller set is
+    kept; one this function set before follows a changed ``LOUPMD_CACHE``. Returns the directory the engine uses, or
+    None for its default (``$HOME/.cache/loupmd``)."""
+    global _plan_dir_set
+    env = os.environ if environ is None else environ
+    current = env.get(OLD_CACHE_VARIABLE)
+    own = current is not None and current == _plan_dir_set
+    if env.get(CACHE_VARIABLE) and (not current or own):
+        _plan_dir_set = str(cache_root(env))
+        env[OLD_CACHE_VARIABLE] = _plan_dir_set
+    elif own and not env.get(CACHE_VARIABLE):
+        del env[OLD_CACHE_VARIABLE]
+        _plan_dir_set = None
+    return env.get(OLD_CACHE_VARIABLE) or None
+
+
 def cache_dir(kind: str, create: bool = True, environ=None) -> Path:
     """``<cache root>/<kind>`` for one of ``KINDS``."""
     if kind not in KINDS:

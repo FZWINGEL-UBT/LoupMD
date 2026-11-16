@@ -71,6 +71,9 @@ def _value(value) -> str:
     return json.dumps(str(value))                 # a TOML basic string has JSON's escapes
 
 
+OFF_WITH_ZERO = ("trajectory_every", "restart_every")   # [output] keys a run file turns off with 0
+
+
 def to_toml(arguments) -> str:
     """The run file of ``arguments``: every key, those at their default as a comment."""
     check(arguments)
@@ -87,7 +90,7 @@ def to_toml(arguments) -> str:
     defaults = {"directory": None, "trajectory_every": 20, "thermo_every": 20, "restart_every": 10_000}
     for key, default in defaults.items():
         if key in out and out[key] is None:
-            lines.append(f"# {key}: none")
+            lines.append(f"{key} = 0{'':<{max(1, 23 - len(key))}s}# off (TOML has no none)")
         elif key in out and out[key] != default:
             lines.append(f"{key} = {_value(out[key])}")
         elif default is not None:
@@ -163,6 +166,9 @@ def md_options(arguments) -> tuple:
             table = _npt_profile(found, arguments, options, table)
     elif arguments.get("schedule"):
         options["schedule"] = protocols.Schedule.from_data(arguments["schedule"])
+    for key in OFF_WITH_ZERO:              # TOML has no null: 0 turns these files off
+        if out.get(key) == 0:
+            out[key] = None
     if out:
         out.setdefault("directory", Path(str(arguments["structure"])).stem + quick.OUTPUT_SUFFIX)
         options["output"] = from_mapping(Output, out, section="output")

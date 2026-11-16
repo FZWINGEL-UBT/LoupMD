@@ -161,6 +161,8 @@ def test_simulation_relax_moves_the_starting_structure_once(tmp_path):
     atoms = _rattled()
     sim = loupmd.Simulation(atoms, _spring_field(tmp_path), integrator=integrators.NVE(timestep_fs=1.0))
     sim.force_field.evaluate = EMTField().evaluate                     # relax on EMT, run on the fake engine
+    with pytest.raises(InputError, match="relaxes at fixed cell"):    # its cell would be dropped
+        sim.relax(loupmd.optimize.FIRE(cell_filter=loupmd.optimize.FrechetCell()))
     result = sim.relax(fmax=0.02)
     assert result.converged and sim.relaxation is result
     assert np.array_equal(sim.atoms.positions, result.atoms.positions) and not np.array_equal(

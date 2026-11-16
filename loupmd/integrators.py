@@ -2,9 +2,9 @@
 
 Names and arguments are FastMACE's (``fm.integrators``). Units: fs, K, friction per fs. A thermostat's temperature
 and friction have no defaults: physics is not chosen silently. Each record maps onto an ``IntegratorConfig``
-(``to_config``), which is what the engine runs. Built so far: ``NVE``, ``Langevin``, ``CSVR``,
-``NoseHooverChain`` and ``Berendsen`` at constant volume; the constant-pressure schemes of FastMACE arrive with
-the engine's integrators (PLAN.md Stage 4).
+(``to_config``), which is what the engine runs: ``NVE``, ``Langevin``, ``CSVR``, ``NoseHooverChain`` and
+``Berendsen`` at constant volume (``Berendsen`` with a pressure couples the cell too), and ``LangevinBAOAB`` and
+``MTK`` at constant pressure.
 
 ``fixcm`` keeps the centre of mass at rest, as in FastMACE: ``"auto"`` (the default) is on, and off when the
 structure has fixed atoms, which pin the frame already; ``True`` with fixed atoms is refused. Langevin's noise then
@@ -20,7 +20,7 @@ from typing import Literal
 from .config import IntegratorConfig
 from .errors import InputError, PlanRefused
 
-__all__ = ["Berendsen", "CSVR", "Langevin", "NVE", "NoseHooverChain"]
+__all__ = ["Berendsen", "CSVR", "Langevin", "LangevinBAOAB", "MTK", "NVE", "NoseHooverChain"]
 
 
 def resolve_fixcm(fixcm, fixed_atoms) -> bool:

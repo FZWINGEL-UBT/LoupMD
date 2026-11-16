@@ -213,3 +213,21 @@ def test_cli_cache_commands(filled):
     assert _cli("cache", "prune", env=env).returncode == 1          # no rule: a LoupMD error
     assert _cli("cache", env=env).returncode == 2                   # no action: usage
     assert _cli("cache", "prune", "--max-size", "lots", env=env).returncode == 1
+
+
+def test_engine_plan_files_follow_loupmd_cache(tmp_path, monkeypatch):
+    # src/engine.cu reads only LOUP_CACHE_DIR for its GEMM plan files; the package points it at $LOUPMD_CACHE.
+    monkeypatch.setattr(cache, "_plan_dir_set", None)
+    env = {"LOUPMD_CACHE": str(tmp_path / "a")}
+    assert cache.engine_plan_environment(env) == str((tmp_path / "a").resolve())
+    env["LOUPMD_CACHE"] = str(tmp_path / "b")                 # a changed root is followed
+    assert cache.engine_plan_environment(env) == str((tmp_path / "b").resolve())
+    del env["LOUPMD_CACHE"]                                   # and dropped again: the engine's default
+    assert cache.engine_plan_environment(env) is None and "LOUP_CACHE_DIR" not in env
+
+
+def test_engine_plan_files_keep_the_callers_loup_cache_dir(tmp_path, monkeypatch):
+    monkeypatch.setattr(cache, "_plan_dir_set", None)
+    env = {"LOUPMD_CACHE": str(tmp_path / "a"), "LOUP_CACHE_DIR": str(tmp_path / "plans")}
+    assert cache.engine_plan_environment(env) == str(tmp_path / "plans")
+    assert cache.engine_plan_environment({}) is None

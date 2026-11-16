@@ -160,13 +160,17 @@ loupmd validate [-h] [--model MODEL] [--dispersion PRESET] [--functional NAME]
 The library has the kernels of the models its release was built from. A model with another symmetric contraction needs its own, compiled here with nvcc into a kernel plugin in the cache; the engine then finds it by itself. Needs the CUDA toolkit and the export extra.
 
 ```text
-loupmd build-kernels [-h] [--checkpoint PATH] [--arch sm_XY] [--force] MODEL
+loupmd build-kernels [-h] [--checkpoint PATH] [--sha256 HEX] [--trusted] [--arch sm_XY]
+                            [--force]
+                            MODEL
 ```
 
 | Argument | Meaning |
 | --- | --- |
 | `MODEL` | a label (see `loupmd models`) or a checkpoint path |
 | `--checkpoint` `PATH` | the file of a label, when it is not in LOUPMD_MODELS |
+| `--sha256` `HEX` | the expected SHA-256 of a file outside the label table |
+| `--trusted` | load a file outside the label table without a hash |
 | `--arch` `sm_XY` | the GPU architecture to compile for (default: GPU 0's) |
 | `--force` | compile even where the library or the cache already has the kernels |
 

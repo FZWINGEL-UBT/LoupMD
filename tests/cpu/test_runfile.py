@@ -64,10 +64,35 @@ def test_a_run_file_lists_every_argument_and_reads_back(world):
     text = runfile.to_toml(arguments)
     for key in runfile.KEYS:
         assert f"\n{key} = " in text or f"\n# {key} =" in text, key
-    assert '# ensemble = "NVT"' in text and "\nsteps = 2000" in text and "# restart_every: none" in text
+    assert '# ensemble = "NVT"' in text and "\nsteps = 2000" in text and "\nrestart_every = 0 " in text
     assert tomllib.loads(text) == {"structure": "salt.cif", "model": "omat0-medium", "steps": 2000,
-                                   "repeat": [3, 3, 3], "output": {"directory": "run"},
+                                   "repeat": [3, 3, 3], "output": {"directory": "run", "restart_every": 0},
                                    "schedule": [{"kind": "hold", "temperature_K": 300.0, "ps": 1.0}]}
+
+
+def test_a_run_file_turns_files_off_with_zero(world):
+    """TOML has no null: 0 in [output] turns the trajectory or the restarts off, and a written file keeps that."""
+    arguments = {"structure": "salt.cif", "model": "m", "steps": 10, "temperature_K": 300.0,
+                 "output": {"trajectory_every": None, "restart_every": None}}
+    file = world.path / "off.toml"
+    file.write_text(runfile.to_toml(arguments))
+    _, options = runfile.md_options(runfile.load(file))
+    assert (options["output"].trajectory_every, options["output"].restart_every) == (None, None)
+    _, fast = runfile.md_options({"structure": "salt.cif", "model": "m", "profile": "fast",
+                                  "output": {"trajectory_every": 0}})
+    assert fast["output"].trajectory_every is None
+
+
+def test_a_hand_written_mc_table_gives_the_move(world, tmp_path):
+    """The [[mc]] example of docs/guide/monte-carlo.md."""
+    from loupmd import mc
+
+    file = tmp_path / "mc.toml"
+    file.write_text('structure = "salt.cif"\nmodel = "m"\nsteps = 10\ntemperature_K = 300\n\n'
+                    '[[mc]]\nmove = "swap"\npairs = [["Cu", "Au"]]\nevery = 100\nattempts = 20\n')
+    _, options = runfile.md_options(runfile.load(file))
+    move = mc.from_record(options["mc"][0])
+    assert isinstance(move, mc.Swap) and (move.every, move.attempts) == (100, 20)
 
 
 def test_unknown_keys_are_refused_by_name(world):

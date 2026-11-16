@@ -117,7 +117,7 @@ class GateUnavailable(_GateError):
     """The gate's reference could not be computed (the export extra is missing, or no device has the memory)."""
 
     default_next_step = ("Install the export extra (pip install 'loupmd[export]'), or run without the gate "
-                         "(check=None), which the run then records.")
+                         "(check=\"skip\"), which the run then records.")
 
 
 # ------------------------------------------------------------------------------------------ restart, runtime
@@ -138,8 +138,8 @@ class CellDivergedError(LoupError):
     """An NPT run's cell left the range its integrator allows; ``step`` is the step whose cell was checked."""
 
     default_next_step = ("The structure left its condensed phase or the barostat diverged: raise the pressure, lower "
-                         "the temperature, or change the integrator's volume limits. The restart at the stop holds "
-                         "the state.")
+                         "the temperature, or couple the cell more slowly. No restart is written at the stop; the last "
+                         "one written before it holds an earlier state.")
 
     def __init__(self, what, why=None, next_step=None, step=None):
         super().__init__(what, why, next_step)

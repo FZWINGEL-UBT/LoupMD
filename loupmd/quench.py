@@ -7,7 +7,7 @@ each ramp separately; evenly spaced within each bin; plus the final frame), the 
 (the picked MD frames), ``quenched.traj`` (their minima), ``quench.csv`` (one row per frame, written after every
 frame) and ``quench.json`` (settings and summary, written last: a quench with it is complete).
 
-Each frame is relaxed at fixed cell with ``lm.optimize`` (LBFGS or FIRE on the host).
+Each frame is relaxed at fixed cell with ``lm.optimize`` (LBFGS on the GPU where the engine offers it, FIRE on the host).
 """
 from __future__ import annotations
 
@@ -31,7 +31,7 @@ ROW_FIELDS = ("phase", "bin", "frame", "step", "time_ps", "target_K", "md_temper
               "volume_A3_atom")
 SELECTION = "thermostat target temperature; each ramp separately; evenly spaced within each bin; plus the final frame"
 DEFAULTS = {"min_K": 500.0, "bin_K": 100.0, "per_bin": 2, "fmax": 0.01, "optimizer": "gpu-LBFGS", "max_steps": 5000}
-# FastMACE's optimiser names: here both LBFGS names run lm.optimize.LBFGS, on the host.
+# FastMACE's optimiser names: here every LBFGS name runs lm.optimize.LBFGS (on the GPU where the engine offers it).
 OPTIMIZERS = {"gpu-LBFGS": optimize.LBFGS, "ase-LBFGS": optimize.LBFGS, "LBFGS": optimize.LBFGS,
               "gpu-FIRE": optimize.FIRE, "FIRE": optimize.FIRE}
 

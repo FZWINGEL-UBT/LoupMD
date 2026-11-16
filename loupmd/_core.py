@@ -387,9 +387,10 @@ class LoupEngine:
     """One engine handle: a bundle on one GPU, then a system, then single points or MD."""
 
     def __init__(self, loup_path: str | Path, device_id: int = 0):
-        from . import kernels
+        from . import cache, kernels
 
         self._lib = _load_lib()
+        cache.engine_plan_environment()                       # GEMM plan files under $LOUPMD_CACHE when it is set
         self._n = 0
         self.dispersion = None      # the resolved Dispersion record set_dispersion installed
         os.environ[kernels.PLUGIN_PATH_VARIABLE] = kernels.plugin_search_path()   # where the engine finds plugins

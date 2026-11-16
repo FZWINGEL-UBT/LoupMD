@@ -399,6 +399,11 @@ class Simulation:
         if self._engine is not None or self._resume is not None:
             raise InputError("relax applies to the starting structure, and this run has started",
                              next_step="Relax before the first run(), or relax sim.atoms with lm.optimize.relax.")
+        if getattr(optimizer, "cell_filter", None) is not None:
+            raise InputError("Simulation.relax relaxes at fixed cell, and the optimiser has a cell filter",
+                             why="the simulation's cell is fixed when it is made",
+                             next_step="Relax the structure with lm.optimize.relax(..., cell_filter=...) first and "
+                                       "make the Simulation from result.atoms.")
         result = optimize.relax(self.force_field, self._atoms, optimizer, fmax=fmax, steps=steps, skin=self.skin)
         self._atoms.set_positions(result.atoms.positions)
         self.relaxation = result
