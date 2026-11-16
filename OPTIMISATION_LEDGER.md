@@ -1132,6 +1132,7 @@ Each entry has the same fields. Unless stated, the system is OMAT-0 medium on th
 <a id="mem-reorder-small"></a>
 #### mem-reorder-small: Morton reorder below L2 size
 - Status: REJECTED. Measured: not recorded. Why: the reorder's extra sync is pure overhead when the system fits L2. Sources: [§3.3][s33].
+- S95 measurement (16 November 2026, 5060 Ti, `libloupmd_s86a.so`, `nsys`, `LOUP_REORDER=1` against the default off; the atoms are already species-grouped, so this is the Morton order inside each group against the caller's): OMAT-0 generic SrTiO3 `gconv_bwd_L1` 2,979 -> 2,932 us, `gconv_fwd_L1` 1,710 -> 1,677, step 7.98 -> 7.96 ms; OMAT-0 specialised SrTiO3 `w'` 2,890 -> 2,874, spline 1,736 -> 1,726, step 8.03 -> 8.00 ms; NbCl5 `w'` 441 -> 431 but spline 317 -> 328, step 1.780 -> 1.781 ms; OFF23-M water216 `gconv_fwd_L1` 222 -> 208, backward unchanged. At most 0.5% of a step before the reorder's costs (it also keeps MD on the host-driven rebuild), so the gate stays at the L2 size.
 
 <a id="mem-shift-cart"></a>
 #### mem-shift-cart: Cartesian float64 shifts
