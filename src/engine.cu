@@ -63,7 +63,7 @@ __global__ void fill_neighbors_kernel(int N, int S, CellMat64 cell, int nx, int 
                                       const int* __restrict__ bin_sp, const int* __restrict__ row_ptr,
                                       int* __restrict__ tmp_snd, int* __restrict__ tmp_rcv,
                                       int* __restrict__ tmp_shifts, int* __restrict__ tmp_pairs,
-                                     uint32_t* __restrict__ sort_keys, int* __restrict__ sort_vals);
+                                     uint32_t* __restrict__ sort_keys);
 __global__ void count_neighbors_scalar_kernel(int N, CellMat64 cell, int nx, int ny, int nz,
                                               int rx, int ry, int rz, double r_list2, float r_lo2_f32, float r_hi2_f32,
                                               const double* __restrict__ pos_wrapped, const int* __restrict__ atom_bin,
@@ -80,15 +80,20 @@ __global__ void fill_neighbors_scalar_kernel(int N, int S, CellMat64 cell, int n
                                              const int* __restrict__ bin_sp, const int* __restrict__ row_ptr,
                                              int* __restrict__ tmp_snd, int* __restrict__ tmp_rcv,
                                              int* __restrict__ tmp_shifts, int* __restrict__ tmp_pairs,
-                                             uint32_t* __restrict__ sort_keys, int* __restrict__ sort_vals);
-__global__ void gather_sorted_edges_kernel(int E, CellMat64 cell, const int* __restrict__ sort_vals,
-                                           const int* __restrict__ tmp_snd, const int* __restrict__ tmp_rcv,
-                                           const int* __restrict__ tmp_shifts, const int* __restrict__ tmp_pairs,
-                                           int* __restrict__ senders, int* __restrict__ receivers,
-                                           double* __restrict__ shift_cart, int* __restrict__ pairs);
-__global__ void check_row_species_order_kernel(int E, const int* __restrict__ senders,
-                                               const int* __restrict__ receivers, const int* __restrict__ species,
-                                               int* __restrict__ err);
+                                             uint32_t* __restrict__ sort_keys);
+__global__ void max_degree_kernel(int N, const int* __restrict__ deg, int* __restrict__ out);
+__global__ void sort_gather_rows_kernel(
+    CellMat64 cell, const int* __restrict__ row_ptr, const uint32_t* __restrict__ sort_keys,
+    const int* __restrict__ tmp_snd, const int* __restrict__ tmp_rcv, const int* __restrict__ tmp_shifts,
+    const int* __restrict__ tmp_pairs, const int* __restrict__ species,
+    int* __restrict__ senders, int* __restrict__ receivers, double* __restrict__ shift_cart, int* __restrict__ pairs,
+    int* __restrict__ order_err);
+__global__ void sort_gather_rows_global_kernel(
+    CellMat64 cell, const int* __restrict__ row_ptr, const uint32_t* __restrict__ sort_keys,
+    const int* __restrict__ tmp_snd, const int* __restrict__ tmp_rcv, const int* __restrict__ tmp_shifts,
+    const int* __restrict__ tmp_pairs, const int* __restrict__ species,
+    int* __restrict__ senders, int* __restrict__ receivers, double* __restrict__ shift_cart, int* __restrict__ pairs,
+    int* __restrict__ order_err, unsigned long long* __restrict__ scratch);
 __global__ void compute_and_count_active_kernel(
     int N, float r_max, const double* __restrict__ pos64,
     const int* __restrict__ row_ptr, const int* __restrict__ senders,
@@ -102,9 +107,49 @@ __global__ void scatter_active_edges_kernel(
     int* __restrict__ act_senders, int* __restrict__ act_receivers, int* __restrict__ act_pairs,
     float4* __restrict__ act_vec_len,
     int* __restrict__ act_slab, float2* __restrict__ act_t_sx);
-__global__ void check_skin_kernel(int N, double half_skin, int lag, int lag_switch, const double* __restrict__ pos64,
-                                  const double* __restrict__ ref_pos64, const unsigned int* __restrict__ max_step_disp2,
-                                  int* __restrict__ need_rebuild);
+__global__ void check_skin_kernel(int N, double half_skin, const double* __restrict__ pos64,
+                                  const double* __restrict__ ref_pos64, int* __restrict__ need_rebuild);
+// Publishes up to three device ints into mapped pinned host memory (pub[1..3]), then the next value of a device
+// counter (pub[0]), so the host can poll for this stream position instead of calling cudaStreamSynchronize, whose
+// wake-up leaves the GPU idle for 0.1-0.2 ms under WSL2. One thread; a stream-ordered (or graph-ordered) launch sees
+// every earlier write of the stream.
+__global__ void publish_kernel(const int* __restrict__ a, const int* __restrict__ b, const int* __restrict__ c,
+                               unsigned int* __restrict__ counter, int* __restrict__ pub) {
+    volatile int* p = pub;
+    p[1] = a ? *a : 0;
+    p[2] = b ? *b : 0;
+    p[3] = c ? *c : 0;
+    const unsigned int seq = *counter + 1u;
+    *counter = seq;
+    __threadfence_system();
+    reinterpret_cast<volatile unsigned int*>(pub)[0] = seq;
+}
+
+// The MD step's hinge (run_md_loop): publishes the skin-check flag and the last rebuild's row-order flag as
+// publish_kernel does, and lets the step's force pass (the IF node's body) run only if no rebuild is needed and the
+// rows are valid, so the host can queue the next step while this one's forces run instead of reading the flag at an
+// idle GPU.
+__global__ void guard_step_kernel(cudaGraphConditionalHandle cond, const int* __restrict__ need_rebuild,
+                                  const int* __restrict__ order_err, unsigned int* __restrict__ counter,
+                                  int* __restrict__ pub) {
+    const int flag = *need_rebuild;
+    const int bad_rows = *order_err;
+    volatile int* p = pub;
+    p[1] = flag;
+    p[2] = bad_rows;
+    p[3] = 0;
+    const unsigned int seq = *counter + 1u;
+    *counter = seq;
+    __threadfence_system();
+    reinterpret_cast<volatile unsigned int*>(pub)[0] = seq;
+    cudaGraphSetConditional(cond, (flag || bad_rows) ? 0u : 1u);
+}
+
+// After a rebuild in the guarded loop: the force pass (the IF node's body) runs only if the rebuild's rows passed the
+// order check, which the host reads with the next guarded step's publication.
+__global__ void rest_guard_kernel(cudaGraphConditionalHandle cond, const int* __restrict__ order_err) {
+    cudaGraphSetConditional(cond, *order_err ? 0u : 1u);
+}
 
 __global__ void tabled_outer_sum0_forward_kernel(
     int N, int S, int pieces0, int n_bins0, float r_lo0, float bin_scale0,
@@ -134,8 +179,7 @@ constexpr double ASE_KB = 8.617330337217213e-5;
 
 __global__ void nve_first_half_kernel(int N, double dt_ase, const double* __restrict__ forces,
                                       const double* __restrict__ inv_masses,
-                                      double* __restrict__ pos64, double* __restrict__ vel64,
-                                      unsigned int* __restrict__ max_step_disp2);
+                                      double* __restrict__ pos64, double* __restrict__ vel64);
 __global__ void nve_second_half_kernel(int N, double dt_ase, const double* __restrict__ forces,
                                        const double* __restrict__ inv_masses, double* __restrict__ vel64);
 __global__ void langevin_first_half_kernel(
@@ -143,7 +187,7 @@ __global__ void langevin_first_half_kernel(
     unsigned long long seed, const unsigned long long* __restrict__ step_counter,
     const double* __restrict__ forces, const double* __restrict__ inv_masses,
     const double* __restrict__ sqrt_inv_masses, double* __restrict__ pos64,
-    double* __restrict__ vel64, double* __restrict__ rnd_vel_save, unsigned int* __restrict__ max_step_disp2);
+    double* __restrict__ vel64, double* __restrict__ rnd_vel_save);
 __global__ void langevin_second_half_kernel(
     int N, double c1, double c2, const double* __restrict__ forces,
     const double* __restrict__ inv_masses, const double* __restrict__ rnd_vel_save,
@@ -324,13 +368,15 @@ struct HybCubin {
 // FNV-1a over this library's own file: GEMM plans are keyed by it, so a rebuilt library (new kernels, other tile
 // code) never reuses plans timed against an older build.
 // Test overrides (LOUP_SPLINE_VARIANT=R1|R1p|R4|R4p|R5, LOUP_WPRIME_THREADS=256|512, LOUP_WPRIME_RCV=0|1,
-// LOUP_REORDER=0|1): pin a kernel variant or path that tuning or a size threshold would otherwise pick, so the
-// gate can cover every one. Parsed by hand (no strtol: the library must link against older glibc).
+// LOUP_REORDER=0|1, LOUP_ROW_SORT=global): pin a kernel variant or path that tuning or a size threshold would
+// otherwise pick, so the gate can cover every one. Parsed by hand (no strtol: the library must link against older
+// glibc).
 struct VariantOverrides {
     int spline_var = -1;  // index into tune_rebuild_variants' table
     int wp_threads = 0;
     int wprime_rcv = -1;
     int reorder = -1;
+    bool row_sort_global = false;  // neighbour rows sorted in global scratch (else only rows over 4096 edges)
     VariantOverrides() {
         static const char* const names[5] = {"R1", "R1p", "R4", "R4p", "R5"};
         if (const char* s = std::getenv("LOUP_SPLINE_VARIANT"))
@@ -342,6 +388,7 @@ struct VariantOverrides {
         }
         if (const char* s = std::getenv("LOUP_WPRIME_RCV")) wprime_rcv = (s[0] == '1') ? 1 : (s[0] == '0') ? 0 : -1;
         if (const char* s = std::getenv("LOUP_REORDER")) reorder = (s[0] == '1') ? 1 : (s[0] == '0') ? 0 : -1;
+        if (const char* s = std::getenv("LOUP_ROW_SORT")) row_sort_global = strcmp(s, "global") == 0;
     }
 };
 static constexpr int kSplineVar = 5;
@@ -375,8 +422,12 @@ struct LoupHandle {
     cudaStream_t stream = nullptr;
     cublasHandle_t cublas = nullptr;
     cublasLtHandle_t cublas_lt = nullptr;
-    int* h_reb_pinned = nullptr;
-    cudaEvent_t ev_reb[2] = {nullptr, nullptr};
+    // Host polling of stream positions (loup::publish_kernel, wait_published): mapped pinned words [0] = counter,
+    // [1..3] = published values; the device counter's mirror on the host.
+    int* h_pub = nullptr;
+    int* d_pub = nullptr;
+    unsigned int* d_pub_counter = nullptr;
+    unsigned int pub_count = 0;
     void* d_cublas_ws = nullptr;
     HybCubin hyb;
     size_t cublas_ws_bytes = 4 << 20;
@@ -517,7 +568,6 @@ struct LoupHandle {
     double* d_sqrt_inv_masses = nullptr;
     double* d_rnd_vel = nullptr;
     int* d_need_rebuild = nullptr;
-    unsigned int* d_max_step_disp2 = nullptr;  // running max of squared per-step displacements (float bits)
     unsigned long long* d_step_counter = nullptr;
     double* d_ke_f64 = nullptr;
 
@@ -557,7 +607,6 @@ struct LoupHandle {
     int* d_tmp_shifts = nullptr;
     int* d_tmp_pairs = nullptr;
     uint32_t* d_sort_keys = nullptr;
-    int* d_sort_vals = nullptr;
     float4* d_act_vec_len = nullptr;
     int* d_act_senders = nullptr;
     int* d_act_receivers = nullptr;
@@ -605,16 +654,12 @@ struct LoupHandle {
     cudaGraphExec_t force_graph_exec = nullptr;
     int force_graph_stress = -1;
 
-    cudaGraph_t md_graph = nullptr;  // pipelined loop: move + check + forces + second half
-    cudaGraphExec_t md_graph_exec = nullptr;
-    // Unpipelined loop: move + check, then (after a rebuild if flagged) forces + second half.
-    cudaGraph_t md_move_graph = nullptr, md_rest_graph = nullptr;
-    cudaGraphExec_t md_move_exec = nullptr, md_rest_exec = nullptr;
-    int md_graph_kind = -1;  // 0=NVE, 1=Langevin
-    double md_graph_dt = 0.0;
-    double md_graph_temp = 0.0;
-    double md_graph_fr = 0.0;
-    unsigned long long md_graph_seed = 0;
+    // MD step: first half + skin check + guard_step_kernel + IF (no rebuild, valid rows) {forces + second half}.
+    cudaGraph_t md_step_graph = nullptr;
+    cudaGraphExec_t md_step_exec = nullptr;
+    // Checked rest, launched after a step's rebuild: rest_guard_kernel + IF (valid rows) {forces + second half}.
+    cudaGraph_t md_checked_graph = nullptr;
+    cudaGraphExec_t md_checked_exec = nullptr;
 
     void invalidate_graphs() {
         if (force_graph_exec) { cudaGraphExecDestroy(force_graph_exec); force_graph_exec = nullptr; }
@@ -623,17 +668,15 @@ struct LoupHandle {
         invalidate_md_graphs();
     }
     void invalidate_md_graphs() {
-        if (md_graph_exec) { cudaGraphExecDestroy(md_graph_exec); md_graph_exec = nullptr; }
-        if (md_graph) { cudaGraphDestroy(md_graph); md_graph = nullptr; }
-        if (md_move_exec) { cudaGraphExecDestroy(md_move_exec); md_move_exec = nullptr; }
-        if (md_move_graph) { cudaGraphDestroy(md_move_graph); md_move_graph = nullptr; }
-        if (md_rest_exec) { cudaGraphExecDestroy(md_rest_exec); md_rest_exec = nullptr; }
-        if (md_rest_graph) { cudaGraphDestroy(md_rest_graph); md_rest_graph = nullptr; }
-        md_graph_kind = -1;
+        if (md_step_exec) { cudaGraphExecDestroy(md_step_exec); md_step_exec = nullptr; }
+        if (md_step_graph) { cudaGraphDestroy(md_step_graph); md_step_graph = nullptr; }
+        if (md_checked_exec) { cudaGraphExecDestroy(md_checked_exec); md_checked_exec = nullptr; }
+        if (md_checked_graph) { cudaGraphDestroy(md_checked_graph); md_checked_graph = nullptr; }
     }
 
     int n_rebuilds = 0;     // rebuilds since set_system (atom reorder cadence)
-    int* d_order_err = nullptr;
+    int* d_order_err = nullptr;  // set by sort_gather_rows_kernel when a row breaks the species-run contract
+    int* d_max_deg = nullptr;    // longest neighbour row of the current rebuild (sizes the row sort)
     bool nl_valid = false;  // neighbour list built for the current system (ref positions and shifts are set)
 
     void free_system() {
@@ -653,9 +696,9 @@ struct LoupHandle {
         };
         freep(d_species); freep(d_pos64); freep(d_ref_pos64); freep(d_vel64);
         freep(d_masses); freep(d_inv_masses); freep(d_sqrt_inv_masses); freep(d_rnd_vel);
-        freep(d_need_rebuild); freep(d_max_step_disp2); freep(d_step_counter); freep(d_ke_f64);
+        freep(d_need_rebuild); freep(d_step_counter); freep(d_ke_f64);
         freep(d_pos_wrapped); freep(d_atom_wrap); freep(d_atom_bin);
-        freep(d_ro_keys); freep(d_ro_vals); freep(d_ro_tmp); freep(d_order_err);
+        freep(d_ro_keys); freep(d_ro_vals); freep(d_ro_tmp); freep(d_order_err); freep(d_max_deg);
         freep(d_bin_counts); freep(d_bin_offsets); freep(d_bin_cursor);
         freep(d_bin_atom_id); freep(d_bin_pos); freep(d_bin_pos_f32); freep(d_bin_wrap); freep(d_bin_sp);
         freep(d_deg); freep(d_row_ptr); freep(d_cub_tmp); cub_tmp_bytes = 0;
@@ -663,7 +706,7 @@ struct LoupHandle {
 
         freep(d_senders); freep(d_receivers); freep(d_shift_cart); freep(d_pairs);
         freep(d_tmp_snd); freep(d_tmp_rcv); freep(d_tmp_shifts); freep(d_tmp_pairs);
-        freep(d_sort_keys); freep(d_sort_vals);
+        freep(d_sort_keys);
         freep(d_act_vec_len);
         freep(d_act_senders); freep(d_act_receivers); freep(d_act_pairs);
         freep(d_act_slab); freep(d_act_t_sx);
@@ -986,7 +1029,6 @@ static int ensure_edge_capacity(LoupHandle* h, int needed) {
     CUDA_CHECK(reallocp(h->d_tmp_shifts, 3 * sizeof(int)));
     CUDA_CHECK(reallocp(h->d_tmp_pairs, sizeof(int)));
     CUDA_CHECK(reallocp(h->d_sort_keys, sizeof(uint32_t)));
-    CUDA_CHECK(reallocp(h->d_sort_vals, sizeof(int)));
     CUDA_CHECK(reallocp(h->d_act_vec_len, sizeof(float4)));
     CUDA_CHECK(reallocp(h->d_act_senders, sizeof(int)));
     CUDA_CHECK(reallocp(h->d_act_receivers, sizeof(int)));
@@ -1002,7 +1044,7 @@ static int ensure_edge_capacity(LoupHandle* h, int needed) {
 
 static int ensure_cub_tmp(LoupHandle* h, size_t bytes) {
     if (bytes <= h->cub_tmp_bytes) return 0;
-    // Queued work (a scan earlier in this rebuild, or the in-flight step of the pipelined loop) may still use the old
+    // Queued work (a scan earlier in this rebuild, or the MD step still in flight) may still use the old
     // buffer: wait for it before the free. Growth is rare (only the first rebuilds of a system reach it).
     CUDA_CHECK(cudaStreamSynchronize(h->stream));
     if (h->d_cub_tmp) cudaFree(h->d_cub_tmp);
@@ -1014,7 +1056,47 @@ static int ensure_cub_tmp(LoupHandle* h, size_t bytes) {
     return 0;
 }
 
-static int rebuild_neighbors(LoupHandle* h) {
+// Queue loup::publish_kernel(a, b, c) on the main stream (outside capture); returns the counter value it will post.
+static unsigned int publish(LoupHandle* h, const int* a, const int* b, const int* c) {
+    loup::publish_kernel<<<1, 1, 0, h->stream>>>(a, b, c, h->d_pub_counter, h->d_pub);
+    return ++h->pub_count;
+}
+
+// Polls the mapped publish words until the publication `want` has landed, then copies its values to out[0..2]. The
+// stream is queried every few thousand polls so a failed kernel or an emptied queue cannot hang the host.
+static int wait_published(LoupHandle* h, unsigned int want, int out[3]) {
+    volatile unsigned int* seq = reinterpret_cast<volatile unsigned int*>(h->h_pub);
+    for (unsigned int spins = 1; *seq != want; ++spins) {
+        if ((spins & 4095) == 0) {
+            const cudaError_t e = cudaStreamQuery(h->stream);
+            if (e == cudaSuccess && *seq != want) {
+                fprintf(stderr, "loupmd: publish %u never landed (have %u)\n", want, *seq);
+                return -1;
+            }
+            if (e != cudaSuccess && e != cudaErrorNotReady) CUDA_CHECK(e);
+        }
+        __builtin_ia32_pause();
+    }
+    __atomic_thread_fence(__ATOMIC_ACQUIRE);
+    volatile int* p = h->h_pub;
+    out[0] = p[1];
+    out[1] = p[2];
+    out[2] = p[3];
+    return 0;
+}
+
+// Reads up to three device ints at the current end of the main stream (polling the mapped publish words).
+static int read_device_ints(LoupHandle* h, const int* a, const int* b, const int* c, int out[3]) {
+    return wait_published(h, publish(h, a, b, c), out);
+}
+
+static int order_error() {
+    fprintf(stderr, "LoupMD: neighbour rows are not grouped by ascending sender species\n");
+    return -1;
+}
+
+// check_order = false (run_md_loop) leaves the sort's contract flag in d_order_err for the caller's next read.
+static int rebuild_neighbors(LoupHandle* h, bool check_order = true) {
     h->nl_valid = false;  // set again only when the rebuild completes
     const int N = h->N;
     const int S = h->n_species();
@@ -1076,7 +1158,7 @@ static int rebuild_neighbors(LoupHandle* h) {
                                            cudaMemcpyDeviceToDevice, h->stream));
                 return 0;
             };
-            // d_rnd_vel: a rebuild in an unpipelined Langevin step falls between the half-kicks, and the second one
+            // d_rnd_vel: a rebuild in a Langevin step falls between the half-kicks, and the second one
             // must reuse the noise the first drew for the same atom.
             if (gather(h->d_pos64, 3) || gather(h->d_vel64, 3) || gather(h->d_forces_f64, 3) ||
                 gather(h->d_masses, 1) || gather(h->d_inv_masses, 1) || gather(h->d_sqrt_inv_masses, 1) ||
@@ -1130,9 +1212,14 @@ static int rebuild_neighbors(LoupHandle* h) {
     if (ensure_cub_tmp(h, scanN_bytes) != 0) return -1;
     cub::DeviceScan::ExclusiveSum(h->d_cub_tmp, scanN_bytes, h->d_deg, h->d_row_ptr, N + 1, h->stream);
 
-    int E_new = 0;
-    CUDA_CHECK(cudaMemcpyAsync(&E_new, h->d_row_ptr + N, sizeof(int), cudaMemcpyDeviceToHost, h->stream));
-    CUDA_CHECK(cudaStreamSynchronize(h->stream));
+    // Zeroed every rebuild, so a deferred check (run_md_loop) reads this rebuild's flag even when no sort runs.
+    CUDA_CHECK(cudaMemsetAsync(h->d_order_err, 0, sizeof(int), h->stream));
+    CUDA_CHECK(cudaMemsetAsync(h->d_max_deg, 0, sizeof(int), h->stream));
+    loup::max_degree_kernel<<<(N + 255) / 256, 256, 0, h->stream>>>(N, h->d_deg, h->d_max_deg);
+    int vals[3];
+    if (read_device_ints(h, h->d_row_ptr + N, h->d_max_deg, nullptr, vals) != 0) return -1;
+    const int E_new = vals[0];
+    const int max_deg = vals[1];
 
     h->E_skin = E_new;
     if (E_new > 0) {
@@ -1148,43 +1235,34 @@ static int rebuild_neighbors(LoupHandle* h) {
                 h->d_pos_wrapped, h->d_atom_wrap, h->d_species, h->d_atom_bin,
                 h->d_bin_offsets, h->d_bin_atom_id, h->d_bin_pos, h->d_bin_pos_f32, h->d_bin_wrap, h->d_bin_sp,
                 h->d_row_ptr, h->d_tmp_snd, h->d_tmp_rcv, h->d_tmp_shifts, h->d_tmp_pairs,
-                h->d_sort_keys, h->d_sort_vals);
+                h->d_sort_keys);
         else
             loup::fill_neighbors_scalar_kernel<<<gridNb, blkN, 0, h->stream>>>(
                 N, S, h->cell, nx, ny, nz, rx, ry, rz, r_list2, r_lo2_f32, r_hi2_f32,
                 h->d_pos_wrapped, h->d_atom_wrap, h->d_species, h->d_atom_bin,
                 h->d_bin_offsets, h->d_bin_atom_id, h->d_bin_pos, h->d_bin_pos_f32, h->d_bin_wrap, h->d_bin_sp,
                 h->d_row_ptr, h->d_tmp_snd, h->d_tmp_rcv, h->d_tmp_shifts, h->d_tmp_pairs,
-                h->d_sort_keys, h->d_sort_vals);
+                h->d_sort_keys);
 
-        // Sort each receiver's row by key (sym_pair << 19 | length bits). Contract: for a fixed receiver sym_pair grows
-        // with the sender species, so every row ends up grouped by ascending sender species, which the receiver-owned
-        // tabled_outer_sum0_forward_kernel relies on (it stores one slot per species run). Rows are ~100 edges:
-        // DeviceSegmentedSort sorts small segments in warps/blocks instead of radix passes over every segment;
-        // stable, so ties keep fill order.
-        size_t sort_bytes = 0;
-        // Key scratch: edge_force_1 ([E, 3] floats) is per-step data, free during a rebuild.
-        cub::DoubleBuffer<uint32_t> d_keys(h->d_sort_keys, reinterpret_cast<uint32_t*>(h->d_edge_force_1));
-        cub::DoubleBuffer<int> d_vals(h->d_sort_vals, reinterpret_cast<int*>(h->d_act_vec_len));
-        cub::DeviceSegmentedSort::StableSortPairs(
-            nullptr, sort_bytes, d_keys, d_vals, E_new, N, h->d_row_ptr, h->d_row_ptr + 1, h->stream);
-        if (ensure_cub_tmp(h, sort_bytes) != 0) return -1;
-        cub::DeviceSegmentedSort::StableSortPairs(
-            h->d_cub_tmp, sort_bytes, d_keys, d_vals, E_new, N, h->d_row_ptr, h->d_row_ptr + 1, h->stream);
-        const int gridE = (E_new + 255) / 256;
-        loup::gather_sorted_edges_kernel<<<gridE, 256, 0, h->stream>>>(
-            E_new, h->cell, d_vals.Current(), h->d_tmp_snd, h->d_tmp_rcv, h->d_tmp_shifts, h->d_tmp_pairs,
-            h->d_senders, h->d_receivers, h->d_shift_cart, h->d_pairs);
-        // Enforce the contract above (a changed key or sym_pair would otherwise corrupt S0 silently).
-        CUDA_CHECK(cudaMemsetAsync(h->d_order_err, 0, sizeof(int), h->stream));
-        loup::check_row_species_order_kernel<<<gridE, 256, 0, h->stream>>>(
-            E_new, h->d_senders, h->d_receivers, h->d_species, h->d_order_err);
-        int order_err = 0;
-        CUDA_CHECK(cudaMemcpyAsync(&order_err, h->d_order_err, sizeof(int), cudaMemcpyDeviceToHost, h->stream));
-        CUDA_CHECK(cudaStreamSynchronize(h->stream));
-        if (order_err) {
-            fprintf(stderr, "LoupMD: neighbour rows are not grouped by ascending sender species\n");
-            return -1;
+        // Sort each receiver's row by key (sym_pair << 19 | length bits), ties in fill order. Contract: for a fixed
+        // receiver sym_pair grows with the sender species, so every row ends up grouped by ascending sender species,
+        // which the receiver-owned tabled_outer_sum0_forward_kernel relies on (it stores one slot per species run);
+        // the sort kernel flags a row that breaks it (a changed key or sym_pair would otherwise corrupt S0 silently).
+        int P = 1;
+        while (P < max_deg) P <<= 1;
+        const int threads = std::min(256, std::max(32, P / 2));
+        if (P <= 4096 && !h->ovr.row_sort_global)
+            loup::sort_gather_rows_kernel<<<N, threads, P * sizeof(unsigned long long), h->stream>>>(
+                h->cell, h->d_row_ptr, h->d_sort_keys, h->d_tmp_snd, h->d_tmp_rcv, h->d_tmp_shifts, h->d_tmp_pairs,
+                h->d_species, h->d_senders, h->d_receivers, h->d_shift_cart, h->d_pairs, h->d_order_err);
+        else  // scratch: act_vec_len (16 B per edge) is per-step data, free during a rebuild
+            loup::sort_gather_rows_global_kernel<<<N, threads, 0, h->stream>>>(
+                h->cell, h->d_row_ptr, h->d_sort_keys, h->d_tmp_snd, h->d_tmp_rcv, h->d_tmp_shifts, h->d_tmp_pairs,
+                h->d_species, h->d_senders, h->d_receivers, h->d_shift_cart, h->d_pairs, h->d_order_err,
+                reinterpret_cast<unsigned long long*>(h->d_act_vec_len));
+        if (check_order) {
+            if (read_device_ints(h, h->d_order_err, nullptr, nullptr, vals) != 0) return -1;
+            if (vals[0]) return order_error();
         }
     } else if (h->E_graph != 0) {
         h->E_graph = 0;
@@ -1681,9 +1759,12 @@ LoupHandle* loup_create(const char* loup_path, int device_id) {
         CUBLAS_CHECK_THROW(cublasLtCreate(&h->cublas_lt));
         CUDA_CHECK_THROW(cudaMalloc(&h->d_cublas_ws, h->cublas_ws_bytes));
         cublas_bind(h, h->stream, h->d_cublas_ws);
-        CUDA_CHECK_THROW(cudaMallocHost(&h->h_reb_pinned, 4 * sizeof(int)));  // [0..1] flags, [2] step-disp bits
-        CUDA_CHECK_THROW(cudaEventCreateWithFlags(&h->ev_reb[0], cudaEventDisableTiming));
-        CUDA_CHECK_THROW(cudaEventCreateWithFlags(&h->ev_reb[1], cudaEventDisableTiming));
+        // Mapped pinned words for polling stream positions (publish_kernel, guard_step_kernel).
+        CUDA_CHECK_THROW(cudaHostAlloc(&h->h_pub, 16 * sizeof(int), cudaHostAllocMapped));
+        memset(h->h_pub, 0, 16 * sizeof(int));
+        CUDA_CHECK_THROW(cudaHostGetDevicePointer(reinterpret_cast<void**>(&h->d_pub), h->h_pub, 0));
+        CUDA_CHECK_THROW(cudaMalloc(&h->d_pub_counter, sizeof(unsigned int)));
+        CUDA_CHECK_THROW(cudaMemset(h->d_pub_counter, 0, sizeof(unsigned int)));
         CUDA_CHECK_THROW(cudaEventCreateWithFlags(&h->ev_fork, cudaEventDisableTiming));
         for (int i = 0; i < LoupHandle::kSide; ++i) {
             CUDA_CHECK_THROW(cudaStreamCreateWithFlags(&h->side[i], cudaStreamNonBlocking));
@@ -1724,15 +1805,14 @@ void loup_destroy(LoupHandle* h) {
     cudaSetDevice(h->device_id);
     h->free_system();
     h->model.free_gpu();
-    if (h->ev_reb[0]) cudaEventDestroy(h->ev_reb[0]);
-    if (h->ev_reb[1]) cudaEventDestroy(h->ev_reb[1]);
     if (h->ev_fork) cudaEventDestroy(h->ev_fork);
     for (int i = 0; i < LoupHandle::kSide; ++i) {
         if (h->ev_join[i]) cudaEventDestroy(h->ev_join[i]);
         if (h->side_ws[i]) cudaFree(h->side_ws[i]);
         if (h->side[i]) cudaStreamDestroy(h->side[i]);
     }
-    if (h->h_reb_pinned) cudaFreeHost(h->h_reb_pinned);
+    if (h->h_pub) cudaFreeHost(h->h_pub);
+    if (h->d_pub_counter) cudaFree(h->d_pub_counter);
     h->hyb.destroy();
     if (h->d_cublas_ws) cudaFree(h->d_cublas_ws);
     for (auto& kv : h->bt_cache) cudaFree(kv.second);
@@ -1809,8 +1889,6 @@ static int set_system_impl(LoupHandle* h, int n_atoms, const int* atomic_numbers
     CUDA_CHECK(cudaMemsetAsync(h->d_vel64, 0, (size_t)n_atoms * 3 * sizeof(double), h->stream));
     CUDA_CHECK(cudaMemsetAsync(h->d_rnd_vel, 0, (size_t)n_atoms * 3 * sizeof(double), h->stream));
     CUDA_CHECK(cudaMalloc(&h->d_need_rebuild, sizeof(int)));
-    CUDA_CHECK(cudaMalloc(&h->d_max_step_disp2, sizeof(unsigned int)));
-    CUDA_CHECK(cudaMemsetAsync(h->d_max_step_disp2, 0, sizeof(unsigned int), h->stream));
     CUDA_CHECK(cudaMalloc(&h->d_step_counter, sizeof(unsigned long long)));
     CUDA_CHECK(cudaMemsetAsync(h->d_step_counter, 0, sizeof(unsigned long long), h->stream));
     CUDA_CHECK(cudaMalloc(&h->d_ke_f64, sizeof(double)));
@@ -1824,6 +1902,7 @@ static int set_system_impl(LoupHandle* h, int n_atoms, const int* atomic_numbers
     CUDA_CHECK(cudaMalloc(&h->d_ro_vals, (size_t)n_atoms * 2 * sizeof(int)));
     CUDA_CHECK(cudaMalloc(&h->d_ro_tmp, (size_t)n_atoms * 3 * sizeof(double)));
     CUDA_CHECK(cudaMalloc(&h->d_order_err, sizeof(int)));
+    CUDA_CHECK(cudaMalloc(&h->d_max_deg, sizeof(int)));
     CUDA_CHECK(cudaMalloc(&h->d_bin_counts, (h->max_bins + 1) * sizeof(int)));
     CUDA_CHECK(cudaMalloc(&h->d_bin_offsets, (h->max_bins + 1) * sizeof(int)));
     CUDA_CHECK(cudaMalloc(&h->d_bin_cursor, (h->max_bins + 1) * sizeof(int)));
@@ -1984,7 +2063,6 @@ static int set_state_impl(LoupHandle* h, const double* positions, const double* 
     CUDA_CHECK(cudaSetDevice(h->device_id));
     if (!valid_input(h->N, positions, cell, velocities)) return -1;
     if (upload_positions(h, positions, cell) < 0) return -1;
-    CUDA_CHECK(cudaMemsetAsync(h->d_max_step_disp2, 0, sizeof(unsigned int), h->stream));
     if (velocities) {
         std::vector<double> v_sorted((size_t)h->N * 3);
         for (int dst = 0; dst < h->N; ++dst) {
@@ -2033,12 +2111,11 @@ static int evaluate_once(
     if (!rebuild) {
         const double half_skin = 0.5 * h->skin;
         CUDA_CHECK(cudaMemsetAsync(h->d_need_rebuild, 0, sizeof(int), h->stream));
-        loup::check_skin_kernel<<<(h->N + 255) / 256, 256, 0, h->stream>>>(
-            h->N, half_skin, 0, 0, h->d_pos64, h->d_ref_pos64, h->d_max_step_disp2, h->d_need_rebuild);
-        int flag = 0;
-        CUDA_CHECK(cudaMemcpyAsync(&flag, h->d_need_rebuild, sizeof(int), cudaMemcpyDeviceToHost, h->stream));
-        CUDA_CHECK(cudaStreamSynchronize(h->stream));
-        rebuild = flag != 0;
+        loup::check_skin_kernel<<<(h->N + 255) / 256, 256, 0, h->stream>>>(h->N, half_skin, h->d_pos64,
+                                                                          h->d_ref_pos64, h->d_need_rebuild);
+        int v[3];
+        if (read_device_ints(h, h->d_need_rebuild, nullptr, nullptr, v) != 0) return -1;
+        rebuild = v[0] != 0;
     }
     if (rebuild && rebuild_neighbors(h) != 0) return -1;
     if (ensure_force_graph(h, compute_stress) != 0) return -1;
@@ -2102,21 +2179,13 @@ static int run_md_loop(
     const int gridN = (N + 255) / 256;
     const double dt_ase = dt_fs * loup::ASE_FS;
     const double half_skin = 0.5 * h->skin;
-    // Two loop modes. Unpipelined: each step's skin check is read before its force pass, so the force always uses a
-    // list built within skin/2 of the current positions (exact for any skin, including 0), at one host sync per step.
-    // Pipelined: step k + 1 is launched before step k's check is read, so two force calls follow each check; the
-    // check lowers its threshold by three times the largest per-step displacement seen (two for the lag, one of
-    // margin for a displacement larger than any so far: check_skin_kernel). That is only sound while the per-step
-    // displacement is well below the skin, so the loop starts unpipelined, switches to pipelining once
-    // 4 x max step displacement < skin/2, and drops back if that stops holding or a step is found to have run on an
-    // incomplete list (counted in dangerous_builds).
-    const bool allow_pipeline = (h->skin > 0.1 && n_steps > 1);
-    constexpr int kPipeLag = 3;  // steps by which the pipelined check lowers its threshold (two of lag, one of margin)
-    auto bits_to_disp = [](int bits) {
-        float d2;
-        memcpy(&d2, &bits, sizeof(d2));
-        return std::sqrt((double)d2);
-    };
+    // One loop. Each step is one launch of the step graph: first half + skin check + guard_step_kernel + an IF node
+    // whose body is the rest (force pass + second half). The guard publishes the check's flag to mapped host memory
+    // and lets the force pass run only while the list is complete, i.e. no atom has moved more than skin/2 since the
+    // last rebuild (exact for any skin, including 0). The host polls the flag, which lands before the force pass
+    // starts, and queues the next step while the force pass runs, so the GPU waits for the host only at a rebuild:
+    // the guard has skipped the force pass, the host rebuilds the list at the new positions and launches the checked
+    // rest graph (rest_guard_kernel + IF (valid rows) rest).
 
     // Initial force evaluation at step 0
     if (ensure_force_graph(h, 0) != 0) return -1;
@@ -2136,22 +2205,20 @@ static int run_md_loop(
         k_c4 = (fr / 2.0) * k_c5;
     }
 
-    auto record_move = [&](int lag) {
+    auto record_move = [&] {
         if (kind == 0) {
             loup::nve_first_half_kernel<<<gridN, 256, 0, h->stream>>>(
-                N, dt_ase, h->d_forces_f64, h->d_inv_masses, h->d_pos64, h->d_vel64, h->d_max_step_disp2);
+                N, dt_ase, h->d_forces_f64, h->d_inv_masses, h->d_pos64, h->d_vel64);
         } else {
             // 32-thread blocks: the FP64 Box-Muller (3 curand_normal2_double per atom) is FP64-throughput bound on
             // consumer GPUs, so spread the atoms over every SM instead of N / 256 of them.
             loup::langevin_first_half_kernel<<<(N + 31) / 32, 32, 0, h->stream>>>(
                 N, dt_ase, c1, c2, k_c3, k_c4, k_c5, seed, h->d_step_counter,
                 h->d_forces_f64, h->d_inv_masses, h->d_sqrt_inv_masses,
-                h->d_pos64, h->d_vel64, h->d_rnd_vel, h->d_max_step_disp2);
+                h->d_pos64, h->d_vel64, h->d_rnd_vel);
         }
-        // The unpipelined check (lag 0) also reports whether the list is still young enough for the pipelined loop.
-        loup::check_skin_kernel<<<gridN, 256, 0, h->stream>>>(
-            N, half_skin, lag, lag == 0 ? kPipeLag : 0, h->d_pos64, h->d_ref_pos64, h->d_max_step_disp2,
-            h->d_need_rebuild);
+        loup::check_skin_kernel<<<gridN, 256, 0, h->stream>>>(N, half_skin, h->d_pos64, h->d_ref_pos64,
+                                                              h->d_need_rebuild);
     };
     auto record_rest = [&]() {
         record_force_pass(h, 0);
@@ -2163,125 +2230,82 @@ static int run_md_loop(
                 N, c1, c2, h->d_forces_f64, h->d_inv_masses, h->d_rnd_vel, h->d_vel64, h->d_step_counter);
         }
     };
-    auto capture = [&](cudaGraph_t& g, cudaGraphExec_t& ge, auto&& body) -> int {
+    // `prologue(cond)` captured into a new graph, then an IF node on cond whose body is the rest: the GPU skips the
+    // force pass when the prologue's kernel clears cond, so the host can queue work behind a decision it has not read.
+    auto capture_if_rest = [&](cudaGraph_t& g, cudaGraphExec_t& ge, auto&& prologue) -> int {
         if (ge) { cudaGraphExecDestroy(ge); ge = nullptr; }
         if (g) { cudaGraphDestroy(g); g = nullptr; }
-        CUDA_CHECK(cudaStreamBeginCapture(h->stream, cudaStreamCaptureModeGlobal));
-        body();
-        CUDA_CHECK(cudaStreamEndCapture(h->stream, &g));
+        CUDA_CHECK(cudaGraphCreate(&g, 0));
+        cudaGraphConditionalHandle cond;
+        CUDA_CHECK(cudaGraphConditionalHandleCreate(&cond, g, 0, 0));
+        CUDA_CHECK(cudaStreamBeginCaptureToGraph(h->stream, g, nullptr, nullptr, 0, cudaStreamCaptureModeGlobal));
+        prologue(cond);
+        cudaStreamCaptureStatus status;
+        const cudaGraphNode_t* deps = nullptr;
+        size_t n_deps = 0;
+        CUDA_CHECK(cudaStreamGetCaptureInfo(h->stream, &status, nullptr, nullptr, &deps, nullptr, &n_deps));
+        cudaGraphNodeParams cp = {};
+        cp.type = cudaGraphNodeTypeConditional;
+        cp.conditional.handle = cond;
+        cp.conditional.type = cudaGraphCondTypeIf;
+        cp.conditional.size = 1;
+        cudaGraphNode_t cond_node;
+        CUDA_CHECK(cudaGraphAddNode(&cond_node, g, deps, nullptr, n_deps, &cp));
+        CUDA_CHECK(cudaStreamUpdateCaptureDependencies(h->stream, &cond_node, nullptr, 1,
+                                                       cudaStreamSetCaptureDependencies));
+        cudaGraph_t captured = nullptr;
+        CUDA_CHECK(cudaStreamEndCapture(h->stream, &captured));
+        CUDA_CHECK(cudaStreamBeginCaptureToGraph(h->stream, cp.conditional.phGraph_out[0], nullptr, nullptr, 0,
+                                                 cudaStreamCaptureModeGlobal));
+        record_rest();
+        CUDA_CHECK(cudaStreamEndCapture(h->stream, &captured));
         CUDA_CHECK(cudaGraphInstantiate(&ge, g, nullptr, nullptr, 0));
         return 0;
     };
-    auto note_params = [&] {
-        h->md_graph_kind = kind;
-        h->md_graph_dt = dt_fs;
-        h->md_graph_temp = temp_k;
-        h->md_graph_fr = friction_per_fs;
-        h->md_graph_seed = seed;
-    };
-    auto ensure_piped = [&]() -> int {
-        if (h->md_graph_exec) return 0;
-        if (capture(h->md_graph, h->md_graph_exec, [&] { record_move(kPipeLag); record_rest(); }) != 0) return -1;
-        note_params();
-        return 0;
-    };
-    auto ensure_unpiped = [&]() -> int {
-        if (h->md_move_exec && h->md_rest_exec) return 0;
-        if (capture(h->md_move_graph, h->md_move_exec, [&] { record_move(0); }) != 0) return -1;
-        if (capture(h->md_rest_graph, h->md_rest_exec, record_rest) != 0) return -1;
-        note_params();
+    auto ensure_graphs = [&]() -> int {
+        if (h->md_step_exec && h->md_checked_exec) return 0;
+        if (capture_if_rest(h->md_step_graph, h->md_step_exec, [&](cudaGraphConditionalHandle c) {
+                record_move();
+                loup::guard_step_kernel<<<1, 1, 0, h->stream>>>(c, h->d_need_rebuild, h->d_order_err,
+                                                                 h->d_pub_counter, h->d_pub);
+            }) != 0)
+            return -1;
+        if (capture_if_rest(h->md_checked_graph, h->md_checked_exec, [&](cudaGraphConditionalHandle c) {
+                loup::rest_guard_kernel<<<1, 1, 0, h->stream>>>(c, h->d_order_err);
+            }) != 0)
+            return -1;
         return 0;
     };
     // The graphs bake in this call's dt, thermostat and seed: drop any from an earlier call.
     h->invalidate_md_graphs();
 
-    int rebuilds = 0, dangerous = 0;
+    int rebuilds = 0;
     double tune_ms = 0.0;
-    // The per-system variant timing (first rebuild only) is not part of the steps: it is timed and excluded.
-    auto rebuild = [&](int flag) -> int {
-        ++rebuilds;
-        if (flag & 2) ++dangerous;
-        if (!h->variants_tuned) {
-            const auto t0 = std::chrono::steady_clock::now();
-            tune_rebuild_variants(h);
-            tune_ms += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
-        }
-        return rebuild_neighbors(h);
-    };
-    int* flags = h->h_reb_pinned;
-    auto copy_disp = [&] {
-        CUDA_CHECK(cudaMemcpyAsync(&flags[2], h->d_max_step_disp2, sizeof(int), cudaMemcpyDeviceToHost, h->stream));
-        return 0;
-    };
-
     EventPairGuard evg;
     cudaEvent_t ev0 = evg.e0, ev1 = evg.e1;
     CUDA_CHECK(cudaEventRecord(ev0, h->stream));
 
-    int launched = 0, pipelined_steps = 0;
-    bool piped = false;
-    while (launched < n_steps) {
-        if (!piped) {
-            if (ensure_unpiped() != 0) return -1;
-            CUDA_CHECK(cudaGraphLaunch(h->md_move_exec, h->stream));
-            flags[0] = 0;
-            CUDA_CHECK(cudaMemcpyAsync(&flags[0], h->d_need_rebuild, sizeof(int), cudaMemcpyDeviceToHost, h->stream));
-            copy_disp();
-            CUDA_CHECK(cudaStreamSynchronize(h->stream));
-            // Rebuilt before this step's forces, so bit 2 (already beyond skin/2) is not a violation here.
-            if (flags[0] & 1) {
-                if (rebuild(1) != 0) return -1;
-                if (ensure_unpiped() != 0) return -1;
+    for (int step = 0; step < n_steps; ++step) {
+        if (ensure_graphs() != 0) return -1;
+        CUDA_CHECK(cudaGraphLaunch(h->md_step_exec, h->stream));
+        int v[3];
+        if (wait_published(h, ++h->pub_count, v) != 0) return -1;
+        if (v[1]) return order_error();
+        if (v[0]) {
+            ++rebuilds;
+            // The per-system variant timing (first rebuild only) is not part of the steps: it is timed and excluded.
+            if (!h->variants_tuned) {
+                const auto t0 = std::chrono::steady_clock::now();
+                tune_rebuild_variants(h);
+                tune_ms += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
             }
-            CUDA_CHECK(cudaGraphLaunch(h->md_rest_exec, h->stream));
-            ++launched;
-            // The first pipelined force calls run on the current list before any flag is read. They are covered
-            // only if the list was rebuilt in this step or no atom is beyond the pipelined (lowered) threshold
-            // (bit 4). Without this, a list aged by unpipelined steps (single-step calls, evaluate()) was used up to
-            // two steps past skin/2: 9 such steps in 60 switches of tests/test_engine.py's switch test.
-            const bool list_young = (flags[0] & 1) || !(flags[0] & 4);
-            piped = allow_pipeline && n_steps - launched >= 2 && 4.0 * bits_to_disp(flags[2]) < half_skin && list_young;
-            continue;
+            // The row-order flag is read with the next step's publication (or at the end of the block); until then
+            // the checked rest's guard keeps the force pass off rows that failed it.
+            if (rebuild_neighbors(h, false) != 0) return -1;
+            if (ensure_graphs() != 0) return -1;
+            CUDA_CHECK(cudaGraphLaunch(h->md_checked_exec, h->stream));
         }
-        if (ensure_piped() != 0) return -1;
-        int prev = 0;
-        flags[0] = 0;
-        CUDA_CHECK(cudaGraphLaunch(h->md_graph_exec, h->stream));
-        CUDA_CHECK(cudaMemcpyAsync(&flags[0], h->d_need_rebuild, sizeof(int), cudaMemcpyDeviceToHost, h->stream));
-        CUDA_CHECK(cudaEventRecord(h->ev_reb[0], h->stream));
-        ++launched;
-        ++pipelined_steps;
-        bool leave = false;
-        while (launched < n_steps && !leave) {
-            const int cur = prev ^ 1;
-            flags[cur] = 0;
-            CUDA_CHECK(cudaGraphLaunch(h->md_graph_exec, h->stream));
-            CUDA_CHECK(cudaMemcpyAsync(&flags[cur], h->d_need_rebuild, sizeof(int), cudaMemcpyDeviceToHost, h->stream));
-            CUDA_CHECK(cudaEventRecord(h->ev_reb[cur], h->stream));
-            ++launched;
-            ++pipelined_steps;
-            CUDA_CHECK(cudaEventSynchronize(h->ev_reb[prev]));
-            if (flags[prev] & 1) {
-                const int before = dangerous;
-                if (rebuild(flags[prev]) != 0) return -1;
-                // rebuild_neighbors synchronised the stream, so the in-flight step's flag copy has landed: that step
-                // also ran on the old list.
-                if ((flags[cur] & 2) && !(flags[prev] & 2)) ++dangerous;
-                flags[cur] = 0;
-                copy_disp();
-                CUDA_CHECK(cudaStreamSynchronize(h->stream));
-                leave = dangerous != before || 4.0 * bits_to_disp(flags[2]) >= half_skin;
-                if (!leave && ensure_piped() != 0) return -1;
-            }
-            prev = cur;
-        }
-        if (!leave) {
-            CUDA_CHECK(cudaEventSynchronize(h->ev_reb[prev]));
-            if ((flags[prev] & 1) && rebuild(flags[prev]) != 0) return -1;
-        }
-        piped = false;
     }
-
     CUDA_CHECK(cudaEventRecord(ev1, h->stream));
     CUDA_CHECK(cudaEventSynchronize(ev1));
     float ms = 0.0f;
@@ -2290,8 +2314,11 @@ static int run_md_loop(
     // The block's last energy (forces feed it every step): non-finite means the run is lost; with the hybrid GEMMs
     // loaded they are dropped first, so a run restarted from a saved state does not hit the same overflow.
     double inter_e = 0.0;
+    int order_err = 0;  // a rebuild in the block's last step is not followed by a flag read
     CUDA_CHECK(cudaMemcpyAsync(&inter_e, h->d_energy_f64, sizeof(double), cudaMemcpyDeviceToHost, h->stream));
+    CUDA_CHECK(cudaMemcpyAsync(&order_err, h->d_order_err, sizeof(int), cudaMemcpyDeviceToHost, h->stream));
     CUDA_CHECK(cudaStreamSynchronize(h->stream));
+    if (order_err) return order_error();
     if (!std::isfinite(inter_e)) {
         drop_hybrid(h);
         fprintf(stderr, "loupmd: non-finite potential energy after the MD block: the state is lost; restart from a "
@@ -2309,9 +2336,7 @@ static int run_md_loop(
         out_stats->final_potential_energy_ev = h->e0_total + inter_e;
         out_stats->final_kinetic_energy_ev = ke;
         out_stats->final_temperature_k = (2.0 * ke) / (3.0 * N * loup::ASE_KB);
-        out_stats->dangerous_builds = dangerous;
         out_stats->tune_ms = tune_ms;
-        out_stats->pipelined_steps = pipelined_steps;
     }
     return 0;
 }

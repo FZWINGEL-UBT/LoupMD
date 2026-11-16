@@ -248,8 +248,7 @@ __global__ void fill_neighbors_kernel(
     int* __restrict__ tmp_rcv,
     int* __restrict__ tmp_shifts,
     int* __restrict__ tmp_pairs,
-    uint32_t* __restrict__ sort_keys,
-    int* __restrict__ sort_vals
+    uint32_t* __restrict__ sort_keys
 ) {
     extern __shared__ int s_bin_off[];
     constexpr int G = kNeighborLanes;
@@ -294,7 +293,6 @@ __global__ void fill_neighbors_kernel(
                            tmp_shifts[pos * 3 + 2] = bin_wrap[slot * 3 + 2] - wi_z - iz;
                            tmp_pairs[pos] = p;
                            sort_keys[pos] = ((uint32_t)p << 19) | (__float_as_uint(r) >> 12);
-                           sort_vals[pos] = pos;
                        });
 }
 
@@ -391,8 +389,7 @@ __global__ void fill_neighbors_scalar_kernel(
     int* __restrict__ tmp_rcv,
     int* __restrict__ tmp_shifts,
     int* __restrict__ tmp_pairs,
-    uint32_t* __restrict__ sort_keys,
-    int* __restrict__ sort_vals
+    uint32_t* __restrict__ sort_keys
 ) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= N) return;
@@ -472,7 +469,6 @@ __global__ void fill_neighbors_scalar_kernel(
                         tmp_shifts[cursor * 3 + 2] = shz;
                         tmp_pairs[cursor] = p;
                         sort_keys[cursor] = ((uint32_t)p << 19) | (__float_as_uint(r) >> 12);
-                        sort_vals[cursor] = cursor;
                         ++cursor;
                     }
                 }
@@ -481,41 +477,88 @@ __global__ void fill_neighbors_scalar_kernel(
     }
 }
 
-// Gathers the sorted skin edges and turns each integer image shift into its Cartesian offset shift @ cell (float64),
-// so the per-step edge-vector kernel does six float64 additions instead of the full shift-cell product.
-__global__ void gather_sorted_edges_kernel(
-    int E, CellMat64 cell,
-    const int* __restrict__ sort_vals,
-    const int* __restrict__ tmp_snd,
-    const int* __restrict__ tmp_rcv,
-    const int* __restrict__ tmp_shifts,
-    const int* __restrict__ tmp_pairs,
-    int* __restrict__ senders,
-    int* __restrict__ receivers,
-    double* __restrict__ shift_cart,
-    int* __restrict__ pairs
-) {
-    int e = blockIdx.x * blockDim.x + threadIdx.x;
-    if (e >= E) return;
-    int src = sort_vals[e];
-    senders[e] = tmp_snd[src];
-    receivers[e] = tmp_rcv[src];
-    const double sx = (double)tmp_shifts[src * 3 + 0];
-    const double sy = (double)tmp_shifts[src * 3 + 1];
-    const double sz = (double)tmp_shifts[src * 3 + 2];
-    shift_cart[e * 3 + 0] = sx * cell.c[0] + sy * cell.c[3] + sz * cell.c[6];
-    shift_cart[e * 3 + 1] = sx * cell.c[1] + sy * cell.c[4] + sz * cell.c[7];
-    shift_cart[e * 3 + 2] = sx * cell.c[2] + sy * cell.c[5] + sz * cell.c[8];
-    pairs[e] = tmp_pairs[src];
+// Largest row length (count kernels' degrees) into *out (zeroed by the caller): sizes sort_gather_rows_kernel's
+// shared memory.
+__global__ void max_degree_kernel(int N, const int* __restrict__ deg, int* __restrict__ out) {
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    const int d = __reduce_max_sync(0xffffffffu, i < N ? deg[i] : 0);
+    if ((threadIdx.x & 31) == 0 && d > 0) atomicMax(out, d);
 }
 
-// Flags any row (consecutive edges with the same receiver) whose sender species decreases.
-__global__ void check_row_species_order_kernel(int E, const int* __restrict__ senders,
-                                               const int* __restrict__ receivers, const int* __restrict__ species,
-                                               int* __restrict__ err) {
-    int e = blockIdx.x * blockDim.x + threadIdx.x;
-    if (e <= 0 || e >= E) return;
-    if (receivers[e] == receivers[e - 1] && species[senders[e]] < species[senders[e - 1]]) *err = 1;
+// One block per receiver row: sorts the row's edges by (key, fill position) -- the order of a stable segmented sort,
+// as each edge's index is its fill position -- with a bitonic network over the row padded to a power of two, gathers
+// the sorted edges (each integer image shift turned into its Cartesian offset shift @ cell in float64, so the per-step
+// edge-vector kernel does six float64 additions instead of the full shift-cell product) and flags a row whose sender
+// species decreases (the receiver-owned tabled_outer_sum0_forward_kernel's contract). The network runs in shared
+// memory sized for the longest row, or (kGlobal, rows too long for it) in `scratch` at 2 x the row start (a row padded
+// to P < 2L entries stays inside its own 2L slots). Unlike cub::DeviceSegmentedSort, which reads its segment partition
+// back to the host, it needs no host round trip.
+template <bool kGlobal>
+__device__ __forceinline__ void sort_gather_row(
+    CellMat64 cell, const int* __restrict__ row_ptr, const uint32_t* __restrict__ sort_keys,
+    const int* __restrict__ tmp_snd, const int* __restrict__ tmp_rcv, const int* __restrict__ tmp_shifts,
+    const int* __restrict__ tmp_pairs, const int* __restrict__ species,
+    int* __restrict__ senders, int* __restrict__ receivers, double* __restrict__ shift_cart, int* __restrict__ pairs,
+    int* __restrict__ order_err, unsigned long long* __restrict__ scratch
+) {
+    extern __shared__ unsigned long long smem_keys[];
+    const int b = row_ptr[blockIdx.x];
+    const int L = row_ptr[blockIdx.x + 1] - b;
+    if (L == 0) return;
+    unsigned long long* sk = kGlobal ? scratch + 2 * (size_t)b : smem_keys;
+    int P = 1;
+    while (P < L) P <<= 1;
+    for (int t = threadIdx.x; t < P; t += blockDim.x)
+        sk[t] = t < L ? ((unsigned long long)sort_keys[b + t] << 32) | (unsigned int)(b + t) : ~0ull;
+    __syncthreads();
+    for (int k = 2; k <= P; k <<= 1) {
+        for (int j = k >> 1; j > 0; j >>= 1) {
+            for (int q = threadIdx.x; q < (P >> 1); q += blockDim.x) {
+                const int t = 2 * q - (q & (j - 1));  // lower index of the q-th pair at distance j
+                const unsigned long long x = sk[t], y = sk[t + j];
+                if ((x > y) == ((t & k) == 0)) {
+                    sk[t] = y;
+                    sk[t + j] = x;
+                }
+            }
+            __syncthreads();
+        }
+    }
+    for (int t = threadIdx.x; t < L; t += blockDim.x) {
+        const int src = (int)(unsigned int)sk[t];
+        const int e = b + t;
+        const int snd = tmp_snd[src];
+        senders[e] = snd;
+        receivers[e] = tmp_rcv[src];
+        const double sx = (double)tmp_shifts[src * 3 + 0];
+        const double sy = (double)tmp_shifts[src * 3 + 1];
+        const double sz = (double)tmp_shifts[src * 3 + 2];
+        shift_cart[e * 3 + 0] = sx * cell.c[0] + sy * cell.c[3] + sz * cell.c[6];
+        shift_cart[e * 3 + 1] = sx * cell.c[1] + sy * cell.c[4] + sz * cell.c[7];
+        shift_cart[e * 3 + 2] = sx * cell.c[2] + sy * cell.c[5] + sz * cell.c[8];
+        pairs[e] = tmp_pairs[src];
+        if (t > 0 && species[snd] < species[tmp_snd[(int)(unsigned int)sk[t - 1]]]) *order_err = 1;
+    }
+}
+__global__ void sort_gather_rows_kernel(
+    CellMat64 cell, const int* __restrict__ row_ptr, const uint32_t* __restrict__ sort_keys,
+    const int* __restrict__ tmp_snd, const int* __restrict__ tmp_rcv, const int* __restrict__ tmp_shifts,
+    const int* __restrict__ tmp_pairs, const int* __restrict__ species,
+    int* __restrict__ senders, int* __restrict__ receivers, double* __restrict__ shift_cart, int* __restrict__ pairs,
+    int* __restrict__ order_err
+) {
+    sort_gather_row<false>(cell, row_ptr, sort_keys, tmp_snd, tmp_rcv, tmp_shifts, tmp_pairs, species, senders,
+                           receivers, shift_cart, pairs, order_err, nullptr);
+}
+__global__ void sort_gather_rows_global_kernel(
+    CellMat64 cell, const int* __restrict__ row_ptr, const uint32_t* __restrict__ sort_keys,
+    const int* __restrict__ tmp_snd, const int* __restrict__ tmp_rcv, const int* __restrict__ tmp_shifts,
+    const int* __restrict__ tmp_pairs, const int* __restrict__ species,
+    int* __restrict__ senders, int* __restrict__ receivers, double* __restrict__ shift_cart, int* __restrict__ pairs,
+    int* __restrict__ order_err, unsigned long long* __restrict__ scratch
+) {
+    sort_gather_row<true>(cell, row_ptr, sort_keys, tmp_snd, tmp_rcv, tmp_shifts, tmp_pairs, species, senders,
+                          receivers, shift_cart, pairs, order_err, scratch);
 }
 
 __global__ void compute_and_count_active_kernel(
@@ -613,19 +656,12 @@ __global__ void scatter_active_edges_kernel(
 }
 
 // The list built at ref_pos64 holds every pair within r_max + skin then, so it stays complete while every atom has
-// moved at most skin/2. Forces computed with it `lag` steps after this check (0: the caller rebuilds before the next
-// force call; 3: the pipelined loop, whose next step is already running, plus one step of margin) are safe if the
-// threshold is lowered by lag times the largest per-step displacement seen (max_step_disp2, maintained by the
-// first-half kernels).
-// Bit 1: rebuild now. Bit 2: some atom is already beyond skin/2, so a force call since the last check may have used
-// an incomplete list (a "dangerous build", counted in LoupMDStats). Bit 4 (only with lag_switch > 0, the unpipelined
-// loop's check): some atom is beyond the threshold a check with lag = lag_switch would use, so the list is too old to
-// switch to the pipelined loop without a rebuild. The flag is cleared only by a rebuild, so bit 4 stays set until then.
+// moved at most skin/2. Sets *need_rebuild when some atom has moved further (always at skin 0); every force pass of
+// the MD loop follows its own check, and a rebuild clears the flag.
 __global__ void check_skin_kernel(
-    int N, double half_skin, int lag, int lag_switch,
+    int N, double half_skin,
     const double* __restrict__ pos64,
     const double* __restrict__ ref_pos64,
-    const unsigned int* __restrict__ max_step_disp2,
     int* __restrict__ need_rebuild
 ) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
@@ -634,16 +670,7 @@ __global__ void check_skin_kernel(
     double dy = pos64[i * 3 + 1] - ref_pos64[i * 3 + 1];
     double dz = pos64[i * 3 + 2] - ref_pos64[i * 3 + 2];
     const double d2 = dx * dx + dy * dy + dz * dz;
-    const double step = sqrt((double)__uint_as_float(*max_step_disp2));
-    const double thr = half_skin - lag * step;
-    int flag = 0;
-    if (thr <= 0.0 || d2 > thr * thr) flag |= 1;
-    if (d2 > half_skin * half_skin) flag |= 2;
-    if (lag_switch > 0) {
-        const double thr_switch = half_skin - lag_switch * step;
-        if (thr_switch <= 0.0 || d2 > thr_switch * thr_switch) flag |= 4;
-    }
-    if (flag) atomicOr(need_rebuild, flag);
+    if (half_skin <= 0.0 || d2 > half_skin * half_skin) *need_rebuild = 1;
 }
 
 void compute_cell_mat(const double* cell_row_major, CellMat64& out, double& out_vol, double heights[3]) {

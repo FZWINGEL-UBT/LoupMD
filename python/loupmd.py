@@ -18,9 +18,7 @@ class LoupMDStats(ctypes.Structure):
         ("final_potential_energy_ev", ctypes.c_double),
         ("final_kinetic_energy_ev", ctypes.c_double),
         ("final_temperature_k", ctypes.c_double),
-        ("dangerous_builds", ctypes.c_int),
         ("tune_ms", ctypes.c_double),
-        ("pipelined_steps", ctypes.c_int),
     ]
 
 
