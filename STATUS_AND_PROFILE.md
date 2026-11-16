@@ -1138,3 +1138,30 @@ ledger `tile-wavefront`. OMAT-0 medium, `SrTiO3` rods rattled by 0.04 A, default
 - Suites: `pytest tests/cpu` 365 passed, 1 skipped; `pytest tests/gpu -m "not acceptance"` on `695d6873` 286
   passed, on `90a30122` 287 passed and 1 failed (`test_output_every_20_steps_costs_at_most_three_percent`, 3.8%
   against 3%; passed three reruns alone on both libraries).
+
+### 6.23 The receiver-cap screen and the tiled call's overheads (16 November 2026, 06:00)
+
+RTX 5060 Ti only; library `90a30122589e77bd` (`deeae56`). PLAN.md S5-T10, D68; ledger `tile-overhead-screen`.
+OMAT-0 medium, `SrTiO3` rattled by 0.04 A, default GEMMs, skin 0.5 A; one process per row, the median of three
+calls with kept lists (`.tmp_o/wave_time.py`).
+
+| Atoms | Receivers | Tiles | Kept call (s) | Device peak (GiB) |
+|---|---|---|---|---|
+| 320,000 (40^3, plain tiled) | 8,192 | 54 | 0.725 | 4.42 |
+| | 16,384 | 27 | 0.705 | 4.47 |
+| | 32,768 | 16 | 0.720 | 8.45 |
+| | 49,152 | 8 | 0.679 | 8.57 |
+| | 65,536 | 8 | 0.677 | 8.57 |
+| 1,081,600 (rod 320x26x26, wavefront) | 16,384 | 96 | 2.402 | 6.70 |
+| | 24,576 | 84 | 2.328 | 7.04 |
+| | 32,768 | 36 | 2.387 | 9.72 |
+| | 49,152 (the plan's) | 32 | 2.357 | 11.80 |
+
+- 320,000 atoms at 65,536: 2.12 us per atom (the whole-system call is 1.65 at 40,000, status §6.16).
+- Phases (`LOUP_DEBUG_TILE_TIMES=1`, `.tmp_o/rebuild_probe.py`, 320,000 atoms, 8 tiles): a kept call is
+  forward 77, last layer 435-471, backward 154 ms; a call that rebuilds the lists (every atom moved 0.3 A) adds
+  plan 16, candidates 43-45, kept lists 79-96 and state buffers 27 ms (about 190 ms); the first call of an
+  engine 2.96 s (GEMM timing in the sweeps).
+- Estimated from these, not built: CUDA graphs per bucket at most about 1 ms per tile (1.5% at 34 tiles of
+  2.36 s); list builds without host round trips at most the 190 ms per rebuild, about 1% of a step at a rebuild
+  every 20 steps.
