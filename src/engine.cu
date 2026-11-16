@@ -28,6 +28,7 @@
 #include <tuple>
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <cstring>
 #include <atomic>
 #include <future>
@@ -661,8 +662,8 @@ struct LoupHandle {
     // rebuild) and the workspace (each tile's domain); loup_set_system and loup_destroy free it.
     TiledMD* tiled_md = nullptr;
     long long tile_list_builds = 0;     // tiled calls that built their lists, since the handle was created
-    int tile_host_lists = 0;
-    int tile_host_state = 0;            // the last loup_plan_execution put the layer state in host memory (O32)            // the last loup_plan_execution put the tile lists' edges in host memory (O31)
+    int tile_host_lists = 0;            // the last loup_plan_execution put the tile lists' edges in host memory (O31)
+    int tile_host_state = 0;            // ... and the layer state (O32): 1 plain order, 2 the wavefront's row pool
     double skin = 0.5;
     double e0_total = 0.0;
     std::vector<int> perm;          // device (species-grouped, spatially ordered) index -> caller index
@@ -4683,8 +4684,9 @@ struct TileList {
     // O32: the compact form (LOUP_TILE_HOST_COMPACT=0: the 36 B form above): the senders and each edge's integer image
     // shift, 8 B per edge; the compaction's inputs are rebuilt from them on the device (tile_decode_edges_kernel)
     bool compact = false;
-    const int* h_csnd = nullptr;
+    const int* h_csnd = nullptr;  // device views: of host_edges, or of senders and ccode (device lists, compact)
     const char4* h_ccode = nullptr;
+    DeviceBufferGuard ccode;      // a compact device list's integer image shifts
     DeviceBufferGuard offset;  // [rows, 3] a row's place in the tile less its atom's position at the build
     DeviceBufferGuard row_slot;  // the wavefront (S5-T08): [rows] each row's atom's row in the pool of x and dx
     // The active edges (r < r_max) of this call's positions: compacted in the tile's first sweep of a call into a
@@ -4887,6 +4889,13 @@ static bool host_compact() {
     return !(e && e[0] && std::atoi(e) == 0);
 }
 
+// O32: device lists in the same compact form (senders and integer image shifts on the device, decoded per
+// compaction); LOUP_TILE_DEVICE_COMPACT=0 keeps the 36 B form there
+static bool device_compact() {
+    const char* e = std::getenv("LOUP_TILE_DEVICE_COMPACT");
+    return !(e && e[0] && std::atoi(e) == 0);
+}
+
 // Sets the workspace up as `t`'s domain, builds its list and keeps a copy of it in `out`.
 static int build_tile_list(LoupHandle* h, const TileDomain& t, const double* positions, TileList& out,
                            bool host_lists) {
@@ -4906,6 +4915,24 @@ static int build_tile_list(LoupHandle* h, const TileDomain& t, const double* pos
         keep(out.pos, h->d_pos64, (size_t)rows * 3 * sizeof(double)) ||
         keep(out.row_ptr, h->d_row_ptr, (size_t)(N + 1) * sizeof(int)))
         return -1;
+    if (!host_lists && device_compact() && E > 0) {  // O32: compact on the device too, where every shift fits
+        CUDA_CHECK(cudaMalloc(&out.ccode.p, (size_t)E * 4));
+        CUDA_CHECK(cudaMemsetAsync(h->d_order_err, 0, sizeof(int), h->stream));
+        tile_encode_edges_kernel<<<(E + 255) / 256, 256, 0, h->stream>>>(
+            E, h->cell, h->d_shift_cart, static_cast<char4*>(out.ccode.p), h->d_order_err);
+        int bad = 0;
+        CUDA_CHECK(cudaMemcpyAsync(&bad, h->d_order_err, sizeof(int), cudaMemcpyDeviceToHost, h->stream));
+        CUDA_CHECK(cudaStreamSynchronize(h->stream));
+        if (bad) {
+            cudaFree(out.ccode.p);
+            out.ccode.p = nullptr;
+        } else {
+            if (keep(out.senders, h->d_senders, (size_t)E * sizeof(int))) return -1;
+            out.h_csnd = static_cast<const int*>(out.senders.p);
+            out.h_ccode = static_cast<const char4*>(out.ccode.p);
+            out.compact = true;
+        }
+    }
     if (host_lists && host_compact() && E > 0) {  // O32: the compact form where every shift fits
         DeviceBufferGuard code;
         CUDA_CHECK(cudaMalloc(&code.p, (size_t)E * 4));
@@ -5057,16 +5084,30 @@ static bool wave_try(const LoupHandle* h, int64_t n_atoms, bool* forced) {
 }
 
 // The row pool of the wavefront on the plan of `receivers` per tile, or -1 when that plan gets the plain sweeps.
+// block_rows (O32, the pool in host memory): the rows of its block form, a block of the most locals per tile in flight.
 static int64_t wave_pool_rows(const double* positions, int n_atoms, const double* cell, int receivers, double reach,
-                              bool forced) {
+                              bool forced, int64_t* block_rows = nullptr) {
     const loup::TilePlan plan = loup::plan_tiles(positions, n_atoms, cell, receivers, 0, nullptr, reach, nullptr, reach);
     const int64_t T = plan.tiles();
     if (!(forced || plan.grid[0] >= 12) || T < 2) return -1;
     std::vector<int64_t> needs_ptr, needs, ready, counts((size_t)T);
-    for (int64_t k = 0; k < T; ++k) counts[(size_t)k] = plan.local_ptr[(size_t)k + 1] - plan.local_ptr[(size_t)k];
+    int64_t max_local = 0;
+    for (int64_t k = 0; k < T; ++k) {
+        counts[(size_t)k] = plan.local_ptr[(size_t)k + 1] - plan.local_ptr[(size_t)k];
+        max_local = std::max(max_local, counts[(size_t)k]);
+    }
     loup::tile_dependencies(plan, needs_ptr, needs, ready);
     int64_t peak = 0;
-    loup::wavefront_schedule(T, needs_ptr.data(), needs.data(), ready.data(), counts.data(), 1, &peak);
+    const std::vector<loup::SweepStep> steps =
+        loup::wavefront_schedule(T, needs_ptr.data(), needs.data(), ready.data(), counts.data(), 1, &peak);
+    if (block_rows) {
+        int64_t open = 0, most = 0;
+        for (const loup::SweepStep& s : steps) {
+            open += s.sweep == 1 ? 1 : s.sweep == 3 ? -1 : 0;
+            most = std::max(most, open);
+        }
+        *block_rows = most * max_local;
+    }
     return peak;
 }
 
@@ -5165,21 +5206,41 @@ static int plan_execution_impl(LoupHandle* h, int n_atoms, const int* atomic_num
     bool wave_forced = false;
     const bool wave = wave_try(h, n_atoms, &wave_forced);
     const double ghost0 = (double)widest_rows - c0;
+    // O32: the device lists' edge arrays per edge: 8 B compact (10% over, as the host lists'), else 36 B
+    const double dev_edge_b = device_compact() ? 8.0 * 1.1 : 36.0;
     double hstate_host = 0.0;  // the host memory of the layer state and its staging at the last cap tried
-    auto tiled_at = [&](double c, bool host, double& global, double& ws, bool hstate = false) -> int {
+    auto tiled_at = [&](double c, bool host, double& global, double& ws, int hstate = 0) -> int {
         c = std::min(c, n);
         const double rows = c + ghost0 * std::pow(c / c0, 2.0 / 3.0), T = std::ceil(n / c);
         ws = row_b * rows + edge_b * edge_cap(c * epl) + fixed_b + adj_per_row * rows;
+        if (hstate == 2) {  // O32: the wavefront's row pool in host memory, as blocks of a tile's locals (no pipeline)
+            int64_t pool = -1, block_rows = 0;
+            try {
+                pool = wave_pool_rows(positions, n_atoms, cell, (int)c, r_list + 1e-3, wave_forced, &block_rows);
+            } catch (const std::exception& e) {
+                loup::set_error("tile wavefront: %s", e.what());
+                return -1;
+            }
+            if (pool < 0) {  // the plain sweeps at this cap: not this step
+                hstate_host = 0.0;
+                global = std::numeric_limits<double>::infinity();
+                return 0;
+            }
+            hstate_host = (double)block_rows * layer_per_atom + 2.0 * ring_per_row * rows;
+            global = n * 3.0 * sizeof(double) + 32.0 * (n + T * (rows - c)) + 4.0 * (n + T) +
+                     (host ? 0.0 : dev_edge_b * n * epl);
+            return 0;
+        }
         if (hstate) {  // O32: the layer state in host memory, four ring slots on the device (HostPipe)
             ws += 4.0 * ring_per_row * rows;
             hstate_host = (alias_plan ? 0.5 * n * layer_per_atom + std::min(T, 4.0) * c * ring_per_row
                                       : n * layer_per_atom) + 6.0 * ring_per_row * rows;
             global = n * 3.0 * sizeof(double) + 32.0 * (n + T * (rows - c)) + 4.0 * (n + T) +
-                     (host ? 0.0 : 36.0 * n * epl);
+                     (host ? 0.0 : dev_edge_b * n * epl);
             return 0;
         }
         // with host lists (O31) the edges' 36 B leave the device
-        double kept = 32.0 * (n + T * (rows - c)) + 4.0 * (n + T) + (host ? 0.0 : 36.0 * n * epl);
+        double kept = 32.0 * (n + T * (rows - c)) + 4.0 * (n + T) + (host ? 0.0 : dev_edge_b * n * epl);
         double layer_rows = n;
         if (wave) {
             int64_t pool = -1;
@@ -5219,17 +5280,25 @@ static int plan_execution_impl(LoupHandle* h, int n_atoms, const int* atomic_num
     // the lists, the state and its staging within 60% of the available host memory; LOUP_TILE_HOST_STATE=1|0 forces
     int hs_force = -1;
     if (const char* e = std::getenv("LOUP_TILE_HOST_STATE")) hs_force = std::atoi(e) != 0 ? 1 : 0;
-    bool hstate = hs_force == 1;
+    // The host state's form (O32): 1 the plain order's (whole system, pipelined), 2 the wavefront's row pool as blocks
+    // (when the wavefront applies: the plain order's first unless the wavefront is forced)
+    const int hs_first = wave && wave_forced ? 2 : 1;
+    int hstate = hs_force == 1 ? hs_first : 0;
     int cap = 0;
     bool host = host_force == 1;
     double global = 0.0, ws = 0.0;
+    double shown_g = 0.0, shown_w = 0.0;  // the last estimate tried (for the refusal's message)
+    bool host_short = false;              // a host state step was left out for the host memory
     auto fits = [&](double c) {  // the tile's own list stays within the edge limit, with 10% for its densest region
+        if (std::isfinite(global)) { shown_g = global; shown_w = ws; }
         return global + ws <= allowed && std::min(c, n) * epl * 1.1 <= (double)h->edge_limit;
     };
-    auto hs_room = [&](double c) {  // the host side of the third step at cap c
+    auto hs_room = [&](double c, int form) {  // the host side of the host state's step at cap c
         double g = 0.0, w = 0.0;
-        tiled_at(c, true, g, w, true);
-        return host_need + hstate_host <= 0.6 * host_avail;
+        tiled_at(c, true, g, w, form);
+        const bool ok = host_need + hstate_host <= 0.6 * host_avail;
+        host_short |= !ok;
+        return ok;
     };
     if (h->exec_receivers > 0) {
         cap = h->exec_receivers;
@@ -5238,21 +5307,31 @@ static int plan_execution_impl(LoupHandle* h, int n_atoms, const int* atomic_num
             host = true;
             if (tiled_at(cap, host, global, ws, hstate) != 0) return -1;
         }
-        if (!hstate && !fits(cap) && hs_force != 0 && (hs_force == 1 || hs_room(cap))) {
-            host = host_force != 0;
-            hstate = true;
-            if (tiled_at(cap, host, global, ws, true) != 0) return -1;
-        }
+        if (!hstate && !fits(cap) && hs_force != 0)
+            for (int form = hs_first; form <= (wave ? 2 : 1); ++form) {
+                if (hs_force != 1 && !hs_room(cap, form)) continue;
+                double g = 0.0, w = 0.0;
+                if (tiled_at(cap, host_force != 0, g, w, form) != 0) return -1;
+                if (!std::isfinite(g)) continue;  // the wavefront does not apply at this cap
+                host = host_force != 0;
+                hstate = form;
+                global = g;
+                ws = w;
+                if (fits(cap)) break;
+            }
     } else {
         // pass 0: everything on the device; 1: the lists in host memory; 2: the lists and the layer state there
-        const int first = hstate ? 2 : host ? 1 : 0;
-        for (int pass = first; pass < 3 && cap == 0; ++pass) {
+        // (plain order); 3: the lists and the wavefront's row pool there
+        const int first = hstate ? hstate + 1 : host ? 1 : 0;
+        for (int pass = first; pass < 4 && cap == 0; ++pass) {
             if (pass == 1 && !(host_ok && host_force != 0)) continue;
-            if (pass == 2 && hs_force == 0) break;
+            if (pass >= 2 && hs_force == 0) break;
+            if (pass == 2 && hs_first == 2) continue;
+            if (pass == 3 && !wave) break;
             host = pass >= 1 ? host_force != 0 : false;
-            hstate = pass == 2;
+            hstate = pass >= 2 ? pass - 1 : 0;
             for (int c : kCaps) {
-                if (pass == 2 && hs_force != 1 && !hs_room(c)) continue;
+                if (pass >= 2 && hs_force != 1 && !hs_room(c, hstate)) continue;
                 if (tiled_at(c, host, global, ws, hstate) != 0) return -1;
                 if (fits(c)) {
                     cap = c;
@@ -5262,13 +5341,14 @@ static int plan_execution_impl(LoupHandle* h, int n_atoms, const int* atomic_num
         }
     }
     h->tile_host_lists = (cap > 0 && host) ? 1 : 0;
-    h->tile_host_state = (cap > 0 && hstate) ? 1 : 0;
+    h->tile_host_state = (cap > 0 && hstate) ? hstate : 0;  // 2: the wavefront's row pool (the call's rule)
     plan.host_lists = h->tile_host_lists;
-    plan.host_state = h->tile_host_state;
+    plan.host_state = h->tile_host_state ? 1 : 0;
     if (h->tile_host_state) {
         double g = 0.0, w = 0.0;
-        tiled_at(cap, host, g, w, true);
+        tiled_at(cap, host, g, w, h->tile_host_state);
     }
+    if (!std::isfinite(global)) global = 0.0;  // the last cap tried had no wavefront (a refusal follows)
     plan.host_bytes = (size_t)((h->tile_host_lists ? host_need : 0.0) + (h->tile_host_state ? hstate_host : 0.0));
     plan.whole_bytes = (size_t)whole;
     plan.tiled_global_bytes = (size_t)global;
@@ -5279,12 +5359,14 @@ static int plan_execution_impl(LoupHandle* h, int n_atoms, const int* atomic_num
     plan.mode = (h->exec_mode == LOUP_EXEC_AUTO && whole_fits) ? LOUP_EXEC_WHOLE : LOUP_EXEC_TILED;
     if (plan.mode == LOUP_EXEC_TILED && cap == 0) {
         loup::set_error("%d atoms do not fit the device even in tiles of %d receivers: %.2f GiB of state and "
-                        "%.2f GiB of workspace against %.2f GiB allowed (%.0f%% of %.2f GiB)%s", n_atoms, kMinReceivers,
-                        global / 1073741824.0, ws / 1073741824.0, allowed / 1073741824.0, 100.0 * h->exec_fraction,
-                        budget / 1073741824.0,
+                        "%.2f GiB of workspace against %.2f GiB allowed (%.0f%% of %.2f GiB)%s%s", n_atoms,
+                        kMinReceivers, shown_g / 1073741824.0, shown_w / 1073741824.0, allowed / 1073741824.0,
+                        100.0 * h->exec_fraction, budget / 1073741824.0,
                         host ? ", with the tile lists' edges in host memory"
                              : (host_force == 0 ? "; host lists are off (LOUP_TILE_HOST_LISTS=0)"
-                                                : "; the tile lists' edges would not fit in half of the free host memory"));
+                                                : "; the tile lists' edges would not fit in half of the free host memory"),
+                        host_short ? "; the layer state in host memory would exceed 60% of the available host memory"
+                                   : "");
         return -1;
     }
     *out = plan;
@@ -5393,10 +5475,12 @@ static int evaluate_tiled_impl(LoupHandle* h, int n_atoms, const int* atomic_num
         // off; otherwise on from 2^20 atoms and 12 layers of tiles along the first axis (the plan's rule). Its plan
         // splits the first and last layer at the faces (boundary skins), so only they stay in the pool all call.
         bool wave_forced = false;
-        // O32: the layer state in host memory (plain order). LOUP_TILE_HOST_STATE=1|0 forces it.
+        // O32: the layer state in host memory: the plain order's, or with the wavefront (the plan's form 2, or the
+        // wavefront forced) its row pool. LOUP_TILE_HOST_STATE=1|0 forces it.
         bool host_state = h->tile_host_state != 0;
         if (const char* e = std::getenv("LOUP_TILE_HOST_STATE")) host_state = std::atoi(e) != 0;
-        const bool wave_on = !host_state && wave_try(h, n_atoms, &wave_forced);
+        const bool wave_ok = wave_try(h, n_atoms, &wave_forced);
+        const bool wave_on = wave_ok && (!host_state || wave_forced || h->tile_host_state == 2);
         loup::TilePlan plan;
         try {
             plan = loup::plan_tiles(positions, n_atoms, cell, receivers, 0, nullptr, r_list + 1e-3, nullptr,
@@ -5463,7 +5547,7 @@ static int evaluate_tiled_impl(LoupHandle* h, int n_atoms, const int* atomic_num
         if (const char* e = std::getenv("LOUP_TILE_HOST_LISTS")) host_lists = std::atoi(e) != 0;
         st = h->tiled_state = new TiledState();
         st->host_lists = host_lists;
-        st->host_state = host_state && !wave;
+        st->host_state = host_state;
         st->lists = std::vector<TileList>((size_t)T);
         int max_edges = 0;
         for (int64_t k = 0; k < T; ++k) {
@@ -5475,7 +5559,7 @@ static int evaluate_tiled_impl(LoupHandle* h, int n_atoms, const int* atomic_num
             max_edges = std::max(max_edges, tl.E);
             st->bytes += (double)tl.rows * (4 + 24 + 4 + 24) + (double)(tl.n_local + 1) * 4;
             if (host_lists) st->host_bytes += (double)tl.E * (tl.compact ? 8 : 36);
-            else st->bytes += (double)tl.E * 36;
+            else st->bytes += (double)tl.E * (tl.compact ? 8 : 36);
         }
         if (max_edges > h->E_cap) {
             release_tiled_state(h);
@@ -5483,28 +5567,15 @@ static int evaluate_tiled_impl(LoupHandle* h, int n_atoms, const int* atomic_num
             return -1;
         }
         tick(host_lists ? "kept list builds (host edges)" : "kept list builds");
+        if (tile_times) {
+            int64_t n_compact = 0;
+            for (const TileList& tl : st->lists) n_compact += tl.compact;
+            std::fprintf(stderr, "tile lists: %s, %lld of %lld compact, %.0f MB of edges\n",
+                         host_lists ? "host" : "device", (long long)n_compact, (long long)T,
+                         (host_lists ? st->host_bytes : st->bytes) / 1e6);
+        }
         st->n = n_atoms; st->receivers = receivers; st->T = T; st->skin = skin;
         st->max_rows = max_rows; st->max_edges = max_edges;
-        if (st->host_state) {  // each atom's host row: its tile's block of locals, in the tile's row order
-            std::vector<int> hrow((size_t)n_atoms, -1);
-            int64_t base = 0;
-            for (TileList& tl : st->lists) {
-                tl.hbase = base;
-                for (int r = 0; r < tl.n_local; ++r) hrow[(size_t)tl.h_row_atom[(size_t)r]] = (int)(base + r);
-                base += tl.n_local;
-            }
-            if (base != n_atoms) {
-                release_tiled_state(h);
-                loup::set_error("internal error: the tiles hold %lld locals for %d atoms", (long long)base, n_atoms);
-                return -1;
-            }
-            for (TileList& tl : st->lists) {
-                tl.h_ghost.resize((size_t)(tl.rows - tl.n_local));
-                for (int r = tl.n_local; r < tl.rows; ++r)
-                    tl.h_ghost[(size_t)(r - tl.n_local)] = hrow[(size_t)tl.h_row_atom[(size_t)r]];
-            }
-        }
-        for (TileList& tl : st->lists) std::vector<int>().swap(tl.h_row_atom);
         if (wave) {
             // The schedule from the plan's locals and candidates (a superset of the kept rows), then a pool row for
             // every atom: the host replays the schedule, taking rows at a tile's sweep 1 and giving them back at its
@@ -5545,26 +5616,73 @@ static int evaluate_tiled_impl(LoupHandle* h, int n_atoms, const int* atomic_num
                                 (long long)peak);
                 return -1;
             }
-            DeviceBufferGuard d_slot;
-            CUDA_CHECK(cudaMalloc(&d_slot.p, (size_t)n_atoms * sizeof(int)));
-            CUDA_CHECK(cudaMemcpyAsync(d_slot.p, slot_of_atom.data(), (size_t)n_atoms * sizeof(int),
-                                       cudaMemcpyHostToDevice, h->stream));
-            for (TileList& tl : st->lists) {
-                CUDA_CHECK(cudaMalloc(&tl.row_slot.p, (size_t)tl.rows * sizeof(int)));
-                tile_map_rows_kernel<<<(tl.rows + 255) / 256, 256, 0, h->stream>>>(
-                    tl.rows, static_cast<const int*>(tl.row_atom.p), static_cast<const int*>(d_slot.p),
-                    static_cast<int*>(tl.row_slot.p));
-                st->bytes += (double)tl.rows * 4;
-            }
-            CUDA_CHECK(cudaStreamSynchronize(h->stream));  // `slot_of_atom` and `d_slot` go out of scope
             st->wave = true;
             st->pool_rows = peak;
+            if (st->host_state) {
+                // O32: the pool in host memory as blocks of the most locals per tile, a tile's locals in one block
+                // (its rows in the tile's row order) from its sweep 1 to its sweep 3: the ghost rows' blocks are
+                // held as long as the device pool's rows would be (the same schedule)
+                int64_t max_local = 0, n_blocks = 0;
+                for (const TileList& tl : st->lists) max_local = std::max<int64_t>(max_local, tl.n_local);
+                std::vector<int64_t> free_blocks;
+                std::vector<int64_t> block_of((size_t)T, -1);
+                for (const loup::SweepStep& s : st->steps) {
+                    if (s.sweep == 1) {
+                        int64_t b;
+                        if (!free_blocks.empty()) { b = free_blocks.back(); free_blocks.pop_back(); }
+                        else b = n_blocks++;
+                        block_of[(size_t)s.tile] = b;
+                        st->lists[(size_t)s.tile].hbase = b * max_local;
+                    } else if (s.sweep == 3) {
+                        free_blocks.push_back(block_of[(size_t)s.tile]);
+                    }
+                }
+                st->pool_rows = n_blocks * max_local;
+                if (tile_times)
+                    std::fprintf(stderr, "tile wavefront host pool: %lld blocks of %lld rows (device pool %lld)\n",
+                                 (long long)n_blocks, (long long)max_local, (long long)peak);
+            } else {
+                DeviceBufferGuard d_slot;
+                CUDA_CHECK(cudaMalloc(&d_slot.p, (size_t)n_atoms * sizeof(int)));
+                CUDA_CHECK(cudaMemcpyAsync(d_slot.p, slot_of_atom.data(), (size_t)n_atoms * sizeof(int),
+                                           cudaMemcpyHostToDevice, h->stream));
+                for (TileList& tl : st->lists) {
+                    CUDA_CHECK(cudaMalloc(&tl.row_slot.p, (size_t)tl.rows * sizeof(int)));
+                    tile_map_rows_kernel<<<(tl.rows + 255) / 256, 256, 0, h->stream>>>(
+                        tl.rows, static_cast<const int*>(tl.row_atom.p), static_cast<const int*>(d_slot.p),
+                        static_cast<int*>(tl.row_slot.p));
+                    st->bytes += (double)tl.rows * 4;
+                }
+                CUDA_CHECK(cudaStreamSynchronize(h->stream));  // `slot_of_atom` and `d_slot` go out of scope
+            }
             tick("wavefront schedule");
             if (tile_times)
                 std::fprintf(stderr, "tile wavefront: %lld tiles, grid %d x %d x %d, row pool %lld of %lld atoms\n",
                              (long long)T, plan.grid[0], plan.grid[1], plan.grid[2], (long long)peak,
                              (long long)n_atoms);
         }
+        if (st->host_state) {  // each atom's host row: its tile's block of locals, in the tile's row order
+            std::vector<int64_t> hrow((size_t)n_atoms, -1);
+            int64_t base = 0, held = 0;
+            for (TileList& tl : st->lists) {
+                if (!st->wave) tl.hbase = base;
+                for (int r = 0; r < tl.n_local; ++r) hrow[(size_t)tl.h_row_atom[(size_t)r]] = tl.hbase + r;
+                base += tl.n_local;
+            }
+            for (int64_t r : hrow) held += r >= 0;
+            if (base != n_atoms || held != n_atoms) {
+                release_tiled_state(h);
+                loup::set_error("internal error: the tiles hold %lld locals (%lld atoms) for %d atoms", (long long)base,
+                                (long long)held, n_atoms);
+                return -1;
+            }
+            for (TileList& tl : st->lists) {
+                tl.h_ghost.resize((size_t)(tl.rows - tl.n_local));
+                for (int r = tl.n_local; r < tl.rows; ++r)
+                    tl.h_ghost[(size_t)(r - tl.n_local)] = (int)hrow[(size_t)tl.h_row_atom[(size_t)r]];
+            }
+        }
+        for (TileList& tl : st->lists) std::vector<int>().swap(tl.h_row_atom);
         const int64_t layer_rows = st->wave ? st->pool_rows : n_atoms;
         std::copy(cell, cell + 9, st->cell);
         st->z.assign(atomic_numbers, atomic_numbers + n_atoms);
@@ -5593,8 +5711,8 @@ static int evaluate_tiled_impl(LoupHandle* h, int n_atoms, const int* atomic_num
             st->host_bytes += (double)bytes;
             return 0;
         };
-        st->pipe = st->host_state;
-        if (const char* e = std::getenv("LOUP_TILE_HOST_PIPE")) st->pipe = st->host_state && std::atoi(e) != 0;
+        st->pipe = st->host_state && !st->wave;  // the wavefront's host pool: one sweep after another
+        if (const char* e = std::getenv("LOUP_TILE_HOST_PIPE")) st->pipe = st->pipe && std::atoi(e) != 0;
         // O32: with the pipeline on a two-layer model dx takes x's rows; LOUP_TILE_HOST_ALIAS=0 keeps both arrays
         st->alias = st->pipe && !st->wave && L == 2;
         if (const char* e = std::getenv("LOUP_TILE_HOST_ALIAS")) st->alias = st->alias && std::atoi(e) != 0;
@@ -5676,8 +5794,11 @@ static int evaluate_tiled_impl(LoupHandle* h, int n_atoms, const int* atomic_num
         size_t free_b = 0, total_b = 0;
         CUDA_CHECK(cudaMemGetInfo(&free_b, &total_b));
         // within the free memory less a reserve of max(256 MB, 2% of the card): the wavefront at 1,081,600 atoms
-        // gains 2.3% from 5 slots (980 of 1,312 MB free) and nothing from 1 (status §6.34)
-        const double reserve = std::max(256.0 * 1048576.0, 0.02 * (double)total_b);
+        // gains 2.3% from 5 slots (980 of 1,312 MB free) and nothing from 1 (status §6.34). O32: and within the
+        // memory fraction (the part of the budget it leaves out stays free): 3,524,845 atoms at fraction 0.75 took 24
+        // slots of 221 MB in 5.8 GB free and ran out of memory in the sweeps; with 8 they ran (peak 13.3 of 16 GB).
+        const double reserve =
+            std::max({256.0 * 1048576.0, 0.02 * (double)total_b, (1.0 - h->exec_fraction) * budget});
         // Host lists: two staging buffers first (LOUP_TILE_HOST_STAGE=0|1), then the slots in what is left
         st->stage = 0;
         for (DeviceBufferGuard& g : st->ring.buf)
@@ -5790,7 +5911,7 @@ static int evaluate_tiled_impl(LoupHandle* h, int n_atoms, const int* atomic_num
     };
     if (hs) {
         CUDA_CHECK(cudaStreamSynchronize(h->stream));  // an earlier call's copies out of the host state
-        for (int t = 0; !st->alias && t + 1 < L; ++t)
+        for (int t = 0; !st->alias && !wave && t + 1 < L; ++t)  // the wavefront's blocks: zeroed at each sweep 1
             for (int l = 0; l <= h->gen->out_lmax(t); ++l) {
                 float* d = static_cast<float*>(st->hdx[(size_t)t * 4 + l].p);
                 const int64_t w = width(t, l);
@@ -6415,11 +6536,15 @@ static int evaluate_tiled_impl(LoupHandle* h, int n_atoms, const int* atomic_num
         record_force_pass(h, stress, false, &sw);
         if (stage_done(sb) != 0) return -1;
         if (pipe) return put_out(t, layer);
+        // the wavefront's host pool: the block may hold an earlier tile's gradients, which its last sweep's copy-in
+        // (queued on the stream) may still read
+        if (hs && wave) CUDA_CHECK(cudaStreamSynchronize(h->stream));
         for (int l = 0; l <= h->gen->out_lmax(layer); ++l) {
             if (hs) {  // the locals' rows are one block of the host state
                 const int64_t w = width(layer, l);
                 CUDA_CHECK(cudaMemcpyAsync(hxp(layer, l) + t.hbase * w, h->gen->layer_out(layer, l),
                                            (size_t)t.n_local * w * 4, cudaMemcpyDeviceToHost, h->stream));
+                if (wave) std::memset(hdxp(layer, l) + t.hbase * w, 0, (size_t)t.n_local * w * 4);
                 continue;
             }
             tile_scatter_rows_kernel<<<grid((int64_t)t.n_local * width(layer, l)), 256, 0, h->stream>>>(

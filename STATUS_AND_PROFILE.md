@@ -1733,4 +1733,37 @@ Tiled capacity on the RTX 5060 Ti 16 GB after O32's host state, compact lists an
 - The host lists take 8 B per edge: 13.7M atoms need 11.2 GiB of them (36 B: about 50 GiB, refused).
 - The limit on this PC is now between 13.7M and 20.5M atoms: the wavefront's row pool on the device at 6,144
   receivers, or the plain host state's `x` (about 2 KB per atom with the alias) within 60% of `MemAvailable`. The
-  wavefront's pool in host memory (O32, not built) would move it to the host RAM for lists and pool together.
+  wavefront's pool in host memory (`tile-wave-host-pool` below) moves it to the host RAM for lists and pool together.
+
+`tile-wave-host-pool` (O32): the wavefront's row pool in pinned host memory, as blocks of the most locals per tile:
+a tile takes a block at its sweep 1 and gives it back at its sweep 3 (the device pool's schedule, so a ghost's block
+is held whenever the device pool's row would be); its rows are the tile's locals in row order, ghosts point into
+their owners' blocks. The sweeps run one after another with the plain host state's copies and host adds (no
+pipeline); a block's gradient rows are zeroed at the tile's sweep 1 after a stream sync. The plan's fourth step
+(after the plain order's host state; first when the wavefront is forced). 5,760 atoms: 7 blocks of 400 rows against
+a device pool of 2,489. Wavefront at 1,081,600 atoms forced: wavefront sweeps about 2.26 s with the device pool,
+about 3.10 s with the host pool (+37%; tick times of one run each side, not an A/B). Tests: host pool against device
+pool (host lists 0 / 1, building and kept call) and the plan's step pass.
+
+`tile-slot-reserve` (O32): force calls above the device-state limit (memory fraction 0.75, library `83c1daed`,
+OMAT-0 medium SrTiO3 cubes, two calls each, `.tmp_o/big_call.py`): 2,560,000 atoms (host lists, cap 4,096) 19.7 s
+building, 5.91 s kept (2.31 us per atom); 3,524,845 atoms ran out of device memory in the sweeps: the kept
+active-edge slots took 24 x 221 MB of 5.8 GB free (their reserve was max(256 MB, 2% of the card) and ignored the
+memory fraction), leaving about 500 MB. The slots' and kept layer 0's reserve now also keeps the part of the budget
+the fraction leaves out: 3,524,845 atoms (cap 65,536, host lists and host state) 26.7 s building, 7.52 s kept
+(2.13 us per atom); 5,000,000 atoms (cap 49,152, host lists and host state, 8.63 GiB device, 14.91 GiB pinned host)
+35.1 s building, 10.66 s kept (2.13 us per atom), peak 13.46 GB of the 16 GB card (`nvidia-smi` every 2 s), energies
+and forces finite. Cost at the default fraction 0.9: the 1,081,600-atom wavefront got 0 slots instead of 3-5
+(2,232 / 2,200 -> 2,257 / 2,268 ms, four runs), won back by compact device lists below.
+
+`tile-device-compact` (O32): the device lists keep their edges in the compact host lists' form (senders and integer
+image shifts, 8 B per edge; the compaction's inputs decoded into the handle's own buffers per compaction;
+`LOUP_TILE_DEVICE_COMPACT=0` keeps 36 B). Library `1f9796ba` against `83c1daed`, A B B A B A A B, fresh plans:
+plain tiled 320,000 atoms 643.2, 638.7, 640.8, 639.9 -> 594.3, 593.5, 599.2, 603.7 ms (b / a 0.93; edges 284 MB);
+wavefront 1,081,600 atoms 2,261.6, 2,258.1, 2,270.9, 2,256.2 -> 2,218.3, 2,204.6, 2,210.2, 2,204.4 ms (b / a 0.977;
+edges 956 MB, so the plan takes 19 tiles instead of 32 and the slots come back). Forces between runs of one side
+agree to 3e-6 eV/A on both libraries (the energies differ by up to 0.13 eV of 8.6 MeV between fresh plan picks with
+the hybrid). The plan counts 8.8 B per device edge. Capacity (planner, the same cubes, fraction 0.9, `MemAvailable`
+38.2 GiB): 1,080,000 atoms cap 49,152 on the device (12.12 GiB); 2,560,000 cap 4,096 with lists and state on the
+device (12.92 GiB; host lists before); 5,000,000 host lists and host state as before; 8.64M and 13.72M the wavefront
+with host lists as before; 20,480,000 refused (the host state beyond 60% of `MemAvailable`).

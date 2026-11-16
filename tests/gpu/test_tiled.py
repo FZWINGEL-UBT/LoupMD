@@ -139,8 +139,9 @@ def test_a_tiled_call_on_a_kept_workspace_gives_a_fresh_engines_result():
         e0, f0, s0, tiles0 = fresh(at, r)
         assert tiles == tiles0 >= 2
         # The same GEMM shapes can get other plans on a new engine only through the autotune's timing; the hybrid
-        # rounding bounds of the tiled test apply (D60).
-        assert abs(e - e0) / len(at) <= 1e-6 and np.abs(f - f0).max() <= 1e-5 and np.abs(s - s0).max() <= 1e-7
+        # rounding bounds of the tiled test apply (D60): 1.02e-6 eV/atom once in 11 runs (16 November 2026; the other
+        # ten and five runs without hybrids passed the old 1e-6 on the same library), so the tiled test's 2e-6.
+        assert abs(e - e0) / len(at) <= 2e-6 and np.abs(f - f0).max() <= 1e-5 and np.abs(s - s0).max() <= 1e-7
     e1, f1, _, _ = kept[0]
     e4, f4, _, _ = kept[3]
     # Same engine, tiles and plans: the same numbers up to the order of the float32 atomic sums (measured up to
@@ -222,6 +223,48 @@ def test_tile_lists_in_host_memory_give_the_device_lists_result(wavefront, keep_
         assert abs(e1 - e0) / len(at) <= 1e-8 and np.abs(f1 - f0).max() <= 1e-5 and np.abs(s1 - s0).max() <= 1e-8
 
 
+@pytest.mark.parametrize("wavefront", ["0", "1"])
+@pytest.mark.parametrize("keep_active", [None, "0"])
+def test_compact_device_lists_give_the_full_device_lists_result(wavefront, keep_active, monkeypatch, capfd):
+    """O32: device tile lists keep their edges as senders and integer image shifts (8 B per edge) and the active-edge
+    compaction's inputs are decoded from them on the device, as with compact host lists; LOUP_TILE_DEVICE_COMPACT=0
+    keeps the 36 B form. Same tiles and kernels: the 36 B lists' numbers up to the order of the float32 atomic sums,
+    in the building call and a kept one, with kept active edges or a compaction in every sweep."""
+    at = srtio3(1).repeat((32, 6, 6))                  # 5,760 atoms in a rod
+    at.positions += np.random.default_rng(18).normal(scale=0.04, size=at.positions.shape)
+    moved = at.positions + np.random.default_rng(19).normal(scale=0.01, size=at.positions.shape)
+    bundle = ensure_loup_bundle(find_model("mace-omat-0-small.model"), [8, 22, 38])
+    monkeypatch.setenv("LOUP_NO_HYBRID", "1")
+    monkeypatch.setenv("LOUP_TILE_WAVEFRONT", wavefront)
+    monkeypatch.setenv("LOUP_TILE_HOST_LISTS", "0")
+    monkeypatch.setenv("LOUP_TILE_HOST_STATE", "0")
+    if keep_active is not None:
+        monkeypatch.setenv("LOUP_TILE_KEEP_ACTIVE", keep_active)
+
+    monkeypatch.setenv("LOUP_DEBUG_TILE_TIMES", "1")
+
+    def run(compact):
+        monkeypatch.setenv("LOUP_TILE_DEVICE_COMPACT", compact)
+        eng = LoupEngine(bundle)
+        try:
+            capfd.readouterr()
+            out = [eng.evaluate_tiled(at.numbers, x, at.cell.array, 400, skin=SKIN) for x in (at.positions, moved)]
+            said = [x for x in capfd.readouterr().err.splitlines() if x.startswith("tile lists:")]
+            return out, eng.last_execution(), said
+        finally:
+            del eng
+            gc.collect()
+
+    (full, ex_f, said_f), (comp, ex_c, said_c) = run("0"), run("1")
+    assert not ex_c.host_lists and ex_c.lists_kept
+    assert said_f and said_f[0].startswith("tile lists: device, 0 of")
+    n_tiles = said_c[0].split(" of ")[1].split()[0]
+    assert said_c[0].startswith(f"tile lists: device, {n_tiles} of {n_tiles} compact")
+    for (e0, f0, s0, t0), (e1, f1, s1, t1) in zip(full, comp):
+        assert t0 == t1 >= 4
+        assert abs(e1 - e0) / len(at) <= 1e-8 and np.abs(f1 - f0).max() <= 1e-5 and np.abs(s1 - s0).max() <= 1e-8
+
+
 @pytest.mark.parametrize("model", ["mace-omat-0-small.model", "mace-mp-0b3-medium.model"])
 @pytest.mark.parametrize("host_lists", ["0", "1"])
 @pytest.mark.parametrize("pipe", ["alias", "1", "0"])
@@ -293,6 +336,95 @@ def test_host_state_tiles_with_their_own_rows_on_the_device_give_the_device_stat
         assert abs(e1 - e0) / len(at) <= 1e-8 and np.abs(f1 - f0).max() <= 1e-5 and np.abs(s1 - s0).max() <= 1e-8
 
 
+@pytest.mark.parametrize("host_lists", ["0", "1"])
+def test_the_wavefronts_row_pool_in_host_memory_gives_the_device_pool_result(host_lists, monkeypatch, capfd):
+    """O32: with the wavefront and LOUP_TILE_HOST_STATE=1 the row pool is in pinned host memory as blocks of a
+    tile's locals, taken at the tile's first sweep and given back at its last (the device pool's schedule); the
+    sweeps run one after another with the plain host state's copies and host adds. Same tiles and kernels: the
+    device pool's numbers up to the order of the float32 sums, in the building call and a kept one."""
+    at = srtio3(1).repeat((32, 6, 6))                  # 5,760 atoms in a rod: several layers of tiles along it
+    at.positions += np.random.default_rng(15).normal(scale=0.04, size=at.positions.shape)
+    moved = at.positions + np.random.default_rng(16).normal(scale=0.01, size=at.positions.shape)
+    bundle = ensure_loup_bundle(find_model("mace-omat-0-small.model"), [8, 22, 38])
+    monkeypatch.setenv("LOUP_NO_HYBRID", "1")
+    monkeypatch.setenv("LOUP_TILE_WAVEFRONT", "1")
+    monkeypatch.setenv("LOUP_TILE_HOST_LISTS", host_lists)
+    monkeypatch.setenv("LOUP_DEBUG_TILE_TIMES", "1")
+
+    def run(state):
+        monkeypatch.setenv("LOUP_TILE_HOST_STATE", state)
+        eng = LoupEngine(bundle)
+        try:
+            capfd.readouterr()
+            out = [eng.evaluate_tiled(at.numbers, x, at.cell.array, 400, skin=SKIN) for x in (at.positions, moved)]
+            return out, eng.last_execution(), capfd.readouterr().err
+        finally:
+            del eng
+            gc.collect()
+
+    (dev, ex_d, err_d), (host, ex_h, err_h) = run("0"), run("1")
+    assert "tile wavefront:" in err_d and "tile wavefront host pool:" not in err_d
+    pool = [x for x in err_h.splitlines() if x.startswith("tile wavefront host pool:")]
+    assert pool and "tile wavefront:" in err_h
+    print(pool[0])
+    assert not ex_d.host_state and ex_h.host_state and ex_h.lists_kept
+    for (e0, f0, s0, t0), (e1, f1, s1, t1) in zip(dev, host):
+        assert t0 == t1 >= 4
+        assert abs(e1 - e0) / len(at) <= 1e-8 and np.abs(f1 - f0).max() <= 1e-5 and np.abs(s1 - s0).max() <= 1e-8
+
+
+def test_the_plan_puts_the_wavefronts_row_pool_in_host_memory_below_the_device_pool(monkeypatch, capfd):
+    """O32: with the wavefront forced, below the smallest memory fraction at which a cap fits with its row pool on
+    the device, the plan moves the pool to host memory (host_state) instead of refusing; the call it plans runs the
+    wavefront with the host pool and gives the device pool's numbers at the same cap."""
+    at = srtio3(1).repeat((64, 6, 6))                  # 11,520 atoms in a rod
+    at.positions += np.random.default_rng(17).normal(scale=0.04, size=at.positions.shape)
+    bundle = ensure_loup_bundle(find_model("mace-omat-0-small.model"), [8, 22, 38])
+    monkeypatch.setenv("LOUP_NO_HYBRID", "1")
+    monkeypatch.setenv("LOUP_TILE_WAVEFRONT", "1")
+    eng = LoupEngine(bundle)
+    try:
+        def plan(fraction, state=None):
+            if state is None:
+                monkeypatch.delenv("LOUP_TILE_HOST_STATE", raising=False)
+            else:
+                monkeypatch.setenv("LOUP_TILE_HOST_STATE", state)
+            eng.set_execution(_core.LOUP_EXEC_TILED, 0, fraction)
+            try:
+                return eng.plan_execution(at.numbers, at.positions, at.cell.array, skin=SKIN)
+            except BackendError:
+                return None
+
+        lo, hi = 1e-4, 0.9                             # the smallest fraction with the pool on the device
+        while hi - lo > 1e-3 * hi:
+            mid = 0.5 * (lo + hi)
+            lo, hi = (lo, mid) if plan(mid, "0") is not None else (mid, hi)
+        at_hi = plan(hi)
+        assert at_hi is not None and not at_hi.host_state
+        below = plan(lo * 0.999)
+        assert below is not None and below.host_state and below.receivers >= 4096
+        assert plan(lo * 0.999, "0") is None
+        assert plan(lo * 0.999) is not None
+        monkeypatch.setenv("LOUP_DEBUG_TILE_TIMES", "1")
+        capfd.readouterr()
+        e1, f1, s1, _ = eng.evaluate_tiled(at.numbers, at.positions, at.cell.array, 0, skin=SKIN)
+        assert eng.last_execution().host_state
+        assert "tile wavefront host pool:" in capfd.readouterr().err
+    finally:
+        del eng
+        gc.collect()
+    monkeypatch.setenv("LOUP_TILE_HOST_STATE", "0")
+    ref = LoupEngine(bundle)
+    try:
+        ref.set_execution(_core.LOUP_EXEC_TILED, below.receivers, 0.9)
+        e0, f0, s0, _ = ref.evaluate_tiled(at.numbers, at.positions, at.cell.array, below.receivers, skin=SKIN)
+        assert not ref.last_execution().host_state
+    finally:
+        del ref
+        gc.collect()
+    assert abs(e1 - e0) / len(at) <= 1e-8 and np.abs(f1 - f0).max() <= 1e-5 and np.abs(s1 - s0).max() <= 1e-8
+
+
 def test_kept_layer0_results_give_the_replay_result(monkeypatch, capfd):
     """O31: in the plain order each tile keeps layer 0's msgf and D from its forward sweep of layer 0, and its
     backward sweep of layer 0 reads them instead of replaying the forward (density layer 0 with the hidden table:
@@ -348,11 +480,11 @@ def test_the_plan_moves_the_tile_lists_to_host_memory_only_when_they_do_not_fit(
         dev, forced = plan(0.9, "0"), plan(0.9, "1")
         assert dev is not None and not dev.host_lists and dev.host_bytes == 0
         assert forced.host_lists and forced.host_bytes > 0
-        # the edges' 36 B leave the device estimate (the same cap on both sides); in host memory they take 8 B in the
-        # compact form (O32; the plan counts them 10% over)
+        # the edges leave the device estimate (the same cap on both sides): 8 B each in the compact form on either side
+        # (O32; the plan counts them 10% over)
         assert forced.receivers == dev.receivers
         moved = dev.tiled_global_bytes - forced.tiled_global_bytes
-        assert abs(moved * 1.1 * 8 / 36 - forced.host_bytes) <= 0.01 * forced.host_bytes
+        assert abs(moved - forced.host_bytes) <= 0.01 * forced.host_bytes
         # the smallest fraction that fits with the lists on the device, to 0.1%
         lo, hi = 1e-4, 0.9
         while hi - lo > 1e-3 * hi:

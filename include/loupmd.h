@@ -323,7 +323,7 @@ typedef struct {
     int host_lists;              // 1: the tiled plan keeps the tiles' edge lists in pinned host memory (O31, S5-T07)
     size_t host_bytes;           // the pinned host memory that plan takes (lists and layer state); 0 without either
     int host_state;              // 1: the tiled plan keeps the layer outputs and their gradients in pinned host
-                                 // memory too (O32; plain order, no wavefront)
+                                 // memory too (O32; the plain order's whole system, or the wavefront's row pool)
 } LoupMemoryPlan;
 // Not counted: MACE-POLAR-1's long-range buffers, captured graphs and cuBLAS's own allocations.
 int loup_plan_memory(LoupHandle* h, int n_atoms, double edges_per_atom, LoupMemoryPlan* out);
@@ -343,7 +343,9 @@ int loup_plan_memory(LoupHandle* h, int n_atoms, double edges_per_atom, LoupMemo
 // host memory either, the plan also moves the whole system's layer outputs and their gradients there (host_state;
 // O32, as FastMACE's host state: each atom's row in its tile's block, a tile's own rows copied as one block, ghost
 // rows gathered and gradient rows added on host threads, the copies overlapped with the sweeps on two copy
-// streams; the plain order, not the wavefront), within 60% of the available host memory with the lists;
+// streams), within 60% of the available host memory with the lists. Where the wavefront applies and the plain
+// order's state does not fit there (or the wavefront is forced), the wavefront's row pool goes to host memory
+// instead, as blocks of a tile's locals held from its first sweep to its last, its sweeps one after another;
 // LOUP_TILE_HOST_STATE=1|0 forces it on or off, LOUP_TILE_HOST_PIPE=0 runs its copies and host work without the
 // overlap (tests). A system that does not fit at 4,096 receivers any way is refused. The handle
 // afterwards holds the probe tile: call loup_set_system before other calls.
