@@ -285,7 +285,10 @@ struct HybCubin {
         if (cudaDeviceGetAttribute(&maj, cudaDevAttrComputeCapabilityMajor, device_id) != cudaSuccess) return;
         if (cudaDeviceGetAttribute(&min, cudaDevAttrComputeCapabilityMinor, device_id) != cudaSuccess) return;
         const char* cname = nullptr;
-        if (maj == 8) cname = "tf32x3_hyb_sm80.cubin";
+        // cc 8.0 (A100): LoupMD's own format-2 cubin (cubins/src/gemm_tc.cu: the shipped three tiles SASS-identical
+        // plus three larger ones and compile-time beta variants), faster or equal on every family measured (S74a) and
+        // gated (S75g); other 8.x GPUs, not measured with it, keep the FastMACE cubin.
+        if (maj == 8) cname = (min == 0) ? "gemm_tc_hyb_sm80.cubin" : "tf32x3_hyb_sm80.cubin";
         else if (maj == 9) cname = "tf32x3_hyb_sm90.cubin";
         else if (maj == 12) cname = "tf32x3_hyb_sm120.cubin";
         else return;

@@ -867,7 +867,17 @@ struct DevCompose {
     }
 };
 
-// The load-time folds (S57, S59) were measured on compute capability 12.0 only; other GPUs keep the plain path.
+// The load-time folds (S57, S59, S73) were measured on compute capability 12.0 (5060 Ti) and 8.0 (A100, S74a: faster on
+// every family, gated in S75g); other GPUs keep the plain path.
+bool folds_measured_here() {
+    int dev = 0, major = 0, minor = 0;
+    CUDA_CHECK_THROW(cudaGetDevice(&dev));
+    CUDA_CHECK_THROW(cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor, dev));
+    CUDA_CHECK_THROW(cudaDeviceGetAttribute(&minor, cudaDevAttrComputeCapabilityMinor, dev));
+    return (major == 12 && minor == 0) || (major == 8 && minor == 0);
+}
+
+// The per-system conv forward variant timing (S64) was measured on compute capability 12.0 only.
 bool device_is_cc120() {
     int dev = 0, major = 0, minor = 0;
     CUDA_CHECK_THROW(cudaGetDevice(&dev));
@@ -1281,15 +1291,15 @@ void GenericModel::load(const Bundle& b) {
 // composed in double at load: the gate kernels read the residual row of each atom's species directly and the skip
 // tables are gathered per atom: no x / res GEMMs in layer 0 and no Wh GEMMs. Layer 0 takes no
 // gradient into h_in, so the backward is unchanged. Not with the long-range block: POLAR-1-L measured no win in the
-// tables-first order (three ABBA pairs), so the POLAR models keep the GEMMs. sm_120 by default; LOUP_SPECIES_TABLES=0
-// keeps the GEMMs, =1 builds the tables on any GPU (tests, A/B on other GPUs).
+// tables-first order (three ABBA pairs), so the POLAR models keep the GEMMs. sm_120 and cc 8.0 by default;
+// LOUP_SPECIES_TABLES=0 keeps the GEMMs, =1 builds the tables on any GPU (tests, A/B on other GPUs).
 void GenericModel::setup_species_tables(const Bundle& b) {
     species_tables_ = false;
     GenericLayer* L = layers_.empty() ? nullptr : layers_[0];
     if (lr_ || !L || !L->first_hidden || L->kind != 4 || L->skip_folded || L->lmax_x != 0) return;
     const char* env = std::getenv("LOUP_SPECIES_TABLES");
     if (env && env[0] == '0') return;
-    if (!device_is_cc120() && !(env && env[0] == '1')) return;
+    if (!folds_measured_here() && !(env && env[0] == '1')) return;
     DevCompose dc;
     const double* E = dc.dup(b.f32("embedding", {S_, C0_}));
     const double* Wup = dc.dup(b.f32("L0.W_up_0", {L->C_in, L->C_x}));
@@ -1312,15 +1322,15 @@ void GenericModel::setup_species_tables(const Bundle& b) {
 // all-gated, readout-free, species-free models (OMOL-0); S73 any layer kind, linear non-last readouts and per-species
 // skips (MH-1, OMAT-0 / MP-0 / MPtrj / OFF on the generic path). Layer 0's skip terms are [S, cols] tables
 // (E W_sc_0 M) with the S59 species tables, else Wh GEMMs; their energy share is always a per-species constant.
-// sm_120 by default (where it was measured); LOUP_CHAIN_FOLD=0 keeps the plain path, =1 folds on any GPU (tests, A/B on
-// other GPUs).
+// sm_120 and cc 8.0 by default (where it was measured); LOUP_CHAIN_FOLD=0 keeps the plain path, =1 folds on any GPU
+// (tests, A/B on other GPUs).
 void GenericModel::setup_chain_fold(const Bundle& b) {
     chain_fold_ = false;
     const int nL = n_layers_;
     if (lr_ || nL < 2) return;
     const char* env = std::getenv("LOUP_CHAIN_FOLD");
     if (env && env[0] == '0') return;
-    if (!device_is_cc120() && !(env && env[0] == '1')) return;
+    if (!folds_measured_here() && !(env && env[0] == '1')) return;
     const GenericLayer* last = layers_.back();
     if (!last->ro_folded || last->readout < 1) return;
     for (int t = 0; t < nL - 1; ++t) {
