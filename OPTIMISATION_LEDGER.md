@@ -1069,6 +1069,7 @@ Each entry has the same fields. Unless stated, the system is OMAT-0 medium on th
 - What: 8 non-blocking side streams, each with its own 4 MB cuBLASLt workspace, inside the captured graph.
 - Status: DEFAULT.
 - Measured: alone not recorded; serialising them costs +2.0% to +5.7% (sched-serialised).
+- S104 falsifier (16 November 2026, 5060 Ti, scratch, reverted): would a receiver-chunked pipeline (conv of one atom chunk beside the GEMMs / product of the previous chunk; the last layer's chain from `mid` to `dmid` is per atom) hide GEMM time under the L2-bound convs? Measured with the last layer's GEMM groups launched a second time on the side lanes, into scratch buffers, concurrent with its conv kernels (OMAT-0 medium generic SrTiO3, same library both sides, ABBA, 3 rounds): the `dmid` group (~450 us alone) beside `gconv_fwd_L1` `1.062` (+480 us), the `lin` group (~470 us) beside `gconv_bwd_L1` `1.059` (+460 us), both `1.121`. Each overlapped group costs its full standalone time: the convs and the SIMT GEMMs share the SMs zero-sum, so overlap between them is closed on this GPU.
 - Sources: [§3.1 #9][s31].
 
 <a id="sched-serialised"></a>
