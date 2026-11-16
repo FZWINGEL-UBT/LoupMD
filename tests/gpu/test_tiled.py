@@ -209,6 +209,38 @@ def test_tile_lists_in_host_memory_give_the_device_lists_result(wavefront, keep_
         assert abs(e1 - e0) / len(at) <= 1e-8 and np.abs(f1 - f0).max() <= 1e-5 and np.abs(s1 - s0).max() <= 1e-8
 
 
+def test_kept_layer0_results_give_the_replay_result(monkeypatch, capfd):
+    """O31: in the plain order each tile keeps layer 0's msgf and D from its forward sweep of layer 0, and its
+    backward sweep of layer 0 reads them instead of replaying the forward (density layer 0 with the hidden table:
+    OMAT-0 medium). Same tiles and kernels: the replay's numbers up to the order of the float32 atomic sums, in the
+    call that builds the lists and in a kept call."""
+    at = _oxide(8)                                     # 2,560 atoms
+    moved = at.positions + np.random.default_rng(10).normal(scale=0.01, size=at.positions.shape)
+    bundle = ensure_loup_bundle(find_model("mace-omat-0-medium.model"), [8, 22, 38])
+    monkeypatch.setenv("LOUP_NO_HYBRID", "1")
+    monkeypatch.setenv("LOUP_TILE_WAVEFRONT", "0")
+    monkeypatch.setenv("LOUP_DEBUG_TILE_TIMES", "1")
+
+    def run(keep):
+        monkeypatch.setenv("LOUP_TILE_KEEP_L0", keep)
+        eng = LoupEngine(bundle)
+        try:
+            capfd.readouterr()
+            out = [eng.evaluate_tiled(at.numbers, x, at.cell.array, 300, skin=SKIN) for x in (at.positions, moved)]
+            said = [line for line in capfd.readouterr().err.splitlines() if line.startswith("tile layer 0 kept:")]
+            return out, said
+        finally:
+            del eng
+            gc.collect()
+
+    (replay, said0), (kept, said1) = run("0"), run("1")
+    assert said0 and said0[0].startswith("tile layer 0 kept: no")
+    assert said1 and said1[0].startswith("tile layer 0 kept: yes")
+    for (e0, f0, s0, t0), (e1, f1, s1, t1) in zip(replay, kept):
+        assert t0 == t1 >= 4
+        assert abs(e1 - e0) / len(at) <= 1e-8 and np.abs(f1 - f0).max() <= 1e-5 and np.abs(s1 - s0).max() <= 1e-8
+
+
 def test_the_plan_moves_the_tile_lists_to_host_memory_only_when_they_do_not_fit(monkeypatch):
     """O31 (S5-T07): the memory plan keeps the tile lists on the device while some cap fits; below the smallest
     memory fraction at which one does, it moves their edge arrays to host memory (host_lists, host_bytes) instead

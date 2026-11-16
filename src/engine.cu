@@ -1711,6 +1711,7 @@ struct DomainSweep {
     int kind = 0, layer = 0;
     const float* adjoint[4] = {nullptr, nullptr, nullptr, nullptr};
     bool active_ready = false;  // the handle's active-edge buffers already hold this domain's (a tile's later sweep)
+    float* keep0 = nullptr;     // O31: the domain's buffer of layer 0's msgf and D (GenericPassInputs::keep0)
 };
 
 static_assert(offsetof(loup::CellDev, h) == 0, "record_dispersion reads the device cell at the start of CellDev");
@@ -1803,6 +1804,7 @@ static void record_force_pass(LoupHandle* h, int compute_stress, bool energy_onl
             in.sweep = sweep->kind;
             in.sweep_layer = sweep->layer;
             for (int l = 0; l < 4; ++l) in.adjoint_in[l] = sweep->adjoint[l];
+            in.keep0 = sweep->keep0;
         }
         in.E_dev = d_E_act;
         in.E_cap = h->E_cap;
@@ -4666,6 +4668,9 @@ struct TileList {
     // every sweep); the slot goes back at the tile's last sweep.
     mutable int act_slot = -1;        // the slot, -1 none
     mutable long long act_call = -1;  // the call in whose first sweep the tile took it
+    // O31: layer 0's msgf and D from the tile's forward sweep of layer 0, read by its backward sweep of layer 0
+    // instead of the replay (GenericModel::sweep_keep_layer0); allocated when the memory allows
+    DeviceBufferGuard keep0;
 };
 
 // One tile's active edges, sized for the longest list (TileList::act_slot)
@@ -4680,6 +4685,7 @@ struct TiledState {
     long long calls = 0;   // tiled calls on these lists
     std::vector<ActiveSlot> act_slots;
     std::vector<int> act_free;  // the slots no tile holds
+    int keep_l0 = -1;           // the tiles keep layer 0's forward results (TileList::keep0): -1 not decided
     int64_t T = 0;
     double skin = 0.0, cell[9] = {0, 0, 0, 0, 0, 0, 0, 0, 0};
     double bytes = 0.0;  // device bytes of everything below
@@ -5359,7 +5365,7 @@ static int evaluate_tiled_impl(LoupHandle* h, int n_atoms, const int* atomic_num
     if (st->act_keep < 0) {
         // A tile's active edges are compacted once per call, in its first sweep, into a slot that it holds until its
         // last sweep (the backward sweep of layer 0). As many slots as tiles are in flight at once (all of them in
-        // the plain order; the wavefront's schedule says how many), within a quarter of the free memory; a tile that
+        // the plain order; the wavefront's schedule says how many), within the free memory less a reserve; a tile that
         // finds no slot free compacts in each of its sweeps. LOUP_TILE_KEEP_ACTIVE=0 keeps none, =k at most k
         // slots whatever the memory.
         int64_t in_flight = st->wave ? 0 : st->T, open = 0;
@@ -5372,7 +5378,10 @@ static int evaluate_tiled_impl(LoupHandle* h, int n_atoms, const int* atomic_num
             (double)std::max(st->max_edges, 1) * (16 + 4 * 4 + 8) + (double)(st->max_rows + 1) * 4;
         size_t free_b = 0, total_b = 0;
         CUDA_CHECK(cudaMemGetInfo(&free_b, &total_b));
-        int64_t want = std::min<int64_t>(in_flight, (int64_t)(0.25 * (double)free_b / slot_bytes));
+        // within the free memory less a reserve of max(256 MB, 2% of the card): the wavefront at 1,081,600 atoms
+        // gains 2.3% from 5 slots (980 of 1,312 MB free) and nothing from 1 (status §6.34)
+        const double reserve = std::max(256.0 * 1048576.0, 0.02 * (double)total_b);
+        int64_t want = std::min<int64_t>(in_flight, (int64_t)(std::max(0.0, (double)free_b - reserve) / slot_bytes));
         if (const char* e = std::getenv("LOUP_TILE_KEEP_ACTIVE"))
             want = std::min<int64_t>(in_flight, std::max(0LL, std::atoll(e)));
         // Built in place: DeviceBufferGuard has no move, so the vector must never copy or grow
@@ -5400,6 +5409,33 @@ static int evaluate_tiled_impl(LoupHandle* h, int n_atoms, const int* atomic_num
             st->bytes += slot_bytes;
         }
         st->act_keep = got;
+        // Layer 0's forward results per tile, after the slots, within the same reserve: plain order only (the
+        // wavefront's tiles in flight would need them too, and it runs where memory is short). LOUP_TILE_KEEP_L0=0|1.
+        st->keep_l0 = 0;
+        if (!st->wave && h->gen->sweep_keep_layer0()) {
+            double l0_bytes = 0.0;
+            for (const TileList& t : lists) l0_bytes += (double)h->gen->sweep_keep_floats(t.n_local) * sizeof(float);
+            size_t f2 = 0, t2 = 0;
+            CUDA_CHECK(cudaMemGetInfo(&f2, &t2));
+            bool on = l0_bytes <= (double)f2 - reserve;
+            if (const char* e = std::getenv("LOUP_TILE_KEEP_L0")) on = std::atoi(e) != 0;
+            bool ok = on;
+            for (TileList& t : lists) {
+                if (!ok) break;
+                const size_t b = h->gen->sweep_keep_floats(t.n_local) * sizeof(float);
+                if (cudaMalloc(&t.keep0.p, std::max<size_t>(b, 1)) != cudaSuccess) { t.keep0.p = nullptr; ok = false; }
+            }
+            if (on && !ok) {  // out of memory after all: the replay
+                (void)cudaGetLastError();
+                for (TileList& t : lists)
+                    if (t.keep0.p) { cudaFree(t.keep0.p); t.keep0.p = nullptr; }
+            }
+            st->keep_l0 = on && ok ? 1 : 0;
+            if (st->keep_l0) st->bytes += l0_bytes;
+            if (tile_times)
+                std::fprintf(stderr, "tile layer 0 kept: %s (%.0f MB, free %.0f MB)\n", st->keep_l0 ? "yes" : "no",
+                             l0_bytes / 1e6, (double)f2 / 1e6);
+        }
         if (tile_times)
             std::fprintf(stderr, "tile active edges: %d slots, %lld tiles in flight (%.0f MB each, free %.0f MB)\n",
                          st->act_keep, (long long)in_flight, slot_bytes / 1e6, (double)free_b / 1e6);
@@ -5484,6 +5520,7 @@ static int evaluate_tiled_impl(LoupHandle* h, int n_atoms, const int* atomic_num
         sw.kind = loup::GenericPassInputs::SweepForward;
         sw.layer = layer;
         use_active(t, sw, false);
+        if (layer == 0 && st->keep_l0 == 1) sw.keep0 = static_cast<float*>(t.keep0.p);
         record_force_pass(h, stress, false, &sw);
         for (int l = 0; l <= h->gen->out_lmax(layer); ++l) {
             tile_scatter_rows_kernel<<<grid((int64_t)t.n_local * width(layer, l)), 256, 0, h->stream>>>(
@@ -5518,6 +5555,7 @@ static int evaluate_tiled_impl(LoupHandle* h, int n_atoms, const int* atomic_num
             sw.adjoint[l] = a;
         }
         use_active(t, sw, layer == 0);
+        if (layer == 0 && st->keep_l0 == 1) sw.keep0 = static_cast<float*>(t.keep0.p);
         record_force_pass(h, stress, false, &sw);
         scatter_grad(t, layer - 1);
         fold_forces(t);

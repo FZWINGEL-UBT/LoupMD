@@ -64,6 +64,10 @@ struct GenericPassInputs {
     int sweep = SweepAll;
     int sweep_layer = 0;
     const float* adjoint_in[4] = {nullptr, nullptr, nullptr, nullptr};
+    // O31 (tiled): a buffer of GenericModel::sweep_keep_floats(N) floats the caller keeps per domain for layer 0's
+    // forward results that its backward reads. SweepForward 0 writes them there; SweepBackward 0 reads them there
+    // and does not replay layer 0's forward. Only where sweep_keep_layer0(); nullptr: the replay.
+    float* keep0 = nullptr;
     GemmFn gemm;
     std::function<void()> gemm_fork;
     std::function<void(int)> gemm_lane;
@@ -99,6 +103,11 @@ public:
     int out_lmax(int t) const;
     // Sweeps need every layer's output to exist: not with the long range, nor with the skip-chain fold.
     bool sweeps_available() const { return lr_ == nullptr && !chain_fold_; }
+    // O31: whether layer 0's backward sweep reads nothing of its forward but msgf[0..3] and D (the density layer 0
+    // with the hidden table, skip folded, linear readout: MACE-MP-0b3 / MPA-0 / OMAT-0 / MatPES), so a domain can
+    // keep them (GenericPassInputs::keep0) instead of the replay; and their floats for N receivers.
+    bool sweep_keep_layer0() const;
+    size_t sweep_keep_floats(int N) const;
     // The compiled product kernels this bundle uses, one signature per layer, joined by ';' (loup_get_info).
     std::string kernel_signature() const;
 

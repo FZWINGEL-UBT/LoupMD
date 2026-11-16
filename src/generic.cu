@@ -1440,6 +1440,25 @@ float* GenericModel::layer_out_grad(int t, int l) const { return layers_[t]->dho
 int GenericModel::out_width(int t) const { return layers_[t]->C_out; }
 int GenericModel::out_lmax(int t) const { return layers_[t]->lmax_out; }
 
+bool GenericModel::sweep_keep_layer0() const {
+    if (layers_.empty() || chain_fold_ || lr_) return false;
+    const GenericLayer* L = layers_[0];
+    return L->first_hidden && L->skip_folded && L->kind == 2 && L->readout == 0 && !L->ro_folded &&
+           L->lmax_x == 0 && !L->res0_table && !L->sc_has[0] && !L->sc_has[1] && !L->sc_has[2] && L->ro_w;
+}
+
+size_t GenericModel::sweep_keep_floats(int N) const {
+    return layers_.empty() ? 0 : (size_t)N * (16 * (size_t)layers_[0]->C_msg + 1);  // msgf l = 0..3, then D
+}
+
+namespace {
+// dh[a, c] += w[c]: the linear readout's gradient seed (ro_linear_kernel's) without its energy
+__global__ void add_row_vector_kernel(int N, int C, const float* __restrict__ w, float* __restrict__ dh) {
+    const int64_t i = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < (int64_t)N * C) dh[i] += w[i % C];
+}
+}  // namespace
+
 std::string GenericModel::kernel_signature() const {
     std::string out;
     for (const GenericLayer* L : layers_) {
@@ -2108,6 +2127,34 @@ void GenericModel::record(const GenericPassInputs& in) {
     };
 
     // ---------------- one sweep of a domain (GenericPassInputs::Sweep)
+    // O31: layer 0's msgf and D in the domain's own buffer (keep0) for its forward and backward sweeps of layer 0;
+    // the layer's pointers are given back when the pass returns
+    const bool keep0 = in.keep0 && sweep_t == 0 &&
+                       (sweep == GenericPassInputs::SweepForward || sweep == GenericPassInputs::SweepBackward);
+    if (keep0 && !sweep_keep_layer0()) throw std::logic_error("generic: keep0 given for a layer 0 that cannot keep");
+    struct Keep0 {
+        GenericLayer* L = nullptr;
+        float* msgf[4] = {};
+        float* D = nullptr;
+        ~Keep0() {
+            if (!L) return;
+            for (int l = 0; l < 4; ++l) L->msgf[l] = msgf[l];
+            L->D = D;
+        }
+    } keep0_guard;
+    if (keep0) {
+        GenericLayer* L0 = layers_[0];
+        keep0_guard.L = L0;
+        for (int l = 0; l < 4; ++l) keep0_guard.msgf[l] = L0->msgf[l];
+        keep0_guard.D = L0->D;
+        const size_t cm = (size_t)L0->C_msg;
+        size_t off = 0;
+        for (int l = 0; l < 4; ++l) {
+            L0->msgf[l] = in.keep0 + off;
+            off += (size_t)N * (2 * l + 1) * cm;
+        }
+        L0->D = in.keep0 + off;
+    }
     if (sweep == GenericPassInputs::SweepForward) {
         forward_layer(sweep_t, in.energy);
         return;
@@ -2128,7 +2175,12 @@ void GenericModel::record(const GenericPassInputs& in) {
                                              (size_t)N * dimL(l) * L->C_out * sizeof(float),
                                              cudaMemcpyDeviceToDevice, st));
         }
-        forward_layer(sweep_t, d_energy_sink_);  // adds the readout's seed onto the adjoint; energy already counted
+        if (keep0) {  // msgf and D kept from the forward sweep: only the readout's seed onto the adjoint
+            add_row_vector_kernel<<<(unsigned)(((int64_t)N * L->C_out + 255) / 256), 256, 0, st>>>(
+                N, L->C_out, L->ro_w, L->dhout[0]);
+        } else {
+            forward_layer(sweep_t, d_energy_sink_);  // adds the readout's seed onto the adjoint; energy already counted
+        }
         backward_layer(sweep_t);
         if (sweep_t > 0) {
             assemble_edges(false);
