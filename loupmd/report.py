@@ -84,13 +84,23 @@ def _plan_lines(metadata) -> list:
     plan, gpu = metadata["plan"], metadata["gpu"]
     where = (f"GPU {gpu['index']} ({gpu['name']}, compute capability {gpu['compute_capability']}, driver "
              f"{gpu['driver']})") if gpu else "the GPU"
-    lines = [f"the whole system on {where}"]
+    if plan.get("execution") == "tiled":
+        tiles = f"{plan['tiles']} " if plan.get("tiles") else ""
+        lines = [f"{tiles}tiles of at most {plan['receivers']:,} atoms on {where} (the cell does not fit the card "
+                 "whole); the integrator runs on the host"]
+    else:
+        lines = [f"the whole system on {where}"]
     if plan["kernels"]:
         layers = f", {plan['interaction_layers']} interaction layers" if plan["interaction_layers"] else ""
         cutoff = f", cutoff {plan['r_max_A']:g} A" if plan["r_max_A"] else ""
         lines.append(f"{plan['kernels']} kernels{layers}{cutoff}; library {plan['library'] or 'unknown'}")
-    if plan["memory"]:
-        lines.append(f"memory: {_bytes(plan['memory']['whole_bytes'])} planned, {_bytes(plan['memory']['free_bytes'])} "
+    memory = plan["memory"]
+    if memory and plan.get("execution") == "tiled" and memory.get("tiled_global_bytes") is not None:
+        lines.append(f"memory: the whole system would need {_bytes(memory['whole_bytes'])}; tiled "
+                     f"{_bytes(memory['tiled_global_bytes'] + memory['tile_workspace_bytes'])} planned, "
+                     f"{_bytes(memory['free_bytes'])} free on the card")
+    elif memory:
+        lines.append(f"memory: {_bytes(memory['whole_bytes'])} planned, {_bytes(memory['free_bytes'])} "
                      "free on the card")
     skin = metadata.get("skin")
     if skin and skin["mode"] == "auto":

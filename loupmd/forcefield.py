@@ -76,7 +76,8 @@ class ForceField:
         self.functional = entry.functional if entry is not None else None
         self.engine = None                 # the LoupEngine of the last structure
         self.last_bundle = None
-        self.bundle = None                 # its bundle file
+        self.last_execution = None         # of the engine made last by new_engine: {"mode", "receivers", "plan"}
+        self.bundle = None                # its bundle file
         self._bundle_elements = frozenset()
         self._system = None                # (atomic numbers, skin) the engine's system was set with
         self._probed = known is not None
@@ -129,10 +130,32 @@ class ForceField:
                 next_step="Put a molecule or a slab in a box with vacuum (at least the model's cutoff on each open "
                           "side) and set pbc=True.")
 
-    def new_engine(self, atoms, skin=0.5):
+    def new_engine(self, atoms, skin=0.5, capacity=None):
         """An engine of its own for ``atoms`` with the system set: what a ``Simulation`` runs on, so that
-        evaluating other structures with this force field does not disturb the run."""
+        evaluating other structures with this force field does not disturb the run.
+
+        ``capacity`` (a ``CapacityConfig``; ``None`` is the whole-system engine without a plan): with ``"auto"`` the
+        engine plans the execution first (``loup_plan_execution``) and a system that does not fit the GPU whole gets
+        a :class:`~loupmd.tiled_engine.TiledEngine`; ``"tiled"`` always does. ``last_execution`` then holds
+        ``{"mode", "receivers", "plan"}``."""
+        from . import _core
+        from .config import CapacityConfig
+
         self._check_periodic(atoms)
+        if capacity is not None and not isinstance(capacity, CapacityConfig):
+            raise InputError(f"capacity must be a CapacityConfig or None, got {type(capacity).__name__}")
+        if capacity is not None:
+            reasons = []
+            if capacity.mode == "wavefront":
+                reasons.append("capacity mode 'wavefront' is not in this version (plan task S5-T08)")
+            if capacity.state == "host":
+                reasons.append("state='host' (the tiled state in pinned host memory) is not in this version (plan "
+                               "task S5-T07)")
+            if capacity.mode == "tiled" and self.long_range:
+                reasons.append(f"capacity mode 'tiled' with {self.name}: the k-space terms of a long-range model "
+                               "need the whole cell")
+            if reasons:
+                raise PlanRefused(reasons, next_step="Use capacity 'auto' or 'whole' with state 'auto' or 'device'.")
         numbers = sorted({int(z) for z in atoms.numbers})
         self.check_elements(numbers)
         ensure_bundle = self._ensure_bundle
@@ -148,8 +171,24 @@ class ForceField:
         bundle = ensure_bundle(self.path, numbers, head=self.head, charge=self.charge,
                                spin_multiplicity=self.spin_multiplicity, environ=self._environ)
         engine = factory(bundle, device_id=self.device)
-        engine.set_system(atoms.numbers, atoms.get_masses(), skin=float(skin))
         self.last_bundle = bundle                  # of the engine made last, for the run's record
+        self.last_execution = {"mode": "whole", "receivers": 0, "plan": None}
+        mode = capacity.mode if capacity is not None else "whole"
+        plan = None
+        if mode == "auto" and not self.long_range and hasattr(engine, "plan_execution"):
+            engine.set_execution(capacity.exec_mode, capacity.receivers or 0, capacity.memory_fraction)
+            plan = engine.plan_execution(atoms.numbers, atoms.positions, atoms.cell.array, float(skin))
+            mode = "tiled" if plan.mode == _core.LOUP_EXEC_TILED else "whole"
+        if mode == "tiled":
+            from .tiled_engine import TiledEngine
+
+            receivers = capacity.receivers or (plan.receivers if plan is not None else 0)
+            tiled = TiledEngine(engine, receivers, capacity.memory_fraction)
+            tiled.set_system(atoms.numbers, atoms.get_masses(), skin=float(skin))
+            self.last_execution = {"mode": "tiled", "receivers": receivers, "plan": plan}
+            return tiled
+        self.last_execution["plan"] = plan
+        engine.set_system(atoms.numbers, atoms.get_masses(), skin=float(skin))
         return engine
 
     def engine_for(self, atoms, skin=0.5):

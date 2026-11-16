@@ -49,6 +49,9 @@ def _arguments_parser(parser):
     parser.add_argument("--check", default="skip", help="skip (default), gate or allow_unavailable: the accuracy "
                                                         "gate before the first step")
     parser.add_argument("--device", type=int, default=0, metavar="N", help="the GPU index (default 0)")
+    parser.add_argument("--capacity", choices=("auto", "whole", "tiled"), default="auto",
+                        help="auto (default): the whole cell when it fits the GPU, else tiles (NVE and Langevin); "
+                             "whole or tiled force one")
     parser.add_argument("--skin", default="auto", metavar="A", help="the neighbour-list skin in A, or auto "
                         "(default): chosen from how far the atoms move per step; it decides speed only")
     parser.add_argument("--output", metavar="DIR", help="the output directory (default <structure stem>.loupmd)")
@@ -97,7 +100,7 @@ def arguments_of(args) -> dict:
         if getattr(args, key) is not None:
             arguments[key] = getattr(args, key)
     for key, default in (("trusted", False), ("download", False), ("ensemble", "NVT"), ("timestep_fs", 0.5),
-                         ("repeat", [1, 1, 1]), ("check", "skip"), ("device", 0)):
+                         ("repeat", [1, 1, 1]), ("check", "skip"), ("device", 0), ("capacity", "auto")):
         if getattr(args, key) != default:
             arguments[key] = getattr(args, key)
     if velocities != "keep":

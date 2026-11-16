@@ -155,7 +155,8 @@ def md(structure, *, model, head=None, charge=None, spin_multiplicity=None, sha2
     - ``check``: ``"skip"`` (default), ``"gate"`` or ``"allow_unavailable"``, with ``gate=`` a ``GateConfig``;
     - ``skin``: the neighbour-list skin in A, or ``"auto"`` (default): chosen from how far the atoms move per
       step (``loupmd.skin``). It decides speed only;
-    - ``capacity``: ``"auto"`` or ``"whole"``; the tiled modes are not in this version;
+    - ``capacity``: ``"auto"`` (default): the whole system when it fits the GPU, else tiles of up to 65,536 atoms
+      (NVE and Langevin only, PLAN.md D65); ``"whole"`` or ``"tiled"`` force one;
     - ``device``: the GPU index.
     """
     # ---- everything below up to "load" needs no model file ----
@@ -173,9 +174,9 @@ def md(structure, *, model, head=None, charge=None, spin_multiplicity=None, sha2
                           next_step="Run without dispersion=, or use FastMACE's D3 (PLAN.md Stage 6D).")
     if capacity not in CAPACITIES:
         raise InputError(f"capacity={capacity!r} is not one of {CAPACITIES}")
-    if capacity in ("tiled", "wavefront"):
-        raise PlanRefused(f"capacity={capacity!r}: tiled execution is not in this version",
-                          next_step="Use capacity='auto' with a system that fits the GPU whole (PLAN.md Stage 5).")
+    if capacity == "wavefront":
+        raise PlanRefused("capacity='wavefront' is not in this version (plan task S5-T08)",
+                          next_step="Use capacity='auto', which runs a cell that does not fit the GPU whole in tiles.")
     repeat = _repeat(repeat)
     if not isinstance(ensemble, str) or ensemble.upper() not in ENSEMBLES:
         raise InputError(f"ensemble={ensemble!r} is not one of {ENSEMBLES}")
@@ -309,7 +310,7 @@ def md(structure, *, model, head=None, charge=None, spin_multiplicity=None, sha2
     if force_field.label is None:              # a file outside the table: its hash, so the record can load it again
         arguments.update(model=str(force_field.path), sha256=force_field.sha256)
     sim = Simulation(atoms, force_field, integrator=integrator, output=out, seed=seed, check=check, gate=gate,
-                     skin=skin)
+                     skin=skin, capacity=capacity)
     sim.run(steps=steps, schedule=schedule)
     sim.save_restart()
     metadata = provenance.collect(sim, source=source, repeat=repeat, arguments=arguments, warnings=warnings)

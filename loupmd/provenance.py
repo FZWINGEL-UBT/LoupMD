@@ -60,10 +60,20 @@ def _plan(sim):
     engine = sim._engine
     if engine is None:
         return plan
+    execution = getattr(sim, "execution", None) or {}
+    if execution.get("mode") == "tiled":       # tiles of at most `receivers` atoms (PLAN.md S5-T12)
+        plan.update(execution="tiled", receivers=int(getattr(engine, "receivers", 0) or execution["receivers"]),
+                    tiles=int(getattr(engine, "tiles", 0)) or None, integrator_on="host")
+    found = execution.get("plan")
+    if found is not None and found.whole_bytes > 0:      # 0: the bundle cannot tile, nothing was measured
+        plan["memory"] = {"whole_bytes": int(found.whole_bytes), "free_bytes": int(found.free_bytes),
+                          "tiled_global_bytes": int(found.tiled_global_bytes),
+                          "tile_workspace_bytes": int(found.tile_workspace_bytes)}
     try:
         from . import _core
 
-        plan["library"] = _core.library_version() if isinstance(engine, _core.LoupEngine) else None
+        inner = getattr(engine, "_eng", engine)               # a TiledEngine's LoupEngine
+        plan["library"] = _core.library_version() if isinstance(inner, _core.LoupEngine) else None
     except Exception:  # noqa: BLE001  (a replaced engine has no library)
         pass
     if hasattr(engine, "info"):
@@ -71,7 +81,7 @@ def _plan(sim):
         plan.update(kernels="specialised" if info.specialised else "generic",
                     kernel_signature=getattr(info, "kernel_signature", None),
                     interaction_layers=getattr(info, "n_layers", None), r_max_A=getattr(info, "r_max", plan["r_max_A"]))
-    if hasattr(engine, "plan_memory"):
+    if plan["memory"] is None and hasattr(engine, "plan_memory"):
         memory = engine.plan_memory(len(sim._atoms))
         plan["memory"] = {"whole_bytes": int(memory.whole_bytes), "free_bytes": int(memory.free_bytes)}
     return plan

@@ -1051,3 +1051,20 @@ RTX 5060 Ti only; library `91fb0fdfb9026c7f...` (the working tree after `3c6ab5c
 `tools/dev/bench_md.py`, OMAT-0 medium, ms per step, a fresh `LOUP_CACHE_DIR` per run. A tie: two builds read up to
 1.3% apart on NbCl5 (§6.8), and the added work is a few microseconds per rebuild, about one rebuild per 20 steps
 (estimate, not measured on its own).
+
+### 6.20 The tiled mode in `lm.md` and `Simulation` (16 November 2026, 03:30)
+
+RTX 5060 Ti only; library `91fb0fdfb9026c7f...` (no C change since §6.19; Python only). PLAN.md S5-T12, D65.
+
+- `pytest -s tests/gpu/test_tiled_md.py` (5 passed in 32 s):
+  - a tiled `Simulation` (cap 2,000, 3 tiles, host velocity Verlet) against the whole-system device NVE loop,
+    5,000 atoms, 20 steps of 1 fs from 300 K, no hybrids: positions 3.6e-8 A, energy 8.4e-9 eV/atom apart;
+  - tiled Langevin, 5,000 atoms from rest, 300 K, 0.05/fs, 200 steps of 2 fs: 298.9 K at the end, 30.7 ms per step
+    (measured by the engine's wall clock around the host loop);
+  - `loupmd md --capacity auto` on 320,000 atoms (`SrTiO3` 40^3), 10 steps: 8 tiles of at most 65,536; the report's
+    plan line says so, memory "the whole system would need 32.12 GiB; tiled 10.45 GiB planned, 14.00 GiB free".
+- `pytest tests/gpu -m "not acceptance"`: 284 passed in 604 s. Every GPU `Simulation` test now runs with
+  `capacity="auto"`, so a probe tile is planned (lists only) before each whole-system run.
+- `pytest tests/cpu`: 358 passed, 1 skipped.
+- Not measured: the setup time the plan adds to a whole-system run (one 4,096-atom list build and its
+  allocations; estimate well under a second); the step path is unchanged, so no step A/B was run.

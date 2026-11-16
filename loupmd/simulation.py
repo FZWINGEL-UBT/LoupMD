@@ -21,7 +21,7 @@ from pathlib import Path
 
 from . import output as _output
 from . import skin as _skin
-from .config import GateConfig, IntegratorConfig, Output
+from .config import CapacityConfig, GateConfig, IntegratorConfig, Output
 from .errors import (BackendError, CellDivergedError, GateFailed, GateUnavailable, InputError, LoupError,
                      NonFiniteError, PlanRefused, RestartMismatch)
 from .forcefield import ForceField, load
@@ -37,6 +37,8 @@ THERMO_ROWS_PER_CALL = 4000
 # the first step; failed -> GateFailed, unavailable -> GateUnavailable. check="allow_unavailable": as "gate", but
 # an unavailable gate is recorded and the run goes on.
 CHECK_MODES = ("skip", "gate", "allow_unavailable")
+CAPACITY_MODES = ("auto", "whole", "tiled", "wavefront")
+TILED_SCHEMES = ("nve", "langevin")        # what the tiled mode integrates (on the host, PLAN.md D65)
 
 
 def fixed_mask(atoms):
@@ -86,12 +88,17 @@ class Simulation:
       (``loupmd.skin``; ``Simulation.skin_record``). It decides speed only;
     - ``check``: ``"skip"`` (default), ``"gate"`` or ``"allow_unavailable"``: the accuracy gate (the 3x rule
       against MACE float64, ``loupmd.validate``) on rattled copies of the structure before the first step;
-      ``gate`` is its ``GateConfig``. ``Simulation.gate`` holds the status and the record.
+      ``gate`` is its ``GateConfig``. ``Simulation.gate`` holds the status and the record;
+    - ``capacity``: ``"auto"`` (default), ``"whole"``, ``"tiled"`` or a ``CapacityConfig``. ``"auto"`` plans the
+      execution before the first step and runs a system that does not fit the GPU whole in tiles of at most
+      ``receivers`` atoms (``Simulation.execution`` says which). The tiled mode runs NVE and Langevin, with the
+      integrator on the host (PLAN.md D65); other integrators are refused in it.
 
     Nothing is exported and no engine is made before the first ``run``; argument errors come before that.
     """
 
-    def __init__(self, atoms, force_field, *, integrator, output=None, seed=None, skin=0.5, check="skip", gate=None):
+    def __init__(self, atoms, force_field, *, integrator, output=None, seed=None, skin=0.5, check="skip", gate=None,
+                 capacity="auto"):
         from ase import Atoms
 
         if not isinstance(atoms, Atoms):
@@ -127,6 +134,20 @@ class Simulation:
             raise InputError(f"check={check!r} is not one of {CHECK_MODES}")
         if gate is not None and not isinstance(gate, GateConfig):
             raise InputError(f"gate must be a GateConfig or None, got {type(gate).__name__}")
+        if isinstance(capacity, str):
+            if capacity not in CAPACITY_MODES:
+                raise InputError(f"capacity={capacity!r} is not one of {CAPACITY_MODES} or a CapacityConfig")
+            capacity = CapacityConfig(mode=capacity)
+        elif not isinstance(capacity, CapacityConfig):
+            raise InputError(f"capacity must be one of {CAPACITY_MODES} or a CapacityConfig, got "
+                             f"{type(capacity).__name__}")
+        self.capacity = capacity
+        if capacity.mode == "wavefront" or capacity.state == "host":
+            raise PlanRefused([r for r, bad in (
+                ("capacity mode 'wavefront' is not in this version (plan task S5-T08)", capacity.mode == "wavefront"),
+                ("state='host' is not in this version (plan task S5-T07)", capacity.state == "host")) if bad],
+                next_step="Use capacity 'auto', 'whole' or 'tiled'.")
+        self.execution = None             # {"mode": "whole" or "tiled", "receivers", "plan"} once the engine is made
         self.check, self.gate_config = check, gate or GateConfig()
         self.gate = {"status": "skipped"}  # then "passed", "failed" or "unavailable", with the gate's record
         self.totals = {"steps": 0, "engine_ms": 0.0, "wall_s": 0.0, "rebuilds": 0, "pipelined_steps": 0,
@@ -162,6 +183,15 @@ class Simulation:
         self._schedule = None              # the ScheduleState of the schedule attached last
         self._schedule_origin = 0          # the step at which that schedule's position was 0
         self._stopped = None               # the error that ended the run
+        if capacity.mode == "tiled":
+            self._check_tiled_scheme()
+
+    def _check_tiled_scheme(self):
+        if self.config.scheme not in TILED_SCHEMES:
+            raise PlanRefused(f"the {self.config.scheme} integrator in tiled mode",
+                              why="the tiled mode integrates NVE and Langevin on the host; the other thermostats and "
+                                  "the barostats wait for the device integrators on the tiled state (PLAN.md D65)",
+                              next_step="Use lm.integrators.NVE or Langevin, or a cell that fits the GPU whole.")
 
     # ---------------------------------------------------------------------------------------------- start
 
@@ -185,8 +215,11 @@ class Simulation:
                     atoms, self.config.timestep_fs, hottest, self._fixed)))
                 self.skin_record.update(estimated_A=self.skin, skin_A=self.skin)
             self._skin_probe = {"from": self._resume[1] if self._resume else 0, "hottest_K": hottest}
-        engine = self.force_field.new_engine(atoms, self.skin)
+        engine = self.force_field.new_engine(atoms, self.skin, capacity=self.capacity)
         self._bundle = self.force_field.last_bundle
+        self.execution = dict(self.force_field.last_execution or {"mode": "whole", "receivers": 0, "plan": None})
+        if self.execution["mode"] == "tiled":
+            self._check_tiled_scheme()
         if self._npt and getattr(getattr(engine, "info", lambda: None)(), "has_long_range", False):
             raise PlanRefused("a barostat with a long-range model (MACE-POLAR-1)",
                               why="the model's k-space terms are set up for one cell in this version")
@@ -253,6 +286,9 @@ class Simulation:
             "integrator": dataclasses.asdict(self.config),
             "output": dataclasses.asdict(self.output),
             "seed": self.seed, "skin": self.skin, "atoms": len(self._atoms),
+            # the execution the run took, so that a resume takes it again (the state blocks of the two differ)
+            "capacity": {"mode": self.execution["mode"], "receivers": self.execution["receivers"] or None,
+                         "memory_fraction": self.capacity.memory_fraction},
         }
         text = json.dumps(record, indent=2) + "\n"
         _output.write_atomically(Path(self.output.directory) / SIMULATION_NAME,
@@ -625,8 +661,9 @@ class Simulation:
         out = Output(**record["output"]) if record.get("output") else None
         if out is not None and Path(out.directory).resolve() != directory.resolve():
             out = dataclasses.replace(out, directory=str(directory))     # the directory was moved or is relative
+        capacity = CapacityConfig(**record["capacity"]) if record.get("capacity") else "whole"   # older records
         sim = cls(atoms, force_field, integrator=IntegratorConfig(**record["integrator"]), output=out,
-                  seed=int(data["seed"]), skin=float(record["skin"]))
+                  seed=int(data["seed"]), skin=float(record["skin"]), capacity=capacity)
         stored = json.loads(str(data["schedule"]))
         if stored is not None:
             sim._schedule_origin = int(stored.pop("origin"))
