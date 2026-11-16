@@ -1500,3 +1500,14 @@ axis lies farther than the cutoff plus the column's cross-section radius, and it
 cheap next to the pair's work: d3bj NbCl5 1.33 -> 1.22 ms, SrTiO3 3.54 -> 3.46, water 4.20 -> 4.16; split 25
 2 to 3%; three-body 1 to 2% (A B B A, both orders agree). Results equal within 4e-8 eV/A (summation order).
 `tests/gpu/test_d3.py` 52 passed on d3m.
+
+Fourth step (`libloupmd_d3n.so`, 7458a4c8045c3e24): the three-body loop formed C6_jk per triangle as
+w_j^T C6ref[s_j, s_k] w_k (25 FMA and 25 table loads). Each entry j now projects u_j(s, y) = sum_x w_j[x]
+C6ref[s_j, s](x, y) once into shared memory (S x 5 floats per thread, 2.5 KB per species per block beyond the 37
+KB of chunk buffers; with more species than the card's opt-in shared memory allows, the old loop runs, and
+`LOUP_D3_ATM_PROJ=0` forces it for tests). d3bj-atm NbCl5 5.66 -> 5.39 ms, SrTiO3 53.9 -> 51.0, water 72.6 -> 68.0
+(5 to 6%, A B B A); d3bj unchanged. Results within 1.5e-9 eV/A. `tests/gpu/test_d3.py` 52 passed on d3n, and its 8
+three-body tests with `LOUP_D3_ATM_PROJ=0`. So the C6 table was not the three-body term's main cost; the
+per-triangle arithmetic (a square root, a power, the angle term and its derivatives) is.
+
+GPU suite (`-m "not acceptance"`) on d3m: 353 passed (not rerun on d3n, which changes only the three-body kernel).

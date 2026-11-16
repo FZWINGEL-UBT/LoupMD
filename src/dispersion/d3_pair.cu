@@ -590,7 +590,7 @@ __global__ void __launch_bounds__(ATM_THREADS) atm_kernel(
         const Grid* __restrict__ gp, AtmParams p, int S, const float* __restrict__ c6ref,
         const float* __restrict__ r0ab, const float* __restrict__ w, const float* __restrict__ dw,
         double* __restrict__ acc, double* __restrict__ eatom, double* __restrict__ force_s,
-        double* __restrict__ dedcn) {
+        double* __restrict__ dedcn, int proj) {
     extern __shared__ float sm[];
     __shared__ int s_count;
     __shared__ double s_red[11];
@@ -658,6 +658,19 @@ __global__ void __launch_bounds__(ATM_THREADS) atm_kernel(
                 const int sj = __float_as_int(pj.w);
                 float wj[MAXREF];
                 for (int t = 0; t < MAXREF; ++t) wj[t] = X[(4 + t) * ATM_CHUNK + a];
+                // proj: u_j(s, y) = sum_x w_j[x] C6ref[s_j, s](x, y) once per entry, so that C6_jk takes 5 FMA per
+                // triangle instead of 25 (status 6.33); this thread's column of the shared table
+                float* uj = sm + 2 * ATM_FIELDS * ATM_CHUNK + threadIdx.x;
+                if (proj) {
+                    for (int s2 = 0; s2 < S; ++s2) {
+                        const float* tab = c6ref + ((size_t)sj * S + s2) * MAXREF * MAXREF;
+                        for (int y = 0; y < MAXREF; ++y) {
+                            float u = 0.0f;
+                            for (int x = 0; x < MAXREF; ++x) u += wj[x] * tab[x * MAXREF + y];
+                            uj[(s2 * MAXREF + y) * ATM_THREADS] = u;
+                        }
+                    }
+                }
                 const float c6ij = X[9 * ATM_CHUNK + a], dc6ij = X[10 * ATM_CHUNK + a];
                 const float r0ij = X[11 * ATM_CHUNK + a];
                 const float ra = pj.x * pj.x + pj.y * pj.y + pj.z * pj.z;
@@ -669,12 +682,17 @@ __global__ void __launch_bounds__(ATM_THREADS) atm_kernel(
                     const float rc = jx * jx + jy * jy + jz * jz;
                     if (rc >= p.cut2 || rc <= 1e-12f) continue;
                     const int sk = __float_as_int(pk.w);
-                    const float* tab = c6ref + ((size_t)sj * S + sk) * MAXREF * MAXREF;
                     float c6jk = 0.0f;
-                    for (int x = 0; x < MAXREF; ++x) {
-                        float t = 0.0f;
-                        for (int y = 0; y < MAXREF; ++y) t += tab[x * MAXREF + y] * Y[(4 + y) * ATM_CHUNK + b];
-                        c6jk += wj[x] * t;
+                    if (proj) {
+                        for (int y = 0; y < MAXREF; ++y)
+                            c6jk += uj[(sk * MAXREF + y) * ATM_THREADS] * Y[(4 + y) * ATM_CHUNK + b];
+                    } else {
+                        const float* tab = c6ref + ((size_t)sj * S + sk) * MAXREF * MAXREF;
+                        for (int x = 0; x < MAXREF; ++x) {
+                            float t = 0.0f;
+                            for (int y = 0; y < MAXREF; ++y) t += tab[x * MAXREF + y] * Y[(4 + y) * ATM_CHUNK + b];
+                            c6jk += wj[x] * t;
+                        }
                     }
                     const float c6ik = Y[9 * ATM_CHUNK + b];
                     const float c9 = p.s9 * sqrtf(c6ij * c6ik * c6jk);
@@ -928,6 +946,20 @@ public:
         sort_tmp_.alloc(sort_bytes_, bytes_);
         smem_ = (size_t)(S + 2 * WPB * S * MAXREF) * sizeof(float);
         smem3_ = (size_t)2 * ATM_FIELDS * ATM_CHUNK * sizeof(float);
+        {   // the three-body projections (atm_kernel's proj) when they fit the shared memory of a block;
+            // LOUP_D3_ATM_PROJ=0 (testing) keeps the per-triangle table walk
+            const size_t with = smem3_ + (size_t)S * MAXREF * ATM_THREADS * sizeof(float);
+            int dev = 0, optin = 0;
+            CK(cudaGetDevice(&dev));
+            CK(cudaDeviceGetAttribute(&optin, cudaDevAttrMaxSharedMemoryPerBlockOptin, dev));
+            const char* env = std::getenv("LOUP_D3_ATM_PROJ");
+            atm_proj_ = with <= (size_t)optin && !(env && std::string(env) == "0") ? 1 : 0;
+            if (atm_proj_) {
+                smem3_ = with;
+                CK(cudaFuncSetAttribute(atm_kernel<true>, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)with));
+                CK(cudaFuncSetAttribute(atm_kernel<false>, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)with));
+            }
+        }
         if (split_) {
             std::vector<float> chan;
             std::vector<double> lam;
@@ -993,11 +1025,11 @@ public:
             if (forces)
                 atm_kernel<true><<<n, ATM_THREADS, smem3_, st>>>(n, ps_.p, keys_.p, bin_start_.p, grid_.p, a3_, S_,
                                                                 c6_d_.p, r0_d_.p, w_.p, dw_.p, acc_.p, eatom,
-                                                                force_s_.p, dedcn_.p);
+                                                                force_s_.p, dedcn_.p, atm_proj_);
             else
                 atm_kernel<false><<<n, ATM_THREADS, smem3_, st>>>(n, ps_.p, keys_.p, bin_start_.p, grid_.p, a3_, S_,
                                                                  c6_d_.p, r0_d_.p, w_.p, dw_.p, acc_.p, eatom,
-                                                                 force_s_.p, dedcn_.p);
+                                                                 force_s_.p, dedcn_.p, atm_proj_);
         }
         if (split_) {
             // the k sum and the self term: after the pair kernels (they add to forces, dE/dCN and per-atom energies)
@@ -1136,6 +1168,7 @@ private:
     DevBuf<KVec> kvec_d_;
     DevBuf<double2> rho6_d_, rho8_d_;
     DevBuf<float3> frac_d_;
+    int atm_proj_ = 0;
     int n_ = 0, S_ = 0, nbins_ = 0, nb_[3] = {1, 1, 1}, end_bit_ = 1;
     size_t bytes_ = 0, sort_bytes_ = 0, smem_ = 0, smem3_ = 0;
     DevBuf<Grid> grid_;

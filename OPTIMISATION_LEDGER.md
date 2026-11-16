@@ -306,6 +306,7 @@ Conventions:
 | [d3-f32-partials](#d3-f32-partials) | D3 force kernels sum forces, virial and dE/dCN in float32 per lane, added to float64 every 32 pairs or triangles; the energy stays float64 per pair | - | `src/dispersion/d3_pair.cu` | ADOPTED | D77 | d3bj 2.56 / 8.51 / 10.08 -> 1.36 / 3.67 / 4.43 ms (NbCl5, SrTiO3, water); d3bj-atm 7.59 / 76.0 / 103.1 -> 5.80 / 54.9 / 73.4 ms; OMAT-0 medium MD step with d3bj x2.01 -> x1.44 of the model alone at 5,000 atoms; forces within 2.2e-8 eV/A | [status 6.33](STATUS_AND_PROFILE.md) |
 | [d3-dedcn-f32](#d3-dedcn-f32) | The CN chain rule reads a float32 copy of dE/dCN instead of converting float64 per pair | d3-f32-partials | `src/dispersion/d3_pair.cu` | ADOPTED | D77 | d3bj 1.35 / 3.67 / 4.45 -> 1.33 / 3.53 / 4.21 ms (NbCl5, SrTiO3, water); forces bit-identical | [status 6.33](STATUS_AND_PROFILE.md) |
 | [d3-walk-trim](#d3-walk-trim) | The D3 walks skip bin columns beyond the cutoff and cut each column to its chord | d3-dedcn-f32 | `src/dispersion/d3_pair.cu` | ADOPTED | D77 | d3bj 1.33 / 3.54 / 4.20 -> 1.22 / 3.46 / 4.16 ms (NbCl5, SrTiO3, water); split 25 and three-body 1 to 3% | [status 6.33](STATUS_AND_PROFILE.md) |
+| [d3-atm-proj](#d3-atm-proj) | Three-body term: C6_jk from per-entry projections in shared memory (5 FMA per triangle instead of 25) | d3-walk-trim | `src/dispersion/d3_pair.cu` | ADOPTED | D77 | d3bj-atm 5.66 / 53.9 / 72.6 -> 5.39 / 51.0 / 68.0 ms (NbCl5, SrTiO3, water); d3bj unchanged | [status 6.33](STATUS_AND_PROFILE.md) |
 
 ## Chronology
 
@@ -2112,5 +2113,7 @@ against this version with the 3x rule before it replaces it.
 <a id="d3-dedcn-f32"></a>**d3-dedcn-f32** (ADOPTED, D77, 16 November 2026, 5060 Ti only). A float64-to-float32 conversion runs at float64 rate on consumer GPUs; the chain rule did one per pair. The copy costs one tiny kernel per evaluation. The pair kernel still converts each pair energy to float64 (kept: the energy-only path must give the same energy).
 
 <a id="d3-walk-trim"></a>**d3-walk-trim** (ADOPTED, D77, 16 November 2026, 5060 Ti only). A conservative bound for any cell: a column of bins is a line thickened by its cross-section radius, so a column whose line is farther than cutoff plus that radius holds no pair, and the rest need only the chord's bins (one bin of margin). It removes most of the walk's out-of-range tests but saves only 2 to 8%: the D3 passes are bound by the pairs' own arithmetic (pair kernel 1.83 ms, chain rule 1.09, CN count 0.61 at 5,000 atoms, nsys), not by the distance tests.
+
+<a id="d3-atm-proj"></a>**d3-atm-proj** (ADOPTED, D77, 16 November 2026, 5060 Ti only). Smaller than expected (5 to 6%): the C6 table walk was not the three-body term's bottleneck. It costs 2.5 KB of shared memory per species per block, so it needs the opt-in limit beyond four species and falls back to the old loop beyond about 24 on the RTX 5060 Ti. Next for the three-body term: per-triangle arithmetic (sqrt, powf, the angle factor and its two derivatives).
 
 [d3bo]: docs/validation/dispersion-bakeoff.md
