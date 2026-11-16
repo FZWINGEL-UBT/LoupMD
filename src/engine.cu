@@ -130,18 +130,18 @@ __global__ void publish_kernel(const int* __restrict__ a, const int* __restrict_
     publish3(counter, pub, a ? *a : 0, b ? *b : 0, c ? *c : 0);
 }
 
-// The MD step's hinge (run_md_loop): publishes the skin-check flag and the last rebuild's row-order flag, and lets
-// the step's force pass (IF node on rest) run only if no rebuild is needed and the rows are valid, so the host can
-// queue the next step while this one's forces run instead of reading the flag at an idle GPU. With has_rebuild, the
-// step graph's rebuild branch (IF node on rebuild) runs when a rebuild is needed and the rows are valid.
-__global__ void guard_step_kernel(cudaGraphConditionalHandle rest, cudaGraphConditionalHandle rebuild, int has_rebuild,
-                                  const int* __restrict__ need_rebuild, const int* __restrict__ order_err,
-                                  unsigned int* __restrict__ counter, int* __restrict__ pub) {
+// The MD step's hinge (run_md_loop): publishes the skin-check flag and the last rebuild's row-order flag, and picks the
+// body of the step graph's SWITCH node: 0 the rest (force pass + second half) when no rebuild is needed, 1 the rebuild
+// branch (has_rebuild) when one is, none when the rows are invalid or the host rebuilds. The host queues the next step
+// while this one's forces run instead of reading the flag at an idle GPU. One SWITCH node rather than an IF node per
+// body: every conditional node a step evaluates costs time even when its body does not run.
+__global__ void guard_step_kernel(cudaGraphConditionalHandle cond, int has_rebuild, const int* __restrict__ need_rebuild,
+                                  const int* __restrict__ order_err, unsigned int* __restrict__ counter,
+                                  int* __restrict__ pub) {
     const int flag = *need_rebuild;
     const int bad_rows = *order_err;
     publish3(counter, pub, flag, bad_rows, 0);
-    cudaGraphSetConditional(rest, (flag || bad_rows) ? 0u : 1u);
-    if (has_rebuild) cudaGraphSetConditional(rebuild, (flag && !bad_rows) ? 1u : 0u);
+    cudaGraphSetConditional(cond, bad_rows ? 2u : !flag ? 0u : has_rebuild ? 1u : 2u);
 }
 
 // The step graph's rebuild branch after nl_count: publishes the edge count, the longest row and whether the new list
@@ -2409,14 +2409,34 @@ static int run_md_loop(
                                                                    h->d_pub_counter, h->d_pub);
             }, {fill_body});
         };
+        // The step graph: move + check + guard_step_kernel, then one SWITCH node (body 0 the rest, body 1 the rebuild
+        // branch when dev).
         const Body step_body = [&](cudaGraph_t g) -> int {
-            std::vector<Body> bodies{rest_body};
-            if (dev) bodies.push_back(rebuild_body);
-            return capture_ifs(g, [&](const cudaGraphConditionalHandle* c) {
-                record_move();
-                loup::guard_step_kernel<<<1, 1, 0, h->stream>>>(c[0], dev ? c[1] : c[0], dev ? 1 : 0, h->d_need_rebuild,
-                                                                 h->d_order_err, h->d_pub_counter, h->d_pub);
-            }, bodies);
+            cudaGraphConditionalHandle c;
+            CUDA_CHECK(cudaGraphConditionalHandleCreate(&c, g, 0, 0));
+            CUDA_CHECK(cudaStreamBeginCaptureToGraph(h->stream, g, nullptr, nullptr, 0, cudaStreamCaptureModeGlobal));
+            record_move();
+            loup::guard_step_kernel<<<1, 1, 0, h->stream>>>(c, dev ? 1 : 0, h->d_need_rebuild, h->d_order_err,
+                                                             h->d_pub_counter, h->d_pub);
+            cudaStreamCaptureStatus status;
+            const cudaGraphNode_t* deps_p = nullptr;
+            size_t n_deps = 0;
+            CUDA_CHECK(cudaStreamGetCaptureInfo(h->stream, &status, nullptr, nullptr, &deps_p, nullptr, &n_deps));
+            const std::vector<cudaGraphNode_t> deps(deps_p, deps_p + n_deps);
+            cudaGraphNodeParams cp = {};
+            cp.type = cudaGraphNodeTypeConditional;
+            cp.conditional.handle = c;
+            cp.conditional.type = cudaGraphCondTypeSwitch;
+            cp.conditional.size = dev ? 2 : 1;
+            cudaGraphNode_t node;
+            CUDA_CHECK(cudaGraphAddNode(&node, g, deps.data(), nullptr, deps.size(), &cp));
+            CUDA_CHECK(cudaStreamUpdateCaptureDependencies(h->stream, &node, nullptr, 1,
+                                                           cudaStreamSetCaptureDependencies));
+            cudaGraph_t captured = nullptr;
+            CUDA_CHECK(cudaStreamEndCapture(h->stream, &captured));
+            if (rest_body(cp.conditional.phGraph_out[0]) != 0) return -1;
+            if (dev && rebuild_body(cp.conditional.phGraph_out[1]) != 0) return -1;
+            return 0;
         };
         if (instantiate(h->md_step_graph, h->md_step_exec, step_body) != 0) return -1;
         if (instantiate(h->md_checked_graph, h->md_checked_exec, checked_rest_body) != 0) return -1;
