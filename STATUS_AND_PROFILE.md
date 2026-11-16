@@ -1027,3 +1027,27 @@ atoms in 3 tiles: within 1e-7 eV/atom and 1e-5 eV/A after moves under skin/2 (ke
   every tile; one per 18 steps here).
 - `pytest tests/cpu`: 350 passed, 1 skipped.
 - Not measured: thermostatted tiled MD (not built, D63); other models; the step path's A/B (not changed).
+
+### 6.19 Large boxes and the edge limit (16 November 2026, 03:30)
+
+RTX 5060 Ti only; library `91fb0fdfb9026c7f...` (the working tree after `3c6ab5c`). PLAN.md S5-T09, D64.
+
+- `pytest -s tests/gpu/test_large_box.py` (3 passed): a 1,080-atom `SrTiO3` piece near the far corner of a 1,000 A
+  box against the same piece in a 100 A box, without hybrids: whole-system call 5.2e-9 eV/atom, 1.8e-6 eV/A;
+  tiled call 6.7e-10 eV/atom, 8.7e-7 eV/A. With the edge limit lowered to 600,000, 13,720 atoms (about 1.37M
+  edges) are refused by the whole-system call with the message and run in tiles by `capacity.evaluate`.
+- Every list rebuild now sums the degrees in 64 bits (one kernel over the atoms and an 8-byte read with the edge
+  count it already reads).
+- `pytest tests/gpu -m "not acceptance"`: 281 passed in 642 s. `pytest tests/cpu`: 350 passed, 1 skipped.
+
+| Round | NbCl5, S5-T06 build | NbCl5, this build | SrTiO3, S5-T06 build | SrTiO3, this build |
+|---|---|---|---|---|
+| 1 | 1.889 | 1.915 | 8.215 | 8.232 |
+| 2 | 1.889 | 1.892 | 8.224 | 8.158 |
+| 3 | 1.894 | 1.886 | 8.156 | 8.169 |
+| 4 | 1.892 | 1.909 | 8.164 | 8.166 |
+| Mean | 1.891 | 1.901 (+0.5%) | 8.190 | 8.181 (-0.1%) |
+
+`tools/dev/bench_md.py`, OMAT-0 medium, ms per step, a fresh `LOUP_CACHE_DIR` per run. A tie: two builds read up to
+1.3% apart on NbCl5 (§6.8), and the added work is a few microseconds per rebuild, about one rebuild per 20 steps
+(estimate, not measured on its own).

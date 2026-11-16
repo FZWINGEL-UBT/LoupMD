@@ -31,7 +31,8 @@ def _whole(bundle, at):
 
 
 @pytest.mark.full
-def test_auto_runs_a_cell_that_fits_whole_as_the_whole_system_call():
+def test_auto_runs_a_cell_that_fits_whole_as_the_whole_system_call(monkeypatch):
+    monkeypatch.setenv("LOUP_NO_HYBRID", "1")     # two engines' hybrid plan picks differ by up to 1.1e-6 eV/atom
     at = srtio3(8)
     at.positions += np.random.default_rng(3).normal(scale=0.03, size=at.positions.shape)
     bundle = _bundle()
@@ -44,9 +45,10 @@ def test_auto_runs_a_cell_that_fits_whole_as_the_whole_system_call():
         gc.collect()
     assert res.mode == "whole" and res.tiles == 1
     assert res.plan.whole_bytes > 0 and res.plan.whole_bytes < res.plan.free_bytes
-    # Two engines' whole-system calls: the hybrid GEMMs' plan picks differ (PLAN.md D61; measured 8.4e-7 eV/atom).
-    assert abs(res.energy - e0) / len(at) <= 1e-6
-    assert np.abs(res.forces - f0).max() <= 1e-5 and np.abs(res.stress - s0).max() <= 1e-7
+    # Without hybrids two engines' whole-system calls agree to float32 rounding (with them, PLAN.md D61: up to
+    # 1.1e-6 eV/atom was seen here).
+    assert abs(res.energy - e0) / len(at) <= 1e-7
+    assert np.abs(res.forces - f0).max() <= 1e-5 and np.abs(res.stress - s0).max() <= 1e-8
 
 
 @pytest.mark.full

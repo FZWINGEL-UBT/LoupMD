@@ -721,6 +721,10 @@ struct LoupHandle {
     int* d_bin_wrap = nullptr;
     int* d_bin_sp = nullptr;
     int* d_deg = nullptr;
+    unsigned long long* d_edge_total = nullptr;  // the degrees' sum in 64 bits (rebuild_neighbors)
+    // The most edges a whole-system list may have: the edge arrays are indexed e * 3 and e * 4 in int.
+    // LOUP_DEBUG_EDGE_LIMIT lowers it for the test of the refusal (read by loup_set_system).
+    long long edge_limit = 536870911;
     int* d_row_ptr = nullptr;
     int* d_act_deg = nullptr;
     int* d_act_row_ptr = nullptr;
@@ -888,7 +892,7 @@ struct LoupHandle {
         freep(d_ro_keys); freep(d_ro_vals); freep(d_ro_tmp); freep(d_order_err);
         freep(d_bin_counts); freep(d_bin_offsets); freep(d_bin_cursor);
         freep(d_bin_atom_id); freep(d_bin_pos); freep(d_bin_pos_f32); freep(d_bin_wrap); freep(d_bin_sp);
-        freep(d_deg); freep(d_row_ptr); freep(d_cub_tmp); cub_tmp_bytes = 0;
+        freep(d_deg); freep(d_edge_total); freep(d_row_ptr); freep(d_cub_tmp); cub_tmp_bytes = 0;
         freep(d_act_deg); freep(d_act_row_ptr);
 
         freep(d_senders); freep(d_receivers); freep(d_shift_cart); freep(d_pairs);
@@ -1280,6 +1284,16 @@ static int download_cell_dev(LoupHandle* h, loup::CellDev* out = nullptr) {
     return 0;
 }
 
+extern "C++" {
+// The sum of n int degrees in 64 bits (*out is zeroed by the caller).
+__global__ void sum_degrees_kernel(int n, const int* __restrict__ deg, unsigned long long* __restrict__ out) {
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    unsigned long long d = i < n ? (unsigned long long)(unsigned)deg[i] : 0ull;
+    for (int o = 16; o > 0; o >>= 1) d += __shfl_down_sync(0xffffffffu, d, o);
+    if ((threadIdx.x & 31) == 0 && d) atomicAdd(out, d);
+}
+}  // extern "C++"
+
 static int rebuild_neighbors(LoupHandle* h) {
     h->nl_valid = false;  // set again only when the rebuild completes
     const int N = h->N;
@@ -1396,14 +1410,25 @@ static int rebuild_neighbors(LoupHandle* h) {
             h->d_bin_offsets, h->d_bin_atom_id, h->d_bin_pos, h->d_bin_pos_f32, h->d_deg);
 
     CUDA_CHECK(cudaMemsetAsync(h->d_deg + N, 0, sizeof(int), h->stream));
+    if (!h->d_edge_total) CUDA_CHECK(cudaMalloc(&h->d_edge_total, sizeof(unsigned long long)));
+    CUDA_CHECK(cudaMemsetAsync(h->d_edge_total, 0, sizeof(unsigned long long), h->stream));
+    sum_degrees_kernel<<<(N + 255) / 256, 256, 0, h->stream>>>(N, h->d_deg, h->d_edge_total);
     size_t scanN_bytes = 0;
     cub::DeviceScan::ExclusiveSum(nullptr, scanN_bytes, h->d_deg, h->d_row_ptr, N + 1, h->stream);
     if (ensure_cub_tmp(h, scanN_bytes) != 0) return -1;
     cub::DeviceScan::ExclusiveSum(h->d_cub_tmp, scanN_bytes, h->d_deg, h->d_row_ptr, N + 1, h->stream);
 
     int E_new = 0;
+    unsigned long long E_total = 0;
     CUDA_CHECK(cudaMemcpyAsync(&E_new, h->d_row_ptr + N, sizeof(int), cudaMemcpyDeviceToHost, h->stream));
+    CUDA_CHECK(cudaMemcpyAsync(&E_total, h->d_edge_total, sizeof(E_total), cudaMemcpyDeviceToHost, h->stream));
     CUDA_CHECK(cudaStreamSynchronize(h->stream));
+    if (E_total > (unsigned long long)h->edge_limit) {
+        h->nl_valid = false;
+        loup::set_error("the neighbour list has %llu edges, more than the %lld one call can index; run the system "
+                        "in tiles (capacity 'auto' or 'tiled')", E_total, h->edge_limit);
+        return -1;
+    }
 
     h->E_skin = E_new;
     if (E_new > 0) {
@@ -2108,6 +2133,10 @@ static int set_system_impl(LoupHandle* h, int n_atoms, const int* atomic_numbers
     if (n_ghost < 0 || n_ghost >= n_atoms) {
         loup::set_error("n_ghost must be between 0 and the atom count less one, got %d of %d", n_ghost, n_atoms);
         return -1;
+    }
+    {
+        const char* lim = std::getenv("LOUP_DEBUG_EDGE_LIMIT");
+        h->edge_limit = (lim && *lim) ? std::max(1LL, std::atoll(lim)) : 536870911LL;
     }
     if (n_ghost > 0 && !(h->gen && h->gen->sweeps_available())) {
         loup::set_error("an open domain needs a bundle of the generic path without long range, and "
@@ -4611,7 +4640,10 @@ static int plan_execution_impl(LoupHandle* h, int n_atoms, const int* atomic_num
     } else {
         for (int c : kCaps) {
             tiled_at(c, global, ws);
-            if (global + ws <= allowed) { cap = c; break; }
+            if (global + ws <= allowed && std::min((double)c, n) * epl * 1.1 <= (double)h->edge_limit) {
+                cap = c;  // the tile's own list stays within the edge limit, with 10% for its densest region
+                break;
+            }
         }
     }
     plan.whole_bytes = (size_t)whole;
@@ -4619,7 +4651,7 @@ static int plan_execution_impl(LoupHandle* h, int n_atoms, const int* atomic_num
     plan.tile_workspace_bytes = (size_t)ws;
     plan.free_bytes = free_b;
     plan.receivers = cap;
-    const bool whole_fits = whole <= allowed && edge_cap(n * epl) < 2147483647.0;
+    const bool whole_fits = whole <= allowed && n * epl <= (double)h->edge_limit;
     plan.mode = (h->exec_mode == LOUP_EXEC_AUTO && whole_fits) ? LOUP_EXEC_WHOLE : LOUP_EXEC_TILED;
     if (plan.mode == LOUP_EXEC_TILED && cap == 0) {
         loup::set_error("%d atoms do not fit the device even in tiles of %d receivers: %.2f GiB of state and "
@@ -4975,7 +5007,7 @@ static int plan_memory_impl(LoupHandle* h, int n_atoms, double edges_per_atom, L
     // The planned system would replace the current one, so its buffers count as free; 10% stay as headroom. Edge
     // indices are 32-bit: beyond that the whole-system call cannot run whatever the memory.
     const double budget = (double)free_b + atom_now + (double)h->sys_fixed_bytes + edge_now + (double)h->cub_tmp_bytes;
-    plan.mode = (whole <= 0.9 * budget && cap < 2147483647.0) ? LOUP_EXEC_WHOLE : LOUP_EXEC_TILED;
+    plan.mode = (whole <= 0.9 * budget && edges <= (double)h->edge_limit) ? LOUP_EXEC_WHOLE : LOUP_EXEC_TILED;
     *out = plan;
     return 0;
 }
