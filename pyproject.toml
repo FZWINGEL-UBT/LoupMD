@@ -62,7 +62,7 @@ include = ["loupmd*"]
 # _lib/ is filled by the wheel build (PLAN.md S2-T02) and is not tracked: the library, the tensor-core cubins, the
 # kernel manifest, and what `loupmd build-kernels` compiles a plugin from (three headers and the generator).
 loupmd = ["_lib/*.so", "_lib/cubins/*", "_lib/generated_generic_manifest.json", "_lib/kernel-src/*",
-          "bench/reference.json", "bench/structures/*", "export/_vendor/VERSION"]
+          "bench/reference.json", "bench/structures/*", "export/_vendor/VERSION", "data/d3_tables.npz"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

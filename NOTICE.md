@@ -101,8 +101,18 @@ authors (MIT, as LoupMD); the urea, naphthalene and paracetamol cells are entrie
 Database, whose data are in the public domain (CC0). The Materials Project cells of the benchmark (`NbCl5`) and
 of the gate's `crystals` set are not in the package (PLAN.md, decision O11).
 
+## D3 reference data (`loupmd/data/d3_tables.npz`)
+
+The D3 reference tables (reference C6 coefficients with their coordination numbers, covalent radii, the r2r4
+factors and the zero-damping cutoff radii) are Grimme's DFT-D3 reference data (S. Grimme, J. Antony, S. Ehrlich,
+H. Krieg, J. Chem. Phys. 132, 154104 (2010)), taken as torch-dftd 0.5.1 distributes them in
+`torch_dftd/nn/params/dftd3_params.npz` (MIT, © 2020 Preferred Networks, Inc.); `tools/dev/make_d3_tables.py`
+rewrites them into LoupMD's layout without changing a value. The damping parameter sets in
+`loupmd/dispersion.py` are numbers from the papers each entry cites. The kernels of `src/dispersion/` are
+LoupMD's own; simple-dftd3 (LGPL-3.0-or-later) is used only as an external reference in the tests and the
+bake-off, never copied or linked.
+
 ## Not yet in this file
 
-Later stages add files that need an entry here when they land: further modules ported from ASE (Stage 4: the remaining integrators), the D3
-reference parameters (Stage 6D) and the Materials Project structures, if their terms allow it. S7-T03 is the
+Later stages add files that need an entry here when they land: further modules ported from ASE (Stage 4: the remaining integrators) and the Materials Project structures, if their terms allow it. S7-T03 is the
 audit.

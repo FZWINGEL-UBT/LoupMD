@@ -105,6 +105,14 @@ def _plan_lines(metadata) -> list:
     elif memory:
         lines.append(f"memory: {_bytes(memory['whole_bytes'])} planned, {_bytes(memory['free_bytes'])} "
                      "free on the card")
+    disp = metadata.get("dispersion")
+    if disp:
+        p = disp.get("parameters") or {}
+        values = ", ".join(f"{k} {v:g}" for k, v in p.items())
+        lines.append(f"dispersion: D3({disp['damping']}) {disp.get('functional') or ''} [{values}], pairs to "
+                     f"{disp['pair_cutoff_bohr']:g} bohr, coordination numbers to {disp['cn_cutoff_bohr']:g} bohr, "
+                     f"{'three-body term' if disp.get('three_body') else 'no three-body term'}, long range: "
+                     f"{disp.get('long_range_used')} ({disp.get('long_range_chosen_by')})".replace("  ", " "))
     skin = metadata.get("skin")
     if skin and skin["mode"] == "auto":
         measured = skin.get("measured_step_A")

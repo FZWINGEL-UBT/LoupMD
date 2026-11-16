@@ -60,8 +60,8 @@ def _arguments_parser(parser):
                                                                           "20; 0: none)")
     parser.add_argument("--restart-every", type=int, metavar="N", help="restart points every N steps (default 10000; "
                                                                        "0: only at the end)")
-    parser.add_argument("--dispersion", metavar="PRESET", help="a dispersion preset (`loupmd dispersion list`); "
-                                                               "checked, then refused until the D3 term is built")
+    parser.add_argument("--dispersion", metavar="PRESET", help="a dispersion preset (`loupmd dispersion list`): "
+                                                               "the D3 term on every step")
 
 
 def _segments(text) -> list:

@@ -46,6 +46,11 @@ class SpringEngine:
         self.md_steps, self.rows, self.forces_current = 0, [], False
         self.log.append("set_state")
 
+    def set_dispersion(self, record=None):
+        """Records the dispersion term the run installs (the springs have none)."""
+        self.dispersion = record
+        self.log.append(("dispersion", None if record is None else record.damping))
+
     def set_fixed_atoms(self, fixed=None):
         self.fixed = None if fixed is None else np.asarray(fixed, dtype=bool)
         self.log.append(("fixed", 0 if fixed is None else int(self.fixed.sum())))

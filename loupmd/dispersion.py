@@ -4,8 +4,9 @@
 One argument at three levels: ``dispersion=None`` (off, the default), a preset name, or a :class:`Dispersion`
 record; the CLI's ``--dispersion NAME`` and a run file's ``dispersion = "NAME"`` or ``[dispersion]`` table give the
 same. :func:`resolve` fills in the model's functional and its parameter set, and refuses what cannot be computed
-with the reason and the way out. The engine's D3 term is S6-D04: until it is built, a run with dispersion is
-refused after these checks.
+with the reason and the way out. :func:`runnable` names the summation method a run uses and refuses what is not
+built: the plain real-space pair sum is (S6-D04, ``src/dispersion/d3_pair.cu``); the three-body term (S6-D08) and
+the tail, split and mesh methods (S6-D05, S6-D06) are not yet.
 
 Units: cutoffs in bohr (as the reference code and the literature give them), ``mesh_spacing_A`` in A.
 """
@@ -69,8 +70,8 @@ METHOD_LIMITS = {
              "Becke-Johnson damping only; a modified coordination number that vanishes at 6 A; cost grows with the "
              "number of elements"),
 }
-# Which methods this version computes: none yet (the D3 term is S6-D04, the long-range methods S6-D05/D06).
-BUILT = frozenset()
+# Which methods this version computes: the plain sum (S6-D04); the long-range methods are S6-D05/D06.
+BUILT = frozenset({"none"})
 
 
 @dataclass(frozen=True)
@@ -229,6 +230,7 @@ def parse(value):
         data = dict(value)
         data.pop("parameter_source", None)
         data.pop("long_range_chosen_by", None)
+        data.pop("long_range_used", None)
         name = data.pop("preset", None)
         base = PRESETS[name][0] if name in PRESETS else {}
         known = {f.name for f in fields(Dispersion)}
@@ -294,6 +296,19 @@ def entry(record: Dispersion) -> dict:
     return data
 
 
+def argument(record):
+    """The record as a run file's ``dispersion`` takes it: the preset's name when it is one unchanged, else the
+    table of its fields (``None``: off)."""
+    if record is None:
+        return None
+    if record.preset in PRESETS and record == preset(record.preset):
+        return record.preset
+    data = {k: v for k, v in asdict(record).items() if k != "preset" and v is not None}
+    if record.auto_methods is not None:
+        data["auto_methods"] = list(record.auto_methods)
+    return data
+
+
 def describe(record: Dispersion) -> str:
     """One line: method, damping, parameters, cutoffs, three-body term, long-range method."""
     p = record.parameters or {}
@@ -323,14 +338,31 @@ def listing() -> str:
     lines += ["", "Refused: models whose training data contains dispersion (" +
               ", ".join(sorted(_DISPERSION_IN_DATA)) + " data; MACE-POLAR-1), a model of unknown functional "
               "without functional= or parameters=, a damping without a parameter set for the functional.",
-              "", "The D3 term itself is not built in this version (PLAN.md S6-D04): runs with dispersion are refused "
-              "after these checks."]
+              "", "Built in this version: the plain real-space pair sum with every damping and the switch "
+              "(PLAN.md S6-D04). Not yet: the three-body term (S6-D08) and the tail, split and mesh methods "
+              "(S6-D05, S6-D06); runs that ask for them are refused. Whole-system execution only (the tiled "
+              "execution: S6-D09)."]
     return "\n".join(lines)
 
 
-def refuse_unbuilt(record: Dispersion):
-    """Until S6-D04: the checks passed, the term is not there."""
-    raise PlanRefused(f"dispersion: {describe(record)}: the D3 term is not built in this version",
-                      why="the settings were checked and are valid; the engine's D3 kernels are PLAN.md task S6-D04",
-                      next_step="Run without dispersion=, or add D3 outside LoupMD (FastMACE's D3, or simple-dftd3 on "
-                                "the saved frames).")
+def runnable(record: Dispersion) -> str:
+    """The summation method a run with ``record`` uses, or :class:`PlanRefused` for what is not built. ``"auto"``
+    picks among the built methods that ``auto_methods`` allows; today that is the plain sum."""
+    reasons = []
+    if record.three_body:
+        reasons.append("three_body=True: the three-body term is not built in this version (PLAN.md S6-D08)")
+    if record.long_range == "auto":
+        allowed = [m for m in (record.auto_methods or AUTO_CANDIDATES) if m in BUILT]
+        if not allowed:
+            reasons.append(f"auto_methods={record.auto_methods!r}: none of them is built in this version (built: "
+                           f"{', '.join(sorted(BUILT))})")
+        method = allowed[0] if allowed else None
+    else:
+        method = record.long_range
+        if method not in BUILT:
+            reasons.append(f"long_range={method!r} is not built in this version (PLAN.md S6-D05, S6-D06; built: "
+                           f"{', '.join(sorted(BUILT))})")
+    if reasons:
+        raise PlanRefused(reasons, next_step="Use the plain sum (long_range='none' or 'auto') without the three-body "
+                                             "term, for example the preset 'd3bj'.")
+    return method

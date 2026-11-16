@@ -8,6 +8,7 @@
 #include "thermo.hpp"
 #include "cell.hpp"
 #include "tiled.hpp"
+#include "dispersion/term.hpp"
 #include <cstddef>
 
 #include <cub/cub.cuh>
@@ -669,6 +670,14 @@ struct LoupHandle {
     // cell; the host's cell follows the device's before a rebuild inside such a run and at the end of the call.
     bool var_cell = false;
     loup::CellDev* d_celldev = nullptr;
+    // The dispersion term (S6-D04, loup_set_dispersion), added to every whole-system force pass. It reads the cell
+    // on the device: d_disp_cell, which follows the host's cell, or the device's own cell inside a variable-cell
+    // step (disp_cell_dev while that step is recorded). disp_ready: prepared for this system (the first positions
+    // after loup_set_system or loup_set_dispersion prepare it).
+    std::unique_ptr<loup::dispersion::Term> disp;
+    double* d_disp_cell = nullptr;
+    bool disp_ready = false;
+    bool disp_cell_dev = false;
     loup::CellDev celldev_host{};
     double cell_v0 = 0.0;          // the volume at loup_set_state / loup_import_state: the cell limits refer to it
     bool cell_ref_stale = false;   // the cell has changed since the list was built (a variable-cell run ended so):
@@ -1307,8 +1316,43 @@ static int download_cell_dev(LoupHandle* h, loup::CellDev* out = nullptr) {
     if (finite) {
         memcpy(h->cell_in, c.h, sizeof(h->cell_in));
         loup::compute_cell_mat(c.h, h->cell, h->cell_vol, h->cell_heights);
+        if (h->d_disp_cell)
+            CUDA_CHECK(cudaMemcpy(h->d_disp_cell, h->cell_in, sizeof(h->cell_in), cudaMemcpyHostToDevice));
     }
     if (out) *out = c;
+    return 0;
+}
+
+// The dispersion term for the handle's system: the atomic numbers in the device's row order (rows stay grouped by
+// species, so they do not change at a rebuild) and the host's cell. Outside capture.
+static int prepare_dispersion(LoupHandle* h) {
+    if (!h->disp || h->N <= 0) return 0;
+    if (h->n_ghost > 0) {
+        loup::set_error("the dispersion term has no open domains (PLAN.md S6-D09)");
+        return -1;
+    }
+    std::vector<int32_t> z(h->N);
+    for (int s = 0; s < h->n_species(); ++s)
+        for (int k = h->species_start[s]; k < h->species_start[s + 1]; ++k) z[k] = h->species_z(s);
+    if (!h->d_disp_cell) CUDA_CHECK(cudaMalloc(&h->d_disp_cell, 9 * sizeof(double)));
+    try {
+        h->disp->prepare(h->N, z.data(), h->cell_in, h->stream);
+    } catch (const std::exception& e) {
+        loup::set_error("%s", e.what());
+        return -1;
+    }
+    CUDA_CHECK(cudaMemcpyAsync(h->d_disp_cell, h->cell_in, sizeof(h->cell_in), cudaMemcpyHostToDevice, h->stream));
+    CUDA_CHECK(cudaStreamSynchronize(h->stream));
+    h->disp_ready = true;
+    h->invalidate_graphs();
+    return 0;
+}
+
+// After the host's cell changed: the term's copy, and the first preparation for a new system.
+static int dispersion_cell_changed(LoupHandle* h) {
+    if (!h->disp) return 0;
+    if (!h->disp_ready) return prepare_dispersion(h);
+    CUDA_CHECK(cudaMemcpyAsync(h->d_disp_cell, h->cell_in, sizeof(h->cell_in), cudaMemcpyHostToDevice, h->stream));
     return 0;
 }
 
@@ -1656,8 +1700,25 @@ struct DomainSweep {
     const float* adjoint[4] = {nullptr, nullptr, nullptr, nullptr};
 };
 
+static_assert(offsetof(loup::CellDev, h) == 0, "record_dispersion reads the device cell at the start of CellDev");
+
+// The dispersion term's share of a whole-system pass, after the model's (which zeroes the accumulators first).
+static void record_dispersion(LoupHandle* h, int compute_stress, bool energy_only) {
+    if (!h->disp) return;
+    if (!h->disp_ready) throw std::logic_error("the dispersion term was not prepared for this system");
+    loup::dispersion::Inputs in{h->stream, h->d_pos64,
+                                h->disp_cell_dev ? reinterpret_cast<const double*>(h->d_celldev)   // CellDev::h is its first field
+                                                  : static_cast<const double*>(h->d_disp_cell),
+                                !energy_only, compute_stress != 0 && !energy_only};
+    loup::dispersion::Outputs out{h->d_energy_f64, energy_only ? h->pass_atom_energy : nullptr,
+                                  energy_only ? nullptr : h->d_forces_f64,
+                                  compute_stress && !energy_only ? h->d_virial_grad_f64 : nullptr};
+    h->disp->record(in, out);
+}
+
 static void record_force_pass(LoupHandle* h, int compute_stress, bool energy_only = false,
                               const DomainSweep* sweep = nullptr) {
+    if (h->disp && sweep) throw std::logic_error("the dispersion term has no domain sweeps (PLAN.md S6-D09)");
     const int N = h->N;
     const int E = h->E_graph;
     const int S = h->n_species();
@@ -1671,7 +1732,10 @@ static void record_force_pass(LoupHandle* h, int compute_stress, bool energy_onl
     // No pair within r_max + skin. The specialised model then has no interaction energy at all. A generic model can
     // still have one per atom (residual first block, readout biases, the long-range term: MACE-MH-1 0.56 eV and
     // MACE-POLAR-1-S 0.64 eV per isolated atom), so its pass runs on the empty edge list.
-    if (E == 0 && !h->generic()) return;
+    if (E == 0 && !h->generic()) {
+        record_dispersion(h, compute_stress, energy_only);
+        return;
+    }
 
     const int gridE64 = (E + 63) / 64;
     const int gridE128 = (E + 127) / 128;
@@ -1751,6 +1815,7 @@ static void record_force_pass(LoupHandle* h, int compute_stress, bool energy_onl
         in.gemm_lane = [h](int lane) { gemm_lane(h, lane); };
         in.gemm_join = [h] { gemm_join(h); };
         h->gen->record(in);
+        if (!sweep) record_dispersion(h, compute_stress, energy_only);
         return;
     }
 
@@ -1832,6 +1897,7 @@ static void record_force_pass(LoupHandle* h, int compute_stress, bool energy_onl
                 d_E_act, h->model.zbl_r_max_max, h->model.zbl_p, h->model.zbl_c[0], h->model.zbl_c[1],
                 h->model.zbl_c[2], h->model.zbl_c[3], h->d_act_vec_len, h->d_act_pairs, h->model.d_zbl_r_cut,
                 h->model.d_zbl_inv_a, h->model.d_zbl_pref, h->d_energy_f64);
+        record_dispersion(h, compute_stress, true);
         return;
     }
     // 7. Backward: Interaction 1
@@ -1910,6 +1976,7 @@ static void record_force_pass(LoupHandle* h, int compute_stress, bool energy_onl
         h->d_dS0_0, h->d_dS0_1, h->d_dS0_2, h->d_dS0_3, h->d_dD0,
         h->model.d_zbl_r_cut, h->model.d_zbl_inv_a, h->model.d_zbl_pref,
         h->d_edge_force_1, h->d_energy_f64, h->d_forces_f64, h->d_virial_grad_f64);
+    record_dispersion(h, compute_stress, false);
 }
 
 static int ensure_force_graph(LoupHandle* h, int compute_stress) {
@@ -2132,6 +2199,8 @@ void loup_destroy(LoupHandle* h) {
     }
     if (h->h_reb_pinned) cudaFreeHost(h->h_reb_pinned);
     if (h->d_celldev) cudaFree(h->d_celldev);
+    h->disp.reset();
+    if (h->d_disp_cell) cudaFree(h->d_disp_cell);
     h->hyb.destroy();
     if (h->d_cublas_ws) cudaFree(h->d_cublas_ws);
     for (auto& kv : h->bt_cache) cudaFree(kv.second);
@@ -2202,6 +2271,7 @@ static int set_system_impl(LoupHandle* h, int n_atoms, const int* atomic_numbers
         if (i < n_local) e0_total += h->species_e0(found);
     }
     h->free_system();  // sets N = 0
+    h->disp_ready = false;
     h->skin = skin;
     h->e0_total = e0_total;
     h->atom_e0.assign(n_atoms, 0.0);
@@ -2437,6 +2507,7 @@ static int upload_positions(LoupHandle* h, const double* positions, const double
     loup::compute_cell_mat(cell, h->cell, h->cell_vol, h->cell_heights);
     const int cell_changed = memcmp(&old_cell, &h->cell, sizeof(old_cell)) != 0 ? 1 : 0;
     if (h->gen && h->gen->set_cell(cell)) h->invalidate_graphs();
+    if (dispersion_cell_changed(h) != 0) return -1;
 
     std::vector<double> p_sorted((size_t)NT * 3);
     for (int dst = 0; dst < NT; ++dst) {
@@ -3061,7 +3132,9 @@ static int run_md_loop(
             loup::shift_cart_kernel<<<(h->E_graph + 255) / 256, 256, 0, h->stream>>>(
                 h->d_row_ptr + N, h->d_celldev, h->d_tmp_snd, h->d_tmp_rcv, h->d_tmp_pairs, h->d_shift_cart);
         }
+        h->disp_cell_dev = var_cell;
         record_force_pass(h, var_cell ? 1 : 0);
+        h->disp_cell_dev = false;
         if (kind == 6) {  // the cell force from the velocities before the last kick, then barostat B
             loup::kinetic_tensor_kernel<<<gridN, 256, 0, h->stream>>>(N, h->d_masses, h->d_vel64, h->d_int_work);
             loup::baoab_cell_second_kernel<<<1, 1, 0, h->stream>>>(
@@ -3665,6 +3738,7 @@ static int set_cell_impl(LoupHandle* h, const double* cell, int scale_atoms) {
     memcpy(h->cell_in, cell, sizeof(h->cell_in));
     loup::compute_cell_mat(cell, h->cell, h->cell_vol, h->cell_heights);
     if (h->gen && h->gen->set_cell(cell)) h->invalidate_graphs();
+    if (dispersion_cell_changed(h) != 0) return -1;
     h->forces_current = false;
     ++h->pos_epoch;
     return rebuild_neighbors(h);
@@ -4229,6 +4303,7 @@ static int set_domain_impl(LoupHandle* h, int n_local, int n_ghost, const int* a
 static int evaluate_domain_impl(LoupHandle* h, const double* positions, const double* cell, const int* ghost_of,
                                 double* out_energy_ev, double* out_forces, double* out_stress) {
     if (!h || h->N <= 0) { loup::set_error("no domain is set (call loup_debug_set_domain first)"); return -1; }
+    if (h->disp) { loup::set_error("the dispersion term has no open domains (PLAN.md S6-D09)"); return -1; }
     if (!(h->gen && h->gen->sweeps_available())) {
         loup::set_error("the handle's model has no sweeps (generic path without long range and chain fold)");
         return -1;
@@ -4833,6 +4908,10 @@ static int evaluate_tiled_impl(LoupHandle* h, int n_atoms, const int* atomic_num
                                const double* cell, int receivers, double skin, double* out_energy_ev,
                                double* out_forces, double* out_stress, long long* out_tiles) {
     if (!h) return -1;
+    if (h->disp) {
+        loup::set_error("the tiled call has no dispersion term yet (PLAN.md S6-D09)");
+        return -1;
+    }
     if (n_atoms <= 0 || !atomic_numbers || !positions || !cell) {
         loup::set_error("n_atoms must be positive and atomic_numbers, positions and cell given");
         return -1;
@@ -5302,6 +5381,38 @@ static int profile_force_impl(LoupHandle* h, int warmup, int n_calls, double* ou
     CUDA_CHECK(cudaEventElapsedTime(&ms, ev0, ev1));
     if (out_total_us) *out_total_us = (double)ms * 1000.0 / n_calls;
     return 0;
+}
+
+int loup_set_dispersion(LoupHandle* h, const LoupD3Settings* settings, const LoupD3Tables* tables) {
+    return guarded(h, "loup_set_dispersion", [&]() -> int {
+        CUDA_CHECK(cudaSetDevice(h->device_id));
+        CUDA_CHECK(cudaStreamSynchronize(h->stream));
+        h->invalidate_graphs();
+        h->disp.reset();
+        h->disp_ready = false;
+        if (!settings) return 0;
+        if (!tables) { loup::set_error("tables is NULL"); return -1; }
+        if (settings->damping < 0 || settings->damping > 3) {
+            loup::set_error("damping must be 0 (BJ), 1 (zero), 2 (modified BJ) or 3 (modified zero), got %d",
+                            settings->damping);
+            return -1;
+        }
+        loup::dispersion::Settings s;
+        s.damping = static_cast<loup::dispersion::Damping>(settings->damping);
+        s.s6 = settings->s6; s.s8 = settings->s8; s.a1 = settings->a1; s.a2 = settings->a2;
+        s.rs6 = settings->rs6; s.rs8 = settings->rs8; s.alpha = settings->alpha; s.beta = settings->beta;
+        s.pair_cutoff_bohr = settings->pair_cutoff_bohr;
+        s.cn_cutoff_bohr = settings->cn_cutoff_bohr;
+        s.smoothing_bohr = settings->smoothing_bohr;
+        loup::dispersion::Tables t{tables->nref, tables->cnref, tables->rcov, tables->r2r4, tables->c6ref,
+                                   tables->r0ab};
+        const char* why = nullptr;
+        h->disp.reset(loup::dispersion::make_term(s, t, &why));
+        if (!h->disp) { loup::set_error("%s", why ? why : "the dispersion term was refused"); return -1; }
+        // a system with positions: prepare now (its cell is known); else at its first positions
+        if (h->N > 0 && h->nl_valid) return prepare_dispersion(h);
+        return 0;
+    });
 }
 
 int loup_set_system(LoupHandle* h, int n_atoms, const int* atomic_numbers, const double* masses_amu, double skin) {

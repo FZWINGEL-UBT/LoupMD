@@ -299,6 +299,7 @@ Conventions:
 | [d3-tail-shorter-cutoff](#d3-tail-shorter-cutoff) | Shorter real-space cutoff (20-30 bohr) plus the uniform-density tail correction | - | prototype | REJECTED as default | S6-D02 | energy and pressure far inside the contract, forces outside it at every cutoff below 40 bohr | [bakeoff][d3bo] |
 | [d3-shell-every-k](#d3-shell-every-k) | Short part every step, the 20/25-40 bohr shell every k steps | - | prototype | REJECTED | S6-D02 | stale forces above the 40 bohr sum's error on all three systems even at k = 2 (ballistic estimate) | [bakeoff][d3bo] |
 | [d3-cn-cutoff](#d3-cn-cutoff) | Coordination-number cutoff 20-35 bohr with the 40 bohr pair sum | `cn_cutoff_bohr` | prototype | OPEN (D73) | S6-D02 | CN 30: -19 to -21%; passes on SrTiO3 and water, misses on NbCl5 pressure by 1.7e-6 GPa | [bakeoff][d3bo] |
+| [d3-pair-production](#d3-pair-production) | The bake-off's variant 1 in the library: device-side grid and reach, four dampings, switch, energy-only path | - | `src/dispersion/d3_pair.cu` | ADOPTED | S6-D04 | same speed as the prototype (2.51 / 8.48 / 9.87 ms vs 2.48 / 8.42 / 9.88); energy-only path 0.68 / 1.43 / 1.53 ms | [status 6.28](STATUS_AND_PROFILE.md) |
 
 ## Chronology
 
@@ -2084,5 +2085,11 @@ coordination-number force pass grows with the cube of its cutoff: with 40 bohr p
 the units in the table; on water the force error moves non-monotonically (0.18 at 35 bohr, 0.21 at 30, 0.39 at
 25, 0.57 at 20 against 0.39). Literally CN 30 fails on NbCl5 pressure by 1.7e-6 GPa; with a relative tolerance it
 would be the default candidate, to be checked on the full validation set (graphite first).
+
+<a id="d3-pair-production"></a>**d3-pair-production** (ADOPTED, S6-D04, 16 November 2026, 5060 Ti only). The
+production kernel is variant 1 with the grid computed on the device at each evaluation, so it is capturable and
+follows a changing cell; the timing is a captured graph of the whole evaluation (wrap, sort, three passes). It is
+no faster than the prototype and was not meant to be; the energy-only path skips the CN-force pass and the
+derivative work (4-6x cheaper), which helps Monte Carlo energy differences.
 
 [d3bo]: docs/validation/dispersion-bakeoff.md

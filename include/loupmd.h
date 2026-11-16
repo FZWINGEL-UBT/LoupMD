@@ -425,6 +425,35 @@ int loup_debug_csvr_noise(LoupHandle* h, unsigned long long seed, unsigned long 
 // Timing breakdown across components for diagnostics (averages over `n_calls` force evaluations).
 int loup_profile_force(LoupHandle* h, int warmup, int n_calls, double* out_total_us);
 
+// ---- Dispersion: the real-space two-body D3 term on its own (S6-D04; src/dispersion/d3_pair.cu) --------------
+// Settings in bohr and hartree units as the literature gives them. damping: 0 BJ, 1 zero, 2 modified BJ, 3 modified
+// zero. smoothing_bohr: 0, or the width of a quintic switch that takes each pair energy to 0 at the pair cutoff.
+typedef struct {
+    int damping;
+    double s6, s8, a1, a2, rs6, rs8, alpha, beta;
+    double pair_cutoff_bohr, cn_cutoff_bohr, smoothing_bohr;
+} LoupD3Settings;
+// The reference tables, index = atomic number 0..94 (loupmd/data/d3_tables.npz): nref [95], cnref [95, 5], rcov
+// [95] (bohr, 4/3 included), r2r4 [95], c6ref [95, 95, 5, 5] (hartree bohr^6; < 0: no reference), r0ab [95, 95] (bohr).
+typedef struct {
+    const int* nref;
+    const double *cnref, *rcov, *r2r4, *c6ref, *r0ab;
+} LoupD3Tables;
+// One evaluation of a periodic cell on the GPU, captured in a CUDA graph and replayed. positions [n, 3] and cell [9]
+// (rows) in A. Outputs: energy eV; forces [n, 3] eV/A, virial [6] (xx xy xz yy yz zz, dE/d strain, eV; stress =
+// virial / V) and per-atom energies [n] eV, each optional (NULL: not computed; neither forces nor virial: the
+// energy-only path). repeat > 0 with out_ms: the mean time of that many further replays. 0 on success; else
+// loup_d3_last_error() says why.
+int loup_d3_evaluate(const LoupD3Settings* settings, const LoupD3Tables* tables, int n_atoms,
+                     const int* atomic_numbers, const double* positions, const double* cell, int repeat,
+                     double* out_energy_ev, double* out_forces, double* out_virial, double* out_atom_energies,
+                     double* out_ms);
+const char* loup_d3_last_error(void);
+// The same term inside a handle's force passes (energy, forces, stress, per-atom energies, the MD step, the
+// variable-cell step): added to every whole-system evaluation from the next positions on. settings NULL removes it.
+// Needs a periodic cell; refused for open domains and the tiled call (PLAN.md S6-D09). The tables are copied.
+int loup_set_dispersion(LoupHandle* h, const LoupD3Settings* settings, const LoupD3Tables* tables);
+
 // Environment:
 //   LOUP_CACHE_DIR  directory for the per-GPU GEMM plan cache (default $HOME/.cache/loupmd). Files are keyed by GPU
 //                   name, compute capability, cuBLASLt version and a hash of this library; plans whose winner leads

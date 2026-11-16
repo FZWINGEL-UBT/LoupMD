@@ -103,8 +103,10 @@ class Simulation:
     """
 
     def __init__(self, atoms, force_field, *, integrator, output=None, seed=None, skin=0.5, check="skip", gate=None,
-                 capacity="auto", elements=None):
+                 capacity="auto", elements=None, dispersion=None):
         from ase import Atoms
+
+        from . import dispersion as _dispersion
 
         if not isinstance(atoms, Atoms):
             raise InputError(f"atoms must be an ase.Atoms, got {type(atoms).__name__}")
@@ -197,6 +199,15 @@ class Simulation:
         self.mc_moves = None               # the moves of the last run(mc=...), as records
         if capacity.mode in ("tiled", "wavefront"):
             self._check_tiled_scheme()
+        # The dispersion term (PLAN.md Stage 6D): resolved against the model, refused when not built; every engine
+        # of the run gets it (_install_dispersion).
+        self.dispersion = _dispersion.resolve(dispersion, functional=force_field.functional,
+                                              family=force_field.family, model=force_field.name)
+        self.dispersion_method = _dispersion.runnable(self.dispersion) if self.dispersion is not None else None
+        if self.dispersion is not None and capacity.mode in ("tiled", "wavefront"):
+            raise PlanRefused(f"dispersion with capacity mode {capacity.mode!r}",
+                              why="the tiled execution has no dispersion term in this version (PLAN.md S6-D09)",
+                              next_step="Use capacity 'auto' or 'whole' on a cell that fits the GPU.")
 
     def _check_tiled_scheme(self):
         if self.config.scheme not in TILED_SCHEMES:
@@ -229,6 +240,7 @@ class Simulation:
             self._skin_probe = {"from": self._resume[1] if self._resume else 0, "hottest_K": hottest}
         engine = self.force_field.new_engine(atoms, self.skin, capacity=self.capacity,
                                              extra_elements=self._extra_elements)
+        self._install_dispersion(engine)
         self._bundle = self.force_field.last_bundle
         self.execution = dict(self.force_field.last_execution or {"mode": "whole", "receivers": 0, "plan": None})
         if self.execution["mode"] in ("tiled", "wavefront"):
@@ -262,6 +274,16 @@ class Simulation:
                 if self.output.trajectory_every is not None:
                     self._submit_frame(positions.copy(), velocities, forces, energy)
         self.status = "idle"
+
+    def _install_dispersion(self, engine):
+        if self.dispersion is None:
+            return
+        if not hasattr(engine, "set_dispersion"):
+            raise PlanRefused("dispersion with the tiled execution",
+                              why="the cell does not fit the GPU whole, and the tiled execution has no dispersion "
+                                  "term in this version (PLAN.md S6-D09)",
+                              next_step="Run a smaller cell, or without dispersion.")
+        engine.set_dispersion(self.dispersion)
 
     def _run_gate(self):
         """The accuracy gate on rattled copies of the structure; the run does not start when it fails."""
@@ -303,6 +325,7 @@ class Simulation:
             # the execution the run took, so that a resume takes it again (the state blocks of the two differ)
             "capacity": {"mode": self.execution["mode"], "receivers": self.execution["receivers"] or None,
                          "memory_fraction": self.capacity.memory_fraction},
+            "dispersion": _dispersion_entry(self),
         }
         text = json.dumps(record, indent=2) + "\n"
         _output.write_atomically(Path(self.output.directory) / SIMULATION_NAME,
@@ -861,6 +884,7 @@ class Simulation:
                 atoms.set_masses(new_masses)
                 new_engine = force_field.new_engine(atoms, self.skin, capacity=self.capacity,
                                                     extra_elements=self._extra_elements)
+                self._install_dispersion(new_engine)
                 target = new_engine
                 if self._fixed is not None:
                     target.set_fixed_atoms(self._fixed)
@@ -1026,7 +1050,7 @@ class Simulation:
         capacity = CapacityConfig(**record["capacity"]) if record.get("capacity") else "whole"   # older records
         sim = cls(atoms, force_field, integrator=IntegratorConfig(**record["integrator"]), output=out,
                   seed=int(data["seed"]), skin=float(record["skin"]), capacity=capacity,
-                  elements=record.get("elements"))
+                  elements=record.get("elements"), dispersion=record.get("dispersion"))
         stored = json.loads(str(data["schedule"]))
         if stored is not None:
             sim._schedule_origin = int(stored.pop("origin"))
@@ -1043,3 +1067,12 @@ class Simulation:
         sim._resume = (data["blob"].tobytes(), int(data["step"]), indices if out is not None else None)
         sim._start()
         return sim
+
+
+def _dispersion_entry(sim):
+    """The run's dispersion record as metadata and the run record hold it, with the summation method it uses."""
+    if getattr(sim, "dispersion", None) is None:
+        return None
+    from . import dispersion as _dispersion
+
+    return dict(_dispersion.entry(sim.dispersion), long_range_used=sim.dispersion_method)

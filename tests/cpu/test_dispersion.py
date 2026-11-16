@@ -1,5 +1,5 @@
 """The dispersion record, its presets and refusals (plan task S6-D03, ``docs/design/dispersion.md``). Needs neither a
-GPU nor the library: the D3 term itself is S6-D04, so every valid run with dispersion ends in "not built"."""
+GPU nor the library; the term's numbers are tests/gpu/test_d3.py's."""
 from __future__ import annotations
 
 import warnings
@@ -156,13 +156,40 @@ def test_none_is_off():
 
 # ------------------------------------------------------------------------------------------------ the front ends
 
-def test_lm_md_checks_then_refuses_until_the_term_is_built(ff):
+def test_lm_md_installs_the_term_and_records_it(ff, tmp_path):
     atoms = bulk("NaCl", "rocksalt", a=5.64, cubic=True)
     ff.functional, ff.family = "PBE", "omat"
-    with pytest.raises(PlanRefused) as caught:
-        loupmd.md(atoms, model=ff, temperature_K=300, steps=10, dispersion="d3bj")
-    assert "the D3 term is not built in this version" in str(caught.value)
-    assert "D3(bj) pbe [s6 1, s8 0.7875, a1 0.4289, a2 4.4407]" in str(caught.value)
+    result = loupmd.md(atoms, model=ff, temperature_K=300, steps=10, seed=1, dispersion="d3bj",
+                       output=str(tmp_path / "run"))
+    engine = result.simulation._engine
+    assert engine.dispersion == d.resolve("d3bj", functional="pbe")
+    entry = result.metadata["dispersion"]
+    assert entry["long_range_used"] == "none" and entry["long_range_chosen_by"] == "automatic, at setup"
+    assert entry["parameter_source"].startswith("S. Grimme, S. Ehrlich, L. Goerigk")
+    assert "dispersion: D3(bj) pbe [s6 1, s8 0.7875, a1 0.4289, a2 4.4407], pairs to 40 bohr" in result.summary
+    assert result.metadata["arguments"]["dispersion"] == "d3bj"
+    import json
+
+    record = json.loads((tmp_path / "run" / "simulation.json").read_text())
+    assert d.parse(record["dispersion"]) == engine.dispersion           # a resume installs the same term
+    resumed = loupmd.Simulation.resume(tmp_path / "run", force_field=ff)
+    assert resumed.dispersion == engine.dispersion
+
+
+@pytest.mark.parametrize("value,message", [
+    ("d3bj-atm", "the three-body term is not built"),
+    (loupmd.Dispersion(long_range="mesh"), "long_range='mesh' is not built"),
+    (loupmd.Dispersion(auto_methods=("tail",)), "none of them is built"),
+])
+def test_what_is_not_built_is_refused_before_the_run(ff, value, message):
+    atoms = bulk("NaCl", "rocksalt", a=5.64, cubic=True)
+    ff.functional, ff.family = "PBE", "omat"
+    with pytest.raises(PlanRefused, match=message):
+        loupmd.md(atoms, model=ff, temperature_K=300, steps=10, dispersion=value)
+
+
+def test_models_with_dispersion_in_their_data_are_refused_by_lm_md(ff):
+    atoms = bulk("NaCl", "rocksalt", a=5.64, cubic=True)
     ff.functional, ff.family = "wB97M-V", "omol"
     with pytest.raises(PlanRefused, match="VV10"):
         loupmd.md(atoms, model=ff, temperature_K=300, steps=10, dispersion="d3bj")
@@ -188,3 +215,5 @@ def test_dispersion_list_shows_the_presets_methods_and_limits(capsys):
         assert name in out
     assert "wrong for slabs, pores, interfaces" in out and "Becke-Johnson damping only" in out
     assert "doi:10.1002/jcc.21759" in out and "[not built yet]" in out and "MACE-POLAR-1" in out
+    plain = next(line for line in out.splitlines() if line.startswith("  none "))
+    assert "the plain real-space sum" in plain and "[not built yet]" not in plain

@@ -6,7 +6,8 @@ OBJDIR = build/$(CUDA_ARCH)
 NVCCFLAGS = -O3 -std=c++17 -arch=$(CUDA_ARCH) -Iinclude -Isrc -diag-suppress=1046 -Xcompiler -fPIC -MMD -MP
 LDFLAGS = -lcublas -lcublasLt -lcudart -ldl
 
-SRCS = src/bundle.cu src/model_loader.cu src/generic.cu src/generated_generic.cu src/polar.cu src/neighbors.cu src/interaction0.cu src/integrator.cu src/minimize.cu src/cell.cu src/thermo.cu src/sgemm.cu src/tile_plan.cu src/engine.cu
+SRCS = src/bundle.cu src/model_loader.cu src/generic.cu src/generated_generic.cu src/polar.cu src/neighbors.cu src/interaction0.cu src/integrator.cu src/minimize.cu src/cell.cu src/thermo.cu src/sgemm.cu src/tile_plan.cu src/engine.cu \
+       src/dispersion/d3_pair.cu
 OBJS = $(patsubst src/%.cu,$(OBJDIR)/%.o,$(SRCS))
 DEPS = $(OBJS:.o=.d)
 
@@ -20,6 +21,7 @@ all: $(OBJDIR)/libloupmd.so
 objects: $(OBJS)
 
 $(OBJDIR)/%.o: src/%.cu | $(OBJDIR)
+	@mkdir -p $(dir $@)
 	$(NVCC) $(NVCCFLAGS) -MF $(@:.o=.d) -c $< -o $@
 $(OBJDIR):
 	mkdir -p $@
@@ -39,6 +41,7 @@ WHEEL_OBJS = $(patsubst src/%.cu,$(WHEELDIR)/%.o,$(SRCS))
 wheel-lib: $(WHEELDIR)/libloupmd.so
 
 $(WHEELDIR)/%.o: src/%.cu | $(WHEELDIR)
+	@mkdir -p $(dir $@)
 	$(NVCC) -O3 -std=c++17 $(WHEEL_GENCODE) -Iinclude -Isrc -diag-suppress=1046 -Xcompiler -fPIC -MMD -MP -MF $(@:.o=.d) -c $< -o $@
 $(WHEELDIR):
 	mkdir -p $@

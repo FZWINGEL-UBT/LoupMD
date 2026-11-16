@@ -1,0 +1,723 @@
+// Real-space two-body D3 (plan task S6-D04; design docs/design/dispersion.md; the S6-D02 bake-off's variant 1).
+//
+// Method (Grimme, Antony, Ehrlich, Krieg 2010; Grimme, Ehrlich, Goerigk 2011; Smith et al. 2016 for the modified
+// dampings): coordination numbers CN_i = sum_j 1 / (1 + exp(-k1 (rco_ij / r_ij - 1))) within cn_cut; per atom the
+// normalised Gaussian weights of its reference CNs, w_ia = exp(-k3 (CN_i - CNref_a)^2) / sum; C6_ij = sum_ab w_ia
+// w_jb C6ref_ab; C8 = 3 C6 Q_i Q_j. E = -sum_{i<j} (s6 C6 g6(r) + s8 C8 g8(r)) S(r), with
+//   BJ, BJM:   g_n = 1 / (r^n + f^n),  f = a1 sqrt(3 Q_i Q_j) + a2
+//   zero:      g_n = d_n / r^n,  d_n = 1 / (1 + 6 (rs_n R0_ij / r)^alpha_n)
+//   zerom:     g_n = d_n / r^n,  d_n = 1 / (1 + 6 (r / (rs_n R0_ij) + beta R0_ij)^-alpha_n)
+// alpha_6 = alpha, alpha_8 = alpha + 2, and S(r) = 1, or with smoothing a quintic switch from 1 at cut - w to 0 at
+// cut. Forces: the direct r-derivative, then the CN chain rule dE/dCN_i dCN_i/dr in a third pass.
+//
+// Layout: atoms sorted by bin of a grid in fractional coordinates; one warp per receiver walks the rows of bins
+// within reach, a bin offset o along an axis being bin (b + o) mod nb at image floor((b + o) / nb), so every (atom,
+// image) pair within the cutoff is visited once even when the cutoff exceeds the cell. The grid's bin counts are
+// fixed by prepare(); the cell, its inverse and the reach are computed on the device at every evaluation, so a
+// captured evaluation stays exact when the cell changes. Pair arithmetic in float32 on relative vectors, sums in
+// float64. Units inside: bohr and hartree.
+#include "dispersion/term.hpp"
+#include "loupmd.h"
+
+#include <cub/cub.cuh>
+
+#include <algorithm>
+#include <cmath>
+#include <map>
+#include <memory>
+#include <stdexcept>
+#include <string>
+#include <vector>
+
+namespace loup::dispersion {
+namespace {
+
+constexpr int MAXREF = kMaxRef;
+constexpr int WSTRIDE = 8;       // per-atom weight row: a float4 and one more
+constexpr int WPB = 4;           // warps per block in the walking kernels
+constexpr int MAXBINS = 64;      // per axis
+constexpr double BOHR = 0.529177210903;          // A
+constexpr double HARTREE = 27.211386245988;      // eV
+constexpr float K1 = 16.0f, K3 = 4.0f;
+
+struct Grid {
+    int nb[3];
+    int reach[3];
+    float cell[9];      // rows, bohr
+    double inv[9];      // inverse of the cell in bohr
+};
+
+struct PairParams {
+    float s6, s8, a1, a2, rs6, rs8, alpha6, alpha8, beta;
+    float cut2, cn_cut2;
+    float sw_on, sw_width;      // switch on [sw_on, sw_on + sw_width]; width 0: none
+};
+
+#define CK(x) do { cudaError_t e_ = (x); if (e_ != cudaSuccess) \
+    throw std::runtime_error(std::string("D3: ") + cudaGetErrorString(e_) + " at " + __FILE__ + ":" + \
+                             std::to_string(__LINE__)); } while (0)
+
+__device__ __forceinline__ double warp_sum(double v) {
+    for (int o = 16; o; o >>= 1) v += __shfl_xor_sync(0xffffffffu, v, o);
+    return v;
+}
+
+// One thread: the cell in bohr, its inverse, and how many bins along each axis cover rmax.
+__global__ void grid_kernel(const double* __restrict__ cell_A, int nb0, int nb1, int nb2, double rmax,
+                            Grid* __restrict__ g) {
+    double c[9];
+    for (int k = 0; k < 9; ++k) c[k] = cell_A[k] / BOHR;
+    const double det = c[0] * (c[4] * c[8] - c[5] * c[7]) - c[1] * (c[3] * c[8] - c[5] * c[6]) +
+                       c[2] * (c[3] * c[7] - c[4] * c[6]);
+    double inv[9];
+    inv[0] = (c[4] * c[8] - c[5] * c[7]) / det; inv[1] = (c[2] * c[7] - c[1] * c[8]) / det;
+    inv[2] = (c[1] * c[5] - c[2] * c[4]) / det; inv[3] = (c[5] * c[6] - c[3] * c[8]) / det;
+    inv[4] = (c[0] * c[8] - c[2] * c[6]) / det; inv[5] = (c[2] * c[3] - c[0] * c[5]) / det;
+    inv[6] = (c[3] * c[7] - c[4] * c[6]) / det; inv[7] = (c[1] * c[6] - c[0] * c[7]) / det;
+    inv[8] = (c[0] * c[4] - c[1] * c[3]) / det;
+    const int nb[3] = {nb0, nb1, nb2};
+    for (int ax = 0; ax < 3; ++ax) {
+        const double* u = c + 3 * ((ax + 1) % 3);
+        const double* w = c + 3 * ((ax + 2) % 3);
+        const double cx = u[1] * w[2] - u[2] * w[1], cy = u[2] * w[0] - u[0] * w[2], cz = u[0] * w[1] - u[1] * w[0];
+        const double h = fabs(det) / sqrt(cx * cx + cy * cy + cz * cz);       // the cell's height along ax
+        g->nb[ax] = nb[ax];
+        g->reach[ax] = (int)ceil(rmax / (h / nb[ax]) * (1.0 + 1e-6));        // float32 pair vectors: a margin
+    }
+    for (int k = 0; k < 9; ++k) { g->cell[k] = (float)c[k]; g->inv[k] = inv[k]; }
+}
+
+// Per atom: wrap into the cell, its bin, its wrapped position (bohr).
+__global__ void wrap_kernel(int n, const double* __restrict__ pos_A, const Grid* __restrict__ gp,
+                            float3* __restrict__ pw, int* __restrict__ bin_of) {
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    const Grid& g = *gp;
+    const double x = pos_A[3 * i] / BOHR, y = pos_A[3 * i + 1] / BOHR, z = pos_A[3 * i + 2] / BOHR;
+    double f[3] = {x * g.inv[0] + y * g.inv[3] + z * g.inv[6], x * g.inv[1] + y * g.inv[4] + z * g.inv[7],
+                   x * g.inv[2] + y * g.inv[5] + z * g.inv[8]};
+    int b[3];
+    for (int a = 0; a < 3; ++a) {
+        f[a] -= floor(f[a]);
+        if (f[a] >= 1.0) f[a] = 0.0;
+        b[a] = min((int)(f[a] * g.nb[a]), g.nb[a] - 1);
+    }
+    bin_of[i] = (b[0] * g.nb[1] + b[1]) * g.nb[2] + b[2];
+    // the wrapped Cartesian position from the float64 fractional one
+    double cx = 0, cy = 0, cz = 0;
+    for (int a = 0; a < 3; ++a) {
+        cx += f[a] * (double)g.cell[3 * a];
+        cy += f[a] * (double)g.cell[3 * a + 1];
+        cz += f[a] * (double)g.cell[3 * a + 2];
+    }
+    pw[i] = make_float3((float)cx, (float)cy, (float)cz);
+}
+
+// starts[b] = first sorted index of bin b; starts[nbins] = n
+__global__ void bin_start_kernel(int n, int nbins, const int* __restrict__ keys, int* __restrict__ starts) {
+    const int k = blockIdx.x * blockDim.x + threadIdx.x;
+    if (k > n) return;
+    const int prev = k == 0 ? -1 : keys[k - 1];
+    const int cur = k == n ? nbins : keys[k];
+    for (int b = prev + 1; b <= cur; ++b) starts[b] = k;
+}
+
+__global__ void gather_kernel(int n, const float3* __restrict__ pw, const int* __restrict__ sp,
+                              const int* __restrict__ order, float4* __restrict__ ps) {
+    const int k = blockIdx.x * blockDim.x + threadIdx.x;
+    if (k >= n) return;
+    const int a = order[k];
+    const float3 p = pw[a];
+    ps[k] = make_float4(p.x, p.y, p.z, __int_as_float(sp[a]));
+}
+
+// Walk the rows of bins around sorted atom k (in bin `home`); fn(j, species_j, dx, dy, dz, r2) for each (atom,
+// image) within cut2 other than k itself.
+template <typename F>
+__device__ __forceinline__ void walk_rows(int k, int home, const float4* __restrict__ ps,
+                                          const int* __restrict__ bin_start, const Grid& g, float cut2, int lane,
+                                          F&& fn) {
+    const float4 pi = ps[k];
+    const int nb0 = g.nb[0], nb1 = g.nb[1], nb2 = g.nb[2];
+    const int bz = home % nb2, by = (home / nb2) % nb1, bx = home / (nb1 * nb2);
+    for (int ox = -g.reach[0]; ox <= g.reach[0]; ++ox) {
+        const int tx = bx + ox, ix = (tx % nb0 + nb0) % nb0, sx = (tx - ix) / nb0;
+        for (int oy = -g.reach[1]; oy <= g.reach[1]; ++oy) {
+            const int ty = by + oy, iy = (ty % nb1 + nb1) % nb1, sy = (ty - iy) / nb1;
+            int tz = bz - g.reach[2];
+            while (tz <= bz + g.reach[2]) {
+                const int iz = (tz % nb2 + nb2) % nb2, sz = (tz - iz) / nb2;
+                const int len = min(bz + g.reach[2] - tz, nb2 - 1 - iz) + 1;
+                const float shx = sx * g.cell[0] + sy * g.cell[3] + sz * g.cell[6];
+                const float shy = sx * g.cell[1] + sy * g.cell[4] + sz * g.cell[7];
+                const float shz = sx * g.cell[2] + sy * g.cell[5] + sz * g.cell[8];
+                const float ox_ = shx - pi.x, oy_ = shy - pi.y, oz_ = shz - pi.z;
+                const int b0 = (ix * nb1 + iy) * nb2 + iz;
+                const int lo = bin_start[b0], hi = bin_start[b0 + len];
+                const bool home_img = sx == 0 && sy == 0 && sz == 0;
+                for (int j = lo + lane; j < hi; j += 32) {
+                    if (home_img && j == k) continue;
+                    const float4 pj = ps[j];
+                    const float dx = pj.x + ox_, dy = pj.y + oy_, dz = pj.z + oz_;
+                    const float r2 = dx * dx + dy * dy + dz * dz;
+                    if (r2 < cut2) fn(j, __float_as_int(pj.w), dx, dy, dz, r2);
+                }
+                tz += len;
+            }
+        }
+    }
+}
+
+// Pass 1: coordination numbers (sorted order).
+__global__ void __launch_bounds__(WPB * 32) cn_kernel(int n, const float4* __restrict__ ps,
+                                                      const int* __restrict__ keys, const int* __restrict__ bin_start,
+                                                      const Grid* __restrict__ gp, float cn_cut2,
+                                                      const float* __restrict__ rcov, double* __restrict__ cn) {
+    const int k = (blockIdx.x * blockDim.x + threadIdx.x) >> 5, lane = threadIdx.x & 31;
+    if (k >= n) return;
+    const Grid g = *gp;
+    const float ri = rcov[__float_as_int(ps[k].w)];
+    float acc = 0.0f;   // per lane: flushed to float64 every 64 terms below 1
+    double tot = 0.0;
+    int cnt = 0;
+    walk_rows(k, keys[k], ps, bin_start, g, cn_cut2, lane, [&](int, int sj, float, float, float, float r2) {
+        acc += 1.0f / (1.0f + __expf(-K1 * ((ri + rcov[sj]) * rsqrtf(r2) - 1.0f)));
+        if (++cnt == 64) { tot += acc; acc = 0.0f; cnt = 0; }
+    });
+    tot = warp_sum(tot + acc);
+    if (lane == 0) cn[k] = tot;
+}
+
+// Per atom: the normalised Gaussian weights of its reference CNs and their CN derivatives.
+__global__ void weight_kernel(int n, const float4* __restrict__ ps, const int* __restrict__ nref,
+                              const float* __restrict__ cnref, const double* __restrict__ cn,
+                              float* __restrict__ w, float* __restrict__ dw) {
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    const int s = __float_as_int(ps[i].w), m = nref[s];
+    double e[MAXREF], de[MAXREF], norm = 0.0, dnorm = 0.0, best = 1e300;
+    int arg = 0;
+    for (int a = 0; a < m; ++a) {
+        const double d = cn[i] - cnref[s * MAXREF + a];
+        e[a] = exp(-(double)K3 * d * d);
+        de[a] = -2.0 * K3 * d * e[a];
+        norm += e[a];
+        dnorm += de[a];
+        if (fabs(d) < best) { best = fabs(d); arg = a; }
+    }
+    for (int a = 0; a < WSTRIDE; ++a) {
+        float wa = 0.0f, dwa = 0.0f;
+        if (a < m) {
+            if (norm > 1e-300) {
+                wa = (float)(e[a] / norm);
+                dwa = (float)((de[a] - e[a] / norm * dnorm) / norm);   // norm^2 underflows far from every reference
+            } else {
+                wa = a == arg ? 1.0f : 0.0f;    // every weight underflowed: the nearest reference
+            }
+        }
+        w[i * WSTRIDE + a] = wa;
+        if (a < MAXREF) dw[i * MAXREF + a] = dwa;
+    }
+}
+
+enum DampKind { kBJ = 0, kZero = 1, kZeroM = 2 };
+
+// G = s6 g6 + s8 qq g8 and dG/dr / r for one pair.
+template <int DAMP>
+__device__ __forceinline__ void damping(const PairParams& p, float r2, float qq, float r0, float& G, float& dG_r) {
+    if (DAMP == kBJ) {
+        const float f = p.a1 * sqrtf(qq) + p.a2;
+        const float f2 = f * f, f6 = f2 * f2 * f2, f8 = f6 * f2;
+        const float r4 = r2 * r2, r6 = r4 * r2, r8 = r6 * r2;
+        const float t6 = 1.0f / (r6 + f6), t8 = 1.0f / (r8 + f8);
+        G = p.s6 * t6 + p.s8 * qq * t8;
+        dG_r = -(p.s6 * 6.0f * r4 * t6 * t6 + p.s8 * qq * 8.0f * r6 * t8 * t8);
+    } else {
+        const float r = sqrtf(r2), ir = 1.0f / r, ir2 = ir * ir, ir6 = ir2 * ir2 * ir2, ir8 = ir6 * ir2;
+        float d6, dd6, d8, dd8;
+        if (DAMP == kZero) {
+            const float t6 = 6.0f * __powf(p.rs6 * r0 * ir, p.alpha6);
+            const float t8 = 6.0f * __powf(p.rs8 * r0 * ir, p.alpha8);
+            d6 = 1.0f / (1.0f + t6);
+            d8 = 1.0f / (1.0f + t8);
+            dd6 = p.alpha6 * t6 * d6 * d6 * ir;          // dd/dr
+            dd8 = p.alpha8 * t8 * d8 * d8 * ir;
+        } else {
+            const float x6 = r / (p.rs6 * r0) + p.beta * r0, x8 = r / (p.rs8 * r0) + p.beta * r0;
+            const float t6 = 6.0f * __powf(x6, -p.alpha6), t8 = 6.0f * __powf(x8, -p.alpha8);
+            d6 = 1.0f / (1.0f + t6);
+            d8 = 1.0f / (1.0f + t8);
+            dd6 = p.alpha6 * t6 * d6 * d6 / (x6 * p.rs6 * r0);
+            dd8 = p.alpha8 * t8 * d8 * d8 / (x8 * p.rs8 * r0);
+        }
+        const float g6 = d6 * ir6, g8 = d8 * ir8;
+        const float dg6 = dd6 * ir6 - 6.0f * g6 * ir, dg8 = dd8 * ir8 - 8.0f * g8 * ir;
+        G = p.s6 * g6 + p.s8 * qq * g8;
+        dG_r = (p.s6 * dg6 + p.s8 * qq * dg8) * ir;
+    }
+}
+
+// Pass 2: pair energies (halved: each pair is seen from both ends), the direct forces and virial, dE/dCN_i.
+// Shared: s_q[S], then per warp the projections u_i(s, b) = sum_a w_ia C6ref[s_i, s](a, b) and du with dw.
+template <int DAMP, bool FORCES>
+__global__ void __launch_bounds__(WPB * 32) pair_kernel(
+        int n, const float4* __restrict__ ps, const int* __restrict__ keys, const int* __restrict__ bin_start,
+        const Grid* __restrict__ gp, PairParams p, int S, const float* __restrict__ c6ref,
+        const float* __restrict__ q, const float* __restrict__ r0ab, const float* __restrict__ w,
+        const float* __restrict__ dw, double* __restrict__ acc, double* __restrict__ eatom,
+        double* __restrict__ force_s, double* __restrict__ dedcn) {
+    extern __shared__ float smem[];
+    float* s_q = smem;
+    const int wib = threadIdx.x >> 5, lane = threadIdx.x & 31;
+    float* s_u = smem + S + wib * 2 * S * MAXREF;
+    float* s_du = s_u + S * MAXREF;
+    const int k = blockIdx.x * WPB + wib;
+    for (int t = threadIdx.x; t < S; t += blockDim.x) s_q[t] = q[t];
+    if (k < n) {
+        const int si = __float_as_int(ps[k].w);
+        for (int t = lane; t < S * MAXREF; t += 32) {
+            const int s = t / MAXREF, b = t % MAXREF;
+            const float* tab = c6ref + ((size_t)si * S + s) * MAXREF * MAXREF;
+            float u = 0.0f, du = 0.0f;
+            for (int a = 0; a < MAXREF; ++a) {
+                u += w[k * WSTRIDE + a] * tab[a * MAXREF + b];
+                if (FORCES) du += dw[k * MAXREF + a] * tab[a * MAXREF + b];
+            }
+            s_u[t] = u;
+            s_du[t] = du;
+        }
+    }
+    __syncthreads();
+    if (k >= n) return;
+    const Grid g = *gp;
+    const int si = __float_as_int(ps[k].w);
+    const float qi = s_q[si];
+    double e = 0.0, fx = 0.0, fy = 0.0, fz = 0.0, dcn = 0.0;
+    double v[6] = {0, 0, 0, 0, 0, 0};
+    walk_rows(k, keys[k], ps, bin_start, g, p.cut2, lane, [&](int j, int sj, float dx, float dy, float dz, float r2) {
+        const float4 w0 = *reinterpret_cast<const float4*>(w + WSTRIDE * (size_t)j);
+        const float w4 = w[WSTRIDE * (size_t)j + 4];
+        const float* u = s_u + sj * MAXREF;
+        const float c6 = u[0] * w0.x + u[1] * w0.y + u[2] * w0.z + u[3] * w0.w + u[4] * w4;
+        const float qq = 3.0f * qi * s_q[sj];
+        float G, dG_r;
+        damping<DAMP>(p, r2, qq, DAMP == kBJ ? 0.0f : r0ab[si * S + sj], G, dG_r);
+        float sw = 1.0f, dsw_r = 0.0f;
+        if (p.sw_width > 0.0f) {
+            const float r = sqrtf(r2);
+            if (r > p.sw_on) {
+                const float x = (r - p.sw_on) / p.sw_width;
+                sw = 1.0f - x * x * x * (10.0f - 15.0f * x + 6.0f * x * x);
+                dsw_r = -30.0f * x * x * (1.0f - x) * (1.0f - x) / (p.sw_width * r);
+            }
+        }
+        e += (double)(-0.5f * c6 * G * sw);
+        if (FORCES) {
+            const float* du = s_du + sj * MAXREF;
+            const float dc6i = du[0] * w0.x + du[1] * w0.y + du[2] * w0.z + du[3] * w0.w + du[4] * w4;
+            const float de_r = -c6 * (dG_r * sw + G * dsw_r);       // dE_ij/dr / r
+            fx += (double)(de_r * dx);
+            fy += (double)(de_r * dy);
+            fz += (double)(de_r * dz);
+            const float h = 0.5f * de_r;
+            v[0] += (double)(h * dx * dx);
+            v[1] += (double)(h * dx * dy);
+            v[2] += (double)(h * dx * dz);
+            v[3] += (double)(h * dy * dy);
+            v[4] += (double)(h * dy * dz);
+            v[5] += (double)(h * dz * dz);
+            dcn += (double)(-dc6i * G * sw);      // dE_ij/dCN_i: the whole pair energy, i's share of both directions
+        }
+    });
+    e = warp_sum(e);
+    if (FORCES) {
+        fx = warp_sum(fx); fy = warp_sum(fy); fz = warp_sum(fz); dcn = warp_sum(dcn);
+        for (int c = 0; c < 6; ++c) v[c] = warp_sum(v[c]);
+    }
+    if (lane == 0) {
+        atomicAdd(&acc[0], e);
+        if (eatom) eatom[k] = e;
+        if (FORCES) {
+            force_s[3 * k + 0] = fx;
+            force_s[3 * k + 1] = fy;
+            force_s[3 * k + 2] = fz;
+            for (int c = 0; c < 6; ++c) atomicAdd(&acc[1 + c], v[c]);
+            dedcn[k] = dcn;
+        }
+    }
+}
+
+// Pass 3: the CN chain rule, dE/dr_ij through CN = (dE/dCN_i + dE/dCN_j) dcn_ij/dr; then the force of sorted atom
+// k goes to the pass's atom order[k] in eV/A.
+__global__ void __launch_bounds__(WPB * 32) cn_force_kernel(
+        int n, const float4* __restrict__ ps, const int* __restrict__ keys, const int* __restrict__ bin_start,
+        const Grid* __restrict__ gp, float cn_cut2, const float* __restrict__ rcov, const double* __restrict__ dedcn,
+        const int* __restrict__ order, const double* __restrict__ force_s, double* __restrict__ forces,
+        double* __restrict__ acc) {
+    const int k = (blockIdx.x * blockDim.x + threadIdx.x) >> 5, lane = threadIdx.x & 31;
+    if (k >= n) return;
+    const Grid g = *gp;
+    const float ri = rcov[__float_as_int(ps[k].w)];
+    const float di = (float)dedcn[k];
+    double fx = 0.0, fy = 0.0, fz = 0.0;
+    double v[6] = {0, 0, 0, 0, 0, 0};
+    walk_rows(k, keys[k], ps, bin_start, g, cn_cut2, lane, [&](int j, int sj, float dx, float dy, float dz, float r2) {
+        const float ir = rsqrtf(r2);
+        const float rco = ri + rcov[sj];
+        const float ex = __expf(-K1 * (rco * ir - 1.0f));
+        const float den = 1.0f + ex;
+        const float s = (di + (float)dedcn[j]) * (-K1 * rco * ir * ir * ex / (den * den)) * ir;
+        if (s == 0.0f) return;
+        fx += (double)(s * dx);
+        fy += (double)(s * dy);
+        fz += (double)(s * dz);
+        const float h = 0.5f * s;
+        v[0] += (double)(h * dx * dx);
+        v[1] += (double)(h * dx * dy);
+        v[2] += (double)(h * dx * dz);
+        v[3] += (double)(h * dy * dy);
+        v[4] += (double)(h * dy * dz);
+        v[5] += (double)(h * dz * dz);
+    });
+    fx = warp_sum(fx); fy = warp_sum(fy); fz = warp_sum(fz);
+    for (int c = 0; c < 6; ++c) v[c] = warp_sum(v[c]);
+    if (lane == 0) {
+        const int a = order[k];
+        constexpr double F = HARTREE / BOHR;
+        forces[3 * a + 0] += (force_s[3 * k + 0] + fx) * F;
+        forces[3 * a + 1] += (force_s[3 * k + 1] + fy) * F;
+        forces[3 * a + 2] += (force_s[3 * k + 2] + fz) * F;
+        for (int c = 0; c < 6; ++c) atomicAdd(&acc[1 + c], v[c]);
+    }
+}
+
+__global__ void finish_kernel(const double* __restrict__ acc, double* __restrict__ energy,
+                              double* __restrict__ virial) {
+    const int t = threadIdx.x;
+    if (t == 0 && energy) energy[0] += acc[0] * HARTREE;
+    if (t < 6 && virial) virial[t] += acc[1 + t] * HARTREE;
+}
+
+__global__ void atom_energy_kernel(int n, const int* __restrict__ order, const double* __restrict__ eatom_s,
+                                   double* __restrict__ atom_energy) {
+    const int k = blockIdx.x * blockDim.x + threadIdx.x;
+    if (k < n) atom_energy[order[k]] += eatom_s[k] * HARTREE;
+}
+
+__global__ void iota_kernel(int n, int* __restrict__ out) {
+    const int k = blockIdx.x * blockDim.x + threadIdx.x;
+    if (k < n) out[k] = k;
+}
+
+int bins_for(const double cell_A[9], double rmax_bohr, int nb[3]) {
+    double c[9];
+    for (int k = 0; k < 9; ++k) c[k] = cell_A[k] / BOHR;
+    const double det = c[0] * (c[4] * c[8] - c[5] * c[7]) - c[1] * (c[3] * c[8] - c[5] * c[6]) +
+                       c[2] * (c[3] * c[7] - c[4] * c[6]);
+    if (!(std::fabs(det) > 1e-12)) throw std::invalid_argument("D3: the cell has no volume (a periodic cell is needed)");
+    for (int ax = 0; ax < 3; ++ax) {
+        const double* u = c + 3 * ((ax + 1) % 3);
+        const double* w = c + 3 * ((ax + 2) % 3);
+        const double cx = u[1] * w[2] - u[2] * w[1], cy = u[2] * w[0] - u[0] * w[2], cz = u[0] * w[1] - u[1] * w[0];
+        const double h = std::fabs(det) / std::sqrt(cx * cx + cy * cy + cz * cz);
+        nb[ax] = std::max(1, std::min(MAXBINS, (int)(h / (rmax_bohr / 4.0))));   // bins of at least a quarter cutoff
+    }
+    return nb[0] * nb[1] * nb[2];
+}
+
+template <class T>
+struct DevBuf {
+    T* p = nullptr;
+    size_t count = 0;
+    void alloc(size_t n, size_t& bytes) {
+        free();
+        if (n == 0) n = 1;
+        CK(cudaMalloc(&p, n * sizeof(T)));
+        count = n;
+        bytes += n * sizeof(T);
+    }
+    void upload(const std::vector<T>& h, cudaStream_t s) {
+        CK(cudaMemcpyAsync(p, h.data(), h.size() * sizeof(T), cudaMemcpyHostToDevice, s));
+    }
+    void free() {
+        if (p) cudaFree(p);
+        p = nullptr;
+        count = 0;
+    }
+    ~DevBuf() { free(); }
+};
+
+class D3Pair final : public Term {
+public:
+    D3Pair(const Settings& s, const Tables& t) : s_(s) {
+        nref_.assign(t.nref, t.nref + kElements);
+        cnref_.assign(t.cnref, t.cnref + kElements * MAXREF);
+        rcov_.assign(t.rcov, t.rcov + kElements);
+        r2r4_.assign(t.r2r4, t.r2r4 + kElements);
+        c6ref_.assign(t.c6ref, t.c6ref + (size_t)kElements * kElements * MAXREF * MAXREF);
+        r0ab_.assign(t.r0ab, t.r0ab + kElements * kElements);
+        damp_ = s.damping == Damping::Zero ? kZero : s.damping == Damping::ZeroM ? kZeroM : kBJ;
+        p_.s6 = (float)s.s6; p_.s8 = (float)s.s8; p_.a1 = (float)s.a1; p_.a2 = (float)s.a2;
+        p_.rs6 = (float)s.rs6; p_.rs8 = (float)s.rs8; p_.alpha6 = (float)s.alpha; p_.alpha8 = (float)(s.alpha + 2.0);
+        p_.beta = (float)s.beta;
+        p_.cut2 = (float)(s.pair_cutoff_bohr * s.pair_cutoff_bohr);
+        p_.cn_cut2 = (float)(s.cn_cutoff_bohr * s.cn_cutoff_bohr);
+        p_.sw_width = (float)s.smoothing_bohr;
+        p_.sw_on = (float)(s.pair_cutoff_bohr - s.smoothing_bohr);
+        rmax_ = std::max(s.pair_cutoff_bohr, s.cn_cutoff_bohr);
+    }
+
+    bool prepare(int n, const int32_t* numbers, const double cell[9], cudaStream_t stream) override {
+        if (n < 1) throw std::invalid_argument("D3: no atoms");
+        std::map<int, int> index;
+        for (int i = 0; i < n; ++i) {
+            const int z = numbers[i];
+            if (z < 1 || z >= kElements || nref_[z] < 1)
+                throw std::invalid_argument("D3: no reference C6 for atomic number " + std::to_string(z));
+            index.emplace(z, 0);
+        }
+        std::vector<int> zs;
+        for (auto& kv : index) { kv.second = (int)zs.size(); zs.push_back(kv.first); }
+        const int S = (int)zs.size();
+        std::vector<int> sp(n);
+        for (int i = 0; i < n; ++i) sp[i] = index[numbers[i]];
+        std::vector<int> nref(S);
+        std::vector<float> cnref(S * MAXREF, 0.0f), rcov(S), q(S), r0((size_t)S * S),
+            c6((size_t)S * S * MAXREF * MAXREF, 0.0f);
+        for (int a = 0; a < S; ++a) {
+            const int za = zs[a];
+            nref[a] = nref_[za];
+            for (int r = 0; r < MAXREF; ++r) cnref[a * MAXREF + r] = (float)cnref_[za * MAXREF + r];
+            rcov[a] = (float)rcov_[za];
+            q[a] = (float)r2r4_[za];
+            for (int b = 0; b < S; ++b) {
+                const int zb = zs[b];
+                r0[a * S + b] = (float)r0ab_[za * kElements + zb];
+                for (int x = 0; x < MAXREF * MAXREF; ++x) {
+                    const double v = c6ref_[((size_t)za * kElements + zb) * MAXREF * MAXREF + x];
+                    c6[((size_t)a * S + b) * MAXREF * MAXREF + x] = v > 0.0 ? (float)v : 0.0f;
+                }
+            }
+        }
+        int nb[3];
+        const int nbins = bins_for(cell, rmax_, nb);
+        bytes_ = 0;
+        n_ = n;
+        S_ = S;
+        nbins_ = nbins;
+        for (int a = 0; a < 3; ++a) nb_[a] = nb[a];
+        grid_.alloc(1, bytes_);
+        pw_.alloc(n, bytes_);
+        bin_of_.alloc(n, bytes_);
+        keys_.alloc(n, bytes_);
+        iota_.alloc(n, bytes_);
+        order_.alloc(n, bytes_);
+        bin_start_.alloc(nbins + 1, bytes_);
+        species_.alloc(n, bytes_);
+        ps_.alloc(n, bytes_);
+        cn_.alloc(n, bytes_);
+        w_.alloc((size_t)n * WSTRIDE, bytes_);
+        dw_.alloc((size_t)n * MAXREF, bytes_);
+        dedcn_.alloc(n, bytes_);
+        force_s_.alloc(3 * (size_t)n, bytes_);
+        eatom_.alloc(n, bytes_);
+        acc_.alloc(7, bytes_);
+        nref_d_.alloc(S, bytes_);
+        cnref_d_.alloc(cnref.size(), bytes_);
+        rcov_d_.alloc(S, bytes_);
+        q_d_.alloc(S, bytes_);
+        r0_d_.alloc(r0.size(), bytes_);
+        c6_d_.alloc(c6.size(), bytes_);
+        species_.upload(sp, stream);
+        nref_d_.upload(nref, stream);
+        cnref_d_.upload(cnref, stream);
+        rcov_d_.upload(rcov, stream);
+        q_d_.upload(q, stream);
+        r0_d_.upload(r0, stream);
+        c6_d_.upload(c6, stream);
+        iota_kernel<<<(n + 255) / 256, 256, 0, stream>>>(n, iota_.p);
+        end_bit_ = 1;
+        while ((1 << end_bit_) < nbins) ++end_bit_;
+        sort_bytes_ = 0;
+        CK(cub::DeviceRadixSort::SortPairs(nullptr, sort_bytes_, bin_of_.p, keys_.p, iota_.p, order_.p, n, 0,
+                                           end_bit_, stream));
+        sort_tmp_.alloc(sort_bytes_, bytes_);
+        smem_ = (size_t)(S + 2 * WPB * S * MAXREF) * sizeof(float);
+        CK(cudaStreamSynchronize(stream));      // the host vectors above go out of scope
+        return true;
+    }
+
+    void record(const Inputs& in, const Outputs& out) override {
+        if (n_ < 1) throw std::logic_error("D3: record() before prepare()");
+        const int n = n_;
+        cudaStream_t st = in.stream;
+        const bool forces = in.forces && out.forces;
+        grid_kernel<<<1, 1, 0, st>>>(in.cell, nb_[0], nb_[1], nb_[2], rmax_, grid_.p);
+        wrap_kernel<<<(n + 255) / 256, 256, 0, st>>>(n, in.positions, grid_.p, pw_.p, bin_of_.p);
+        CK(cub::DeviceRadixSort::SortPairs(sort_tmp_.p, sort_bytes_, bin_of_.p, keys_.p, iota_.p, order_.p, n, 0,
+                                           end_bit_, st));
+        bin_start_kernel<<<(n + 256) / 256, 256, 0, st>>>(n, nbins_, keys_.p, bin_start_.p);
+        gather_kernel<<<(n + 255) / 256, 256, 0, st>>>(n, pw_.p, species_.p, order_.p, ps_.p);
+        CK(cudaMemsetAsync(acc_.p, 0, 7 * sizeof(double), st));
+        const int blocks = (n + WPB - 1) / WPB, threads = WPB * 32;
+        cn_kernel<<<blocks, threads, 0, st>>>(n, ps_.p, keys_.p, bin_start_.p, grid_.p, p_.cn_cut2, rcov_d_.p, cn_.p);
+        weight_kernel<<<(n + 127) / 128, 128, 0, st>>>(n, ps_.p, nref_d_.p, cnref_d_.p, cn_.p, w_.p, dw_.p);
+        double* eatom = out.atom_energy ? eatom_.p : nullptr;
+#define LOUP_D3_PAIR(D, F) pair_kernel<D, F><<<blocks, threads, smem_, st>>>(n, ps_.p, keys_.p, bin_start_.p, \
+            grid_.p, p_, S_, c6_d_.p, q_d_.p, r0_d_.p, w_.p, dw_.p, acc_.p, eatom, force_s_.p, dedcn_.p)
+        if (forces) {
+            if (damp_ == kBJ) LOUP_D3_PAIR(kBJ, true);
+            else if (damp_ == kZero) LOUP_D3_PAIR(kZero, true);
+            else LOUP_D3_PAIR(kZeroM, true);
+            cn_force_kernel<<<blocks, threads, 0, st>>>(n, ps_.p, keys_.p, bin_start_.p, grid_.p, p_.cn_cut2,
+                                                        rcov_d_.p, dedcn_.p, order_.p, force_s_.p, out.forces, acc_.p);
+        } else {
+            if (damp_ == kBJ) LOUP_D3_PAIR(kBJ, false);
+            else if (damp_ == kZero) LOUP_D3_PAIR(kZero, false);
+            else LOUP_D3_PAIR(kZeroM, false);
+        }
+#undef LOUP_D3_PAIR
+        finish_kernel<<<1, 32, 0, st>>>(acc_.p, out.energy, forces && in.virial ? out.virial : nullptr);
+        if (out.atom_energy)
+            atom_energy_kernel<<<(n + 255) / 256, 256, 0, st>>>(n, order_.p, eatom_.p, out.atom_energy);
+        CK(cudaGetLastError());
+    }
+
+    size_t device_bytes() const override { return bytes_; }
+
+private:
+    Settings s_;
+    std::vector<int> nref_;
+    std::vector<double> cnref_, rcov_, r2r4_, c6ref_, r0ab_;
+    int damp_ = kBJ;
+    PairParams p_{};
+    double rmax_ = 0.0;
+    int n_ = 0, S_ = 0, nbins_ = 0, nb_[3] = {1, 1, 1}, end_bit_ = 1;
+    size_t bytes_ = 0, sort_bytes_ = 0, smem_ = 0;
+    DevBuf<Grid> grid_;
+    DevBuf<float3> pw_;
+    DevBuf<int> bin_of_, keys_, iota_, order_, bin_start_, species_, nref_d_;
+    DevBuf<float4> ps_;
+    DevBuf<double> cn_, dedcn_, force_s_, eatom_, acc_;
+    DevBuf<float> w_, dw_, cnref_d_, rcov_d_, q_d_, r0_d_, c6_d_;
+    DevBuf<unsigned char> sort_tmp_;
+};
+
+thread_local std::string tl_d3_error;
+
+}  // namespace
+
+Term* make_term(const Settings& settings, const Tables& tables, const char** why_not) {
+    static thread_local std::string reason;
+    auto refuse = [&](const char* text) -> Term* {
+        reason = text;
+        if (why_not) *why_not = reason.c_str();
+        return nullptr;
+    };
+    if (settings.three_body) return refuse("the three-body term is not built in this version (PLAN.md S6-D08)");
+    if (settings.long_range != LongRange::None)
+        return refuse("only the plain real-space sum is built in this version (PLAN.md S6-D05, S6-D06)");
+    if (!(settings.pair_cutoff_bohr > 0.0) || !(settings.cn_cutoff_bohr > 0.0))
+        return refuse("the cutoffs must be positive");
+    if (settings.smoothing_bohr < 0.0 || settings.smoothing_bohr >= settings.pair_cutoff_bohr)
+        return refuse("the switch width must lie between 0 and the pair cutoff");
+    const bool zero = settings.damping == Damping::Zero || settings.damping == Damping::ZeroM;
+    if (zero && !(settings.rs6 > 0.0 && settings.rs8 > 0.0))
+        return refuse("the zero dampings need rs6 > 0 and rs8 > 0");
+    return new D3Pair(settings, tables);
+}
+
+}  // namespace loup::dispersion
+
+extern "C" {
+
+const char* loup_d3_last_error(void) { return loup::dispersion::tl_d3_error.c_str(); }
+
+int loup_d3_evaluate(const LoupD3Settings* settings, const LoupD3Tables* tables, int n_atoms,
+                     const int* atomic_numbers, const double* positions, const double* cell, int repeat,
+                     double* out_energy_ev, double* out_forces, double* out_virial, double* out_atom_energies,
+                     double* out_ms) {
+    using namespace loup::dispersion;
+    tl_d3_error.clear();
+    cudaStream_t st = nullptr;
+    cudaGraph_t graph = nullptr;
+    cudaGraphExec_t exec = nullptr;
+    double *d_pos = nullptr, *d_cell = nullptr, *d_e = nullptr, *d_f = nullptr, *d_v = nullptr, *d_ae = nullptr;
+    int rc = 0;
+    try {
+        if (!settings || !tables || !atomic_numbers || !positions || !cell || !out_energy_ev)
+            throw std::invalid_argument("a required pointer is NULL");
+        Settings s;
+        s.damping = static_cast<Damping>(settings->damping);
+        if (settings->damping < 0 || settings->damping > 3) throw std::invalid_argument("damping must be 0..3");
+        s.s6 = settings->s6; s.s8 = settings->s8; s.a1 = settings->a1; s.a2 = settings->a2;
+        s.rs6 = settings->rs6; s.rs8 = settings->rs8; s.alpha = settings->alpha; s.beta = settings->beta;
+        s.pair_cutoff_bohr = settings->pair_cutoff_bohr;
+        s.cn_cutoff_bohr = settings->cn_cutoff_bohr;
+        s.smoothing_bohr = settings->smoothing_bohr;
+        Tables t{tables->nref, tables->cnref, tables->rcov, tables->r2r4, tables->c6ref, tables->r0ab};
+        const char* why = nullptr;
+        std::unique_ptr<Term> term(make_term(s, t, &why));
+        if (!term) throw std::invalid_argument(why);
+        CK(cudaStreamCreateWithFlags(&st, cudaStreamNonBlocking));
+        std::vector<int32_t> z(atomic_numbers, atomic_numbers + n_atoms);
+        term->prepare(n_atoms, z.data(), cell, st);
+        const size_t n = (size_t)n_atoms;
+        CK(cudaMalloc(&d_pos, 3 * n * sizeof(double)));
+        CK(cudaMalloc(&d_cell, 9 * sizeof(double)));
+        CK(cudaMalloc(&d_e, sizeof(double)));
+        CK(cudaMalloc(&d_f, 3 * n * sizeof(double)));
+        CK(cudaMalloc(&d_v, 6 * sizeof(double)));
+        CK(cudaMalloc(&d_ae, n * sizeof(double)));
+        CK(cudaMemcpyAsync(d_pos, positions, 3 * n * sizeof(double), cudaMemcpyHostToDevice, st));
+        CK(cudaMemcpyAsync(d_cell, cell, 9 * sizeof(double), cudaMemcpyHostToDevice, st));
+        CK(cudaMemsetAsync(d_e, 0, sizeof(double), st));
+        CK(cudaMemsetAsync(d_f, 0, 3 * n * sizeof(double), st));
+        CK(cudaMemsetAsync(d_v, 0, 6 * sizeof(double), st));
+        CK(cudaMemsetAsync(d_ae, 0, n * sizeof(double), st));
+        const bool forces = out_forces || out_virial;
+        Inputs in{st, d_pos, d_cell, forces, out_virial != nullptr};
+        Outputs out{d_e, out_atom_energies ? d_ae : nullptr, forces ? d_f : nullptr, out_virial ? d_v : nullptr};
+        // the evaluation is captured and replayed: the term must be capturable
+        CK(cudaStreamBeginCapture(st, cudaStreamCaptureModeThreadLocal));
+        try {
+            term->record(in, out);
+        } catch (...) {
+            cudaStreamEndCapture(st, &graph);
+            throw;
+        }
+        CK(cudaStreamEndCapture(st, &graph));
+        CK(cudaGraphInstantiate(&exec, graph, 0));
+        CK(cudaGraphLaunch(exec, st));
+        CK(cudaStreamSynchronize(st));
+        CK(cudaMemcpy(out_energy_ev, d_e, sizeof(double), cudaMemcpyDeviceToHost));
+        if (out_forces) CK(cudaMemcpy(out_forces, d_f, 3 * n * sizeof(double), cudaMemcpyDeviceToHost));
+        if (out_virial) CK(cudaMemcpy(out_virial, d_v, 6 * sizeof(double), cudaMemcpyDeviceToHost));
+        if (out_atom_energies) CK(cudaMemcpy(out_atom_energies, d_ae, n * sizeof(double), cudaMemcpyDeviceToHost));
+        if (repeat > 0 && out_ms) {
+            cudaEvent_t a, b;
+            CK(cudaEventCreate(&a));
+            CK(cudaEventCreate(&b));
+            CK(cudaGraphLaunch(exec, st));                     // warm
+            CK(cudaEventRecord(a, st));
+            for (int r = 0; r < repeat; ++r) CK(cudaGraphLaunch(exec, st));
+            CK(cudaEventRecord(b, st));
+            CK(cudaEventSynchronize(b));
+            float ms = 0.0f;
+            CK(cudaEventElapsedTime(&ms, a, b));
+            *out_ms = ms / repeat;
+            cudaEventDestroy(a);
+            cudaEventDestroy(b);
+        }
+    } catch (const std::exception& e) {
+        tl_d3_error = std::string("loup_d3_evaluate: ") + e.what();
+        rc = -1;
+    }
+    if (exec) cudaGraphExecDestroy(exec);
+    if (graph) cudaGraphDestroy(graph);
+    for (double* p : {d_pos, d_cell, d_e, d_f, d_v, d_ae}) if (p) cudaFree(p);
+    if (st) cudaStreamDestroy(st);
+    return rc;
+}
+
+}  // extern "C"

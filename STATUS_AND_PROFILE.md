@@ -1233,3 +1233,38 @@ default is that sum. Shorter cutoffs with the tail correction fail on forces, an
 updated every k steps. The split sum was not prototyped. With the model's step on record (about 1.85 and 8.3 ms),
 dispersion would cost 1.3 times the model on NbCl5 and 1.0 times on SrTiO3 at this kernel's speed.
 
+### 6.28 The D3 term in the engine, S6-D04 (16 November 2026)
+
+RTX 5060 Ti only. `src/dispersion/d3_pair.cu` is in `libloupmd.so` (side build `libloupmd_d3b.so`, sha
+cba405445b767699): the bake-off's variant 1 with all four dampings (BJ, zero, modified BJ, modified zero), the
+optional quintic switch, the energy-only path and per-atom energies. It reads the cell on the device at every
+evaluation (the bin counts are fixed at setup, the reach is not), so the captured step stays exact in a
+variable-cell run. `loup_d3_evaluate` runs it on its own; `loup_set_dispersion` adds it to every whole-system pass
+of a handle (evaluate, per-atom, energy-only, the MD step, the variable-cell step). `lm.md(dispersion=)`, `loupmd md
+--dispersion`, run files, restarts and `metadata.json` carry it.
+
+Measured, `tests/gpu/test_d3.py` (20 passed):
+- Against simple-dftd3 at the same settings (40/40 bohr, s9 = 0), every damping on NbCl5, paracetamol and SrTiO3
+  2x2x2, and 20/30 bohr on SrTiO3: within 1e-6 eV/atom, 1e-5 eV/A, 1e-7 eV/A^3 (the plan's bounds; the test
+  does not print the margins).
+- `d3bj-mace` against torch-dftd's calculator as `mace_mp(dispersion=True)` builds it, at float64: the same bounds.
+- In the engine (OMAT-0 medium, SrTiO3 3x3x3): energy, forces, stress and per-atom energies are the model's plus
+  the term alone; after 200 captured NVE steps (13 list rebuilds) and after 200 variable-cell steps growing the cell
+  0.02% per step (11 rebuilds), energy and forces on the device are the model's plus the term at the final
+  positions and cell (1e-5 eV/atom, 1e-4 eV/A).
+- Switch: forces are the central-difference gradient within 2e-5 eV/A; stress xx within 2.4e-7 eV/A^3 of it
+  (rounding bound of the check 1.0e-6).
+
+Time per captured evaluation, d3bj 40/40 bohr (`loup_d3_evaluate`, mean of 50 graph replays):
+
+| System | Forces and stress | Energy only | Bake-off prototype |
+| --- | ---: | ---: | ---: |
+| NbCl5 3x3x3 (1,944) | 2.51 ms | 0.68 ms | 2.48 ms |
+| SrTiO3 10x10x10 (5,000) | 8.48 ms | 1.43 ms | 8.42 ms |
+| water 216 2x2x2 (5,184) | 9.87 ms | 1.53 ms | 9.88 ms |
+
+Errors against the 150 bohr reference are the bake-off's (NbCl5 0.58 meV/atom, SrTiO3 1.06, water 0.064). Not
+measured: an MD step with and without the term (the step cost should rise by about the table's first column), and
+any other GPU. Runs without dispersion are unchanged in code path (`record_dispersion` returns at once); the GPU
+suite on this library is recorded in PLAN.md's S6-D04 row.
+

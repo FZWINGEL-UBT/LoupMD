@@ -16,8 +16,8 @@ loaded. What ``md`` decides itself:
 Arguments that select FastMACE internals (``mode``, ``allow_reference``, ``fallback``, ``runner``, ``engine``,
 ``neighbours``, ``calibrate``) are accepted at their defaults and refused by name otherwise. ``mc=`` takes
 ``lm.mc`` moves (S6-T04); ``min_mc_temperature_K=`` is refused. ``dispersion=`` (a preset name or an
-``lm.Dispersion``) is checked against the model (``loupmd.dispersion.resolve``) and then refused until the D3 term
-is built (S6-D04).
+``lm.Dispersion``) is checked against the model (``loupmd.dispersion.resolve``) and adds the D3 pair term to every
+step (S6-D04); the three-body term and the long-range methods are refused until they are built.
 """
 from __future__ import annotations
 
@@ -309,6 +309,7 @@ def md(structure, *, model, head=None, charge=None, spin_multiplicity=None, sha2
                  "steps": steps, "repeat": list(repeat), "seed": seed, "initial_velocities": initial_velocities,
                  "check": check, "capacity": capacity, "device": device, "skin": skin,
                  "mc": [_mc.record(m) for m in moves] or None,
+                 "dispersion": _dispersion.argument(dispersion),
                  "output": {"directory": out.directory, "trajectory_every": out.trajectory_every,
                             "thermo_every": out.thermo_every, "restart_every": out.restart_every}}
     if explicit is not None:                    # so that the record repeats the run: `loupmd run metadata.json`
@@ -318,14 +319,11 @@ def md(structure, *, model, head=None, charge=None, spin_multiplicity=None, sha2
     force_field = model if isinstance(model, ForceField) else load(
         model, head, checkpoint=checkpoint, sha256=sha256, trusted=trusted, download=download, charge=charge,
         spin_multiplicity=spin_multiplicity, device=device)
-    if dispersion is not None:
-        _dispersion.refuse_unbuilt(_dispersion.resolve(dispersion, functional=force_field.functional,
-                                                       family=force_field.family, model=force_field.name))
     if force_field.label is None:              # a file outside the table: its hash, so the record can load it again
         arguments.update(model=str(force_field.path), sha256=force_field.sha256)
     transmuted = sorted({z for m in moves if isinstance(m, _mc.Transmute) for z in m.species})
     sim = Simulation(atoms, force_field, integrator=integrator, output=out, seed=seed, check=check, gate=gate,
-                     skin=skin, capacity=capacity, elements=transmuted or None)
+                     skin=skin, capacity=capacity, elements=transmuted or None, dispersion=dispersion)
     sim.run(steps=steps, schedule=schedule, mc=moves or None)
     sim.save_restart()
     metadata = provenance.collect(sim, source=source, repeat=repeat, arguments=arguments, warnings=warnings)

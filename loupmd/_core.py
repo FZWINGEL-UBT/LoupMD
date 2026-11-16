@@ -365,6 +365,7 @@ class LoupEngine:
 
         self._lib = _load_lib()
         self._n = 0
+        self.dispersion = None      # the resolved Dispersion record set_dispersion installed
         os.environ[kernels.PLUGIN_PATH_VARIABLE] = kernels.plugin_search_path()   # where the engine finds plugins
         self._h = self._lib.loup_create(os.fsencode(str(loup_path)), int(device_id))
         if not self._h:
@@ -508,6 +509,29 @@ class LoupEngine:
         if mask.shape != (self._n,):
             raise InputError(f"fixed has shape {mask.shape}, expected ({self._n},)")
         self._check(self._lib.loup_set_fixed_atoms(self._h, mask.ctypes.data_as(_c_int_p)), "loup_set_fixed_atoms")
+
+    def set_dispersion(self, record=None):
+        """Add the D3 pair term of a resolved :class:`loupmd.dispersion.Dispersion` to every force evaluation, MD
+        step and energy-only call of this engine (``None`` removes it). Needs a periodic cell. A library built
+        before PLAN.md task S6-D04 is refused."""
+        from . import _d3
+
+        if not hasattr(self._lib, "loup_set_dispersion"):
+            raise BackendError("the library has no dispersion term", why="it was built before PLAN.md task S6-D04",
+                               next_step="Rebuild the library from this source tree (`make`).")
+        self._lib.loup_set_dispersion.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p]
+        self._lib.loup_set_dispersion.restype = ctypes.c_int
+        if record is None:
+            self._check(self._lib.loup_set_dispersion(self._h, None, None), "loup_set_dispersion")
+            self.dispersion = None
+            return
+        settings = _d3.settings(record)
+        t = _d3.tables()
+        tables = _d3.LoupD3Tables(t["nref"].ctypes.data_as(_c_int_p), *(t[k].ctypes.data_as(_c_double_p) for k in
+                                                                         ("cnref", "rcov", "r2r4", "c6ref", "r0ab")))
+        self._check(self._lib.loup_set_dispersion(self._h, ctypes.byref(settings), ctypes.byref(tables)),
+                    "loup_set_dispersion")
+        self.dispersion = record
 
     def run(self, n_steps: int, it: LoupIntegrator) -> LoupMDStats:
         """``n_steps`` steps of the integrator ``it`` (see ``integrator``)."""

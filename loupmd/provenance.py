@@ -88,6 +88,12 @@ def _plan(sim):
     return plan
 
 
+def _dispersion_entry(sim):
+    from .simulation import _dispersion_entry as entry
+
+    return entry(sim)
+
+
 def collect(sim, *, source=None, repeat=None, arguments=None, warnings=()) -> dict:
     """The metadata of ``sim`` as it stands now."""
     from collections import Counter
@@ -120,6 +126,7 @@ def collect(sim, *, source=None, repeat=None, arguments=None, warnings=()) -> di
         "output": dataclasses.asdict(sim.output) if sim.output is not None else None,
         "seed": sim.seed, "skin_A": sim.skin, "skin": dict(sim.skin_record),
         "plan": _plan(sim),
+        "dispersion": _dispersion_entry(sim),
         "gate": sim.gate,
         "step": sim.step,
         "counters": {key: totals[key] for key in ("steps", "rebuilds", "pipelined_steps", "dangerous_builds")},
