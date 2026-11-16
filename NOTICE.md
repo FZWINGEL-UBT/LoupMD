@@ -112,7 +112,32 @@ rewrites them into LoupMD's layout without changing a value. The damping paramet
 LoupMD's own; simple-dftd3 (LGPL-3.0-or-later) is used only as an external reference in the tests and the
 bake-off, never copied or linked.
 
+## Integrators that follow ASE's conventions (`src/integrator.cu`, `src/cell.cu`)
+
+The thermostats and barostats below are CUDA kernels written for the engine. Each implements a published algorithm
+and follows ASE 3.27's class of the same name in its argument meanings, its coefficients and its order of
+operations, so that a LoupMD run agrees with ASE's to rounding (the tests compare them). No ASE source file was
+copied; the comments name the ASE class each one follows. They are distributed under MIT with the rest of the
+engine. Whether following ASE's order of operations makes them derived works of ASE (as decision O6 found for
+the optimisers, which port ASE's Python classes) is open for the owner (PLAN.md D81).
+
+| Kernel section | Algorithm | Follows (ASE 3.27) |
+| --- | --- | --- |
+| `src/integrator.cu`: Langevin and velocity Verlet steps, `fix_com` | Langevin dynamics, velocity Verlet | `Langevin`, `VelocityVerlet` |
+| `src/integrator.cu`: CSVR | Bussi, Donadio, Parrinello, J. Chem. Phys. 126, 014101 (2007) | `Bussi` |
+| `src/integrator.cu`: Nose-Hoover chain | Martyna, Klein, Tuckerman (1992); Tuckerman et al. (2006); Suzuki-Yoshida coefficients | `NoseHooverChainNVT` |
+| `src/integrator.cu`: Berendsen thermostat | Berendsen et al., J. Chem. Phys. 81, 3684 (1984) | `NVTBerendsen` |
+| `src/integrator.cu`: Langevin BAOAB NPT | Leimkuhler and Matthews' BAOAB with a barostat | `LangevinBAOAB` |
+| `src/integrator.cu`: Martyna-Tobias-Klein NPT | Martyna, Tobias, Klein, J. Chem. Phys. 101, 4177 (1994) | `IsotropicMTKNPT` |
+| `src/cell.cu`: Berendsen barostat | Berendsen et al. (1984) | `NPTBerendsen` (isotropic and per axis) |
+
+## Run-time libraries that are not shipped
+
+The wheel ships `libloupmd.so` and depends on NVIDIA's CUDA run-time libraries through the `cuda-toolkit` package
+(cuBLAS, cuBLASLt, the CUDA runtime and, for the split dispersion sum, cuFFT, which the library opens with
+`dlopen`). They are installed by pip under NVIDIA's licence and are not part of LoupMD's distribution.
+
 ## Not yet in this file
 
-Later stages add files that need an entry here when they land: further modules ported from ASE (Stage 4: the remaining integrators) and the Materials Project structures, if their terms allow it. S7-T03 is the
-audit.
+The Materials Project structures, if their terms allow shipping them, and the `pip-licenses` listing of the
+run-time dependencies (S7-T03: `pip-licenses` is not installed in the build environment).
