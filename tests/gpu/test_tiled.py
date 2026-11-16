@@ -176,12 +176,15 @@ def test_the_wavefront_gives_the_plain_tiled_result_from_a_smaller_row_pool(monk
 
 
 @pytest.mark.parametrize("wavefront", ["0", "1"])
-@pytest.mark.parametrize("keep_active", [None, "0"])
-def test_tile_lists_in_host_memory_give_the_device_lists_result(wavefront, keep_active, monkeypatch):
-    """O31 (S5-T07): LOUP_TILE_HOST_LISTS=1 keeps the tile lists' edge arrays in mapped pinned host memory, which
-    the active-edge compaction reads over the bus (once per tile and call, or in every sweep with
-    LOUP_TILE_KEEP_ACTIVE=0). Same tiles, same kernels: the device lists' numbers up to the order of the float32
-    atomic sums, in the call that builds the lists and in a later call that keeps them."""
+@pytest.mark.parametrize("keep_active", [None, "0", "1"])
+@pytest.mark.parametrize("stage", ["1", "0"])
+def test_tile_lists_in_host_memory_give_the_device_lists_result(wavefront, keep_active, stage, monkeypatch, capfd):
+    """O31 (S5-T07): LOUP_TILE_HOST_LISTS=1 keeps the tile lists' edge arrays in mapped pinned host memory. Each
+    sweep that compacts a tile's active edges (its first of the call, or every sweep of a tile without a slot:
+    LOUP_TILE_KEEP_ACTIVE=0 none, =1 one slot for all tiles) reads them from a device buffer they were copied into
+    on a copy stream one compaction ahead (LOUP_TILE_HOST_STAGE=1, the default where it fits), or over the bus
+    (=0). Same tiles, same kernels: the device lists' numbers up to the order of the float32 atomic sums, in the
+    call that builds the lists and in a later call that keeps them."""
     at = srtio3(1).repeat((32, 6, 6))                  # 5,760 atoms in a rod: several layers of tiles along it
     at.positions += np.random.default_rng(8).normal(scale=0.04, size=at.positions.shape)
     moved = at.positions + np.random.default_rng(9).normal(scale=0.01, size=at.positions.shape)
@@ -190,6 +193,8 @@ def test_tile_lists_in_host_memory_give_the_device_lists_result(wavefront, keep_
     monkeypatch.setenv("LOUP_NO_HYBRID", "1")         # two engines: no hybrid-or-not plan pick between them (D16)
     if keep_active is not None:
         monkeypatch.setenv("LOUP_TILE_KEEP_ACTIVE", keep_active)
+    monkeypatch.setenv("LOUP_TILE_HOST_STAGE", stage)
+    monkeypatch.setenv("LOUP_DEBUG_TILE_TIMES", "1")
 
     def run(host):
         monkeypatch.setenv("LOUP_TILE_HOST_LISTS", host)
@@ -203,7 +208,10 @@ def test_tile_lists_in_host_memory_give_the_device_lists_result(wavefront, keep_
             gc.collect()
 
     (dev, ex_d), (host, ex_h) = run("0"), run("1")
+    err = capfd.readouterr().err
     assert not ex_d.host_lists and ex_h.host_lists and ex_h.lists_kept
+    assert f"tile host lists staged: {'yes' if stage == '1' else 'no'}" in err
+    assert "staging out of step" not in err
     for (e0, f0, s0, t0), (e1, f1, s1, t1) in zip(dev, host):
         assert t0 == t1 >= 4
         assert abs(e1 - e0) / len(at) <= 1e-8 and np.abs(f1 - f0).max() <= 1e-5 and np.abs(s1 - s0).max() <= 1e-8

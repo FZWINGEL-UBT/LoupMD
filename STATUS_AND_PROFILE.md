@@ -1609,3 +1609,20 @@ call run at these sizes):
   4000 Ada; tiled with the state aliased in host memory 70.96M NbCl5 atoms on that card with 250 GB of host;
   wavefront 179.7M on it and 397.5M on an A100 80 GB. FastMACE keeps every per-atom array in host memory, which is
   S5-T07 step 2 here.
+
+`tile-host-stage` (O31, S5-T07): with host lists, each sweep that compacts a tile's active edges read the lists'
+36 B per edge over the bus. The edge arrays of the next compacting sweep are now copied into one of two device
+buffers on a copy stream while the current sweep runs (`StageRing`; the order of compacting sweeps follows the
+slot rule of `use_active`, worked out before the sweeps). Host lists forced, separate processes, order 1 0 0 1,
+median of five kept calls (`.tmp_o/tiled_ab.py`, `LOUP_TILE_HOST_STAGE`):
+
+| System | Over the bus (ms) | Staged (ms) | b / a |
+| --- | --- | --- | --- |
+| 320,000 atoms, 8 tiles, 8 slots | 698.1, 705.0 | 608.4, 615.7 | 0.871 |
+| 1,081,600 atoms, wavefront, 19 tiles, 5 slots | 2,532.9, 2,538.4 | 2,217.1, 2,197.1 | 0.870 |
+
+Forces 1.5e-6 / 2.2e-6 eV/A apart (run-to-run atomics). With device lists the same calls took about 598-644 ms
+(lever D build) and 2,215-2,234 ms (5 slots): the host lists now cost about what they save, so the fallback is
+no longer 15-20% slower. Two buffers of 36 B per edge of the longest list (2 x 144 MB at 320,000 atoms), taken
+before the slots within the same reserve. `test_tile_lists_in_host_memory...` (plain and wavefront, 0 / 1 / all
+slots, staged and over the bus) 12 passed.

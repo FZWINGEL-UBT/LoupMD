@@ -4673,6 +4673,24 @@ struct TileList {
     DeviceBufferGuard keep0;
 };
 
+// O31 (S5-T07): with host lists, the edge arrays of each sweep that compacts a tile's active edges are copied into
+// one of two device buffers on a copy stream, one compaction ahead, instead of the compaction reading them over the bus
+struct StageRing {
+    DeviceBufferGuard buf[2];
+    cudaStream_t copy = nullptr;
+    cudaEvent_t copied[2] = {nullptr, nullptr}, used[2] = {nullptr, nullptr};
+    StageRing() = default;
+    StageRing(const StageRing&) = delete;
+    StageRing& operator=(const StageRing&) = delete;
+    ~StageRing() {
+        for (int i = 0; i < 2; ++i) {
+            if (copied[i]) cudaEventDestroy(copied[i]);
+            if (used[i]) cudaEventDestroy(used[i]);
+        }
+        if (copy) cudaStreamDestroy(copy);
+    }
+};
+
 // One tile's active edges, sized for the longest list (TileList::act_slot)
 struct ActiveSlot {
     DeviceBufferGuard row_ptr, senders, receivers, pairs, vec_len, slab, t_sx;
@@ -4691,6 +4709,8 @@ struct TiledState {
     double bytes = 0.0;  // device bytes of everything below
     bool host_lists = false;  // the lists' edge arrays in pinned host memory (O31, S5-T07)
     double host_bytes = 0.0;  // their bytes
+    int stage = 0;            // the host lists are staged through `ring` (StageRing; decided with the slots)
+    StageRing ring;
     std::vector<int> z;
     std::vector<TileList> lists;
     DeviceBufferGuard whole_pos, ref_pos, disp2;  // [n, 3] this call's and the build's positions; one 64-bit word
@@ -5381,7 +5401,40 @@ static int evaluate_tiled_impl(LoupHandle* h, int n_atoms, const int* atomic_num
         // within the free memory less a reserve of max(256 MB, 2% of the card): the wavefront at 1,081,600 atoms
         // gains 2.3% from 5 slots (980 of 1,312 MB free) and nothing from 1 (status §6.34)
         const double reserve = std::max(256.0 * 1048576.0, 0.02 * (double)total_b);
-        int64_t want = std::min<int64_t>(in_flight, (int64_t)(std::max(0.0, (double)free_b - reserve) / slot_bytes));
+        // Host lists: two staging buffers first (LOUP_TILE_HOST_STAGE=0|1), then the slots in what is left
+        st->stage = 0;
+        for (DeviceBufferGuard& g : st->ring.buf)
+            if (g.p) { cudaFree(g.p); g.p = nullptr; }
+        double avail = (double)free_b - reserve;
+        if (st->host_lists) {
+            const size_t stage_b = (size_t)std::max(st->max_edges, 1) * 36;
+            bool on = 2.0 * (double)stage_b <= avail;
+            if (const char* e = std::getenv("LOUP_TILE_HOST_STAGE")) on = std::atoi(e) != 0;
+            StageRing& r = st->ring;
+            bool ok = on;
+            if (ok && !r.copy) {
+                ok = cudaStreamCreateWithFlags(&r.copy, cudaStreamNonBlocking) == cudaSuccess;
+                for (int i = 0; ok && i < 2; ++i)
+                    ok = cudaEventCreateWithFlags(&r.copied[i], cudaEventDisableTiming) == cudaSuccess &&
+                         cudaEventCreateWithFlags(&r.used[i], cudaEventDisableTiming) == cudaSuccess;
+            }
+            for (int i = 0; ok && i < 2; ++i)
+                if (cudaMalloc(&r.buf[i].p, stage_b) != cudaSuccess) { r.buf[i].p = nullptr; ok = false; }
+            if (on && !ok) {  // out of memory: the compaction reads the host lists over the bus
+                (void)cudaGetLastError();
+                for (DeviceBufferGuard& g : r.buf)
+                    if (g.p) { cudaFree(g.p); g.p = nullptr; }
+            }
+            st->stage = on && ok ? 1 : 0;
+            if (st->stage) {
+                st->bytes += 2.0 * (double)stage_b;
+                avail -= 2.0 * (double)stage_b;
+            }
+            if (tile_times)
+                std::fprintf(stderr, "tile host lists staged: %s (2 x %.0f MB)\n", st->stage ? "yes" : "no",
+                             (double)stage_b / 1e6);
+        }
+        int64_t want = std::min<int64_t>(in_flight, (int64_t)(std::max(0.0, avail) / slot_bytes));
         if (const char* e = std::getenv("LOUP_TILE_KEEP_ACTIVE"))
             want = std::min<int64_t>(in_flight, std::max(0LL, std::atoll(e)));
         // Built in place: DeviceBufferGuard has no move, so the vector must never copy or grow
@@ -5465,6 +5518,72 @@ static int evaluate_tiled_impl(LoupHandle* h, int n_atoms, const int* atomic_num
     CUDA_CHECK(cudaMemsetAsync(static_cast<char*>(h->d_zero_slab) + h->zero_tail_off, 0,
                                h->zero_slab_bytes - h->zero_tail_off, h->stream));
     TileListBorrow borrow(h);  // the sweeps point the handle at each tile's list (restore_tile_list)
+    // The sweeps in order (tile, last sweep of the tile), and from them, with use_active's slot rule, the tiles whose
+    // sweeps compact active edges, in order: the staging ring copies the k-th one's host lists during the (k-1)-th
+    std::vector<int> comp_tiles;
+    size_t next_comp = 0;
+    const bool stage = st->stage == 1;
+    if (stage) {
+        std::vector<std::pair<int, bool>> seq;
+        if (wave) {
+            for (const loup::SweepStep& s : st->steps) seq.push_back({s.tile, s.sweep == 3});
+        } else {
+            for (int k = 0; k < 2 * (L - 1) + 1; ++k)
+                for (int64_t i = 0; i < T; ++i) seq.push_back({(int)i, k == 2 * (L - 1)});
+        }
+        std::vector<int> fr = st->act_free, slot(lists.size(), -1);
+        std::vector<char> seen(lists.size(), 0);
+        for (const auto& [i, is_last] : seq) {
+            bool comp;
+            if (!seen[(size_t)i]) {
+                seen[(size_t)i] = 1;
+                comp = true;
+                if (!fr.empty()) { slot[(size_t)i] = fr.back(); fr.pop_back(); }
+            } else {
+                comp = slot[(size_t)i] < 0;
+            }
+            if (comp) comp_tiles.push_back(i);
+            if (is_last && slot[(size_t)i] >= 0) { fr.push_back(slot[(size_t)i]); slot[(size_t)i] = -1; }
+        }
+        // the buffers are free once the stream reaches here (an earlier call's sweeps read them)
+        for (int b = 0; b < 2; ++b) CUDA_CHECK(cudaEventRecord(st->ring.used[b], h->stream));
+    }
+    auto stage_copy = [&](size_t k) -> int {  // the k-th compaction's lists into buffer k % 2
+        if (k >= comp_tiles.size()) return 0;
+        const TileList& t = lists[(size_t)comp_tiles[k]];
+        StageRing& r = st->ring;
+        const int b = (int)(k % 2);
+        CUDA_CHECK(cudaStreamWaitEvent(r.copy, r.used[b], 0));
+        if (t.E)
+            CUDA_CHECK(cudaMemcpyAsync(r.buf[b].p, t.host_edges.p, (size_t)t.E * 36, cudaMemcpyHostToDevice, r.copy));
+        CUDA_CHECK(cudaEventRecord(r.copied[b], r.copy));
+        return 0;
+    };
+    if (stage && stage_copy(0) != 0) return -1;
+    // A sweep that compacts reads its tile's edges from the staged buffer: returns the buffer (-1 none, -2 error)
+    auto stage_use = [&](const TileList& t, const DomainSweep& sw) -> int {
+        if (!stage || sw.active_ready) return -1;
+        const size_t k = next_comp++;
+        if (k >= comp_tiles.size() || comp_tiles[k] != (int)(&t - lists.data())) {
+            std::fprintf(stderr, "loupmd: tile list staging out of step; reading the host lists\n");
+            return -1;  // not reached while the slot rule above matches use_active
+        }
+        StageRing& r = st->ring;
+        const int b = (int)(k % 2);
+        if (cudaStreamWaitEvent(h->stream, r.copied[b], 0) != cudaSuccess) return -2;
+        char* dp = static_cast<char*>(r.buf[b].p);
+        const size_t e = (size_t)t.E;
+        h->d_shift_cart = reinterpret_cast<double*>(dp);
+        h->d_senders = reinterpret_cast<int*>(dp + e * 24);
+        h->d_receivers = reinterpret_cast<int*>(dp + e * 28);
+        h->d_pairs = reinterpret_cast<int*>(dp + e * 32);
+        if (stage_copy(k + 1) != 0) return -2;
+        return b;
+    };
+    auto stage_done = [&](int b) -> int {  // after the sweep: its buffer may take the next copy
+        if (b >= 0) CUDA_CHECK(cudaEventRecord(st->ring.used[b], h->stream));
+        return 0;
+    };
     auto row_atom = [](const TileList& t) { return static_cast<const int*>(t.row_atom.p); };
     // The rows of x and dx: the atoms' own rows, or with the wavefront their rows in the pool
     auto row_x = [&](const TileList& t) { return static_cast<const int*>(wave ? t.row_slot.p : t.row_atom.p); };
@@ -5521,7 +5640,10 @@ static int evaluate_tiled_impl(LoupHandle* h, int n_atoms, const int* atomic_num
         sw.layer = layer;
         use_active(t, sw, false);
         if (layer == 0 && st->keep_l0 == 1) sw.keep0 = static_cast<float*>(t.keep0.p);
+        const int sb = stage_use(t, sw);
+        if (sb == -2) return -1;
         record_force_pass(h, stress, false, &sw);
+        if (stage_done(sb) != 0) return -1;
         for (int l = 0; l <= h->gen->out_lmax(layer); ++l) {
             tile_scatter_rows_kernel<<<grid((int64_t)t.n_local * width(layer, l)), 256, 0, h->stream>>>(
                 t.n_local, width(layer, l), row_x(t), h->gen->layer_out(layer, l), fx(layer, l));
@@ -5537,7 +5659,10 @@ static int evaluate_tiled_impl(LoupHandle* h, int n_atoms, const int* atomic_num
         DomainSweep sw;
         sw.kind = loup::GenericPassInputs::SweepLast;
         use_active(t, sw, false);
+        const int sb = stage_use(t, sw);
+        if (sb == -2) return -1;
         record_force_pass(h, stress, false, &sw);
+        if (stage_done(sb) != 0) return -1;
         scatter_grad(t, L - 2);
         fold_forces(t);
         return 0;
@@ -5556,7 +5681,10 @@ static int evaluate_tiled_impl(LoupHandle* h, int n_atoms, const int* atomic_num
         }
         use_active(t, sw, layer == 0);
         if (layer == 0 && st->keep_l0 == 1) sw.keep0 = static_cast<float*>(t.keep0.p);
+        const int sb = stage_use(t, sw);
+        if (sb == -2) return -1;
         record_force_pass(h, stress, false, &sw);
+        if (stage_done(sb) != 0) return -1;
         scatter_grad(t, layer - 1);
         fold_forces(t);
         return 0;
