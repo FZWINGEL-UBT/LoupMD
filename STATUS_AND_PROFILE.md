@@ -1542,3 +1542,12 @@ at the tile's buffers, and a scope guard gives the handle its own back when the 
 processes, median of five kept calls (`.tmp_o/tiled_ab.py`): 672.1 / 668.4 / 659.6 / 673.3 ms (a b b a), b / a
 0.987; forces against the copy build 1.8e-6 eV/A (run-to-run atomics), `test_kept_lists...` and the wavefront
 Simulation test pass. Less than the 23.5 ms of copies: they partly overlapped other work.
+
+`tile-active-once` (after `tile-list-borrow`): each sweep compacted its tile's active edges (`compute_and_count_active`,
+the scan, `scatter_active_edges`) again, three times per tile and call. A tile now compacts them in its first sweep
+of a call into a slot that it holds until its last sweep (layer 0's backward); the slots (160 MB each at 65,536
+receivers) number the tiles in flight, within a quarter of the free memory. 320,000 atoms, 8 slots, A B B A
+against the borrow build: 656.1 / 649.7 / 641.6 / 658.5 ms (a b b a), b / a 0.982; forces 1.6e-6 eV/A apart
+(run-to-run atomics). The wavefront at 1,081,600 atoms has 5 tiles in flight but 1.3 GB free, so one slot: 2,256.7 /
+2,257.5 / 2,268.0 / 2,287.1 ms, a tie (it helps the wavefront only where memory is to spare). `tests/gpu/
+test_tiled_md.py` 10 passed; the kept-list and wavefront tests also with `LOUP_TILE_KEEP_ACTIVE=1` and `=0`.

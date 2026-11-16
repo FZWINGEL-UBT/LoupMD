@@ -1704,6 +1704,7 @@ static void tune_rebuild_variants(LoupHandle* h) {
 struct DomainSweep {
     int kind = 0, layer = 0;
     const float* adjoint[4] = {nullptr, nullptr, nullptr, nullptr};
+    bool active_ready = false;  // the handle's active-edge buffers already hold this domain's (a tile's later sweep)
 };
 
 static_assert(offsetof(loup::CellDev, h) == 0, "record_dispersion reads the device cell at the start of CellDev");
@@ -1773,16 +1774,18 @@ static void record_force_pass(LoupHandle* h, int compute_stress, bool energy_onl
 
     // 1. Compute edge vectors, compact active edges (r < r_max) with their spline locator
     const int warpGridN = (N + 3) / 4;  // 4 warps per 128-thread block (1 warp per atom)
-    loup::compute_and_count_active_kernel<<<warpGridN, 128, 0, h->stream>>>(
-        N, r_max, h->d_pos64, h->d_row_ptr, h->d_senders, h->d_receivers, h->d_shift_cart,
-        h->d_tmp_vec_len, h->d_act_deg);
-    size_t act_scan_bytes = h->cub_tmp_bytes;
-    cub::DeviceScan::ExclusiveSum(
-        h->d_cub_tmp, act_scan_bytes, h->d_act_deg, h->d_act_row_ptr, N + 1, h->stream);
-    loup::scatter_active_edges_kernel<<<warpGridN, 128, 0, h->stream>>>(
-        N, r_max, sg, S, sg_psym, h->d_species, h->d_row_ptr, h->d_act_row_ptr, h->d_senders, h->d_receivers,
-        h->d_pairs, h->d_tmp_vec_len, h->d_act_senders, h->d_act_receivers, h->d_act_pairs, h->d_act_vec_len,
-        h->d_act_slab, h->d_act_t_sx);
+    if (!(sweep && sweep->active_ready)) {
+        loup::compute_and_count_active_kernel<<<warpGridN, 128, 0, h->stream>>>(
+            N, r_max, h->d_pos64, h->d_row_ptr, h->d_senders, h->d_receivers, h->d_shift_cart,
+            h->d_tmp_vec_len, h->d_act_deg);
+        size_t act_scan_bytes = h->cub_tmp_bytes;
+        cub::DeviceScan::ExclusiveSum(
+            h->d_cub_tmp, act_scan_bytes, h->d_act_deg, h->d_act_row_ptr, N + 1, h->stream);
+        loup::scatter_active_edges_kernel<<<warpGridN, 128, 0, h->stream>>>(
+            N, r_max, sg, S, sg_psym, h->d_species, h->d_row_ptr, h->d_act_row_ptr, h->d_senders, h->d_receivers,
+            h->d_pairs, h->d_tmp_vec_len, h->d_act_senders, h->d_act_receivers, h->d_act_pairs, h->d_act_vec_len,
+            h->d_act_slab, h->d_act_t_sx);
+    }
 
     const int* d_E_act = h->d_act_row_ptr + N;
     if (h->generic()) {
@@ -4647,11 +4650,25 @@ struct TileList {
     DeviceBufferGuard species, pos, row_ptr, senders, receivers, pairs, shift, row_atom;
     DeviceBufferGuard offset;  // [rows, 3] a row's place in the tile less its atom's position at the build
     DeviceBufferGuard row_slot;  // the wavefront (S5-T08): [rows] each row's atom's row in the pool of x and dx
+    // The active edges (r < r_max) of this call's positions: compacted in the tile's first sweep of a call into a
+    // slot of TiledState::act_slots when one is free, read from it by its later sweeps (O31: the compaction ran in
+    // every sweep); the slot goes back at the tile's last sweep.
+    mutable int act_slot = -1;        // the slot, -1 none
+    mutable long long act_call = -1;  // the call in whose first sweep the tile took it
+};
+
+// One tile's active edges, sized for the longest list (TileList::act_slot)
+struct ActiveSlot {
+    DeviceBufferGuard row_ptr, senders, receivers, pairs, vec_len, slab, t_sx;
 };
 
 // The tiled call's state kept on the handle between calls (S5-T06). Never copied: its buffers free themselves.
 struct TiledState {
     int n = 0, receivers = 0, max_rows = 0, max_edges = 0;
+    int act_keep = -1;     // the slots of kept active edges: -1 not decided yet, else their number
+    long long calls = 0;   // tiled calls on these lists
+    std::vector<ActiveSlot> act_slots;
+    std::vector<int> act_free;  // the slots no tile holds
     int64_t T = 0;
     double skin = 0.0, cell[9] = {0, 0, 0, 0, 0, 0, 0, 0, 0};
     double bytes = 0.0;  // device bytes of everything below
@@ -4743,10 +4760,27 @@ struct TileListBorrow {
     LoupHandle* h;
     int *species, *row_ptr, *senders, *receivers, *pairs;
     double *pos64, *shift_cart;
+    int *act_row_ptr, *act_senders, *act_receivers, *act_pairs, *act_slab;
+    float4* act_vec_len;
+    float2* act_t_sx;
     explicit TileListBorrow(LoupHandle* h_)
         : h(h_), species(h_->d_species), row_ptr(h_->d_row_ptr), senders(h_->d_senders),
-          receivers(h_->d_receivers), pairs(h_->d_pairs), pos64(h_->d_pos64), shift_cart(h_->d_shift_cart) {}
+          receivers(h_->d_receivers), pairs(h_->d_pairs), pos64(h_->d_pos64), shift_cart(h_->d_shift_cart),
+          act_row_ptr(h_->d_act_row_ptr), act_senders(h_->d_act_senders), act_receivers(h_->d_act_receivers),
+          act_pairs(h_->d_act_pairs), act_slab(h_->d_act_slab), act_vec_len(h_->d_act_vec_len),
+          act_t_sx(h_->d_act_t_sx) {}
+    // The handle's own active-edge buffers (a tile without kept active edges compacts into them)
+    void own_active() const {
+        h->d_act_row_ptr = act_row_ptr;
+        h->d_act_senders = act_senders;
+        h->d_act_receivers = act_receivers;
+        h->d_act_pairs = act_pairs;
+        h->d_act_slab = act_slab;
+        h->d_act_vec_len = act_vec_len;
+        h->d_act_t_sx = act_t_sx;
+    }
     ~TileListBorrow() {
+        own_active();
         h->d_species = species;
         h->d_row_ptr = row_ptr;
         h->d_senders = senders;
@@ -5222,6 +5256,8 @@ static int evaluate_tiled_impl(LoupHandle* h, int n_atoms, const int* atomic_num
         if (fail) { release_tiled_state(h); return -1; }
         CUDA_CHECK(cudaMemcpyAsync(st->whole_pos.p, positions, pos_bytes, cudaMemcpyHostToDevice, h->stream));
         CUDA_CHECK(cudaMemcpyAsync(st->ref_pos.p, st->whole_pos.p, pos_bytes, cudaMemcpyDeviceToDevice, h->stream));
+        st->act_keep = -1;
+        st->act_slots.clear();
         ++h->tile_list_builds;
     } else {
         for (TileList& t : st->lists)
@@ -5239,6 +5275,59 @@ static int evaluate_tiled_impl(LoupHandle* h, int n_atoms, const int* atomic_num
     std::vector<DeviceBufferGuard>& dx = st->dx;
     DeviceBufferGuard& d_forces = st->forces;
     DeviceBufferGuard* adj = st->adj;
+    ++st->calls;
+    if (st->act_keep < 0) {
+        // A tile's active edges are compacted once per call, in its first sweep, into a slot that it holds until its
+        // last sweep (the backward sweep of layer 0). As many slots as tiles are in flight at once (all of them in
+        // the plain order; the wavefront's schedule says how many), within a quarter of the free memory; a tile that
+        // finds no slot free compacts in each of its sweeps. LOUP_TILE_KEEP_ACTIVE=0 keeps none, =k at most k
+        // slots whatever the memory.
+        int64_t in_flight = st->wave ? 0 : st->T, open = 0;
+        for (const loup::SweepStep& s : st->steps) {
+            if (!st->wave) break;
+            open += s.sweep == 1 ? 1 : s.sweep == 3 ? -1 : 0;
+            in_flight = std::max(in_flight, open);
+        }
+        const double slot_bytes =
+            (double)std::max(st->max_edges, 1) * (16 + 4 * 4 + 8) + (double)(st->max_rows + 1) * 4;
+        size_t free_b = 0, total_b = 0;
+        CUDA_CHECK(cudaMemGetInfo(&free_b, &total_b));
+        int64_t want = std::min<int64_t>(in_flight, (int64_t)(0.25 * (double)free_b / slot_bytes));
+        if (const char* e = std::getenv("LOUP_TILE_KEEP_ACTIVE"))
+            want = std::min<int64_t>(in_flight, std::max(0LL, std::atoll(e)));
+        // Built in place: DeviceBufferGuard has no move, so the vector must never copy or grow
+        st->act_slots = std::vector<ActiveSlot>((size_t)want);
+        const size_t E = (size_t)std::max(st->max_edges, 1);
+        int got = 0;
+        for (int64_t k = 0; k < want; ++k) {
+            ActiveSlot& sl = st->act_slots[(size_t)k];
+            bool ok = true;
+            auto get = [&](DeviceBufferGuard& g, size_t bytes) {
+                if (ok && cudaMalloc(&g.p, bytes) != cudaSuccess) { g.p = nullptr; ok = false; }
+            };
+            get(sl.row_ptr, (size_t)(st->max_rows + 1) * sizeof(int));
+            get(sl.senders, E * sizeof(int));
+            get(sl.receivers, E * sizeof(int));
+            get(sl.pairs, E * sizeof(int));
+            get(sl.slab, E * sizeof(int));
+            get(sl.vec_len, E * sizeof(float4));
+            get(sl.t_sx, E * sizeof(float2));
+            if (!ok) {  // out of memory after all: the slots so far (the rest free their buffers with the state)
+                (void)cudaGetLastError();
+                break;
+            }
+            ++got;
+            st->bytes += slot_bytes;
+        }
+        st->act_keep = got;
+        if (tile_times)
+            std::fprintf(stderr, "tile active edges: %d slots, %lld tiles in flight (%.0f MB each, free %.0f MB)\n",
+                         st->act_keep, (long long)in_flight, slot_bytes / 1e6, (double)free_b / 1e6);
+    }
+    for (const TileList& t : lists) t.act_slot = -1;  // a failed call may have left slots taken
+    st->act_free.clear();
+    for (int k = st->act_keep - 1; k >= 0; --k) st->act_free.push_back(k);
+    const long long call = st->calls;
     const bool wave = st->wave;  // the pool's rows are zeroed tile by tile at each tile's sweep 1
     for (int t = 0; !wave && t + 1 < L; ++t)
         for (int l = 0; l <= h->gen->out_lmax(t); ++l)
@@ -5277,6 +5366,36 @@ static int evaluate_tiled_impl(LoupHandle* h, int n_atoms, const int* atomic_num
             tile_scatter_add_rows_kernel<float><<<grid((int64_t)t.rows * width(layer, l)), 256, 0, h->stream>>>(
                 t.rows, width(layer, l), row_x(t), h->gen->layer_out_grad(layer, l), fdx(layer, l));
     };
+    // The active edges: the tile's kept buffers (compacted in its first sweep of the call, read by the others) or
+    // the handle's own (compacted in every sweep)
+    auto use_active = [&](const TileList& t, DomainSweep& sw, bool last_sweep) {
+        if (t.act_call != call) {  // the tile's first sweep of this call: take a slot if one is free
+            t.act_call = call;
+            t.act_slot = -1;
+            if (!st->act_free.empty()) {
+                t.act_slot = st->act_free.back();
+                st->act_free.pop_back();
+            }
+        } else if (t.act_slot >= 0) {
+            sw.active_ready = true;
+        }
+        if (t.act_slot < 0) {
+            borrow.own_active();
+            return;
+        }
+        const ActiveSlot& sl = st->act_slots[(size_t)t.act_slot];
+        h->d_act_row_ptr = static_cast<int*>(sl.row_ptr.p);
+        h->d_act_senders = static_cast<int*>(sl.senders.p);
+        h->d_act_receivers = static_cast<int*>(sl.receivers.p);
+        h->d_act_pairs = static_cast<int*>(sl.pairs.p);
+        h->d_act_slab = static_cast<int*>(sl.slab.p);
+        h->d_act_vec_len = static_cast<float4*>(sl.vec_len.p);
+        h->d_act_t_sx = static_cast<float2*>(sl.t_sx.p);
+        if (last_sweep) {  // one stream: the next compaction into this slot runs after this sweep
+            st->act_free.push_back(t.act_slot);
+            t.act_slot = -1;
+        }
+    };
     auto forward = [&](const TileList& t, int layer) -> int {
         if (restore_tile_list(h, t) != 0) return -1;
         if (layer == 0) energy += t.e0;
@@ -5284,6 +5403,7 @@ static int evaluate_tiled_impl(LoupHandle* h, int n_atoms, const int* atomic_num
         DomainSweep sw;
         sw.kind = loup::GenericPassInputs::SweepForward;
         sw.layer = layer;
+        use_active(t, sw, false);
         record_force_pass(h, stress, false, &sw);
         for (int l = 0; l <= h->gen->out_lmax(layer); ++l) {
             tile_scatter_rows_kernel<<<grid((int64_t)t.n_local * width(layer, l)), 256, 0, h->stream>>>(
@@ -5299,6 +5419,7 @@ static int evaluate_tiled_impl(LoupHandle* h, int n_atoms, const int* atomic_num
         gather_input(t, L - 2);
         DomainSweep sw;
         sw.kind = loup::GenericPassInputs::SweepLast;
+        use_active(t, sw, false);
         record_force_pass(h, stress, false, &sw);
         scatter_grad(t, L - 2);
         fold_forces(t);
@@ -5316,6 +5437,7 @@ static int evaluate_tiled_impl(LoupHandle* h, int n_atoms, const int* atomic_num
                 t.n_local, width(layer, l), row_x(t), fdx(layer, l), a);
             sw.adjoint[l] = a;
         }
+        use_active(t, sw, layer == 0);
         record_force_pass(h, stress, false, &sw);
         scatter_grad(t, layer - 1);
         fold_forces(t);
