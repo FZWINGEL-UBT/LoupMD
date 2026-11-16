@@ -409,14 +409,14 @@ __global__ void __launch_bounds__(WPB * 32) pair_kernel(
 // k goes to the pass's atom order[k] in eV/A.
 __global__ void __launch_bounds__(WPB * 32) cn_force_kernel(
         int n, const float4* __restrict__ ps, const int* __restrict__ keys, const int* __restrict__ bin_start,
-        const Grid* __restrict__ gp, float cn_cut2, const float* __restrict__ rcov, const double* __restrict__ dedcn,
+        const Grid* __restrict__ gp, float cn_cut2, const float* __restrict__ rcov, const float* __restrict__ dedcn,
         const int* __restrict__ order, const double* __restrict__ force_s, double* __restrict__ forces,
         double* __restrict__ acc) {
     const int k = (blockIdx.x * blockDim.x + threadIdx.x) >> 5, lane = threadIdx.x & 31;
     if (k >= n) return;
     const Grid g = *gp;
     const float ri = rcov[__float_as_int(ps[k].w)];
-    const float di = (float)dedcn[k];
+    const float di = dedcn[k];
     double fx = 0.0, fy = 0.0, fz = 0.0;
     double v[6] = {0, 0, 0, 0, 0, 0};
     float pfx = 0.0f, pfy = 0.0f, pfz = 0.0f;       // float32 partials, as in pair_kernel
@@ -433,7 +433,7 @@ __global__ void __launch_bounds__(WPB * 32) cn_force_kernel(
         const float rco = ri + rcov[sj];
         const float ex = __expf(-K1 * (rco * ir - 1.0f));
         const float den = 1.0f + ex;
-        const float s = (di + (float)dedcn[j]) * (-K1 * rco * ir * ir * ex / (den * den)) * ir;
+        const float s = (di + dedcn[j]) * (-K1 * rco * ir * ir * ex / (den * den)) * ir;
         if (s == 0.0f) return;
         pfx += s * dx;
         pfy += s * dy;
@@ -705,6 +705,13 @@ __global__ void __launch_bounds__(ATM_THREADS) atm_kernel(
     }
 }
 
+// dE/dCN in float32 for the chain rule, which reads it once per pair (a conversion per pair costs as much as a
+// float64 add on consumer GPUs; status 6.33).
+__global__ void to_float_kernel(int n, const double* __restrict__ x, float* __restrict__ y) {
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) y[i] = (float)x[i];
+}
+
 __global__ void finish_kernel(const double* __restrict__ acc, double* __restrict__ energy,
                               double* __restrict__ virial) {
     const int t = threadIdx.x;
@@ -853,6 +860,7 @@ public:
         w_.alloc((size_t)n * WSTRIDE, bytes_);
         dw_.alloc((size_t)n * MAXREF, bytes_);
         dedcn_.alloc(n, bytes_);
+        dedcn_f_.alloc(n, bytes_);
         force_s_.alloc(3 * (size_t)n, bytes_);
         eatom_.alloc(n, bytes_);
         acc_.alloc(7, bytes_);
@@ -972,9 +980,12 @@ public:
             else LOUP_D3_SPLIT(false);
 #undef LOUP_D3_SPLIT
         }
-        if (forces)
+        if (forces) {
+            to_float_kernel<<<(n + 255) / 256, 256, 0, st>>>(n, dedcn_.p, dedcn_f_.p);
             cn_force_kernel<<<blocks, threads, 0, st>>>(n, ps_.p, keys_.p, bin_start_.p, grid_.p, p_.cn_cut2,
-                                                        rcov_d_.p, dedcn_.p, order_.p, force_s_.p, out.forces, acc_.p);
+                                                        rcov_d_.p, dedcn_f_.p, order_.p, force_s_.p, out.forces,
+                                                        acc_.p);
+        }
         finish_kernel<<<1, 32, 0, st>>>(acc_.p, out.energy, forces && in.virial ? out.virial : nullptr);
         if (out.atom_energy)
             atom_energy_kernel<<<(n + 255) / 256, 256, 0, st>>>(n, order_.p, eatom_.p, out.atom_energy);
@@ -1090,7 +1101,7 @@ private:
     DevBuf<int> bin_of_, keys_, iota_, order_, bin_start_, species_, nref_d_;
     DevBuf<float4> ps_;
     DevBuf<double> cn_, dedcn_, force_s_, eatom_, acc_;
-    DevBuf<float> w_, dw_, cnref_d_, rcov_d_, q_d_, r0_d_, c6_d_;
+    DevBuf<float> w_, dw_, cnref_d_, rcov_d_, q_d_, r0_d_, c6_d_, dedcn_f_;
     DevBuf<unsigned char> sort_tmp_;
 };
 

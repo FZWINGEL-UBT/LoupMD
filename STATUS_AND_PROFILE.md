@@ -1487,3 +1487,8 @@ numbers and the pair walk; the forces path adds the second 40 bohr walk of the c
 three-body term is dominated by forming C6_jk per triangle from the 5x5 reference table (status 6.29). Not tried:
 float32 partials in the split sum's mesh kernels, a fused CN-count and chain-rule pass, and per-chunk-pair C6 in
 the three-body loop.
+
+Second step (`libloupmd_d3l.so`, da03339207d63d16): the chain rule read dE/dCN of atom j as float64 and converted
+it for every pair. A float32 copy made once per atom (`to_float_kernel`) gives bit-identical forces and saves 1 to
+5%: d3bj NbCl5 1.35 -> 1.33 ms, SrTiO3 3.67 -> 3.53, water 4.45 -> 4.21 (A B B A); the three-body term unchanged.
+`tests/gpu/test_d3.py` 52 passed on d3l.
