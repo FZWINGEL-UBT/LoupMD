@@ -2317,9 +2317,9 @@ static int run_md_loop(
             loup::nve_first_half_kernel<<<gridN, 256, 0, h->stream>>>(
                 N, dt_ase, h->d_forces_f64, h->d_inv_masses, h->d_pos64, h->d_vel64);
         } else {
-            // 32-thread blocks: the FP64 Box-Muller (3 curand_normal2_double per atom) is FP64-throughput bound on
-            // consumer GPUs, so spread the atoms over every SM instead of N / 256 of them.
-            loup::langevin_first_half_kernel<<<(N + 31) / 32, 32, 0, h->stream>>>(
+            // 32 atoms per block: the FP64 Box-Muller (3 curand_normal2_double per atom) is FP64-throughput bound on
+            // consumer GPUs, so spread the atoms over every SM instead of N / 256 of them; S106: one thread per draw.
+            loup::langevin_first_half_kernel<<<(N + 31) / 32, 96, 0, h->stream>>>(
                 N, dt_ase, c1, c2, k_c3, k_c4, k_c5, seed, h->d_step_counter,
                 h->d_forces_f64, h->d_inv_masses, h->d_sqrt_inv_masses,
                 h->d_pos64, h->d_vel64, h->d_rnd_vel);

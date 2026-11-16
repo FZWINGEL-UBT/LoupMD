@@ -45,7 +45,13 @@ __global__ void nve_second_half_kernel(
     }
 }
 
-__global__ void langevin_first_half_kernel(
+// S106: 32 atoms per 96-thread block. Thread (atom i, c) draws the c-th normal pair of atom i at Philox offset
+// step * 16 + 4 c: the same 32-bit words, and so the same noise, as the three sequential curand_normal2_double calls
+// of the former one-thread-per-atom kernel (each consumes 4 words from an aligned position), in a third of the
+// double-precision latency chain. The same thread then updates component c of atom i (contiguous across the block).
+// Offset counts 32-bit outputs; the three pairs consume 3 x 4 = 12, so 16 per step keeps consecutive steps on
+// disjoint words.
+__global__ void __launch_bounds__(96) langevin_first_half_kernel(
     int N, double dt_ase, double c1, double c2,
     double k_c3, double k_c4, double k_c5,
     unsigned long long seed, const unsigned long long* __restrict__ step_counter,
@@ -56,36 +62,32 @@ __global__ void langevin_first_half_kernel(
     double* __restrict__ vel64,
     double* __restrict__ rnd_vel_save
 ) {
-    int i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i >= N) return;
-    unsigned long long step = *step_counter;
-    curandStatePhilox4_32_10_t rng;
-    // Offset counts 32-bit outputs; the three curand_normal2_double calls consume 3 x 4 = 12, so 16 per step keeps
-    // consecutive steps on disjoint words.
-    curand_init(seed, (unsigned long long)i, step * 16ULL, &rng);
-    double2 n0 = curand_normal2_double(&rng);
-    double2 n1 = curand_normal2_double(&rng);
-    double2 n2 = curand_normal2_double(&rng);
-    double xi[3]  = {n0.x, n0.y, n1.x};
-    double eta[3] = {n1.y, n2.x, n2.y};
-
-    double im = inv_masses[i];
-    double sim = sqrt_inv_masses[i];
-    double c3 = k_c3 * sim;
-    double c4 = k_c4 * sim;
-    double c5 = k_c5 * sim;
-
-    #pragma unroll
-    for (int c = 0; c < 3; ++c) {
-        int idx = i * 3 + c;
-        double rnd_p = c5 * eta[c];
-        double rnd_v = c3 * xi[c] - c4 * eta[c];
-        rnd_vel_save[idx] = rnd_v;
-        double v = vel64[idx] + c1 * forces[idx] * im - c2 * vel64[idx] + rnd_v;
-        double dx = dt_ase * v + rnd_p;
-        pos64[idx] += dx;
-        vel64[idx] = (dx - rnd_p) / dt_ase;
+    __shared__ double s_n[32][6];  // per atom: xi[0..2], eta[0..2] = the three pairs in draw order
+    const int t = threadIdx.x, a = t / 3, c = t - 3 * a;
+    const int i = blockIdx.x * 32 + a;
+    if (i < N) {
+        curandStatePhilox4_32_10_t rng;
+        curand_init(seed, (unsigned long long)i, *step_counter * 16ULL + 4ULL * c, &rng);
+        const double2 n = curand_normal2_double(&rng);
+        s_n[a][2 * c] = n.x;
+        s_n[a][2 * c + 1] = n.y;
     }
+    __syncthreads();
+    if (i >= N) return;
+    const double xi = s_n[a][c], eta = s_n[a][3 + c];
+    const double im = inv_masses[i];
+    const double sim = sqrt_inv_masses[i];
+    const double c3 = k_c3 * sim;
+    const double c4 = k_c4 * sim;
+    const double c5 = k_c5 * sim;
+    const int idx = i * 3 + c;
+    const double rnd_p = c5 * eta;
+    const double rnd_v = c3 * xi - c4 * eta;
+    rnd_vel_save[idx] = rnd_v;
+    const double v = vel64[idx] + c1 * forces[idx] * im - c2 * vel64[idx] + rnd_v;
+    const double dx = dt_ase * v + rnd_p;
+    pos64[idx] += dx;
+    vel64[idx] = (dx - rnd_p) / dt_ase;
 }
 
 // Also advances the step counter: every first-half read of it for this step has completed.

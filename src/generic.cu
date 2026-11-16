@@ -341,7 +341,8 @@ __global__ void assemble_forces_kernel(const int* __restrict__ E_dev, int S, con
 
 // Layer 0 (input = species embedding): S0_l[a][m][s (J-1) + j] = sum over the active edges of receiver a whose sender
 // has species s of col_j(r) Y_lm, with col the radial chain's columns [h c, c] (j < J - 1); column J - 1 is the edge
-// density, summed into D. One block per receiver, one thread per column; a receiver's edges are grouped by ascending
+// density, summed into D. One block per receiver, one thread per column j < J - 1 (S105: the density column is summed
+// by warp 0, one lane per staged edge, instead of by a warp of its own); a receiver's edges are grouped by ascending
 // sender species (the neighbour list's contract), so each species slot is written once (zeros if it has no edge).
 __global__ void __launch_bounds__(256) first_fwd_kernel(
     int N, int S, int I, int J, int K0, SplineGrid grid, int sh_perm, int pair_sym,
@@ -358,7 +359,7 @@ __global__ void __launch_bounds__(256) first_fwd_kernel(
     const int Jp = J - 1, K = S * Jp, sa = species[a];
     const int e_end = row_ptr[a + 1];
     int e_cur = row_ptr[a];
-    float dsum = 0.0f;
+    float dsum = 0.0f;  // S105: warp 0 sums the density column in edge order (the order of the former density thread)
     for (int s = 0; s < S; ++s) {
         if (tid < 32) {
             int p = e_cur;
@@ -393,20 +394,24 @@ __global__ void __launch_bounds__(256) first_fwd_kernel(
                 else         loup::edge_sh16(vl.x, vl.y, vl.z, vl.w, reinterpret_cast<float4*>(s_sh + (tid - 32) * 16));
             }
             __syncthreads();
-            if (tid < J) {
+            float dv = 0.0f;
+            if (tid < cnt) {
+                const float4 dc = __ldg(table + ((int64_t)pr * I + s_iv[tid]) * J + Jp);
+                const float t = s_t[tid];
+                dv = fmaf(t, fmaf(t, fmaf(t, dc.w, dc.z), dc.y), dc.x);
+            }
+            if (tid < Jp) {
                 for (int k = 0; k < cnt; ++k) {
                     const float4 cf = __ldg(table + ((int64_t)pr * I + s_iv[k]) * J + tid);
                     const float t = s_t[k];
                     const float v = fmaf(t, fmaf(t, fmaf(t, cf.w, cf.z), cf.y), cf.x);
-                    if (tid == Jp) {
-                        dsum += v;
-                    } else {
-                        const float* sh = s_sh + k * 16;
-                        #pragma unroll
-                        for (int m = 0; m < 16; ++m) acc[m] = fmaf(v, sh[m], acc[m]);
-                    }
+                    const float* sh = s_sh + k * 16;
+                    #pragma unroll
+                    for (int m = 0; m < 16; ++m) acc[m] = fmaf(v, sh[m], acc[m]);
                 }
             }
+            if (tid < 32)
+                for (int k = 0; k < cnt; ++k) dsum += __shfl_sync(0xffffffffu, dv, k);
             __syncthreads();
         }
         if (tid < Jp) {
@@ -429,7 +434,7 @@ __global__ void __launch_bounds__(256) first_fwd_kernel(
         #pragma unroll
         for (int m = 0; m < 7; ++m) s3[((int64_t)a * 7 + m) * K0 + K + tid] = 0.0f;
     }
-    if (tid == Jp) D[a] = dsum;
+    if (tid == 0) D[a] = dsum;
 }
 
 // STAGE_G: the receiver's gradient rows G[m][s Jp + j] (16 x K floats, the same for all its edges) are staged once in
@@ -1703,7 +1708,7 @@ void GenericModel::record(const GenericPassInputs& in) {
         }
         if (L->first_hidden) {
             const int Kh = L->K0;
-            first_fwd_kernel<<<N, ((std::max(L->J, 64) + 31) / 32) * 32, 0, st>>>(
+            first_fwd_kernel<<<N, ((std::max(L->J - 1, 64) + 31) / 32) * 32, 0, st>>>(
                 N, S, L->intervals, L->J, L->K0, L->grid, sh_perm_, L->pair_sym, in.act_row_ptr, in.act_senders,
                 in.act_vec_len, in.species, L->table, L->S0[0], L->S0[1], L->S0[2], L->S0[3], L->D);
             if (L->skip_folded) {
