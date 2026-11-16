@@ -5,8 +5,8 @@ One argument at three levels: ``dispersion=None`` (off, the default), a preset n
 record; the CLI's ``--dispersion NAME`` and a run file's ``dispersion = "NAME"`` or ``[dispersion]`` table give the
 same. :func:`resolve` fills in the model's functional and its parameter set, and refuses what cannot be computed
 with the reason and the way out. :func:`runnable` names the summation method a run uses and refuses what is not
-built: the plain real-space pair sum is (S6-D04, ``src/dispersion/d3_pair.cu``); the three-body term (S6-D08) and
-the tail, split and mesh methods (S6-D05, S6-D06) are not yet.
+built: the plain real-space pair sum (S6-D04, ``src/dispersion/d3_pair.cu``), the three-body term (S6-D08) and the
+split sum (S6-D06, ``src/dispersion/d3_split.cuh``) are; the tail and mesh methods (S6-D05, S6-D06) are not yet.
 
 Units: cutoffs in bohr (as the reference code and the literature give them), ``mesh_spacing_A`` in A.
 """
@@ -64,14 +64,16 @@ METHOD_LIMITS = {
              "beyond the cutoff", "wrong for slabs, pores, interfaces and anything with vacuum; corrects energy and "
              "pressure, not forces; 'auto' considers it only for cells whose density is uniform on the scale of the "
              "cutoff"),
-    "split": ("damped short range in real space, the smooth remainder on a mesh", "exact up to the mesh tolerance",
-              "3D periodic cells only; accuracy set by the mesh spacing"),
+    "split": ("the damped pair term minus its smooth long-range part in real space to pair_cutoff_bohr, that part "
+              "for every pair and image in reciprocal space", "the infinite sum, up to the damping's departure from "
+              "1/r^6 beyond the real-space cutoff, and the mesh's interpolation", "3D periodic cells only; the "
+              "reciprocal part on a mesh of mesh_spacing_A (default 0.8 A, B-splines of order 8) needs cuFFT"),
     "mesh": ("the whole damped sum on a mesh (after FourierD3)", "exact up to the mesh tolerance",
              "Becke-Johnson damping only; a modified coordination number that vanishes at 6 A; cost grows with the "
              "number of elements"),
 }
-# Which methods this version computes: the plain sum (S6-D04); the long-range methods are S6-D05/D06.
-BUILT = frozenset({"none"})
+# Which methods this version computes: the plain sum (S6-D04) and the split sum (S6-D06).
+BUILT = frozenset({"none", "split"})
 
 
 @dataclass(frozen=True)
@@ -346,9 +348,9 @@ def listing() -> str:
               ", ".join(sorted(_DISPERSION_IN_DATA)) + " data; MACE-POLAR-1), a model of unknown functional "
               "without functional= or parameters=, a damping without a parameter set for the functional.",
               "", "Built in this version: the plain real-space pair sum with every damping and the switch "
-              "(PLAN.md S6-D04) and the three-body term (S6-D08). Not yet: the tail, split and mesh methods "
-              "(S6-D05, S6-D06); runs that ask for them are refused. In the tiled execution the term runs for the "
-              "whole system beside the tiled model (S6-D09)."]
+              "(PLAN.md S6-D04), the three-body term (S6-D08) and the split sum (S6-D06). Not yet: the tail and "
+              "mesh methods (S6-D05, S6-D06); runs that ask for them are refused. In the tiled execution the term "
+              "runs for the whole system beside the tiled model (S6-D09)."]
     return "\n".join(lines)
 
 

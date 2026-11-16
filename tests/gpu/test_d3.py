@@ -15,6 +15,7 @@ from loupmd.errors import BackendError, InputError
 BOHR = _d3.BOHR
 HARTREE = 27.211386245988
 TOL_E, TOL_F, TOL_S = 1e-6, 1e-5, 1e-7
+SPLIT_E_FRACTION = 0.05     # the split sum's energy error against the plain 40 bohr sum's
 
 
 def _lib_or_skip():
@@ -466,3 +467,102 @@ def test_the_tiled_execution_carries_the_term(model_path):
     dx, de = np.abs(pt - pw).max(), abs(et - ew) / len(base)
     print(f"tiled with d3bj: {tiles} tiles, vs whole after 20 NVE steps dx {dx:.2e} A, dE {de:.2e} eV/atom; {cost}")
     assert tiles >= 3 and dx <= 1e-5 and de <= 1e-5          # the gate's energy floor; float32 rounding of the total
+
+
+# ------------------------------------------------------------------------------------------ the split sum (S6-D06)
+
+def _split(rc=20.0, **fields):
+    return d.resolve(d.Dispersion(pair_cutoff_bohr=rc, cn_cutoff_bohr=40.0, long_range="split", **fields),
+                     functional="pbe")
+
+
+def _long_sum(atoms, lib):
+    """simple-dftd3 at 150 bohr plus the uniform tail beyond it, estimated from the 40 -> 150 bohr difference
+    (E(R) - E_inf ~ R^-3): the infinite sum's energy; forces and stress of the 150 bohr sum; and the plain sum."""
+    e150, f150, s150 = _reference(atoms, d.resolve(d.Dispersion(pair_cutoff_bohr=150.0, long_range="none"),
+                                                   functional="pbe"))
+    e40 = _d3.evaluate(atoms, d.resolve(d.Dispersion(long_range="none"), functional="pbe"), lib=lib)
+    x = (40.0 / 150.0) ** 3
+    return e150 + (e150 - e40["energy"]) * x / (1 - x), f150, s150, e40
+
+
+@pytest.mark.parametrize("system", ["paracetamol", "srtio3", "nbcl5"])
+def test_the_split_sum_reaches_the_infinite_sum(system):
+    """At a 20 bohr real-space cutoff the split sum is closer to the infinite sum than the plain 40 bohr sum, in
+    energy, forces and stress."""
+    lib = _lib_or_skip()
+    atoms = _system(system)
+    n = len(atoms)
+    e, f, s, plain = _long_sum(atoms, lib)
+    got = _d3.evaluate(atoms, _split(), lib=lib)
+    errs = [(abs(r["energy"] - e) / n, float(np.abs(r["forces"] - f).max()), float(np.abs(r["stress"] - s).max()))
+            for r in (got, plain)]
+    print(f"{system}: split 20 bohr {errs[0]}, plain 40 bohr {errs[1]} (eV/atom, eV/A, eV/A^3)")
+    assert errs[0][0] < SPLIT_E_FRACTION * errs[1][0]
+    assert errs[0][1] <= max(errs[1][1], TOL_F) and errs[0][2] <= max(errs[1][2], TOL_S)
+
+
+def test_the_mesh_matches_the_direct_k_sum(monkeypatch):
+    lib = _lib_or_skip()
+    atoms = _system("paracetamol")
+    n = len(atoms)
+    monkeypatch.setenv("LOUP_D3_KSUM", "direct")
+    direct = _d3.evaluate(atoms, _split(), lib=lib)
+    monkeypatch.delenv("LOUP_D3_KSUM")
+    mesh = _d3.evaluate(atoms, _split(), lib=lib)
+    de = abs(mesh["energy"] - direct["energy"]) / n
+    df = float(np.abs(mesh["forces"] - direct["forces"]).max())
+    ds = float(np.abs(mesh["stress"] - direct["stress"]).max())
+    print(f"mesh (order 8, 0.8 A) vs direct k sum: {de:.1e} eV/atom, {df:.1e} eV/A, {ds:.1e} eV/A^3")
+    assert de <= TOL_E and df <= TOL_F and ds <= TOL_S
+
+
+@pytest.mark.parametrize("ksum", ["mesh", "direct"])
+def test_the_split_sums_forces_and_stress_are_the_gradient(monkeypatch, ksum):
+    """Central differences of the energy: a check of signs and factors. Float32 pair energies make the difference
+    quotient noisy at the 1e-5 eV/A level (status 6.31), so precision is checked against simple-dftd3 above."""
+    lib = _lib_or_skip()
+    if ksum == "direct":
+        monkeypatch.setenv("LOUP_D3_KSUM", "direct")
+    atoms = _system("srtio3")
+    record = _split()
+    got = _d3.evaluate(atoms, record, lib=lib)
+    h, worst = 1e-2, 0.0
+    for i in (0, 7, 23):
+        for a in range(3):
+            up, down = atoms.copy(), atoms.copy()
+            up.positions[i, a] += h
+            down.positions[i, a] -= h
+            fd = -(_d3.evaluate(up, record, forces=False, stress=False, lib=lib)["energy"] -
+                   _d3.evaluate(down, record, forces=False, stress=False, lib=lib)["energy"]) / (2 * h)
+            worst = max(worst, abs(fd - got["forces"][i, a]))
+    eps, sw = 1e-3, 0.0
+    for a, b in ((0, 0), (2, 2), (0, 1)):
+        e = []
+        for sign in (1, -1):
+            strain = np.eye(3)
+            strain[a, b] += sign * eps / (1 if a == b else 2)
+            strain[b, a] += 0 if a == b else sign * eps / 2
+            x = atoms.copy()
+            x.set_cell(np.asarray(atoms.cell) @ strain, scale_atoms=True)
+            e.append(_d3.evaluate(x, record, forces=False, stress=False, lib=lib)["energy"])
+        sw = max(sw, abs((e[0] - e[1]) / (2 * eps) / atoms.get_volume() - got["stress"][a, b]))
+    only = _d3.evaluate(atoms, record, forces=False, stress=False, per_atom=True, lib=lib)
+    print(f"split ({ksum}): forces vs central differences {worst:.1e} eV/A, stress {sw:.1e} eV/A^3")
+    assert worst <= 1e-4 and sw <= 1e-5
+    assert abs(only["energy"] - got["energy"]) <= 1e-9 * abs(got["energy"])
+    assert abs(only["energies"].sum() - only["energy"]) <= 1e-7 * abs(got["energy"])     # rounding: 1.4e-8 seen
+
+
+def test_lm_md_runs_the_split_sum_in_npt(model_path, tmp_path):
+    """lm.md with long_range="split" under the barostat: the run completes and the summary names the method."""
+    import loupmd
+
+    _lib_or_skip()
+    ff = loupmd.load(model_path, trusted=True)
+    result = loupmd.md(_oxide(), model=ff, ensemble="NPT", temperature_K=300.0, pressure_GPa=0.0, timestep_fs=1.0,
+                       steps=50, seed=2, dispersion=loupmd.Dispersion(pair_cutoff_bohr=20.0, long_range="split"),
+                       output=str(tmp_path / "run"))
+    assert "long range: split (the user)" in result.summary
+    assert result.metadata["dispersion"]["long_range"] == "split"
+    assert np.isfinite(result.simulation.atoms.get_volume())

@@ -241,6 +241,32 @@ def _preload_nvidia_libs():
                         pass
 
 
+def ensure_cufft():
+    """Make cuFFT loadable by its name for the split dispersion sum (PLAN.md D79: the library opens it with dlopen
+    when a mesh is first made): from the loader path, else preloaded from the nvidia pip wheels. False when neither
+    has it (the library then refuses the split sum with the install line)."""
+    import importlib.util
+
+    for name in ("libcufft.so.12", "libcufft.so.13"):
+        try:
+            ctypes.CDLL(name, mode=ctypes.RTLD_GLOBAL)
+            return True
+        except OSError:
+            pass
+    spec = importlib.util.find_spec("nvidia")
+    for base in (spec.submodule_search_locations or []) if spec is not None else []:
+        for sub in ("cu13/lib", "cufft/lib"):
+            for name in ("libcufft.so.12", "libcufft.so.13"):
+                f = Path(base) / sub / name
+                if f.exists():
+                    try:
+                        ctypes.CDLL(str(f), mode=ctypes.RTLD_GLOBAL)
+                        return True
+                    except OSError:
+                        pass
+    return False
+
+
 def _load_lib():
     global _LIB
     if _LIB is not None:

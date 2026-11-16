@@ -20,9 +20,12 @@
 #include "loupmd.h"
 
 #include <cub/cub.cuh>
+#include <cufft.h>
+#include <dlfcn.h>
 
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
 #include <map>
 #include <memory>
 #include <stdexcept>
@@ -42,15 +45,18 @@ constexpr float K1 = 16.0f, K3 = 4.0f;
 
 struct Grid {
     int nb[3];
-    int reach[3];
+    int reach[3];       // bins along each axis that cover rmax
+    float hb[3];        // the bins' heights (bohr): a pass with a shorter cutoff walks fewer
     float cell[9];      // rows, bohr
     double inv[9];      // inverse of the cell in bohr
+    double vol;         // bohr^3
 };
 
 struct PairParams {
     float s6, s8, a1, a2, rs6, rs8, alpha6, alpha8, beta;
     float cut2, cn_cut2;
     float sw_on, sw_width;      // switch on [sw_on, sw_on + sw_width]; width 0: none
+    float ew_b2;                // the split sum's beta^2 (1/bohr^2): the pair kernel subtracts the smooth part; 0: none
 };
 
 #define CK(x) do { cudaError_t e_ = (x); if (e_ != cudaSuccess) \
@@ -83,8 +89,10 @@ __global__ void grid_kernel(const double* __restrict__ cell_A, int nb0, int nb1,
         const double h = fabs(det) / sqrt(cx * cx + cy * cy + cz * cz);       // the cell's height along ax
         g->nb[ax] = nb[ax];
         g->reach[ax] = (int)ceil(rmax / (h / nb[ax]) * (1.0 + 1e-6));        // float32 pair vectors: a margin
+        g->hb[ax] = (float)(h / nb[ax]);
     }
     for (int k = 0; k < 9; ++k) { g->cell[k] = (float)c[k]; g->inv[k] = inv[k]; }
+    g->vol = fabs(det);
 }
 
 // Per atom: wrap into the cell, its bin, its wrapped position (bohr).
@@ -140,14 +148,17 @@ __device__ __forceinline__ void walk_rows(int k, int home, const float4* __restr
     const float4 pi = ps[k];
     const int nb0 = g.nb[0], nb1 = g.nb[1], nb2 = g.nb[2];
     const int bz = home % nb2, by = (home / nb2) % nb1, bx = home / (nb1 * nb2);
-    for (int ox = -g.reach[0]; ox <= g.reach[0]; ++ox) {
+    int rc_[3];
+    for (int a = 0; a < 3; ++a)
+        rc_[a] = min(g.reach[a], (int)ceilf(sqrtf(cut2) / g.hb[a] * (1.0f + 1e-5f)));
+    for (int ox = -rc_[0]; ox <= rc_[0]; ++ox) {
         const int tx = bx + ox, ix = (tx % nb0 + nb0) % nb0, sx = (tx - ix) / nb0;
-        for (int oy = -g.reach[1]; oy <= g.reach[1]; ++oy) {
+        for (int oy = -rc_[1]; oy <= rc_[1]; ++oy) {
             const int ty = by + oy, iy = (ty % nb1 + nb1) % nb1, sy = (ty - iy) / nb1;
-            int tz = bz - g.reach[2];
-            while (tz <= bz + g.reach[2]) {
+            int tz = bz - rc_[2];
+            while (tz <= bz + rc_[2]) {
                 const int iz = (tz % nb2 + nb2) % nb2, sz = (tz - iz) / nb2;
-                const int len = min(bz + g.reach[2] - tz, nb2 - 1 - iz) + 1;
+                const int len = min(bz + rc_[2] - tz, nb2 - 1 - iz) + 1;
                 const float shx = sx * g.cell[0] + sy * g.cell[3] + sz * g.cell[6];
                 const float shy = sx * g.cell[1] + sy * g.cell[4] + sz * g.cell[7];
                 const float shz = sx * g.cell[2] + sy * g.cell[5] + sz * g.cell[8];
@@ -257,6 +268,28 @@ __device__ __forceinline__ void damping(const PairParams& p, float r2, float qq,
     }
 }
 
+// The split sum's smooth long-range parts h_l6, h_l8 (d3_split.cuh) and their r-derivatives over r, for subtraction
+// from the damped pair term. 1 - e^-x P(x) by its series below x = 1 (float32 cancellation), directly above.
+__device__ __forceinline__ void split_long(float b2, float r2, float& h6, float& h8, float& dh6_r, float& dh8_r) {
+    const float x = b2 * r2, e = expf(-x);
+    float p6, p8;
+    if (x < 1.0f) {
+        const float x3 = x * x * x;
+        p6 = e * x3 / 6.0f * (1.0f + x * (1.0f / 4 + x * (1.0f / 20 + x * (1.0f / 120 + x * (1.0f / 840 + x *
+                (1.0f / 6720 + x * (1.0f / 60480 + x * (1.0f / 604800))))))));
+        p8 = e * x3 * x / 24.0f * (1.0f + x * (1.0f / 5 + x * (1.0f / 30 + x * (1.0f / 210 + x * (1.0f / 1680 + x *
+                (1.0f / 15120 + x * (1.0f / 151200 + x * (1.0f / 1663200))))))));
+    } else {
+        p6 = 1.0f - e * (1.0f + x * (1.0f + x * 0.5f));
+        p8 = 1.0f - e * (1.0f + x * (1.0f + x * (0.5f + x * (1.0f / 6))));
+    }
+    const float ir2 = 1.0f / r2, ir6 = ir2 * ir2 * ir2, ir8 = ir6 * ir2;
+    h6 = p6 * ir6;
+    h8 = p8 * ir8;
+    dh6_r = b2 * e * x * x * ir6 - 6.0f * h6 * ir2;
+    dh8_r = b2 * e * x * x * x / 3.0f * ir8 - 8.0f * h8 * ir2;
+}
+
 // Pass 2: pair energies (halved: each pair is seen from both ends), the direct forces and virial, dE/dCN_i.
 // Shared: s_q[S], then per warp the projections u_i(s, b) = sum_a w_ia C6ref[s_i, s](a, b) and du with dw.
 template <int DAMP, bool FORCES>
@@ -302,6 +335,12 @@ __global__ void __launch_bounds__(WPB * 32) pair_kernel(
         const float qq = 3.0f * qi * s_q[sj];
         float G, dG_r;
         damping<DAMP>(p, r2, qq, DAMP == kBJ ? 0.0f : r0ab[si * S + sj], G, dG_r);
+        if (p.ew_b2 > 0.0f) {
+            float h6, h8, dh6, dh8;
+            split_long(p.ew_b2, r2, h6, h8, dh6, dh8);
+            G -= p.s6 * h6 + p.s8 * qq * h8;
+            dG_r -= p.s6 * dh6 + p.s8 * qq * dh8;
+        }
         float sw = 1.0f, dsw_r = 0.0f;
         if (p.sw_width > 0.0f) {
             const float r = sqrtf(r2);
@@ -418,14 +457,17 @@ __device__ __forceinline__ int walk_list(int k, int home, const float4* __restri
     const int nb0 = g.nb[0], nb1 = g.nb[1], nb2 = g.nb[2];
     const int bz = home % nb2, by = (home / nb2) % nb1, bx = home / (nb1 * nb2);
     int base = 0;
-    for (int ox = -g.reach[0]; ox <= g.reach[0]; ++ox) {
+    int rc_[3];
+    for (int a = 0; a < 3; ++a)
+        rc_[a] = min(g.reach[a], (int)ceilf(sqrtf(cut2) / g.hb[a] * (1.0f + 1e-5f)));
+    for (int ox = -rc_[0]; ox <= rc_[0]; ++ox) {
         const int tx = bx + ox, ix = (tx % nb0 + nb0) % nb0, sx = (tx - ix) / nb0;
-        for (int oy = -g.reach[1]; oy <= g.reach[1]; ++oy) {
+        for (int oy = -rc_[1]; oy <= rc_[1]; ++oy) {
             const int ty = by + oy, iy = (ty % nb1 + nb1) % nb1, sy = (ty - iy) / nb1;
-            int tz = bz - g.reach[2];
-            while (tz <= bz + g.reach[2]) {
+            int tz = bz - rc_[2];
+            while (tz <= bz + rc_[2]) {
                 const int iz = (tz % nb2 + nb2) % nb2, sz = (tz - iz) / nb2;
-                const int len = min(bz + g.reach[2] - tz, nb2 - 1 - iz) + 1;
+                const int len = min(bz + rc_[2] - tz, nb2 - 1 - iz) + 1;
                 const float shx = sx * g.cell[0] + sy * g.cell[3] + sz * g.cell[6];
                 const float shy = sx * g.cell[1] + sy * g.cell[4] + sz * g.cell[7];
                 const float shz = sx * g.cell[2] + sy * g.cell[5] + sz * g.cell[8];
@@ -640,6 +682,9 @@ __global__ void iota_kernel(int n, int* __restrict__ out) {
     if (k < n) out[k] = k;
 }
 
+#include "dispersion/d3_split.cuh"
+#include "dispersion/d3_mesh.cuh"
+
 int bins_for(const double cell_A[9], double rmax_bohr, int nb[3]) {
     double c[9];
     for (int k = 0; k < 9; ++k) c[k] = cell_A[k] / BOHR;
@@ -702,7 +747,18 @@ public:
         a3_.sw_on = (float)(s.three_body_cutoff_bohr - s.smoothing_bohr);
         a3_.beta = (float)((s.alpha + 2.0) / 3.0);
         a3_.s9 = 1.0f;
+        split_ = s.long_range == LongRange::Split;
+        ew_beta_ = split_ ? SPLIT_BETA_RC / s.pair_cutoff_bohr : 0.0;
+        p_.ew_b2 = (float)(ew_beta_ * ew_beta_);
+        const char* ksum = std::getenv("LOUP_D3_KSUM");         // testing: "direct" sums reciprocal space directly
+        mesh_ = split_ && !(ksum && std::string(ksum) == "direct");
+        const char* order = std::getenv("LOUP_D3_PME_ORDER");   // testing: the B-spline order (4, 5, 6 or 8)
+        order_p_ = order ? std::atoi(order) : 8;
+        if (order_p_ != 4 && order_p_ != 5 && order_p_ != 6 && order_p_ != 8) order_p_ = 8;
+        spacing_A_ = s.mesh_spacing_A > 0.0 ? s.mesh_spacing_A : 0.8;   // with order 8: status 6.31
     }
+
+    ~D3Pair() override { destroy_plans(); }
 
     bool prepare(int n, const int32_t* numbers, const double cell[9], cudaStream_t stream) override {
         if (n < 1) throw std::invalid_argument("D3: no atoms");
@@ -781,6 +837,34 @@ public:
         sort_tmp_.alloc(sort_bytes_, bytes_);
         smem_ = (size_t)(S + 2 * WPB * S * MAXREF) * sizeof(float);
         smem3_ = (size_t)2 * ATM_FIELDS * ATM_CHUNK * sizeof(float);
+        if (split_) {
+            std::vector<float> chan;
+            std::vector<double> lam;
+            nc_ = split_channels(S, nref, c6, chan, lam);
+            lam_h_ = lam;
+            const std::vector<int3> ks = mesh_ ? std::vector<int3>{} : split_kset(cell, ew_beta_);
+            nk_ = (int)ks.size();
+            // the direct k sum costs n * nk * channels sincos-and-sums twice per evaluation (nk grows with the
+            // volume): refused where one evaluation would take seconds (it is the mesh's reference)
+            if ((double)n * nk_ * nc_ > 4e10)
+                throw std::invalid_argument("D3 split sum: " + std::to_string(n) + " atoms with " +
+                                            std::to_string(nk_) + " k-vectors is too large for the direct k sum; "
+                                            "unset LOUP_D3_KSUM to use the mesh");
+            if (mesh_) prepare_mesh(cell);
+            chan_d_.alloc(chan.size(), bytes_);
+            lam_d_.alloc(lam.size(), bytes_);
+            kidx_d_.alloc(ks.size(), bytes_);
+            kvec_d_.alloc(ks.size(), bytes_);
+            rho6_d_.alloc((size_t)nk_ * nc_, bytes_);
+            rho8_d_.alloc((size_t)nk_ * nc_, bytes_);
+            frac_d_.alloc(n, bytes_);
+            qc_d_.alloc((size_t)n * nc_, bytes_);
+            dqc_d_.alloc((size_t)n * nc_, bytes_);
+            chan_d_.upload(chan, stream);
+            lam_d_.upload(lam, stream);
+            kidx_d_.upload(ks, stream);
+            CK(cudaStreamSynchronize(stream));
+        }
         CK(cudaStreamSynchronize(stream));      // the host vectors above go out of scope
         return true;
     }
@@ -824,6 +908,29 @@ public:
                                                                  c6_d_.p, r0_d_.p, w_.p, dw_.p, acc_.p, eatom,
                                                                  force_s_.p, dedcn_.p);
         }
+        if (split_) {
+            // the k sum and the self term: after the pair kernels (they add to forces, dE/dCN and per-atom energies)
+            split_atom_kernel<<<(n + 127) / 128, 128, 0, st>>>(n, nc_, ps_.p, grid_.p, chan_d_.p, w_.p, dw_.p,
+                                                               frac_d_.p, qc_d_.p, dqc_d_.p);
+            if (mesh_) {
+                record_mesh(st, forces, eatom);
+            } else {
+                split_kvec_kernel<<<(nk_ + 127) / 128, 128, 0, st>>>(nk_, kidx_d_.p, grid_.p, ew_beta_, s_.s6, s_.s8,
+                                                                     kvec_d_.p);
+                const int nkc = nk_ * nc_;
+                split_rho_kernel<<<(nkc + 127) / 128, 128, 0, st>>>(n, nk_, nc_, kidx_d_.p, frac_d_.p, ps_.p, q_d_.p,
+                                                                    qc_d_.p, rho6_d_.p, rho8_d_.p);
+                split_energy_kernel<<<(nkc + 127) / 128, 128, 0, st>>>(nk_, nc_, kvec_d_.p, lam_d_.p, rho6_d_.p,
+                                                                       rho8_d_.p, acc_.p);
+            }
+            // with the mesh, nk_ = 0: the self term only
+#define LOUP_D3_SPLIT(F) split_force_kernel<F><<<(n + 127) / 128, 128, 0, st>>>(n, nk_, nc_, kidx_d_.p, kvec_d_.p, \
+            lam_d_.p, rho6_d_.p, rho8_d_.p, frac_d_.p, ps_.p, q_d_.p, qc_d_.p, dqc_d_.p, ew_beta_, s_.s6, s_.s8, \
+            acc_.p, eatom, force_s_.p, dedcn_.p)
+            if (forces) LOUP_D3_SPLIT(true);
+            else LOUP_D3_SPLIT(false);
+#undef LOUP_D3_SPLIT
+        }
         if (forces)
             cn_force_kernel<<<blocks, threads, 0, st>>>(n, ps_.p, keys_.p, bin_start_.p, grid_.p, p_.cn_cut2,
                                                         rcov_d_.p, dedcn_.p, order_.p, force_s_.p, out.forces, acc_.p);
@@ -836,14 +943,105 @@ public:
     size_t device_bytes() const override { return bytes_; }
 
 private:
+    void destroy_plans() {
+        if (!plans_) return;
+        const CufftApi& api = cufft_api();
+        api.destroy(plan_f_);
+        api.destroy(plan_b_);
+        plans_ = false;
+    }
+
+    // The mesh for this cell: K_a points along each axis at the spacing (2-3-5 sizes, at least twice the order),
+    // the moduli, the grids and the two cuFFT plans (their work areas are allocated here, outside capture).
+    void prepare_mesh(const double cell[9]) {
+        const CufftApi& api = cufft_api();
+        if (!api.error.empty()) throw std::invalid_argument("D3 split sum: " + api.error);
+        for (int a = 0; a < 3; ++a) {
+            const double len = std::sqrt(cell[3 * a] * cell[3 * a] + cell[3 * a + 1] * cell[3 * a + 1] +
+                                         cell[3 * a + 2] * cell[3 * a + 2]);
+            md_.k[a] = pme_good_size(std::max(2 * order_p_, (int)std::ceil(len / spacing_A_)));
+        }
+        const size_t pts = (size_t)md_.k[0] * md_.k[1] * md_.k[2];
+        const size_t half = (size_t)md_.k[0] * md_.k[1] * (md_.k[2] / 2 + 1);
+        mesh_grid_.alloc(pts, bytes_);
+        mesh_spec_.alloc(half, bytes_);
+        for (int a = 0; a < 3; ++a) {
+            const std::vector<double> b = pme_moduli(md_.k[a], order_p_);
+            bmod_[a].alloc(b.size(), bytes_);
+            CK(cudaMemcpy(bmod_[a].p, b.data(), b.size() * sizeof(double), cudaMemcpyHostToDevice));
+        }
+        destroy_plans();
+        CF(api.plan3d(&plan_f_, md_.k[0], md_.k[1], md_.k[2], CUFFT_D2Z));
+        if (api.plan3d(&plan_b_, md_.k[0], md_.k[1], md_.k[2], CUFFT_Z2D) != CUFFT_SUCCESS) {
+            api.destroy(plan_f_);
+            throw std::runtime_error("D3 mesh: cuFFT could not plan the inverse transform");
+        }
+        plans_ = true;
+        bytes_ += 2 * pts * sizeof(double);         // about what the two plans' work areas hold
+    }
+
+    template <int P>
+    void record_mesh_p(cudaStream_t st, bool forces, double* eatom) {
+        const CufftApi& api = cufft_api();
+        CF(api.set_stream(plan_f_, st));
+        CF(api.set_stream(plan_b_, st));
+        const size_t pts = (size_t)md_.k[0] * md_.k[1] * md_.k[2];
+        const long long half = (long long)md_.k[0] * md_.k[1] * (md_.k[2] / 2 + 1);
+        const int n = n_;
+        for (int comp = 0; comp < 2 * nc_; ++comp) {
+            const int c = comp % nc_;
+            const bool c8 = comp >= nc_;
+            CK(cudaMemsetAsync(mesh_grid_.p, 0, pts * sizeof(double), st));
+            pme_spread_kernel<P><<<(n + 127) / 128, 128, 0, st>>>(n, nc_, c, c8, md_, frac_d_.p, ps_.p, q_d_.p,
+                                                                   qc_d_.p, mesh_grid_.p);
+            CF(api.d2z(plan_f_, mesh_grid_.p, mesh_spec_.p));
+            pme_kspace_kernel<<<(unsigned)((half + 127) / 128), 128, 0, st>>>(
+                md_, grid_.p, ew_beta_, c8 ? s_.s8 : s_.s6, c8 ? 8 : 6, lam_h_[c], bmod_[0].p, bmod_[1].p,
+                bmod_[2].p, mesh_spec_.p, acc_.p);
+            CF(api.z2d(plan_b_, mesh_spec_.p, mesh_grid_.p));
+            if (forces)
+                pme_gather_kernel<P, true><<<(n + 127) / 128, 128, 0, st>>>(n, nc_, c, c8, md_, grid_.p, frac_d_.p,
+                    ps_.p, q_d_.p, qc_d_.p, dqc_d_.p, mesh_grid_.p, eatom, force_s_.p, dedcn_.p);
+            else if (eatom)
+                pme_gather_kernel<P, false><<<(n + 127) / 128, 128, 0, st>>>(n, nc_, c, c8, md_, grid_.p, frac_d_.p,
+                    ps_.p, q_d_.p, qc_d_.p, dqc_d_.p, mesh_grid_.p, eatom, force_s_.p, dedcn_.p);
+        }
+    }
+
+    void record_mesh(cudaStream_t st, bool forces, double* eatom) {
+        switch (order_p_) {
+            case 4: record_mesh_p<4>(st, forces, eatom); break;
+            case 5: record_mesh_p<5>(st, forces, eatom); break;
+
+            case 6: record_mesh_p<6>(st, forces, eatom); break;
+            default: record_mesh_p<8>(st, forces, eatom); break;
+        }
+    }
+
     Settings s_;
     std::vector<int> nref_;
     std::vector<double> cnref_, rcov_, r2r4_, c6ref_, r0ab_;
     int damp_ = kBJ;
     PairParams p_{};
     AtmParams a3_{};
-    bool three_ = false;
-    double rmax_ = 0.0;
+    bool three_ = false, split_ = false;
+    double rmax_ = 0.0, ew_beta_ = 0.0;
+    int nc_ = 0, nk_ = 0;
+    bool mesh_ = false;
+    int order_p_ = 8;
+    double spacing_A_ = 0.8;
+    std::vector<double> lam_h_;
+    MeshDims md_{};
+    DevBuf<double> mesh_grid_, bmod_[3];
+    DevBuf<cufftDoubleComplex> mesh_spec_;
+    cufftHandle plan_f_ = 0, plan_b_ = 0;
+    bool plans_ = false;
+    DevBuf<float> chan_d_, qc_d_, dqc_d_;
+    DevBuf<double> lam_d_;
+    DevBuf<int3> kidx_d_;
+    DevBuf<KVec> kvec_d_;
+    DevBuf<double2> rho6_d_, rho8_d_;
+    DevBuf<float3> frac_d_;
     int n_ = 0, S_ = 0, nbins_ = 0, nb_[3] = {1, 1, 1}, end_bit_ = 1;
     size_t bytes_ = 0, sort_bytes_ = 0, smem_ = 0, smem3_ = 0;
     DevBuf<Grid> grid_;
@@ -871,8 +1069,8 @@ Term* make_term(const Settings& settings, const Tables& tables, const char** why
         return refuse("the three-body cutoff must be positive and no longer than the pair cutoff");
     if (settings.three_body && settings.smoothing_bohr >= settings.three_body_cutoff_bohr)
         return refuse("the switch width must be shorter than the three-body cutoff");
-    if (settings.long_range != LongRange::None)
-        return refuse("only the plain real-space sum is built in this version (PLAN.md S6-D05, S6-D06)");
+    if (settings.long_range != LongRange::None && settings.long_range != LongRange::Split)
+        return refuse("the tail and mesh methods are not built in this version (PLAN.md S6-D05, S6-D06)");
     if (!(settings.pair_cutoff_bohr > 0.0) || !(settings.cn_cutoff_bohr > 0.0))
         return refuse("the cutoffs must be positive");
     if (settings.smoothing_bohr < 0.0 || settings.smoothing_bohr >= settings.pair_cutoff_bohr)
@@ -913,6 +1111,8 @@ int loup_d3_evaluate(const LoupD3Settings* settings, const LoupD3Tables* tables,
         s.smoothing_bohr = settings->smoothing_bohr;
         s.three_body = settings->three_body != 0;
         s.three_body_cutoff_bohr = settings->three_body_cutoff_bohr;
+        s.long_range = static_cast<LongRange>(settings->long_range);
+        s.mesh_spacing_A = settings->mesh_spacing_A;
         Tables t{tables->nref, tables->cnref, tables->rcov, tables->r2r4, tables->c6ref, tables->r0ab};
         const char* why = nullptr;
         std::unique_ptr<Term> term(make_term(s, t, &why));
@@ -1005,6 +1205,8 @@ LoupD3* loup_d3_create(const LoupD3Settings* settings, const LoupD3Tables* table
         s.smoothing_bohr = settings->smoothing_bohr;
         s.three_body = settings->three_body != 0;
         s.three_body_cutoff_bohr = settings->three_body_cutoff_bohr;
+        s.long_range = static_cast<LongRange>(settings->long_range);
+        s.mesh_spacing_A = settings->mesh_spacing_A;
         Tables t{tables->nref, tables->cnref, tables->rcov, tables->r2r4, tables->c6ref, tables->r0ab};
         const char* why = nullptr;
         ctx->term.reset(make_term(s, t, &why));

@@ -430,12 +430,16 @@ int loup_profile_force(LoupHandle* h, int warmup, int n_calls, double* out_total
 // zero. smoothing_bohr: 0, or the width of a quintic switch that takes each pair energy to 0 at the pair cutoff
 // (and each side of a three-body triangle to 0 at the three-body cutoff). three_body: nonzero adds the
 // Axilrod-Teller-Muto term (S6-D08) with s9 = 1 over triangles whose sides lie within three_body_cutoff_bohr.
+// long_range 2: the split sum (S6-D06): the pair term minus its smooth long-range part to pair_cutoff_bohr, the rest
+// as a sum over reciprocal space of the exact C6 / C8 channels (an Ewald sum for 1/r^6 and 1/r^8).
 typedef struct {
     int damping;
     double s6, s8, a1, a2, rs6, rs8, alpha, beta;
     double pair_cutoff_bohr, cn_cutoff_bohr, smoothing_bohr;
     int three_body;
     double three_body_cutoff_bohr;
+    int long_range;             // 0 the plain sum, 2 the split sum (S6-D06; 1 tail and 3 mesh not built)
+    double mesh_spacing_A;      // 0: the method's default
 } LoupD3Settings;
 // The reference tables, index = atomic number 0..94 (loupmd/data/d3_tables.npz): nref [95], cnref [95, 5], rcov
 // [95] (bohr, 4/3 included), r2r4 [95], c6ref [95, 95, 5, 5] (hartree bohr^6; < 0: no reference), r0ab [95, 95] (bohr).

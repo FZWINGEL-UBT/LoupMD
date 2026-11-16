@@ -22,14 +22,15 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Chemistry",
     "Topic :: Scientific/Engineering :: Physics",
 ]
-# The runtime needs no torch and no compiler. The CUDA 13 runtime and cuBLAS come from the NVIDIA wheels, pinned
+# The runtime needs no torch and no compiler. The CUDA 13 runtime, cuBLAS and cuFFT (the split dispersion sum, opened
+# only when used; PLAN.md D79) come from the NVIDIA wheels, pinned
 # exactly as torch 2.14.1+cu130 pins them (cuda-toolkit 13.0.3: nvidia-cuda-runtime 13.0.96, nvidia-cublas
 # 13.1.1.3), so that the export extra's torch and the engine load the same libraries.
 dependencies = [
     "numpy>=1.26",
     "ase>=3.23",
     "tomli>=2; python_version < '3.11'",
-    "cuda-toolkit[cublas,cudart]==13.0.3; platform_system == 'Linux'",
+    "cuda-toolkit[cublas,cudart,cufft]==13.0.3; platform_system == 'Linux'",
 ]
 
 [project.optional-dependencies]

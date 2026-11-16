@@ -1328,6 +1328,81 @@ The owner chose D74 (a): the split sum and the reciprocal-space sum are one meth
   5,000 atoms (NbCl5 needs 16,000 to 73,000 k-vectors at beta 0.15 to 0.25). The gain needs a mesh (smooth PME):
   the k cutoff 2 beta x 4.5 at beta 0.15 implies a mesh spacing near 2.3 bohr (1.2 A, FourierD3's default).
   Forces and stress are not prototyped yet; the CN chain rule needs dE/dq_ic from the k-space part.
-- **Not finished:** the C6+C8 split on NbCl5, and SrTiO3 and water. WSL stopped twice with Wsl/Service/E_UNEXPECTED
-  (09:10, and during the NbCl5 rerun) while the other session held the GPU; the SrTiO3 run (16 million pairs in an
-  ASE neighbour list) may have caused the first.
+- **Not finished at first:** WSL stopped twice with Wsl/Service/E_UNEXPECTED (09:10, and during the NbCl5 rerun)
+  while the other session held the GPU. The cause was most likely the prototype itself: ASE's 40 bohr neighbour list
+  of NbCl5 3x3x3 asks for arrays of 42 million rows (973 MB each, several at once). Rerun with the address space
+  capped at 8 GB (`ulimit -v`; the list then failed cleanly) and the pairs streamed in blocks of 48 atoms.
+- **C6 and C8 both split (NbCl5 3x3x3, 1944 atoms, energy):** against the 150 bohr sum the error stopped falling at
+  0.012 meV/atom for every beta at 20 to 25 bohr. That floor is the 150 bohr reference's own truncation: the uniform
+  tail beyond 150 bohr is -0.0111 meV/atom (C6 only). Against the reference plus that tail: **0.0067 meV/atom at a
+  20 bohr real-space cutoff and 0.0008 at 25 bohr, for beta 0.200 and 0.225 per bohr alike** (plain 40 bohr sum:
+  0.594); at 15 bohr 0.06 to 0.08. The rest at 20 bohr is not the Ewald part but the BJ damping's departure from
+  1/r^6 beyond the real-space cutoff (about (f/r)^6 of the tail, f near 7 bohr); a uniform-density correction for it
+  (C6 f^6 / r^12 over the tail) would remove most of it and is not built. Consequence for the validation set (D73):
+  the 150 bohr references are short of the infinite sum by about 0.01 meV/atom on NbCl5, a hundredth of the plain
+  40 bohr sum's error, so they stay the reference with the tail estimate added where the split sum is compared.
+
+### 6.31 The split sum on the GPU, S6-D06 (16 November 2026)
+
+`long_range="split"`: the damped pair term minus its smooth long-range part (C6 and C8) in real space to
+`pair_cutoff_bohr`, that part for every pair and image in reciprocal space through the exact channels of status
+6.30 (`src/dispersion/d3_split.cuh`), on a smooth-PME mesh (`src/dispersion/d3_mesh.cuh`; cuFFT opened with
+`dlopen`, D79). beta = 4.5 / real-space cutoff. The direct k sum stays as the mesh's reference (`LOUP_D3_KSUM=direct`,
+testing only; refused above about 4e10 atom-k-channel products). Every damping and the three-body term work with it
+(only the real-space kernel differs). Measured on the RTX 5060 Ti, `libloupmd_d3f.so` (a589b930c20f5c05).
+
+**Accuracy against the infinite sum** (simple-dftd3 at 150 bohr plus the uniform tail beyond 150 bohr, estimated from
+the 40 to 150 bohr difference; CN to 40 bohr everywhere), direct k sum, energy in meV/atom, max force error in eV/A:
+
+| system (atoms) | plain 40 bohr | split 15 | split 20 | split 25 |
+| --- | --- | --- | --- | --- |
+| paracetamol (80) | 0.153, 7.1e-5 | 0.0064, 4.6e-6 | 0.0005, 1.7e-6 | 0.0001, 1.4e-6 |
+| SrTiO3 2x2x2 (40) | 1.080, 4.5e-6 | 0.543, 1.9e-4 | 0.032, 4.2e-6 | 0.0039, 3.9e-7 |
+| NbCl5 (72) | 0.594, 4.8e-6 | 0.077, 1.6e-4 | 0.0066, 5.0e-6 | 0.0007, 3.8e-7 |
+
+Stress errors at 20 bohr: 1.3e-4 / 2.3e-3 / 3.0e-4 GPa against the plain sum's 5.0e-3 / 2.9e-2 / 6.6e-3. So at 20 bohr
+the split sum is within the literal contract (no worse than the plain 40 bohr sum) in energy, force and stress on these
+three, except SrTiO3's force at 4.2e-6 against 4.5e-6 (just inside). 15 bohr fails it in force.
+
+**The mesh against the direct k sum** (rc 20 bohr), largest errors over paracetamol, SrTiO3 and NbCl5:
+
+| order, spacing | dE meV/atom | dF eV/A | dS GPa | ms (NbCl5) |
+| --- | --- | --- | --- | --- |
+| 4, 1.0 A | 0.107 | 1.5e-3 | 1.1e-3 | 1.08 |
+| 6, 1.0 A (D78's plan) | 4.4e-3 | 8.5e-5 | 9.5e-5 | 1.28 |
+| 6, 0.6 A | 1.6e-4 | 4.6e-6 | 7.4e-6 | 1.40 |
+| 8, 1.0 A | 5.3e-4 | 7.9e-6 | 1.8e-5 | 1.59 |
+| **8, 0.8 A (default)** | 5.3e-4 | 1.4e-6 | 7.0e-6 | 1.62 |
+
+The energy floor near 2e-4 to 5e-4 meV/atom (1 part in 1e6 of the k = 0 and self terms, which nearly cancel) is
+float32 rounding of the channel values, the same in both sums, and inside the 1e-6 eV/atom tolerance. Order 6 at
+1.0 A misses the force tolerance on NbCl5 by 8x, hence the default of order 8 at 0.8 A (D78 amended).
+
+**Checks:** forces and stress are the gradient (central differences at h = 1e-2 A and strain 1e-3: noise from
+float32 pair energies is near 1e-5 eV/A at h = 1e-3 A, so the precise check is the comparison with simple-dftd3
+above); energy-only equals the full call to 4e-15 eV; per-atom energies sum to the total within 1e-7 eV.
+
+**Cost on small cells** (40 to 80 atoms): the split sum is slower than the plain sum (1.2 to 3 ms against 0.7 to
+0.85 ms), the mesh pipeline being 2 x channels x (spread, FFT, k-space, inverse FFT, gather) launches. The large
+cells decide (below).
+
+**Large cells** (`libloupmd_d3h.so`, d1653946c4f82dd5, which adds per-pass walk reaches; one run each, 20 replays of
+the captured evaluation; errors against the cached 150 bohr references plus the tail beyond 150 bohr):
+
+| system (atoms) | plain 40: ms, dE meV/atom, dF eV/A | split 20, mesh 0.8 A order 8 | split 25, same mesh |
+| --- | --- | --- | --- |
+| NbCl5 3x3x3 (1,944) | 2.61, 0.594, 5.7e-6 | 4.27 (energy only 2.62), 0.0068, 7.2e-6 | 4.43, 0.0008, 4.1e-7 |
+| SrTiO3 10x10x10 (5,000) | 8.56, 1.080, 6.2e-6 | 12.67 (6.95), 0.0329, 9.2e-6 | 13.13, 0.0041, 9.2e-7 |
+| water 216 2x2x2 (5,184) | 10.20, 0.065, 3.1e-4 | 9.52 (3.70), 0.0002, 6.3e-6 | 10.25, 0.0000, 5.6e-6 |
+| SrTiO3 27^3 (98,415) | 152.8 | 203.4 | 213.9 |
+| SrTiO3 58^3 (975,560) | 1493.9 | 1975.3 | 2080.9 |
+
+Stress at 20 bohr: 3.0e-4 / 2.3e-3 / 4.9e-5 GPa against 6.6e-3 / 2.9e-2 / 2.0e-3. **The split sum is an accuracy
+method, not a speed-up, at the record's 40 bohr CN cutoff:** at 20 bohr its force error exceeds the plain sum's on
+NbCl5 (7.2e-6 against 5.7e-6) and SrTiO3 (9.2e-6 against 6.2e-6), both below the 1e-5 eV/A tolerance, so it misses
+D73's literal contract there in force while being 10 to 300 times better in energy and stress; at 25 bohr it is
+better in all three on all three systems, at 1.05 to 1.7 times the plain sum's time. Where the time goes: both
+methods walk 40 bohr twice for the coordination numbers (count and chain rule), and the mesh costs about 5 ms at 5,000
+atoms (energy only 6.95 ms against the plain sum's 1.40). Tuning ideas are in the ledger (`d3-split-mesh`). The
+1,000,000-atom energies show the size of the plain sum's truncation in a large cell: -0.264539 against -0.265652
+eV/atom, 1.1 meV/atom.

@@ -13,13 +13,16 @@ from .errors import BackendError, InputError
 
 BOHR = 0.529177210903       # A
 DAMPING_CODES = {"bj": 0, "zero": 1, "bjm": 2, "zerom": 3}
+# "auto" is resolved before the term is made (S6-D07); until then it runs the plain sum
+LONG_RANGE_CODES = {"auto": 0, "none": 0, "tail": 1, "split": 2, "mesh": 3}
 TABLES = Path(__file__).parent / "data" / "d3_tables.npz"
 
 
 class LoupD3Settings(ctypes.Structure):
     _fields_ = [("damping", ctypes.c_int)] + [(name, ctypes.c_double) for name in (
         "s6", "s8", "a1", "a2", "rs6", "rs8", "alpha", "beta", "pair_cutoff_bohr", "cn_cutoff_bohr",
-        "smoothing_bohr")] + [("three_body", ctypes.c_int), ("three_body_cutoff_bohr", ctypes.c_double)]
+        "smoothing_bohr")] + [("three_body", ctypes.c_int), ("three_body_cutoff_bohr", ctypes.c_double),
+                              ("long_range", ctypes.c_int), ("mesh_spacing_A", ctypes.c_double)]
 
 
 _D = ctypes.POINTER(ctypes.c_double)
@@ -45,10 +48,15 @@ def settings(record) -> LoupD3Settings:
         raise InputError("the dispersion record has no parameters: resolve it against the model first")
     p = record.parameters
     smoothing = 0.0 if record.smoothing == "none" else float(record.smoothing)
+    if record.long_range == "split":
+        from ._core import ensure_cufft
+
+        ensure_cufft()          # the library opens cuFFT by name (PLAN.md D79); it refuses the term without it
     return LoupD3Settings(DAMPING_CODES[record.damping], p["s6"], p["s8"], p.get("a1", 0.0), p.get("a2", 0.0),
                           p.get("rs6", 0.0), p.get("rs8", 1.0), p.get("alpha", 14.0), p.get("beta", 0.0),
                           record.pair_cutoff_bohr, record.cn_cutoff_bohr, smoothing, int(record.three_body),
-                          record.three_body_cutoff_bohr)
+                          record.three_body_cutoff_bohr, LONG_RANGE_CODES[record.long_range],
+                          float(record.mesh_spacing_A or 0.0))
 
 
 def _lib(lib=None):

@@ -301,6 +301,8 @@ Conventions:
 | [d3-cn-cutoff](#d3-cn-cutoff) | Coordination-number cutoff 20-35 bohr with the 40 bohr pair sum | `cn_cutoff_bohr` | prototype | OPEN (D73) | S6-D02 | CN 30: -19 to -21%; passes on SrTiO3 and water, misses on NbCl5 pressure by 1.7e-6 GPa | [bakeoff][d3bo] |
 | [d3-pair-production](#d3-pair-production) | The bake-off's variant 1 in the library: device-side grid and reach, four dampings, switch, energy-only path | - | `src/dispersion/d3_pair.cu` | ADOPTED | S6-D04 | same speed as the prototype (2.51 / 8.48 / 9.87 ms vs 2.48 / 8.42 / 9.88); energy-only path 0.68 / 1.43 / 1.53 ms | [status 6.28](STATUS_AND_PROFILE.md) |
 | [d3-atm-first](#d3-atm-first) | Three-body ATM term: one block per atom, its neighbour list in shared memory in chunks, corner-owned forces without atomics | - | `src/dispersion/d3_pair.cu` | ADOPTED | S6-D08 | first version, nothing to compare with: d3bj-atm 12.3 / 102 / 133 ms against d3bj 2.5 / 8.5 / 9.8 ms | [status 6.29](STATUS_AND_PROFILE.md) |
+| [d3-split-mesh](#d3-split-mesh) | Split D3 sum: real space to 20 bohr, the C6/C8 channels' long-range part by smooth PME (order 8, 0.8 A) | - | `src/dispersion/d3_split.cuh`, `d3_mesh.cuh` | ADOPTED (as an accuracy option) | S6-D06 | not faster: 4.27 / 12.7 / 9.5 ms against the plain 40 bohr sum's 2.61 / 8.56 / 10.2 ms (NbCl5, SrTiO3, water); 203 against 153 ms at 98,415 atoms, 1975 against 1494 ms at 975,560; energy error 0.007 / 0.033 / 0.0002 meV/atom against 0.59 / 1.08 / 0.065 | [status 6.31](STATUS_AND_PROFILE.md) |
+| [d3-walk-reach](#d3-walk-reach) | Each D3 walk covers the bins of its own cutoff, not of max(pair, CN) | d3-split-mesh | `src/dispersion/d3_pair.cu` | ADOPTED | S6-D06 | split 20 bohr: NbCl5 4.39 -> 4.27 ms, SrTiO3 12.81 -> 12.67, water 9.90 -> 9.52, 975,560 atoms 2015 -> 1975 (single runs; the plain sum unchanged within noise) | [status 6.31](STATUS_AND_PROFILE.md) |
 
 ## Chronology
 
@@ -2097,5 +2099,9 @@ derivative work (4-6x cheaper), which helps Monte Carlo energy differences.
 implementation of the three-body term, kept because it is correct (within 1e-7 eV/A of simple-dftd3), not because it
 is fast: at 20 bohr it costs 4 to 13 times the pair term. The open ideas are in status 6.29; each is to be measured
 against this version with the 3x rule before it replaces it.
+
+<a id="d3-split-mesh"></a>**d3-split-mesh** (ADOPTED as an accuracy option, S6-D06, 16 November 2026, 5060 Ti only). The first version of `long_range="split"`. It removes the plain sum's truncation error almost entirely (10 to 300 times smaller in energy, up to 50 times in force on water) but costs 1.0 to 1.6 times the plain 40 bohr sum: the coordination numbers still walk 40 bohr twice (count, then the chain rule), which neither method avoids, and the mesh (2 x channels components, each spread with 512 double atomics per atom, two FFTs, a gather) costs about 5 ms at 5,000 atoms. A 1.0 A mesh saves 0.5 to 2 ms but misses the 1e-5 eV/A force tolerance against the direct k sum on SrTiO3 (1.2e-5). Ideas for the tuning stage (D77): spread every component in one pass, float atomics into shared tiles, batched FFTs, and the CN cutoff (owner, D73).
+
+<a id="d3-walk-reach"></a>**d3-walk-reach** (ADOPTED, S6-D06, 16 November 2026, 5060 Ti only). The bin grid is sized for max(pair, CN cutoff); each pass now walks only the bins its own cutoff reaches (the split sum's 20 bohr pair pass, the three-body list). Single A/B runs, so the gains (1 to 4%) are near noise; kept because it cannot be slower and gives the same sums (the D3 tests pass on the library).
 
 [d3bo]: docs/validation/dispersion-bakeoff.md

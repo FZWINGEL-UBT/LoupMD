@@ -78,6 +78,24 @@ pair term's tolerances (`tests/gpu/test_d3.py`). With `smoothing=w` each side of
 last `w` bohr before the three-body cutoff too; without it the cutoff is hard, as in simple-dftd3. Its cost grows with
 the square of the neighbours within its cutoff: at 40 bohr it is many times the pair term.
 
+## The split sum
+
+`Dispersion(long_range="split", pair_cutoff_bohr=25.0)` sums the pair term without truncating it. The damped
+pair energy minus its smooth long-range part runs in real space to `pair_cutoff_bohr`; that smooth part for every
+pair and periodic image goes to reciprocal space on a mesh (smooth particle-mesh Ewald). This works because D3's C6
+and C8 coefficients separate exactly into a few "charges" per atom (at most 5 per element), so no combination rule
+is assumed. The coordination numbers are still summed to `cn_cutoff_bohr`.
+
+- **Accuracy.** Against the infinite sum it is 10 to 300 times closer in energy than the plain 40 bohr sum (0.0008
+  meV/atom on NbCl5 at 25 bohr, against 0.59), and closer in forces and stress at 25 bohr. At 20 bohr the forces can
+  be slightly worse than the plain sum's, though still within 1e-5 eV/A.
+- **Cost.** It is not faster: 1.05 to 1.7 times the plain sum on the RTX 5060 Ti, from 2,000 to 1,000,000 atoms.
+  Both walk 40 bohr for the coordination numbers, and the mesh adds its own cost.
+- **Mesh.** B-splines of order 8 at `mesh_spacing_A` (default 0.8 A, within 1e-7 eV/A of an exact reciprocal sum).
+- **Needs** a 3D periodic cell and cuFFT (`pip install 'cuda-toolkit[cufft]'`; LoupMD's wheel depends on it).
+- **Where it fits.** Large cells where the plain sum's truncation matters, for example the pressure or the energy
+  per atom of a big cell (1.1 meV/atom on SrTiO3).
+
 ## The ASE calculator
 
 `lm.calc("omat0-medium", dispersion="d3bj")` adds the term to every calculation (energy, forces, stress).
@@ -90,7 +108,8 @@ lists the time per evaluation on the RTX 5060 Ti.
 
 ## Not in this version
 
-- The tail correction, the split sum and the mesh sum (S6-D05, S6-D06): `long_range="auto"` uses the plain sum.
+- The tail correction and the mesh sum (S6-D05, S6-D06). `long_range="auto"` uses the plain sum until the
+  automatic choice (S6-D07) is built.
 - Dispersion with open domains. (A cell that does not fit the GPU whole runs the model tiled and the D3 term for
   the whole system beside it: the term needs no neighbour list and about 200 bytes per atom.)
 - D4. Its own ASE calculator (`dftd4.ase.DFTD4`) adds it to `lm.calc` through ASE's `SumCalculator`:

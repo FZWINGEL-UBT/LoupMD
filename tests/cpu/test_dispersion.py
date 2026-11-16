@@ -234,6 +234,16 @@ def test_dispersion_list_shows_the_presets_methods_and_limits(capsys):
     assert "doi:10.1002/jcc.21759" in out and "[not built yet]" in out and "MACE-POLAR-1" in out
     plain = next(line for line in out.splitlines() if line.startswith("  none "))
     assert "the plain real-space sum" in plain and "[not built yet]" not in plain
+    split = next(line for line in out.splitlines() if line.startswith("  split "))
+    assert "reciprocal space" in split and "[not built yet]" not in split
+
+
+def test_the_split_sum_is_runnable_and_auto_still_picks_the_plain_sum():
+    assert d.runnable(loupmd.Dispersion(long_range="split")) == "split"
+    assert d.runnable(loupmd.Dispersion(long_range="split", three_body=True, three_body_cutoff_bohr=20.0)) == "split"
+    assert d.runnable(loupmd.Dispersion()) == "none"           # until S6-D07 chooses
+    assert d.runnable(loupmd.Dispersion(auto_methods=("split",))) == "split"
+    assert d.runnable(loupmd.Dispersion(long_range="split", mesh_spacing_A=0.8)) == "split"
 
 
 # ----------------------------------------------------------------------------- loupmd validate --dispersion (S6-D10)
