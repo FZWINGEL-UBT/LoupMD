@@ -9,10 +9,11 @@ The MACE references are cached (LOUP_GATE_CACHE, default ~/.cache/loupmd/gate_re
 
 Structure sets: "oxide" (NaCl, SrTiO3, NbCl5; the default), "organic" (urea, naphthalene, paracetamol, the
 648-atom water box; MACE-OFF's set) and "crystals" (NaCl, NaNbO3, NbCl5 R2SCAN cells; FastMACE's MH-1 / POLAR set).
-For the specialised OMAT-0-medium bundle every structure is evaluated with the default kernel choices; the NbCl5 2x2x2 cell (576 atoms, above the 512-atom
-switch to the receiver-owned w' kernel) is also evaluated with every forced spline variant, both w' block sizes and the
-Morton atom reorder on and off, and the small cells with the receiver-owned w' forced, so every kernel path the
-engine can pick is gated (the per-system tuning otherwise only picks one of them per run).
+For the specialised OMAT-0-medium bundle every structure is evaluated with the default kernel choices; the NbCl5 2x2x2
+cell (576 atoms, above the 512-atom switch to the receiver-owned w' kernel on GPUs other than sm_120) is also evaluated
+with every forced spline variant, both w' block sizes and the Morton atom reorder on and off, and the small cells with
+each w' kernel forced (edge-tiled, receiver-owned at both block sizes), so every kernel path the engine can pick is gated
+(the per-system tuning otherwise only picks one of them per run).
 """
 from __future__ import annotations
 
@@ -118,7 +119,7 @@ LARGE_VARIANTS = (
     [{"LOUP_SPLINE_VARIANT": v} for v in ("R1", "R1p", "R4", "R4p", "R5")]
     + [{"LOUP_WPRIME_THREADS": "512"}, {"LOUP_REORDER": "1"}, {"LOUP_REORDER": "0"}]
 )
-SMALL_VARIANTS = [{"LOUP_WPRIME_RCV": "1"}, {"LOUP_WPRIME_RCV": "1", "LOUP_WPRIME_THREADS": "512"}]
+SMALL_VARIANTS = [{"LOUP_WPRIME_RCV": "0"}, {"LOUP_WPRIME_RCV": "1"}, {"LOUP_WPRIME_RCV": "1", "LOUP_WPRIME_THREADS": "512"}]
 # Generic models: the conv forward variants of lx 1 layers at C 128 (GenericModel::tune_conv_variants picks one per
 # system on sm_120; each is gated forced, on every configuration)
 GENERIC_VARIANTS = [{"LOUP_CONV_FWD_VARIANT": v} for v in ("1", "2")]

@@ -509,7 +509,9 @@ struct LoupHandle {
         }
         if (ovr.wp_threads) wp_threads = ovr.wp_threads;
     }
-    bool use_wprime_rcv() const { return ovr.wprime_rcv >= 0 ? ovr.wprime_rcv == 1 : N >= 512; }
+    // S96: on cc 12.0 the receiver-owned w' also wins below 512 atoms (SrTiO3 40 / 135 / 320 atoms 0.984 / 0.953 /
+    // 0.967 of the step); other GPUs keep the S3 threshold (the edge-tiled kernel there is unmeasured against it).
+    bool use_wprime_rcv() const { return ovr.wprime_rcv >= 0 ? ovr.wprime_rcv == 1 : (is_sm120 || N >= 512); }
     bool variants_tuned = false;  // tune_rebuild_variants ran for this system
     struct DiskPlan {
         int M, N, K;

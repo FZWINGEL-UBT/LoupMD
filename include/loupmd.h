@@ -81,6 +81,8 @@ int loup_profile_force(LoupHandle* h, int warmup, int n_calls, double* out_total
 //                   the runner-up by less than 3% are not persisted.
 //   LOUP_RETUNE     if set, ignore the plan cache and re-time every GEMM shape (results are still saved).
 //   LOUP_SPLINE_VARIANT, LOUP_WPRIME_THREADS, LOUP_REORDER  force kernel variants (testing; see python/test_gate.py).
+//   LOUP_WPRIME_RCV=0|1  specialised OMAT-0 path: the edge-tiled (0) or receiver-owned (1) w' backward (testing; the
+//                   receiver-owned kernel is the default on sm_120, and on other GPUs from 512 atoms).
 //   LOUP_ROW_SORT=global  sort every neighbour row in global scratch, the path of rows over 4,096 edges (testing).
 //   LOUP_MD_REBUILD=host|fallback  MD neighbour rebuilds host-driven, or counted on the GPU and always finished on the
 //                   host, instead of inside the step graph (testing).

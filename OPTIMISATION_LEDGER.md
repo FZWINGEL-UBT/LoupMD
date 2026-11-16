@@ -69,7 +69,7 @@ Conventions:
 | ID | Idea | Switch/flag | Path | Status | Stage | Effect | Evidence |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | [wp-cubic-packed8](#wp-cubic-packed8) | 8-byte exact quantised cubic table instead of `float4` | `d_cubic_packed8_1` | spec | DEFAULT | S1 | part of S0 -> S1: 2.384 -> 2.187 / 11.380 -> 10.458 ms (5060 Ti) | [§3.1 #1][s31], [§1][s1] |
-| [wp-receiver-owned](#wp-receiver-owned) | One receiver per block, q staged once (N >= 512) | `wprime_backward_inter1_rcv`, `LOUP_WPRIME_RCV` | spec | DEFAULT | S3 | -170 us on both GPUs | [§3.1 #12][s31] |
+| [wp-receiver-owned](#wp-receiver-owned) | One receiver per block, q staged once (N >= 512; every N on `sm_120` since S96) | `wprime_backward_inter1_rcv`, `LOUP_WPRIME_RCV` | spec | DEFAULT | S3, S96 | -170 us on both GPUs; S96 small SrTiO3 cells (5060 Ti) 40 / 135 / 320 atoms `0.984` / `0.953` / `0.967` | [§3.1 #12][s31], this file |
 | [wp-channel-major-q](#wp-channel-major-q) | Channel-major staged q, conflict-free `LDS.128` | – | spec | DEFAULT | S3 | `w'` -1.7% (5060 Ti), -2.5% (Ada) | [§3.1 #21][s31] |
 | [wp-shift-free-decode](#wp-shift-free-decode) | Coefficient bits packed at their float position: one `LOP3` per decode | – | spec | DEFAULT | S4 | `w'` 3,177 -> 3,065 us; MD up to -1.3% | [§3.1 #27][s31] |
 | [wp-dt-scale](#wp-dt-scale) | Radial derivative scaled by 2^8 (one `FMUL` less per path) | – | spec | DEFAULT | S4 | `w'` 3,069 -> 3,010 us; MD -0.1% to -0.6% | [§3.1 #28][s31] |
@@ -511,12 +511,12 @@ Each entry has the same fields. Unless stated, the system is OMAT-0 medium on th
 
 <a id="wp-receiver-owned"></a>
 #### wp-receiver-owned: one receiver per block
-- Switch: `wprime_backward_inter1_rcv` for N >= 512 (the edge-tiled kernel stays for N < 512); `LOUP_WPRIME_RCV` forces it.
-- Stage: S3 (item 12).
+- Switch: `wprime_backward_inter1_rcv` for N >= 512, and for every N on `sm_120` since S96 (`LoupHandle::use_wprime_rcv`); the edge-tiled kernel stays for N < 512 on other GPUs. `LOUP_WPRIME_RCV=0|1` forces either kernel.
+- Stage: S3 (item 12); S96 (16 November 2026).
 - Status: DEFAULT.
-- Measured: -170 us on both GPUs.
-- Why: the receiver's q is staged once per block.
-- Sources: [§3.1 #12][s31].
+- Measured: -170 us on both GPUs. S96 (5060 Ti): the threshold dated from S3, before the receiver-owned kernel's later tuning (shift-free decode, per-system block size, decode bias fold). Small SrTiO3 cells, `LOUP_WPRIME_RCV=1` against the default in separate processes, 3 ABBA rounds: 40 / 135 / 320 atoms `0.984` / `0.953` / `0.967` (both orders below 1). Library ABBA on shared GEMM plans, S86 -> S96: 135 atoms `0.974` (`0.975` / `0.973`), 320 atoms `0.963` (`0.967` / `0.959`), NbCl5 and the 5,000-atom SrTiO3 (already receiver-owned) `1.000` / `1.000`. Gates (oxide set, OMAT-0 medium and MPA-0 medium specialised): the small cells now run the receiver-owned kernel by default and the edge-tiled one forced (`test_gate.py` `SMALL_VARIANTS` gate both kernels on any GPU), all PASS; 77 tests pass.
+- Why: the receiver's q is staged once per block. At 320 atoms the edge-tiled `w'` took 208 us against the generic path's receiver-owned `gconv_bwd_L1` at 186 us (`nsys`), which made the generic path 5.5% faster than the specialised one there (`ab_libs.py`, both orders).
+- Sources: [§3.1 #12][s31], this file.
 
 <a id="wp-channel-major-q"></a>
 #### wp-channel-major-q: channel-major staged q
