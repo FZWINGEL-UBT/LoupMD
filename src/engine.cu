@@ -1416,23 +1416,33 @@ static void for_each_m1_chunk(const LoupHandle* h, F&& fn) {
     for (int c = 0, a0 = 0; a0 < h->N; ++c, a0 += h->m1_rows) fn(c, a0, std::min(h->m1_rows, h->N - a0));
 }
 
-// m1 chunk pipeline (S112): lanes 0-3 record that the lin1 GEMMs of buffer `buf` are done; the main stream waits for
-// that. Without forked GEMMs (autotune pass) everything runs in order on the main stream.
+// m1 chunk pipeline (S112). Odd chunks' spline and w' run on side stream kM1OddStream, even ones on the main stream,
+// so each chunk's kernel fills the tail of the previous one; lanes 0-3 run the lin1 GEMMs. m1_fork_lanes: lanes 0-3
+// wait for everything queued on `st`; m1_lanes_done: they record that the GEMMs into buffer `buf` are done;
+// m1_wait_lanes: `st` waits for that. Without forked GEMMs (autotune pass) everything runs in order on the main stream.
+static constexpr int kM1OddStream = 4;
+
+static void m1_fork_lanes(LoupHandle* h, cudaStream_t st) {
+    if (!h->fork_ok) return;
+    CUDA_CHECK_THROW(cudaEventRecord(h->ev_fork, st));
+    for (int l = 0; l < 4; ++l) CUDA_CHECK_THROW(cudaStreamWaitEvent(h->side[l], h->ev_fork, 0));
+}
+
 static void m1_lanes_done(LoupHandle* h, int buf) {
     if (!h->fork_ok) return;
     for (int l = 0; l < 4; ++l) CUDA_CHECK_THROW(cudaEventRecord(h->ev_m1[buf][l], h->side[l]));
 }
 
-static void m1_wait_lanes(LoupHandle* h, int buf) {
+static void m1_wait_lanes(LoupHandle* h, int buf, cudaStream_t st) {
     if (!h->fork_ok) return;
-    for (int l = 0; l < 4; ++l) CUDA_CHECK_THROW(cudaStreamWaitEvent(h->stream, h->ev_m1[buf][l], 0));
+    for (int l = 0; l < 4; ++l) CUDA_CHECK_THROW(cudaStreamWaitEvent(st, h->ev_m1[buf][l], 0));
 }
 
 // The receiver-owned kernels index receivers through row_ptr and their per-receiver rows only, so a chunk is the
 // shifted row_ptr / D1 / dD1 with chunk-local m1 / dm1 rows; senders, edges and dx0 / dx1 stay global.
-static void launch_wprime_rcv(LoupHandle* h, int threads, int a0, int n, int buf) {
+static void launch_wprime_rcv(LoupHandle* h, int threads, int a0, int n, int buf, cudaStream_t st) {
     float* const* dm1 = h->d_m1[buf];
-    wprime_backward_inter1_rcv<<<n, threads, 0, h->stream>>>(
+    wprime_backward_inter1_rcv<<<n, threads, 0, st>>>(
         n, h->d_act_row_ptr + h->N, h->d_x0, h->d_x1, h->d_act_vec_len,
         h->d_act_senders, h->d_act_row_ptr + a0,
         h->d_act_slab, h->d_act_t_sx,
@@ -1441,12 +1451,12 @@ static void launch_wprime_rcv(LoupHandle* h, int threads, int a0, int n, int buf
         h->d_dx0, h->d_dx1, h->d_edge_force_1);
 }
 
-static void launch_spline(LoupHandle* h, int rpb, bool pair, int a0, int n, int buf) {
+static void launch_spline(LoupHandle* h, int rpb, bool pair, int a0, int n, int buf, cudaStream_t st) {
     float* const* m1 = h->d_m1[buf];
     auto* kernel = rpb == 5 ? spline_forward_inter1<5, false>
                  : rpb == 4 ? (pair ? spline_forward_inter1<4, true> : spline_forward_inter1<4, false>)
                             : (pair ? spline_forward_inter1<1, true> : spline_forward_inter1<1, false>);
-    kernel<<<(n + rpb - 1) / rpb, 128 * rpb, 0, h->stream>>>(
+    kernel<<<(n + rpb - 1) / rpb, 128 * rpb, 0, st>>>(
         n, h->d_act_row_ptr + h->N, h->d_x0, h->d_x1, h->d_act_vec_len, h->d_act_senders, h->d_act_row_ptr + a0,
         h->d_act_slab, h->d_act_t_sx, h->model.d_cubic_packed8_1, h->model.d_density_table_1,
         h->model.cubic_bias_shift,
@@ -1500,7 +1510,7 @@ static void tune_rebuild_variants(LoupHandle* h) {
         for (int v = 0; v < kSplineVar; ++v)
             best[v] = time_best_of_3(h, e0, e1, [&] {
                 for_each_m1_chunk(h, [&](int c, int a0, int n) {
-                    launch_spline(h, kSplineVarR[v], kSplineVarPair[v], a0, n, c & 1);
+                    launch_spline(h, kSplineVarR[v], kSplineVarPair[v], a0, n, c & 1, h->stream);
                 });
             });
         int cur = 0;
@@ -1520,7 +1530,9 @@ static void tune_rebuild_variants(LoupHandle* h) {
     if (h->use_wprime_rcv() && !h->ovr.wp_threads) {  // the receiver-owned w' (else the edge-tiled kernel)
         for (int t = 0; t < 2; ++t)
             wp[t] = time_best_of_3(h, e0, e1, [&] {
-                for_each_m1_chunk(h, [&](int c, int a0, int n) { launch_wprime_rcv(h, t ? 512 : 256, a0, n, c & 1); });
+                for_each_m1_chunk(h, [&](int c, int a0, int n) {
+                    launch_wprime_rcv(h, t ? 512 : 256, a0, n, c & 1, h->stream);
+                });
             });
         const int cur_t = h->wp_threads == 512 ? 1 : 0;
         if (wp[1 - cur_t] < 0.98f * wp[cur_t]) {
@@ -1671,13 +1683,19 @@ static void record_force_pass(LoupHandle* h, int compute_stress) {
     sgemm_rm(h, false, false, N * 3, 128, 128, 1.0f, h->d_h0_1, 128, h->model.d_W_up_1, 128, 0.0f, h->d_x1, 128);
     gemm_join(h);
 
-    // 4b. Spline forward + linear1 per m1 chunk (S112). With chunks the two m1 buffers alternate: chunk c's lin1
-    // GEMMs (lanes 0-3) overlap chunk c + 1's spline, and chunk c + 2's spline waits for them.
+    // 4b. Spline forward + linear1 per m1 chunk (S112). With chunks the two m1 buffers alternate and so do the
+    // spline streams (m1_fork_lanes); chunk c's lin1 GEMMs (lanes 0-3) follow its spline, and chunk c + 2's spline
+    // waits for them.
+    const int n_chunks = (N + h->m1_rows - 1) / h->m1_rows;
+    const bool alternate = n_chunks > 1 && h->fork_ok;
+    auto chunk_stream = [&](int c) { return alternate && (c & 1) ? h->side[kM1OddStream] : h->stream; };
+    if (alternate) gemm_fork(h);  // the odd chunks' stream after x0 / x1
     for_each_m1_chunk(h, [&](int c, int a0, int n) {
         float* const* m1 = h->d_m1[c & 1];
-        if (c >= 2) m1_wait_lanes(h, c & 1);
-        launch_spline(h, h->spline_rpb, h->spline_pair, a0, n, c & 1);
-        gemm_fork(h);
+        const cudaStream_t st = chunk_stream(c);
+        if (c >= 2) m1_wait_lanes(h, c & 1, st);
+        launch_spline(h, h->spline_rpb, h->spline_pair, a0, n, c & 1, st);
+        m1_fork_lanes(h, st);
         gemm_lane(h, 0);
         sgemm_rm(h, false, false, n, 128, 256, 1.0f, m1[0], 256, h->model.d_W_lin1[0], 128, 0.0f,
                  h->d_b0 + (size_t)a0 * 128, 128);
@@ -1702,9 +1720,9 @@ static void record_force_pass(LoupHandle* h, int compute_stress) {
         h->d_hidden16, h->d_energy_f64,
         h->d_db0, h->d_db1, h->d_db2, h->d_db3, h->d_dD1);
 
-    // 7. Backward: linear1 + w' per m1 chunk. Chunk c + 1's lin1 GEMMs (lanes 0-3) overlap chunk c's w' (main
-    // stream); chunk c + 2's GEMMs, into the same buffer as chunk c's, are forked after that w'. Chunks exist only
-    // with the receiver-owned w' (set_system_impl): the edge-tiled kernel indexes dm1 by global receiver.
+    // 7. Backward: linear1 + w' per m1 chunk. Chunk c + 1's lin1 GEMMs (lanes 0-3) overlap chunk c's w', which runs
+    // on the chunk's stream; chunk c + 2's GEMMs, into the same buffer as chunk c's, are forked after that w'. Chunks
+    // exist only with the receiver-owned w' (set_system_impl): the edge-tiled kernel indexes dm1 by global receiver.
     auto lin1_backward = [&](int c) {
         const int a0 = c * h->m1_rows, n = std::min(h->m1_rows, N - a0);
         float* const* dm1 = h->d_m1[c & 1];
@@ -1722,12 +1740,12 @@ static void record_force_pass(LoupHandle* h, int compute_stress) {
                  0.0f, dm1[3], 256);
         m1_lanes_done(h, c & 1);
     };
-    const int n_chunks = (N + h->m1_rows - 1) / h->m1_rows;
-    gemm_fork(h);
+    gemm_fork(h);  // lanes and the odd chunks' stream after sc1_fused
     lin1_backward(0);
     if (n_chunks > 1) lin1_backward(1);
     for_each_m1_chunk(h, [&](int c, int a0, int n) {
-        m1_wait_lanes(h, c & 1);
+        const cudaStream_t st = chunk_stream(c);
+        m1_wait_lanes(h, c & 1, st);
         if (!h->use_wprime_rcv()) {
             float* const* dm1 = h->d_m1[0];
             wprime_backward_inter1<<<gridE64, 256, 0, h->stream>>>(
@@ -1738,10 +1756,10 @@ static void record_force_pass(LoupHandle* h, int compute_stress) {
                 h->model.d_cubic_packed8_1, h->model.d_density_table_1, h->model.cubic_bias_shift,
                 h->d_dx0, h->d_dx1, h->d_edge_force_1);
         } else {
-            launch_wprime_rcv(h, h->wp_threads, a0, n, c & 1);
+            launch_wprime_rcv(h, h->wp_threads, a0, n, c & 1, st);
         }
         if (c + 2 < n_chunks) {
-            gemm_fork(h);
+            m1_fork_lanes(h, st);
             lin1_backward(c + 2);
         }
     });
