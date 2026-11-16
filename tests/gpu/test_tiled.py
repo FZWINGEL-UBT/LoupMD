@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import ctypes
 import gc
+import re
 
 import numpy as np
 import pytest
@@ -255,6 +256,38 @@ def test_layer_state_in_host_memory_gives_the_device_state_result(model, host_li
 
     (dev, ex_d), (host, ex_h) = run("0"), run("1")
     assert ex_h.lists_kept
+    for (e0, f0, s0, t0), (e1, f1, s1, t1) in zip(dev, host):
+        assert t0 == t1 >= 4
+        assert abs(e1 - e0) / len(at) <= 1e-8 and np.abs(f1 - f0).max() <= 1e-5 and np.abs(s1 - s0).max() <= 1e-8
+
+
+@pytest.mark.parametrize("alias", ["1", "0"])
+def test_host_state_tiles_with_their_own_rows_on_the_device_give_the_device_state_result(alias, monkeypatch, capfd):
+    """O32: in a cube cut into tiles without ghosts of their own atoms, the last forward tile's outputs stay in the
+    layer buffer for its last sweep (the first of that phase), and the last last-layer tile's own gradient rows stay
+    on the device for its backward sweep (the first of that phase), added there to the other tiles' host adds. The
+    device state's numbers, in the building call and a kept one, with the gradients on the outputs' rows or not."""
+    at = srtio3(1).repeat((14, 14, 14))               # 13,720 atoms
+    at.positions += np.random.default_rng(13).normal(scale=0.04, size=at.positions.shape)
+    moved = at.positions + np.random.default_rng(14).normal(scale=0.01, size=at.positions.shape)
+    bundle = ensure_loup_bundle(find_model("mace-omat-0-small.model"), [8, 22, 38])
+    monkeypatch.setenv("LOUP_NO_HYBRID", "1")
+    monkeypatch.setenv("LOUP_TILE_WAVEFRONT", "0")
+    monkeypatch.setenv("LOUP_TILE_HOST_ALIAS", alias)
+    monkeypatch.setenv("LOUP_DEBUG_TILE_TIMES", "1")
+
+    def run(state):
+        monkeypatch.setenv("LOUP_TILE_HOST_STATE", state)
+        eng = LoupEngine(bundle)
+        try:
+            return [eng.evaluate_tiled(at.numbers, x, at.cell.array, 1800, skin=SKIN) for x in (at.positions, moved)]
+        finally:
+            del eng
+            gc.collect()
+
+    dev, host = run("0"), run("1")
+    line = [x for x in capfd.readouterr().err.splitlines() if x.startswith("tile host state order:")]
+    assert line and all(int(v) >= 0 for v in re.findall(r"tiles (-?\d+) .* and (-?\d+)", line[-1])[0])
     for (e0, f0, s0, t0), (e1, f1, s1, t1) in zip(dev, host):
         assert t0 == t1 >= 4
         assert abs(e1 - e0) / len(at) <= 1e-8 and np.abs(f1 - f0).max() <= 1e-5 and np.abs(s1 - s0).max() <= 1e-8

@@ -1705,3 +1705,13 @@ there (pinned; the backward sweeps read it). Host state forced, 320,000 atoms: 7
 652.9, 645.4, 652.5, 650.6 (b / a 0.893); the gaps over 2 ms are now 47 ms (15.9 forward to last-layer phase, 21.1
 last-layer to backward). Host state against device state: about 651 against 601 ms (+8%; +27% at the first version),
 2.03 us per atom, 1.23 times the whole-system call (FastMACE's host state: 1.40 times on this card).
+
+`tile-host-edges` (O32): the two phase-boundary gaps. The last forward tile's outputs are still in the layer buffer,
+so its last-layer sweep goes first and takes only its ghost rows from the host; the last last-layer tile's own
+gradient rows are still in ring slot b, so its backward sweep adds them there to the other tiles' host adds while its
+own host add does its ghost rows (tiles without ghosts of their own atoms only). A first build left the first tile
+to the readiness order: right on the 2 x 2 x 2 cube, 50 eV off on the 40,000-atom planner test, where another tile
+came first and overwrote the buffer; the tile is now always first. Host state forced, 320,000 atoms: 646.9, 648.9,
+641.6, 651.5 -> 629.6, 631.2, 633.5, 631.4 ms (first build, b / a 0.974); the fixed build 638.8, 641.0 -> 621.6,
+631.1 (b / a 0.98). The boundary gaps 9.4 and 15.6 ms (from 15.9 and 21.1). Host state about 630 ms against the
+device state's 601 (+5%), 1.97 us per atom, 1.19 times the whole-system call.
