@@ -953,6 +953,18 @@ Stage 0 -> Stage 1 -+-> Stage 2 -> Stage 3 -+-> Stage 4 (from S4-T10 on needs St
   message, never silently replaced.
 - Not at 1.0, same as FastMACE: non-periodic systems, several GPUs, batching of structures, ASE constraints other
   than `FixAtoms`, tiled MACE-POLAR-1. The domain abstraction is the route to the first two.
+- After the release (owner, 16 November 2026: recorded, not scheduled): **tiled MACE-POLAR-1.** FastMACE refuses it
+  too (`TiledForceField`: "does not support ... PolarMACE"). The long-range block (`src/polar.cu`) uses no
+  neighbour list; its only global operation is the k-space sum over atoms in each SCF step. Route: each tile
+  projects its layer outputs into whole-cell charge / mixed-feature buffers (linear, so it also fits the wavefront),
+  the long-range block runs on those, and its gradients go back through the projections into the tiles' backward
+  sweeps; the last-layer sweep splits into a forward and a backward part (recomputed or stored), with a backward
+  sweep kind that takes an injected gradient. Estimate about one to two weeks with the tiled-vs-whole gates of
+  POLAR-1-S/M/L. The limit is time, not memory: the direct k sum costs N x K with K growing with the volume, so
+  O(N^2) (POLAR-1-M `NbCl5` 1,944 atoms: 25 ms per step against 1.9 ms for OMAT-0); real scaling needs a mesh
+  (PME-style) for POLAR's charge features, a research task of several weeks with its own accuracy validation.
+  **First step:** measure POLAR's step time against cell size up to the whole-system limit, to see whether tiling
+  alone pays or the mesh must come first.
 - Dispersion, cut by decision O4: D4 (no periodic GPU implementation to build on; its charge solve is a dense
   matrix problem in the reference code), D2, the rare dampings D3(op), D3(CSO) and D3(Z), and every method that
   needs the electron density (MBD, TS, XDM, dDsC, VV10). Reasons in `docs/design/dispersion.md` §6.3.
