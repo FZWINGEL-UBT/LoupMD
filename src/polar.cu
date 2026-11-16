@@ -622,14 +622,20 @@ __global__ void add_bias_kernel(int64_t rows, int cols, const float* __restrict_
     x[(i / cols) * ld + i % cols] += b[i % cols];
 }
 
-// LayerNorm (eps 1e-5, biased variance) + SiLU per row, one warp per row (H <= 256).
-__global__ void ln_silu_fwd_kernel(int N, int H, const float* __restrict__ z, const float* __restrict__ g,
-                                   const float* __restrict__ be, float* __restrict__ out, float* __restrict__ stat) {
+// Bias + LayerNorm (eps 1e-5, biased variance) + SiLU per row, one warp per row (H <= 256). z += b in place (the
+// backward reads the biased pre-activation; each lane rereads only the elements it wrote), then out = silu(LN(z)).
+__global__ void bias_ln_silu_fwd_kernel(int N, int H, const float* __restrict__ b, float* __restrict__ z,
+                                        const float* __restrict__ g, const float* __restrict__ be,
+                                        float* __restrict__ out, float* __restrict__ stat) {
     const int r = blockIdx.x * (blockDim.x >> 5) + (threadIdx.x >> 5), lane = threadIdx.x & 31;
     if (r >= N) return;
-    const float* zr = z + (int64_t)r * H;
+    float* zr = z + (int64_t)r * H;
     float s = 0.0f;
-    for (int j = lane; j < H; j += 32) s += zr[j];
+    for (int j = lane; j < H; j += 32) {
+        const float v = zr[j] + b[j];
+        zr[j] = v;
+        s += v;
+    }
     #pragma unroll
     for (int off = 16; off > 0; off >>= 1) s += __shfl_xor_sync(0xffffffffu, s, off);
     const float mean = s / H;
@@ -982,6 +988,15 @@ __global__ void add8_kernel(int N, const float* __restrict__ x, int ldx, float* 
     const float v = x[(int64_t)(i / 8) * ldx + i % 8];
     if (assign) y[dst] = v;
     else y[dst] += v;
+}
+
+// y[a][0..7] = b[a][0..7] + x[a][0..7] (x row stride ldx; b, y [N, 8]): a copy of b and an add8_kernel in one launch,
+// with the same float sum.
+__global__ void add8_to_kernel(int N, const float* __restrict__ x, int ldx, const float* __restrict__ b,
+                               float* __restrict__ y) {
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= N * 8) return;
+    y[i] = b[i] + x[(int64_t)(i / 8) * ldx + i % 8];
 }
 
 // dq[a][ch*4 + m] += g[a][m] for both spin channels (g has row stride 8, its first 4 columns used)
@@ -1615,11 +1630,13 @@ void PolarLR::record(cudaStream_t st, int N, const GemmFn& gemm,
         const float* in = x;
         for (int k = 0; k < m.n; ++k) {
             gemm(false, N, m.out[k], m.in[k], 1.0f, in, m.in[k], m.W[k], m.out[k], 0.0f, z[k], m.out[k]);
-            add_bias_kernel<<<blocks_for((int64_t)N * m.out[k]), 256, 0, st>>>(N, m.out[k], m.b[k], z[k], m.out[k]);
             if (k < m.n - 1) {
-                ln_silu_fwd_kernel<<<blocks_for(N, 4), 128, 0, st>>>(N, m.out[k], z[k], m.g[k], m.be[k], act[k],
-                                                                     stat + (size_t)2 * N * k);
+                bias_ln_silu_fwd_kernel<<<blocks_for(N, 4), 128, 0, st>>>(N, m.out[k], m.b[k], z[k], m.g[k], m.be[k],
+                                                                          act[k], stat + (size_t)2 * N * k);
                 in = act[k];
+            } else {
+                add_bias_kernel<<<blocks_for((int64_t)N * m.out[k]), 256, 0, st>>>(N, m.out[k], m.b[k], z[k],
+                                                                                   m.out[k]);
             }
         }
     };
@@ -1692,8 +1709,7 @@ void PolarLR::record(cudaStream_t st, int N, const GemmFn& gemm,
         ro_fwd_kernel<<<blocks_for(N, 4), 128, 0, st>>>(N, U.rc, lm >= 1, s.s0, s.v1, U.ro_Wm0, U.ro_bm, U.ro_Wm1,
                                                         U.ro_W2, U.ro_b2, s.smid, s.vmid, s.out);
         // q_new = q_in + out[:8]; then the Fukui constraint with out[8:10]
-        CUDA_CHECK_THROW(cudaMemcpyAsync(s.qnew, s.qin, (size_t)N * 8 * sizeof(float), cudaMemcpyDeviceToDevice, st));
-        add8_kernel<<<blocks_for((int64_t)N * 8), 256, 0, st>>>(N, s.out, 10, s.qnew, 8, 0);
+        add8_to_kernel<<<blocks_for((int64_t)N * 8), 256, 0, st>>>(N, s.out, 10, s.qin, s.qnew);
         fukui_sums_kernel<<<blocks_for(N), 256, 0, st>>>(N, s.qnew, s.out + 8, 10, red_step(i));
         float* qnext = i + 1 < P.n_rec ? P.steps[i + 1].qin : P.qfin;
         fukui_apply_kernel<<<blocks_for((int64_t)N * 8), 256, 0, st>>>(N, s.qnew, s.out + 8, 10, red_step(i), qnext);
@@ -1702,8 +1718,7 @@ void PolarLR::record(cudaStream_t st, int N, const GemmFn& gemm,
     }
     // ---------------- local electron energy
     if (P.add_le) {
-        CUDA_CHECK_THROW(cudaMemcpyAsync(P.qin_le, P.qfin, (size_t)N * 8 * sizeof(float), cudaMemcpyDeviceToDevice, st));
-        axpy_kernel<<<blocks_for((int64_t)N * 8), 256, 0, st>>>((int64_t)N * 8, 1.0f, P.q0, P.qin_le);
+        add8_to_kernel<<<blocks_for((int64_t)N * 8), 256, 0, st>>>(N, P.q0, 8, P.qfin, P.qin_le);
         if (P.fold) {
             fork();
             for (int l = 0; l <= lm; ++l) {
