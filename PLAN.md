@@ -975,6 +975,13 @@ Stage 0 -> Stage 1 -+-> Stage 2 -> Stage 3 -+-> Stage 4 (from S4-T10 on needs St
   taken from a device-side amax, in front of the FP16 hybrid GEMM, so that operands of 32,752 or more no longer
   overflow its cross term (`gemm-hybrid-cubin`) instead of being guarded. A whole-system scale costs the small
   values' precision when one contact is extreme, so it needs the 3x gate with a close-contact case on every family.
+- After the release, low priority (recorded 16 November 2026, from symmetrix's `float32-mixed`): FP16 storage of the
+  higher spline coefficients (`c2`, `c3`; a load-time refusal above the FP16 range) to cut table bandwidth in the
+  spline kernels; the packed-table error guard and the 3x gate with every forced spline variant decide.
+- Looked at and not taken (symmetrix, 16 November 2026): its whole-system-scaled FP16 GEMMs as built (one contact can
+  degrade every force, against §2), its first-layer basis compression (shifts the pressure), the `inv(linear_up)`
+  weight folds it removed (none of ours invert a matrix), and its first-layer hidden table + per-element GEMM, which
+  `first_fwd` already does. Details in `OPTIMISATION_LEDGER.md` "Open or untried".
 - Dispersion, cut by decision O4: D4 (no periodic GPU implementation to build on; its charge solve is a dense
   matrix problem in the reference code), D2, the rare dampings D3(op), D3(CSO) and D3(Z), and every method that
   needs the electron density (MBD, TS, XDM, dDsC, VV10). Reasons in `docs/design/dispersion.md` §6.3.
