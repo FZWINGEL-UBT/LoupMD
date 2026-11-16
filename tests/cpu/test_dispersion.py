@@ -276,3 +276,30 @@ def test_the_dispersion_check_refuses_the_switch():
 
     with pytest.raises(PlanRefused, match="simple-dftd3 has no switch"):
         check.checkable(d.resolve(loupmd.Dispersion(smoothing=4.0), functional="pbe"))
+
+
+# --------------------------------------------------------------------------------------- lm.calc(dispersion=) (S6-D09)
+
+def test_the_ase_calculator_sets_its_own_term_on_the_shared_engine(ff):
+    atoms = bulk("NaCl", "rocksalt", a=5.64, cubic=True)
+    ff.functional, ff.family = "PBE", "omat"
+    import numpy as np
+
+    ff.evaluate = lambda at, stress=False, skin=0.5: (0.0, np.zeros((len(at), 3)), None)   # the springs need a state
+    with_d3, plain = loupmd.calc(ff, dispersion="d3bj"), loupmd.calc(ff)
+    assert with_d3.dispersion == d.resolve("d3bj", functional="pbe") and plain.dispersion is None
+    a, b = atoms.copy(), atoms.copy()
+    a.calc, b.calc = with_d3, plain
+    a.get_potential_energy()
+    assert ff.engine.dispersion == with_d3.dispersion
+    b.get_potential_energy()                                  # the same engine, the term removed
+    assert ff.engine.dispersion is None
+
+
+def test_the_ase_calculator_refuses_what_lm_md_refuses(ff):
+    ff.functional, ff.family = "wB97M-V", "omol"
+    with pytest.raises(PlanRefused, match="VV10"):
+        loupmd.calc(ff, dispersion="d3bj")
+    ff.functional, ff.family = "PBE", "omat"
+    with pytest.raises(PlanRefused, match="long_range='mesh' is not built"):
+        loupmd.calc(ff, dispersion=loupmd.Dispersion(long_range="mesh"))

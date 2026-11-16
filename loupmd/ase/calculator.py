@@ -8,12 +8,16 @@ The calculator is a thin layer over a ``ForceField`` (``loupmd.forcefield``): th
 rule applied when the calculator is made; the bundle and the engine are made at the first calculation, for the
 structure's elements. The engine is kept while the atomic numbers stay; a change of their order or count sets the
 system again on the same engine; an element outside the loaded bundle gets a new bundle and engine.
+
+``dispersion=`` (a preset or an ``lm.Dispersion``, PLAN.md S6-D09) adds the D3 term to every calculation, resolved
+against the model as ``lm.md`` does. The force field's engine is shared by its calculators, so each calculation sets
+the calculator's own term on it (or removes it) before it runs.
 """
 from __future__ import annotations
 
 from ase.calculators.calculator import Calculator, all_changes
 
-from ..errors import InputError
+from ..errors import InputError, PlanRefused
 from ..forcefield import ForceField, load
 
 
@@ -24,9 +28,15 @@ class LoupCalculator(Calculator):
 
     implemented_properties = ["energy", "free_energy", "forces", "stress", "energies"]
 
-    def __init__(self, force_field: ForceField, *, skin: float = 0.5):
+    def __init__(self, force_field: ForceField, *, skin: float = 0.5, dispersion=None):
+        from .. import dispersion as _dispersion
+
         super().__init__()
         self.force_field, self.skin = force_field, float(skin)
+        self.dispersion = _dispersion.resolve(_dispersion.parse(dispersion), functional=force_field.functional,
+                                              family=force_field.family, model=force_field.name)
+        if self.dispersion is not None:
+            _dispersion.runnable(self.dispersion)
 
     @property
     def engine(self):
@@ -38,6 +48,14 @@ class LoupCalculator(Calculator):
 
         Calculator.calculate(self, atoms, properties, system_changes)
         with_stress = "stress" in properties
+        engine = self.force_field.engine_for(self.atoms, self.skin)
+        if getattr(engine, "dispersion", None) != self.dispersion:
+            if not hasattr(engine, "set_dispersion"):
+                raise PlanRefused("dispersion with the tiled execution",
+                                  why="the cell does not fit the GPU whole, and the tiled execution has no "
+                                      "dispersion term in this version (PLAN.md S6-D09)",
+                                  next_step="Use a smaller cell, or a calculator without dispersion.")
+            engine.set_dispersion(self.dispersion)
         if "energies" in properties:            # atoms.get_potential_energies(): one more energy-only pass
             energy, forces, stress, energies = self.force_field.evaluate_per_atom(self.atoms, stress=with_stress,
                                                                                   skin=self.skin)
@@ -52,13 +70,14 @@ class LoupCalculator(Calculator):
 
 
 def calc(model, *, head=None, checkpoint=None, sha256=None, trusted=False, download=False, charge=None,
-         spin_multiplicity=None, device=None, skin=0.5, engine_factory=None, ensure_bundle=None, probe=None,
-         environ=None):
+         spin_multiplicity=None, device=None, skin=0.5, dispersion=None, engine_factory=None, ensure_bundle=None,
+         probe=None, environ=None):
     """``atoms.calc = lm.calc("omat0-medium")``: an ASE calculator for ``model``.
 
     ``model`` is what ``lm.load`` takes (a label, a checkpoint path or a URL, with ``head``, ``checkpoint``,
     ``sha256`` / ``trusted``, ``download``, ``charge``, ``spin_multiplicity`` and ``device`` as there), or a
     ``ForceField`` that ``lm.load`` returned (then without those). ``skin`` is the neighbour-list skin in A.
+    ``dispersion`` adds the D3 term (a preset name such as ``"d3bj"`` or an ``lm.Dispersion``).
 
     The stress is computed only when it is asked for.
     """
@@ -70,8 +89,8 @@ def calc(model, *, head=None, checkpoint=None, sha256=None, trusted=False, downl
         if named:
             raise InputError(f"the model is already loaded, so {', '.join(named)} cannot be given here",
                              next_step="Pass them to lm.load instead.")
-        return LoupCalculator(model, skin=skin)
+        return LoupCalculator(model, skin=skin, dispersion=dispersion)
     return LoupCalculator(load(model, head, checkpoint=checkpoint, sha256=sha256, trusted=trusted, download=download,
                                charge=charge, spin_multiplicity=spin_multiplicity, device=device or 0,
                                engine_factory=engine_factory, ensure_bundle=ensure_bundle, probe=probe,
-                               environ=environ), skin=skin)
+                               environ=environ), skin=skin, dispersion=dispersion)

@@ -362,3 +362,75 @@ def test_the_dispersion_check_fails_for_a_wrong_parameter_set():
     assert not result["passed"]
     assert result["rows"][0]["deviation"]["energy_eV_atom"] > 100 * check.BOUNDS["energy_eV_atom"]
     assert check.check([("srtio3", _system("srtio3"))], record, lib=lib)["passed"]
+
+
+# ------------------------------------------------------------------- the ASE calculator and Monte Carlo (S6-D09)
+
+def test_the_ase_calculator_adds_the_term(model_path):
+    import loupmd
+
+    lib = _lib_or_skip()
+    ff = loupmd.load(model_path, trusted=True)
+    atoms = _oxide()
+    record = d.resolve("d3bj", functional="pbe")
+    alone = _d3.evaluate(atoms, record, lib=lib)
+    a, b = atoms.copy(), atoms.copy()
+    a.calc, b.calc = loupmd.calc(ff), loupmd.calc(ff, dispersion="d3bj")
+    e0, f0, s0 = a.get_potential_energy(), a.get_forces(), a.get_stress(voigt=False)
+    e1, f1, s1 = b.get_potential_energy(), b.get_forces(), b.get_stress(voigt=False)
+    n = len(atoms)
+    assert abs(e1 - (e0 + alone["energy"])) / n < 1e-5
+    assert np.abs(f1 - (f0 + alone["forces"])).max() < 1e-4
+    assert np.abs(s1 - (s0 + alone["stress"])).max() < 1e-6
+    a.calc.reset()                                     # the shared engine loses the term again for the plain one
+    assert abs(a.get_potential_energy() - e0) / n < 1e-5
+
+
+def test_swap_monte_carlo_with_the_term(model_path):
+    """Energy-only move energies include the term (against the full call, 0.01 kT at 300 K); a block of swaps on a
+    Simulation with dispersion runs and the run goes on."""
+    import gc
+
+    from ase import units
+    from ase.build import bulk
+
+    import loupmd
+    from loupmd import integrators, mc
+
+    _lib_or_skip()
+    at = bulk("Cu", "fcc", a=3.75, cubic=True).repeat((4, 4, 4))
+    rng = np.random.default_rng(2)
+    numbers = at.numbers.copy()
+    numbers[rng.choice(len(at), len(at) // 4, replace=False)] = 79
+    at.numbers = numbers
+    at.positions += rng.normal(0.0, 0.03, at.positions.shape)
+    ff = loupmd.load(model_path, trusted=True)
+    sim = loupmd.Simulation(at, ff, integrator=integrators.Langevin(timestep_fs=1.0, temperature_K=300.0,
+                                                                    friction_per_fs=0.01),
+                            seed=1, capacity="whole", dispersion="d3bj")
+    try:
+        sim.run(steps=10)
+        engine = sim._engine
+        assert engine.dispersion is not None
+        positions = engine.get_state()[0]
+        cell = at.cell.array
+        cu, au = np.flatnonzero(at.numbers == 29), np.flatnonzero(at.numbers == 79)
+        worst = 0.0
+        for _ in range(5):
+            i, j = rng.choice(cu), rng.choice(au)
+            trial = positions.copy()
+            trial[[i, j]] = positions[[j, i]]
+            worst = max(worst, abs(engine.evaluate_energy(trial, cell) -
+                                   engine.evaluate(trial, cell, compute_stress=False)[0]))
+        engine.evaluate(positions, cell, compute_stress=False)
+        result = mc.swap(sim, mc.Swap(pairs=[("Cu", "Au")], attempts=100), seed=5)
+        kT = units.kB * 300.0
+        print(f"swap with D3 on {len(at)} atoms: move energies within {worst:.2e} eV ({worst / kT:.1e} kT), "
+              f"{result.counters.accepted} of 100 accepted")
+        assert worst <= 0.01 * kT and result.counters.attempted == 100
+        sim.run(steps=10)
+        assert np.isfinite(sim.atoms.get_potential_energy())
+    finally:
+        sim.close()
+        del sim
+        gc.collect()
