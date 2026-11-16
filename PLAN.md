@@ -59,6 +59,7 @@ behaviour is an estimate and says so.
 | O28 | A5 accepted: Linux x86-64 and WSL2, compute capability 8.0 and newer, no T4 | 15 Nov 2026, 21:30 |
 | O29 | A7 accepted, and the first public release is 0.1.0, not 1.0.0, until the owner is sure of the scope. Stages end in internal tags (`v0.1.0a1` ...); nothing is uploaded before 0.1.0 | 15 Nov 2026, 21:30 |
 | O30 | The release waits for the merge of `round6-hardening` (32 commits after `3c050fe` on 16 November: the guarded MD loop and device-side rebuild S75-S78, the A100 defaults, S85-S98; its ledger gives OFF23 water 0.6-0.75 of this branch's step time). S7-T06 runs again on the merged code; its 16 November results describe the branch before the merge (`docs/validation/release-0.1.0.md`) | 16 Nov 2026, 14:45 |
+| O31 | Before the release, make the tiled and wavefront modes as fast as possible (first: the integrator on the device for tiled MD, then what the profile shows), and add host memory for sizes that do not fit the device: the capacity plan picks whole, then device tiled / wavefront, then a host-backed wavefront. S5-T07 is revised to that order: first the kept tile lists in pinned host memory, compressed (int16 sender ranks) and copied in while the previous tile computes, with positions, velocities, forces and the row pool on the device; the row pool on the host (`dx` aliased onto `x`) only if that is not enough. The release still waits for the merge (O30) | 16 Nov 2026, 15:20 |
 
 ### 1.2 Defaults this plan assumes (open; each can be changed before the stage that depends on it)
 
