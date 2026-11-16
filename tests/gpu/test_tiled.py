@@ -177,14 +177,16 @@ def test_the_wavefront_gives_the_plain_tiled_result_from_a_smaller_row_pool(monk
 
 @pytest.mark.parametrize("wavefront", ["0", "1"])
 @pytest.mark.parametrize("keep_active", [None, "0", "1"])
-@pytest.mark.parametrize("stage", ["1", "0"])
+@pytest.mark.parametrize("stage", ["1", "0", "36"])
 def test_tile_lists_in_host_memory_give_the_device_lists_result(wavefront, keep_active, stage, monkeypatch, capfd):
     """O31 (S5-T07): LOUP_TILE_HOST_LISTS=1 keeps the tile lists' edge arrays in mapped pinned host memory. Each
     sweep that compacts a tile's active edges (its first of the call, or every sweep of a tile without a slot:
     LOUP_TILE_KEEP_ACTIVE=0 none, =1 one slot for all tiles) reads them from a device buffer they were copied into
     on a copy stream one compaction ahead (LOUP_TILE_HOST_STAGE=1, the default where it fits), or over the bus
-    (=0). Same tiles, same kernels: the device lists' numbers up to the order of the float32 atomic sums, in the
-    call that builds the lists and in a later call that keeps them."""
+    (=0). The host lists are compact (O32: senders and integer image shifts, 8 B per edge, the rest rebuilt on
+    the device per compaction) unless LOUP_TILE_HOST_COMPACT=0 ("36": the 36 B form, staged). Same tiles, same
+    kernels: the device lists' numbers up to the order of the float32 atomic sums, in the call that builds the
+    lists and in a later call that keeps them."""
     at = srtio3(1).repeat((32, 6, 6))                  # 5,760 atoms in a rod: several layers of tiles along it
     at.positions += np.random.default_rng(8).normal(scale=0.04, size=at.positions.shape)
     moved = at.positions + np.random.default_rng(9).normal(scale=0.01, size=at.positions.shape)
@@ -193,7 +195,8 @@ def test_tile_lists_in_host_memory_give_the_device_lists_result(wavefront, keep_
     monkeypatch.setenv("LOUP_NO_HYBRID", "1")         # two engines: no hybrid-or-not plan pick between them (D16)
     if keep_active is not None:
         monkeypatch.setenv("LOUP_TILE_KEEP_ACTIVE", keep_active)
-    monkeypatch.setenv("LOUP_TILE_HOST_STAGE", stage)
+    monkeypatch.setenv("LOUP_TILE_HOST_STAGE", "0" if stage == "0" else "1")
+    monkeypatch.setenv("LOUP_TILE_HOST_COMPACT", "0" if stage == "36" else "1")
     monkeypatch.setenv("LOUP_DEBUG_TILE_TIMES", "1")
 
     def run(host):
@@ -210,7 +213,8 @@ def test_tile_lists_in_host_memory_give_the_device_lists_result(wavefront, keep_
     (dev, ex_d), (host, ex_h) = run("0"), run("1")
     err = capfd.readouterr().err
     assert not ex_d.host_lists and ex_h.host_lists and ex_h.lists_kept
-    assert f"tile host lists staged: {'yes' if stage == '1' else 'no'}" in err
+    assert f"tile host lists staged: {'no' if stage == '0' else 'yes'}" in err
+    assert (", compact" in err) == (stage != "36")
     assert "staging out of step" not in err
     for (e0, f0, s0, t0), (e1, f1, s1, t1) in zip(dev, host):
         assert t0 == t1 >= 4
@@ -311,10 +315,11 @@ def test_the_plan_moves_the_tile_lists_to_host_memory_only_when_they_do_not_fit(
         dev, forced = plan(0.9, "0"), plan(0.9, "1")
         assert dev is not None and not dev.host_lists and dev.host_bytes == 0
         assert forced.host_lists and forced.host_bytes > 0
-        # the edges' 36 B (the plan counts them 10% over) leave the device estimate (the same cap on both sides)
+        # the edges' 36 B leave the device estimate (the same cap on both sides); in host memory they take 8 B in the
+        # compact form (O32; the plan counts them 10% over)
         assert forced.receivers == dev.receivers
         moved = dev.tiled_global_bytes - forced.tiled_global_bytes
-        assert abs(moved * 1.1 - forced.host_bytes) <= 0.01 * forced.host_bytes
+        assert abs(moved * 1.1 * 8 / 36 - forced.host_bytes) <= 0.01 * forced.host_bytes
         # the smallest fraction that fits with the lists on the device, to 0.1%
         lo, hi = 1e-4, 0.9
         while hi - lo > 1e-3 * hi:

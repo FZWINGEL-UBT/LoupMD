@@ -1687,3 +1687,21 @@ last-layer phase takes 515-565 ms (the main thread waits about 410 ms in all for
 behind them; the adds themselves 52-100 ms). It stays (neutral; the alias builds on its order). The alias removes the
 separate `dx` array (half the layer state's host memory) and its zeroing per call. Forces 1.5e-6 eV/A apart (the
 host adds' order). Open: the last-layer phase's gradient copies.
+
+`tile-host-compact` (O32): the host lists keep each edge's sender and integer image shift (8 B instead of 36); each
+compaction rebuilds receivers (row pointers), pairs (species) and Cartesian shifts (the tile's box, the list build's
+own expression, so bitwise the same) on the device into the handle's own list buffers; a tile whose shifts do not
+fit a byte or do not come back bit for bit keeps the 36 B form. Host lists forced, device state, 320,000 atoms (same
+protocol): 613.2, 615.0, 631.3, 619.1 ms -> 599.2, 611.1, 600.9, 601.8 (b / a 0.975), staging buffers 2 x 32 MB,
+forces 1.8e-6 eV/A apart. The plan counts 8 B per edge of host memory (4.5 times as many edges per GB).
+
+`tile-host-dma` (O32): an nsys trace of the host-state call (`.tmp_o/prof_gaps.py`, `prof_gaplist.py`) put its
+kernels at 597 ms, as many as the device state's call, and the rest in GPU gaps: 105 ms in six over 2 ms. Two fixes:
+(1) the copies to and from the host run one at a time on this PC (WSL), in the order queued, so a tile's gradient
+copy out (which waits for its sweep) queued ahead of the next tile's input copy held both back (18.6 ms, twice a
+call): it is now queued after them; (2) with 8 neighbouring tiles every block's fold into `x` fell into the last add
+of the phase (45.7 ms before the backward sweeps): a block whose window no later block takes keeps its gradients
+there (pinned; the backward sweeps read it). Host state forced, 320,000 atoms: 729.2, 729.5, 730.7, 728.9 ms ->
+652.9, 645.4, 652.5, 650.6 (b / a 0.893); the gaps over 2 ms are now 47 ms (15.9 forward to last-layer phase, 21.1
+last-layer to backward). Host state against device state: about 651 against 601 ms (+8%; +27% at the first version),
+2.03 us per atom, 1.23 times the whole-system call (FastMACE's host state: 1.40 times on this card).
