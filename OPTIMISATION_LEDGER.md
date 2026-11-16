@@ -152,6 +152,8 @@ Conventions:
 | [sched-reversed-order](#sched-reversed-order) | Kernels between GEMMs walk receivers from the top (L2 reuse) | – | spec | REJECTED | – | step span 8,274 -> 8,285 us | [§3.3][s33] |
 | [mem-aliasing](#mem-aliasing) | Gradient buffers alias forward ones (`dm1 -> m1`, `dh0 -> h0`, `dS0 -> S0`) | – | spec | DEFAULT | S3 | not recorded alone | [§3.1 #16][s31] |
 | [mem-inplace-s110](#mem-inplace-s110) | `db` written over `b` (`sc1_fused`), `dm0` over `m0` (`sc0_backward`); rebuild temporaries as views of `tmp_vec_len` / `edge_force_1`; dead `y1` dropped | – | spec | DEFAULT (5060 Ti only) | S110 | VRAM `SrTiO3` 5,000 atoms 658 -> 542 MiB, 40,000 atoms 3,632 -> 2,840 MiB (93.0 -> 72.7 KiB/atom); MD a-b-b-a 1.0001 / 0.9968; gate passes | this file |
+| [mem-b-in-s0](#mem-b-in-s0) | `b` / `db` in the S0 regions of the zero slab (S0 is dead from the C0 GEMMs to the dS0 GEMMs); one-species bundles get 128-float S0 rows | – | spec | DEFAULT (5060 Ti only) | S111 | VRAM `SrTiO3` 5,000 atoms 542 -> 498 MiB, 40,000 atoms 2,840 -> 2,524 MiB; MD a-b-b-a over six rounds `NbCl5` 0.9994-1.0056 (mean 1.0016), `SrTiO3` 0.9975-1.0002 (mean 0.9992) | this file |
+| [mem-m1-chunks](#mem-m1-chunks) | `m1` / `dm1` in receiver chunks of <= 8,192 above 16,384 atoms, two alternating buffers; chunk c's lin1 GEMMs overlap chunk c + 1's spline (forward) and chunk c's `w'` (backward) | `LOUP_M1_CHUNK` (testing) | spec | DEFAULT (5060 Ti only) | S112 | VRAM `SrTiO3` 40,000 atoms 2,524 -> 2,060 MiB; 40k MD a-b-b-a 1.0005 (+0.24% / -0.14%); serial one-buffer chunks +0.29% (both orders) | this file |
 | [mem-l1-carveout](#mem-l1-carveout) | Per-arch smallest carveout keeping occupancy | `tune_l1` | both | DEFAULT | S3 | i0 forward 305 -> ~250 us at 64 KB (5060 Ti) | [§3.1 #17][s31], [§2.5][s2] |
 | [edge-packed](#edge-packed) | Packed edge arrays (`float4` x, y, z, r; `float2`) | `act_vec_len`, `act_t_sx` | both | DEFAULT | S3 | not recorded alone | [§3.1 #13][s31] |
 | [edge-sh-coalesced](#edge-sh-coalesced) | Coalesced SH stores in `scatter_active_edges` | – | spec | SUPERSEDED | S3 | superseded by edge-sh-recompute | [§3.1 #19][s31] |
@@ -1112,6 +1114,38 @@ Each entry has the same fields. Unless stated, the system is OMAT-0 medium on th
 
   - Results at equal GEMM plans (the s106a plan file copied to the new build's key) differ by dE 2.4-3.5e-6 eV, max dF 0.9-1.2e-6 eV/A and max dS 1.7-5.5e-10. That is the installed build's own run-to-run spread (2.9-4.7e-6 eV, 0.9-1.3e-6 eV/A, 3.1e-10). With freshly tuned plans the difference is dE 1.6-3.0e-4 eV, max dF 3.3-3.6e-6 eV/A.
   - MD a-b-b-a vs s106a: `NbCl5` 1.779 -> 1.779 ms (1.0001), `SrTiO3` 8.016 -> 7.990 ms (0.9968), faster or tied in both orders. The gate passes on every variant.
+- Status: DEFAULT (5060 Ti only).
+- Sources: this file.
+
+<a id="mem-b-in-s0"></a>
+#### mem-b-in-s0: `b` / `db` in the S0 regions of the zero slab
+- Stage: S111 (16 November 2026), 5060 Ti. The arithmetic is unchanged.
+- What: the C0 GEMMs read S0, and the dS0 GEMMs are the next to write it. `b` / `db` live only between lin1's forward and backward GEMMs, inside that window, so `b_l` starts at `S0_l`. Each `S0_l` region holds max(K0, 128) floats per row (K0 = 64 S): from two species on S0 already holds `b`, and a one-species bundle gets 128-float rows (8 KiB per atom for S0 and `b` instead of 4 + 8). S0 needs no zeroing (the interaction-0 forward writes all of it), so the slab's memset is unchanged.
+- Measured (`cudaMemGetInfo` deltas over the engine's lifetime, `SrTiO3`):
+
+  | Atoms | Before (MiB) | After (MiB) | Per atom (KiB) |
+  | --- | --- | --- | --- |
+  | 5,000 | 542 | 498 | 111.0 -> 102.0 |
+  | 40,000 | 2,840 | 2,524 | 72.7 -> 64.6 |
+
+  - Results at equal GEMM plans: `SrTiO3` vs s106a dE 2.3-3.1e-6 eV, max dF 1.0-1.4e-6 eV/A, max dS 3.8-4.0e-10, the run-to-run spread. Cu 6x6x6 (one species, widened rows) vs s110a: dE 4.9e-6 eV, max dF 3.3e-7 eV/A, max dS 5.6e-10.
+  - MD a-b-b-a vs s110a, six rounds (the last five with S112 built in, whose 5,000-atom path is one chunk): `NbCl5` 1.0056, 1.0010, 1.0018, 0.9994, 1.0021, 0.9995 (mean 1.0016); `SrTiO3` 1.0002, 0.9975, 1.0002, 0.9991, 0.9989, 0.9994 (mean 0.9992). Sides of one library differ by up to 1.3% on `NbCl5` within a round, so this is a tie. The gate passes.
+- Status: DEFAULT (5060 Ti only).
+- Sources: this file.
+
+<a id="mem-m1-chunks"></a>
+#### mem-m1-chunks: `m1` / `dm1` in receiver chunks above 16,384 atoms
+- Stage: S112 (16 November 2026), 5060 Ti.
+- What: `m1` / `dm1` (5,120 floats, 20 KiB per atom) hold one chunk of receivers at a time. Above 2 x 8,192 atoms (`kM1ChunkAtoms`) the receivers split into equal chunks of at most 8,192, rounded up to 20 (whole blocks of every spline variant), and two buffers alternate.
+  - Forward: chunk c's spline writes buffer c & 1. Its lin1 GEMMs (lanes 0-3) write `b` rows and overlap chunk c + 1's spline. Chunk c + 2's spline waits for them through per-buffer lane events (`ev_m1`).
+  - Backward: chunk c + 1's lin1 GEMMs overlap chunk c's `w'`. Chunk c + 2's GEMMs are forked after that `w'`.
+  - The receiver-owned kernels take a chunk as shifted `row_ptr` / `D1` / `dD1` pointers with chunk-local `m1` rows; senders, edges and `dx0` / `dx1` stay global. Chunks therefore need the receiver-owned `w'`: the edge-tiled kernel indexes `dm1` by global receiver, and a forced `LOUP_WPRIME_RCV=0` keeps one chunk.
+  - `LOUP_M1_CHUNK=<atoms>` forces chunks of that size on any larger system (gate variants `m1_chunk=40` and `m1_chunk=100`, both with a shorter last chunk); `0` keeps one chunk.
+- Measured (`SrTiO3` 20x20x20, 40,000 atoms):
+  - VRAM: 2,524 -> 2,060 MiB (64.6 -> 52.7 KiB/atom; five chunks of 8,000).
+  - MD a-b-b-a (300 K, scratch `bench40k.py`), one chunk vs default: 65.027 -> 65.059 ms (1.0005; +0.24% / -0.14%).
+  - A first version with one buffer and serial chunks of at most 16,384 (three chunks) saved more (2,004 MiB) but was slower in both orders: 1.0029 (+0.44% / +0.15%). Each chunk boundary exposed a spline and a `w'` tail. The pipeline replaced it.
+  - Results: at 5,000 atoms (one chunk) and equal GEMM plans the difference to s106a is the run-to-run spread. Forced chunks of 1,000 vs one chunk differ by dE 5.3e-6 / 1.4e-5 eV and max dF 1.4-1.5e-6 eV/A (other GEMM shapes, so other plans). The gate passes on every variant, the forced chunks included.
 - Status: DEFAULT (5060 Ti only).
 - Sources: this file.
 

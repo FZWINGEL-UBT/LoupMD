@@ -115,15 +115,19 @@ DATA_ROOTS = [r for r in (os.environ.get("LOUP_DATA_ROOT"), "/mnt/d/Margraf", "/
 NBCL5_CIFS = [f"{r}/FastMACE/fastmace/protocols/data/NbCl5_R2SCAN.cif" for r in DATA_ROOTS]
 
 # Forced kernel paths (environment read at engine creation, see include/loupmd.h).
+# LOUP_M1_CHUNK forces the S112 receiver chunks of m1 / dm1 (by default above 16,384 atoms) onto these small cells,
+# with a shorter last chunk.
 LARGE_VARIANTS = (
     [{"LOUP_SPLINE_VARIANT": v} for v in ("R1", "R1p", "R4", "R4p", "R5")]
-    + [{"LOUP_WPRIME_THREADS": "512"}, {"LOUP_REORDER": "1"}, {"LOUP_REORDER": "0"}]
+    + [{"LOUP_WPRIME_THREADS": "512"}, {"LOUP_REORDER": "1"}, {"LOUP_REORDER": "0"}, {"LOUP_M1_CHUNK": "100"}]
 )
-SMALL_VARIANTS = [{"LOUP_WPRIME_RCV": "0"}, {"LOUP_WPRIME_RCV": "1"}, {"LOUP_WPRIME_RCV": "1", "LOUP_WPRIME_THREADS": "512"}]
+SMALL_VARIANTS = [{"LOUP_WPRIME_RCV": "0"}, {"LOUP_WPRIME_RCV": "1"}, {"LOUP_WPRIME_RCV": "1", "LOUP_WPRIME_THREADS": "512"},
+                  {"LOUP_WPRIME_RCV": "1", "LOUP_M1_CHUNK": "40"}]
 # Generic models: the conv forward variants of lx 1 layers at C 128 (GenericModel::tune_conv_variants picks one per
 # system on sm_120; each is gated forced, on every configuration)
 GENERIC_VARIANTS = [{"LOUP_CONV_FWD_VARIANT": v} for v in ("1", "2")]
-VARIANT_KEYS = ("LOUP_SPLINE_VARIANT", "LOUP_WPRIME_THREADS", "LOUP_WPRIME_RCV", "LOUP_REORDER", "LOUP_CONV_FWD_VARIANT")
+VARIANT_KEYS = ("LOUP_SPLINE_VARIANT", "LOUP_WPRIME_THREADS", "LOUP_WPRIME_RCV", "LOUP_REORDER", "LOUP_CONV_FWD_VARIANT",
+                "LOUP_M1_CHUNK")
 
 
 def has_conv_variants(meta) -> bool:

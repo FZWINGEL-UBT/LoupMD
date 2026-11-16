@@ -410,9 +410,9 @@ struct HybCubin {
 // FNV-1a over this library's own file: GEMM plans are keyed by it, so a rebuilt library (new kernels, other tile
 // code) never reuses plans timed against an older build.
 // Test overrides (LOUP_SPLINE_VARIANT=R1|R1p|R4|R4p|R5, LOUP_WPRIME_THREADS=256|512, LOUP_WPRIME_RCV=0|1,
-// LOUP_REORDER=0|1, LOUP_ROW_SORT=global, LOUP_MD_REBUILD=host|fallback): pin a kernel variant or path that tuning or
-// a size threshold would otherwise pick, so the gate and the tests can cover every one. Parsed by hand (no strtol: the
-// library must link against older glibc).
+// LOUP_REORDER=0|1, LOUP_ROW_SORT=global, LOUP_MD_REBUILD=host|fallback, LOUP_M1_CHUNK=<atoms>|0): pin a kernel
+// variant or path that tuning or a size threshold would otherwise pick, so the gate and the tests can cover every one.
+// Parsed by hand (no strtol: the library must link against older glibc).
 struct VariantOverrides {
     int spline_var = -1;  // index into tune_rebuild_variants' table
     int wp_threads = 0;
@@ -420,6 +420,7 @@ struct VariantOverrides {
     int reorder = -1;
     bool row_sort_global = false;  // neighbour rows sorted in global scratch (else only rows over 4096 edges)
     int md_rebuild = 0;  // MD rebuilds: 0 on the GPU in the step graph, 1 host-driven, 2 counted on the GPU, finished on the host
+    int m1_chunk = -1;   // receivers per m1 chunk (0: one chunk; -1: kM1ChunkAtoms)
     VariantOverrides() {
         static const char* const names[5] = {"R1", "R1p", "R4", "R4p", "R5"};
         if (const char* s = std::getenv("LOUP_SPLINE_VARIANT"))
@@ -433,11 +434,18 @@ struct VariantOverrides {
         if (const char* s = std::getenv("LOUP_REORDER")) reorder = (s[0] == '1') ? 1 : (s[0] == '0') ? 0 : -1;
         if (const char* s = std::getenv("LOUP_ROW_SORT")) row_sort_global = strcmp(s, "global") == 0;
         if (const char* s = std::getenv("LOUP_MD_REBUILD")) md_rebuild = strcmp(s, "host") == 0 ? 1 : strcmp(s, "fallback") == 0 ? 2 : 0;
+        if (const char* s = std::getenv("LOUP_M1_CHUNK")) {
+            int v = 0;
+            for (; *s >= '0' && *s <= '9' && v < 100000000; ++s) v = v * 10 + (*s - '0');
+            m1_chunk = v;
+        }
     }
 };
 static constexpr int kSplineVar = 5;
 static constexpr int kSplineVarR[kSplineVar] = {1, 1, 4, 4, 5};
 static constexpr bool kSplineVarPair[kSplineVar] = {false, true, false, true, false};
+// Above twice this many atoms m1 / dm1 (20 KB per atom) run in receiver chunks of at most this many (S112).
+static constexpr int kM1ChunkAtoms = 8192;
 
 static uint64_t library_build_hash() {
     static uint64_t cached = 0;
@@ -484,6 +492,7 @@ struct LoupHandle {
     void* side_ws[kSide] = {};
     cudaEvent_t ev_fork = nullptr;
     cudaEvent_t ev_join[kSide] = {};
+    cudaEvent_t ev_m1[2][4] = {};  // per m1 buffer: its lin1 GEMMs on lanes 0-3 are done (S112 chunk pipeline)
     cudaStream_t gemm_stream = nullptr;  // stream sgemm_rm launches on (main stream outside fork groups)
     void* gemm_ws = nullptr;
     bool fork_ok = true;
@@ -511,7 +520,8 @@ struct LoupHandle {
     }
     // S96: on cc 12.0 the receiver-owned w' also wins below 512 atoms (SrTiO3 40 / 135 / 320 atoms 0.984 / 0.953 /
     // 0.967 of the step); other GPUs keep the S3 threshold (the edge-tiled kernel there is unmeasured against it).
-    bool use_wprime_rcv() const { return ovr.wprime_rcv >= 0 ? ovr.wprime_rcv == 1 : (is_sm120 || N >= 512); }
+    bool use_wprime_rcv_at(int n) const { return ovr.wprime_rcv >= 0 ? ovr.wprime_rcv == 1 : (is_sm120 || n >= 512); }
+    bool use_wprime_rcv() const { return use_wprime_rcv_at(N); }
     bool variants_tuned = false;  // tune_rebuild_variants ran for this system
     struct DiskPlan {
         int M, N, K;
@@ -683,13 +693,14 @@ struct LoupHandle {
     float* d_h0_0 = nullptr; float* d_h0_1 = nullptr;
     float* d_sc_skip16 = nullptr;
     float* d_x0 = nullptr;   float* d_x1 = nullptr;
-    float* d_m1_0 = nullptr; float* d_m1_1 = nullptr; float* d_m1_2 = nullptr; float* d_m1_3 = nullptr;
+    // m1 / dm1 (aliased) per receiver chunk. With chunks the two buffers alternate (S112); else only [0] exists.
+    float* d_m1[2][4] = {};
     float* d_D1 = nullptr;
+    int m1_rows = 0;  // receivers per m1 buffer: N, or the chunk size
     float* d_b0 = nullptr;   float* d_b1 = nullptr;   float* d_b2 = nullptr;   float* d_b3 = nullptr;
     float* d_hidden16 = nullptr;  // d(energy)/d(hidden16) [N, 16], written by sc1_fused for the skip backward
     float* d_db0 = nullptr;  float* d_db1 = nullptr;  float* d_db2 = nullptr;  float* d_db3 = nullptr;
     float* d_dD1 = nullptr;
-    float* d_dm1_0 = nullptr; float* d_dm1_1 = nullptr; float* d_dm1_2 = nullptr; float* d_dm1_3 = nullptr;
     float* d_dh0_0 = nullptr; float* d_dh0_1 = nullptr;
     float* d_dm0_0 = nullptr; float* d_dm0_1 = nullptr; float* d_dm0_2 = nullptr; float* d_dm0_3 = nullptr;
     float* d_dD0 = nullptr;
@@ -770,12 +781,13 @@ struct LoupHandle {
         freep(d_m0_0); freep(d_m0_1); freep(d_m0_2); freep(d_m0_3);
         freep(d_h0_0); freep(d_h0_1); freep(d_sc_skip16);
         freep(d_x0); freep(d_x1);
-        freep(d_m1_0); freep(d_m1_1); freep(d_m1_2); freep(d_m1_3); freep(d_D1);
-        freep(d_b0); freep(d_b1); freep(d_b2); freep(d_b3);
+        for (auto& buf : d_m1)
+            for (float*& p : buf) freep(p);
+        freep(d_D1);
+        d_b0 = d_b1 = d_b2 = d_b3 = nullptr;              // views into d_zero_slab (the S0 regions)
         freep(d_hidden16);
         d_db0 = d_db1 = d_db2 = d_db3 = nullptr;          // aliased onto d_b_*
         freep(d_dD1);
-        d_dm1_0 = d_dm1_1 = d_dm1_2 = d_dm1_3 = nullptr;  // aliased onto d_m1_*
         d_dh0_0 = d_dh0_1 = nullptr;                      // aliased onto d_h0_*
         d_dm0_0 = d_dm0_1 = d_dm0_2 = d_dm0_3 = nullptr;  // aliased onto d_m0_*
         freep(d_dD0);
@@ -1408,27 +1420,48 @@ static void gemm_join(LoupHandle* h) {
     h->gemm_ws = nullptr;
 }
 
-static void launch_wprime_rcv(LoupHandle* h, int threads) {
-    const int N = h->N;
-    wprime_backward_inter1_rcv<<<N, threads, 0, h->stream>>>(
-        N, h->d_act_row_ptr + N, h->d_x0, h->d_x1, h->d_act_vec_len,
-        h->d_act_senders, h->d_act_row_ptr,
+// Receiver chunks of the m1 / dm1 buffers in order: fn(c, a0, n) for chunk c = [a0, a0 + n), whose buffer is c & 1
+// (one chunk, the whole system, unless set_system_impl chose chunks).
+template <class F>
+static void for_each_m1_chunk(const LoupHandle* h, F&& fn) {
+    for (int c = 0, a0 = 0; a0 < h->N; ++c, a0 += h->m1_rows) fn(c, a0, std::min(h->m1_rows, h->N - a0));
+}
+
+// m1 chunk pipeline (S112): lanes 0-3 record that the lin1 GEMMs of buffer `buf` are done; the main stream waits for
+// that. Without forked GEMMs (autotune pass) everything runs in order on the main stream.
+static void m1_lanes_done(LoupHandle* h, int buf) {
+    if (!h->fork_ok) return;
+    for (int l = 0; l < 4; ++l) CUDA_CHECK_THROW(cudaEventRecord(h->ev_m1[buf][l], h->side[l]));
+}
+
+static void m1_wait_lanes(LoupHandle* h, int buf) {
+    if (!h->fork_ok) return;
+    for (int l = 0; l < 4; ++l) CUDA_CHECK_THROW(cudaStreamWaitEvent(h->stream, h->ev_m1[buf][l], 0));
+}
+
+// The receiver-owned kernels index receivers through row_ptr and their per-receiver rows only, so a chunk is the
+// shifted row_ptr / D1 / dD1 with chunk-local m1 / dm1 rows; senders, edges and dx0 / dx1 stay global.
+static void launch_wprime_rcv(LoupHandle* h, int threads, int a0, int n, int buf) {
+    float* const* dm1 = h->d_m1[buf];
+    wprime_backward_inter1_rcv<<<n, threads, 0, h->stream>>>(
+        n, h->d_act_row_ptr + h->N, h->d_x0, h->d_x1, h->d_act_vec_len,
+        h->d_act_senders, h->d_act_row_ptr + a0,
         h->d_act_slab, h->d_act_t_sx,
-        h->d_dm1_0, h->d_dm1_1, h->d_dm1_2, h->d_dm1_3, h->d_dD1,
+        dm1[0], dm1[1], dm1[2], dm1[3], h->d_dD1 + a0,
         h->model.d_cubic_packed8_1, h->model.d_density_table_1, h->model.cubic_bias_shift,
         h->d_dx0, h->d_dx1, h->d_edge_force_1);
 }
 
-static void launch_spline(LoupHandle* h, int rpb, bool pair) {
-    const int N = h->N;
+static void launch_spline(LoupHandle* h, int rpb, bool pair, int a0, int n, int buf) {
+    float* const* m1 = h->d_m1[buf];
     auto* kernel = rpb == 5 ? spline_forward_inter1<5, false>
                  : rpb == 4 ? (pair ? spline_forward_inter1<4, true> : spline_forward_inter1<4, false>)
                             : (pair ? spline_forward_inter1<1, true> : spline_forward_inter1<1, false>);
-    kernel<<<(N + rpb - 1) / rpb, 128 * rpb, 0, h->stream>>>(
-        N, h->d_act_row_ptr + N, h->d_x0, h->d_x1, h->d_act_vec_len, h->d_act_senders, h->d_act_row_ptr,
+    kernel<<<(n + rpb - 1) / rpb, 128 * rpb, 0, h->stream>>>(
+        n, h->d_act_row_ptr + h->N, h->d_x0, h->d_x1, h->d_act_vec_len, h->d_act_senders, h->d_act_row_ptr + a0,
         h->d_act_slab, h->d_act_t_sx, h->model.d_cubic_packed8_1, h->model.d_density_table_1,
         h->model.cubic_bias_shift,
-        h->d_m1_0, h->d_m1_1, h->d_m1_2, h->d_m1_3, h->d_D1);
+        m1[0], m1[1], m1[2], m1[3], h->d_D1 + a0);
 }
 
 // Kernel variants whose ranking depends on the system, timed once per system at the first MD rebuild (thermalised
@@ -1437,7 +1470,8 @@ static void launch_spline(LoupHandle* h, int rpb, bool pair) {
 // rewritten (m1, D1, edge forces) or re-zeroed (dx0, dx1) by every force pass before use. The w' launches read
 // dm1/dD1, which alias m1/D1 and so hold the spline timings' forward values by then: harmless for timing (same
 // shapes, same access pattern), and nothing reads w' outputs from these launches. The time spent here is reported as
-// LoupMDStats::tune_ms and excluded from step_ms.
+// LoupMDStats::tune_ms and excluded from step_ms. Both kernels are timed over every m1 chunk, as the force pass runs
+// them.
 //   spline: the 4- and 5-receiver blocks win where consecutive receivers share table slabs and lose where they rarely
 //   do (5060 Ti: SrTiO3 -8%, NbCl5 +6.8%); the paired-edge decode depends on how many consecutive edges share a slab.
 //   The ideal starting lattice of a run shows neither.
@@ -1475,7 +1509,11 @@ static void tune_rebuild_variants(LoupHandle* h) {
     float best[kSplineVar] = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
     if (h->ovr.spline_var < 0) {
         for (int v = 0; v < kSplineVar; ++v)
-            best[v] = time_best_of_3(h, e0, e1, [&] { launch_spline(h, kSplineVarR[v], kSplineVarPair[v]); });
+            best[v] = time_best_of_3(h, e0, e1, [&] {
+                for_each_m1_chunk(h, [&](int c, int a0, int n) {
+                    launch_spline(h, kSplineVarR[v], kSplineVarPair[v], a0, n, c & 1);
+                });
+            });
         int cur = 0;
         for (int v = 0; v < kSplineVar; ++v)
             if (kSplineVarR[v] == h->spline_rpb && kSplineVarPair[v] == h->spline_pair) cur = v;
@@ -1491,8 +1529,10 @@ static void tune_rebuild_variants(LoupHandle* h) {
 
     float wp[2] = {0.0f, 0.0f};
     if (h->use_wprime_rcv() && !h->ovr.wp_threads) {  // the receiver-owned w' (else the edge-tiled kernel)
-        wp[0] = time_best_of_3(h, e0, e1, [&] { launch_wprime_rcv(h, 256); });
-        wp[1] = time_best_of_3(h, e0, e1, [&] { launch_wprime_rcv(h, 512); });
+        for (int t = 0; t < 2; ++t)
+            wp[t] = time_best_of_3(h, e0, e1, [&] {
+                for_each_m1_chunk(h, [&](int c, int a0, int n) { launch_wprime_rcv(h, t ? 512 : 256, a0, n, c & 1); });
+            });
         const int cur_t = h->wp_threads == 512 ? 1 : 0;
         if (wp[1 - cur_t] < 0.98f * wp[cur_t]) {
             h->wp_threads = cur_t == 1 ? 256 : 512;
@@ -1642,17 +1682,27 @@ static void record_force_pass(LoupHandle* h, int compute_stress) {
     sgemm_rm(h, false, false, N * 3, 128, 128, 1.0f, h->d_h0_1, 128, h->model.d_W_up_1, 128, 0.0f, h->d_x1, 128);
     gemm_join(h);
 
-    launch_spline(h, h->spline_rpb, h->spline_pair);
-
-    gemm_fork(h);
-    gemm_lane(h, 0);
-    sgemm_rm(h, false, false, N, 128, 256, 1.0f, h->d_m1_0, 256, h->model.d_W_lin1[0], 128, 0.0f, h->d_b0, 128);
-    gemm_lane(h, 1);
-    sgemm_rm(h, false, false, N * 3, 128, 384, 1.0f, h->d_m1_1, 384, h->model.d_W_lin1[1], 128, 0.0f, h->d_b1, 128);
-    gemm_lane(h, 2);
-    sgemm_rm(h, false, false, N * 5, 128, 384, 1.0f, h->d_m1_2, 384, h->model.d_W_lin1[2], 128, 0.0f, h->d_b2, 128);
-    gemm_lane(h, 3);
-    sgemm_rm(h, false, false, N * 7, 128, 256, 1.0f, h->d_m1_3, 256, h->model.d_W_lin1[3], 128, 0.0f, h->d_b3, 128);
+    // 4b. Spline forward + linear1 per m1 chunk (S112). With chunks the two m1 buffers alternate: chunk c's lin1
+    // GEMMs (lanes 0-3) overlap chunk c + 1's spline, and chunk c + 2's spline waits for them.
+    for_each_m1_chunk(h, [&](int c, int a0, int n) {
+        float* const* m1 = h->d_m1[c & 1];
+        if (c >= 2) m1_wait_lanes(h, c & 1);
+        launch_spline(h, h->spline_rpb, h->spline_pair, a0, n, c & 1);
+        gemm_fork(h);
+        gemm_lane(h, 0);
+        sgemm_rm(h, false, false, n, 128, 256, 1.0f, m1[0], 256, h->model.d_W_lin1[0], 128, 0.0f,
+                 h->d_b0 + (size_t)a0 * 128, 128);
+        gemm_lane(h, 1);
+        sgemm_rm(h, false, false, n * 3, 128, 384, 1.0f, m1[1], 384, h->model.d_W_lin1[1], 128, 0.0f,
+                 h->d_b1 + (size_t)a0 * 3 * 128, 128);
+        gemm_lane(h, 2);
+        sgemm_rm(h, false, false, n * 5, 128, 384, 1.0f, m1[2], 384, h->model.d_W_lin1[2], 128, 0.0f,
+                 h->d_b2 + (size_t)a0 * 5 * 128, 128);
+        gemm_lane(h, 3);
+        sgemm_rm(h, false, false, n * 7, 128, 256, 1.0f, m1[3], 256, h->model.d_W_lin1[3], 128, 0.0f,
+                 h->d_b3 + (size_t)a0 * 7 * 128, 128);
+        m1_lanes_done(h, c & 1);
+    });
     gemm_join(h);
 
     // 5-6. Product 1 + Readout 1 forward and backward (one block per atom)
@@ -1663,29 +1713,50 @@ static void record_force_pass(LoupHandle* h, int compute_stress) {
         h->d_hidden16, h->d_energy_f64,
         h->d_db0, h->d_db1, h->d_db2, h->d_db3, h->d_dD1);
 
-    // 7. Backward: Interaction 1
+    // 7. Backward: linear1 + w' per m1 chunk. Chunk c + 1's lin1 GEMMs (lanes 0-3) overlap chunk c's w' (main
+    // stream); chunk c + 2's GEMMs, into the same buffer as chunk c's, are forked after that w'. Chunks exist only
+    // with the receiver-owned w' (set_system_impl): the edge-tiled kernel indexes dm1 by global receiver.
+    auto lin1_backward = [&](int c) {
+        const int a0 = c * h->m1_rows, n = std::min(h->m1_rows, N - a0);
+        float* const* dm1 = h->d_m1[c & 1];
+        gemm_lane(h, 0);
+        sgemm_rm(h, false, true, n, 256, 128, 1.0f, h->d_db0 + (size_t)a0 * 128, 128, h->model.d_W_lin1[0], 128, 0.0f,
+                 dm1[0], 256);
+        gemm_lane(h, 1);
+        sgemm_rm(h, false, true, n * 3, 384, 128, 1.0f, h->d_db1 + (size_t)a0 * 3 * 128, 128, h->model.d_W_lin1[1], 128,
+                 0.0f, dm1[1], 384);
+        gemm_lane(h, 2);
+        sgemm_rm(h, false, true, n * 5, 384, 128, 1.0f, h->d_db2 + (size_t)a0 * 5 * 128, 128, h->model.d_W_lin1[2], 128,
+                 0.0f, dm1[2], 384);
+        gemm_lane(h, 3);
+        sgemm_rm(h, false, true, n * 7, 256, 128, 1.0f, h->d_db3 + (size_t)a0 * 7 * 128, 128, h->model.d_W_lin1[3], 128,
+                 0.0f, dm1[3], 256);
+        m1_lanes_done(h, c & 1);
+    };
+    const int n_chunks = (N + h->m1_rows - 1) / h->m1_rows;
     gemm_fork(h);
-    gemm_lane(h, 0);
-    sgemm_rm(h, false, true, N, 256, 128, 1.0f, h->d_db0, 128, h->model.d_W_lin1[0], 128, 0.0f, h->d_dm1_0, 256);
-    gemm_lane(h, 1);
-    sgemm_rm(h, false, true, N * 3, 384, 128, 1.0f, h->d_db1, 128, h->model.d_W_lin1[1], 128, 0.0f, h->d_dm1_1, 384);
-    gemm_lane(h, 2);
-    sgemm_rm(h, false, true, N * 5, 384, 128, 1.0f, h->d_db2, 128, h->model.d_W_lin1[2], 128, 0.0f, h->d_dm1_2, 384);
-    gemm_lane(h, 3);
-    sgemm_rm(h, false, true, N * 7, 256, 128, 1.0f, h->d_db3, 128, h->model.d_W_lin1[3], 128, 0.0f, h->d_dm1_3, 256);
+    lin1_backward(0);
+    if (n_chunks > 1) lin1_backward(1);
+    for_each_m1_chunk(h, [&](int c, int a0, int n) {
+        m1_wait_lanes(h, c & 1);
+        if (!h->use_wprime_rcv()) {
+            float* const* dm1 = h->d_m1[0];
+            wprime_backward_inter1<<<gridE64, 256, 0, h->stream>>>(
+                N, d_E_act, h->d_x0, h->d_x1, h->d_act_vec_len,
+                h->d_act_senders, h->d_act_receivers,
+                h->d_act_slab, h->d_act_t_sx,
+                dm1[0], dm1[1], dm1[2], dm1[3], h->d_dD1,
+                h->model.d_cubic_packed8_1, h->model.d_density_table_1, h->model.cubic_bias_shift,
+                h->d_dx0, h->d_dx1, h->d_edge_force_1);
+        } else {
+            launch_wprime_rcv(h, h->wp_threads, a0, n, c & 1);
+        }
+        if (c + 2 < n_chunks) {
+            gemm_fork(h);
+            lin1_backward(c + 2);
+        }
+    });
     gemm_join(h);
-
-    if (!h->use_wprime_rcv()) {
-        wprime_backward_inter1<<<gridE64, 256, 0, h->stream>>>(
-            N, d_E_act, h->d_x0, h->d_x1, h->d_act_vec_len,
-            h->d_act_senders, h->d_act_receivers,
-            h->d_act_slab, h->d_act_t_sx,
-            h->d_dm1_0, h->d_dm1_1, h->d_dm1_2, h->d_dm1_3, h->d_dD1,
-            h->model.d_cubic_packed8_1, h->model.d_density_table_1, h->model.cubic_bias_shift,
-            h->d_dx0, h->d_dx1, h->d_edge_force_1);
-    } else {
-        launch_wprime_rcv(h, h->wp_threads);
-    }
 
     // dh0_0 = dx0 @ W_up_0^T, then the skip backward accumulates into it (same lane keeps that order)
     gemm_fork(h);
@@ -1882,6 +1953,8 @@ LoupHandle* loup_create(const char* loup_path, int device_id) {
         for (int i = 0; i < LoupHandle::kSide; ++i) {
             CUDA_CHECK_THROW(cudaStreamCreateWithFlags(&h->side[i], cudaStreamNonBlocking));
             CUDA_CHECK_THROW(cudaEventCreateWithFlags(&h->ev_join[i], cudaEventDisableTiming));
+            if (i < 4)
+                for (auto& ev : h->ev_m1) CUDA_CHECK_THROW(cudaEventCreateWithFlags(&ev[i], cudaEventDisableTiming));
             CUDA_CHECK_THROW(cudaMalloc(&h->side_ws[i], h->cublas_ws_bytes));
         }
         {
@@ -1922,6 +1995,9 @@ void loup_destroy(LoupHandle* h) {
     if (h->ev_fork) cudaEventDestroy(h->ev_fork);
     for (int i = 0; i < LoupHandle::kSide; ++i) {
         if (h->ev_join[i]) cudaEventDestroy(h->ev_join[i]);
+        if (i < 4)
+            for (auto& ev : h->ev_m1)
+                if (ev[i]) cudaEventDestroy(ev[i]);
         if (h->side_ws[i]) cudaFree(h->side_ws[i]);
         if (h->side[i]) cudaStreamDestroy(h->side[i]);
     }
@@ -2053,15 +2129,18 @@ static int set_system_impl(LoupHandle* h, int n_atoms, const int* atomic_numbers
         return 0;
     }
 
-    // Zero-initialized per-step slab
+    // Zero-initialized per-step slab. b / db (16 x 128 floats per atom) overlay the S0 regions (S111): S0 is dead from
+    // the C0 GEMMs that read it to the dS0 GEMMs that overwrite it, and b / db live only between lin1's forward and
+    // backward GEMMs inside that window. Each S0_l region therefore holds max(K0, 128) floats per row.
     const size_t K0 = (size_t)S * 64;
+    const size_t K0r = std::max<size_t>(K0, 128);
     const size_t nN = (size_t)n_atoms;
     auto align256 = [](size_t b) { return (b + 255) & ~size_t(255); };
     size_t off_S0_0 = 0;
-    size_t off_S0_1 = off_S0_0 + align256(nN * 1 * K0 * sizeof(float));
-    size_t off_S0_2 = off_S0_1 + align256(nN * 3 * K0 * sizeof(float));
-    size_t off_S0_3 = off_S0_2 + align256(nN * 5 * K0 * sizeof(float));
-    size_t off_D0   = off_S0_3 + align256(nN * 7 * K0 * sizeof(float));
+    size_t off_S0_1 = off_S0_0 + align256(nN * 1 * K0r * sizeof(float));
+    size_t off_S0_2 = off_S0_1 + align256(nN * 3 * K0r * sizeof(float));
+    size_t off_S0_3 = off_S0_2 + align256(nN * 5 * K0r * sizeof(float));
+    size_t off_D0   = off_S0_3 + align256(nN * 7 * K0r * sizeof(float));
     size_t off_dx0  = off_D0   + align256(nN * sizeof(float));
     size_t off_dx1  = off_dx0  + align256(nN * 128 * sizeof(float));
     size_t off_en   = off_dx1  + align256(nN * 3 * 128 * sizeof(float));
@@ -2075,6 +2154,10 @@ static int set_system_impl(LoupHandle* h, int n_atoms, const int* atomic_numbers
     h->d_S0_1 = reinterpret_cast<float*>(base + off_S0_1);
     h->d_S0_2 = reinterpret_cast<float*>(base + off_S0_2);
     h->d_S0_3 = reinterpret_cast<float*>(base + off_S0_3);
+    h->d_b0 = h->d_S0_0;
+    h->d_b1 = h->d_S0_1;
+    h->d_b2 = h->d_S0_2;
+    h->d_b3 = h->d_S0_3;
     h->d_D0   = reinterpret_cast<float*>(base + off_D0);
     h->d_dx0  = reinterpret_cast<float*>(base + off_dx0);
     h->d_dx1  = reinterpret_cast<float*>(base + off_dx1);
@@ -2093,22 +2176,25 @@ static int set_system_impl(LoupHandle* h, int n_atoms, const int* atomic_numbers
     CUDA_CHECK(allocf(h->d_sc_skip16, nN * 16));
     CUDA_CHECK(allocf(h->d_x0, nN * 128));
     CUDA_CHECK(allocf(h->d_x1, nN * 3 * 128));
-    CUDA_CHECK(allocf(h->d_m1_0, nN * 1 * 256));
-    CUDA_CHECK(allocf(h->d_m1_1, nN * 3 * 384));
-    CUDA_CHECK(allocf(h->d_m1_2, nN * 5 * 384));
-    CUDA_CHECK(allocf(h->d_m1_3, nN * 7 * 256));
+    // m1 / dm1 run in receiver chunks above 2 x kM1ChunkAtoms atoms (S112; LOUP_M1_CHUNK=<atoms> forces chunks of at
+    // most that size whenever there are more atoms, 0 keeps one chunk): equal chunks rounded up to 20 receivers (whole
+    // blocks of every spline variant) in two alternating buffers. Only with the receiver-owned w': the edge-tiled
+    // kernel indexes dm1 by global receiver.
+    const int chunk_max = h->ovr.m1_chunk >= 0 ? h->ovr.m1_chunk : kM1ChunkAtoms;
+    const int chunk_above = h->ovr.m1_chunk >= 0 ? chunk_max : 2 * chunk_max;
+    h->m1_rows = n_atoms;
+    if (chunk_max > 0 && n_atoms > chunk_above && h->use_wprime_rcv_at(n_atoms)) {
+        const int n_chunks = (n_atoms + chunk_max - 1) / chunk_max;
+        h->m1_rows = std::min(n_atoms, ((n_atoms + n_chunks - 1) / n_chunks + 19) / 20 * 20);
+    }
+    const size_t nM = (size_t)h->m1_rows;
+    const size_t m1_row_floats[4] = {1 * 256, 3 * 384, 5 * 384, 7 * 256};
+    for (int b = 0; b < (h->m1_rows < n_atoms ? 2 : 1); ++b)
+        for (int l = 0; l < 4; ++l) CUDA_CHECK(allocf(h->d_m1[b][l], nM * m1_row_floats[l]));
     CUDA_CHECK(allocf(h->d_D1, nN));
-    CUDA_CHECK(allocf(h->d_b0, nN * 1 * 128));
-    CUDA_CHECK(allocf(h->d_b1, nN * 3 * 128));
-    CUDA_CHECK(allocf(h->d_b2, nN * 5 * 128));
-    CUDA_CHECK(allocf(h->d_b3, nN * 7 * 128));
     CUDA_CHECK(allocf(h->d_hidden16, nN * 16));
     CUDA_CHECK(allocf(h->d_dD1, nN));
     // Alias backward buffers whose forward counterparts are dead before backward writes them (~34 KB/atom saved).
-    h->d_dm1_0 = h->d_m1_0;
-    h->d_dm1_1 = h->d_m1_1;
-    h->d_dm1_2 = h->d_m1_2;
-    h->d_dm1_3 = h->d_m1_3;
     h->d_dh0_0 = h->d_h0_0;
     h->d_dh0_1 = h->d_h0_1;
     // In place (S110, 16 KB/atom): sc1_fused writes db over its own inputs b and sc0_backward dm0 over m0, each thread
