@@ -299,7 +299,7 @@ int loup_get_state(LoupHandle* h, double* out_positions, double* out_velocities,
 int loup_export_state(LoupHandle* h, void* buffer, size_t capacity, size_t* written);
 int loup_import_state(LoupHandle* h, const void* buffer, size_t size);
 
-// How a force call is executed. Only LOUP_EXEC_WHOLE is built; the tiled modes come with the capacity stage.
+// How a force call is executed. LOUP_EXEC_WAVEFRONT is not built.
 enum { LOUP_EXEC_AUTO = 0, LOUP_EXEC_WHOLE = 1, LOUP_EXEC_TILED = 2, LOUP_EXEC_WAVEFRONT = 3 };
 
 // The device memory a system of `n_atoms` with `edges_per_atom` neighbours per atom inside cutoff + skin would
@@ -317,6 +317,30 @@ typedef struct {
 } LoupMemoryPlan;
 // Not counted: MACE-POLAR-1's long-range buffers, captured graphs and cuBLAS's own allocations.
 int loup_plan_memory(LoupHandle* h, int n_atoms, double edges_per_atom, LoupMemoryPlan* out);
+
+// The execution of the capacity mode (plan task S5-T05). loup_set_execution sets the mode (LOUP_EXEC_AUTO,
+// LOUP_EXEC_WHOLE or LOUP_EXEC_TILED), a receiver cap (0: the plan's) and the fraction of free device memory a
+// plan may use (above 0, at most 1; default 0.9); loup_set_system keeps them. loup_plan_execution plans the
+// periodic system `positions` in `cell` under them: with AUTO or TILED on a bundle that can tile (generic path,
+// no long range, two or more layers) one probe tile of at most 4,096 receivers is set up on the handle and its
+// buffers measured per row and per edge; whole_bytes is then the whole-system call's estimate, and receivers the
+// largest cap of 4,096, 6,144, 8,192, ... 65,536 whose workspace and whole-system state (tiled_global_bytes,
+// tile_workspace_bytes) fit, or the cap set. mode: WHOLE when asked, when the bundle cannot tile, or (AUTO) when
+// the whole-system call fits; else TILED. A system that does not fit at 4,096 receivers is refused. The handle
+// afterwards holds the probe tile: call loup_set_system before other calls.
+// loup_get_execution: how the last tiled call (loup_debug_evaluate_tiled) ran. budget_bytes is the device memory
+// free when it began plus the handle's own buffers; peak_bytes that budget less the least memory free during it.
+typedef struct {
+    int mode;
+    int receivers;
+    long long tiles;
+    size_t budget_bytes;
+    size_t peak_bytes;
+} LoupExecution;
+int loup_set_execution(LoupHandle* h, int mode, int receivers, double memory_fraction);
+int loup_plan_execution(LoupHandle* h, int n_atoms, const int* atomic_numbers, const double* positions,
+                        const double* cell, double skin, LoupMemoryPlan* out);
+int loup_get_execution(LoupHandle* h, LoupExecution* out);
 
 // The tile planner of the tiled mode, on the host: no handle and no GPU. loup_tile_plan divides `n_atoms` atoms at
 // `positions` [n_atoms, 3] in `cell` (rows are the lattice vectors) into tiles of at most `receivers` local atoms
@@ -353,9 +377,9 @@ int loup_debug_evaluate_domain(LoupHandle* h, const double* positions, const dou
 int loup_debug_domain_edges(LoupHandle* h, const double* positions, const double* cell, long long capacity,
                             int* out_receivers, int* out_senders, double* out_shifts, long long* out_count,
                             unsigned char* out_ghost_used);
-// Testing only (plan task S5-T03, until S5-T05 makes it a mode of the public calls): energy, forces [n_atoms, 3]
+// Testing only (plan task S5-T03, until S5-T12 makes it a mode of the public calls): energy, forces [n_atoms, 3]
 // and stress of the periodic system `positions` in `cell`, evaluated tile by tile with the per-layer sweeps, at most
-// `receivers` local atoms per tile. Bundles of the generic path without long range; the handle afterwards holds
+// `receivers` local atoms per tile (0 or less: the cap of loup_plan_execution). Bundles of the generic path without long range; the handle afterwards holds
 // the last tile's domain (call loup_set_system for an ordinary system again). *out_tiles (optional): the tiles.
 int loup_debug_evaluate_tiled(LoupHandle* h, int n_atoms, const int* atomic_numbers, const double* positions,
                               const double* cell, int receivers, double skin, double* out_energy_ev, double* out_forces,

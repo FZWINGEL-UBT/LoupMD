@@ -152,6 +152,27 @@ class MemoryPlan:
     mode: int               # LOUP_EXEC_WHOLE: fits whole; LOUP_EXEC_TILED: needs the capacity mode
 
 
+class LoupExecution(ctypes.Structure):
+    _fields_ = [
+        ("mode", ctypes.c_int),
+        ("receivers", ctypes.c_int),
+        ("tiles", ctypes.c_longlong),
+        ("budget_bytes", ctypes.c_size_t),
+        ("peak_bytes", ctypes.c_size_t),
+    ]
+
+
+@dataclass(frozen=True)
+class Execution:
+    """How the last tiled call ran (``loup_get_execution``): its cap, tiles and device memory."""
+
+    mode: int
+    receivers: int
+    tiles: int
+    budget_bytes: int       # device memory free for the call when it began (the handle's own buffers included)
+    peak_bytes: int         # the call's device peak: budget less the least memory free during the call
+
+
 def integrator(kind: int, dt_fs: float = 1.0, **fields) -> LoupIntegrator:
     """A ``LoupIntegrator`` with ``size`` set and every field not named left at zero."""
     it = LoupIntegrator()
@@ -388,7 +409,7 @@ class LoupEngine:
 
     def evaluate_tiled(self, atomic_numbers, positions, cell, receivers: int, skin: float = 0.5):
         """Energy, forces and stress of a periodic system evaluated tile by tile (plan task S5-T03; testing until
-        the capacity mode of S5-T05): at most ``receivers`` local atoms per tile. Returns ``(energy, forces,
+        the front end of S5-T12): at most ``receivers`` local atoms per tile, 0 for the cap of the memory plan. Returns ``(energy, forces,
         stress, tiles)``. The handle then holds the last tile's domain: call ``set_system`` before other calls."""
         lib = self._lib
         n = len(atomic_numbers)
@@ -405,6 +426,39 @@ class LoupEngine:
                                                   int(receivers), float(skin), ctypes.byref(energy), _ptr(forces),
                                                   _ptr(stress), ctypes.byref(tiles)), "loup_debug_evaluate_tiled")
         return float(energy.value), forces, stress, int(tiles.value)
+
+    def set_execution(self, mode: int, receivers: int = 0, memory_fraction: float = 0.9):
+        """``loup_set_execution``: the mode (``LOUP_EXEC_*``), a receiver cap (0: from the memory plan) and the
+        fraction of free device memory the plan may use."""
+        lib = self._lib
+        lib.loup_set_execution.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_int, ctypes.c_double]
+        self._check(lib.loup_set_execution(self._h, int(mode), int(receivers), float(memory_fraction)),
+                    "loup_set_execution")
+
+    def plan_execution(self, atomic_numbers, positions, cell, skin: float = 0.5) -> MemoryPlan:
+        """``loup_plan_execution``: whole or tiled, and the receiver cap, for this system under the handle's
+        execution settings. A probe tile measures the workspace; the handle then holds it (call ``set_system``
+        before other calls)."""
+        lib = self._lib
+        lib.loup_plan_execution.argtypes = [ctypes.c_void_p, ctypes.c_int, _c_int_p, _c_double_p, _c_double_p,
+                                            ctypes.c_double, ctypes.POINTER(LoupMemoryPlan)]
+        n = len(atomic_numbers)
+        z = np.ascontiguousarray(atomic_numbers, dtype=np.int32)
+        pos = _array(positions, (n, 3), "positions")
+        cel = _array(cell, (3, 3), "cell")
+        raw = LoupMemoryPlan()
+        self._check(lib.loup_plan_execution(self._h, n, z.ctypes.data_as(_c_int_p), _ptr(pos), _ptr(cel),
+                                            float(skin), ctypes.byref(raw)), "loup_plan_execution")
+        return MemoryPlan(raw.whole_bytes, raw.tiled_global_bytes, raw.tile_workspace_bytes, raw.free_bytes,
+                          raw.receivers, raw.mode)
+
+    def last_execution(self) -> Execution:
+        """``loup_get_execution``: the cap, tiles and device memory of the last tiled call."""
+        lib = self._lib
+        lib.loup_get_execution.argtypes = [ctypes.c_void_p, ctypes.POINTER(LoupExecution)]
+        raw = LoupExecution()
+        self._check(lib.loup_get_execution(self._h, ctypes.byref(raw)), "loup_get_execution")
+        return Execution(raw.mode, raw.receivers, raw.tiles, raw.budget_bytes, raw.peak_bytes)
 
     def evaluate_energy(self, positions, cell) -> float:
         """The energy alone, from a pass without gradients (``LOUP_EVAL_ENERGY_ONLY``). The forces on the device

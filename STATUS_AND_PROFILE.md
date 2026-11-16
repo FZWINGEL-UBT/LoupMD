@@ -991,3 +991,20 @@ warm-up call on the same engine (`.tmp_o/probe_tiled_time.py`):
 - The first tiled call on a new workspace is slow (sweeps 5.3 s at 8 tiles, 1.5 s at 2): each tile's row count is
   a GEMM shape of its own, looked up and timed once. Size buckets for the tile shapes are the next step.
 - Not measured: the A/B of the step path (the tiled code and the new handle flag are not on it); other models.
+
+### 6.17 The capacity mode (16 November 2026, 01:30)
+
+RTX 5060 Ti only; library `6b30910ad0011307...` (the working tree after `4c93637`). `loup_plan_execution` and
+`loupmd/capacity.py` (PLAN.md S5-T05, D62). `pytest -s tests/gpu/test_capacity.py`, OMAT-0 medium, skin 0.5 A:
+
+| Cell | Atoms | Mode chosen | Cap, tiles | Plan: whole; tiled state + workspace | Budget | Device peak |
+|---|---|---|---|---|---|---|
+| `SrTiO3` 8x8x8, rattled | 2,560 | whole | - | 0.29 GiB; - | 13.91 GiB | (plan's estimate) |
+| `SrTiO3` 40x40x40 | 320,000 | tiled | 65,536, 8 | 32.12 GiB; 2.34 + 8.10 GiB | 14.60 GiB | 8.22 GiB (56%) |
+
+- 320,000 atoms: the energy per atom is the 4x4x4 cell's (whole-system call) to 1e-6 eV, the largest force within
+  1e-5 eV/A of that cell's. No user setting: `capacity.evaluate(engine, atoms)`.
+- The auto mode on 2,560 atoms gives the whole-system call's result to two engines' spread (D61).
+- Tests on this build: `pytest tests/gpu` (all tiers) 286 passed in 760 s, `tests/gpu/test_capacity.py` among them; `pytest tests/cpu` 347 passed, 1 skipped.
+- Not measured: the time per call at 320,000 atoms (the first call on a new workspace tunes every tile shape;
+  S5-T10), other models, the A/B of the step path (the step path is not changed).

@@ -631,6 +631,12 @@ struct LoupHandle {
     // takes any smaller domain without allocating again.
     int atom_cap = 0;
     bool tile_workspace = false;  // the handle holds the tiled call's workspace (set up by it, kept between calls)
+    // loup_set_execution (kept by loup_set_system): mode, receiver cap (0: the plan's), fraction of free device
+    // memory a plan may use; and how the last tiled call ran (loup_get_execution).
+    int exec_mode = LOUP_EXEC_AUTO;
+    int exec_receivers = 0;
+    double exec_fraction = 0.9;
+    LoupExecution last_exec{};
     double skin = 0.5;
     double e0_total = 0.0;
     std::vector<int> perm;          // device (species-grouped, spatially ordered) index -> caller index
@@ -4291,6 +4297,40 @@ struct TileDomain {        // one tile as an open domain: locals, then the ghost
 };
 }  // namespace
 
+// Tile k of `plan` as an open domain on the host: its locals, then all its ghost candidates, placed in a box with
+// room for the list's reach on every side.
+static void host_domain(const loup::TilePlan& plan, int64_t k, const int* atomic_numbers, const double* positions,
+                        const double* cell, double r_list, TileDomain& all) {
+    const int64_t l0 = plan.local_ptr[k], l1 = plan.local_ptr[k + 1];
+    const int64_t g0 = plan.ghost_ptr[k], g1 = plan.ghost_ptr[k + 1];
+    all.n_local = (int)(l1 - l0);
+    auto add = [&](int a, const int32_t* s) {
+        all.atom.push_back(a);
+        all.z.push_back(atomic_numbers[a]);
+        for (int c = 0; c < 3; ++c)
+            all.place.push_back(positions[(int64_t)a * 3 + c] + s[0] * cell[c] + s[1] * cell[3 + c] +
+                                s[2] * cell[6 + c]);
+    };
+    for (int64_t i = l0; i < l1; ++i) add(plan.local[i], &plan.local_shift[i * 3]);
+    for (int64_t i = g0; i < g1; ++i) add(plan.ghost[i], &plan.ghost_shift[i * 3]);
+    double lo[3] = {INFINITY, INFINITY, INFINITY}, hi[3] = {-INFINITY, -INFINITY, -INFINITY};
+    for (size_t r = 0; r < all.atom.size(); ++r)
+        for (int c = 0; c < 3; ++c) {
+            lo[c] = std::min(lo[c], all.place[r * 3 + c]);
+            hi[c] = std::max(hi[c], all.place[r * 3 + c]);
+        }
+    const double pad = r_list + 1.0;  // the box's own images then lie beyond the list's reach
+    for (size_t r = 0; r < all.atom.size(); ++r)
+        for (int c = 0; c < 3; ++c) all.place[r * 3 + c] -= lo[c] - pad;
+    for (int c = 0; c < 3; ++c) all.box[c * 4] = hi[c] - lo[c] + 2.0 * pad;
+}
+
+// Device bytes of the handle's per-system buffers (released when another system or workspace is set up).
+static double handle_system_bytes(const LoupHandle* h) {
+    return (double)h->sys_atom_bytes + (double)h->sys_edge_bytes + (double)h->sys_fixed_bytes +
+           (double)h->cub_tmp_bytes + (h->gen ? (double)h->gen->system_bytes() + (double)h->gen->edge_bytes() : 0.0);
+}
+
 // A tile workspace: the handle holds an open domain whose buffers have room for `atom_cap` rows. Another domain
 // of at most that many rows takes them over: only the species grouping, the per-atom constants and the row counts
 // change. Buffers, the edge capacity, the GEMM plans and the cuBLASLt cache stay (loup_set_system would free and
@@ -4410,6 +4450,123 @@ static int restore_tile_list(LoupHandle* h, const TileList& t) {
     return 0;
 }
 
+static bool can_tile(const LoupHandle* h) { return h->gen && h->gen->sweeps_available() && h->gen->n_layers() >= 2; }
+
+// loup_plan_execution (see the header).
+static int plan_execution_impl(LoupHandle* h, int n_atoms, const int* atomic_numbers, const double* positions,
+                               const double* cell, double skin, LoupMemoryPlan* out) {
+    if (!h) return -1;
+    if (!out) { loup::set_error("out is NULL"); return -1; }
+    if (n_atoms <= 0 || !atomic_numbers || !positions || !cell) {
+        loup::set_error("n_atoms must be positive and atomic_numbers, positions and cell given");
+        return -1;
+    }
+    if (!(skin >= 0.0) || !std::isfinite(skin)) { loup::set_error("skin must be finite and not negative"); return -1; }
+    if (h->exec_mode == LOUP_EXEC_WAVEFRONT) { loup::set_error("the wavefront mode is not in this version"); return -1; }
+    if (h->exec_mode == LOUP_EXEC_TILED && !can_tile(h)) {
+        loup::set_error("the tiled mode needs a bundle of the generic path without long range and with two or more "
+                        "layers, and LOUP_CHAIN_FOLD=0 where the skip-chain fold applies");
+        return -1;
+    }
+    CUDA_CHECK(cudaSetDevice(h->device_id));
+    LoupMemoryPlan plan{};
+    size_t free_b = 0, total_b = 0;
+    if (h->exec_mode == LOUP_EXEC_WHOLE || !can_tile(h)) {  // the whole-system call: asked, or all the bundle has
+        CUDA_CHECK(cudaMemGetInfo(&free_b, &total_b));
+        plan.free_bytes = free_b;
+        plan.mode = LOUP_EXEC_WHOLE;
+        *out = plan;
+        return 0;
+    }
+    // The probe: the tile with the most rows of a plan at 4,096 receivers, set up and listed on the handle.
+    constexpr int kMinReceivers = 4096;
+    const double r_list = (double)h->gen->r_max() + skin;
+    const int c0 = std::min(kMinReceivers, n_atoms);
+    loup::TilePlan tp;
+    try {
+        tp = loup::plan_tiles(positions, n_atoms, cell, c0, 0, nullptr, r_list + 1e-3, nullptr);
+    } catch (const std::exception& e) {
+        loup::set_error("tile plan: %s", e.what());
+        return -1;
+    }
+    int64_t widest = 0, widest_rows = -1;
+    for (int64_t k = 0; k < tp.tiles(); ++k) {
+        const int64_t rows = tp.local_ptr[k + 1] - tp.local_ptr[k] + tp.ghost_ptr[k + 1] - tp.ghost_ptr[k];
+        if (rows > widest_rows) { widest_rows = rows; widest = k; }
+    }
+    TileDomain d;
+    host_domain(tp, widest, atomic_numbers, positions, cell, r_list, d);
+    if (set_domain_impl(h, d.n_local, d.n_ghost(), d.z.data(), skin) != 0) return -1;
+    h->tile_workspace = true;
+    if (upload_positions(h, d.place.data(), d.box) < 0) return -1;
+    if (rebuild_neighbors(h) != 0) return -1;
+    // Bytes per row (locals and ghosts alike), per edge of capacity, and those that do not scale; kPlanAllowance as
+    // in loup_plan_memory.
+    constexpr double kPlanAllowance = 32.0 * 1024.0 * 1024.0;
+    const double row_b = ((double)h->sys_atom_bytes + (double)h->gen->system_bytes() + (double)h->cub_tmp_bytes) /
+                         h->atom_cap;
+    const double edge_b = ((double)h->sys_edge_bytes + (double)h->gen->edge_bytes()) / h->E_cap;
+    const double fixed_b = (double)h->sys_fixed_bytes + (double)h->weight_copy_bytes + kPlanAllowance;
+    const double epl = (double)h->E_skin / d.n_local;  // edges per receiver
+    auto edge_cap = [](double e) { return std::max(e + std::floor(e / 4.0) + 1024.0, 4096.0); };
+    CUDA_CHECK(cudaMemGetInfo(&free_b, &total_b));
+    const double budget = (double)free_b + handle_system_bytes(h);  // the probe's buffers go when the call sets up
+    const double allowed = h->exec_fraction * budget;
+    const double n = n_atoms;
+    const double whole = row_b * n + edge_b * edge_cap(n * epl) + fixed_b;
+    // The tiled call: the whole system's layer outputs, their gradients and the forces; each tile's kept list
+    // (rows: species, positions, row map; edges: senders, receivers, pairs, shifts); the workspace for the widest
+    // domain, whose ghost rows grow with a tile's surface; the adjoint buffers.
+    const int L = h->gen->n_layers();
+    double state_per_atom = 3.0 * sizeof(double), adj_per_row = 0.0;
+    for (int l = 0; l < 4; ++l) {
+        double widest_l = 0.0;
+        for (int t = 0; t + 1 < L; ++t)
+            if (l <= h->gen->out_lmax(t)) {
+                const double w = (double)(2 * l + 1) * h->gen->out_width(t);
+                state_per_atom += 2.0 * w * sizeof(float);
+                widest_l = std::max(widest_l, w);
+            }
+        adj_per_row += widest_l * sizeof(float);
+    }
+    const double ghost0 = (double)widest_rows - c0;
+    auto tiled_at = [&](double c, double& global, double& ws) {
+        c = std::min(c, n);
+        const double rows = c + ghost0 * std::pow(c / c0, 2.0 / 3.0), T = std::ceil(n / c);
+        ws = row_b * rows + edge_b * edge_cap(c * epl) + fixed_b + adj_per_row * rows;
+        const double kept = 32.0 * (n + T * (rows - c)) + 4.0 * (n + T) + 36.0 * n * epl;
+        global = n * state_per_atom + kept;
+    };
+    static const int kCaps[] = {65536, 49152, 32768, 24576, 16384, 12288, 8192, 6144, 4096};
+    int cap = 0;
+    double global = 0.0, ws = 0.0;
+    if (h->exec_receivers > 0) {
+        cap = h->exec_receivers;
+        tiled_at(cap, global, ws);
+    } else {
+        for (int c : kCaps) {
+            tiled_at(c, global, ws);
+            if (global + ws <= allowed) { cap = c; break; }
+        }
+    }
+    plan.whole_bytes = (size_t)whole;
+    plan.tiled_global_bytes = (size_t)global;
+    plan.tile_workspace_bytes = (size_t)ws;
+    plan.free_bytes = free_b;
+    plan.receivers = cap;
+    const bool whole_fits = whole <= allowed && edge_cap(n * epl) < 2147483647.0;
+    plan.mode = (h->exec_mode == LOUP_EXEC_AUTO && whole_fits) ? LOUP_EXEC_WHOLE : LOUP_EXEC_TILED;
+    if (plan.mode == LOUP_EXEC_TILED && cap == 0) {
+        loup::set_error("%d atoms do not fit the device even in tiles of %d receivers: %.2f GiB of state and "
+                        "%.2f GiB of workspace against %.2f GiB allowed (%.0f%% of %.2f GiB); the tiled state in "
+                        "host memory is plan task S5-T07", n_atoms, kMinReceivers, global / 1073741824.0,
+                        ws / 1073741824.0, allowed / 1073741824.0, 100.0 * h->exec_fraction, budget / 1073741824.0);
+        return -1;
+    }
+    *out = plan;
+    return 0;
+}
+
 static int evaluate_tiled_impl(LoupHandle* h, int n_atoms, const int* atomic_numbers, const double* positions,
                                const double* cell, int receivers, double skin, double* out_energy_ev,
                                double* out_forces, double* out_stress, long long* out_tiles) {
@@ -4427,6 +4584,27 @@ static int evaluate_tiled_impl(LoupHandle* h, int n_atoms, const int* atomic_num
     if (L < 2) { loup::set_error("the tiled call needs a model of two or more layers, this one has %d", L); return -1; }
     if (!(skin >= 0.0) || !std::isfinite(skin)) { loup::set_error("skin must be finite and not negative"); return -1; }
     CUDA_CHECK(cudaSetDevice(h->device_id));
+    if (receivers <= 0) {  // the memory plan's cap, the mode taken as tiled
+        struct Mode {
+            LoupHandle* h;
+            int saved;
+            ~Mode() { h->exec_mode = saved; }
+        } mode{h, h->exec_mode};
+        h->exec_mode = LOUP_EXEC_TILED;
+        LoupMemoryPlan mp{};
+        if (plan_execution_impl(h, n_atoms, atomic_numbers, positions, cell, skin, &mp) != 0) return -1;
+        receivers = mp.receivers;
+    }
+    size_t free_b = 0, total_b = 0, least_free = 0;
+    CUDA_CHECK(cudaMemGetInfo(&free_b, &total_b));
+    const double budget = (double)free_b + handle_system_bytes(h);
+    least_free = free_b;
+    auto note_free = [&]() -> int {
+        size_t f = 0, t = 0;
+        CUDA_CHECK(cudaMemGetInfo(&f, &t));
+        least_free = std::min(least_free, f);
+        return 0;
+    };
     const double r_list = (double)h->gen->r_max() + skin;
     const bool tile_times = std::getenv("LOUP_DEBUG_TILE_TIMES") && std::getenv("LOUP_DEBUG_TILE_TIMES")[0] == '1';
     auto tick_last = std::chrono::steady_clock::now();
@@ -4453,30 +4631,8 @@ static int evaluate_tiled_impl(LoupHandle* h, int n_atoms, const int* atomic_num
     int max_rows = 0;
     size_t widest = 0;
     for (int64_t k = 0; k < T; ++k) {
-        TileDomain& all = alls[(size_t)k];
-        const int64_t l0 = plan.local_ptr[k], l1 = plan.local_ptr[k + 1];
-        const int64_t g0 = plan.ghost_ptr[k], g1 = plan.ghost_ptr[k + 1];
-        all.n_local = (int)(l1 - l0);
-        auto add = [&](int a, const int32_t* s) {
-            all.atom.push_back(a);
-            all.z.push_back(atomic_numbers[a]);
-            for (int c = 0; c < 3; ++c)
-                all.place.push_back(positions[(int64_t)a * 3 + c] + s[0] * cell[c] + s[1] * cell[3 + c] +
-                                    s[2] * cell[6 + c]);
-        };
-        for (int64_t i = l0; i < l1; ++i) add(plan.local[i], &plan.local_shift[i * 3]);
-        for (int64_t i = g0; i < g1; ++i) add(plan.ghost[i], &plan.ghost_shift[i * 3]);
-        double lo[3] = {INFINITY, INFINITY, INFINITY}, hi[3] = {-INFINITY, -INFINITY, -INFINITY};
-        for (size_t r = 0; r < all.atom.size(); ++r)
-            for (int c = 0; c < 3; ++c) {
-                lo[c] = std::min(lo[c], all.place[r * 3 + c]);
-                hi[c] = std::max(hi[c], all.place[r * 3 + c]);
-            }
-        const double pad = r_list + 1.0;  // the box's own images then lie beyond the list's reach
-        for (size_t r = 0; r < all.atom.size(); ++r)
-            for (int c = 0; c < 3; ++c) all.place[r * 3 + c] -= lo[c] - pad;
-        for (int c = 0; c < 3; ++c) all.box[c * 4] = hi[c] - lo[c] + 2.0 * pad;
-        if (all.atom.size() > alls[widest].atom.size()) widest = (size_t)k;
+        host_domain(plan, k, atomic_numbers, positions, cell, r_list, alls[(size_t)k]);
+        if (alls[(size_t)k].atom.size() > alls[widest].atom.size()) widest = (size_t)k;
     }
     tick("plan and host domains");
     // One workspace for every tile: the buffers of the widest domain (all its candidates), set up once.
@@ -4581,6 +4737,7 @@ static int evaluate_tiled_impl(LoupHandle* h, int n_atoms, const int* atomic_num
                 t.rows, width(layer, l), row_atom(t), h->gen->layer_out_grad(layer, l), fdx(layer, l));
     };
 
+    if (note_free() != 0) return -1;
     tick("state buffers");
     for (int layer = 0; layer + 1 < L; ++layer)  // forward sweeps
         for (const TileList& t : lists) {
@@ -4624,6 +4781,9 @@ static int evaluate_tiled_impl(LoupHandle* h, int n_atoms, const int* atomic_num
             fold_forces(t);
         }
     tick("backward sweeps");
+    if (note_free() != 0) return -1;
+    h->last_exec = LoupExecution{LOUP_EXEC_TILED, receivers, (long long)T, (size_t)budget,
+                                 (size_t)std::max(0.0, budget - (double)least_free)};
     {
         double e = 0.0;
         CUDA_CHECK(cudaMemcpyAsync(&e, h->d_energy_f64, sizeof(double), cudaMemcpyDeviceToHost, h->stream));
@@ -4811,6 +4971,39 @@ int loup_debug_evaluate_tiled(LoupHandle* h, int n_atoms, const int* atomic_numb
     return guarded(h, "loup_debug_evaluate_tiled", [&] {
         return evaluate_tiled_impl(h, n_atoms, atomic_numbers, positions, cell, receivers, skin, out_energy_ev,
                                    out_forces, out_stress, out_tiles);
+    });
+}
+
+int loup_set_execution(LoupHandle* h, int mode, int receivers, double memory_fraction) {
+    return guarded(h, "loup_set_execution", [&] {
+        if (!h) return -1;
+        if (mode < LOUP_EXEC_AUTO || mode > LOUP_EXEC_WAVEFRONT) { loup::set_error("unknown mode %d", mode); return -1; }
+        if (mode == LOUP_EXEC_WAVEFRONT) { loup::set_error("the wavefront mode is not in this version"); return -1; }
+        if (receivers < 0) { loup::set_error("receivers must not be negative, got %d", receivers); return -1; }
+        if (!(memory_fraction > 0.0 && memory_fraction <= 1.0)) {
+            loup::set_error("memory_fraction must be above 0 and at most 1, got %g", memory_fraction);
+            return -1;
+        }
+        h->exec_mode = mode;
+        h->exec_receivers = receivers;
+        h->exec_fraction = memory_fraction;
+        return 0;
+    });
+}
+
+int loup_plan_execution(LoupHandle* h, int n_atoms, const int* atomic_numbers, const double* positions,
+                        const double* cell, double skin, LoupMemoryPlan* out) {
+    return guarded(h, "loup_plan_execution", [&] {
+        return plan_execution_impl(h, n_atoms, atomic_numbers, positions, cell, skin, out);
+    });
+}
+
+int loup_get_execution(LoupHandle* h, LoupExecution* out) {
+    return guarded(h, "loup_get_execution", [&] {
+        if (!h) return -1;
+        if (!out) { loup::set_error("out is NULL"); return -1; }
+        *out = h->last_exec;
+        return 0;
     });
 }
 
