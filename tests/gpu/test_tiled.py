@@ -111,6 +111,40 @@ def test_the_tiled_call_gives_the_whole_system_result(model, structure, receiver
         assert d <= bound, f"{name}, default GEMMs: the tiled call differs by {d:.3e}"
 
 
+def test_a_tiled_call_on_a_kept_workspace_gives_a_fresh_engines_result():
+    """The handle keeps the tile workspace between tiled calls (ledger `tile-kept-lists`): a later call with
+    other tiles, or on a smaller system, must give what a new engine gives."""
+    big, small = _oxide(8), _oxide(6)
+    bundle = ensure_loup_bundle(find_model("mace-omat-0-small.model"), [8, 22, 38])
+
+    def fresh(at, receivers):
+        eng = LoupEngine(bundle)
+        try:
+            return eng.evaluate_tiled(at.numbers, at.positions, at.cell.array, receivers, skin=SKIN)
+        finally:
+            del eng
+            gc.collect()
+
+    eng = LoupEngine(bundle)
+    try:
+        calls = [(big, 1000), (big, 400), (small, 300), (big, 1000)]
+        kept = [eng.evaluate_tiled(at.numbers, at.positions, at.cell.array, r, skin=SKIN) for at, r in calls]
+    finally:
+        del eng
+        gc.collect()
+    for (at, r), (e, f, s, tiles) in zip(calls, kept):
+        e0, f0, s0, tiles0 = fresh(at, r)
+        assert tiles == tiles0 >= 2
+        # The same GEMM shapes can get other plans on a new engine only through the autotune's timing; the hybrid
+        # rounding bounds of the tiled test apply (D60).
+        assert abs(e - e0) / len(at) <= 1e-6 and np.abs(f - f0).max() <= 1e-5 and np.abs(s - s0).max() <= 1e-7
+    e1, f1, _, _ = kept[0]
+    e4, f4, _, _ = kept[3]
+    # Same engine, tiles and plans: the same numbers up to the order of the float32 atomic sums (measured up to
+    # 3.5e-9 eV/atom and 1.03e-6 eV/A); stale state from an earlier call would be far larger.
+    assert abs(e4 - e1) / len(big) <= 1e-8 and np.abs(f4 - f1).max() <= 1e-5
+
+
 def test_the_tiled_call_is_refused_for_long_range_models():
     at = _oxide(1)
     bundle = ensure_loup_bundle(find_model("MACE-POLAR-1-S.model"), [8, 22, 38])

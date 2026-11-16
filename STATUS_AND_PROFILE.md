@@ -972,3 +972,22 @@ tests/gpu/test_tile_lists.py tests/gpu/test_open_domain.py`: 15 passed, the tile
 | OMAT-0 small | 40,000 | 8; 2 | 0.85 | 75.0; 30.1 | 23.2; 9.5 | 27.4; 11.2 |
 | OMAT-0 medium | 24,565 | 3; 2 | 1.64 | 44.4; 45.1 | 19.1; 12.9 | 11.6; 7.8 |
 | OMAT-0 medium | 40,000 | 8; 2 | 1.63 | 67.1; 25.9 | 19.7; 10.0 | 12.1; 6.1 |
+
+### 6.16 Tile lists kept and the workspace kept between calls (16 November 2026, 00:40)
+
+RTX 5060 Ti only; library `656d0a580da22ba9...` (the working tree after `31f0ac3`). Ledger `tile-kept-lists`.
+`pytest tests/gpu/test_tiled.py tests/gpu/test_tile_lists.py`: 9 passed, with a new test that a kept workspace (other tiles, a smaller system) gives a fresh engine's result. Median of three tiled calls after a
+warm-up call on the same engine (`.tmp_o/probe_tiled_time.py`):
+
+| Model | Atoms | Tiles | Whole system, us/atom | Tiled before (§6.15) | Tiled now | Tiled / whole now |
+|---|---|---|---|---|---|---|
+| OMAT-0 small | 24,565 | 3; 2 | 0.91 | 15.0; 12.8 | 2.39; 1.94 | 2.6; 2.1 |
+| OMAT-0 small | 40,000 | 8; 2 | 0.89 | 23.2; 9.5 | 2.55; 2.01 | 2.9; 2.3 |
+| OMAT-0 medium | 24,565 | 3; 2 | 1.64 | 19.1; 12.9 | 4.01; 3.62 | 2.4; 2.2 |
+| OMAT-0 medium | 40,000 | 8; 2 | 1.65 | 19.7; 10.0 | 4.33; 2.97 | 2.6; 1.8 |
+
+- Phases of the second call (OMAT-0 medium, 40,000 atoms, 8 tiles, `LOUP_DEBUG_TILE_TIMES=1`): plan 3 ms,
+  candidate lists 11, kept lists 23, state buffers 4, forward sweeps 10, last-layer sweeps 58, backward sweeps 20.
+- The first tiled call on a new workspace is slow (sweeps 5.3 s at 8 tiles, 1.5 s at 2): each tile's row count is
+  a GEMM shape of its own, looked up and timed once. Size buckets for the tile shapes are the next step.
+- Not measured: the A/B of the step path (the tiled code and the new handle flag are not on it); other models.

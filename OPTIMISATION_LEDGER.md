@@ -285,6 +285,7 @@ Conventions:
 | ID | Idea | Switch/flag | Path | Status | Stage | Effect | Evidence |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | [tile-workspace](#tile-workspace) | One set of per-system buffers for every tile: the domain of the most rows is set up once, the others reshape it (species grouping, row counts) instead of `loup_set_system`'s free, allocate and cuBLASLt cache clear | none | generic, tiled | ADOPTED | S5 | tiled call 2.5-3.4x faster: `SrTiO3` 40,000 atoms 8 tiles, OMAT-0 medium 67.1 -> 19.7 us/atom, small 75.0 -> 23.2; still 6-27x the whole-system call | [§6.15][s615] |
+| [tile-kept-lists](#tile-kept-lists) | Each tile's list built once per call and kept on the device; the sweeps restore it with device copies; energy and virial summed on the device, read once; the workspace kept between calls when it is large enough (no `loup_set_system` path, so the cuBLASLt cache survives) | none | generic, tiled | ADOPTED | S5 | `SrTiO3` 40,000 atoms, OMAT-0 medium 8 tiles 19.7 -> 4.33 us/atom (2.6x whole), 2 tiles 10.0 -> 2.97 (1.8x); small 23.2 -> 2.55 (2.9x) | [§6.16][s616] |
 
 ## Chronology
 
@@ -1975,6 +1976,35 @@ warm-up (`.tmp_o/probe_tiled_time.py`):
 Still 50-100 ms per tile: four list builds per tile and call (the candidates' build and one per sweep), each with
 host syncs, and a host round trip after every tile sweep. Next: keep each tile's list across its sweeps.
 
+<a id="tile-kept-lists"></a>**tile-kept-lists** (ADOPTED, 16 November 2026, 5060 Ti only). Two changes, measured
+together because the first alone changed nothing. (1) Every tile's list is built once per call, after the candidate
+pass, and kept on the device (positions, species, CSR, senders, receivers, pairs, shifts, the row-to-atom map); a
+sweep restores it into the workspace with device-to-device copies, so no tile sweep rebuilds a list or waits for the
+host. Energy and virial accumulate on the device over all sweeps and are read once; each tile's forces are folded
+into the whole-system array on the stream. Alone: OMAT-0 medium 40,000 atoms 8 tiles 22.45 us/atom, no gain.
+(2) The phase timer (`LOUP_DEBUG_TILE_TIMES=1`, syncs at each phase) showed why: the call began with
+`set_domain_impl`, whose `free_system` empties the cuBLASLt cache, so every tile shape's GEMMs asked for their
+heuristics again in every call (sweeps 0.5-1.2 s). The call now keeps the handle's tile workspace when it has room
+for the widest candidate domain and the same skin; `loup_set_system` and `loup_set_domain` drop it. Phases of a
+second call, OMAT-0 medium, 40,000 atoms, 8 tiles: plan 3 ms, candidate lists 11, kept lists 23, state 4, forward
+sweeps 10, last layer 58, backward 20 (the whole-system call: 65 ms). Same results (`tests/gpu/test_tiled.py`,
+`test_tile_lists.py`). Time of one tiled call, median of three after a warm-up (`.tmp_o/probe_tiled_time.py`):
+
+| Model, atoms, tiles | Workspace (us/atom) | Kept lists and workspace (us/atom) | Whole system | Tiled / whole |
+| --- | --- | --- | --- | --- |
+| OMAT-0 small, 24,565, 3 | 15.0 | 2.39 | 0.91 | 2.6 |
+| OMAT-0 small, 24,565, 2 | 12.8 | 1.94 | 0.91 | 2.1 |
+| OMAT-0 small, 40,000, 8 | 23.2 | 2.55 | 0.89 | 2.9 |
+| OMAT-0 small, 40,000, 2 | 9.5 | 2.01 | 0.89 | 2.3 |
+| OMAT-0 medium, 24,565, 3 | 19.1 | 4.01 | 1.64 | 2.4 |
+| OMAT-0 medium, 24,565, 2 | 12.9 | 3.62 | 1.64 | 2.2 |
+| OMAT-0 medium, 40,000, 8 | 19.7 | 4.33 | 1.65 | 2.6 |
+| OMAT-0 medium, 40,000, 2 | 10.0 | 2.97 | 1.65 | 1.8 |
+
+Left: the list builds of a single call (34 ms of 173 at 8 tiles; an MD run keeps them until skin/2, S5-T06), the
+ghosts' share of the sweeps (each tile computes its ghost candidates' layer 0 too), and the first call on a new
+workspace (5.3 s of sweeps at 8 tiles: every distinct tile row count is a new GEMM shape; size buckets, S5-T10).
+
 [s1]: STATUS_AND_PROFILE.md#1-benchmark--verification-summary
 [s2]: STATUS_AND_PROFILE.md#2-detailed-kernel-profile-current-build
 [s31]: STATUS_AND_PROFILE.md#31-implemented-optimisations
@@ -1997,3 +2027,4 @@ host syncs, and a host round trip after every tile sweep. Next: keep each tile's
 [s55]: STATUS_AND_PROFILE.md#55-known-limitations
 
 [s615]: STATUS_AND_PROFILE.md#615-the-tile-workspace-16-november-2026-0015
+[s616]: STATUS_AND_PROFILE.md#616-tile-lists-kept-and-the-workspace-kept-between-calls-16-november-2026-0040
