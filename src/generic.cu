@@ -243,7 +243,8 @@ __global__ void gate_bwd_kernel(int N, int C, int lx, const float* __restrict__ 
 
 // Linear readout: E += sum_a h0[a] . w (double accumulation); its gradient dh0 += w.
 __global__ void ro_linear_kernel(int N, int C, const float* __restrict__ h0, const float* __restrict__ w,
-                                 float* __restrict__ dh0, double* __restrict__ energy) {
+                                 float* __restrict__ dh0, double* __restrict__ energy,
+                                 double* __restrict__ atom_energy = nullptr) {
     const int a = blockIdx.x * (blockDim.x >> 5) + (threadIdx.x >> 5), lane = threadIdx.x & 31;
     if (a >= N) return;
     double e = 0.0;
@@ -254,7 +255,10 @@ __global__ void ro_linear_kernel(int N, int C, const float* __restrict__ h0, con
     }
     #pragma unroll
     for (int off = 16; off > 0; off >>= 1) e += __shfl_xor_sync(0xffffffffu, e, off);
-    if (lane == 0) atomicAdd(energy, e);
+    if (lane == 0) {
+        atomicAdd(energy, e);
+        if (atom_energy) atom_energy[a] += e;
+    }
 }
 
 // MLP readout tail on hid [N, H] (= h0 @ W1, bias added here): kind 1: E += sum c silu(hid + b1) . W2;
@@ -262,7 +266,8 @@ __global__ void ro_linear_kernel(int N, int C, const float* __restrict__ h0, con
 // pre-activation in pre; stage 2 runs on hid2 = act1 @ Wm. dhid receives dE/d(hid + b1) of the stage.
 __global__ void ro_mlp_kernel(int N, int H, float c, float* __restrict__ hid, const float* __restrict__ b,
                               const float* __restrict__ W2, float* __restrict__ pre, float* __restrict__ dhid,
-                              double* __restrict__ energy, int final_stage) {
+                              double* __restrict__ energy, int final_stage,
+                              double* __restrict__ atom_energy = nullptr) {
     const int64_t i = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
     double e = 0.0;
     if (i < (int64_t)N * H) {
@@ -272,6 +277,7 @@ __global__ void ro_mlp_kernel(int N, int H, float c, float* __restrict__ hid, co
             const float w2 = W2[j];
             e = (double)(c * silu_f(x)) * (double)w2;
             dhid[i] = c * dsilu_f(x) * w2;
+            if (atom_energy && e != 0.0) atomicAdd(&atom_energy[i / H], e);
         } else {
             pre[i] = x;
             hid[i] = c * silu_f(x);
@@ -323,7 +329,8 @@ __device__ __forceinline__ bool zbl_pair(const ZblParams& z, int p, float r, flo
 // for the energy-only pass.
 __global__ void zbl_energy_kernel(const int* __restrict__ E_dev, int S, const float4* __restrict__ vec_len,
                                   const int* __restrict__ senders, const int* __restrict__ receivers,
-                                  const int* __restrict__ species, ZblParams z, double* __restrict__ energy) {
+                                  const int* __restrict__ species, ZblParams z, double* __restrict__ energy,
+                                  double* __restrict__ atom_energy = nullptr) {
     const int E = *E_dev;
     const int e = blockIdx.x * blockDim.x + threadIdx.x;
     double en = 0.0;
@@ -331,6 +338,7 @@ __global__ void zbl_energy_kernel(const int* __restrict__ E_dev, int S, const fl
         const float4 vl = vec_len[e];
         float zen, g;
         if (vl.w < z.r_max && zbl_pair(z, species[senders[e]] * S + species[receivers[e]], vl.w, zen, g)) en = zen;
+        if (atom_energy && en != 0.0) atomicAdd(&atom_energy[receivers[e]], en);  // MACE: the receiver's node energy
     }
     #pragma unroll
     for (int off = 16; off > 0; off >>= 1) en += __shfl_xor_sync(0xffffffffu, en, off);
@@ -1792,7 +1800,7 @@ void GenericModel::record(const GenericPassInputs& in) {
         const float* Dp = (L->kind == 2 || L->kind == 3) ? L->D : nullptr;
         // the fused product + readout kernel runs one thread per channel (<= 512)
         const bool ro1_fused = L->ro_folded && L->readout == 1 && L->ro_H == 16 && L->prod->ro1_128 != nullptr &&
-                               L->C_out <= 512;
+                               L->C_out <= 512 && !in.atom_energy;
         if (ro1_fused) {
             if (L->sc_has[0] && !chain_fold_) {  // with the S57 fold, hid already holds the skip's share
                 if (L->sc_species) {
@@ -1862,7 +1870,8 @@ void GenericModel::record(const GenericPassInputs& in) {
         }
         // readout (energy) and its gradient seed into dhout[0] (or dhid directly when ro_folded)
         if (L->readout == 0) {
-            ro_linear_kernel<<<(N + 7) / 8, 256, 0, st>>>(N, Co, L->hout[0], L->ro_w, L->dhout[0], energy);
+            ro_linear_kernel<<<(N + 7) / 8, 256, 0, st>>>(N, Co, L->hout[0], L->ro_w, L->dhout[0], energy,
+                                                          in.atom_energy);
         } else if (L->readout > 0) {
             const int H = L->ro_H;
             const unsigned gH = (unsigned)(((int64_t)N * H + 255) / 256);
@@ -1885,14 +1894,14 @@ void GenericModel::record(const GenericPassInputs& in) {
             }
             if (L->readout == 1) {
                 ro_mlp_kernel<<<gH, 256, 0, st>>>(N, H, L->ro_act_c, L->hid, L->ro_b1, L->ro_W2, nullptr, L->dhid,
-                                                  energy, 1);
+                                                  energy, 1, in.atom_energy);
             } else {
                 // stage 1: hid -> act1 (pre kept in dhid2 as scratch), stage 2 on hid2 = act1 @ Wm
                 ro_mlp_kernel<<<gH, 256, 0, st>>>(N, H, L->ro_act_c, L->hid, L->ro_b1, nullptr, L->dhid2, nullptr,
                                                   nullptr, 0);
                 in.gemm(false, N, H, H, 1.0f, L->hid, H, L->ro_Wm, H, 0.0f, L->hid2, H);
                 ro_mlp_kernel<<<gH, 256, 0, st>>>(N, H, L->ro_act_c, L->hid2, L->ro_bm, L->ro_W2, nullptr, L->dhid,
-                                                  energy, 1);
+                                                  energy, 1, in.atom_energy);
                 // dhid = (dhid @ Wm^T) * c silu'(pre1)
                 in.gemm(true, N, H, H, 1.0f, L->dhid, H, L->ro_Wm, H, 0.0f, L->hid2, H);
                 ro_act_bwd_kernel<<<gH, 256, 0, st>>>((int64_t)N * H, L->ro_act_c, L->dhid2, L->hid2);
@@ -2145,7 +2154,8 @@ void GenericModel::record(const GenericPassInputs& in) {
         }
         if (has_edges && has_zbl_)
             zbl_energy_kernel<<<(in.E_cap + 255) / 256, 256, 0, st>>>(in.E_dev, S, in.act_vec_len, in.act_senders,
-                                                                      in.act_receivers, in.species, zbl_p, in.energy);
+                                                                      in.act_receivers, in.species, zbl_p, in.energy,
+                                                                      in.atom_energy);
         return;
     }
     if (sweep != GenericPassInputs::SweepAll) {

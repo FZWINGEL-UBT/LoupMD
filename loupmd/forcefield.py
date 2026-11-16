@@ -229,6 +229,13 @@ class ForceField:
         engine = self.engine_for(atoms, skin)
         return engine.evaluate(atoms.positions, atoms.cell.array, compute_stress=bool(stress))
 
+    def evaluate_per_atom(self, atoms, stress=False, skin=0.5):
+        """``(energy, forces, stress, energies)``: as ``evaluate``, plus each atom's energy in eV (its MACE node
+        energy and its E0; they sum to the energy). Generic kernels and short-range models only: the library
+        refuses the others."""
+        engine = self.engine_for(atoms, skin)
+        return engine.evaluate_per_atom(atoms.positions, atoms.cell.array, compute_stress=bool(stress))
+
 
 def load(model, head=None, *, checkpoint=None, sha256=None, trusted=False, download=False, charge=None,
          spin_multiplicity=None, device=0, precision="float32", engine_factory=None, ensure_bundle=None, probe=None,

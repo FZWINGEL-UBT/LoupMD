@@ -18,10 +18,11 @@ from ..forcefield import ForceField, load
 
 
 class LoupCalculator(Calculator):
-    """Energy, free energy (the same number), forces and Voigt stress in ASE units, for cells periodic in all
-    three directions. See ``loupmd.calc`` for the arguments."""
+    """Energy, free energy (the same number), forces, Voigt stress and per-atom energies in ASE units, for cells
+    periodic in all three directions. See ``loupmd.calc`` for the arguments. Per-atom energies
+    (``get_potential_energies``) need the generic kernels and a short-range model."""
 
-    implemented_properties = ["energy", "free_energy", "forces", "stress"]
+    implemented_properties = ["energy", "free_energy", "forces", "stress", "energies"]
 
     def __init__(self, force_field: ForceField, *, skin: float = 0.5):
         super().__init__()
@@ -37,8 +38,15 @@ class LoupCalculator(Calculator):
 
         Calculator.calculate(self, atoms, properties, system_changes)
         with_stress = "stress" in properties
-        energy, forces, stress = self.force_field.evaluate(self.atoms, stress=with_stress, skin=self.skin)
+        if "energies" in properties:            # atoms.get_potential_energies(): one more energy-only pass
+            energy, forces, stress, energies = self.force_field.evaluate_per_atom(self.atoms, stress=with_stress,
+                                                                                  skin=self.skin)
+        else:
+            energy, forces, stress = self.force_field.evaluate(self.atoms, stress=with_stress, skin=self.skin)
+            energies = None
         self.results = {"energy": energy, "free_energy": energy, "forces": forces}
+        if energies is not None:
+            self.results["energies"] = energies
         if with_stress:
             self.results["stress"] = full_3x3_to_voigt_6_stress(stress)
 

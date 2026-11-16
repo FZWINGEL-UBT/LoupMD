@@ -34,6 +34,11 @@ class SpringEngine:
         stress = np.array([[1.0, 0.4, 0.5], [0.4, 2.0, 0.6], [0.5, 0.6, 3.0]]) * 1e-3 if compute_stress else None
         return 0.5 * K * float((positions ** 2).sum()), -K * positions, stress
 
+    def evaluate_per_atom(self, positions, cell, compute_stress=False):
+        energy, forces, stress = self.evaluate(positions, cell, compute_stress)
+        self.calls[-1] = ("evaluate_per_atom", bool(compute_stress))
+        return energy, forces, stress, 0.5 * K * (np.asarray(positions, dtype=float) ** 2).sum(axis=1)
+
 
 @pytest.fixture
 def checkpoint(tmp_path):
@@ -75,7 +80,19 @@ def test_energy_forces_and_voigt_stress(make):
     assert np.allclose(at.get_forces(), -K * at.positions)
     assert np.allclose(at.get_stress(), np.array([1.0, 2.0, 3.0, 0.6, 0.5, 0.4]) * 1e-3)   # xx yy zz yz xz xy
     assert at.get_stress(voigt=False).shape == (3, 3)
-    assert set(at.calc.implemented_properties) == {"energy", "free_energy", "forces", "stress"}
+    assert set(at.calc.implemented_properties) == {"energy", "free_energy", "forces", "stress", "energies"}
+
+
+def test_per_atom_energies_come_from_the_per_atom_call_only_when_asked_for(make):
+    """S6-T08: get_potential_energies asks the engine for its per-atom call; energy and forces alone do not."""
+    at = _nacl()
+    at.calc = make()
+    at.get_forces()
+    energies = at.get_potential_energies()
+    engine, = SpringEngine.made
+    assert [c[0] for c in engine.calls if c[0].startswith("evaluate")] == ["evaluate", "evaluate_per_atom"]
+    assert energies.shape == (len(at),)
+    assert energies.sum() == pytest.approx(at.get_potential_energy())
 
 
 def test_the_stress_is_computed_only_when_it_is_asked_for(make):

@@ -654,6 +654,7 @@ struct LoupHandle {
     double skin = 0.5;
     double e0_total = 0.0;
     std::vector<int> perm;          // device (species-grouped, spatially ordered) index -> caller index
+    std::vector<double> atom_e0;    // caller index -> the atom's E0 (0 for ghosts): per-atom energies (S6-T08)
     std::vector<int> h_order;       // scratch: new device index -> old device index at an atom reorder
     std::vector<int> species_start; // [S+1]
     std::vector<int> species_count; // [S]
@@ -801,6 +802,7 @@ struct LoupHandle {
     // alternating the two (Monte Carlo between MD steps) captures neither again.
     cudaGraph_t energy_graph = nullptr;
     cudaGraphExec_t energy_graph_exec = nullptr;
+    double* pass_atom_energy = nullptr;  // a per-atom energy pass (S6-T08) is being recorded: its [N] buffer
 
     cudaGraph_t md_graph = nullptr;  // pipelined loop: move + check + forces + second half
     cudaGraphExec_t md_graph_exec = nullptr;
@@ -1739,6 +1741,7 @@ static void record_force_pass(LoupHandle* h, int compute_stress, bool energy_onl
         in.virial = h->d_virial_grad_f64;
         in.compute_stress = compute_stress;
         in.energy_only = energy_only ? 1 : 0;
+        in.atom_energy = energy_only ? h->pass_atom_energy : nullptr;
         in.pos64 = h->d_pos64;
         in.gemm = [h](bool transB, int M, int Nc, int K, float alpha, const float* A, int lda, const float* B, int ldb,
                       float beta, float* C, int ldc) {
@@ -2201,6 +2204,8 @@ static int set_system_impl(LoupHandle* h, int n_atoms, const int* atomic_numbers
     h->free_system();  // sets N = 0
     h->skin = skin;
     h->e0_total = e0_total;
+    h->atom_e0.assign(n_atoms, 0.0);
+    for (int i = 0; i < n_local; ++i) h->atom_e0[i] = h->species_e0(sp_orig[i]);
     h->species_hash = fnv1a64(atomic_numbers, (size_t)n_atoms * sizeof(int), fnv1a64(&n_atoms, sizeof(n_atoms)));
 
     // Build stable species-grouping permutation (the spatial order inside each group is set at every rebuild)
@@ -2621,6 +2626,48 @@ static int evaluate_impl(
     return rc;
 }
 
+// Per-atom energies (S6-T08, PLAN.md D70) of the positions the last evaluation uploaded: one uncaptured energy-only
+// pass whose readouts and ZBL term also add each row's share into an [N] buffer (MACE's node energies: the readout
+// of every layer, and half of each ZBL pair energy on its receiver), plus each atom's E0. They sum to the total
+// energy up to float64 rounding. The pass reuses the GEMM plans of the energy graph and leaves the device forces
+// stale.
+static int per_atom_energies(LoupHandle* h, double* out) {
+    if (ensure_energy_graph(h) != 0) return -1;
+    const int rows = h->N + h->n_ghost;
+    double* d_ae = nullptr;
+    CUDA_CHECK(cudaMalloc(&d_ae, (size_t)rows * sizeof(double)));
+    struct Pass {  // the buffer goes, and the next recorded pass is a plain one, whatever happens
+        LoupHandle* h;
+        double* d;
+        bool saved_fork;
+        Pass(LoupHandle* h_, double* d_) : h(h_), d(d_), saved_fork(h_->fork_ok) {
+            h->pass_atom_energy = d;
+            h->fork_ok = false;
+        }
+        ~Pass() {
+            h->pass_atom_energy = nullptr;
+            h->fork_ok = saved_fork;
+            cudaFree(d);
+        }
+    } pass(h, d_ae);
+    CUDA_CHECK(cudaMemsetAsync(d_ae, 0, (size_t)rows * sizeof(double), h->stream));
+    record_force_pass(h, 0, true);
+    CUDA_CHECK(cudaGetLastError());
+    std::vector<double> ae(rows);
+    CUDA_CHECK(cudaMemcpyAsync(ae.data(), d_ae, (size_t)rows * sizeof(double), cudaMemcpyDeviceToHost, h->stream));
+    CUDA_CHECK(cudaStreamSynchronize(h->stream));
+    h->forces_current = false;
+    for (int r = 0; r < rows; ++r) {
+        const int orig = h->perm[r];
+        out[orig] = r < h->N ? ae[r] + h->atom_e0[orig] : 0.0;
+        if (!std::isfinite(out[orig])) {
+            loup::set_error("non-finite per-atom energy (atom %d)", orig);
+            return -1;
+        }
+    }
+    return 0;
+}
+
 static int evaluate2_impl(
     LoupHandle* h, const double* positions, const double* cell, int flags, double* out_energy_ev,
     double* out_forces, double* out_stress, double* out_atom_energies
@@ -2628,9 +2675,30 @@ static int evaluate2_impl(
     const int known = LOUP_EVAL_STRESS | LOUP_EVAL_ENERGY_ONLY | LOUP_EVAL_PER_ATOM;
     if (flags & ~known) { loup::set_error("unknown evaluation flags 0x%x", flags & ~known); return -1; }
     if (flags & LOUP_EVAL_PER_ATOM) {
-        loup::set_error("LOUP_EVAL_PER_ATOM is not built in this version of the library (per-atom energies need "
-                        "variants of the generated readout kernels)");
-        return -1;
+        if (!out_atom_energies) { loup::set_error("LOUP_EVAL_PER_ATOM needs out_atom_energies"); return -1; }
+        if (!h->generic()) {
+            loup::set_error("per-atom energies are built for the generic kernels only; this engine runs the "
+                            "specialised MACE-OMAT-0 medium kernels (load the bundle with generic=True)");
+            return -1;
+        }
+        if (h->gen->has_lr()) {
+            loup::set_error("per-atom energies are not built for long-range models (the k-space energy is not "
+                            "split by atom)");
+            return -1;
+        }
+        if (evaluate2_impl(h, positions, cell, flags & ~LOUP_EVAL_PER_ATOM, out_energy_ev, out_forces, out_stress,
+                           nullptr) != 0)
+            return -1;
+        if (per_atom_energies(h, out_atom_energies) != 0) return -1;
+        // The energy of a per-atom call is the sum of its per-atom energies (the energy-only pass), so the two
+        // agree to the rounding of the sum; it differs from the plain call's energy in the float32 rounding of the
+        // readouts (measured up to 6e-7 relative on a compressed cell).
+        if (out_energy_ev) {
+            double sum = 0.0;
+            for (int r = 0; r < h->N; ++r) sum += out_atom_energies[h->perm[r]];
+            *out_energy_ev = sum;
+        }
+        return 0;
     }
     (void)out_atom_energies;
     if (!(flags & LOUP_EVAL_ENERGY_ONLY)) {
@@ -4477,6 +4545,8 @@ static int reshape_domain(LoupHandle* h, int n_local, int n_ghost, const int* at
                                h->stream));
     CUDA_CHECK(cudaStreamSynchronize(h->stream));  // `sp_sorted` goes out of scope
     h->e0_total = e0_total;
+    h->atom_e0.assign(n_atoms, 0.0);
+    for (int i = 0; i < n_local; ++i) h->atom_e0[i] = h->species_e0(sp_orig[i]);
     h->N = n_local;
     h->n_ghost = n_ghost;
     h->nl_valid = false;

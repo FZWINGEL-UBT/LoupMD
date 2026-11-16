@@ -88,7 +88,13 @@ int loup_evaluate(
 //                          and stress are not computed and out_forces is not written; the forces loup_get_state
 //                          returns are then not those of these positions, and a run that follows starts with a
 //                          force pass of its own. Excludes LOUP_EVAL_STRESS.
-//   LOUP_EVAL_PER_ATOM     per-atom energies into out_atom_energies [n_atoms]: refused until built.
+//   LOUP_EVAL_PER_ATOM     also per-atom energies (eV) into out_atom_energies [n_atoms], in the caller's order:
+//                          each atom's MACE node energy (the readouts of every layer and its share of the ZBL
+//                          pair energies) plus its E0 (0 for ghost atoms). out_energy_ev is then their sum; it
+//                          differs from a plain call's energy in float32 rounding (the per-atom energies come from
+//                          one more energy-only pass; measured up to 6e-7 relative), while forces and stress are
+//                          the plain call's. The device forces are stale afterwards.
+//                          Generic kernels only, and not for long-range models: refused there.
 #define LOUP_EVAL_STRESS 1
 #define LOUP_EVAL_ENERGY_ONLY 2
 #define LOUP_EVAL_PER_ATOM 4

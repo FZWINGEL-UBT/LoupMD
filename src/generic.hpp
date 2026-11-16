@@ -43,6 +43,8 @@ struct GenericPassInputs {
     const double* pos64;       // [N, 3] positions (device order; the long-range k-space terms read them)
     int compute_stress;
     int energy_only = 0;       // forward of every layer and the ZBL energy only: no forces, no stress
+    double* atom_energy = nullptr;  // energy_only (S6-T08): also each row's readout and ZBL energy [N], added
+                                    // to (the caller zeroes it); the fused product + readout kernel is not used
     // Which part of the pass record() runs (PLAN.md 4.4). SweepAll is the whole pass. The others are one sweep of a
     // domain with ghost atoms; the caller carries the layer outputs and their gradients from sweep to sweep:
     //   SweepForward t (t < L - 1): needs layer t - 1's output rows (receivers and ghosts) in layer_out(t - 1, l);

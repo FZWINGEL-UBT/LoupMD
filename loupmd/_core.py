@@ -475,6 +475,22 @@ class LoupEngine:
                                              ctypes.byref(energy), None, None, None), "loup_evaluate2")
         return float(energy.value)
 
+    def evaluate_per_atom(self, positions, cell, compute_stress: bool = False):
+        """Energy, forces, stress (or ``None``) and the per-atom energies [n] (``LOUP_EVAL_PER_ATOM``): each atom's
+        MACE node energy plus its E0. The energy is their sum (an energy-only pass; it differs from ``evaluate``'s
+        in float32 rounding), forces and stress are ``evaluate``'s. Generic kernels and short-range models only. The
+        forces on the device are not those of these positions afterwards."""
+        pos = _array(positions, (self._n, 3), "positions")
+        cel = _array(cell, (3, 3), "cell")
+        energy = ctypes.c_double()
+        forces = np.zeros((self._n, 3))
+        stress = np.zeros((3, 3)) if compute_stress else None
+        atom = np.zeros(self._n)
+        flags = LOUP_EVAL_PER_ATOM | (LOUP_EVAL_STRESS if compute_stress else 0)
+        self._check(self._lib.loup_evaluate2(self._h, _ptr(pos), _ptr(cel), flags, ctypes.byref(energy),
+                                             _ptr(forces), _ptr(stress), _ptr(atom)), "loup_evaluate2")
+        return float(energy.value), forces, stress, atom
+
     def set_state(self, positions, velocities, cell):
         pos = _array(positions, (self._n, 3), "positions")
         vel = _array(velocities, (self._n, 3), "velocities") if velocities is not None else None
