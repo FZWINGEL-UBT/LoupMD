@@ -175,6 +175,80 @@ def test_the_wavefront_gives_the_plain_tiled_result_from_a_smaller_row_pool(monk
     assert np.abs(f_w - f_p).max() <= 1e-5 and np.abs(s_w - s_p).max() <= 1e-8
 
 
+@pytest.mark.parametrize("wavefront", ["0", "1"])
+@pytest.mark.parametrize("keep_active", [None, "0"])
+def test_tile_lists_in_host_memory_give_the_device_lists_result(wavefront, keep_active, monkeypatch):
+    """O31 (S5-T07): LOUP_TILE_HOST_LISTS=1 keeps the tile lists' edge arrays in mapped pinned host memory, which
+    the active-edge compaction reads over the bus (once per tile and call, or in every sweep with
+    LOUP_TILE_KEEP_ACTIVE=0). Same tiles, same kernels: the device lists' numbers up to the order of the float32
+    atomic sums, in the call that builds the lists and in a later call that keeps them."""
+    at = srtio3(1).repeat((32, 6, 6))                  # 5,760 atoms in a rod: several layers of tiles along it
+    at.positions += np.random.default_rng(8).normal(scale=0.04, size=at.positions.shape)
+    moved = at.positions + np.random.default_rng(9).normal(scale=0.01, size=at.positions.shape)
+    bundle = ensure_loup_bundle(find_model("mace-omat-0-small.model"), [8, 22, 38])
+    monkeypatch.setenv("LOUP_TILE_WAVEFRONT", wavefront)
+    monkeypatch.setenv("LOUP_NO_HYBRID", "1")         # two engines: no hybrid-or-not plan pick between them (D16)
+    if keep_active is not None:
+        monkeypatch.setenv("LOUP_TILE_KEEP_ACTIVE", keep_active)
+
+    def run(host):
+        monkeypatch.setenv("LOUP_TILE_HOST_LISTS", host)
+        eng = LoupEngine(bundle)
+        try:
+            out = [eng.evaluate_tiled(at.numbers, x, at.cell.array, 400, skin=SKIN) for x in (at.positions, moved)]
+            ex = eng.last_execution()
+            return out, ex
+        finally:
+            del eng
+            gc.collect()
+
+    (dev, ex_d), (host, ex_h) = run("0"), run("1")
+    assert not ex_d.host_lists and ex_h.host_lists and ex_h.lists_kept
+    for (e0, f0, s0, t0), (e1, f1, s1, t1) in zip(dev, host):
+        assert t0 == t1 >= 4
+        assert abs(e1 - e0) / len(at) <= 1e-8 and np.abs(f1 - f0).max() <= 1e-5 and np.abs(s1 - s0).max() <= 1e-8
+
+
+def test_the_plan_moves_the_tile_lists_to_host_memory_only_when_they_do_not_fit(monkeypatch):
+    """O31 (S5-T07): the memory plan keeps the tile lists on the device while some cap fits; below the smallest
+    memory fraction at which one does, it moves their edge arrays to host memory (host_lists, host_bytes) instead
+    of refusing the system."""
+    at = _oxide(20)                                    # 40,000 atoms
+    bundle = ensure_loup_bundle(find_model("mace-omat-0-small.model"), [8, 22, 38])
+    eng = LoupEngine(bundle)
+    try:
+        def plan(fraction, host=None):
+            if host is None:
+                monkeypatch.delenv("LOUP_TILE_HOST_LISTS", raising=False)
+            else:
+                monkeypatch.setenv("LOUP_TILE_HOST_LISTS", host)
+            eng.set_execution(_core.LOUP_EXEC_TILED, 0, fraction)
+            try:
+                return eng.plan_execution(at.numbers, at.positions, at.cell.array, skin=SKIN)
+            except BackendError:
+                return None
+
+        dev, forced = plan(0.9, "0"), plan(0.9, "1")
+        assert dev is not None and not dev.host_lists and dev.host_bytes == 0
+        assert forced.host_lists and forced.host_bytes > 0
+        # the edges' 36 B (the plan counts them 10% over) leave the device estimate (the same cap on both sides)
+        assert forced.receivers == dev.receivers
+        moved = dev.tiled_global_bytes - forced.tiled_global_bytes
+        assert abs(moved * 1.1 - forced.host_bytes) <= 0.01 * forced.host_bytes
+        # the smallest fraction that fits with the lists on the device, to 0.1%
+        lo, hi = 1e-4, 0.9
+        while hi - lo > 1e-3 * hi:
+            mid = 0.5 * (lo + hi)
+            lo, hi = (lo, mid) if plan(mid, "0") is not None else (mid, hi)
+        assert plan(hi).host_lists is False         # automatic choice: still on the device at that fraction
+        below = plan(lo * 0.999)
+        assert below is not None and below.host_lists and below.receivers >= 4096
+        assert plan(lo * 0.999, "0") is None         # and refused when host lists are off
+    finally:
+        del eng
+        gc.collect()
+
+
 def test_the_tiled_call_is_refused_for_long_range_models():
     at = _oxide(1)
     bundle = ensure_loup_bundle(find_model("MACE-POLAR-1-S.model"), [8, 22, 38])

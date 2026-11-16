@@ -658,6 +658,7 @@ struct LoupHandle {
     // rebuild) and the workspace (each tile's domain); loup_set_system and loup_destroy free it.
     TiledMD* tiled_md = nullptr;
     long long tile_list_builds = 0;     // tiled calls that built their lists, since the handle was created
+    int tile_host_lists = 0;            // the last loup_plan_execution put the tile lists' edges in host memory (O31)
     double skin = 0.5;
     double e0_total = 0.0;
     std::vector<int> perm;          // device (species-grouped, spatially ordered) index -> caller index
@@ -957,6 +958,11 @@ void transpose(int R, int Ccols, const float* in, float* out, cudaStream_t strea
 struct DeviceBufferGuard {
     void* p = nullptr;
     ~DeviceBufferGuard() { if (p) cudaFree(p); }
+};
+// Pinned host memory mapped into the device's address space (cudaHostAllocMapped): kernels read it over the bus
+struct HostBufferGuard {
+    void* p = nullptr;
+    ~HostBufferGuard() { if (p) cudaFreeHost(p); }
 };
 struct EventPairGuard {
     cudaEvent_t e0 = nullptr, e1 = nullptr;
@@ -4648,6 +4654,11 @@ struct TileList {
     double e0 = 0.0, box[9] = {0, 0, 0, 0, 0, 0, 0, 0, 0};
     std::vector<int> perm, species_start, species_count;
     DeviceBufferGuard species, pos, row_ptr, senders, receivers, pairs, shift, row_atom;
+    // O31 (S5-T07): with host lists the edge arrays (senders, receivers, pairs, shifts: 36 B per edge) live in one
+    // block of mapped pinned host memory instead of `senders` ... `shift`, and the pointers below are its device view
+    HostBufferGuard host_edges;
+    int *h_senders = nullptr, *h_receivers = nullptr, *h_pairs = nullptr;
+    double* h_shift = nullptr;
     DeviceBufferGuard offset;  // [rows, 3] a row's place in the tile less its atom's position at the build
     DeviceBufferGuard row_slot;  // the wavefront (S5-T08): [rows] each row's atom's row in the pool of x and dx
     // The active edges (r < r_max) of this call's positions: compacted in the tile's first sweep of a call into a
@@ -4672,6 +4683,8 @@ struct TiledState {
     int64_t T = 0;
     double skin = 0.0, cell[9] = {0, 0, 0, 0, 0, 0, 0, 0, 0};
     double bytes = 0.0;  // device bytes of everything below
+    bool host_lists = false;  // the lists' edge arrays in pinned host memory (O31, S5-T07)
+    double host_bytes = 0.0;  // their bytes
     std::vector<int> z;
     std::vector<TileList> lists;
     DeviceBufferGuard whole_pos, ref_pos, disp2;  // [n, 3] this call's and the build's positions; one 64-bit word
@@ -4714,7 +4727,8 @@ static void release_tiled_state(LoupHandle* h) {
 }  // extern "C++"
 
 // Sets the workspace up as `t`'s domain, builds its list and keeps a copy of it in `out`.
-static int build_tile_list(LoupHandle* h, const TileDomain& t, const double* positions, TileList& out) {
+static int build_tile_list(LoupHandle* h, const TileDomain& t, const double* positions, TileList& out,
+                           bool host_lists) {
     if (reshape_domain(h, t.n_local, t.n_ghost(), t.z.data()) != 0) return -1;
     if (upload_positions(h, t.place.data(), t.box) < 0) return -1;
     if (rebuild_neighbors(h) != 0) return -1;
@@ -4729,12 +4743,32 @@ static int build_tile_list(LoupHandle* h, const TileDomain& t, const double* pos
     };
     if (keep(out.species, h->d_species, (size_t)rows * sizeof(int)) ||
         keep(out.pos, h->d_pos64, (size_t)rows * 3 * sizeof(double)) ||
-        keep(out.row_ptr, h->d_row_ptr, (size_t)(N + 1) * sizeof(int)) ||
-        keep(out.senders, h->d_senders, (size_t)E * sizeof(int)) ||
-        keep(out.receivers, h->d_receivers, (size_t)E * sizeof(int)) ||
-        keep(out.pairs, h->d_pairs, (size_t)E * sizeof(int)) ||
-        keep(out.shift, h->d_shift_cart, (size_t)E * 3 * sizeof(double)))
+        keep(out.row_ptr, h->d_row_ptr, (size_t)(N + 1) * sizeof(int)))
         return -1;
+    if (host_lists) {
+        // shifts first (8-byte aligned), then the three index arrays
+        const size_t e = (size_t)E;
+        CUDA_CHECK(cudaHostAlloc(&out.host_edges.p, std::max<size_t>(e * 36, 1), cudaHostAllocMapped));
+        void* dev = nullptr;
+        CUDA_CHECK(cudaHostGetDevicePointer(&dev, out.host_edges.p, 0));
+        char* hp = static_cast<char*>(out.host_edges.p);
+        char* dp = static_cast<char*>(dev);
+        out.h_shift = reinterpret_cast<double*>(dp);
+        out.h_senders = reinterpret_cast<int*>(dp + e * 24);
+        out.h_receivers = reinterpret_cast<int*>(dp + e * 28);
+        out.h_pairs = reinterpret_cast<int*>(dp + e * 32);
+        if (E) {
+            CUDA_CHECK(cudaMemcpyAsync(hp, h->d_shift_cart, e * 24, cudaMemcpyDeviceToHost, h->stream));
+            CUDA_CHECK(cudaMemcpyAsync(hp + e * 24, h->d_senders, e * 4, cudaMemcpyDeviceToHost, h->stream));
+            CUDA_CHECK(cudaMemcpyAsync(hp + e * 28, h->d_receivers, e * 4, cudaMemcpyDeviceToHost, h->stream));
+            CUDA_CHECK(cudaMemcpyAsync(hp + e * 32, h->d_pairs, e * 4, cudaMemcpyDeviceToHost, h->stream));
+        }
+    } else if (keep(out.senders, h->d_senders, (size_t)E * sizeof(int)) ||
+               keep(out.receivers, h->d_receivers, (size_t)E * sizeof(int)) ||
+               keep(out.pairs, h->d_pairs, (size_t)E * sizeof(int)) ||
+               keep(out.shift, h->d_shift_cart, (size_t)E * 3 * sizeof(double))) {
+        return -1;
+    }
     std::vector<int> map(rows);
     std::vector<double> offset((size_t)rows * 3);
     for (int dst = 0; dst < rows; ++dst) {
@@ -4809,10 +4843,11 @@ static int restore_tile_list(LoupHandle* h, const TileList& t) {
     h->d_species = static_cast<int*>(t.species.p);
     h->d_pos64 = static_cast<double*>(t.pos.p);
     h->d_row_ptr = static_cast<int*>(t.row_ptr.p);
-    h->d_senders = static_cast<int*>(t.senders.p);
-    h->d_receivers = static_cast<int*>(t.receivers.p);
-    h->d_pairs = static_cast<int*>(t.pairs.p);
-    h->d_shift_cart = static_cast<double*>(t.shift.p);
+    const bool host = t.host_edges.p != nullptr;  // O31: only the active-edge compaction reads these
+    h->d_senders = host ? t.h_senders : static_cast<int*>(t.senders.p);
+    h->d_receivers = host ? t.h_receivers : static_cast<int*>(t.receivers.p);
+    h->d_pairs = host ? t.h_pairs : static_cast<int*>(t.pairs.p);
+    h->d_shift_cart = host ? t.h_shift : static_cast<double*>(t.shift.p);
     h->E_skin = t.E;
     h->nl_valid = true;
     h->forces_current = false;
@@ -4932,11 +4967,12 @@ static int plan_execution_impl(LoupHandle* h, int n_atoms, const int* atomic_num
     bool wave_forced = false;
     const bool wave = wave_try(h, n_atoms, &wave_forced);
     const double ghost0 = (double)widest_rows - c0;
-    auto tiled_at = [&](double c, double& global, double& ws) -> int {
+    auto tiled_at = [&](double c, bool host, double& global, double& ws) -> int {
         c = std::min(c, n);
         const double rows = c + ghost0 * std::pow(c / c0, 2.0 / 3.0), T = std::ceil(n / c);
         ws = row_b * rows + edge_b * edge_cap(c * epl) + fixed_b + adj_per_row * rows;
-        double kept = 32.0 * (n + T * (rows - c)) + 4.0 * (n + T) + 36.0 * n * epl;
+        // with host lists (O31) the edges' 36 B leave the device
+        double kept = 32.0 * (n + T * (rows - c)) + 4.0 * (n + T) + (host ? 0.0 : 36.0 * n * epl);
         double layer_rows = n;
         if (wave) {
             int64_t pool = -1;
@@ -4955,20 +4991,52 @@ static int plan_execution_impl(LoupHandle* h, int n_atoms, const int* atomic_num
         return 0;
     };
     static const int kCaps[] = {65536, 49152, 32768, 24576, 16384, 12288, 8192, 6144, 4096};
+    // O31 (S5-T07): the lists' edge arrays go to pinned host memory only when no cap fits with them on the device,
+    // and only within half of the host memory available now (MemAvailable); LOUP_TILE_HOST_LISTS=1|0 forces it.
+    const double host_need = 36.0 * n * epl * 1.1;
+    double host_avail = 0.0;
+    {
+        FILE* f = std::fopen("/proc/meminfo", "r");
+        char line[256];
+        while (f && std::fgets(line, sizeof(line), f)) {
+            long long kb = 0;
+            if (std::sscanf(line, "MemAvailable: %lld kB", &kb) == 1) { host_avail = (double)kb * 1024.0; break; }
+        }
+        if (f) std::fclose(f);
+        if (host_avail <= 0.0) host_avail = (double)sysconf(_SC_AVPHYS_PAGES) * (double)sysconf(_SC_PAGESIZE);
+    }
+    int host_force = -1;
+    if (const char* e = std::getenv("LOUP_TILE_HOST_LISTS")) host_force = std::atoi(e) != 0 ? 1 : 0;
+    const bool host_ok = host_force == 1 || (host_force < 0 && host_need <= 0.5 * host_avail);
     int cap = 0;
+    bool host = host_force == 1;
     double global = 0.0, ws = 0.0;
+    auto fits = [&](double c) {  // the tile's own list stays within the edge limit, with 10% for its densest region
+        return global + ws <= allowed && std::min(c, n) * epl * 1.1 <= (double)h->edge_limit;
+    };
     if (h->exec_receivers > 0) {
         cap = h->exec_receivers;
-        if (tiled_at(cap, global, ws) != 0) return -1;
+        if (tiled_at(cap, host, global, ws) != 0) return -1;
+        if (!host && !fits(cap) && host_ok && host_force != 0) {
+            host = true;
+            if (tiled_at(cap, host, global, ws) != 0) return -1;
+        }
     } else {
-        for (int c : kCaps) {
-            if (tiled_at(c, global, ws) != 0) return -1;
-            if (global + ws <= allowed && std::min((double)c, n) * epl * 1.1 <= (double)h->edge_limit) {
-                cap = c;  // the tile's own list stays within the edge limit, with 10% for its densest region
-                break;
+        for (int pass = host ? 1 : 0; pass < 2 && cap == 0; ++pass) {
+            if (pass == 1 && !(host_ok && host_force != 0)) break;
+            host = pass == 1;
+            for (int c : kCaps) {
+                if (tiled_at(c, host, global, ws) != 0) return -1;
+                if (fits(c)) {
+                    cap = c;
+                    break;
+                }
             }
         }
     }
+    h->tile_host_lists = (cap > 0 && host) ? 1 : 0;
+    plan.host_lists = h->tile_host_lists;
+    plan.host_bytes = h->tile_host_lists ? (size_t)host_need : 0;
     plan.whole_bytes = (size_t)whole;
     plan.tiled_global_bytes = (size_t)global;
     plan.tile_workspace_bytes = (size_t)ws;
@@ -4978,9 +5046,12 @@ static int plan_execution_impl(LoupHandle* h, int n_atoms, const int* atomic_num
     plan.mode = (h->exec_mode == LOUP_EXEC_AUTO && whole_fits) ? LOUP_EXEC_WHOLE : LOUP_EXEC_TILED;
     if (plan.mode == LOUP_EXEC_TILED && cap == 0) {
         loup::set_error("%d atoms do not fit the device even in tiles of %d receivers: %.2f GiB of state and "
-                        "%.2f GiB of workspace against %.2f GiB allowed (%.0f%% of %.2f GiB); the tiled state in "
-                        "host memory is plan task S5-T07", n_atoms, kMinReceivers, global / 1073741824.0,
-                        ws / 1073741824.0, allowed / 1073741824.0, 100.0 * h->exec_fraction, budget / 1073741824.0);
+                        "%.2f GiB of workspace against %.2f GiB allowed (%.0f%% of %.2f GiB)%s", n_atoms, kMinReceivers,
+                        global / 1073741824.0, ws / 1073741824.0, allowed / 1073741824.0, 100.0 * h->exec_fraction,
+                        budget / 1073741824.0,
+                        host ? ", with the tile lists' edges in host memory"
+                             : (host_force == 0 ? "; host lists are off (LOUP_TILE_HOST_LISTS=0)"
+                                                : "; the tile lists' edges would not fit in half of the free host memory"));
         return -1;
     }
     *out = plan;
@@ -5150,22 +5221,31 @@ static int evaluate_tiled_impl(LoupHandle* h, int n_atoms, const int* atomic_num
             all.place.clear(); all.place.shrink_to_fit();
         }
         tick("candidate builds");
-        // Every tile's list, built once and kept on the device with the rest of the state
+        // Every tile's list, built once and kept with the rest of the state: on the device, or (O31, the plan's
+        // choice when the lists do not fit; LOUP_TILE_HOST_LISTS=1|0 forces it) its edge arrays in host memory
+        bool host_lists = h->tile_host_lists != 0;
+        if (const char* e = std::getenv("LOUP_TILE_HOST_LISTS")) host_lists = std::atoi(e) != 0;
         st = h->tiled_state = new TiledState();
+        st->host_lists = host_lists;
         st->lists = std::vector<TileList>((size_t)T);
         int max_edges = 0;
         for (int64_t k = 0; k < T; ++k) {
             TileList& tl = st->lists[(size_t)k];
-            if (build_tile_list(h, tiles[(size_t)k], positions, tl) != 0) { release_tiled_state(h); return -1; }
+            if (build_tile_list(h, tiles[(size_t)k], positions, tl, host_lists) != 0) {
+                release_tiled_state(h);
+                return -1;
+            }
             max_edges = std::max(max_edges, tl.E);
-            st->bytes += (double)tl.rows * (4 + 24 + 4 + 24) + (double)(tl.n_local + 1) * 4 + (double)tl.E * 36;
+            st->bytes += (double)tl.rows * (4 + 24 + 4 + 24) + (double)(tl.n_local + 1) * 4;
+            if (host_lists) st->host_bytes += (double)tl.E * 36;
+            else st->bytes += (double)tl.E * 36;
         }
         if (max_edges > h->E_cap) {
             release_tiled_state(h);
             loup::set_error("internal error: a kept tile list outgrew the edge capacity");
             return -1;
         }
-        tick("kept list builds");
+        tick(host_lists ? "kept list builds (host edges)" : "kept list builds");
         st->n = n_atoms; st->receivers = receivers; st->T = T; st->skin = skin;
         st->max_rows = max_rows; st->max_edges = max_edges;
         if (wave) {
@@ -5468,7 +5548,7 @@ static int evaluate_tiled_impl(LoupHandle* h, int n_atoms, const int* atomic_num
     if (note_free() != 0) return -1;
     h->last_exec = LoupExecution{wave ? LOUP_EXEC_WAVEFRONT : LOUP_EXEC_TILED, receivers, (long long)T, (size_t)budget,
                                  (size_t)std::max(0.0, budget - (double)least_free), keep ? 1 : 0,
-                                 h->tile_list_builds};
+                                 h->tile_list_builds, st->host_lists ? 1 : 0};
     {
         double e = 0.0;
         CUDA_CHECK(cudaMemcpyAsync(&e, h->d_energy_f64, sizeof(double), cudaMemcpyDeviceToHost, h->stream));

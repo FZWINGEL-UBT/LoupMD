@@ -103,7 +103,9 @@ def _plan_lines(metadata) -> list:
     if memory and plan.get("execution") == "tiled" and memory.get("tiled_global_bytes") is not None:
         lines.append(f"memory: the whole system would need {_bytes(memory['whole_bytes'])}; tiled "
                      f"{_bytes(memory['tiled_global_bytes'] + memory['tile_workspace_bytes'])} planned, "
-                     f"{_bytes(memory['free_bytes'])} free on the card")
+                     f"{_bytes(memory['free_bytes'])} free on the card"
+                     + (f"; the tile lists' edges in host memory ({_bytes(memory['host_bytes'])})"
+                        if memory.get("host_bytes") else ""))
     elif memory:
         lines.append(f"memory: {_bytes(memory['whole_bytes'])} planned, {_bytes(memory['free_bytes'])} "
                      "free on the card")

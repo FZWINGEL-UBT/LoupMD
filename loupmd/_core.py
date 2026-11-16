@@ -138,6 +138,8 @@ class LoupMemoryPlan(ctypes.Structure):
         ("free_bytes", ctypes.c_size_t),
         ("receivers", ctypes.c_int),
         ("mode", ctypes.c_int),
+        ("host_lists", ctypes.c_int),
+        ("host_bytes", ctypes.c_size_t),
     ]
 
 
@@ -151,6 +153,8 @@ class MemoryPlan:
     free_bytes: int
     receivers: int
     mode: int               # LOUP_EXEC_WHOLE: fits whole; LOUP_EXEC_TILED: needs the capacity mode
+    host_lists: bool = False  # the tiled plan keeps the tile lists' edges in pinned host memory (O31)
+    host_bytes: int = 0       # the pinned host memory that takes
 
 
 class LoupExecution(ctypes.Structure):
@@ -162,6 +166,7 @@ class LoupExecution(ctypes.Structure):
         ("peak_bytes", ctypes.c_size_t),
         ("lists_kept", ctypes.c_int),
         ("list_builds", ctypes.c_longlong),
+        ("host_lists", ctypes.c_int),
     ]
 
 
@@ -176,6 +181,7 @@ class Execution:
     peak_bytes: int         # the call's device peak: budget less the least memory free during the call
     lists_kept: bool = False  # the call kept the previous call's tile lists (no atom moved skin/2 since they were built)
     list_builds: int = 0      # tiled calls of this engine that built their tile lists
+    host_lists: bool = False  # the call read its tile lists' edges from pinned host memory (O31)
 
 
 def integrator(kind: int, dt_fs: float = 1.0, **fields) -> LoupIntegrator:
@@ -548,7 +554,7 @@ class LoupEngine:
         self._check(lib.loup_plan_execution(self._h, n, z.ctypes.data_as(_c_int_p), _ptr(pos), _ptr(cel),
                                             float(skin), ctypes.byref(raw)), "loup_plan_execution")
         return MemoryPlan(raw.whole_bytes, raw.tiled_global_bytes, raw.tile_workspace_bytes, raw.free_bytes,
-                          raw.receivers, raw.mode)
+                          raw.receivers, raw.mode, bool(raw.host_lists), raw.host_bytes)
 
     def last_execution(self) -> Execution:
         """``loup_get_execution``: the cap, tiles and device memory of the last tiled call."""
@@ -557,7 +563,7 @@ class LoupEngine:
         raw = LoupExecution()
         self._check(lib.loup_get_execution(self._h, ctypes.byref(raw)), "loup_get_execution")
         return Execution(raw.mode, raw.receivers, raw.tiles, raw.budget_bytes, raw.peak_bytes, bool(raw.lists_kept),
-                         raw.list_builds)
+                         raw.list_builds, bool(raw.host_lists))
 
     def evaluate_energy(self, positions, cell) -> float:
         """The energy alone, from a pass without gradients (``LOUP_EVAL_ENERGY_ONLY``). The forces on the device
@@ -726,7 +732,7 @@ class LoupEngine:
         self._check(self._lib.loup_plan_memory(self._h, int(n_atoms), float(edges_per_atom), ctypes.byref(raw)),
                     "loup_plan_memory")
         return MemoryPlan(raw.whole_bytes, raw.tiled_global_bytes, raw.tile_workspace_bytes, raw.free_bytes,
-                          raw.receivers, raw.mode)
+                          raw.receivers, raw.mode, bool(raw.host_lists), raw.host_bytes)
 
     def export_state(self) -> bytes:
         """Positions, velocities, cell, step counter and displacement tracker as one versioned block of bytes."""

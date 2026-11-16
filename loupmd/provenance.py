@@ -71,7 +71,8 @@ def _plan(sim):
     if found is not None and found.whole_bytes > 0:      # 0: the bundle cannot tile, nothing was measured
         plan["memory"] = {"whole_bytes": int(found.whole_bytes), "free_bytes": int(found.free_bytes),
                           "tiled_global_bytes": int(found.tiled_global_bytes),
-                          "tile_workspace_bytes": int(found.tile_workspace_bytes)}
+                          "tile_workspace_bytes": int(found.tile_workspace_bytes),
+                          "host_bytes": int(getattr(found, "host_bytes", 0) or 0)}
     try:
         from . import _core
 

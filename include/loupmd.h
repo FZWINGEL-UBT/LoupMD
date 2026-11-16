@@ -320,6 +320,8 @@ typedef struct {
     int receivers;               // receiver cap of the tiled mode; 0 until it is built
     int mode;                    // LOUP_EXEC_WHOLE if the whole-system call fits with 10% headroom once the current
                                  // system is released, else LOUP_EXEC_TILED (the size needs the capacity mode)
+    int host_lists;              // 1: the tiled plan keeps the tiles' edge lists in pinned host memory (O31, S5-T07)
+    size_t host_bytes;           // the pinned host memory that plan takes; 0 without host lists
 } LoupMemoryPlan;
 // Not counted: MACE-POLAR-1's long-range buffers, captured graphs and cuBLAS's own allocations.
 int loup_plan_memory(LoupHandle* h, int n_atoms, double edges_per_atom, LoupMemoryPlan* out);
@@ -332,7 +334,11 @@ int loup_plan_memory(LoupHandle* h, int n_atoms, double edges_per_atom, LoupMemo
 // buffers measured per row and per edge; whole_bytes is then the whole-system call's estimate, and receivers the
 // largest cap of 4,096, 6,144, 8,192, ... 65,536 whose workspace and whole-system state (tiled_global_bytes,
 // tile_workspace_bytes) fit, or the cap set. mode: WHOLE when asked, when the bundle cannot tile, or (AUTO) when
-// the whole-system call fits; else TILED. A system that does not fit at 4,096 receivers is refused. The handle
+// the whole-system call fits; else TILED. When no cap fits with the tile lists on the device, the plan moves the
+// lists' edge arrays (36 B per edge) to pinned host memory (host_lists, host_bytes; at most half of the available
+// host memory), which the active-edge compaction reads over the bus once per tile and call (PLAN.md O31); the
+// environment variable LOUP_TILE_HOST_LISTS=1|0 forces that on or off (tests). A system that does not fit at
+// 4,096 receivers either way is refused. The handle
 // afterwards holds the probe tile: call loup_set_system before other calls.
 // The wavefront (S5-T08; two-layer models): the tiled call runs its three sweeps in loup_wavefront_schedule's order
 // and keeps the layer outputs and their gradients in a row pool instead of whole-system arrays. LOUP_EXEC_WAVEFRONT
@@ -353,6 +359,7 @@ typedef struct {
     size_t peak_bytes;
     int lists_kept;          // 1: the call kept the tile lists of an earlier call and refreshed their positions
     long long list_builds;   // tiled calls of this handle that built their tile lists
+    int host_lists;          // 1: the call's tile edge lists were in pinned host memory (read over the bus)
 } LoupExecution;
 int loup_set_execution(LoupHandle* h, int mode, int receivers, double memory_fraction);
 int loup_plan_execution(LoupHandle* h, int n_atoms, const int* atomic_numbers, const double* positions,
