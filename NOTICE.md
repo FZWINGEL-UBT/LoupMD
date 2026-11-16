@@ -137,7 +137,16 @@ The wheel ships `libloupmd.so` and depends on NVIDIA's CUDA run-time libraries t
 (cuBLAS, cuBLASLt, the CUDA runtime and, for the split dispersion sum, cuFFT, which the library opens with
 `dlopen`). They are installed by pip under NVIDIA's licence and are not part of LoupMD's distribution.
 
-## Not yet in this file
+## Licences of the run-time dependencies
 
-The Materials Project structures, if their terms allow shipping them, and the `pip-licenses` listing of the
-run-time dependencies (S7-T03: `pip-licenses` is not installed in the build environment).
+`docs/validation/dependency-licences.md` lists every distribution `pip install loupmd` brings in, with its version
+and licence as its metadata states it, written by `tools/release/dependency_licences.py` (the listing `pip-licenses`
+gives, from installed metadata; `--extra export` adds the export extra). In short: ASE is LGPL-2.1-or-later and
+NumPy, SciPy and matplotlib's dependencies are permissive (BSD, MIT, PSF, Apache-2.0, MIT-CMU); the NVIDIA wheels
+(`nvidia-cuda-runtime`, `nvidia-cublas`, `nvidia-cufft`, `nvidia-cuda-nvrtc`, `nvidia-nvjitlink`) are under NVIDIA's
+proprietary licence, and the `cuda-toolkit` meta-package states none. None of them is copied into the wheel.
+
+## Not in the package
+
+The Materials Project structures of the benchmark set stay out of the package (decisions O11 and O25):
+`LOUPMD_BENCH_STRUCTURES` names a folder that holds them.
