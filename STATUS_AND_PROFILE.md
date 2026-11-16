@@ -1439,3 +1439,51 @@ Reading: under D73's literal contract the plain sum is its own bound and is alwa
 plain sum unless the split sum is also faster. The split sum's accuracy (30 to 2,500 times closer in energy) does
 not count. To make accuracy count, the rule could be "the most accurate candidate within 1.5 times the fastest",
 which would pick split 25 on every row above. That changes the contract, so it is left to the owner.
+
+### 6.33 D3 tuning: float32 partial sums on the force path (16 November 2026)
+
+RTX 5060 Ti only. The D3 force kernels added each pair's contributions straight into float64: three force
+components, six virial components and dE/dCN (`pair_kernel`), nine in the chain rule (`cn_force_kernel`), and ten
+per triangle in `atm_kernel`. That is 10 float64 adds and 10 float-to-double conversions per pair, and this card
+runs float64 at 1/64 of float32's rate. The forces path therefore took about six times the energy-only path.
+
+The change: each lane sums these in float32 and adds the partial sums to the float64 totals every 32 pairs or
+triangles (`D3_FLUSH`). The coordination-number kernel already did this with 64 terms. The energy itself stays
+float64 per pair, so the energy-only path gives the same energy: a first version that also summed the energy in
+float32 put the two paths 1.3e-9 to 2.2e-9 apart, above the tests' 1e-9 relative bound. This is float32
+arithmetic, within PLAN section 2.
+
+Time per captured evaluation (forces and stress; minimum of three runs of 20 replays; A B B A in separate
+processes, both orders agree within 1%):
+
+| System | d3bj before -> after | split 25 before -> after | d3bj-atm (three-body to 20 bohr) before -> after |
+| --- | ---: | ---: | ---: |
+| NbCl5 3x3x3 (1,944) | 2.56 -> 1.36 ms | 4.46 -> 3.67 ms | 7.59 -> 5.80 ms |
+| SrTiO3 10x10x10 (5,000) | 8.51 -> 3.67 ms | 13.16 -> 10.06 ms | 76.0 -> 54.9 ms |
+| water 216 2x2x2 (5,184) | 10.08 -> 4.43 ms | 10.28 -> 6.75 ms | 103.1 -> 73.4 ms |
+
+The libraries: `libloupmd_d3h.so` (before) to `libloupmd_d3j.so` (pair and chain-rule kernels,
+c357289d34c8a705) to `libloupmd_d3k.so` (also `atm_kernel`, 7d1efc7fa71e94f7). The d3bj-atm "before" column is
+d3j: the three-body step alone, since d3j already contains the pair change. Energy-only times are unchanged.
+
+Results against the previous library: energies equal to 1e-15 eV/atom, forces within 2.2e-8 eV/A, stress within
+1.3e-10 eV/A^3.
+
+MD step of MACE-OMAT-0 medium (generic kernels) on SrTiO3, Langevin, median of 4 x 200 steps, A B B A:
+
+| System | model alone | with d3bj, d3h | with d3bj, d3j |
+| --- | ---: | ---: | ---: |
+| SrTiO3 6x6x6 (1,080) | 1.89 ms | 4.56 ms (x2.41) | 3.06 ms (x1.62) |
+| SrTiO3 10x10x10 (5,000) | 8.30 ms | 16.72 ms (x2.01) | 11.95 ms (x1.44) |
+
+Tests: `tests/gpu/test_d3.py` 52 passed on d3j and on d3k; the GPU suite (`-m "not acceptance"`) 353 passed on
+d3j (not rerun on d3k, which changes only `atm_kernel`, covered by test_d3.py). One test bound was loosened:
+the engine test's energy-only check compared two engines' model energies at 1e-6 eV/atom. The model total's
+float32 rounding reaches that (1.05e-6 seen once, with the D3 energies equal to 1e-16), and the forces-path check
+beside it already used 1e-5.
+
+What is left in the D3 step, from these numbers: the energy-only path (1.5 ms at 5,000 atoms) is the coordination
+numbers and the pair walk; the forces path adds the second 40 bohr walk of the chain rule (about 2 ms). The
+three-body term is dominated by forming C6_jk per triangle from the 5x5 reference table (status 6.29). Not tried:
+float32 partials in the split sum's mesh kernels, a fused CN-count and chain-rule pass, and per-chunk-pair C6 in
+the three-body loop.

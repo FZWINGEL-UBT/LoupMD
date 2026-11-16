@@ -201,7 +201,7 @@ def _parameters(damping, given):
 _D3BJ_FIELDS = dict(damping="bj", pair_cutoff_bohr=40.0, cn_cutoff_bohr=40.0, long_range="auto")
 PRESETS = {
     "d3bj": (dict(_D3BJ_FIELDS), "BJ, the model's functional, no three-body term; the pair sum by the fastest method "
-                                 "that meets the accuracy contract on the structure (today: the plain 40 bohr sum)"),
+                                 "that meets the accuracy contract on the structure, checked at setup"),
     "d3bj-mace": (dict(damping="bj", pair_cutoff_bohr=40.0, cn_cutoff_bohr=40.0, long_range="none"),
                   "BJ, the model's functional, the plain sum cut at 40 bohr for pairs and coordination numbers: the "
                   "numbers of mace_mp(dispersion=True) and FastMACE's d3bj"),

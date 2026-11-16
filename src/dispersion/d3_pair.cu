@@ -39,6 +39,9 @@ constexpr int MAXREF = kMaxRef;
 constexpr int WSTRIDE = 8;       // per-atom weight row: a float4 and one more
 constexpr int WPB = 4;           // warps per block in the walking kernels
 constexpr int MAXBINS = 64;      // per axis
+#ifndef D3_FLUSH
+#define D3_FLUSH 32              // pairs per lane summed in float32 before they go to the float64 totals
+#endif
 constexpr double BOHR = 0.529177210903;          // A
 constexpr double HARTREE = 27.211386245988;      // eV
 constexpr float K1 = 16.0f, K3 = 4.0f;
@@ -325,8 +328,22 @@ __global__ void __launch_bounds__(WPB * 32) pair_kernel(
     const Grid g = *gp;
     const int si = __float_as_int(ps[k].w);
     const float qi = s_q[si];
+    // Per lane: float32 partial sums of the forces, virial and dE/dCN, added to the float64 totals every D3_FLUSH
+    // pairs (float64 runs at a fraction of float32's rate on consumer GPUs; status 6.33). The energy is summed in
+    // float64 per pair, so that the energy-only path gives the same energy.
     double e = 0.0, fx = 0.0, fy = 0.0, fz = 0.0, dcn = 0.0;
     double v[6] = {0, 0, 0, 0, 0, 0};
+    float pfx = 0.0f, pfy = 0.0f, pfz = 0.0f, pdcn = 0.0f;
+    float pv[6] = {0, 0, 0, 0, 0, 0};
+    int cnt = 0;
+    auto flush = [&]() {
+        if (FORCES) {
+            fx += pfx; fy += pfy; fz += pfz; dcn += pdcn;
+            pfx = pfy = pfz = pdcn = 0.0f;
+            for (int c = 0; c < 6; ++c) { v[c] += pv[c]; pv[c] = 0.0f; }
+        }
+        cnt = 0;
+    };
     walk_rows(k, keys[k], ps, bin_start, g, p.cut2, lane, [&](int j, int sj, float dx, float dy, float dz, float r2) {
         const float4 w0 = *reinterpret_cast<const float4*>(w + WSTRIDE * (size_t)j);
         const float w4 = w[WSTRIDE * (size_t)j + 4];
@@ -355,19 +372,21 @@ __global__ void __launch_bounds__(WPB * 32) pair_kernel(
             const float* du = s_du + sj * MAXREF;
             const float dc6i = du[0] * w0.x + du[1] * w0.y + du[2] * w0.z + du[3] * w0.w + du[4] * w4;
             const float de_r = -c6 * (dG_r * sw + G * dsw_r);       // dE_ij/dr / r
-            fx += (double)(de_r * dx);
-            fy += (double)(de_r * dy);
-            fz += (double)(de_r * dz);
+            pfx += de_r * dx;
+            pfy += de_r * dy;
+            pfz += de_r * dz;
             const float h = 0.5f * de_r;
-            v[0] += (double)(h * dx * dx);
-            v[1] += (double)(h * dx * dy);
-            v[2] += (double)(h * dx * dz);
-            v[3] += (double)(h * dy * dy);
-            v[4] += (double)(h * dy * dz);
-            v[5] += (double)(h * dz * dz);
-            dcn += (double)(-dc6i * G * sw);      // dE_ij/dCN_i: the whole pair energy, i's share of both directions
+            pv[0] += h * dx * dx;
+            pv[1] += h * dx * dy;
+            pv[2] += h * dx * dz;
+            pv[3] += h * dy * dy;
+            pv[4] += h * dy * dz;
+            pv[5] += h * dz * dz;
+            pdcn += -dc6i * G * sw;      // dE_ij/dCN_i: the whole pair energy, i's share of both directions
         }
+        if (++cnt == D3_FLUSH) flush();
     });
+    flush();
     e = warp_sum(e);
     if (FORCES) {
         fx = warp_sum(fx); fy = warp_sum(fy); fz = warp_sum(fz); dcn = warp_sum(dcn);
@@ -400,6 +419,15 @@ __global__ void __launch_bounds__(WPB * 32) cn_force_kernel(
     const float di = (float)dedcn[k];
     double fx = 0.0, fy = 0.0, fz = 0.0;
     double v[6] = {0, 0, 0, 0, 0, 0};
+    float pfx = 0.0f, pfy = 0.0f, pfz = 0.0f;       // float32 partials, as in pair_kernel
+    float pv[6] = {0, 0, 0, 0, 0, 0};
+    int cnt = 0;
+    auto flush = [&]() {
+        fx += pfx; fy += pfy; fz += pfz;
+        pfx = pfy = pfz = 0.0f;
+        for (int c = 0; c < 6; ++c) { v[c] += pv[c]; pv[c] = 0.0f; }
+        cnt = 0;
+    };
     walk_rows(k, keys[k], ps, bin_start, g, cn_cut2, lane, [&](int j, int sj, float dx, float dy, float dz, float r2) {
         const float ir = rsqrtf(r2);
         const float rco = ri + rcov[sj];
@@ -407,17 +435,19 @@ __global__ void __launch_bounds__(WPB * 32) cn_force_kernel(
         const float den = 1.0f + ex;
         const float s = (di + (float)dedcn[j]) * (-K1 * rco * ir * ir * ex / (den * den)) * ir;
         if (s == 0.0f) return;
-        fx += (double)(s * dx);
-        fy += (double)(s * dy);
-        fz += (double)(s * dz);
+        pfx += s * dx;
+        pfy += s * dy;
+        pfz += s * dz;
         const float h = 0.5f * s;
-        v[0] += (double)(h * dx * dx);
-        v[1] += (double)(h * dx * dy);
-        v[2] += (double)(h * dx * dz);
-        v[3] += (double)(h * dy * dy);
-        v[4] += (double)(h * dy * dz);
-        v[5] += (double)(h * dz * dz);
+        pv[0] += h * dx * dx;
+        pv[1] += h * dx * dy;
+        pv[2] += h * dx * dz;
+        pv[3] += h * dy * dy;
+        pv[4] += h * dy * dz;
+        pv[5] += h * dz * dz;
+        if (++cnt == D3_FLUSH) flush();
     });
+    flush();
     fx = warp_sum(fx); fy = warp_sum(fy); fz = warp_sum(fz);
     for (int c = 0; c < 6; ++c) v[c] = warp_sum(v[c]);
     if (lane == 0) {
@@ -561,6 +591,15 @@ __global__ void __launch_bounds__(ATM_THREADS) atm_kernel(
     float* bufB = sm + ATM_FIELDS * ATM_CHUNK;
     double e = 0.0, fx = 0.0, fy = 0.0, fz = 0.0, dcn = 0.0;
     double v[6] = {0, 0, 0, 0, 0, 0};
+    float pfx = 0.0f, pfy = 0.0f, pfz = 0.0f, pdcn = 0.0f;   // float32 partials, as in pair_kernel; the energy
+    float pv[6] = {0, 0, 0, 0, 0, 0};                         // is summed in float64 per triangle
+    int cnt = 0;
+    auto flush = [&]() {
+        fx += pfx; fy += pfy; fz += pfz; dcn += pdcn;
+        pfx = pfy = pfz = pdcn = 0.0f;
+        for (int c = 0; c < 6; ++c) { v[c] += pv[c]; pv[c] = 0.0f; }
+        cnt = 0;
+    };
     for (int A = 0; A < chunks; ++A) {
         for (int B = A; B < chunks; ++B) {
             __syncthreads();
@@ -622,21 +661,23 @@ __global__ void __launch_bounds__(ATM_THREADS) atm_kernel(
                                                ang * dfR / (2.0f * ra) * sw + ang * f * dswa * swb * swc);
                         const float gb = c9 * ((0.375f * dPb * iR3 * iR * iR - hR / (2.0f * rb)) * f * sw +
                                                ang * dfR / (2.0f * rb) * sw + ang * f * swa * dswb * swc);
-                        fx += (double)(2.0f * (ga * pj.x + gb * pk.x));
-                        fy += (double)(2.0f * (ga * pj.y + gb * pk.y));
-                        fz += (double)(2.0f * (ga * pj.z + gb * pk.z));
-                        v[0] += (double)(ga * pj.x * pj.x + gb * pk.x * pk.x);
-                        v[1] += (double)(ga * pj.x * pj.y + gb * pk.x * pk.y);
-                        v[2] += (double)(ga * pj.x * pj.z + gb * pk.x * pk.z);
-                        v[3] += (double)(ga * pj.y * pj.y + gb * pk.y * pk.y);
-                        v[4] += (double)(ga * pj.y * pj.z + gb * pk.y * pk.z);
-                        v[5] += (double)(ga * pj.z * pj.z + gb * pk.z * pk.z);
-                        dcn += (double)(0.5f * E * (dc6ij / c6ij + Y[10 * ATM_CHUNK + b] / c6ik));
+                        pfx += 2.0f * (ga * pj.x + gb * pk.x);
+                        pfy += 2.0f * (ga * pj.y + gb * pk.y);
+                        pfz += 2.0f * (ga * pj.z + gb * pk.z);
+                        pv[0] += ga * pj.x * pj.x + gb * pk.x * pk.x;
+                        pv[1] += ga * pj.x * pj.y + gb * pk.x * pk.y;
+                        pv[2] += ga * pj.x * pj.z + gb * pk.x * pk.z;
+                        pv[3] += ga * pj.y * pj.y + gb * pk.y * pk.y;
+                        pv[4] += ga * pj.y * pj.z + gb * pk.y * pk.z;
+                        pv[5] += ga * pj.z * pj.z + gb * pk.z * pk.z;
+                        pdcn += 0.5f * E * (dc6ij / c6ij + Y[10 * ATM_CHUNK + b] / c6ik);
+                        if (++cnt == D3_FLUSH) flush();
                     }
                 }
             }
         }
     }
+    if (FORCES) flush();
     e = warp_sum(e);
     if (FORCES) {
         fx = warp_sum(fx); fy = warp_sum(fy); fz = warp_sum(fz); dcn = warp_sum(dcn);
