@@ -266,13 +266,19 @@ def emit_conv_fwd(lx, groups=(0, 1, 2), name=None):
 
     x_args = ", ".join(f"const float* __restrict__ x{l}" for l in range(lx + 1))
     m_args = ", ".join(f"float* __restrict__ mid{l}" for l in range(4))
+    # S99: zx{l} (nullable): the layer's x gradient rows of this receiver, zeroed here for the backward's atomics
+    # instead of in the pass's zero slab (the forward conv is L2-bound, its spare DRAM bandwidth absorbs the stores).
+    z_args = ", ".join(f"float* __restrict__ zx{l}" for l in range(lx + 1))
+    zero_rows = "\n".join(
+        f"    if (zx{l}) for (int i = ch; i < {2 * l + 1} * C; i += tpr) zx{l}[(int64_t)rcv * {2 * l + 1} * C + i] = 0.0f;"
+        for l in range(lx + 1))
     return f"""template <int R, bool PAIR, int MAX_T = (R == 1 ? 256 : 128 * R), bool PRELOC = false, int C_FIX = 0>
 __global__ void __launch_bounds__(MAX_T) {name}(
     int N, int C_arg, int S, int I, SplineGrid grid, int sh_perm, int pair_sym,
     const int* __restrict__ row_ptr, const int* __restrict__ senders, const float4* __restrict__ vec_len,
     const int* __restrict__ act_slab, const float2* __restrict__ act_t_sx,
     const int* __restrict__ species, const uint2* __restrict__ packed_table, const float4* __restrict__ density_table,
-    unsigned bias_shift, {x_args}, {m_args}, float* __restrict__ D) {{
+    unsigned bias_shift, {x_args}, {m_args}, float* __restrict__ D, {z_args}) {{
   const int C = C_FIX ? C_FIX : C_arg;
   constexpr int TILE = 32, ED = {ED};
   static_assert(R >= 1 && R <= 15, "bar.sync id limit");
@@ -283,6 +289,10 @@ __global__ void __launch_bounds__(MAX_T) {name}(
   const int half = R == 1 ? 0 : (threadIdx.x >> 7), ch = R == 1 ? threadIdx.x : (threadIdx.x & 127);
   const int rcv = blockIdx.x * R + half;
   if (rcv >= N) return;
+  {{  // S99: before the edge loop, so the zero targets are dead during it (no register pressure there)
+    const int tpr = R == 1 ? (int)blockDim.x : 128;
+{zero_rows}
+  }}
   int* s_snd = s_snd_all[half];
   float4* s_pw = s_pw_all[half];
   int64_t* s_tq = s_tq_all[half];
@@ -1043,75 +1053,83 @@ int conv_fwd_variants(int lx, int C) { return (lx == 1 && C == 128) ? 3 : 1; }
 void launch_conv_fwd(int lx, cudaStream_t st, int N, int C, int S, int I, const SplineGrid& sg, int perm, int psym,
                      const int* rp, const int* snd, const float4* vl, const int* act_slab, const float2* act_t_sx,
                      bool preloc, const int* sp, const uint2* packed, const float4* dens, unsigned bias_shift,
-                     float* const* x, float* const* mid, float* D, int var) {
+                     float* const* x, float* const* mid, float* D, int var, float* const* zx) {
+    // S99: zx (nullable) = the layer's x gradient rows, zeroed by the (first) forward kernel of each receiver
+    float* z0 = zx ? zx[0] : nullptr;
+    float* z1 = (zx && lx >= 1) ? zx[1] : nullptr;
+    float* z2 = (zx && lx >= 2) ? zx[2] : nullptr;
     if (lx == 0) {
         if (C == 128) {
             auto fn = preloc ? gconv_fwd_L0<1, true, 256, true, 128> : gconv_fwd_L0<1, true, 256, false, 128>;
             fn<<<N, 128, 0, st>>>(N, C, S, I, sg, perm, psym, rp, snd, vl, act_slab, act_t_sx, sp, packed, dens,
-                                  bias_shift, x[0], mid[0], mid[1], mid[2], mid[3], D);
+                                  bias_shift, x[0], mid[0], mid[1], mid[2], mid[3], D, z0);
         } else if (C <= 256) {
             auto fn = preloc ? gconv_fwd_L0<1, false, 256, true> : gconv_fwd_L0<1, false, 256, false>;
             fn<<<N, C, 0, st>>>(N, C, S, I, sg, perm, psym, rp, snd, vl, act_slab, act_t_sx, sp, packed, dens,
-                                bias_shift, x[0], mid[0], mid[1], mid[2], mid[3], D);
+                                bias_shift, x[0], mid[0], mid[1], mid[2], mid[3], D, z0);
         } else {
             auto fn = preloc ? gconv_fwd_L0<1, false, 512, true> : gconv_fwd_L0<1, false, 512, false>;
             fn<<<N, C, 0, st>>>(N, C, S, I, sg, perm, psym, rp, snd, vl, act_slab, act_t_sx, sp, packed, dens,
-                                bias_shift, x[0], mid[0], mid[1], mid[2], mid[3], D);
+                                bias_shift, x[0], mid[0], mid[1], mid[2], mid[3], D, z0);
         }
     } else if (lx == 1) {
         if (C == 128) {
             if (var == 2) {
                 auto fn = preloc ? gconv_fwd_L1<5, false, 640, true, 128> : gconv_fwd_L1<5, false, 640, false, 128>;
                 fn<<<(N + 4) / 5, 640, 0, st>>>(N, C, S, I, sg, perm, psym, rp, snd, vl, act_slab, act_t_sx, sp, packed,
-                                                dens, bias_shift, x[0], x[1], mid[0], mid[1], mid[2], mid[3], D);
+                                                dens, bias_shift, x[0], x[1], mid[0], mid[1], mid[2], mid[3], D, z0, z1);
             } else {
                 auto fn = var == 1 ? (preloc ? gconv_fwd_L1<1, false, 256, true, 128> : gconv_fwd_L1<1, false, 256, false, 128>)
                                    : (preloc ? gconv_fwd_L1<1, true, 256, true, 128> : gconv_fwd_L1<1, true, 256, false, 128>);
                 fn<<<N, 128, 0, st>>>(N, C, S, I, sg, perm, psym, rp, snd, vl, act_slab, act_t_sx, sp, packed, dens,
-                                      bias_shift, x[0], x[1], mid[0], mid[1], mid[2], mid[3], D);
+                                      bias_shift, x[0], x[1], mid[0], mid[1], mid[2], mid[3], D, z0, z1);
             }
         } else if (C == 256) {
             auto fn = preloc ? gconv_fwd_L1<1, false, 256, true, 256> : gconv_fwd_L1<1, false, 256, false, 256>;
             fn<<<N, 256, 0, st>>>(N, C, S, I, sg, perm, psym, rp, snd, vl, act_slab, act_t_sx, sp, packed, dens,
-                                  bias_shift, x[0], x[1], mid[0], mid[1], mid[2], mid[3], D);
+                                  bias_shift, x[0], x[1], mid[0], mid[1], mid[2], mid[3], D, z0, z1);
         } else if (C <= 256) {
             auto fn = preloc ? gconv_fwd_L1<1, false, 256, true> : gconv_fwd_L1<1, false, 256, false>;
             fn<<<N, C, 0, st>>>(N, C, S, I, sg, perm, psym, rp, snd, vl, act_slab, act_t_sx, sp, packed, dens,
-                                bias_shift, x[0], x[1], mid[0], mid[1], mid[2], mid[3], D);
+                                bias_shift, x[0], x[1], mid[0], mid[1], mid[2], mid[3], D, z0, z1);
         } else {
             auto fn = preloc ? gconv_fwd_L1<1, false, 512, true> : gconv_fwd_L1<1, false, 512, false>;
             fn<<<N, C, 0, st>>>(N, C, S, I, sg, perm, psym, rp, snd, vl, act_slab, act_t_sx, sp, packed, dens,
-                                bias_shift, x[0], x[1], mid[0], mid[1], mid[2], mid[3], D);
+                                bias_shift, x[0], x[1], mid[0], mid[1], mid[2], mid[3], D, z0, z1);
         }
     } else {
         if (C == 128) {
             auto fa = preloc ? gconv_fwd_L2a<1, true, 128, true, 128> : gconv_fwd_L2a<1, true, 128, false, 128>;
             auto fb = preloc ? gconv_fwd_L2b<1, true, 128, true, 128> : gconv_fwd_L2b<1, true, 128, false, 128>;
             fa<<<N, 128, 0, st>>>(N, C, S, I, sg, perm, psym, rp, snd, vl, act_slab, act_t_sx, sp, packed, dens,
-                                  bias_shift, x[0], x[1], x[2], mid[0], mid[1], mid[2], mid[3], D);
+                                  bias_shift, x[0], x[1], x[2], mid[0], mid[1], mid[2], mid[3], D, z0, z1, z2);
             fb<<<N, 128, 0, st>>>(N, C, S, I, sg, perm, psym, rp, snd, vl, act_slab, act_t_sx, sp, packed, nullptr,
-                                  bias_shift, x[0], x[1], x[2], mid[0], mid[1], mid[2], mid[3], D);
+                                  bias_shift, x[0], x[1], x[2], mid[0], mid[1], mid[2], mid[3], D, nullptr, nullptr,
+                                  nullptr);
         } else if (C == 224) {
             auto fa = preloc ? gconv_fwd_L2a<1, true, 256, true, 224> : gconv_fwd_L2a<1, true, 256, false, 224>;
             auto fb = preloc ? gconv_fwd_L2b<1, true, 256, true, 224> : gconv_fwd_L2b<1, true, 256, false, 224>;
             fa<<<N, 224, 0, st>>>(N, C, S, I, sg, perm, psym, rp, snd, vl, act_slab, act_t_sx, sp, packed, dens,
-                                  bias_shift, x[0], x[1], x[2], mid[0], mid[1], mid[2], mid[3], D);
+                                  bias_shift, x[0], x[1], x[2], mid[0], mid[1], mid[2], mid[3], D, z0, z1, z2);
             fb<<<N, 224, 0, st>>>(N, C, S, I, sg, perm, psym, rp, snd, vl, act_slab, act_t_sx, sp, packed, nullptr,
-                                  bias_shift, x[0], x[1], x[2], mid[0], mid[1], mid[2], mid[3], D);
+                                  bias_shift, x[0], x[1], x[2], mid[0], mid[1], mid[2], mid[3], D, nullptr, nullptr,
+                                  nullptr);
         } else if (C <= 256) {
             auto fa = preloc ? gconv_fwd_L2a<1, true, 256, true> : gconv_fwd_L2a<1, true, 256, false>;
             auto fb = preloc ? gconv_fwd_L2b<1, true, 256, true> : gconv_fwd_L2b<1, true, 256, false>;
             fa<<<N, C, 0, st>>>(N, C, S, I, sg, perm, psym, rp, snd, vl, act_slab, act_t_sx, sp, packed, dens,
-                                bias_shift, x[0], x[1], x[2], mid[0], mid[1], mid[2], mid[3], D);
+                                bias_shift, x[0], x[1], x[2], mid[0], mid[1], mid[2], mid[3], D, z0, z1, z2);
             fb<<<N, C, 0, st>>>(N, C, S, I, sg, perm, psym, rp, snd, vl, act_slab, act_t_sx, sp, packed, nullptr,
-                                bias_shift, x[0], x[1], x[2], mid[0], mid[1], mid[2], mid[3], D);
+                                bias_shift, x[0], x[1], x[2], mid[0], mid[1], mid[2], mid[3], D, nullptr, nullptr,
+                                nullptr);
         } else {
             auto fa = preloc ? gconv_fwd_L2a<1, false, 512, true> : gconv_fwd_L2a<1, false, 512, false>;
             auto fb = preloc ? gconv_fwd_L2b<1, false, 512, true> : gconv_fwd_L2b<1, false, 512, false>;
             fa<<<N, C, 0, st>>>(N, C, S, I, sg, perm, psym, rp, snd, vl, act_slab, act_t_sx, sp, packed, dens,
-                                bias_shift, x[0], x[1], x[2], mid[0], mid[1], mid[2], mid[3], D);
+                                bias_shift, x[0], x[1], x[2], mid[0], mid[1], mid[2], mid[3], D, z0, z1, z2);
             fb<<<N, C, 0, st>>>(N, C, S, I, sg, perm, psym, rp, snd, vl, act_slab, act_t_sx, sp, packed, nullptr,
-                                bias_shift, x[0], x[1], x[2], mid[0], mid[1], mid[2], mid[3], D);
+                                bias_shift, x[0], x[1], x[2], mid[0], mid[1], mid[2], mid[3], D, nullptr, nullptr,
+                                nullptr);
         }
     }
 }
@@ -1408,7 +1426,7 @@ def main():
         "void launch_conv_fwd(int lx, cudaStream_t st, int N, int C, int S, int I, const SplineGrid& sg, int perm, int psym,",
         "                     const int* rp, const int* snd, const float4* vl, const int* act_slab, const float2* act_t_sx,",
         "                     bool preloc, const int* sp, const uint2* packed, const float4* dens, unsigned bias_shift,",
-        "                     float* const* x, float* const* mid, float* D, int var = 0);",
+        "                     float* const* x, float* const* mid, float* D, int var = 0, float* const* zx = nullptr);",
         "int conv_fwd_variants(int lx, int C);",
         "void launch_conv_bwd(int lx, cudaStream_t st, int N, int C, int S, int I, const SplineGrid& sg, int perm, int psym,",
         "                     const int* rp, const int* snd, const float4* vl, const int* act_slab, const float2* act_t_sx,",

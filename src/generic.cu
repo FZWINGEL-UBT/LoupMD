@@ -1518,14 +1518,12 @@ void GenericModel::alloc_system(int N) {
     auto align256 = [](size_t b) { return (b + 255) & ~size_t(255); };
     // Pack every zero-initialized per-step gradient accumulator into one contiguous slab (1 cudaMemsetAsync/step).
     // S97: a folded linear readout (S73) assigns dy[0] in the forward, the pass's first write of it, so dy[0] is not
-    // one of them.
+    // one of them; S99: neither is a conv layer's dx, which its forward conv kernel zeroes per receiver.
     size_t zbytes = 0;
     for (int t = 0; t < n_layers_; ++t) {
         GenericLayer* L = layers_[t];
         if (!L->ro_folded && !(chain_fold_ && t < n_layers_ - 1))
             for (int l = 0; l <= L->lmax_out; ++l) zbytes += align256(n * dimL(l) * L->C_out * sizeof(float));
-        if (t > 0)
-            for (int l = 0; l <= L->lmax_x; ++l) zbytes += align256(n * dimL(l) * L->C_x * sizeof(float));
         if (L->kind >= 2) zbytes += align256(n * sizeof(float));
     }
     if (zbytes) {
@@ -1544,7 +1542,7 @@ void GenericModel::alloc_system(int N) {
         GenericLayer* L = layers_[t];
         for (int l = 0; l <= L->lmax_x; ++l) {
             L->x[l] = alloc(n * dimL(l) * L->C_x);
-            L->dx[l] = (t > 0) ? zalloc(n * dimL(l) * L->C_x) : nullptr;
+            L->dx[l] = (t > 0) ? alloc(n * dimL(l) * L->C_x) : nullptr;
         }
         if (L->first_hidden)
             for (int l = 0; l < 4; ++l) L->S0[l] = alloc(n * dimL(l) * (size_t)L->K0);
@@ -1721,7 +1719,7 @@ void GenericModel::record(const GenericPassInputs& in) {
                                 ? conv_var_override_ : L->fwd_var;
             launch_conv_fwd(L->lmax_x, st, N, Cx, S, L->intervals, L->grid, sh_perm_, L->pair_sym, in.act_row_ptr,
                             in.act_senders, in.act_vec_len, in.act_slab, in.act_t_sx, L->last_preloc, in.species,
-                            L->packed_table, L->density_table, L->cubic_bias_shift, L->x, L->mid, L->D, var);
+                            L->packed_table, L->density_table, L->cubic_bias_shift, L->x, L->mid, L->D, var, L->dx);
             if (L->skip_folded) {
                 fork();
                 for (int l = 0; l < 4; ++l)
