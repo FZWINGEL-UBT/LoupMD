@@ -168,7 +168,30 @@ Phases are mapped by hand from the kernel lists in `prof/`; times in µs per cal
 - **Same instruction count, different bytes.** Both libraries execute about the same instructions per convolution. symmetrix reads more L2 bytes per edge: 2.3× (float32) or 1.75× (mixed) in the forward, 1.95× or 1.5× in the backward. That is its 16-byte or 12-byte table entries against LoupMD's 8-byte packed ones, and each implementation's time follows its bytes.
 - **symmetrix streams L2 faster per byte:** about 8% faster in the forward and 11–15% in the backward, even with 25% warps active in its backward.
   - This is the one measurable gap in LoupMD's convolutions.
-  - The S103 ncu numbers put LoupMD's convolutions at about 82% of L2 peak; that would put symmetrix's forward near 88% [inference: same peak assumed].
+  - The S103 ncu numbers put LoupMD's convolutions at about 82% of L2 peak; that would put symmetrix's forward near 88% [inference: same peak assumed]. Round 3 measured it directly.
+
+## Round 3: L2 throughput and stall reasons (`scripts/job_ncu_full.sh`)
+
+ncu sections (speed of light, warp states, scheduler) for the layer-1 convolutions of one `evaluate()` call, 5,000 atoms. Stalls are in warps per issued instruction.
+
+| Kernel | L2 throughput (% of peak) | Warps active | Issue per scheduler cycle | Long scoreboard | `lg_throttle` | Not selected | Dispatch |
+|---|---|---|---|---|---|---|---|
+| LoupMD `spline_forward_inter1<1, true>` | 85.1 | 41% | 0.55 | 4.26 | 0.03 | 1.11 | 0.39 |
+| LoupMD generic `gconv_fwd_L1<1, true, ...>` | 78.4 | 33% | 0.52 | 3.45 | 0.03 | 0.87 | 0.40 |
+| symmetrix `k_Phi1` float32 | 87.8 | 41% | 0.26 | 4.44 | 5.63 | 1.74 | 0.51 |
+| LoupMD `wprime_backward_inter1_rcv` | 82.7 | 64% | 0.75 | 1.73 | 0.01 | 3.81 | 1.39 |
+| LoupMD generic `gconv_bwd_L1` | 82.1 | 63% | 0.76 | 1.43 | 0.01 | 3.88 | 1.36 |
+| symmetrix `k_Phi1_reverse` float32 | 89.2 | 25% | 0.45 | 2.19 | 0.27 | 0.71 | 0.31 |
+
+- **symmetrix is memory-bound:** its forward fills the load queue (`lg_throttle` 5.6).
+- **LoupMD is latency- or issue-bound with half the bytes:**
+  - forward: long scoreboard, no `lg_throttle`;
+  - backward: issue 75%, many warps ready but not selected.
+- **MD uses different forward variants.** After tuning, MD runs the five-receiver `R5` variant. It shares table slabs in L1 (43% hits) at only 67-73% of L2 peak and is 15% faster than the `<1, true>` variant above.
+- **Two forward prefetch attempts were measured and reverted:**
+  - L1 prefetch of the next edge: +2.6% / +3.1% per MD step.
+  - Register prefetch one edge ahead: a tie in MD.
+- Details, the backward's stall sampling and the reasons are in `OPTIMISATION_LEDGER.md` `s107-l2-match`.
 
 ## Rerun
 
@@ -179,6 +202,7 @@ bash scripts/job_extract.sh SrTiO3           # ~/src/symmetrix-eval/json
 bash scripts/queue_all.sh                    # job_speed.sh, then job_gate.sh (which extracts NaCl and NbCl5)
 bash scripts/queue_apples.sh                 # round 2: equal-skin timing and nsys profiles
 bash scripts/queue_ncu.sh                    # round 2: ncu convolution kernels
+bash scripts/queue_ncu_full.sh               # round 3: ncu sections of the layer-1 convolutions
 ```
 
 ## Files
@@ -188,5 +212,6 @@ bash scripts/queue_ncu.sh                    # round 2: ncu convolution kernels
 - `apples_time.jsonl`, `apples_report.md`: round 2 timing and nsys tables (the report's automatic phase grouping is coarser than the table above).
 - `prof/`: nsys kernel summaries per implementation.
 - `ncu/`: ncu metrics per convolution kernel, and the edge count.
+- `ncu_full/`: round 3 ncu sections (`*.csv`) and raw metrics (`*_raw.csv`).
 - `logs/`: job output.
 - `scripts/`: build, extraction, timing, gate and profiling scripts.

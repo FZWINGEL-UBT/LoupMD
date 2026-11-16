@@ -1588,6 +1588,40 @@ POLAR-1 NaCl 3x3x3 (216) and POLAR-1-M `NbCl5` 3x3x3 (1,944).
 - Unpacked backward table, tested (S25) and rejected: a scratch `gconv_bwd_L0<..., F4>` reading a bias-folded `float4` copy (`c_k = r_k - 1.5 * 2^e`, so `w = c0 + s1 c1 + s2 c2 + s3 c3`, `dw = c1 + ds2 c2 + ds3 c3`; 64 registers, no stack) removed the decode but doubled the backward's table bytes. `nsys` kernel time per step, two runs each: `OMAT-0-S` `SrTiO3` 1232 / 1243 -> 1556 / 1546 us (`+25%`), `OFF23-S` water 612 / 628 -> 748 / 774 us (`+23%`); the extra L2 traffic costs more than the decode it removes. Forces matched the packed path to float32 rounding (`dF` 7.1e-6 / 5.2e-6 against a same-library run-to-run 9.4e-7 / 3.6e-6). The packed table stays for both directions.
 - Sources: this file.
 
+<a id="s107-l2-match"></a>
+#### s107-l2-match: matching symmetrix's L2 throughput in the layer-1 convs (no change adopted)
+- Stage: S107 (16 November 2026), 5060 Ti, OMAT-0 medium, SrTiO3 10x10x10 (5,000 atoms, 371,624 directed edges).
+- Comparison (`ncu`, `evaluate()` path, `results/symmetrix-main-20261116` rounds 2 / 3):
+  - **symmetrix main b907f04, `float32`:** `k_Phi1` at 87.8% of L2 peak, `k_Phi1_reverse` at 89.2%.
+  - **LoupMD:** `spline_forward_inter1<1, true>` 85.1%, `wprime_backward_inter1_rcv` 82.7%; generic `gconv_fwd_L1<1, true, 256, true, 128>` 78.4% (104 registers, 33% occupancy), `gconv_bwd_L1` 82.1%.
+  - **Instructions are equal per edge-channel** (~490): 411M against 382M in the forward, 735M against 717M in the backward. symmetrix reads 727 L2 sectors per edge in the forward against 313; it is memory-bound (`lg_throttle` 5.6, `mio_throttle` 3.2 warps per issue: the load queue is full).
+  - **LoupMD is latency- or issue-bound instead.** Forward: long scoreboard 4.3, `lg_throttle` 0.03, issue 0.55 per cycle. Backward: issue 0.75, not selected 3.8, dispatch 1.4.
+- MD-tuned kernels (`ncu` of `loup_profile_force` after 150 Langevin steps):
+  - **Forward is R5:** `spline_forward_inter1<5, false>` / `gconv_fwd_L1<5, false, 640, ...>`, 1.80 / 1.76 ms. L1 hit 43% / 38% from the slab sharing; L2 at only 67% / 73%; long scoreboard 2.49.
+  - **R5 beats R1p by 15%** (tuning 1,649 against 1,947 us), so the MD forward is not L2-bound.
+  - **Backward:** `wprime_backward_inter1_rcv` 81% of L2 peak, `gconv_bwd_L1` 83%.
+- Falsifier 1 (reverted): L1 prefetch of the next unit in both forward kernels.
+  - What: at the top of each unit, `prefetch.global.L1` of the next unit's 10 slab rows and 4 sender rows.
+  - Tuning R5 1,649 -> 2,004 us (default), generic R5 1,617 -> 1,949 us.
+  - ABBA SrTiO3 default 8.21 -> 8.42 ms (`+2.6%`), generic 7.98 -> 8.23 ms (`+3.1%`).
+  - Cause: the prefetched lines evict the slabs R5's five receivers share in L1.
+- Falsifier 2 (reverted): register prefetch one edge ahead in the unpaired variants with `R <= 4`.
+  - What: the next edge's slab row and sender rows were loaded before the current edge's math (`gen_kernels.py`, switch `LOUP_GEN_FWD_PF`).
+  - Registers: R4 unpaired 96 -> 128 (still one 512-thread block per SM).
+  - Forced R4 in MD 1,937 -> 1,868 us (`-3.6%`); tuning R4 1,683 -> 1,667 us.
+  - R5 cannot hold the extra registers (640 threads x 96 = 61k of 64k), still wins at 1,633-1,636 us and stays the pick.
+  - ABBA default SrTiO3 8.163 -> 8.155 ms, NbCl5 1.810 -> 1.826 ms: ties.
+- Backward stall sampling (`ncu` source counters, MD-tuned rcv `w'`):
+  - Samples: not selected 36%, long scoreboard 19%, dispatch 13%, selected 10%.
+  - Long scoreboard: 6% on the first use of each channel's first table entry, 3% on the per-edge metadata.
+  - Dispatch: spread over FFMA / LOP3 / SHF, no hotspot.
+  - Executed instructions: FFMA 49%, FMUL 15%; the decode (LOP3 / SHF / IADD) is 19%.
+  - Consequence: the backward reaches higher L2 throughput only with fewer instructions per edge-channel. More loads in flight cannot raise it.
+- Not built:
+  - cp.async staging of R5's slab rows. 60 KB of shared memory forces the 100 KB carveout, leaving 28 KB of L1 and losing the slab sharing that makes R5 faster than R1p.
+  - A register cap for the generic R1 / R1p forward (104 registers against the specialised kernel's 96). These variants run only in `evaluate()` before tuning, and in systems where they win.
+- Sources: this file; `results/symmetrix-main-20261116` (README rounds 2 and 3, `ncu/`, `ncu_full/`).
+
 <a id="s26-fwd-pair-c96"></a>
 #### s26-fwd-pair-c96: paired-edge forward with `C_FIX` for `C = 96 / 224` (rejected)
 - Stage: S26 (14 November 2026), 5060 Ti.

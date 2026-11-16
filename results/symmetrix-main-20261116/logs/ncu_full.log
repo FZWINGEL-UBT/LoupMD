@@ -1,0 +1,25 @@
+local_gpu: reserved /home/fzwin/.fastmace-local-gpu for 'loupmd dev: ncu sections, layer-1 conv kernels, LoupMD vs symmetrix (SrTiO3 5,000)' (pid 169147)
+==PROF== Connected to process 171791 (/home/fzwin/.local/share/uv/python/cpython-3.10.12-linux-x86_64-gnu/bin/python3.10)
+==PROF== Profiling "spline_forward_inter1": 0%....50%....100% - 35 passes
+==PROF== Profiling "wprime_backward_inter1_rcv": 0%....50%....100% - 35 passes
+profiled 1 force calls (loup, skin 0.5, 5000 atoms)
+==PROF== Disconnected from process 171791
+==PROF== Report: /home/fzwin/src/symmetrix-eval/scratch/ncufull_loup.ncu-rep
+==PROF== Connected to process 171946 (/home/fzwin/.local/share/uv/python/cpython-3.10.12-linux-x86_64-gnu/bin/python3.10)
+==PROF== Profiling "gconv_fwd_L1": 0%....50%....100% - 35 passes
+==PROF== Profiling "gconv_bwd_L1": 0%....50%....100% - 35 passes
+profiled 1 force calls (loup-generic, skin 0.5, 5000 atoms)
+==PROF== Disconnected from process 171946
+==PROF== Report: /home/fzwin/src/symmetrix-eval/scratch/ncufull_loup-generic.ncu-rep
+==PROF== Connected to process 172096 (/home/fzwin/.local/share/uv/python/cpython-3.10.12-linux-x86_64-gnu/bin/python3.10)
+==PROF== Profiling "k_Phi1": 0%....50%....100% - 35 passes
+==PROF== Profiling "k_Phi1_reverse": 0%....50%....100% - 35 passes
+profiled 1 force calls (sx, skin 0.5, 5000 atoms)
+==PROF== Disconnected from process 172096
+==PROF== Report: /home/fzwin/src/symmetrix-eval/scratch/ncufull_sx-f32.ncu-rep
+total 180
+drwxrwxrwx 1 fzwin fzwin  4096 Nov 16 20:15 .
+drwxrwxrwx 1 fzwin fzwin  4096 Nov 16 20:15 ..
+-rwxrwxrwx 1 fzwin fzwin 80986 Nov 16 20:15 loup-generic.csv
+-rwxrwxrwx 1 fzwin fzwin 52196 Nov 16 20:15 loup.csv
+-rwxrwxrwx 1 fzwin fzwin 48222 Nov 16  2026 sx-f32.csv
