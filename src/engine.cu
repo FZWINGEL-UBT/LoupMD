@@ -168,18 +168,21 @@ static uint64_t fnv1a_file(const char* path) {
 // Tensor-core GEMM cubin (GEMM autotune candidates). Two formats: the shipped FastMACE builds (cubins/tf32x3_hyb_*,
 // fm_tf32x3_info: tiles 64x64, 32x64, 64x32, beta 0 only) and LoupMD's own (cubins/src/gemm_tc.cu,
 // loup_gemm_tc_info: math, beta support and up to kMaxTiles tiles; through LOUP_HYBRID_CUBIN for now). Tiles 0-2 are
-// the same shapes in both, so a stored plan's tile index means the same kernel shape.
+// the same shapes in both, so a stored plan's tile index means the same kernel shape. Own format 1 passes beta at run
+// time to every entry; format 2 fixes it at 0 in the plain entries (tiles 0-2 SASS-identical to the FastMACE ones)
+// and adds loup_gemm_tc_{rrb,rcb}_<t> for beta != 0.
 struct HybCubin {
     static constexpr int kMaxTiles = 8;
     bool loaded = false;
-    bool own_format = false;  // loup_gemm_tc_info: entries take beta
+    bool own_format = false;  // loup_gemm_tc_info
     bool beta_ok = false;     // C = A B + beta C may use it
     int ntiles = 0;
     uint64_t cubin_hash = 0;  // the loaded cubin file's FNV-1a hash (keys the GEMM plan cache)
     std::string path_loaded;  // for diagnostics (the cubin's math: its build, see cubins/src)
     void* lib = nullptr;
     CUmodule mod = nullptr;
-    CUfunction fn[kMaxTiles][2] = {};  // [tile][transB ? 1 : 0]
+    CUfunction fn[kMaxTiles][2] = {};   // [tile][transB ? 1 : 0]: C = A B (format 1: any beta)
+    CUfunction fnb[kMaxTiles][2] = {};  // beta != 0 (format 1: the fn entries)
     int threads[kMaxTiles] = {};
     int smem[kMaxTiles][2] = {};
     int tile_m[kMaxTiles] = {};
@@ -242,7 +245,10 @@ struct HybCubin {
         CUdeviceptr gptr = 0; size_t gsz = 0;
         if (p_cuModuleGetGlobal(&gptr, &gsz, mod, "loup_gemm_tc_info") == CUDA_SUCCESS && gsz >= 4 * sizeof(int)) {
             std::vector<int> info(gsz / sizeof(int));
-            if (p_cuMemcpyDtoH(info.data(), gptr, gsz) != CUDA_SUCCESS || info[0] != 1) { destroy(); return; }
+            if (p_cuMemcpyDtoH(info.data(), gptr, gsz) != CUDA_SUCCESS || (info[0] != 1 && info[0] != 2)) {
+                destroy();
+                return;
+            }
             own_format = true;
             beta_ok = info[2] != 0;
             ntiles = info[3];
@@ -254,6 +260,11 @@ struct HybCubin {
                     char name[48];
                     snprintf(name, sizeof(name), "loup_gemm_tc_%s_%d", b ? "rc" : "rr", t);
                     if (p_cuModuleGetFunction(&fn[t][b], mod, name) != CUDA_SUCCESS) { destroy(); return; }
+                    fnb[t][b] = fn[t][b];
+                    if (beta_ok && info[0] == 2) {
+                        snprintf(name, sizeof(name), "loup_gemm_tc_%s_%d", b ? "rcb" : "rrb", t);
+                        if (p_cuModuleGetFunction(&fnb[t][b], mod, name) != CUDA_SUCCESS) { destroy(); return; }
+                    }
                 }
             }
         } else {
@@ -279,7 +290,8 @@ struct HybCubin {
         for (int t = 0; t < ntiles; ++t)
             for (int b = 0; b < 2; ++b)
                 if (smem[t][b] > 48 * 1024)
-                    p_cuFuncSetAttribute(fn[t][b], CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES, smem[t][b]);
+                    for (CUfunction f : {fn[t][b], fnb[t][b]})
+                        if (f) p_cuFuncSetAttribute(f, CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES, smem[t][b]);
         loaded = true;
     }
 
@@ -296,7 +308,7 @@ struct HybCubin {
         unsigned gx = (unsigned)((M + tile_m[tile] - 1) / tile_m[tile]);
         unsigned gy = (unsigned)((N + tile_n[tile] - 1) / tile_n[tile]);
         CUresult rc = p_cuLaunchKernel(
-            fn[tile][transB ? 1 : 0], gx, gy, 1,
+            (beta != 0.0f ? fnb : fn)[tile][transB ? 1 : 0], gx, gy, 1,
             (unsigned)threads[tile], 1, 1, (unsigned)smem[tile][transB ? 1 : 0],
             (CUstream)stream, args, nullptr);  // the legacy entries take the first 9 arguments only
         if (rc != CUDA_SUCCESS) throw std::runtime_error("cuLaunchKernel hybrid failed");
@@ -349,9 +361,17 @@ struct LoupHandle {
     int device_id = 0;
     int l2_bytes = 0;
     bool is_sm120 = false;
-    // The own-SGEMM extensions measured on the 5060 Ti (sgemm64 / sgemm32 + split-K candidates, the narrow-N rules,
-    // N-fastest rasterisation and the N = 96 kernel of sgemm128): on for sm_120; LOUP_OWN_EXT=0|1 forces them (tests).
+    // The own-SGEMM extensions (sgemm64 / sgemm32 + split-K candidates, the narrow-N rules, N-fastest rasterisation and
+    // the N = 96 kernel of sgemm128): on for sm_120 (5060 Ti). Faster on small cells of compute capability 8.0 too
+    // (A100, S70: MH-1 NaCl216 0.954, POLAR-1-M NaCl216 0.932, large ones tie), off there until its gates pass;
+    // LOUP_OWN_EXT=0|1 forces them (tests).
     bool own_ext = false;
+    // The lane-group neighbour count / fill kernels: on for sm_120; faster on compute capability 8.0 too (A100, S70:
+    // OFF23-M water216 0.891, water 0.976), off there until its gates pass; LOUP_NB_GROUPS=0|1 forces them (tests).
+    bool nb_groups_ok = false;
+    // LOUP_FORCE_TC=1 (tests): every GEMM the tensor-core cubin can take runs its fastest cubin tile (no cuBLASLt or own
+    // SGEMM candidates), so gates cover the cubin's arithmetic on every eligible shape; no plans are loaded or saved.
+    bool force_tc = false;
     cudaStream_t stream = nullptr;
     cublasHandle_t cublas = nullptr;
     cublasLtHandle_t cublas_lt = nullptr;
@@ -404,6 +424,7 @@ struct LoupHandle {
     std::map<std::tuple<int, int, int, bool, bool>, DiskPlan> disk_plans;
     bool disk_dirty = false;
     void load_disk_plans(int device_id) {
+        if (force_tc) return;  // forced picks must not reach (or come from) the plan cache
         const char* cdir = std::getenv("LOUP_CACHE_DIR");
         std::string dir;
         if (cdir && cdir[0]) dir = cdir;
@@ -855,7 +876,10 @@ static inline void sgemm_rm(
                     second_ms = std::min(second_ms, ms);
                     return false;
                 };
-                for (int r = 0; r < n_res; ++r) {
+                const bool tc_ok = alpha == 1.0f && h->hyb.takes(beta) && (K & 3) == 0 && (N & 3) == 0 &&
+                                   ((((uintptr_t)A | (uintptr_t)B | (uintptr_t)d_tmpC) & 15) == 0);
+                const bool only_tc = h->force_tc && tc_ok;
+                for (int r = 0; r < (only_tc ? 0 : n_res); ++r) {
                     cublasStatus_t st = cublasLtMatmul(
                         lt_h, plan.desc, &alpha, B, plan.layA, A, plan.layB, &beta,
                         d_tmpC, plan.layC, d_tmpC, plan.layC, &res[r].algo, ws_p, h->cublas_ws_bytes, strm);
@@ -867,14 +891,13 @@ static inline void sgemm_rm(
                     });
                     if (consider(ms)) { plan.algo = res[r].algo; plan.use_hyb = false; }
                 }
-                if (alpha == 1.0f && h->hyb.takes(beta) && (K & 3) == 0 && (N & 3) == 0 &&
-                    ((((uintptr_t)A | (uintptr_t)B | (uintptr_t)d_tmpC) & 15) == 0)) {
+                if (tc_ok) {
                     for (int t = 0; t < h->hyb.ntiles; ++t) {
                         const float ms = time_min([&] { h->hyb.launch(t, transB, M, N, K, A, lda, B, ldb, d_tmpC, ldc, beta, strm); });
                         if (consider(ms)) { plan.use_hyb = true; plan.hyb_tile = t; }
                     }
                 }
-                if (own_ok && (((uintptr_t)d_tmpC & 15) == 0)) {
+                if (!only_tc && own_ok && (((uintptr_t)d_tmpC & 15) == 0)) {
                     const float* Bkn = own_b();
                     const float ms128 = time_min([&] { loup::sgemm128(M, N, K, A, Bkn, d_tmpC, beta, h->own_ext, strm); });
                     if (consider(ms128)) { plan.own_mode = 1; plan.use_hyb = false; }
@@ -1085,7 +1108,7 @@ static int rebuild_neighbors(LoupHandle* h) {
     // one-thread-per-atom kernels (32-thread blocks), which the lane-group kernels were not measured against.
     const int nscan = (2 * rx + 1) * (2 * ry + 1) * (2 * rz + 1);
     const size_t nb_smem = (size_t)(128 / loup::kNeighborLanes) * nscan * sizeof(int);
-    const bool nb_groups = h->is_sm120 && nb_smem <= 48 * 1024;
+    const bool nb_groups = h->nb_groups_ok && nb_smem <= 48 * 1024;
     const int blkN = nb_groups ? 128 : 32;
     const int gridNb = (int)(((int64_t)N * (nb_groups ? loup::kNeighborLanes : 1) + blkN - 1) / blkN);
     loup::scatter_bins_kernel<<<gridN, blk, 0, h->stream>>>(
@@ -1649,6 +1672,9 @@ LoupHandle* loup_create(const char* loup_path, int device_id) {
             h->is_sm120 = (cc_maj == 12 && cc_min == 0);
             h->own_ext = h->is_sm120;
             if (const char* e = std::getenv("LOUP_OWN_EXT"); e && (e[0] == '0' || e[0] == '1')) h->own_ext = e[0] == '1';
+            h->nb_groups_ok = h->is_sm120;
+            if (const char* e = std::getenv("LOUP_NB_GROUPS"); e && (e[0] == '0' || e[0] == '1')) h->nb_groups_ok = e[0] == '1';
+            if (const char* e = std::getenv("LOUP_FORCE_TC"); e && e[0] == '1') h->force_tc = true;
         }
         CUDA_CHECK_THROW(cudaStreamCreate(&h->stream));
         CUBLAS_CHECK_THROW(cublasCreate(&h->cublas));
