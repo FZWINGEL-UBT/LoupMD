@@ -1339,6 +1339,7 @@ POLAR-1 NaCl 3x3x3 (216) and POLAR-1-M `NbCl5` 3x3x3 (1,944).
 - Status: DEFAULT.
 - Measured (b/a against the build before, which already had pol-sf-f32): OMAT-S 0.987, OFF23-M 0.961 / 0.990, MH-1 0.975, POLAR-1-S 0.918, POLAR-1-M 0.974 / 0.963 (NaCl / `NbCl5`), POLAR-1-L 0.914. Gates: all families PASS; 47 tests pass.
 - S80 falsifier (16 November 2026, 5060 Ti, reverted): `nsys` of OMAT-0 medium generic SrTiO3 shows the slab's memset (12.8 MB: layer 1's `dx` and the S73 energy-fold `dy[0]`) running alone for 21-33 us per step, plus `zero_edge_kernel` 9 us. Both moved to a forked side stream beside `gather_rows` / `first_fwd_kernel` (the first join comes before any reader): library ABBA on shared GEMM plans, 3 rounds, OMAT-0 generic SrTiO3 `1.000`, MP-0 medium SrTiO3 `1.001`, MH-1 SrTiO3 `1.001`, OFF23-M water216 `0.996`, OFF23-S water216 `1.005`: the overlapped writes cost the forward what they save.
+- S89 falsifier (16 November 2026, 5060 Ti, reverted): the same memset issued first in the engine's force pass, before the edge compaction (the specialised OMAT-0 path's 10.4 MB tail memset takes 9 us there against the generic slab's 35 us after the compaction). Library ABBA on shared GEMM plans, 3 rounds: OMAT-0 generic SrTiO3 `0.999`, MP-0 medium SrTiO3 `1.001`, MH-1 SrTiO3 `1.000`, OFF23-M water216 `1.002`, POLAR-1-M NaCl216 `0.996`: a tie, the zeroing cost moves to the kernels that follow.
 - Sources: this file (commit `1310ddc`).
 
 <a id="gen-cublas-stream"></a>
