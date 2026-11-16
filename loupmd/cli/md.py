@@ -60,6 +60,8 @@ def _arguments_parser(parser):
                                                                           "20; 0: none)")
     parser.add_argument("--restart-every", type=int, metavar="N", help="restart points every N steps (default 10000; "
                                                                        "0: only at the end)")
+    parser.add_argument("--dispersion", metavar="PRESET", help="a dispersion preset (`loupmd dispersion list`); "
+                                                               "checked, then refused until the D3 term is built")
 
 
 def _segments(text) -> list:
@@ -96,7 +98,7 @@ def arguments_of(args) -> dict:
         except ValueError:
             raise InputError(f"--skin {args.skin!r} is not a length in A or auto") from None
     for key in ("head", "checkpoint", "sha256", "charge", "spin_multiplicity", "temperature_K", "profile", "steps",
-                "seed", "pressure_GPa", "cell_mode"):
+                "seed", "pressure_GPa", "cell_mode", "dispersion"):
         if getattr(args, key) is not None:
             arguments[key] = getattr(args, key)
     for key, default in (("trusted", False), ("download", False), ("ensemble", "NVT"), ("timestep_fs", 0.5),

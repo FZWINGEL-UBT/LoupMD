@@ -12,6 +12,7 @@ from ..errors import LoupError
 from . import bench as _bench
 from . import build_kernels as _build_kernels
 from . import cache as _cache
+from . import dispersion as _dispersion
 from . import doctor as _doctor
 from . import md as _md
 from . import models as _models
@@ -19,7 +20,7 @@ from . import quench as _quench
 from . import relax as _relax
 from . import validate as _validate
 
-COMMANDS = (_doctor, _models, _cache, _bench, _validate, _build_kernels, _md, _relax, _quench)
+COMMANDS = (_doctor, _models, _cache, _bench, _validate, _build_kernels, _md, _relax, _quench, _dispersion)
 
 
 def build_parser() -> argparse.ArgumentParser:

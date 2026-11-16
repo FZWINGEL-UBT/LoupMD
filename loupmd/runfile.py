@@ -24,6 +24,7 @@ KEYS = {
     "pressure_GPa": 0.0, "cell_mode": "hydrostatic",
     "profile": None, "timestep_fs": 0.5, "steps": None, "repeat": [1, 1, 1], "seed": None,
     "initial_velocities": "keep", "check": "skip", "capacity": "auto", "device": 0, "skin": "auto", "mc": None,
+    "dispersion": None,
 }
 TABLES = ("output", "integrator", "schedule")
 _COMMENTS = {
@@ -31,6 +32,8 @@ _COMMENTS = {
     "model": "a label (`loupmd models`), a checkpoint path or a URL",
     "head": "the head of a multi-head model",
     "mc": "Monte Carlo moves: a list of tables with move = swap, transmute or displace and the move's fields",
+    "dispersion": 'a preset ("d3bj", "d3bj-mace", ...; `loupmd dispersion list`) or a table with the fields of '
+                  'lm.Dispersion',
     "checkpoint": "the file of a label, when it is not in LOUPMD_MODELS or the cache",
     "sha256": "the stated hash of a file that is not in the label table",
     "trusted": "load a file outside the label table without a hash",
@@ -63,6 +66,8 @@ def _value(value) -> str:
         return repr(value)
     if isinstance(value, (list, tuple)):
         return "[" + ", ".join(_value(v) for v in value) + "]"
+    if isinstance(value, dict):                   # an inline table; TOML has no null, so a None field is left out
+        return "{" + ", ".join(f"{k} = {_value(v)}" for k, v in value.items() if v is not None) + "}"
     return json.dumps(str(value))                 # a TOML basic string has JSON's escapes
 
 

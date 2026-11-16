@@ -24,7 +24,7 @@ def load(model, head=None, **options):
 _LAZY = {"ForceField": ("forcefield", "ForceField"), "Simulation": ("simulation", "Simulation"),
          "Output": ("config", "Output"), "integrators": ("integrators", None), "protocols": ("protocols", None),
          "md": ("quick", "md"), "RunResult": ("quick", "RunResult"), "optimize": ("optimize", None),
-         "mc": ("mc", None)}
+         "mc": ("mc", None), "Dispersion": ("dispersion", "Dispersion"), "dispersion": ("dispersion", None)}
 
 
 def __getattr__(name):
@@ -46,10 +46,11 @@ def calc(model, **options):
 
 
 __all__ = [
-    "BackendError", "CacheLocationError", "CapacityError", "CellDivergedError", "CheckpointTrustError", "EngineInfo",
+    "BackendError", "CacheLocationError", "CapacityError", "CellDivergedError", "CheckpointTrustError", "Dispersion",
+    "EngineInfo",
     "ForceField", "GateFailed", "GateUnavailable", "GpuInfo", "InputError", "LoupEngine", "LoupError", "LoupMDStats",
     "ModelElementError", "NonFiniteError", "Output", "PlanRefused", "RestartMismatch", "RunResult", "RuntimeInfo",
     "Simulation", "UnsupportedModel",
-    "__version__", "calc", "ensure_loup_bundle", "exporter_fingerprint", "last_error", "library_path",
+    "__version__", "calc", "dispersion", "ensure_loup_bundle", "exporter_fingerprint", "last_error", "library_path",
     "integrators", "library_version", "load", "mc", "md", "optimize", "protocols", "runtime_info",
 ]

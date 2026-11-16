@@ -15,7 +15,9 @@ loaded. What ``md`` decides itself:
 
 Arguments that select FastMACE internals (``mode``, ``allow_reference``, ``fallback``, ``runner``, ``engine``,
 ``neighbours``, ``calibrate``) are accepted at their defaults and refused by name otherwise. ``mc=`` takes
-``lm.mc`` moves (S6-T04); ``min_mc_temperature_K=`` and ``dispersion=`` are refused until they are built.
+``lm.mc`` moves (S6-T04); ``min_mc_temperature_K=`` is refused. ``dispersion=`` (a preset name or an
+``lm.Dispersion``) is checked against the model (``loupmd.dispersion.resolve``) and then refused until the D3 term
+is built (S6-D04).
 """
 from __future__ import annotations
 
@@ -180,9 +182,9 @@ def md(structure, *, model, head=None, charge=None, spin_multiplicity=None, sha2
     from . import mc as _mc
 
     moves = [] if mc is None else [_mc.from_record(m) for m in (mc if isinstance(mc, (list, tuple)) else [mc])]
-    if dispersion is not None:
-        raise PlanRefused("dispersion=: dispersion corrections are not in this version",
-                          next_step="Run without dispersion=, or use FastMACE's D3 (PLAN.md Stage 6D).")
+    from . import dispersion as _dispersion
+
+    dispersion = _dispersion.parse(dispersion)          # an unknown preset or a bad record: refused before loading
     if capacity not in CAPACITIES:
         raise InputError(f"capacity={capacity!r} is not one of {CAPACITIES}")
     repeat = _repeat(repeat)
@@ -316,6 +318,9 @@ def md(structure, *, model, head=None, charge=None, spin_multiplicity=None, sha2
     force_field = model if isinstance(model, ForceField) else load(
         model, head, checkpoint=checkpoint, sha256=sha256, trusted=trusted, download=download, charge=charge,
         spin_multiplicity=spin_multiplicity, device=device)
+    if dispersion is not None:
+        _dispersion.refuse_unbuilt(_dispersion.resolve(dispersion, functional=force_field.functional,
+                                                       family=force_field.family, model=force_field.name))
     if force_field.label is None:              # a file outside the table: its hash, so the record can load it again
         arguments.update(model=str(force_field.path), sha256=force_field.sha256)
     transmuted = sorted({z for m in moves if isinstance(m, _mc.Transmute) for z in m.species})

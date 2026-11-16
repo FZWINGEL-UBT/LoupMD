@@ -74,6 +74,7 @@ class ForceField:
         # MACE-POLAR-1: k-space electrostatics (no cell relaxation, no tiled execution).
         self.long_range = known is not None and known.model_type == "PolarMACE"
         self.functional = entry.functional if entry is not None else None
+        self.family = known.family if known is not None else None
         self.engine = None                 # the LoupEngine of the last structure
         self.last_bundle = None
         self.last_execution = None         # of the engine made last by new_engine: {"mode", "receivers", "plan"}
