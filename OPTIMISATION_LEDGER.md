@@ -1278,6 +1278,7 @@ Each entry has the same fields. Unless stated, the system is OMAT-0 medium on th
 #### comp-active-edge-tighten: active-edge compaction pass
 - Status: NOT BUILT.
 - What: `compute_and_count_active` (47 us) + `DeviceScan::ExclusiveSum` + `scatter_active_edges` (54 us) take ~101 us/step on 5060 Ti `SrTiO3`, writing and re-reading `d_tmp_vec_len`. Note single-pass decoupled look-back compaction (`edge-compaction-1pass`) was already rejected as an MD tie.
+- S102 falsifier (16 November 2026, 5060 Ti, reverted): one block of 1,024 threads scanning the offsets (one launch) instead of CUB's two kernels, for systems up to 64 Ki atoms, after S100 showed a single removed node worth 1.3% on OFF23-M water216. Library ABBA on shared plans, 3 rounds: OFF23-M water216 `0.994` (`0.995` / `0.993`), OFF23-S water216 `1.008` (`1.010` / `1.007`), MH-1 NaCl216 `1.002` (`1.004` / `1.000`), POLAR-1-S NaCl216 `1.001`: CUB's decoupled scan over many blocks beats one block even at 216-648 atoms; not kept.
 - Sources: `OMAT0_SPEEDUP_BRIEF.md`.
 
 ### Generic path
