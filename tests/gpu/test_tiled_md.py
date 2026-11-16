@@ -112,6 +112,35 @@ def test_a_tiled_simulation_follows_the_whole_systems_nve_trajectory(monkeypatch
 
 
 @pytest.mark.full
+def test_a_wavefront_simulation_follows_the_whole_systems_nve_trajectory(monkeypatch):
+    """S5-T08: lm.Simulation with capacity 'wavefront' on a rod (13 layers of tiles), without hybrids: 20 steps of
+    1 fs from 300 K stay with the whole-system device loop to float32 force rounding, and the wavefront ran."""
+    import loupmd
+    from loupmd import integrators
+
+    monkeypatch.setenv("LOUP_NO_HYBRID", "1")
+    at = srtio3(1).repeat((64, 6, 6))                 # 11,520 atoms
+    at.set_velocities(maxwell_velocities(at, 300.0, seed=7))
+    ff = loupmd.load(find_model("mace-omat-0-medium.model"), trusted=True)
+    nve = integrators.NVE(timestep_fs=1.0, fixcm=False)
+    sims = {}
+    for name, cap in (("whole", "whole"), ("wavefront", CapacityConfig(mode="wavefront", receivers=600))):
+        sim = loupmd.Simulation(at, ff, integrator=nve, seed=1, skin=SKIN, capacity=cap)
+        sim.run(steps=20)
+        sims[name] = (sim.execution["mode"], getattr(sim._engine, "wavefront", False),
+                      getattr(sim._engine, "tiles", 1), sim.atoms)
+        sim.close()
+        del sim
+        gc.collect()
+    (_, _, _, whole), (mode, ran, tiles, wave) = sims["whole"], sims["wavefront"]
+    dx = np.abs(wave.positions - whole.positions).max()
+    de = abs(wave.get_potential_energy() - whole.get_potential_energy()) / len(at)
+    print(f"wavefront Simulation vs whole, 20 NVE steps: {tiles} tiles, dx {dx:.2e} A, dE {de:.2e} eV/atom")
+    assert mode == "wavefront" and ran and tiles >= 13
+    assert dx <= 1e-5 and de <= 1e-6
+
+
+@pytest.mark.full
 def test_tiled_langevin_heats_toward_its_target():
     import loupmd
     from loupmd import integrators

@@ -40,9 +40,10 @@ def add_parser(sub):
     parser.add_argument("--specialised", action="store_true",
                         help="the kernels specialised to MACE-OMAT-0 medium instead of the generic ones every model "
                              "runs by default")
-    parser.add_argument("--capacity", choices=("whole", "tiled"), default="whole",
+    parser.add_argument("--capacity", choices=("whole", "tiled", "wavefront"), default="whole",
                         help="whole: one call per structure (default); tiled: tile by tile, about four tiles per "
-                             "structure, as large cells run (generic kernels)")
+                             "structure, as large cells run (generic kernels); wavefront: tiled in the wavefront "
+                             "order with the row pool (two-layer models)")
     parser.add_argument("--charge", type=int, help="total charge (models with a charge embedding)")
     parser.add_argument("--spin-multiplicity", type=int, help="2S + 1 (models with a spin embedding)")
     parser.add_argument("--device", type=int, default=0, metavar="N", help="the GPU index (default 0)")

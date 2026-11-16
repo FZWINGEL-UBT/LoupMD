@@ -180,6 +180,14 @@ class GateEngine:
         energy, forces, stress = self.evaluate(positions, cell)
         return energy, forces, stress, -(-len(numbers) // receivers)
 
+    def set_execution(self, mode, receivers, memory_fraction):
+        self.execution = (mode, receivers, memory_fraction)
+
+    def last_execution(self):
+        from loupmd import _core
+
+        return _core.Execution(getattr(self, "execution", (_core.LOUP_EXEC_TILED,))[0], 0, 4, 0, 0)
+
 
 @pytest.fixture
 def setup(tmp_path, monkeypatch, structures):
@@ -275,10 +283,21 @@ def test_the_tiled_gate_runs_every_configuration_tile_by_tile(setup, monkeypatch
     assert "capacity: tiled" in validate.format_gate(record)
 
 
+def test_the_wavefront_gate_asks_the_engine_for_the_wavefront(setup):
+    """S5-T08: --capacity wavefront runs the tiled call with LOUP_EXEC_WAVEFRONT set, and records the mode."""
+    from loupmd import _core
+
+    GateEngine.specialised = False
+    record = setup(capacity="wavefront")
+    assert record["passed"] is True and record["capacity"] == "wavefront"
+    assert all(engine.execution[0] == _core.LOUP_EXEC_WAVEFRONT for engine in GateEngine.made)
+    assert len([call for engine in GateEngine.made for call in engine.tiled]) == 6
+
+
 def test_the_tiled_gate_refuses_the_specialised_kernels(setup):
     with pytest.raises(PlanRefused, match="the tiled mode runs the generic kernels"):
         setup(capacity="tiled", generic=False)
-    with pytest.raises(PlanRefused, match="capacity must be 'whole' or 'tiled'"):
+    with pytest.raises(PlanRefused, match="capacity must be 'whole', 'tiled' or 'wavefront'"):
         setup(capacity="auto")
 
 

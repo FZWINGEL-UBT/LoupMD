@@ -106,7 +106,8 @@ def run_gate(model, *, head=None, checkpoint=None, sha256=None, trusted=False, d
 
     Refusals come first and in this order: checkpoint trust, the export extra (``GateUnavailable``), the
     structures. ``capacity="tiled"`` evaluates every configuration tile by tile, about four tiles per cell (plan
-    task S5-T04), on the generic kernels. ``reference(model_path, configs, head, device, charge, spin)``,
+    task S5-T04), on the generic kernels; ``capacity="wavefront"`` does so in the wavefront order with the row pool
+    (S5-T08; two-layer models). ``reference(model_path, configs, head, device, charge, spin)``,
     ``engine_factory``,
     ``ensure_bundle`` and ``bundle_meta`` replace MACE, the engine, the exporter and the bundle reader (tests).
     """
@@ -114,9 +115,9 @@ def run_gate(model, *, head=None, checkpoint=None, sha256=None, trusted=False, d
 
     from .. import __version__
 
-    if capacity not in ("whole", "tiled"):
-        raise PlanRefused(f"capacity must be 'whole' or 'tiled', got {capacity!r}")
-    tiled = capacity == "tiled"
+    if capacity not in ("whole", "tiled", "wavefront"):
+        raise PlanRefused(f"capacity must be 'whole', 'tiled' or 'wavefront', got {capacity!r}")
+    tiled, wavefront = capacity != "whole", capacity == "wavefront"
     if tiled and generic is False:
         raise PlanRefused("the tiled mode runs the generic kernels; the specialised ones have no per-layer sweeps",
                           next_step="Leave out --specialised, or gate the specialised kernels without --capacity.")
@@ -211,8 +212,14 @@ def run_gate(model, *, head=None, checkpoint=None, sha256=None, trusted=False, d
         engine = engines[key]
         if tiled:
             receivers = -(-len(at) // TILES_PER_CELL)
+            if wavefront:
+                from .. import _core
+
+                engine.set_execution(_core.LOUP_EXEC_WAVEFRONT, receivers, 0.9)
             result = engine.evaluate_tiled(at.get_atomic_numbers(), at.positions, at.cell.array, receivers,
                                            skin=0.5)[:3]
+            if wavefront and engine.last_execution().mode != _core.LOUP_EXEC_WAVEFRONT:
+                raise PlanRefused(f"{name}: the wavefront did not run on {len(at)} atoms in tiles of {receivers}")
         else:
             engine.set_system(at.get_atomic_numbers(), at.get_masses(), skin=0.5)
             result = engine.evaluate(at.positions, at.cell.array, compute_stress=True)

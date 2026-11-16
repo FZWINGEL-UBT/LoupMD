@@ -1165,3 +1165,23 @@ calls with kept lists (`.tmp_o/wave_time.py`).
 - Estimated from these, not built: CUDA graphs per bucket at most about 1 ms per tile (1.5% at 34 tiles of
   2.36 s); list builds without host round trips at most the 190 ms per rebuild, about 1% of a step at a rebuild
   every 20 steps.
+
+### 6.24 The wavefront under the accuracy gate and in MD (16 November 2026, 06:30)
+
+RTX 5060 Ti only; library `90a30122589e77bd`. PLAN.md S5-T08. `loupmd validate --model LABEL --capacity wavefront`
+(about four tiles per cell, `LOUP_EXEC_WAVEFRONT`; the gate refuses a call that did not run the wavefront), worst
+ratios energy, force, stress:
+
+| Label | Set | Wavefront | Tiled (§6.21) |
+|---|---|---|---|
+| omat0-medium | oxide | 0.68, 1.92, 1.37 | 0.57, 1.81, 1.23 |
+| omat0-small | oxide | 0.33, 1.31, 1.52 | 0.34, 1.31, 1.50 |
+| mp0-medium | oxide | 0.04, 0.69, 1.07 | 0.02, 0.60, 0.52 |
+| mpa0-medium | oxide | 0.36, 2.09, 2.16 | 0.33, 2.05, 2.23 |
+| matpes-pbe | crystals | 0.18, 1.05, 0.89 | 0.19, 1.04, 1.00 |
+| mh1-omat | crystals | 0.10, 0.86, 0.29 | 0.10, 0.88, 0.29 |
+| off23-medium | organic | 0.01, 0.35, 0.51 | 0.01, 0.33, 0.54 |
+
+All PASS. `tests/gpu/test_tiled_md.py::test_a_wavefront_simulation_follows_the_whole_systems_nve_trajectory`
+(`SrTiO3` 64x6x6, 11,520 atoms, 600 receivers, 26 tiles, no hybrids): after 20 NVE steps of 1 fs from 300 K,
+positions 3.8e-8 A and energy 6.9e-9 eV/atom from the whole-system device loop (the tiled engine: 3.5e-8 A).
