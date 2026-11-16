@@ -1174,6 +1174,8 @@ Each entry has the same fields. Unless stated, the system is OMAT-0 medium on th
   - Results at equal GEMM plans vs s106a: dE 3.7-4.0e-6 eV, max dF 0.9-1.0e-6 eV/A, max dS 2.1-6.0e-10, the run-to-run spread.
   - MD a-b-b-a vs S112: `NbCl5` 1.773 -> 1.772 ms (0.9993; +0.28% / -0.45%), `SrTiO3` 7.995 -> 7.977 ms (0.9978; -0.01% / -0.44%).
   - `tests/test_engine.py` 31 passed, also with `LOUP_M1_CHUNK=40` (the S112 chunks under NVE, Langevin and every MD rebuild mode); gate 42 / 42.
+  - Generic-path gates on the final build (HEAD `0cc8e33`, which shares these kernels): OMAT-0 small (oxide) 6 / 6, OFF23-S (organic) 8 / 8, POLAR-1-S (oxide) 6 / 6, MH-1 (oxide) 18 / 18.
+- Cumulative S110-S113 (final build vs the installed s106a): VRAM `SrTiO3` 5,000 atoms 658 -> 490 MiB (134.8 -> 100.4 KiB/atom), 40,000 atoms 3,632 -> 2,020 MiB (93.0 -> 51.7 KiB/atom); MD a-b-b-a `NbCl5` 1.773 -> 1.773 ms (0.9995), `SrTiO3` 8.002 -> 7.987 ms (0.9982, both orders faster); `pytest -q` 77 passed; OMAT-0 medium gate 42 / 42.
 - Status: DEFAULT (5060 Ti only).
 - Sources: this file.
 
