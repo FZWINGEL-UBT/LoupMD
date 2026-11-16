@@ -300,6 +300,7 @@ Conventions:
 | [d3-shell-every-k](#d3-shell-every-k) | Short part every step, the 20/25-40 bohr shell every k steps | - | prototype | REJECTED | S6-D02 | stale forces above the 40 bohr sum's error on all three systems even at k = 2 (ballistic estimate) | [bakeoff][d3bo] |
 | [d3-cn-cutoff](#d3-cn-cutoff) | Coordination-number cutoff 20-35 bohr with the 40 bohr pair sum | `cn_cutoff_bohr` | prototype | OPEN (D73) | S6-D02 | CN 30: -19 to -21%; passes on SrTiO3 and water, misses on NbCl5 pressure by 1.7e-6 GPa | [bakeoff][d3bo] |
 | [d3-pair-production](#d3-pair-production) | The bake-off's variant 1 in the library: device-side grid and reach, four dampings, switch, energy-only path | - | `src/dispersion/d3_pair.cu` | ADOPTED | S6-D04 | same speed as the prototype (2.51 / 8.48 / 9.87 ms vs 2.48 / 8.42 / 9.88); energy-only path 0.68 / 1.43 / 1.53 ms | [status 6.28](STATUS_AND_PROFILE.md) |
+| [d3-atm-first](#d3-atm-first) | Three-body ATM term: one block per atom, its neighbour list in shared memory in chunks, corner-owned forces without atomics | - | `src/dispersion/d3_pair.cu` | ADOPTED | S6-D08 | first version, nothing to compare with: d3bj-atm 12.3 / 102 / 133 ms against d3bj 2.5 / 8.5 / 9.8 ms | [status 6.29](STATUS_AND_PROFILE.md) |
 
 ## Chronology
 
@@ -2091,5 +2092,10 @@ production kernel is variant 1 with the grid computed on the device at each eval
 follows a changing cell; the timing is a captured graph of the whole evaluation (wrap, sort, three passes). It is
 no faster than the prototype and was not meant to be; the energy-only path skips the CN-force pass and the
 derivative work (4-6x cheaper), which helps Monte Carlo energy differences.
+
+<a id="d3-atm-first"></a>**d3-atm-first** (ADOPTED, S6-D08, 16 November 2026, 5060 Ti only). The only
+implementation of the three-body term, kept because it is correct (within 1e-7 eV/A of simple-dftd3), not because it
+is fast: at 20 bohr it costs 4 to 13 times the pair term. The open ideas are in status 6.29; each is to be measured
+against this version with the 3x rule before it replaces it.
 
 [d3bo]: docs/validation/dispersion-bakeoff.md

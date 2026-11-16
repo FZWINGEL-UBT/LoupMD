@@ -427,11 +427,15 @@ int loup_profile_force(LoupHandle* h, int warmup, int n_calls, double* out_total
 
 // ---- Dispersion: the real-space two-body D3 term on its own (S6-D04; src/dispersion/d3_pair.cu) --------------
 // Settings in bohr and hartree units as the literature gives them. damping: 0 BJ, 1 zero, 2 modified BJ, 3 modified
-// zero. smoothing_bohr: 0, or the width of a quintic switch that takes each pair energy to 0 at the pair cutoff.
+// zero. smoothing_bohr: 0, or the width of a quintic switch that takes each pair energy to 0 at the pair cutoff
+// (and each side of a three-body triangle to 0 at the three-body cutoff). three_body: nonzero adds the
+// Axilrod-Teller-Muto term (S6-D08) with s9 = 1 over triangles whose sides lie within three_body_cutoff_bohr.
 typedef struct {
     int damping;
     double s6, s8, a1, a2, rs6, rs8, alpha, beta;
     double pair_cutoff_bohr, cn_cutoff_bohr, smoothing_bohr;
+    int three_body;
+    double three_body_cutoff_bohr;
 } LoupD3Settings;
 // The reference tables, index = atomic number 0..94 (loupmd/data/d3_tables.npz): nref [95], cnref [95, 5], rcov
 // [95] (bohr, 4/3 included), r2r4 [95], c6ref [95, 95, 5, 5] (hartree bohr^6; < 0: no reference), r0ab [95, 95] (bohr).

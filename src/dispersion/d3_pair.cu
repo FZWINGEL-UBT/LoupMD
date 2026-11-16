@@ -391,6 +391,237 @@ __global__ void __launch_bounds__(WPB * 32) cn_force_kernel(
     }
 }
 
+// ---------------------------------------------------------------------------------------- three-body term (S6-D08)
+// Axilrod-Teller-Muto with simple-dftd3's convention for every damping: for each triangle of (atom, image) points
+// whose three sides lie within the three-body cutoff,
+//   E_ijk = s9 sqrt(C6_ij C6_ik C6_jk) (3 cos a cos b cos c + 1) / (r_ij r_ik r_jk)^3 f(R) S,
+//   f = 1 / (1 + 6 (R0 / R)^((alpha + 2) / 3)),  R = r_ij r_ik r_jk,  R0 = prod (4/3 R0ab) over the sides,
+// S the product of the switch of each side (the pair term's width, if any, at the three-body cutoff). One block per
+// atom i: its neighbours within the cutoff are listed in warp order into shared memory in chunks of ATM_CHUNK, and
+// the block runs over the pairs (j, k) of the list. Each triangle is seen from each of its corners; corner i keeps
+// E/3 and its share of the virial, and the force and dE/dCN_i in full, both of which only involve its own two sides.
+constexpr int ATM_THREADS = 128;
+constexpr int ATM_CHUNK = 384;
+constexpr int ATM_FIELDS = 12;          // per entry: dx dy dz species | w[5] | c6_ij dc6_ij/dCN_i r0_ij
+
+struct AtmParams {
+    float cut2, sw_on, sw_width, beta, s9;
+};
+
+// The warp-ordered list of the (atom, image) neighbours of sorted atom k within cut2: fn(slot, j, sj, dx, dy, dz)
+// for the entries with running index in [first, first + count); returns the total number.
+template <typename F>
+__device__ __forceinline__ int walk_list(int k, int home, const float4* __restrict__ ps,
+                                         const int* __restrict__ bin_start, const Grid& g, float cut2, int lane,
+                                         int first, int count, F&& fn) {
+    const float4 pi = ps[k];
+    const int nb0 = g.nb[0], nb1 = g.nb[1], nb2 = g.nb[2];
+    const int bz = home % nb2, by = (home / nb2) % nb1, bx = home / (nb1 * nb2);
+    int base = 0;
+    for (int ox = -g.reach[0]; ox <= g.reach[0]; ++ox) {
+        const int tx = bx + ox, ix = (tx % nb0 + nb0) % nb0, sx = (tx - ix) / nb0;
+        for (int oy = -g.reach[1]; oy <= g.reach[1]; ++oy) {
+            const int ty = by + oy, iy = (ty % nb1 + nb1) % nb1, sy = (ty - iy) / nb1;
+            int tz = bz - g.reach[2];
+            while (tz <= bz + g.reach[2]) {
+                const int iz = (tz % nb2 + nb2) % nb2, sz = (tz - iz) / nb2;
+                const int len = min(bz + g.reach[2] - tz, nb2 - 1 - iz) + 1;
+                const float shx = sx * g.cell[0] + sy * g.cell[3] + sz * g.cell[6];
+                const float shy = sx * g.cell[1] + sy * g.cell[4] + sz * g.cell[7];
+                const float shz = sx * g.cell[2] + sy * g.cell[5] + sz * g.cell[8];
+                const float ox_ = shx - pi.x, oy_ = shy - pi.y, oz_ = shz - pi.z;
+                const int b0 = (ix * nb1 + iy) * nb2 + iz;
+                const int lo = bin_start[b0], hi = bin_start[b0 + len];
+                const bool home_img = sx == 0 && sy == 0 && sz == 0;
+                for (int j0 = lo; j0 < hi; j0 += 32) {
+                    const int j = j0 + lane;
+                    bool ok = false;
+                    float dx = 0.0f, dy = 0.0f, dz = 0.0f;
+                    int sj = 0;
+                    if (j < hi && !(home_img && j == k)) {
+                        const float4 pj = ps[j];
+                        dx = pj.x + ox_; dy = pj.y + oy_; dz = pj.z + oz_;
+                        ok = dx * dx + dy * dy + dz * dz < cut2;
+                        sj = __float_as_int(pj.w);
+                    }
+                    const unsigned m = __ballot_sync(0xffffffffu, ok);
+                    const int idx = base + __popc(m & ((1u << lane) - 1u));
+                    if (ok && idx >= first && idx < first + count) fn(idx - first, j, sj, dx, dy, dz);
+                    base += __popc(m);
+                }
+                tz += len;
+            }
+        }
+    }
+    return base;
+}
+
+__device__ __forceinline__ void atm_switch(const AtmParams& p, float r2, float& s, float& ds_a) {
+    // s(r) and ds/d(r^2)
+    s = 1.0f;
+    ds_a = 0.0f;
+    if (p.sw_width > 0.0f) {
+        const float r = sqrtf(r2);
+        if (r > p.sw_on) {
+            const float x = (r - p.sw_on) / p.sw_width;
+            s = 1.0f - x * x * x * (10.0f - 15.0f * x + 6.0f * x * x);
+            ds_a = -30.0f * x * x * (1.0f - x) * (1.0f - x) / (p.sw_width * 2.0f * r);
+        }
+    }
+}
+
+template <bool FORCES>
+__global__ void __launch_bounds__(ATM_THREADS) atm_kernel(
+        int n, const float4* __restrict__ ps, const int* __restrict__ keys, const int* __restrict__ bin_start,
+        const Grid* __restrict__ gp, AtmParams p, int S, const float* __restrict__ c6ref,
+        const float* __restrict__ r0ab, const float* __restrict__ w, const float* __restrict__ dw,
+        double* __restrict__ acc, double* __restrict__ eatom, double* __restrict__ force_s,
+        double* __restrict__ dedcn) {
+    extern __shared__ float sm[];
+    __shared__ int s_count;
+    __shared__ double s_red[11];
+    const int k = blockIdx.x, warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
+    const Grid g = *gp;
+    const int si = __float_as_int(ps[k].w);
+    float wk[MAXREF], dwk[MAXREF];
+    for (int a = 0; a < MAXREF; ++a) { wk[a] = w[k * WSTRIDE + a]; dwk[a] = dw[k * MAXREF + a]; }
+    if (threadIdx.x < 11) s_red[threadIdx.x] = 0.0;
+    if (warp == 0) {
+        const int c = walk_list(k, keys[k], ps, bin_start, g, p.cut2, lane, 0, 0,
+                                [](int, int, int, float, float, float) {});
+        if (lane == 0) s_count = c;
+    }
+    __syncthreads();
+    const int N = s_count, chunks = (N + ATM_CHUNK - 1) / ATM_CHUNK;
+    // fill chunk c into the buffer at `buf` (one warp)
+    auto fill = [&](float* buf, int c) {
+        float4* pos = reinterpret_cast<float4*>(buf);
+        float* rest = buf + 4 * ATM_CHUNK;
+        walk_list(k, keys[k], ps, bin_start, g, p.cut2, lane, c * ATM_CHUNK, ATM_CHUNK,
+                  [&](int slot, int j, int sj, float dx, float dy, float dz) {
+            pos[slot] = make_float4(dx, dy, dz, __int_as_float(sj));
+            const float* tab = c6ref + ((size_t)si * S + sj) * MAXREF * MAXREF;
+            float wj[MAXREF];
+            for (int b = 0; b < MAXREF; ++b) { wj[b] = w[j * WSTRIDE + b]; rest[b * ATM_CHUNK + slot] = wj[b]; }
+            float c6 = 0.0f, dc6 = 0.0f;
+            for (int a = 0; a < MAXREF; ++a) {
+                float t = 0.0f;
+                for (int b = 0; b < MAXREF; ++b) t += tab[a * MAXREF + b] * wj[b];
+                c6 += wk[a] * t;
+                dc6 += dwk[a] * t;
+            }
+            rest[5 * ATM_CHUNK + slot] = c6;
+            rest[6 * ATM_CHUNK + slot] = dc6;
+            rest[7 * ATM_CHUNK + slot] = (4.0f / 3.0f) * r0ab[si * S + sj];
+        });
+    };
+    float* bufA = sm;
+    float* bufB = sm + ATM_FIELDS * ATM_CHUNK;
+    double e = 0.0, fx = 0.0, fy = 0.0, fz = 0.0, dcn = 0.0;
+    double v[6] = {0, 0, 0, 0, 0, 0};
+    for (int A = 0; A < chunks; ++A) {
+        for (int B = A; B < chunks; ++B) {
+            __syncthreads();
+            if (warp == 0 && B == A) fill(bufA, A);
+            if (warp == 1 && B != A) fill(bufB, B);
+            __syncthreads();
+            const int nA = min(ATM_CHUNK, N - A * ATM_CHUNK), nB = min(ATM_CHUNK, N - B * ATM_CHUNK);
+            const float* X = bufA;
+            const float* Y = B == A ? bufA : bufB;
+            const float4* Xp = reinterpret_cast<const float4*>(X);
+            const float4* Yp = reinterpret_cast<const float4*>(Y);
+            for (int a = threadIdx.x; a < nA; a += ATM_THREADS) {
+                const float4 pj = Xp[a];
+                const int sj = __float_as_int(pj.w);
+                float wj[MAXREF];
+                for (int t = 0; t < MAXREF; ++t) wj[t] = X[(4 + t) * ATM_CHUNK + a];
+                const float c6ij = X[9 * ATM_CHUNK + a], dc6ij = X[10 * ATM_CHUNK + a];
+                const float r0ij = X[11 * ATM_CHUNK + a];
+                const float ra = pj.x * pj.x + pj.y * pj.y + pj.z * pj.z;
+                float swa, dswa;
+                atm_switch(p, ra, swa, dswa);
+                for (int b = B == A ? a + 1 : 0; b < nB; ++b) {
+                    const float4 pk = Yp[b];
+                    const float jx = pk.x - pj.x, jy = pk.y - pj.y, jz = pk.z - pj.z;
+                    const float rc = jx * jx + jy * jy + jz * jz;
+                    if (rc >= p.cut2 || rc <= 1e-12f) continue;
+                    const int sk = __float_as_int(pk.w);
+                    const float* tab = c6ref + ((size_t)sj * S + sk) * MAXREF * MAXREF;
+                    float c6jk = 0.0f;
+                    for (int x = 0; x < MAXREF; ++x) {
+                        float t = 0.0f;
+                        for (int y = 0; y < MAXREF; ++y) t += tab[x * MAXREF + y] * Y[(4 + y) * ATM_CHUNK + b];
+                        c6jk += wj[x] * t;
+                    }
+                    const float c6ik = Y[9 * ATM_CHUNK + b];
+                    const float c9 = p.s9 * sqrtf(c6ij * c6ik * c6jk);
+                    if (!(c9 > 0.0f)) continue;
+                    const float rb = pk.x * pk.x + pk.y * pk.y + pk.z * pk.z;
+                    const float R = sqrtf(ra * rb * rc), iR = 1.0f / R, iR3 = iR * iR * iR;
+                    const float X1 = ra + rc - rb, Y1 = ra - rc + rb, Z1 = -ra + rc + rb;
+                    const float P = X1 * Y1 * Z1;
+                    const float ang = 0.375f * P * iR3 * iR * iR + iR3;
+                    const float r0 = r0ij * Y[11 * ATM_CHUNK + b] * (4.0f / 3.0f) * r0ab[sj * S + sk];
+                    const float t = 6.0f * __powf(r0 * iR, p.beta);
+                    const float f = 1.0f / (1.0f + t);
+                    float swb, dswb, swc, dswc;
+                    atm_switch(p, rb, swb, dswb);
+                    atm_switch(p, rc, swc, dswc);
+                    const float sw = swa * swb * swc;
+                    const float E = c9 * ang * f * sw;
+                    e += (double)(E * (1.0f / 3.0f));
+                    if (FORCES) {
+                        // dE/d(r^2) of the sides ij (a) and ik (b): R depends on each as R / (2 r^2)
+                        const float hR = 0.375f * P * iR3 * iR * iR * 5.0f + 3.0f * iR3;   // -dang/dR * R
+                        const float dfR = f * f * t * p.beta;                             // df/dR * R
+                        const float dPa = Y1 * Z1 + X1 * Z1 - X1 * Y1;
+                        const float dPb = -Y1 * Z1 + X1 * Z1 + X1 * Y1;
+                        const float ga = c9 * ((0.375f * dPa * iR3 * iR * iR - hR / (2.0f * ra)) * f * sw +
+                                               ang * dfR / (2.0f * ra) * sw + ang * f * dswa * swb * swc);
+                        const float gb = c9 * ((0.375f * dPb * iR3 * iR * iR - hR / (2.0f * rb)) * f * sw +
+                                               ang * dfR / (2.0f * rb) * sw + ang * f * swa * dswb * swc);
+                        fx += (double)(2.0f * (ga * pj.x + gb * pk.x));
+                        fy += (double)(2.0f * (ga * pj.y + gb * pk.y));
+                        fz += (double)(2.0f * (ga * pj.z + gb * pk.z));
+                        v[0] += (double)(ga * pj.x * pj.x + gb * pk.x * pk.x);
+                        v[1] += (double)(ga * pj.x * pj.y + gb * pk.x * pk.y);
+                        v[2] += (double)(ga * pj.x * pj.z + gb * pk.x * pk.z);
+                        v[3] += (double)(ga * pj.y * pj.y + gb * pk.y * pk.y);
+                        v[4] += (double)(ga * pj.y * pj.z + gb * pk.y * pk.z);
+                        v[5] += (double)(ga * pj.z * pj.z + gb * pk.z * pk.z);
+                        dcn += (double)(0.5f * E * (dc6ij / c6ij + Y[10 * ATM_CHUNK + b] / c6ik));
+                    }
+                }
+            }
+        }
+    }
+    e = warp_sum(e);
+    if (FORCES) {
+        fx = warp_sum(fx); fy = warp_sum(fy); fz = warp_sum(fz); dcn = warp_sum(dcn);
+        for (int c = 0; c < 6; ++c) v[c] = warp_sum(v[c]);
+    }
+    if (lane == 0) {
+        atomicAdd(&s_red[0], e);
+        if (FORCES) {
+            atomicAdd(&s_red[1], fx); atomicAdd(&s_red[2], fy); atomicAdd(&s_red[3], fz);
+            atomicAdd(&s_red[4], dcn);
+            for (int c = 0; c < 6; ++c) atomicAdd(&s_red[5 + c], v[c]);
+        }
+    }
+    __syncthreads();
+    if (threadIdx.x == 0) {
+        atomicAdd(&acc[0], s_red[0]);
+        if (eatom) eatom[k] += s_red[0];
+        if (FORCES) {
+            force_s[3 * k + 0] += s_red[1];
+            force_s[3 * k + 1] += s_red[2];
+            force_s[3 * k + 2] += s_red[3];
+            dedcn[k] += s_red[4];
+            for (int c = 0; c < 6; ++c) atomicAdd(&acc[1 + c], s_red[5 + c]);
+        }
+    }
+}
+
 __global__ void finish_kernel(const double* __restrict__ acc, double* __restrict__ energy,
                               double* __restrict__ virial) {
     const int t = threadIdx.x;
@@ -465,6 +696,12 @@ public:
         p_.sw_width = (float)s.smoothing_bohr;
         p_.sw_on = (float)(s.pair_cutoff_bohr - s.smoothing_bohr);
         rmax_ = std::max(s.pair_cutoff_bohr, s.cn_cutoff_bohr);
+        three_ = s.three_body;
+        a3_.cut2 = (float)(s.three_body_cutoff_bohr * s.three_body_cutoff_bohr);
+        a3_.sw_width = (float)s.smoothing_bohr;
+        a3_.sw_on = (float)(s.three_body_cutoff_bohr - s.smoothing_bohr);
+        a3_.beta = (float)((s.alpha + 2.0) / 3.0);
+        a3_.s9 = 1.0f;
     }
 
     bool prepare(int n, const int32_t* numbers, const double cell[9], cudaStream_t stream) override {
@@ -543,6 +780,7 @@ public:
                                            end_bit_, stream));
         sort_tmp_.alloc(sort_bytes_, bytes_);
         smem_ = (size_t)(S + 2 * WPB * S * MAXREF) * sizeof(float);
+        smem3_ = (size_t)2 * ATM_FIELDS * ATM_CHUNK * sizeof(float);
         CK(cudaStreamSynchronize(stream));      // the host vectors above go out of scope
         return true;
     }
@@ -569,14 +807,26 @@ public:
             if (damp_ == kBJ) LOUP_D3_PAIR(kBJ, true);
             else if (damp_ == kZero) LOUP_D3_PAIR(kZero, true);
             else LOUP_D3_PAIR(kZeroM, true);
-            cn_force_kernel<<<blocks, threads, 0, st>>>(n, ps_.p, keys_.p, bin_start_.p, grid_.p, p_.cn_cut2,
-                                                        rcov_d_.p, dedcn_.p, order_.p, force_s_.p, out.forces, acc_.p);
         } else {
             if (damp_ == kBJ) LOUP_D3_PAIR(kBJ, false);
             else if (damp_ == kZero) LOUP_D3_PAIR(kZero, false);
             else LOUP_D3_PAIR(kZeroM, false);
         }
 #undef LOUP_D3_PAIR
+        if (three_) {
+            // after the pair kernel (it adds to the forces, dE/dCN and per-atom energies), before the CN chain rule
+            if (forces)
+                atm_kernel<true><<<n, ATM_THREADS, smem3_, st>>>(n, ps_.p, keys_.p, bin_start_.p, grid_.p, a3_, S_,
+                                                                c6_d_.p, r0_d_.p, w_.p, dw_.p, acc_.p, eatom,
+                                                                force_s_.p, dedcn_.p);
+            else
+                atm_kernel<false><<<n, ATM_THREADS, smem3_, st>>>(n, ps_.p, keys_.p, bin_start_.p, grid_.p, a3_, S_,
+                                                                 c6_d_.p, r0_d_.p, w_.p, dw_.p, acc_.p, eatom,
+                                                                 force_s_.p, dedcn_.p);
+        }
+        if (forces)
+            cn_force_kernel<<<blocks, threads, 0, st>>>(n, ps_.p, keys_.p, bin_start_.p, grid_.p, p_.cn_cut2,
+                                                        rcov_d_.p, dedcn_.p, order_.p, force_s_.p, out.forces, acc_.p);
         finish_kernel<<<1, 32, 0, st>>>(acc_.p, out.energy, forces && in.virial ? out.virial : nullptr);
         if (out.atom_energy)
             atom_energy_kernel<<<(n + 255) / 256, 256, 0, st>>>(n, order_.p, eatom_.p, out.atom_energy);
@@ -591,9 +841,11 @@ private:
     std::vector<double> cnref_, rcov_, r2r4_, c6ref_, r0ab_;
     int damp_ = kBJ;
     PairParams p_{};
+    AtmParams a3_{};
+    bool three_ = false;
     double rmax_ = 0.0;
     int n_ = 0, S_ = 0, nbins_ = 0, nb_[3] = {1, 1, 1}, end_bit_ = 1;
-    size_t bytes_ = 0, sort_bytes_ = 0, smem_ = 0;
+    size_t bytes_ = 0, sort_bytes_ = 0, smem_ = 0, smem3_ = 0;
     DevBuf<Grid> grid_;
     DevBuf<float3> pw_;
     DevBuf<int> bin_of_, keys_, iota_, order_, bin_start_, species_, nref_d_;
@@ -614,7 +866,11 @@ Term* make_term(const Settings& settings, const Tables& tables, const char** why
         if (why_not) *why_not = reason.c_str();
         return nullptr;
     };
-    if (settings.three_body) return refuse("the three-body term is not built in this version (PLAN.md S6-D08)");
+    if (settings.three_body && !(settings.three_body_cutoff_bohr > 0.0 &&
+                                 settings.three_body_cutoff_bohr <= settings.pair_cutoff_bohr))
+        return refuse("the three-body cutoff must be positive and no longer than the pair cutoff");
+    if (settings.three_body && settings.smoothing_bohr >= settings.three_body_cutoff_bohr)
+        return refuse("the switch width must be shorter than the three-body cutoff");
     if (settings.long_range != LongRange::None)
         return refuse("only the plain real-space sum is built in this version (PLAN.md S6-D05, S6-D06)");
     if (!(settings.pair_cutoff_bohr > 0.0) || !(settings.cn_cutoff_bohr > 0.0))
@@ -655,6 +911,8 @@ int loup_d3_evaluate(const LoupD3Settings* settings, const LoupD3Tables* tables,
         s.pair_cutoff_bohr = settings->pair_cutoff_bohr;
         s.cn_cutoff_bohr = settings->cn_cutoff_bohr;
         s.smoothing_bohr = settings->smoothing_bohr;
+        s.three_body = settings->three_body != 0;
+        s.three_body_cutoff_bohr = settings->three_body_cutoff_bohr;
         Tables t{tables->nref, tables->cnref, tables->rcov, tables->r2r4, tables->c6ref, tables->r0ab};
         const char* why = nullptr;
         std::unique_ptr<Term> term(make_term(s, t, &why));

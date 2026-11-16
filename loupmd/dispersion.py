@@ -83,9 +83,11 @@ class Dispersion:
     - ``functional``: the parameter set by functional name (``None``: the model's training functional).
     - ``parameters``: raw parameters instead of a functional's set (``s6``, ``s8``, ``a1``, ``a2`` for the BJ
       dampings; ``s6``, ``s8``, ``rs6``, optional ``rs8`` and ``alpha`` for zero damping, plus ``beta`` for zerom).
-    - ``three_body`` with ``three_body_cutoff_bohr``: the Axilrod-Teller-Muto term, with a smoothed cutoff.
+    - ``three_body`` with ``three_body_cutoff_bohr``: the Axilrod-Teller-Muto term (s9 = 1) over triangles whose
+      sides lie within that cutoff; ``smoothing`` switches each side off at it.
     - ``pair_cutoff_bohr``, ``cn_cutoff_bohr``: the pair sum's and the coordination numbers' cutoffs.
-    - ``smoothing``: ``"none"`` or the width in bohr of a switch that takes the pair sum to zero at its cutoff.
+    - ``smoothing``: ``"none"`` or the width in bohr of a switch that takes the pair sum to zero at its cutoff
+      (and the three-body term at its own).
     - ``long_range``: ``"auto"`` (the fastest method that meets the accuracy contract on the user's structure,
       checked at setup), or a method by name, used as given: ``"none"``, ``"tail"``, ``"split"``, ``"mesh"``.
     - ``mesh_spacing_A``: the mesh of ``"split"`` and ``"mesh"`` (``None``: the method's default).
@@ -139,6 +141,9 @@ class Dispersion:
                 bad(f"smoothing must be 'none' or a switch width in bohr between 0 and the pair cutoff, got "
                     f"{self.smoothing!r}")
             object.__setattr__(self, "smoothing", float(self.smoothing))
+            if self.three_body and self.smoothing >= self.three_body_cutoff_bohr:
+                bad(f"smoothing ({self.smoothing:g}) must be shorter than three_body_cutoff_bohr "
+                    f"({self.three_body_cutoff_bohr:g})")
         if self.long_range not in LONG_RANGE:
             bad(f"long_range={self.long_range!r} is not one of {LONG_RANGE}")
         if self.long_range == "mesh" and self.damping != "bj":
@@ -198,7 +203,7 @@ PRESETS = {
                   "BJ, the model's functional, the plain sum cut at 40 bohr for pairs and coordination numbers: the "
                   "numbers of mace_mp(dispersion=True) and FastMACE's d3bj"),
     "d3bj-atm": (dict(_D3BJ_FIELDS, three_body=True, three_body_cutoff_bohr=20.0),
-                 "d3bj plus the three-body term with a 20 bohr smoothed cutoff"),
+                 "d3bj plus the three-body term to 20 bohr"),
     "d3-reference": (dict(damping="bj", pair_cutoff_bohr=60.0, cn_cutoff_bohr=40.0, three_body=True,
                           three_body_cutoff_bohr=40.0, long_range="none"),
                      "BJ, 60 bohr pairs, 40 bohr coordination numbers and three-body term: simple-dftd3's Python "
@@ -313,8 +318,10 @@ def describe(record: Dispersion) -> str:
     """One line: method, damping, parameters, cutoffs, three-body term, long-range method."""
     p = record.parameters or {}
     values = ", ".join(f"{k} {v:g}" for k, v in p.items()) if p else "the model's set"
-    three = (f", three-body term to {record.three_body_cutoff_bohr:g} bohr (smoothed)" if record.three_body
+    three = (f", three-body term to {record.three_body_cutoff_bohr:g} bohr" if record.three_body
              else ", no three-body term")
+    if record.smoothing != "none":
+        three += f", switched off over the last {record.smoothing:g} bohr"
     lr = (f"long range: {record.long_range} (chosen by the user)" if record.long_range != "auto"
           else "long range: automatic")
     return (f"D3({record.damping}) {record.functional or ''} [{values}], pairs to {record.pair_cutoff_bohr:g} bohr, "
@@ -339,7 +346,7 @@ def listing() -> str:
               ", ".join(sorted(_DISPERSION_IN_DATA)) + " data; MACE-POLAR-1), a model of unknown functional "
               "without functional= or parameters=, a damping without a parameter set for the functional.",
               "", "Built in this version: the plain real-space pair sum with every damping and the switch "
-              "(PLAN.md S6-D04). Not yet: the three-body term (S6-D08) and the tail, split and mesh methods "
+              "(PLAN.md S6-D04) and the three-body term (S6-D08). Not yet: the tail, split and mesh methods "
               "(S6-D05, S6-D06); runs that ask for them are refused. Whole-system execution only (the tiled "
               "execution: S6-D09)."]
     return "\n".join(lines)
@@ -349,8 +356,6 @@ def runnable(record: Dispersion) -> str:
     """The summation method a run with ``record`` uses, or :class:`PlanRefused` for what is not built. ``"auto"``
     picks among the built methods that ``auto_methods`` allows; today that is the plain sum."""
     reasons = []
-    if record.three_body:
-        reasons.append("three_body=True: the three-body term is not built in this version (PLAN.md S6-D08)")
     if record.long_range == "auto":
         allowed = [m for m in (record.auto_methods or AUTO_CANDIDATES) if m in BUILT]
         if not allowed:
@@ -363,6 +368,6 @@ def runnable(record: Dispersion) -> str:
             reasons.append(f"long_range={method!r} is not built in this version (PLAN.md S6-D05, S6-D06; built: "
                            f"{', '.join(sorted(BUILT))})")
     if reasons:
-        raise PlanRefused(reasons, next_step="Use the plain sum (long_range='none' or 'auto') without the three-body "
-                                             "term, for example the preset 'd3bj'.")
+        raise PlanRefused(reasons, next_step="Use the plain sum (long_range='none' or 'auto'), for example the preset "
+                                             "'d3bj'.")
     return method

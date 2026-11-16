@@ -241,6 +241,7 @@ class Simulation:
         engine = self.force_field.new_engine(atoms, self.skin, capacity=self.capacity,
                                              extra_elements=self._extra_elements)
         self._install_dispersion(engine)
+        self.dispersion_cost = self._time_dispersion(engine, atoms)
         self._bundle = self.force_field.last_bundle
         self.execution = dict(self.force_field.last_execution or {"mode": "whole", "receivers": 0, "plan": None})
         if self.execution["mode"] in ("tiled", "wavefront"):
@@ -284,6 +285,25 @@ class Simulation:
                                   "term in this version (PLAN.md S6-D09)",
                               next_step="Run a smaller cell, or without dispersion.")
         engine.set_dispersion(self.dispersion)
+
+    def _time_dispersion(self, engine, atoms):
+        """The term's time per force evaluation on the starting structure (ms, the mean of three captured replays),
+        and the three-body term's share of it, for the record and the report (PLAN.md S6-D08). Only with the library's
+        engine; None otherwise."""
+        from . import _core
+
+        if self.dispersion is None or not isinstance(engine, _core.LoupEngine):
+            return None
+        from dataclasses import replace
+
+        from . import _d3
+
+        total = _d3.evaluate(atoms, self.dispersion, repeat=3)["ms"]
+        cost = {"ms_per_evaluation": round(total, 3)}
+        if self.dispersion.three_body:
+            pair = _d3.evaluate(atoms, replace(self.dispersion, three_body=False), repeat=3)["ms"]
+            cost["three_body_ms"] = round(max(total - pair, 0.0), 3)
+        return cost
 
     def _run_gate(self):
         """The accuracy gate on rattled copies of the structure; the run does not start when it fails."""
@@ -1075,4 +1095,7 @@ def _dispersion_entry(sim):
         return None
     from . import dispersion as _dispersion
 
-    return dict(_dispersion.entry(sim.dispersion), long_range_used=sim.dispersion_method)
+    entry = dict(_dispersion.entry(sim.dispersion), long_range_used=sim.dispersion_method)
+    if getattr(sim, "dispersion_cost", None):
+        entry["cost"] = sim.dispersion_cost
+    return entry

@@ -1,7 +1,9 @@
-"""``loupmd validate``: the accuracy gate on a model and a structure set or your own structures."""
+"""``loupmd validate``: the accuracy gate on a model and a structure set or your own structures; with
+``--dispersion``, the D3 term against simple-dftd3 at the same settings (PLAN.md S6-D10)."""
 from __future__ import annotations
 
 import sys
+from pathlib import Path
 
 from .. import validate as _validate
 from ..config import GateConfig
@@ -14,9 +16,15 @@ def add_parser(sub):
         description="Compares LoupMD's energy, forces and stress with MACE float64 on strained and rattled "
                     "structures. A quantity passes when its deviation is at most three times MACE float32's own "
                     "deviation, or below 0.01 meV/atom, 1e-5 eV/A, 1e-7 eV/A^3. Needs the export extra (torch, "
-                    "mace-torch). Exit code 1 when the gate fails.")
-    parser.add_argument("--model", required=True, metavar="MODEL", help="a label (see `loupmd models`), a checkpoint "
-                                                                       "path or a URL")
+                    "mace-torch). With --dispersion: LoupMD's D3 term against simple-dftd3 (the dftd3 package) at the "
+                    "same settings on the structures, within 1e-6 eV/atom, 1e-5 eV/A, 1e-7 eV/A^3; the model is not "
+                    "run. Exit code 1 when the check fails.")
+    parser.add_argument("--model", metavar="MODEL", help="a label (see `loupmd models`), a checkpoint path or a URL; "
+                                                         "with --dispersion a label, for its training functional")
+    parser.add_argument("--dispersion", metavar="PRESET",
+                        help="check this dispersion preset (`loupmd dispersion list`) instead of the model")
+    parser.add_argument("--functional", metavar="NAME",
+                        help="with --dispersion: the functional whose D3 parameters to use (default: the model's)")
     parser.add_argument("--head", help="the head of a multi-head model")
     parser.add_argument("--checkpoint", metavar="PATH", help="the file of a label, when it is not in LOUPMD_MODELS")
     parser.add_argument("--sha256", metavar="HEX", help="the stated hash of a file that is not in the label table")
@@ -53,6 +61,12 @@ def add_parser(sub):
 
 def run(args) -> int:
     out = sys.stderr if args.json == "-" else sys.stdout
+    if args.dispersion is not None:
+        return run_dispersion(args, out)
+    if args.model is None:
+        from ..errors import InputError
+
+        raise InputError("loupmd validate needs --model (the accuracy gate) or --dispersion (the D3 check)")
     record = _validate.run_gate(
         args.model, head=args.head, checkpoint=args.checkpoint, sha256=args.sha256, trusted=args.trusted,
         download=args.download, set_name=args.set, structures=args.structure,
@@ -65,3 +79,42 @@ def run(args) -> int:
     if args.json:
         _validate.write_record(record, args.json)
     return 0 if record["passed"] else 1
+
+
+def run_dispersion(args, out) -> int:
+    from .. import dispersion as _dispersion
+    from .. import models
+    from ..validate import dispersion as _check
+
+    functional, family, name = args.functional, None, None
+    if args.model is not None:
+        label = models.find(args.model, args.head)
+        if label is None:
+            from ..errors import InputError
+
+            raise InputError(f"--model {args.model!r} is not a label of the model table",
+                             next_step="Give a label (`loupmd models`), or --functional instead.")
+        functional = functional or label.functional
+        family, name = label.checkpoint.family, label.label
+    record = _dispersion.resolve(args.dispersion, functional=functional, family=family, model=name)
+    if args.structure:
+        structures = [(Path(path).stem, read(path)) for path in args.structure]
+    else:
+        structures = [(n, a) for n, a in _sets.configs(args.set)]
+    result = _check.check(structures, record)
+    print(_check.format_check(result), file=out)
+    print("dispersion check PASSED" if result["passed"] else "dispersion check FAILED", file=out)
+    if args.json:
+        _check.write(result, args.json)
+    return 0 if result["passed"] else 1
+
+
+def read(path):
+    from ase.io import read as ase_read
+
+    from ..errors import InputError
+
+    if not Path(path).is_file():
+        raise InputError(f"structure file {path} not found")
+    return ase_read(path)
+

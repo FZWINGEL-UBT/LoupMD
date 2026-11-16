@@ -47,19 +47,21 @@ def _system(name):
 
 
 def _reference(atoms, record):
-    """simple-dftd3 (LGPL, called as an external library) at the record's settings, no three-body term."""
+    """simple-dftd3 (LGPL, called as an external library) at the record's settings, with the three-body term
+    (s9 = 1) when the record has it."""
     dftd3 = pytest.importorskip("dftd3.interface")
     p = record.parameters
-    param = {"bj": lambda: dftd3.RationalDampingParam(s6=p["s6"], s8=p["s8"], a1=p["a1"], a2=p["a2"], s9=0.0),
+    s9 = 1.0 if record.three_body else 0.0
+    param = {"bj": lambda: dftd3.RationalDampingParam(s6=p["s6"], s8=p["s8"], a1=p["a1"], a2=p["a2"], s9=s9),
              "bjm": lambda: dftd3.ModifiedRationalDampingParam(s6=p["s6"], s8=p["s8"], a1=p["a1"], a2=p["a2"],
-                                                               s9=0.0),
+                                                               s9=s9),
              "zero": lambda: dftd3.ZeroDampingParam(s6=p["s6"], s8=p["s8"], rs6=p["rs6"], rs8=p["rs8"],
-                                                    alp=p["alpha"], s9=0.0),
+                                                    alp=p["alpha"], s9=s9),
              "zerom": lambda: dftd3.ModifiedZeroDampingParam(s6=p["s6"], s8=p["s8"], rs6=p["rs6"], rs8=p["rs8"],
-                                                             alp=p["alpha"], bet=p["beta"], s9=0.0)}[record.damping]()
+                                                             alp=p["alpha"], bet=p["beta"], s9=s9)}[record.damping]()
     model = dftd3.DispersionModel(atoms.numbers, atoms.positions / BOHR, np.asarray(atoms.cell) / BOHR,
                                   np.array([True, True, True]))
-    model.set_realspace_cutoff(disp2=record.pair_cutoff_bohr, disp3=record.pair_cutoff_bohr,
+    model.set_realspace_cutoff(disp2=record.pair_cutoff_bohr, disp3=record.three_body_cutoff_bohr,
                                cn=record.cn_cutoff_bohr)
     res = model.get_dispersion(param, grad=True)
     return (float(res["energy"]) * HARTREE, -np.asarray(res["gradient"]) * HARTREE / BOHR,
@@ -163,6 +165,58 @@ def test_the_switch_is_smooth_and_its_forces_are_the_gradient():
     assert switched <= bound
 
 
+# ----------------------------------------------------------------------------------- the three-body term (S6-D08)
+
+@pytest.mark.parametrize("system,damping", [("nbcl5", "bj"), ("paracetamol", "bj"), ("srtio3", "bj"),
+                                            ("srtio3", "zero"), ("paracetamol", "zerom")])
+def test_the_three_body_term_agrees_with_simple_dftd3(system, damping):
+    """d3bj-atm's 20 bohr three-body cutoff; SrTiO3 2x2x2 (14.8 bohr) is shorter than it, so triangles hold two
+    images of one atom."""
+    lib = _lib_or_skip()
+    atoms = _system(system)
+    record = d.resolve(d.Dispersion(damping=damping, three_body=True, three_body_cutoff_bohr=20.0,
+                                    long_range="none"), functional="pbe")
+    got = _d3.evaluate(atoms, record, lib=lib)
+    two = _d3.evaluate(atoms, d.resolve(d.Dispersion(damping=damping, long_range="none"), functional="pbe"), lib=lib)
+    ref = _reference(atoms, record)
+    de, df, ds = _compare(atoms, got, ref)
+    share = (got["energy"] - two["energy"]) / abs(two["energy"])
+    print(f"{system} {damping}: three-body {1e3 * (got['energy'] - two['energy']) / len(atoms):+.3f} meV/atom "
+          f"({100 * share:.1f}% of the pair term); vs simple-dftd3 {de:.1e} eV/atom, {df:.1e} eV/A, {ds:.1e} eV/A^3")
+    assert share > 0.0                                    # ATM is repulsive in these crystals (design section 3.2)
+
+
+def test_the_three_body_term_at_40_bohr_agrees_with_simple_dftd3():
+    """d3-reference's cutoffs (60 bohr pairs, 40 bohr three-body and coordination numbers): several chunks of
+    neighbours per atom."""
+    lib = _lib_or_skip()
+    atoms = _system("srtio3")
+    record = d.resolve("d3-reference", functional="pbe")
+    _compare(atoms, _d3.evaluate(atoms, record, lib=lib), _reference(atoms, record))
+
+
+def test_the_three_body_term_per_atom_energy_only_and_switched():
+    lib = _lib_or_skip()
+    atoms = _system("srtio3")
+    record = d.resolve(d.Dispersion(three_body=True, three_body_cutoff_bohr=20.0, long_range="none"),
+                       functional="pbe")
+    full = _d3.evaluate(atoms, record, per_atom=True, lib=lib)
+    assert abs(full["energies"].sum() - full["energy"]) < 1e-9 * abs(full["energy"])
+    only = _d3.evaluate(atoms, record, forces=False, stress=False, lib=lib)
+    assert abs(only["energy"] - full["energy"]) < 1e-9 * abs(full["energy"])
+    switched = d.resolve(d.Dispersion(three_body=True, three_body_cutoff_bohr=20.0, pair_cutoff_bohr=20.0,
+                                      cn_cutoff_bohr=20.0, smoothing=6.0, long_range="none"), functional="pbe")
+    got = _d3.evaluate(atoms, switched, lib=lib)
+    h = 1e-3
+    for atom, axis in ((0, 0), (7, 2), (21, 1)):
+        up, down = atoms.copy(), atoms.copy()
+        up.positions[atom, axis] += h
+        down.positions[atom, axis] -= h
+        fd = -(_d3.evaluate(up, switched, forces=False, stress=False, lib=lib)["energy"] -
+               _d3.evaluate(down, switched, forces=False, stress=False, lib=lib)["energy"]) / (2 * h)
+        assert abs(fd - got["forces"][atom, axis]) < 2e-5, (atom, axis, fd, got["forces"][atom, axis])
+
+
 def test_what_is_not_built_is_refused_by_the_library():
     lib = _lib_or_skip()
     atoms = _system("srtio3")
@@ -211,7 +265,8 @@ def test_the_engine_adds_the_term_to_energy_forces_stress_and_per_atom_energies(
     e1, f1, s1 = with_d3.evaluate(atoms.positions, cell)
     spread = np.abs(plain.evaluate(atoms.positions, cell)[1] - f0).max()      # the model's own repeat spread
     n = len(atoms)
-    assert abs(e1 - (e0 + alone["energy"])) / n < 1e-6
+    # the gate's energy floor (0.01 meV/atom): float32 rounding of the model's total, about 1e-7 of it, comes near 1e-6
+    assert abs(e1 - (e0 + alone["energy"])) / n < 1e-5
     assert np.abs(f1 - (f0 + alone["forces"])).max() < max(4 * spread, 1e-5)
     assert np.abs(s1 - (s0 + alone["stress"])).max() < 1e-7
     _, _, _, a0 = plain.evaluate_per_atom(atoms.positions, cell)
@@ -256,3 +311,54 @@ def test_the_md_step_carries_the_term(sto_bundle, monkeypatch, variable_cell):
     assert stats.rebuilds >= 1
     assert abs(energy - (e0 + alone["energy"])) / len(atoms) < 1e-5
     assert np.abs(forces - (f0 + alone["forces"])).max() < 1e-4
+
+
+def test_lm_md_with_the_three_body_preset_in_npt_reports_its_cost(model_path, tmp_path):
+    """lm.md(dispersion="d3bj-atm") under the barostat: the run completes, the report names the term and its measured
+    cost per evaluation with the three-body share (PLAN.md S6-D08), and the term moves the pressure."""
+    import loupmd
+
+    _lib_or_skip()
+    ff = loupmd.load(model_path, trusted=True)
+    atoms = _oxide()
+    result = loupmd.md(atoms, model=ff, ensemble="NPT", temperature_K=300.0, pressure_GPa=0.0, timestep_fs=1.0,
+                       steps=100, seed=2, dispersion="d3bj-atm", output=str(tmp_path / "run"))
+    cost = result.metadata["dispersion"]["cost"]
+    print(f"d3bj-atm on SrTiO3 3x3x3 ({len(atoms)} atoms): {cost}")
+    assert cost["ms_per_evaluation"] > 0.0 and cost["three_body_ms"] > 0.0
+    assert "three-body term to 20 bohr" in result.summary or "three-body term" in result.summary
+    assert "of which the three-body term" in result.summary
+    assert np.isfinite(result.simulation.atoms.get_volume())
+
+
+# ----------------------------------------------------------------------------- loupmd validate --dispersion (S6-D10)
+
+@pytest.mark.parametrize("preset", list(d.PRESETS))
+def test_loupmd_validate_dispersion_passes_for_every_preset(preset, tmp_path, capsys):
+    from ase.io import write
+
+    from loupmd.cli import main
+
+    pytest.importorskip("dftd3.interface")
+    _lib_or_skip()
+    path = tmp_path / "sto.extxyz"
+    write(path, _system("srtio3"))
+    code = main(["validate", "--dispersion", preset, "--model", "omat0-medium", "--structure", str(path)])
+    out = capsys.readouterr().out
+    print(out.splitlines()[-2])
+    assert code == 0 and "dispersion check PASSED" in out, out
+
+
+def test_the_dispersion_check_fails_for_a_wrong_parameter_set():
+    from dataclasses import replace
+
+    from loupmd.validate import dispersion as check
+
+    pytest.importorskip("dftd3.interface")
+    lib = _lib_or_skip()
+    record = d.resolve("d3bj", functional="pbe")
+    wrong = replace(record, parameters=dict(record.parameters, a2=record.parameters["a2"] + 0.05))
+    result = check.check([("srtio3", _system("srtio3"))], record, lib=lib, reference_record=wrong)
+    assert not result["passed"]
+    assert result["rows"][0]["deviation"]["energy_eV_atom"] > 100 * check.BOUNDS["energy_eV_atom"]
+    assert check.check([("srtio3", _system("srtio3"))], record, lib=lib)["passed"]

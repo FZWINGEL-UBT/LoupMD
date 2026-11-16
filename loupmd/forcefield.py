@@ -73,7 +73,13 @@ class ForceField:
         self.licence = known.licence if known is not None else None
         # MACE-POLAR-1: k-space electrostatics (no cell relaxation, no tiled execution).
         self.long_range = known is not None and known.model_type == "PolarMACE"
-        self.functional = entry.functional if entry is not None else None
+        # The training functional of the head that runs: from the checkpoint's table, so a known file given by path
+        # (no label) or a label with another head= gets it too (it selects the D3 parameters).
+        if known is not None:
+            key = self.head if self.head is not None else (known.heads[0] if known.heads else "")
+            self.functional = known.head_functionals.get(key)
+        else:
+            self.functional = entry.functional if entry is not None else None
         self.family = known.family if known is not None else None
         self.engine = None                 # the LoupEngine of the last structure
         self.last_bundle = None

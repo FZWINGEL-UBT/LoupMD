@@ -176,8 +176,25 @@ def test_lm_md_installs_the_term_and_records_it(ff, tmp_path):
     assert resumed.dispersion == engine.dispersion
 
 
+def test_the_three_body_preset_runs_and_is_reported(ff, tmp_path):
+    atoms = bulk("NaCl", "rocksalt", a=5.64, cubic=True)
+    ff.functional, ff.family = "PBE", "omat"
+    result = loupmd.md(atoms, model=ff, temperature_K=300, steps=10, seed=1, dispersion="d3bj-atm",
+                       output=str(tmp_path / "run"))
+    assert result.simulation._engine.dispersion.three_body
+    assert result.metadata["dispersion"]["three_body_cutoff_bohr"] == 20.0
+    assert "three-body term, long range: none" in result.summary
+
+
+def test_the_switch_must_be_shorter_than_the_three_body_cutoff():
+    with pytest.raises(InputError, match="must be shorter than three_body_cutoff_bohr"):
+        loupmd.Dispersion(three_body=True, three_body_cutoff_bohr=20.0, smoothing=25.0)
+    text = d.describe(d.resolve(loupmd.Dispersion(three_body=True, three_body_cutoff_bohr=20.0, smoothing=4.0),
+                                functional="pbe"))
+    assert "three-body term to 20 bohr, switched off over the last 4 bohr" in text
+
+
 @pytest.mark.parametrize("value,message", [
-    ("d3bj-atm", "the three-body term is not built"),
     (loupmd.Dispersion(long_range="mesh"), "long_range='mesh' is not built"),
     (loupmd.Dispersion(auto_methods=("tail",)), "none of them is built"),
 ])
@@ -217,3 +234,45 @@ def test_dispersion_list_shows_the_presets_methods_and_limits(capsys):
     assert "doi:10.1002/jcc.21759" in out and "[not built yet]" in out and "MACE-POLAR-1" in out
     plain = next(line for line in out.splitlines() if line.startswith("  none "))
     assert "the plain real-space sum" in plain and "[not built yet]" not in plain
+
+
+# ----------------------------------------------------------------------------- loupmd validate --dispersion (S6-D10)
+
+def test_validate_dispersion_resolves_the_preset_against_the_label_and_reports(tmp_path, monkeypatch, capsys):
+    from ase.io import write
+
+    from loupmd.validate import dispersion as check
+
+    seen = {}
+
+    def fake_check(structures, record, **kw):
+        seen["record"], seen["names"] = record, [n for n, _ in structures]
+        return {"schema": check.SCHEMA, "dispersion": d.entry(record), "description": d.describe(record),
+                "reference": "simple-dftd3 x", "bounds": dict(check.BOUNDS), "passed": False,
+                "rows": [{"structure": "salt", "atoms": 8, "energy_eV": -1.0, "reference_energy_eV": -1.0,
+                          "deviation": {"energy_eV_atom": 2e-6, "force_eV_A": 0.0, "stress_eV_A3": 0.0},
+                          "passed": False}]}
+
+    monkeypatch.setattr(check, "check", fake_check)
+    path = tmp_path / "salt.cif"
+    write(path, bulk("NaCl", "rocksalt", a=5.64, cubic=True))
+    code = main(["validate", "--dispersion", "d3bj-atm", "--model", "omat0-medium", "--structure", str(path),
+                 "--json", str(tmp_path / "out.json")])
+    out = capsys.readouterr().out
+    assert code == 1 and "FAIL" in out and "dispersion check FAILED" in out
+    assert seen["record"] == d.resolve("d3bj-atm", functional="pbe") and seen["names"] == ["salt"]
+    import json
+
+    assert json.loads((tmp_path / "out.json").read_text())["schema"] == "loupmd.dispersion-check/1"
+
+
+def test_validate_needs_a_model_or_a_dispersion_preset(capsys):
+    assert main(["validate"]) == 1
+    assert "needs --model" in capsys.readouterr().err
+
+
+def test_the_dispersion_check_refuses_the_switch():
+    from loupmd.validate import dispersion as check
+
+    with pytest.raises(PlanRefused, match="simple-dftd3 has no switch"):
+        check.checkable(d.resolve(loupmd.Dispersion(smoothing=4.0), functional="pbe"))

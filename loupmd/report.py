@@ -113,6 +113,12 @@ def _plan_lines(metadata) -> list:
                      f"{disp['pair_cutoff_bohr']:g} bohr, coordination numbers to {disp['cn_cutoff_bohr']:g} bohr, "
                      f"{'three-body term' if disp.get('three_body') else 'no three-body term'}, long range: "
                      f"{disp.get('long_range_used')} ({disp.get('long_range_chosen_by')})".replace("  ", " "))
+        cost = disp.get("cost")
+        if cost:
+            text = f"dispersion cost: {cost['ms_per_evaluation']:.2f} ms per force evaluation on the starting structure"
+            if "three_body_ms" in cost:
+                text += f", of which the three-body term {cost['three_body_ms']:.2f} ms"
+            lines.append(text)
     skin = metadata.get("skin")
     if skin and skin["mode"] == "auto":
         measured = skin.get("measured_step_A")

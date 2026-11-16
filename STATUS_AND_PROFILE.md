@@ -1268,3 +1268,40 @@ measured: an MD step with and without the term (the step cost should rise by abo
 any other GPU. Runs without dispersion are unchanged in code path (`record_dispersion` returns at once); the GPU
 suite on this library is recorded in PLAN.md's S6-D04 row.
 
+### 6.29 The D3 three-body term, S6-D08 (16 November 2026)
+
+RTX 5060 Ti only. `atm_kernel` in `src/dispersion/d3_pair.cu` (side build `libloupmd_d3c.so`, sha
+523fc8430d43f194): the Axilrod-Teller-Muto term with simple-dftd3 1.6.0's convention for every damping (found by
+comparing its s9 = 1 and s9 = 0 energies with a numpy sum on a small molecule: R0 = 4/3 R0ab per side, exponent
+(alpha + 2) / 3). One block per atom lists its neighbours within the three-body cutoff into shared memory in chunks
+of 384 and runs over the pairs of the list; each triangle is seen from its three corners, each keeping E/3, its
+share of the virial, and its force and dE/dCN in full (they involve only its own two sides), so there are no
+atomics on atoms. It runs after the pair kernel and before the coordination-number chain rule. 127 registers, no
+spills (forces); 72 registers and 24 bytes of stack (energy only).
+
+Measured, `tests/gpu/test_d3.py` (27 passed with the three-body tests):
+- Against simple-dftd3 (s9 = 1, three-body cutoff 20 bohr, pairs and CN 40 bohr): NbCl5 BJ 6.1e-9 eV/atom,
+  3.2e-8 eV/A, 2.8e-10 eV/A^3; paracetamol BJ 4.2e-9, 1.2e-7, 6.0e-10; SrTiO3 2x2x2 BJ 2.2e-8, 1.8e-8, 2.3e-9
+  (its 14.8 bohr cell is shorter than the cutoff, so triangles hold two images of one atom); SrTiO3 zero 1.3e-8,
+  6.8e-8, 5.4e-10; paracetamol zerom 3.5e-8, 4.3e-7, 5.1e-9. `d3-reference` (60/40/40 bohr, several chunks per
+  atom) on SrTiO3 2x2x2: within the plan's bounds (1e-6 eV/atom, 1e-5 eV/A, 1e-7 eV/A^3).
+- The three-body energy: NbCl5 +7.06 meV/atom (3.7% of the pair term), paracetamol +3.46 (4.9%), SrTiO3 +16.85
+  (6.4%), as in the design's table 3.2.
+- Per-atom energies sum to the total, the energy-only path gives the same energy, and with a 6 bohr switch the
+  forces are the central-difference gradient within 2e-5 eV/A.
+
+Time per captured evaluation (`loup_d3_evaluate`, forces and stress; energy only in brackets; 20 replays, 3 for
+d3-reference):
+
+| System | d3bj | d3bj-atm (three-body to 20 bohr) | d3-reference (60 / 40 / 40 bohr) |
+| --- | ---: | ---: | ---: |
+| NbCl5 3x3x3 (1,944) | 2.51 ms (0.69) | 12.34 ms (7.29) | 272 ms (124) |
+| SrTiO3 10x10x10 (5,000) | 8.46 ms (1.40) | 102.0 ms (53.0) | 4,027 ms (2,072) |
+| water 216 2x2x2 (5,184) | 9.81 ms (1.52) | 132.7 ms (64.8) | 5,639 ms (3,069) |
+
+The three-body term costs 4 to 13 times the pair term at 20 bohr and is not usable for MD at 40 bohr. The kernel is
+a first, correct version: the C6 of the side jk is formed per triangle from the 5x5 reference table in global
+memory (25 FMA and 25 loads), and the neighbour walk covers the pair cutoff's bins. Not tried yet: per-species
+projections of the weights in shared memory (as the pair kernel does), a walk sized to the three-body cutoff, and
+a triangle loop that keeps side jk's C6 per (j, k) chunk pair. `lm.md` measures the term's time on the starting
+structure at setup and the report shows it with the three-body share (`metadata.json` dispersion.cost).

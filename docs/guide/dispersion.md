@@ -31,7 +31,8 @@ parameter sets with their sources.
 | `d3bj` | Becke-Johnson damping, the model's functional, pairs and coordination numbers to 40 bohr, no three-body term. The default choice. |
 | `d3bj-mace` | the same numbers as `mace_mp(dispersion=True)` (torch-dftd, 40 bohr) and FastMACE's d3bj, with the plain sum fixed |
 | `d3zero`, `d3bjm`, `d3zerom` | zero damping and the two modified dampings of Smith et al. 2016, with d3bj's cutoffs |
-| `d3bj-atm`, `d3-reference` | with the three-body term: refused in this version (PLAN.md S6-D08) |
+| `d3bj-atm` | `d3bj` plus the three-body (Axilrod-Teller-Muto) term over triangles whose sides are within 20 bohr |
+| `d3-reference` | simple-dftd3's Python defaults: pairs to 60 bohr, coordination numbers and the three-body term to 40 bohr |
 
 The parameters follow the model's training functional: PBE for OMAT-0, MP-0, MPA-0 and MH-1's `omat_pbe` head,
 r2SCAN for MatPES-r2SCAN and MH-1's `matpes_r2scan` head (Becke-Johnson damping only: r2SCAN has no zero-damping
@@ -54,6 +55,29 @@ what the bake-off lists per system; no faster method met that accuracy contract 
 switch, so energy and forces are continuous at the cutoff. The default is no switch, as in simple-dftd3 and
 torch-dftd.
 
+## Checking the term on your structure
+
+`loupmd validate --dispersion PRESET` evaluates LoupMD's term on your structures and on simple-dftd3 (the `dftd3`
+Python package, LGPL, installed separately) at the same settings, and passes when they agree within 1e-6 eV/atom,
+1e-5 eV/A and 1e-7 eV/A^3. The model is not run; `--model` only names the training functional (or give
+`--functional`). Without `--structure` it uses the oxide validation set.
+
+```bash
+loupmd validate --dispersion d3bj-atm --model omat0-medium --structure structure.cif --json check.json
+```
+
+The switch (`smoothing=`) has no counterpart in simple-dftd3 and is refused by the check.
+
+## The three-body term
+
+`three_body=True` (or the presets `d3bj-atm` and `d3-reference`) adds the Axilrod-Teller-Muto term with s9 = 1,
+computed as simple-dftd3 does for every damping: C9 from the three pair C6 values, a zero damping of the triangle with
+4/3 R0 and the exponent (alpha + 2) / 3, every side within `three_body_cutoff_bohr`. It is repulsive in crystals, 3 to
+9% of the pair term (docs/design/dispersion.md section 3.2). Against simple-dftd3 at the same cutoffs it agrees to the
+pair term's tolerances (`tests/gpu/test_d3.py`). With `smoothing=w` each side of a triangle is switched off over the
+last `w` bohr before the three-body cutoff too; without it the cutoff is hard, as in simple-dftd3. Its cost grows with
+the square of the neighbours within its cutoff: at 40 bohr it is many times the pair term.
+
 ## Cost
 
 The term walks every pair within 40 bohr (21 A), which is far more pairs than the model's 6 A cutoff: on small cells
@@ -62,7 +86,6 @@ lists the time per evaluation on the RTX 5060 Ti.
 
 ## Not in this version
 
-- The three-body (Axilrod-Teller-Muto) term (S6-D08).
 - The tail correction, the split sum and the mesh sum (S6-D05, S6-D06): `long_range="auto"` uses the plain sum.
 - Dispersion with the tiled execution and open domains (S6-D09): a cell that does not fit the GPU whole is refused
   with dispersion.

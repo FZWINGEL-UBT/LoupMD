@@ -19,7 +19,7 @@ TABLES = Path(__file__).parent / "data" / "d3_tables.npz"
 class LoupD3Settings(ctypes.Structure):
     _fields_ = [("damping", ctypes.c_int)] + [(name, ctypes.c_double) for name in (
         "s6", "s8", "a1", "a2", "rs6", "rs8", "alpha", "beta", "pair_cutoff_bohr", "cn_cutoff_bohr",
-        "smoothing_bohr")]
+        "smoothing_bohr")] + [("three_body", ctypes.c_int), ("three_body_cutoff_bohr", ctypes.c_double)]
 
 
 _D = ctypes.POINTER(ctypes.c_double)
@@ -47,7 +47,8 @@ def settings(record) -> LoupD3Settings:
     smoothing = 0.0 if record.smoothing == "none" else float(record.smoothing)
     return LoupD3Settings(DAMPING_CODES[record.damping], p["s6"], p["s8"], p.get("a1", 0.0), p.get("a2", 0.0),
                           p.get("rs6", 0.0), p.get("rs8", 1.0), p.get("alpha", 14.0), p.get("beta", 0.0),
-                          record.pair_cutoff_bohr, record.cn_cutoff_bohr, smoothing)
+                          record.pair_cutoff_bohr, record.cn_cutoff_bohr, smoothing, int(record.three_body),
+                          record.three_body_cutoff_bohr)
 
 
 def _lib(lib=None):

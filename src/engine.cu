@@ -5404,6 +5404,8 @@ int loup_set_dispersion(LoupHandle* h, const LoupD3Settings* settings, const Lou
         s.pair_cutoff_bohr = settings->pair_cutoff_bohr;
         s.cn_cutoff_bohr = settings->cn_cutoff_bohr;
         s.smoothing_bohr = settings->smoothing_bohr;
+        s.three_body = settings->three_body != 0;
+        s.three_body_cutoff_bohr = settings->three_body_cutoff_bohr;
         loup::dispersion::Tables t{tables->nref, tables->cnref, tables->rcov, tables->r2r4, tables->c6ref,
                                    tables->r0ab};
         const char* why = nullptr;
