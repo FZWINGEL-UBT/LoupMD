@@ -1566,3 +1566,19 @@ The wavefront's host-list plan took 19 larger tiles (its device budget no longer
 cost about 100 ms per 320,000 atoms (about 14 GB/s); the builds pay for pinning. A fallback for cells that do not
 fit otherwise, so the default path is unchanged; the copy of each tile's list into a device staging buffer on a
 second stream, ahead of its first sweep, would hide most of the read time (not built).
+
+`tile-slot-reserve` and `tile-keep-layer0` (`be75b89`):
+
+- The active-edge slots now take the free memory less a reserve of max(256 MB, 2% of the card) instead of a
+  quarter of it. The wavefront at 1,081,600 atoms then gets 5 slots (its tiles in flight) instead of 1: A B B A
+  2,274.3 / 2,221.9 / 2,234.7 / 2,274.4 ms, b / a 0.979 (forces 2.1e-6 eV/A apart). With `LOUP_TILE_KEEP_ACTIVE`
+  forced: 0 slots 2,272.0 / 2,277.2, 1 slot 2,290.2, 5 slots 2,233.3 / 2,214.8. A list rebuild at that size with
+  the 5 slots: peak 13.7 of 14.6 GiB, no error.
+- Layer 0's backward sweep replayed layer 0's forward (`first_fwd`, the species GEMMs, the product, `W_p`, the
+  readout) to get the two things its backward reads, `msgf[0..3]` and `D` (8.2 KB per receiver at 128 channels).
+  In the plain order each tile now keeps them from its forward sweep of layer 0 (the layer's pointers point at the
+  tile's buffer, no copies) and its backward sweep adds only the readout's constant seed: for density layer 0 with
+  the hidden table, skip folded and a linear readout (`GenericModel::sweep_keep_layer0`), within the same reserve.
+  320,000 atoms (2.6 GB kept, 5.0 GB free): A B B A 642.2 / 598.9 / 596.3 / 644.1 ms, b / a 0.929; forces 1.8e-6
+  eV/A apart. More than the replay's 26 ms of kernels in the profile: the replay also re-gathered and re-launched.
+  Not in the wavefront (its tiles in flight would need it; memory is short there). Tiled label gates with it: the 8 oxide labels and mh1-omat passed; it engages for mp0b3-medium, mpa0-medium, omat0-small / -medium, matpes-pbe / -r2scan (not MP-0, MH-1, OFF, OMOL-0).
