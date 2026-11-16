@@ -90,6 +90,7 @@ def test_auto_runs_a_cell_that_does_not_fit_in_tiles_with_the_whole_runs_nve_tra
     assert provenance.validate(runs["auto"].metadata) == []
     summary = runs["auto"].summary
     assert "3 tiles of at most 64 atoms" in summary and "the integrator runs on the host" in summary
+    assert "(the cell does not fit the card whole)" in summary              # auto chose the tiles
     assert "the whole system on" in runs["whole"].summary
     record = json.loads((tmp_path / "auto" / "simulation.json").read_text())
     assert record["capacity"] == {"mode": "tiled", "receivers": 64, "memory_fraction": 0.9}
@@ -127,6 +128,7 @@ def test_the_wavefront_mode_runs_the_tiled_engine_and_the_report_says_so(ff, tmp
     plan = res.metadata["plan"]
     assert plan["execution"] == "tiled" and plan["wavefront"] is True
     assert "wavefront order" in res.summary
+    assert "(capacity='wavefront' asked for tiles)" in res.summary          # not "does not fit": it was asked for
     assert provenance.validate(res.metadata) == []
 
 

@@ -62,9 +62,11 @@ def _plan(sim):
         return plan
     execution = getattr(sim, "execution", None) or {}
     if execution.get("mode") in ("tiled", "wavefront"):   # tiles of at most `receivers` atoms (PLAN.md S5-T12)
+        requested = getattr(getattr(sim, "capacity", None), "mode", "auto")
         plan.update(execution="tiled", receivers=int(getattr(engine, "receivers", 0) or execution["receivers"]),
                     tiles=int(getattr(engine, "tiles", 0)) or None, integrator_on="host",
-                    wavefront=bool(getattr(engine, "wavefront", False)))
+                    wavefront=bool(getattr(engine, "wavefront", False)),
+                    requested=requested, tiled_because="asked" if requested in ("tiled", "wavefront") else "memory")
     found = execution.get("plan")
     if found is not None and found.whole_bytes > 0:      # 0: the bundle cannot tile, nothing was measured
         plan["memory"] = {"whole_bytes": int(found.whole_bytes), "free_bytes": int(found.free_bytes),

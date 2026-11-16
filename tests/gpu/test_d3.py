@@ -387,6 +387,32 @@ def test_the_ase_calculator_adds_the_term(model_path):
     assert abs(a.get_potential_energy() - e0) / n < 1e-5
 
 
+def test_relaxations_take_exactly_their_own_term(model_path):
+    """lm.optimize.relax with dispersion= relaxes MACE + D3 (the on-device LBFGS and the host FIRE alike: the
+    calculator with the same term finds the relaxed forces small); without it no term the shared engine held from a
+    calculator is used."""
+    import loupmd
+
+    _lib_or_skip()
+    ff = loupmd.load(model_path, trusted=True)
+    atoms = _oxide()
+    with_d3, plain = loupmd.calc(ff, dispersion="d3bj"), loupmd.calc(ff)
+    for optimizer in (loupmd.optimize.LBFGS(), loupmd.optimize.FIRE()):
+        relaxed = loupmd.optimize.relax(ff, atoms, optimizer, fmax=0.02, steps=400, dispersion="d3bj")
+        assert relaxed.converged, (type(optimizer).__name__, relaxed)
+        check = relaxed.atoms.copy()
+        check.calc = with_d3
+        assert np.abs(check.get_forces()).max() < 0.03
+        assert abs(check.get_potential_energy() - relaxed.energy) / len(atoms) < 1e-5
+    probe = atoms.copy()
+    probe.calc = with_d3
+    probe.get_potential_energy()                                  # the shared engine now holds the term
+    bare = loupmd.optimize.relax(ff, atoms, steps=0)
+    reference = atoms.copy()
+    reference.calc = plain
+    assert abs(bare.energy - reference.get_potential_energy()) / len(atoms) < 1e-5
+
+
 def test_swap_monte_carlo_with_the_term(model_path):
     """Energy-only move energies include the term (against the full call, 0.01 kT at 300 K); a block of swaps on a
     Simulation with dispersion runs and the run goes on."""
