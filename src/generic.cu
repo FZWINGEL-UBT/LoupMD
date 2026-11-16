@@ -1653,6 +1653,20 @@ void GenericModel::record(const GenericPassInputs& in) {
                     transB ? K : Nc, beta, C + row0 * Nc, Nc);
         }
     };
+    // S100: a folded linear readout of y_t[0] (the S73 energy target) runs in the layer's product forward (E +=
+    // y_t[0] . Wy) and its gradient seed Wy is added in the product backward, when some other fold target's GEMM is
+    // the first write of dy_t[0] (else ro_linear_kernel assigns the seed as before).
+    auto fused_readout = [&](int t) -> const float* {
+        const GenericLayer* L = layers_[t];
+        if (!chain_fold_ || t >= n_layers_ - 1) return nullptr;
+        const float* w = nullptr;
+        bool other = false;
+        for (const auto& ft : L->fold[0]) {
+            if (ft.dest_layer == -2) w = ft.Wy;
+            else other = true;
+        }
+        return other ? w : nullptr;
+    };
 
     // in.energy / in.forces / in.virial live in engine.cu's d_zero_slab and are already zeroed by record_force_pass.
     const bool has_edges = in.E_cap > 0;
@@ -1781,18 +1795,21 @@ void GenericModel::record(const GenericPassInputs& in) {
                                   L->dhid, in.energy, dm, dDp);
             continue;
         }
+        const float* ro_fw = fused_readout(t);
         launch_prod(L->prod, false, st, N, Cm, L->msgf, Dp, L->prod_w,
-                    L->prod_species ? (int64_t)L->prod_segw * Cm : 0, in.species, L->y, nullptr, nullptr);
+                    L->prod_species ? (int64_t)L->prod_segw * Cm : 0, in.species, L->y, nullptr, nullptr, ro_fw,
+                    ro_fw ? in.energy : nullptr);
         if (chain_fold_ && t < n_layers_ - 1) {
             // S57: y_t (and layer 0's species-only skip input) into every downstream consumer of hout_t; the first
             // write of a destination in this pass assigns it, later ones accumulate (program order: race-free).
             // S59: the species-table skip terms (layer 0, l 0; each its destination's first write) are gathered on
             // the main stream before the lanes fork, so the lane GEMMs accumulate onto them. S73: the energy targets
-            // (folded linear readouts) also run there: E += y_t[0] . Wy (seeding dy_t[0] += Wy) and the per-species
-            // constant of the layer-0 skip.
+            // (folded linear readouts) also run there: E += y_t[0] . Wy (assigning the seed dy_t[0] = Wy; S100: in
+            // the product kernels instead, see fused_readout) and the per-species constant of the layer-0 skip.
             for (const auto& ft : L->fold[0]) {
                 if (ft.dest_layer == -2) {
-                    ro_linear_kernel<<<(N + 7) / 8, 256, 0, st>>>(N, Co, L->y[0], ft.Wy, L->dy[0], in.energy, true);
+                    if (!ro_fw)
+                        ro_linear_kernel<<<(N + 7) / 8, 256, 0, st>>>(N, Co, L->y[0], ft.Wy, L->dy[0], in.energy, true);
                     if (ft.Th) species_energy_kernel<<<(N + 255) / 256, 256, 0, st>>>(N, in.species, ft.Th, in.energy);
                     continue;
                 }
@@ -1938,13 +1955,15 @@ void GenericModel::record(const GenericPassInputs& in) {
             } else if (chain_fold_) {
                 // S57: dy_t[l] from every downstream consumer's gradient through the composed weights (all final:
                 // later layers and the readout ran first); one lane per degree, its terms in order. S73: a folded
-                // linear readout already seeded dy_t[0] in the forward, so every term accumulates onto it.
+                // linear readout seeded dy_t[0] in the forward, so every term accumulates onto it (S100: unless the
+                // product backward adds the seed, then the first term assigns).
+                const bool seed_in_prod = fused_readout(t) != nullptr;
                 fork();
                 for (int l = 0; l <= L->lmax_out; ++l) {
                     lane(l);
                     float beta = 0.0f;
                     for (const auto& ft : L->fold[l])
-                        if (ft.dest_layer == -2) beta = 1.0f;
+                        if (ft.dest_layer == -2 && !seed_in_prod) beta = 1.0f;
                     for (const auto& ft : L->fold[l]) {
                         if (ft.dest_layer == -2) continue;
                         const float* dsrc = ft.dest_layer >= 0 ? layers_[ft.dest_layer]->dx[l] : layers_.back()->dhid;
@@ -1982,7 +2001,8 @@ void GenericModel::record(const GenericPassInputs& in) {
             float* dm[4];
             for (int l = 0; l < 4; ++l) dm[l] = (L->kind == 1 || L->kind == 3) ? L->dlin[l] : L->dmsgf[l];
             launch_prod(L->prod, true, st, N, Cm, L->msgf, Dp, L->prod_w,
-                        L->prod_species ? (int64_t)L->prod_segw * Cm : 0, in.species, L->dy, dm, dDp);
+                        L->prod_species ? (int64_t)L->prod_segw * Cm : 0, in.species, L->dy, dm, dDp,
+                        fused_readout(t));
         }
         if (L->kind == 4) {
             fork();

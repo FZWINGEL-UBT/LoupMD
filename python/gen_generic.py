@@ -850,8 +850,12 @@ def emit_product(sig, prog, feats, sh):
             loads.append(f"  const float x{l * l + m} = __ldg(m{l} + ((int64_t)a * {2 * l + 1} + {m}) * C + c) * s;")
     args_in = "int N, int C, " + _ptr_args("m", range(4)) + \
         ", const float* __restrict__ D, const float* __restrict__ w, int64_t w_stride, const int* __restrict__ sp"
+    # S100: ro_w / energy (nullable): a folded linear readout of y0 (S73's energy target), E += sum_a y0[a] . ro_w in
+    # double, one atomic per block; the backward adds its gradient seed (gseed = ro_w) to g0 at load, so no kernel
+    # writes the seed into the upstream gradient buffer.
     F = [f'extern "C" __global__ void __launch_bounds__(128) gprod_fwd_{sig}(',
-         f"    {args_in}, {_ptr_args('y', range(lo + 1), const=False)}) {{"] + head + loads
+         f"    {args_in}, {_ptr_args('y', range(lo + 1), const=False)},",
+         "    const float* __restrict__ ro_w, double* __restrict__ energy) {"] + head + loads
     for i in used:
         _ssa(F, i, prog.nodes[i])
     F.append("  float " + ", ".join(f"o{cc} = 0.0f" for cc in range(seg_out)) + ";")
@@ -864,14 +868,29 @@ def emit_product(sig, prog, feats, sh):
     for l in range(lo + 1):
         for m in range(2 * l + 1):
             F.append(f"  y{l}[((int64_t)a * {2 * l + 1} + {m}) * C + c] = o{l * l + m};")
-    F.append("}")
+    F += ["  if (ro_w) {",
+          "    double e = (double)o0 * (double)__ldg(ro_w + c);",
+          "    #pragma unroll",
+          "    for (int off = 16; off > 0; off >>= 1) e += __shfl_xor_sync(0xffffffffu, e, off);",
+          "    __shared__ double s_e[4];",
+          "    if ((threadIdx.x & 31) == 0) s_e[threadIdx.x >> 5] = e;",
+          "    __syncthreads();",
+          "    if (threadIdx.x == 0) {",
+          "      double t = 0.0;",
+          "      for (int i = 0; i < (int)(blockDim.x >> 5); ++i) t += s_e[i];",
+          "      atomicAdd(energy, t);",
+          "    }",
+          "  }",
+          "}"]
 
     B = [f'extern "C" __global__ void __launch_bounds__(128) gprod_bwd_{sig}(',
          f"    {args_in}, {_ptr_args('gin', range(lo + 1))},",
-         f"    {_ptr_args('dm', range(4), const=False)}, float* __restrict__ dD) {{"] + head + loads
+         f"    {_ptr_args('dm', range(4), const=False)}, float* __restrict__ dD, const float* __restrict__ gseed) {{"] + \
+        head + loads
     for l in range(lo + 1):
         for m in range(2 * l + 1):
-            B.append(f"  const float g{l * l + m} = __ldg(gin{l} + ((int64_t)a * {2 * l + 1} + {m}) * C + c);")
+            seed = " + (gseed ? __ldg(gseed + c) : 0.0f)" if l == 0 else ""
+            B.append(f"  const float g{l * l + m} = __ldg(gin{l} + ((int64_t)a * {2 * l + 1} + {m}) * C + c){seed};")
     for i in used:
         _ssa(B, i, prog.nodes[i])
     adj = {}
@@ -1194,7 +1213,9 @@ void launch_conv_bwd(int lx, cudaStream_t st, int N, int C, int S, int I, const 
 }
 
 void launch_prod(const GProdKernels* k, bool backward, cudaStream_t st, int N, int C, float* const* m, const float* D,
-                 const float* w, int64_t w_stride, const int* sp, float* const* y_or_g, float* const* dm, float* dD) {
+                 const float* w, int64_t w_stride, const int* sp, float* const* y_or_g, float* const* dm, float* dD,
+                 const float* ro_w, double* energy) {
+    // S100: ro_w (nullable): forward, E += y0 . ro_w into energy; backward, ro_w is the seed added to g0
     std::vector<void*> args;
     args.push_back(&N);
     args.push_back(&C);
@@ -1207,6 +1228,10 @@ void launch_prod(const GProdKernels* k, bool backward, cudaStream_t st, int N, i
     if (backward) {
         for (int l = 0; l < 4; ++l) args.push_back((void*)&dm[l]);
         args.push_back(&dD);
+        args.push_back(&ro_w);
+    } else {
+        args.push_back(&ro_w);
+        args.push_back(&energy);
     }
     const int blk = (C % 128 == 0) ? 128 : 32;
     check_cuda(cudaLaunchKernel(backward ? k->bwd : k->fwd, dim3(N, C / blk), dim3(blk), args.data(), 0, st));
@@ -1434,7 +1459,8 @@ def main():
         "                     float* const* x, float* const* dmid, const float* dD, float* const* dx, bool want_dx,",
         "                     float* edge_dvec, bool dvec_assign);",
         "void launch_prod(const GProdKernels* k, bool backward, cudaStream_t st, int N, int C, float* const* m, const float* D,",
-        "                 const float* w, int64_t w_stride, const int* sp, float* const* y_or_g, float* const* dm, float* dD);",
+        "                 const float* w, int64_t w_stride, const int* sp, float* const* y_or_g, float* const* dm, float* dD,",
+        "                 const float* ro_w = nullptr, double* energy = nullptr);",
         "void launch_prod_ro1_fused(const GProdKernels* k, cudaStream_t st, int N, int C, float* const* m, const float* D,",
         "                           const float* w, int64_t w_stride, const int* sp, const float* sc_skip16,",
         "                           const float* ro_W1, const float* ro_b1, const float* ro_W2, float ro_act_c,",

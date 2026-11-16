@@ -3975,7 +3975,8 @@ __global__ void __launch_bounds__(128) gconv_bwd_L2(
 }
 
 extern "C" __global__ void __launch_bounds__(128) gprod_fwd_dd662f9d3a2b5b2b(
-    int N, int C, const float* __restrict__ m0, const float* __restrict__ m1, const float* __restrict__ m2, const float* __restrict__ m3, const float* __restrict__ D, const float* __restrict__ w, int64_t w_stride, const int* __restrict__ sp, float* __restrict__ y0, float* __restrict__ y1) {
+    int N, int C, const float* __restrict__ m0, const float* __restrict__ m1, const float* __restrict__ m2, const float* __restrict__ m3, const float* __restrict__ D, const float* __restrict__ w, int64_t w_stride, const int* __restrict__ sp, float* __restrict__ y0, float* __restrict__ y1,
+    const float* __restrict__ ro_w, double* __restrict__ energy) {
   const int a = blockIdx.x, c = blockIdx.y * blockDim.x + threadIdx.x;
   const float s = D ? 1.0f / (D[a] + 1.0f) : 1.0f;
   const float* wr = w + (int64_t)sp[a] * w_stride + c;
@@ -4349,11 +4350,24 @@ extern "C" __global__ void __launch_bounds__(128) gprod_fwd_dd662f9d3a2b5b2b(
   y1[((int64_t)a * 3 + 0) * C + c] = o1;
   y1[((int64_t)a * 3 + 1) * C + c] = o2;
   y1[((int64_t)a * 3 + 2) * C + c] = o3;
+  if (ro_w) {
+    double e = (double)o0 * (double)__ldg(ro_w + c);
+    #pragma unroll
+    for (int off = 16; off > 0; off >>= 1) e += __shfl_xor_sync(0xffffffffu, e, off);
+    __shared__ double s_e[4];
+    if ((threadIdx.x & 31) == 0) s_e[threadIdx.x >> 5] = e;
+    __syncthreads();
+    if (threadIdx.x == 0) {
+      double t = 0.0;
+      for (int i = 0; i < (int)(blockDim.x >> 5); ++i) t += s_e[i];
+      atomicAdd(energy, t);
+    }
+  }
 }
 
 extern "C" __global__ void __launch_bounds__(128) gprod_bwd_dd662f9d3a2b5b2b(
     int N, int C, const float* __restrict__ m0, const float* __restrict__ m1, const float* __restrict__ m2, const float* __restrict__ m3, const float* __restrict__ D, const float* __restrict__ w, int64_t w_stride, const int* __restrict__ sp, const float* __restrict__ gin0, const float* __restrict__ gin1,
-    float* __restrict__ dm0, float* __restrict__ dm1, float* __restrict__ dm2, float* __restrict__ dm3, float* __restrict__ dD) {
+    float* __restrict__ dm0, float* __restrict__ dm1, float* __restrict__ dm2, float* __restrict__ dm3, float* __restrict__ dD, const float* __restrict__ gseed) {
   const int a = blockIdx.x, c = blockIdx.y * blockDim.x + threadIdx.x;
   const float s = D ? 1.0f / (D[a] + 1.0f) : 1.0f;
   const float* wr = w + (int64_t)sp[a] * w_stride + c;
@@ -4373,7 +4387,7 @@ extern "C" __global__ void __launch_bounds__(128) gprod_bwd_dd662f9d3a2b5b2b(
   const float x13 = __ldg(m3 + ((int64_t)a * 7 + 4) * C + c) * s;
   const float x14 = __ldg(m3 + ((int64_t)a * 7 + 5) * C + c) * s;
   const float x15 = __ldg(m3 + ((int64_t)a * 7 + 6) * C + c) * s;
-  const float g0 = __ldg(gin0 + ((int64_t)a * 1 + 0) * C + c);
+  const float g0 = __ldg(gin0 + ((int64_t)a * 1 + 0) * C + c) + (gseed ? __ldg(gseed + c) : 0.0f);
   const float g1 = __ldg(gin1 + ((int64_t)a * 3 + 0) * C + c);
   const float g2 = __ldg(gin1 + ((int64_t)a * 3 + 1) * C + c);
   const float g3 = __ldg(gin1 + ((int64_t)a * 3 + 2) * C + c);
@@ -5381,7 +5395,8 @@ extern "C" __global__ void __launch_bounds__(128) gprod_bwd_dd662f9d3a2b5b2b(
 }
 
 extern "C" __global__ void __launch_bounds__(128) gprod_fwd_ae0a447b65f4fcd4(
-    int N, int C, const float* __restrict__ m0, const float* __restrict__ m1, const float* __restrict__ m2, const float* __restrict__ m3, const float* __restrict__ D, const float* __restrict__ w, int64_t w_stride, const int* __restrict__ sp, float* __restrict__ y0) {
+    int N, int C, const float* __restrict__ m0, const float* __restrict__ m1, const float* __restrict__ m2, const float* __restrict__ m3, const float* __restrict__ D, const float* __restrict__ w, int64_t w_stride, const int* __restrict__ sp, float* __restrict__ y0,
+    const float* __restrict__ ro_w, double* __restrict__ energy) {
   const int a = blockIdx.x, c = blockIdx.y * blockDim.x + threadIdx.x;
   const float s = D ? 1.0f / (D[a] + 1.0f) : 1.0f;
   const float* wr = w + (int64_t)sp[a] * w_stride + c;
@@ -5542,11 +5557,24 @@ extern "C" __global__ void __launch_bounds__(128) gprod_fwd_ae0a447b65f4fcd4(
     o0 = fmaf(wb, v99, o0);
   }
   y0[((int64_t)a * 1 + 0) * C + c] = o0;
+  if (ro_w) {
+    double e = (double)o0 * (double)__ldg(ro_w + c);
+    #pragma unroll
+    for (int off = 16; off > 0; off >>= 1) e += __shfl_xor_sync(0xffffffffu, e, off);
+    __shared__ double s_e[4];
+    if ((threadIdx.x & 31) == 0) s_e[threadIdx.x >> 5] = e;
+    __syncthreads();
+    if (threadIdx.x == 0) {
+      double t = 0.0;
+      for (int i = 0; i < (int)(blockDim.x >> 5); ++i) t += s_e[i];
+      atomicAdd(energy, t);
+    }
+  }
 }
 
 extern "C" __global__ void __launch_bounds__(128) gprod_bwd_ae0a447b65f4fcd4(
     int N, int C, const float* __restrict__ m0, const float* __restrict__ m1, const float* __restrict__ m2, const float* __restrict__ m3, const float* __restrict__ D, const float* __restrict__ w, int64_t w_stride, const int* __restrict__ sp, const float* __restrict__ gin0,
-    float* __restrict__ dm0, float* __restrict__ dm1, float* __restrict__ dm2, float* __restrict__ dm3, float* __restrict__ dD) {
+    float* __restrict__ dm0, float* __restrict__ dm1, float* __restrict__ dm2, float* __restrict__ dm3, float* __restrict__ dD, const float* __restrict__ gseed) {
   const int a = blockIdx.x, c = blockIdx.y * blockDim.x + threadIdx.x;
   const float s = D ? 1.0f / (D[a] + 1.0f) : 1.0f;
   const float* wr = w + (int64_t)sp[a] * w_stride + c;
@@ -5566,7 +5594,7 @@ extern "C" __global__ void __launch_bounds__(128) gprod_bwd_ae0a447b65f4fcd4(
   const float x13 = __ldg(m3 + ((int64_t)a * 7 + 4) * C + c) * s;
   const float x14 = __ldg(m3 + ((int64_t)a * 7 + 5) * C + c) * s;
   const float x15 = __ldg(m3 + ((int64_t)a * 7 + 6) * C + c) * s;
-  const float g0 = __ldg(gin0 + ((int64_t)a * 1 + 0) * C + c);
+  const float g0 = __ldg(gin0 + ((int64_t)a * 1 + 0) * C + c) + (gseed ? __ldg(gseed + c) : 0.0f);
   const float v0 = x0 * x0;
   const float v1 = x0 * v0;
   const float v2 = x1 * x1;
@@ -6509,7 +6537,8 @@ __global__ void __launch_bounds__(MAX_B, MIN_BLK) gprod_ro1_fused_ae0a447b65f4fc
 }
 
 extern "C" __global__ void __launch_bounds__(128) gprod_fwd_00dc9085957f7969(
-    int N, int C, const float* __restrict__ m0, const float* __restrict__ m1, const float* __restrict__ m2, const float* __restrict__ m3, const float* __restrict__ D, const float* __restrict__ w, int64_t w_stride, const int* __restrict__ sp, float* __restrict__ y0, float* __restrict__ y1, float* __restrict__ y2) {
+    int N, int C, const float* __restrict__ m0, const float* __restrict__ m1, const float* __restrict__ m2, const float* __restrict__ m3, const float* __restrict__ D, const float* __restrict__ w, int64_t w_stride, const int* __restrict__ sp, float* __restrict__ y0, float* __restrict__ y1, float* __restrict__ y2,
+    const float* __restrict__ ro_w, double* __restrict__ energy) {
   const int a = blockIdx.x, c = blockIdx.y * blockDim.x + threadIdx.x;
   const float s = D ? 1.0f / (D[a] + 1.0f) : 1.0f;
   const float* wr = w + (int64_t)sp[a] * w_stride + c;
@@ -7133,11 +7162,24 @@ extern "C" __global__ void __launch_bounds__(128) gprod_fwd_00dc9085957f7969(
   y2[((int64_t)a * 5 + 2) * C + c] = o6;
   y2[((int64_t)a * 5 + 3) * C + c] = o7;
   y2[((int64_t)a * 5 + 4) * C + c] = o8;
+  if (ro_w) {
+    double e = (double)o0 * (double)__ldg(ro_w + c);
+    #pragma unroll
+    for (int off = 16; off > 0; off >>= 1) e += __shfl_xor_sync(0xffffffffu, e, off);
+    __shared__ double s_e[4];
+    if ((threadIdx.x & 31) == 0) s_e[threadIdx.x >> 5] = e;
+    __syncthreads();
+    if (threadIdx.x == 0) {
+      double t = 0.0;
+      for (int i = 0; i < (int)(blockDim.x >> 5); ++i) t += s_e[i];
+      atomicAdd(energy, t);
+    }
+  }
 }
 
 extern "C" __global__ void __launch_bounds__(128) gprod_bwd_00dc9085957f7969(
     int N, int C, const float* __restrict__ m0, const float* __restrict__ m1, const float* __restrict__ m2, const float* __restrict__ m3, const float* __restrict__ D, const float* __restrict__ w, int64_t w_stride, const int* __restrict__ sp, const float* __restrict__ gin0, const float* __restrict__ gin1, const float* __restrict__ gin2,
-    float* __restrict__ dm0, float* __restrict__ dm1, float* __restrict__ dm2, float* __restrict__ dm3, float* __restrict__ dD) {
+    float* __restrict__ dm0, float* __restrict__ dm1, float* __restrict__ dm2, float* __restrict__ dm3, float* __restrict__ dD, const float* __restrict__ gseed) {
   const int a = blockIdx.x, c = blockIdx.y * blockDim.x + threadIdx.x;
   const float s = D ? 1.0f / (D[a] + 1.0f) : 1.0f;
   const float* wr = w + (int64_t)sp[a] * w_stride + c;
@@ -7157,7 +7199,7 @@ extern "C" __global__ void __launch_bounds__(128) gprod_bwd_00dc9085957f7969(
   const float x13 = __ldg(m3 + ((int64_t)a * 7 + 4) * C + c) * s;
   const float x14 = __ldg(m3 + ((int64_t)a * 7 + 5) * C + c) * s;
   const float x15 = __ldg(m3 + ((int64_t)a * 7 + 6) * C + c) * s;
-  const float g0 = __ldg(gin0 + ((int64_t)a * 1 + 0) * C + c);
+  const float g0 = __ldg(gin0 + ((int64_t)a * 1 + 0) * C + c) + (gseed ? __ldg(gseed + c) : 0.0f);
   const float g1 = __ldg(gin1 + ((int64_t)a * 3 + 0) * C + c);
   const float g2 = __ldg(gin1 + ((int64_t)a * 3 + 1) * C + c);
   const float g3 = __ldg(gin1 + ((int64_t)a * 3 + 2) * C + c);
@@ -8714,7 +8756,8 @@ extern "C" __global__ void __launch_bounds__(128) gprod_bwd_00dc9085957f7969(
 }
 
 extern "C" __global__ void __launch_bounds__(128) gprod_fwd_6f194247389dfa5c(
-    int N, int C, const float* __restrict__ m0, const float* __restrict__ m1, const float* __restrict__ m2, const float* __restrict__ m3, const float* __restrict__ D, const float* __restrict__ w, int64_t w_stride, const int* __restrict__ sp, float* __restrict__ y0, float* __restrict__ y1, float* __restrict__ y2) {
+    int N, int C, const float* __restrict__ m0, const float* __restrict__ m1, const float* __restrict__ m2, const float* __restrict__ m3, const float* __restrict__ D, const float* __restrict__ w, int64_t w_stride, const int* __restrict__ sp, float* __restrict__ y0, float* __restrict__ y1, float* __restrict__ y2,
+    const float* __restrict__ ro_w, double* __restrict__ energy) {
   const int a = blockIdx.x, c = blockIdx.y * blockDim.x + threadIdx.x;
   const float s = D ? 1.0f / (D[a] + 1.0f) : 1.0f;
   const float* wr = w + (int64_t)sp[a] * w_stride + c;
@@ -8960,11 +9003,24 @@ extern "C" __global__ void __launch_bounds__(128) gprod_fwd_6f194247389dfa5c(
   y2[((int64_t)a * 5 + 2) * C + c] = o6;
   y2[((int64_t)a * 5 + 3) * C + c] = o7;
   y2[((int64_t)a * 5 + 4) * C + c] = o8;
+  if (ro_w) {
+    double e = (double)o0 * (double)__ldg(ro_w + c);
+    #pragma unroll
+    for (int off = 16; off > 0; off >>= 1) e += __shfl_xor_sync(0xffffffffu, e, off);
+    __shared__ double s_e[4];
+    if ((threadIdx.x & 31) == 0) s_e[threadIdx.x >> 5] = e;
+    __syncthreads();
+    if (threadIdx.x == 0) {
+      double t = 0.0;
+      for (int i = 0; i < (int)(blockDim.x >> 5); ++i) t += s_e[i];
+      atomicAdd(energy, t);
+    }
+  }
 }
 
 extern "C" __global__ void __launch_bounds__(128) gprod_bwd_6f194247389dfa5c(
     int N, int C, const float* __restrict__ m0, const float* __restrict__ m1, const float* __restrict__ m2, const float* __restrict__ m3, const float* __restrict__ D, const float* __restrict__ w, int64_t w_stride, const int* __restrict__ sp, const float* __restrict__ gin0, const float* __restrict__ gin1, const float* __restrict__ gin2,
-    float* __restrict__ dm0, float* __restrict__ dm1, float* __restrict__ dm2, float* __restrict__ dm3, float* __restrict__ dD) {
+    float* __restrict__ dm0, float* __restrict__ dm1, float* __restrict__ dm2, float* __restrict__ dm3, float* __restrict__ dD, const float* __restrict__ gseed) {
   const int a = blockIdx.x, c = blockIdx.y * blockDim.x + threadIdx.x;
   const float s = D ? 1.0f / (D[a] + 1.0f) : 1.0f;
   const float* wr = w + (int64_t)sp[a] * w_stride + c;
@@ -8984,7 +9040,7 @@ extern "C" __global__ void __launch_bounds__(128) gprod_bwd_6f194247389dfa5c(
   const float x13 = __ldg(m3 + ((int64_t)a * 7 + 4) * C + c) * s;
   const float x14 = __ldg(m3 + ((int64_t)a * 7 + 5) * C + c) * s;
   const float x15 = __ldg(m3 + ((int64_t)a * 7 + 6) * C + c) * s;
-  const float g0 = __ldg(gin0 + ((int64_t)a * 1 + 0) * C + c);
+  const float g0 = __ldg(gin0 + ((int64_t)a * 1 + 0) * C + c) + (gseed ? __ldg(gseed + c) : 0.0f);
   const float g1 = __ldg(gin1 + ((int64_t)a * 3 + 0) * C + c);
   const float g2 = __ldg(gin1 + ((int64_t)a * 3 + 1) * C + c);
   const float g3 = __ldg(gin1 + ((int64_t)a * 3 + 2) * C + c);
@@ -9565,7 +9621,8 @@ extern "C" __global__ void __launch_bounds__(128) gprod_bwd_6f194247389dfa5c(
 }
 
 extern "C" __global__ void __launch_bounds__(128) gprod_fwd_4715eda4cc3ebda5(
-    int N, int C, const float* __restrict__ m0, const float* __restrict__ m1, const float* __restrict__ m2, const float* __restrict__ m3, const float* __restrict__ D, const float* __restrict__ w, int64_t w_stride, const int* __restrict__ sp, float* __restrict__ y0) {
+    int N, int C, const float* __restrict__ m0, const float* __restrict__ m1, const float* __restrict__ m2, const float* __restrict__ m3, const float* __restrict__ D, const float* __restrict__ w, int64_t w_stride, const int* __restrict__ sp, float* __restrict__ y0,
+    const float* __restrict__ ro_w, double* __restrict__ energy) {
   const int a = blockIdx.x, c = blockIdx.y * blockDim.x + threadIdx.x;
   const float s = D ? 1.0f / (D[a] + 1.0f) : 1.0f;
   const float* wr = w + (int64_t)sp[a] * w_stride + c;
@@ -9621,11 +9678,24 @@ extern "C" __global__ void __launch_bounds__(128) gprod_fwd_4715eda4cc3ebda5(
     o0 = fmaf(wb, v18, o0);
   }
   y0[((int64_t)a * 1 + 0) * C + c] = o0;
+  if (ro_w) {
+    double e = (double)o0 * (double)__ldg(ro_w + c);
+    #pragma unroll
+    for (int off = 16; off > 0; off >>= 1) e += __shfl_xor_sync(0xffffffffu, e, off);
+    __shared__ double s_e[4];
+    if ((threadIdx.x & 31) == 0) s_e[threadIdx.x >> 5] = e;
+    __syncthreads();
+    if (threadIdx.x == 0) {
+      double t = 0.0;
+      for (int i = 0; i < (int)(blockDim.x >> 5); ++i) t += s_e[i];
+      atomicAdd(energy, t);
+    }
+  }
 }
 
 extern "C" __global__ void __launch_bounds__(128) gprod_bwd_4715eda4cc3ebda5(
     int N, int C, const float* __restrict__ m0, const float* __restrict__ m1, const float* __restrict__ m2, const float* __restrict__ m3, const float* __restrict__ D, const float* __restrict__ w, int64_t w_stride, const int* __restrict__ sp, const float* __restrict__ gin0,
-    float* __restrict__ dm0, float* __restrict__ dm1, float* __restrict__ dm2, float* __restrict__ dm3, float* __restrict__ dD) {
+    float* __restrict__ dm0, float* __restrict__ dm1, float* __restrict__ dm2, float* __restrict__ dm3, float* __restrict__ dD, const float* __restrict__ gseed) {
   const int a = blockIdx.x, c = blockIdx.y * blockDim.x + threadIdx.x;
   const float s = D ? 1.0f / (D[a] + 1.0f) : 1.0f;
   const float* wr = w + (int64_t)sp[a] * w_stride + c;
@@ -9645,7 +9715,7 @@ extern "C" __global__ void __launch_bounds__(128) gprod_bwd_4715eda4cc3ebda5(
   const float x13 = __ldg(m3 + ((int64_t)a * 7 + 4) * C + c) * s;
   const float x14 = __ldg(m3 + ((int64_t)a * 7 + 5) * C + c) * s;
   const float x15 = __ldg(m3 + ((int64_t)a * 7 + 6) * C + c) * s;
-  const float g0 = __ldg(gin0 + ((int64_t)a * 1 + 0) * C + c);
+  const float g0 = __ldg(gin0 + ((int64_t)a * 1 + 0) * C + c) + (gseed ? __ldg(gseed + c) : 0.0f);
   const float v0 = x0 * x0;
   const float v1 = x1 * x1;
   const float v2 = x2 * x2;
@@ -10117,7 +10187,9 @@ void launch_conv_bwd(int lx, cudaStream_t st, int N, int C, int S, int I, const 
 }
 
 void launch_prod(const GProdKernels* k, bool backward, cudaStream_t st, int N, int C, float* const* m, const float* D,
-                 const float* w, int64_t w_stride, const int* sp, float* const* y_or_g, float* const* dm, float* dD) {
+                 const float* w, int64_t w_stride, const int* sp, float* const* y_or_g, float* const* dm, float* dD,
+                 const float* ro_w, double* energy) {
+    // S100: ro_w (nullable): forward, E += y0 . ro_w into energy; backward, ro_w is the seed added to g0
     std::vector<void*> args;
     args.push_back(&N);
     args.push_back(&C);
@@ -10130,6 +10202,10 @@ void launch_prod(const GProdKernels* k, bool backward, cudaStream_t st, int N, i
     if (backward) {
         for (int l = 0; l < 4; ++l) args.push_back((void*)&dm[l]);
         args.push_back(&dD);
+        args.push_back(&ro_w);
+    } else {
+        args.push_back(&ro_w);
+        args.push_back(&energy);
     }
     const int blk = (C % 128 == 0) ? 128 : 32;
     check_cuda(cudaLaunchKernel(backward ? k->bwd : k->fwd, dim3(N, C / blk), dim3(blk), args.data(), 0, st));
