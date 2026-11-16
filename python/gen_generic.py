@@ -383,6 +383,12 @@ EDGE_DVEC_RED = """\
 #else
 """ + EDGE_DVEC_RMW + """
 #endif"""
+# S98: the backward of the top conv layer runs first in the pass and assigns the per-edge vectors instead (no zero
+# fill of the buffer, no load to wait on); dvec_assign is uniform per launch.
+EDGE_DVEC_SET = """\
+      edge_dvec[(int64_t)e * 3 + 0] = fx;
+      edge_dvec[(int64_t)e * 3 + 1] = fy;
+      edge_dvec[(int64_t)e * 3 + 2] = fz;"""
 
 def emit_conv_bwd_lp(lx):
     """Late pull-back backward over layout(lx)'s paths with x degree <= 1: every path for lx 0 / 1; for lx 2 the ten
@@ -542,7 +548,8 @@ __global__ void __launch_bounds__(512) {name}(
     const int* __restrict__ row_ptr, const int* __restrict__ senders, const float4* __restrict__ vec_len,
     const int* __restrict__ act_slab, const float2* __restrict__ act_t_sx,
     const int* __restrict__ species, const uint2* __restrict__ packed_table, const float4* __restrict__ density_table,
-    unsigned bias_shift, {x_args}, {dm_args}, const float* __restrict__ dD, {dx_args}, float* __restrict__ edge_dvec) {{
+    unsigned bias_shift, {x_args}, {dm_args}, const float* __restrict__ dD, {dx_args}, float* __restrict__ edge_dvec,
+    int dvec_assign) {{
   extern __shared__ float s_q[];
   const int C = C_FIX ? C_FIX : C_arg;
   const int rcv = blockIdx.x, tid = threadIdx.x, wid = tid >> 5, lane = tid & 31, n_warps = blockDim.x >> 5;
@@ -599,7 +606,11 @@ __global__ void __launch_bounds__(512) {name}(
       float fy = fmaf(ny, rad - fn * inv_d, pull_Gy * inv_d);
       float fz = fmaf(nz, rad - fn * inv_d, pull_Gz * inv_d);
       if (sh_perm) {{ const float tx = fx, ty = fy, tz = fz; fx = tz; fy = tx; fz = ty; }}
+      if (dvec_assign) {{
+{EDGE_DVEC_SET}
+      }} else {{
 {EDGE_DVEC_RED if lx == 0 else EDGE_DVEC_RMW}
+      }}
     }}
   }}
 }}
@@ -1109,7 +1120,7 @@ void launch_conv_bwd(int lx, cudaStream_t st, int N, int C, int S, int I, const 
                      const int* rp, const int* snd, const float4* vl, const int* act_slab, const float2* act_t_sx,
                      bool preloc, const int* sp, const uint2* packed, const float4* dens, unsigned bias_shift,
                      float* const* x, float* const* dmid, const float* dD, float* const* dx, bool want_dx,
-                     float* edge_dvec) {
+                     float* edge_dvec, bool dvec_assign) {
     if (lx == 0) {
         const size_t smem = (size_t)C * 20 * sizeof(float);
         auto pick = [&](auto f_p, auto f_n) { return preloc ? f_p : f_n; };
@@ -1121,7 +1132,8 @@ void launch_conv_bwd(int lx, cudaStream_t st, int N, int C, int S, int I, const 
                                         : pick(gconv_bwd_L0<false, 0, true>, gconv_bwd_L0<false, 0, false>));
         if (smem > 48000) check_cuda(cudaFuncSetAttribute((const void*)fn, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)smem));
         fn<<<N, 256, smem, st>>>(N, C, S, I, sg, perm, psym, rp, snd, vl, act_slab, act_t_sx, sp, packed, dens,
-                                 bias_shift, x[0], dmid[0], dmid[1], dmid[2], dmid[3], dD, dx[0], edge_dvec);
+                                 bias_shift, x[0], dmid[0], dmid[1], dmid[2], dmid[3], dD, dx[0], edge_dvec,
+                                 (int)dvec_assign);
     } else if (lx == 1) {
         const size_t smem = (size_t)C * 44 * sizeof(float);
         auto pick = [&](auto f_p, auto f_n) { return preloc ? f_p : f_n; };
@@ -1136,7 +1148,7 @@ void launch_conv_bwd(int lx, cudaStream_t st, int N, int C, int S, int I, const 
         if (smem > 48000) check_cuda(cudaFuncSetAttribute((const void*)fn, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)smem));
         fn<<<N, C == 256 ? 512 : 256, smem, st>>>(N, C, S, I, sg, perm, psym, rp, snd, vl, act_slab, act_t_sx, sp, packed, dens,
                                  bias_shift, x[0], x[1], dmid[0], dmid[1], dmid[2], dmid[3], dD, dx[0], dx[1],
-                                 edge_dvec);
+                                 edge_dvec, (int)dvec_assign);
     } else {
         const size_t smem = (size_t)C * 44 * sizeof(float), smem_g = (size_t)C * kGconvBwdL2GS * sizeof(float);
         auto pick_lp = [&](auto f_p, auto f_n) { return preloc ? f_p : f_n; };
@@ -1156,7 +1168,7 @@ void launch_conv_bwd(int lx, cudaStream_t st, int N, int C, int S, int I, const 
         if (smem_g > 48000) check_cuda(cudaFuncSetAttribute((const void*)fg, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)smem_g));
         flp<<<N, C == 224 ? 512 : 256, smem, st>>>(N, C, S, I, sg, perm, psym, rp, snd, vl, act_slab, act_t_sx, sp, packed, dens,
                                   bias_shift, x[0], x[1], dmid[0], dmid[1], dmid[2], dmid[3], dD, dx[0], dx[1],
-                                  edge_dvec);
+                                  edge_dvec, (int)dvec_assign);
         fg<<<N, 128, smem_g, st>>>(N, C, S, I, sg, perm, psym, rp, snd, vl, act_slab, act_t_sx, sp, packed, dens,
                                    bias_shift, x[0], x[1], x[2], dmid[0], dmid[1], dmid[2], dmid[3],
                                    nullptr, dx[0], dx[1], dx[2], edge_dvec);
@@ -1402,7 +1414,7 @@ def main():
         "                     const int* rp, const int* snd, const float4* vl, const int* act_slab, const float2* act_t_sx,",
         "                     bool preloc, const int* sp, const uint2* packed, const float4* dens, unsigned bias_shift,",
         "                     float* const* x, float* const* dmid, const float* dD, float* const* dx, bool want_dx,",
-        "                     float* edge_dvec);",
+        "                     float* edge_dvec, bool dvec_assign);",
         "void launch_prod(const GProdKernels* k, bool backward, cudaStream_t st, int N, int C, float* const* m, const float* D,",
         "                 const float* w, int64_t w_stride, const int* sp, float* const* y_or_g, float* const* dm, float* dD);",
         "void launch_prod_ro1_fused(const GProdKernels* k, cudaStream_t st, int N, int C, float* const* m, const float* D,",

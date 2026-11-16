@@ -1664,7 +1664,10 @@ void GenericModel::record(const GenericPassInputs& in) {
         zbl_p.c0 = zbl_c_[0]; zbl_p.c1 = zbl_c_[1]; zbl_p.c2 = zbl_c_[2]; zbl_p.c3 = zbl_c_[3];
         zbl_p.p = zbl_p_; zbl_p.r_max = zbl_rmax_;
     }
-    if (has_edges) zero_edge_kernel<<<(3 * in.E_cap + 255) / 256, 256, 0, st>>>(in.E_dev, d_edge_dvec_);
+    // S98: the top layer's conv backward (the first in the pass) assigns the per-edge vectors; only a model without
+    // conv layers (layer 0 alone) needs them zeroed for the layer-0 backward's accumulation.
+    if (has_edges && layers_.back()->first_hidden)
+        zero_edge_kernel<<<(3 * in.E_cap + 255) / 256, 256, 0, st>>>(in.E_dev, d_edge_dvec_);
     if (zero_slab_bytes_) CUDA_CHECK_THROW(cudaMemsetAsync(d_zero_slab_, 0, zero_slab_bytes_, st));
 
     if (h0_read_)
@@ -2082,7 +2085,7 @@ void GenericModel::record(const GenericPassInputs& in) {
         launch_conv_bwd(L->lmax_x, st, N, Cx, S, L->intervals, L->grid, sh_perm_, L->pair_sym, in.act_row_ptr,
                         in.act_senders, in.act_vec_len, in.act_slab, in.act_t_sx, can_preloc(L), in.species,
                         L->packed_table, L->density_table, L->cubic_bias_shift, L->x, L->mid,
-                        density ? L->dD : nullptr, L->dx, t > 0, d_edge_dvec_);
+                        density ? L->dD : nullptr, L->dx, t > 0, d_edge_dvec_, t == n_layers_ - 1);
         if (t > 0 && !chain_fold_) {  // S57: the earlier layers' fold reads dx directly
             if (L->lmax_x > 0) fork();
             for (int l = 0; l <= L->lmax_x; ++l) {
