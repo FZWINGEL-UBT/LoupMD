@@ -453,12 +453,13 @@ struct LoupHandle {
     int l2_bytes = 0;
     bool is_sm120 = false;
     // The own-SGEMM extensions (sgemm64 / sgemm32 + split-K candidates, the narrow-N rules, N-fastest rasterisation and
-    // the N = 96 kernel of sgemm128): on for sm_120 (5060 Ti). Faster on small cells of compute capability 8.0 too
-    // (A100, S70: MH-1 NaCl216 0.954, POLAR-1-M NaCl216 0.932, large ones tie), off there until its gates pass;
-    // LOUP_OWN_EXT=0|1 forces them (tests).
+    // the N = 96 kernel of sgemm128): on for sm_120 (5060 Ti), and on compute capability 8.0 when no tensor-core cubin
+    // is loaded (long-range models, float32 SIMT GEMMs: A100, S82: POLAR-1-S NaCl216 0.870, POLAR-1-M 0.959); with
+    // the cubin they lose there (S80: OFF23-S water216 1.034, OMOL-0 1.008). LOUP_OWN_EXT=0|1 forces them (tests).
     bool own_ext = false;
-    // The lane-group neighbour count / fill kernels: on for sm_120; faster on compute capability 8.0 too (A100, S70:
-    // OFF23-M water216 0.891, water 0.976), off there until its gates pass; LOUP_NB_GROUPS=0|1 forces them (tests).
+    // The lane-group neighbour count / fill kernels: on for sm_120 and compute capability 8.0 (A100, S80: OFF23-S
+    // water216 0.843, OFF23-M water216 0.885, MH-1 NaCl216 0.965, large cells 0.990-0.995; the same lists, so the same
+    // forces); LOUP_NB_GROUPS=0|1 forces them (tests).
     bool nb_groups_ok = false;
     // LOUP_FORCE_TC=1 (tests): every GEMM the tensor-core cubin can take runs its fastest cubin tile (no cuBLASLt or own
     // SGEMM candidates), so gates cover the cubin's arithmetic on every eligible shape; no plans are loaded or saved.
@@ -1841,14 +1842,19 @@ LoupHandle* loup_create(const char* loup_path, int device_id) {
         h = new LoupHandle();
         h->device_id = device_id;
         CUDA_CHECK_THROW(cudaDeviceGetAttribute(&h->l2_bytes, cudaDevAttrL2CacheSize, device_id));
+        bool own_ext_env = false, cc80 = false;
         {
             int cc_maj = 0, cc_min = 0;
             CUDA_CHECK_THROW(cudaDeviceGetAttribute(&cc_maj, cudaDevAttrComputeCapabilityMajor, device_id));
             CUDA_CHECK_THROW(cudaDeviceGetAttribute(&cc_min, cudaDevAttrComputeCapabilityMinor, device_id));
             h->is_sm120 = (cc_maj == 12 && cc_min == 0);
+            cc80 = cc_maj == 8 && cc_min == 0;
             h->own_ext = h->is_sm120;
-            if (const char* e = std::getenv("LOUP_OWN_EXT"); e && (e[0] == '0' || e[0] == '1')) h->own_ext = e[0] == '1';
-            h->nb_groups_ok = h->is_sm120;
+            if (const char* e = std::getenv("LOUP_OWN_EXT"); e && (e[0] == '0' || e[0] == '1')) {
+                h->own_ext = e[0] == '1';
+                own_ext_env = true;
+            }
+            h->nb_groups_ok = h->is_sm120 || cc80;
             if (const char* e = std::getenv("LOUP_NB_GROUPS"); e && (e[0] == '0' || e[0] == '1')) h->nb_groups_ok = e[0] == '1';
             if (const char* e = std::getenv("LOUP_FORCE_TC"); e && e[0] == '1') h->force_tc = true;
         }
@@ -1885,6 +1891,7 @@ LoupHandle* loup_create(const char* loup_path, int device_id) {
         // LOUP_HYBRID_CUBIN, gated before any adoption).
         const char* lr_hyb = std::getenv("LOUP_LR_HYBRID");
         if (!(h->gen && h->gen->has_lr()) || (lr_hyb && lr_hyb[0] == '1')) h->hyb.init(device_id);
+        if (cc80 && !h->hyb.loaded && !own_ext_env) h->own_ext = true;  // float32 SIMT GEMMs only (see own_ext)
         h->load_disk_plans(device_id);
         tune_l1(device_id);
         loup::sgemm128_init();

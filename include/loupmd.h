@@ -84,7 +84,8 @@ int loup_profile_force(LoupHandle* h, int warmup, int n_calls, double* out_total
 //   LOUP_ROW_SORT=global  sort every neighbour row in global scratch, the path of rows over 4,096 edges (testing).
 //   LOUP_MD_REBUILD=host|fallback  MD neighbour rebuilds host-driven, or counted on the GPU and always finished on the
 //                   host, instead of inside the step graph (testing).
-//   LOUP_POLAR_FOLD=0  POLAR long range without the load-time dot^T weight fold (testing the path other GPUs take).
+//   LOUP_POLAR_FOLD=0|1  POLAR long range without (0) the load-time dot^T weight fold, testing the path other GPUs take,
+//                   or with it (1) on any GPU (sm_120 and cc 8.0 fold by default).
 //   LOUP_CHAIN_FOLD=0|1  generic models (OMOL-0, MH-1, the OMAT-0 / MP-0 / MPtrj / OFF families on the generic path):
 //                   0 skips the load-time skip-chain fold (the path other GPUs take), 1 folds on any GPU (testing;
 //                   sm_120 and cc 8.0 fold by default).
@@ -99,8 +100,9 @@ int loup_profile_force(LoupHandle* h, int warmup, int n_calls, double* out_total
 //                   cubins/tf32x3_hyb_sm<arch>.cubin elsewhere) (testing). GEMM plans are keyed by the cubin file.
 //   LOUP_LR_HYBRID=1  load the GEMM cubin for long-range models too (testing; they run float32 SIMT GEMMs by default).
 //   LOUP_OWN_EXT=0|1  force the own-SGEMM extensions (sgemm64 / sgemm32 candidates, N-fastest rasterisation; testing;
-//                   on for sm_120 by default).
-//   LOUP_NB_GROUPS=0|1  force the lane-group neighbour-list kernels (testing; on for sm_120 by default).
+//                   on by default for sm_120, and for cc 8.0 when no GEMM cubin is loaded, e.g. long-range models).
+//   LOUP_NB_GROUPS=0|1  force the lane-group neighbour-list kernels (testing; on for sm_120 and compute capability 8.0
+//                   by default).
 //   LOUP_FORCE_TC=1  every GEMM the tensor-core cubin can take runs on it (testing the cubin's accuracy on every
 //                   eligible shape; no GEMM plans are loaded or saved).
 //   LOUP_DEBUG_SPLINE, LOUP_DEBUG_GEMM  print the variant / GEMM tuning decisions to stderr.

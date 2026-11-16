@@ -1040,9 +1040,10 @@ struct PolarLR::Impl {
         std::vector<float*> W, b, g, be;
     };
     // The SCF's Z = (pot Wpot + q Wq + fm Wnf) dot^T and the electron energy's Zq = (q Wq + bq) dotq^T (Zv alike) are
-    // linear in their inputs. With `fold` (sm_120, the GPU it was measured on; LOUP_POLAR_FOLD=0 disables it) the
-    // weights are stored composed with dot^T (`_dot`, fold_dotT_kernel): one C x C product per SCF step and l in
-    // each direction instead of two, and none for the electron energy. Otherwise the unfolded weights and products.
+    // linear in their inputs. With `fold` (sm_120 and compute capability 8.0, the GPUs it was measured on;
+    // LOUP_POLAR_FOLD=0 disables it, =1 forces it elsewhere) the weights are stored composed with dot^T (`_dot`,
+    // fold_dotT_kernel): one C x C product per SCF step and l in each direction instead of two, and none for the
+    // electron energy. Otherwise the unfolded weights and products.
     bool fold = false;
     struct Update {
         float *Wpot = nullptr, *Wq = nullptr, *Wnf[3] = {}, *dot[3] = {};              // unfolded
@@ -1194,8 +1195,9 @@ void PolarLR::load(const Bundle& b, int S, int n_layers) {
         CUDA_CHECK_THROW(cudaGetDevice(&dev));
         CUDA_CHECK_THROW(cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor, dev));
         CUDA_CHECK_THROW(cudaDeviceGetAttribute(&minor, cudaDevAttrComputeCapabilityMinor, dev));
-        P.fold = major == 12 && minor == 0;
-        if (const char* e = std::getenv("LOUP_POLAR_FOLD"); e && e[0] == '0') P.fold = false;  // test the unfolded path
+        P.fold = (major == 12 && minor == 0) || (major == 8 && minor == 0);
+        if (const char* e = std::getenv("LOUP_POLAR_FOLD"); e && (e[0] == '0' || e[0] == '1'))
+            P.fold = e[0] == '1';  // tests: the unfolded path here, the fold elsewhere
     }
     for (int t = 0; t < n_layers; ++t) {
         P.src.push_back(P.up(b.f32("LR.src_" + std::to_string(t), {R, 8})));
