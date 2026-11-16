@@ -122,7 +122,7 @@ inline int64_t floor_div(int64_t a, int64_t b) { return a >= 0 ? a / b : -((-a +
 }  // namespace
 
 TilePlan plan_tiles(const double* positions, int64_t n, const double* cell, int receivers, int64_t edges,
-                    const int32_t* degree, double reach, const int* shape) {
+                    const int32_t* degree, double reach, const int* shape, double boundary_skin) {
     if (!positions || !cell) throw std::runtime_error("plan_tiles: positions and cell are needed");
     if (n < 1 || n > std::numeric_limits<int32_t>::max()) throw std::runtime_error("plan_tiles: the atom count must be from 1 to 2^31 - 1");
     if (receivers < 1) throw std::runtime_error("plan_tiles: receivers must be positive");
@@ -138,7 +138,14 @@ TilePlan plan_tiles(const double* positions, int64_t n, const double* cell, int 
         fit_grid(g, positions, n, receivers, plan.grid);
     }
     const int* k = plan.grid;
-    const int64_t blocks = count_of(k, "the grid");
+    if (!(boundary_skin >= 0.0) || !std::isfinite(boundary_skin))
+        throw std::runtime_error("plan_tiles: boundary_skin must be finite and not negative");
+    // With the boundary skins: two more layers of blocks along axis 0, the first and the last, for the atoms within
+    // boundary_skin of the faces (only when the grid has two layers or more and a skin is thinner than a layer).
+    const double skin_f = boundary_skin / g.spacing[0];
+    const bool split = boundary_skin > 0.0 && k[0] >= 2 && skin_f < 1.0 / k[0];
+    const int64_t layer = static_cast<int64_t>(k[1]) * k[2];
+    const int64_t blocks = count_of(k, "the grid") + (split ? 2 * layer : 0);
 
     // ---- the atoms of each block, in atom order (a counting sort) ----
     std::vector<int32_t> block(static_cast<size_t>(n));
@@ -147,7 +154,13 @@ TilePlan plan_tiles(const double* positions, int64_t n, const double* cell, int 
         double f[3];
         int32_t whole[3];
         wrapped(g, positions, a, f, whole);
-        const int64_t b = cell_index(f, k);
+        int64_t b = cell_index(f, k);
+        if (split) {  // layers shift by one; the skins take layer 0 and the new last layer
+            const int64_t across = b % layer, l0 = b / layer;
+            if (l0 == 0 && f[0] < skin_f) b = across;
+            else if (l0 == k[0] - 1 && f[0] >= 1.0 - skin_f) b = (static_cast<int64_t>(k[0]) + 1) * layer + across;
+            else b = (l0 + 1) * layer + across;
+        }
         block[static_cast<size_t>(a)] = static_cast<int32_t>(b);
         start[static_cast<size_t>(b) + 1]++;
     }
@@ -275,6 +288,84 @@ TilePlan plan_tiles(const double* positions, int64_t n, const double* cell, int 
     return plan;
 }
 
+void tile_dependencies(const TilePlan& plan, std::vector<int64_t>& needs_ptr, std::vector<int64_t>& needs,
+                       std::vector<int64_t>& ready) {
+    const int64_t tiles = plan.tiles();
+    int32_t most = -1;
+    for (int32_t a : plan.local) most = std::max(most, a);
+    std::vector<int64_t> tile_of(static_cast<size_t>(most) + 1, -1);
+    for (int64_t t = 0; t < tiles; t++)
+        for (int64_t p = plan.local_ptr[static_cast<size_t>(t)]; p < plan.local_ptr[static_cast<size_t>(t) + 1]; p++)
+            tile_of[static_cast<size_t>(plan.local[static_cast<size_t>(p)])] = t;
+    needs_ptr.assign(static_cast<size_t>(tiles) + 1, 0);
+    needs.clear();
+    ready.resize(static_cast<size_t>(tiles));
+    for (int64_t t = 0; t < tiles; t++) ready[static_cast<size_t>(t)] = t;
+    std::vector<int64_t> mark(static_cast<size_t>(tiles), -1), mine;
+    for (int64_t t = 0; t < tiles; t++) {
+        mine.clear();
+        auto take = [&](int32_t a) {
+            const int64_t u = tile_of[static_cast<size_t>(a)];
+            if (mark[static_cast<size_t>(u)] == t) return;
+            mark[static_cast<size_t>(u)] = t;
+            mine.push_back(u);
+            ready[static_cast<size_t>(u)] = std::max(ready[static_cast<size_t>(u)], t);
+        };
+        for (int64_t p = plan.local_ptr[static_cast<size_t>(t)]; p < plan.local_ptr[static_cast<size_t>(t) + 1]; p++)
+            take(plan.local[static_cast<size_t>(p)]);
+        for (int64_t p = plan.ghost_ptr[static_cast<size_t>(t)]; p < plan.ghost_ptr[static_cast<size_t>(t) + 1]; p++)
+            take(plan.ghost[static_cast<size_t>(p)]);
+        std::sort(mine.begin(), mine.end());
+        needs.insert(needs.end(), mine.begin(), mine.end());
+        needs_ptr[static_cast<size_t>(t) + 1] = static_cast<int64_t>(needs.size());
+    }
+}
+
+std::vector<SweepStep> wavefront_schedule(int64_t tiles, const int64_t* needs_ptr, const int64_t* needs,
+                                          const int64_t* ready, const int64_t* counts, int group, int64_t* peak) {
+    if (tiles < 1 || !needs_ptr || !needs || !ready || !counts)
+        throw std::runtime_error("wavefront_schedule: tiles must be positive and needs, ready and counts given");
+    for (int64_t t = 0; t < tiles; t++) {
+        bool self = false;
+        for (int64_t i = needs_ptr[t]; i < needs_ptr[t + 1]; i++) {
+            if (needs[i] < 0 || needs[i] >= tiles)
+                throw std::runtime_error("wavefront_schedule: tile " + std::to_string(t) + " needs a tile out of range");
+            self = self || needs[i] == t;
+        }
+        if (!self) throw std::runtime_error("wavefront_schedule: tile " + std::to_string(t) + " does not need itself");
+        if (ready[t] < t || ready[t] >= tiles)
+            throw std::runtime_error("wavefront_schedule: tile " + std::to_string(t) + " is ready before its own sweep 2");
+    }
+    const int64_t step = std::max(1, group);
+    std::vector<int64_t> order(static_cast<size_t>(tiles));
+    for (int64_t t = 0; t < tiles; t++) order[static_cast<size_t>(t)] = t;
+    std::stable_sort(order.begin(), order.end(), [&](int64_t a, int64_t b) { return ready[a] < ready[b]; });
+    std::vector<char> done(static_cast<size_t>(tiles), 0);
+    std::vector<SweepStep> steps;
+    steps.reserve(3 * static_cast<size_t>(tiles));
+    int64_t live = 0, most = 0, next3 = 0;
+    for (int64_t start = 0; start < tiles; start += step) {
+        const int64_t stop = std::min(tiles, start + step);
+        for (int64_t t = start; t < stop; t++)
+            for (int64_t i = needs_ptr[t]; i < needs_ptr[t + 1]; i++) {
+                const int64_t u = needs[i];
+                if (done[static_cast<size_t>(u)]) continue;
+                done[static_cast<size_t>(u)] = 1;
+                steps.push_back({1, u});
+                live += counts[u];
+                most = std::max(most, live);
+            }
+        for (int64_t t = start; t < stop; t++) steps.push_back({2, t});
+        while (next3 < tiles && ready[order[static_cast<size_t>(next3)]] < stop) {
+            const int64_t u = order[static_cast<size_t>(next3++)];
+            steps.push_back({3, u});
+            live -= counts[u];
+        }
+    }
+    if (peak) *peak = most;
+    return steps;
+}
+
 }  // namespace loup
 
 // ------------------------------------------------------------------------------------------------- C interface
@@ -322,5 +413,59 @@ int loup_tile_plan_copy(long long* local_ptr, int* local, int* local_shift, long
 }
 
 const char* loup_tile_plan_error(void) { return t_error.c_str(); }
+
+int loup_tile_plan_wavefront(const double* positions, long long n_atoms, const double* cell, int receivers,
+                             double reach, double boundary_skin, const int* shape, long long* n_tiles,
+                             long long* n_ghosts, int* grid) {
+    try {
+        t_plan = loup::plan_tiles(positions, n_atoms, cell, receivers, 0, nullptr, reach, shape, boundary_skin);
+    } catch (const std::exception& e) {
+        t_plan = loup::TilePlan();
+        t_error = e.what();
+        return -1;
+    }
+    t_error.clear();
+    if (n_tiles) *n_tiles = t_plan.tiles();
+    if (n_ghosts) *n_ghosts = static_cast<long long>(t_plan.ghost.size());
+    if (grid) std::memcpy(grid, t_plan.grid, sizeof(t_plan.grid));
+    return 0;
+}
+
+int loup_tile_dependencies(long long* needs_ptr, long long* needs, long long* ready, long long* n_needs) {
+    if (t_plan.local_ptr.empty()) {
+        t_error = "loup_tile_dependencies: there is no plan; call loup_tile_plan first";
+        return -1;
+    }
+    std::vector<int64_t> p, nd, r;
+    loup::tile_dependencies(t_plan, p, nd, r);
+    if (n_needs) *n_needs = static_cast<long long>(nd.size());
+    if (needs_ptr) for (size_t i = 0; i < p.size(); i++) needs_ptr[i] = p[i];
+    if (needs) for (size_t i = 0; i < nd.size(); i++) needs[i] = nd[i];
+    if (ready) for (size_t i = 0; i < r.size(); i++) ready[i] = r[i];
+    return 0;
+}
+
+int loup_wavefront_schedule(long long tiles, const long long* needs_ptr, const long long* needs,
+                            const long long* ready, const long long* counts, int group, int* out_sweep,
+                            long long* out_tile, long long* out_peak) {
+    static_assert(sizeof(long long) == sizeof(int64_t), "long long is 64 bits");
+    try {
+        int64_t peak = 0;
+        const auto steps = loup::wavefront_schedule(tiles, reinterpret_cast<const int64_t*>(needs_ptr),
+                                                    reinterpret_cast<const int64_t*>(needs),
+                                                    reinterpret_cast<const int64_t*>(ready),
+                                                    reinterpret_cast<const int64_t*>(counts), group, &peak);
+        for (size_t i = 0; i < steps.size(); i++) {
+            if (out_sweep) out_sweep[i] = steps[i].sweep;
+            if (out_tile) out_tile[i] = steps[i].tile;
+        }
+        if (out_peak) *out_peak = peak;
+    } catch (const std::exception& e) {
+        t_error = e.what();
+        return -1;
+    }
+    t_error.clear();
+    return 0;
+}
 
 }  // extern "C"

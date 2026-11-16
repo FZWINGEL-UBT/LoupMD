@@ -363,6 +363,21 @@ int loup_tile_plan(const double* positions, long long n_atoms, const double* cel
 int loup_tile_plan_copy(long long* local_ptr, int* local, int* local_shift, long long* ghost_ptr, int* ghost,
                         int* ghost_shift);
 const char* loup_tile_plan_error(void);
+// The wavefront's plan and schedule (plan task S5-T08; testing and the front end, no handle). loup_tile_plan_wavefront
+// is loup_tile_plan without an edge cap and with `boundary_skin` (Angstrom; 0: none): the first and last layer of
+// blocks along the first cell axis split into the atoms within boundary_skin of the cell's faces and the rest.
+// loup_tile_dependencies, for the thread's plan: needs_ptr [n_tiles + 1] and needs [*n_needs] (each tile's tiles
+// that own one of its locals or candidates, ascending), ready [n_tiles] (the last tile that holds one of a tile's
+// locals); NULL outputs are left out, so a first call with needs NULL gives the size. loup_wavefront_schedule: the
+// 3 * tiles steps (out_sweep 1, 2 or 3; out_tile) of the schedule, `group` sweep-2 tiles at a time, and in *out_peak
+// the most `counts` between a tile's sweeps 1 and 3. All return 0, or -1 with the reason in loup_tile_plan_error().
+int loup_tile_plan_wavefront(const double* positions, long long n_atoms, const double* cell, int receivers,
+                             double reach, double boundary_skin, const int* shape, long long* n_tiles,
+                             long long* n_ghosts, int* grid);
+int loup_tile_dependencies(long long* needs_ptr, long long* needs, long long* ready, long long* n_needs);
+int loup_wavefront_schedule(long long tiles, const long long* needs_ptr, const long long* needs,
+                            const long long* ready, const long long* counts, int group, int* out_sweep,
+                            long long* out_tile, long long* out_peak);
 
 // Testing only; not part of the interface a caller may rely on. A handle as an open domain (the unit a tiled run
 // evaluates): the first n_local atoms are local and receive, the n_ghost atoms after them only send. Bundles of the

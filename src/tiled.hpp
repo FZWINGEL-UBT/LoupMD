@@ -33,8 +33,32 @@ struct TilePlan {
 // so every atom within `reach` of a local is in the tile, as a local or as a candidate. A candidate may be farther
 // than `reach` from every local (the box's corners); the tile's neighbour list drops those.
 //
+// boundary_skin > 0 (the wavefront's plan, S5-T08; FastMACE's TileConfig.boundary_skin): the first and the last
+// layer of blocks along axis 0 (the slowest in tile order) each split into the atoms within boundary_skin of the
+// cell's face at that end (a layer of tiles of their own, first and last) and the rest. Across the periodic
+// boundary only those skins are read, so only they stay in the wavefront's row pool for the whole call.
+//
 // Throws std::runtime_error with the reason when nothing can be planned.
 TilePlan plan_tiles(const double* positions, int64_t n, const double* cell, int receivers, int64_t edges,
-                    const int32_t* degree, double reach, const int* shape);
+                    const int32_t* degree, double reach, const int* shape, double boundary_skin = 0.0);
+
+// What the wavefront schedule needs of a plan with ghost candidates: needs[needs_ptr[t] .. needs_ptr[t + 1]) the
+// tiles that own a local or candidate of tile t, ascending (t among them); ready[u] the last tile that has one of
+// u's locals among its locals or candidates (at least u).
+void tile_dependencies(const TilePlan& plan, std::vector<int64_t>& needs_ptr, std::vector<int64_t>& needs,
+                       std::vector<int64_t>& ready);
+
+// The wavefront's order of the tile sweeps (FastMACE's wavefront_schedule, fastmace/model/tiled.py): sweep 2 visits
+// the tiles in order, `group` at a time; before a group, sweep 1 runs on every tile its tiles need that has not had
+// it; after the group, sweep 3 on every tile whose ready tile is in or before the group (by ready, then index). Each
+// step is (sweep, tile); *peak is the most receivers (`counts`) between their sweeps 1 and 3 at once: the row pool.
+// Throws std::runtime_error when needs or ready do not describe a schedule (a tile out of range, a tile that does
+// not need itself, or ready[t] < t).
+struct SweepStep {
+    int sweep;
+    int64_t tile;
+};
+std::vector<SweepStep> wavefront_schedule(int64_t tiles, const int64_t* needs_ptr, const int64_t* needs,
+                                          const int64_t* ready, const int64_t* counts, int group, int64_t* peak);
 
 }  // namespace loup
