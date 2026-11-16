@@ -186,7 +186,8 @@ def quench_run(directory, force_field, settings=None, *, name=QUENCH_DIRECTORY, 
         md_energy = frames[pick["index"]].get_potential_energy() / len(atoms)
         atoms.calc = None
         began = time.perf_counter()
-        result = optimize.relax(force_field, atoms, optimizer, fmax=settings["fmax"], steps=settings["max_steps"])
+        result = optimize.relax(force_field, atoms, optimizer, fmax=settings["fmax"], steps=settings["max_steps"],
+                                dispersion=arguments.get("dispersion"))      # the run's D3 term, as FastMACE
         seconds = time.perf_counter() - began
         for trajectory, frame in ((CAPTURED, atoms), (QUENCHED, result.atoms)):
             path = out / trajectory

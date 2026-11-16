@@ -134,3 +134,21 @@ def test_the_command_quenches_with_the_given_settings(run, capsys):
     settings = json.loads((run.directory / "quench-coarse" / "settings.json").read_text())
     assert settings == {"min_K": 200.0, "bin_K": 100.0, "per_bin": 1, "fmax": 0.01, "optimizer": "gpu-LBFGS",
                         "max_steps": 200}
+
+
+def test_a_quench_relaxes_with_the_run_s_dispersion_term(run, monkeypatch):
+    """A run with D3 is quenched with the same term (FastMACE's quench uses the run's D3 record)."""
+    record = run.directory / "metadata.json"
+    metadata = json.loads(record.read_text())
+    metadata["arguments"]["dispersion"] = {"preset": "d3bj", "functional": "pbe"}
+    record.write_text(json.dumps(metadata))
+    seen = []
+    real = quench.optimize.relax
+
+    def watch(*args, **kwargs):
+        seen.append(kwargs.get("dispersion"))
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(quench.optimize, "relax", watch)
+    quench.quench_run(run.directory, run.ff, dict(SETTINGS, max_steps=5), log=lambda *a: None)
+    assert seen and all(d == {"preset": "d3bj", "functional": "pbe"} for d in seen)

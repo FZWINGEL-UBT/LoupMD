@@ -245,3 +245,24 @@ def test_the_cell_filter_is_refused_with_fixed_atoms_and_for_long_range_models()
 
     with pytest.raises(PlanRefused, match="the cell cannot be relaxed with polar1-s"):
         optimize.relax(Polar(), _strained(), optimize.LBFGS(cell_filter=optimize.FrechetCell()))
+
+
+def test_relax_puts_exactly_its_own_dispersion_term_on_the_shared_engine(tmp_path):
+    """The force field's engine is shared with lm.calc: a term a calculator set must not leak into a relaxation,
+    and dispersion= adds one (as FastMACE's relax --dispersion)."""
+    import loupmd
+
+    ff = _spring_field(tmp_path)
+    ff.evaluate = EMTField().evaluate                                  # forces from EMT, the engine for the term
+    atoms = _rattled()
+    d3 = {"preset": "d3bj", "functional": "pbe"}
+    ff.engine_for(atoms).set_dispersion(optimize._dispersion_record(ff, d3))   # as an lm.calc with D3 leaves it
+    assert ff.engine.dispersion is not None and loupmd.calc is not None
+    optimize.relax(ff, atoms, steps=2)
+    assert ff.engine.dispersion is None                                # none asked for: none used
+    optimize.relax(ff, atoms, steps=2, dispersion=d3)
+    assert ff.engine.dispersion.damping == "bj" and ff.engine.dispersion.functional == "pbe"
+    with pytest.raises(InputError, match="not a preset"):
+        optimize.relax(ff, atoms, dispersion="d3nonsense")
+    with pytest.raises(PlanRefused, match="dispersion with this force field"):
+        optimize.relax(EMTField(), atoms, dispersion=d3)

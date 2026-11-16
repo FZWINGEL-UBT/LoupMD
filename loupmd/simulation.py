@@ -391,8 +391,8 @@ class Simulation:
     # -------------------------------------------------------------------------------------------- relax
 
     def relax(self, optimizer=None, *, fmax=0.05, steps=100_000_000):
-        """Relax the starting structure at fixed cell before the first step (``lm.optimize.relax``): the run then
-        starts from the relaxed positions with the structure's velocities. Returns the ``RelaxResult``. Refused
+        """Relax the starting structure at fixed cell before the first step (``lm.optimize.relax``, with the run's
+        dispersion term): the run then starts from the relaxed positions with the structure's velocities. Returns the ``RelaxResult``. Refused
         once steps have run."""
         from . import optimize
 
@@ -404,7 +404,8 @@ class Simulation:
                              why="the simulation's cell is fixed when it is made",
                              next_step="Relax the structure with lm.optimize.relax(..., cell_filter=...) first and "
                                        "make the Simulation from result.atoms.")
-        result = optimize.relax(self.force_field, self._atoms, optimizer, fmax=fmax, steps=steps, skin=self.skin)
+        result = optimize.relax(self.force_field, self._atoms, optimizer, fmax=fmax, steps=steps, skin=self.skin,
+                                dispersion=self.dispersion)
         self._atoms.set_positions(result.atoms.positions)
         self.relaxation = result
         return result

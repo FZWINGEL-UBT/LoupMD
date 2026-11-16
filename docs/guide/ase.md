@@ -143,6 +143,7 @@ filter, takes its steps on the host around the engine's force call.
 - `logfile` is standard output by default (`None` for none); `trajectory` writes an ASE trajectory.
 - For the cell, wrap the atoms in `FrechetCellFilter(atoms, scalar_pressure=...)` or pass
   `cell_filter=lm.optimize.FrechetCell(...)`. ASE's other filters are refused by name.
+- `dispersion=` adds the D3 term, as `lm.calc(dispersion=)` does; without it the relaxation has none.
 - Not offered: `restart=`, `use_line_search=True`, FIRE's `maxmove` (use `maxstep`) and `position_reset_callback`.
 
 ASE's own optimisers also work with `atoms.calc = lm.calc(...)`, with one calculator call per step.

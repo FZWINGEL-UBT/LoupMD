@@ -168,13 +168,46 @@ class RelaxResult:
                 f"{self.energy:.6f} eV")
 
 
-def relax(force_field, atoms, optimizer=None, *, fmax=0.05, steps=100_000_000, skin=0.5, callback=None,
-          _on_step=None) -> RelaxResult:
+def _dispersion_record(force_field, dispersion):
+    """``dispersion`` (a preset name, an ``lm.Dispersion`` or its table) resolved for the model, as ``lm.calc``
+    resolves it; ``None`` for none."""
+    if dispersion is None:
+        return None
+    from .. import dispersion as _dispersion
+
+    record = _dispersion.resolve(_dispersion.parse(dispersion), functional=getattr(force_field, "functional", None),
+                                 family=getattr(force_field, "family", None), model=getattr(force_field, "name", None))
+    if record is not None:
+        _dispersion.runnable(record)
+    return record
+
+
+def _install_dispersion(force_field, work, skin, record):
+    """Put exactly ``record`` (or no term) on the engine the relaxation uses: the force field's shared engine may
+    hold the term another user (``lm.calc``) set."""
+    if not hasattr(force_field, "engine_for"):
+        if record is not None:
+            raise PlanRefused("dispersion with this force field", why="it has no engine to add the D3 term to")
+        return
+    engine = force_field.engine_for(work, skin)
+    if getattr(engine, "dispersion", None) == record:
+        return
+    if not hasattr(engine, "set_dispersion"):
+        if record is not None:
+            raise PlanRefused("dispersion with the tiled execution", why="the relaxation's engine has no D3 term",
+                              next_step="Relax a cell that fits the GPU whole, or relax without dispersion.")
+        return
+    engine.set_dispersion(record)
+
+
+def relax(force_field, atoms, optimizer=None, *, fmax=0.05, steps=100_000_000, skin=0.5, dispersion=None,
+          callback=None, _on_step=None) -> RelaxResult:
     """Relax ``atoms`` until the largest force on an atom is below ``fmax`` (eV/A), or ``steps`` optimiser steps
     were taken. ``optimizer`` is an ``lm.optimize`` record (default ``LBFGS()``); with its ``cell_filter`` the cell
     is relaxed too and the cell's rows count for ``fmax`` as in ASE. ``force_field`` is what ``lm.load`` returned.
-    ``atoms`` is not changed; ``callback(step, atoms positions, energy, max force)`` is called after every force
-    call."""
+    ``dispersion`` (a preset name or an ``lm.Dispersion``, as ``lm.calc`` takes it) adds the D3 term to the
+    energy, forces and stress; ``long_range="auto"`` is the plain sum here, without the setup check. ``atoms`` is
+    not changed; ``callback(step, atoms positions, energy, max force)`` is called after every force call."""
     import numpy as np
     from ase.calculators.singlepoint import SinglePointCalculator
 
@@ -188,6 +221,7 @@ def relax(force_field, atoms, optimizer=None, *, fmax=0.05, steps=100_000_000, s
         raise InputError(f"fmax must be positive and finite (eV/A), got {fmax!r}")
     if isinstance(steps, bool) or not isinstance(steps, int) or steps < 0:
         raise InputError(f"steps must be a whole number of at least 0, got {steps!r}")
+    record = _dispersion_record(force_field, dispersion)          # a wrong record: refused before the export
     work = atoms.copy()
     fixed = fixed_mask(work)                      # refuses other constraints before anything is exported
     view = None
@@ -199,6 +233,7 @@ def relax(force_field, atoms, optimizer=None, *, fmax=0.05, steps=100_000_000, s
             raise PlanRefused(f"the cell cannot be relaxed with {force_field.name}: its long-range part has no "
                               "stress the filter can use", next_step="Relax at fixed cell (cell_filter=None).")
         view = optimizer.cell_filter.view(work)
+    _install_dispersion(force_field, work, skin, record)
     if view is None and isinstance(optimizer, LBFGS) and hasattr(force_field, "engine_for"):
         engine = force_field.engine_for(work, skin)
         if hasattr(engine, "minimize"):

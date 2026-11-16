@@ -53,6 +53,7 @@ def _unwrap(atoms, cell_filter, what):
 class _Optimizer:
     def __init__(self, atoms, record_class, settings, cell_filter, model, head, options):
         what = type(self).__name__
+        self.dispersion = options.pop("dispersion", None)   # the D3 term, as lm.calc takes it (lm.optimize.relax)
         ase_arguments = take_ase_arguments(options, what)
         if ase_arguments.get("restart") is not None:
             raise InputError(f"{what}: restart= is not offered", why="the optimiser's history is not written to a file",
@@ -123,7 +124,7 @@ class _Optimizer:
                         function(*args, **kwargs)
 
         self.result = _optimize.relax(self.force_field, self.atoms, self.record, fmax=fmax, steps=steps,
-                                      _on_step=on_step)
+                                      dispersion=self.dispersion, _on_step=on_step)
         self._update(self.result.atoms)
         self.nsteps = self.result.steps
         return self.result.converged

@@ -28,6 +28,10 @@ def add_parser(sub):
     parser.add_argument("--steps", type=int, default=100_000_000, help="at most this many optimiser steps")
     parser.add_argument("--maxstep", type=float, default=0.2, metavar="A", help="the longest step (default 0.2 A)")
     parser.add_argument("--repeat", type=int, nargs=3, metavar=("A", "B", "C"), default=[1, 1, 1], help="the supercell")
+    parser.add_argument("--dispersion", metavar="PRESET", help="a dispersion preset (`loupmd dispersion list`): the "
+                                                               "D3 term in every force call")
+    parser.add_argument("--d3-functional", metavar="NAME", dest="d3_functional",
+                        help="with --dispersion: the functional whose D3 parameters to use (default: the model's)")
     parser.add_argument("--device", type=int, default=0, metavar="N", help="the GPU index (default 0)")
     parser.add_argument("--output", metavar="FILE", help="the relaxed structure (default <structure "
                                                          "stem>.relaxed.extxyz)")
@@ -36,7 +40,7 @@ def add_parser(sub):
 
 def relax_file(structure, *, model, head=None, checkpoint=None, sha256=None, trusted=False, download=False,
                charge=None, spin_multiplicity=None, optimizer="lbfgs", fmax=0.05, steps=100_000_000, maxstep=0.2,
-               repeat=(1, 1, 1), device=0, output=None):
+               repeat=(1, 1, 1), device=0, output=None, dispersion=None):
     """What ``loupmd relax`` does: read, relax, write. Returns ``(RelaxResult, output path)``."""
     from ase.io import read, write
 
@@ -49,18 +53,24 @@ def relax_file(structure, *, model, head=None, checkpoint=None, sha256=None, tru
         atoms = atoms.repeat(tuple(repeat))
     force_field = load(model, head, checkpoint=checkpoint, sha256=sha256, trusted=trusted, download=download,
                              charge=charge, spin_multiplicity=spin_multiplicity, device=device)
-    result = optimize.relax(force_field, atoms, record, fmax=fmax, steps=steps)
+    result = optimize.relax(force_field, atoms, record, fmax=fmax, steps=steps, dispersion=dispersion)
     target = Path(output) if output else Path(path.stem + ".relaxed.extxyz")
     write(target, result.atoms, format="extxyz")
     return result, target
 
 
 def run(args) -> int:
+    dispersion = args.dispersion
+    if args.d3_functional is not None:
+        if dispersion is None:
+            raise InputError("--d3-functional names the parameters of --dispersion, which is not given",
+                             next_step="Add --dispersion d3bj (or another preset of `loupmd dispersion list`).")
+        dispersion = {"preset": dispersion, "functional": args.d3_functional}
     result, target = relax_file(args.structure, model=args.model, head=args.head, checkpoint=args.checkpoint,
                                 sha256=args.sha256, trusted=args.trusted, download=args.download, charge=args.charge,
                                 spin_multiplicity=args.spin_multiplicity, optimizer=args.optimizer, fmax=args.fmax,
                                 steps=args.steps, maxstep=args.maxstep, repeat=args.repeat, device=args.device,
-                                output=args.output)
+                                output=args.output, dispersion=dispersion)
     calls = result.force_calls
     print(f"{result}; {calls} force calls in {result.force_s:.2f} s, {result.optimizer_s:.3f} s in the optimiser")
     print(f"written to {target}")

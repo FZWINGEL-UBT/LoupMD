@@ -314,8 +314,8 @@ Relaxes a structure at fixed cell with ASE's LBFGS or FIRE until the largest for
 loupmd relax [-h] --model MODEL [--head HEAD] [--checkpoint PATH] [--sha256 HEX]
                     [--trusted] [--download] [--charge CHARGE]
                     [--spin-multiplicity SPIN_MULTIPLICITY] [--optimizer {lbfgs,fire}]
-                    [--fmax EV_PER_A] [--steps STEPS] [--maxstep A] [--repeat A B C] [--device N]
-                    [--output FILE]
+                    [--fmax EV_PER_A] [--steps STEPS] [--maxstep A] [--repeat A B C]
+                    [--dispersion PRESET] [--d3-functional NAME] [--device N] [--output FILE]
                     structure
 ```
 
@@ -335,6 +335,8 @@ loupmd relax [-h] --model MODEL [--head HEAD] [--checkpoint PATH] [--sha256 HEX]
 | `--steps` `STEPS` | at most this many optimiser steps |
 | `--maxstep` `A` | the longest step (default 0.2 A) |
 | `--repeat` `A B C` | the supercell |
+| `--dispersion` `PRESET` | a dispersion preset (`loupmd dispersion list`): the D3 term in every force call |
+| `--d3-functional` `NAME` | with --dispersion: the functional whose D3 parameters to use (default: the model's) |
 | `--device` `N` | the GPU index (default 0) |
 | `--output` `FILE` | the relaxed structure (default <structure stem>.relaxed.extxyz) |
 

@@ -13,7 +13,8 @@ loupmd relax structure.cif --model omat0-medium --fmax 0.01
 It relaxes the positions at fixed cell until the largest force on an atom is below `--fmax` (default 0.05 eV/A) or
 `--steps` optimiser steps were taken, and writes the structure with its energy and forces as extended XYZ to
 `--output` (default `<structure stem>.relaxed.extxyz` in the current directory). `--optimizer` is `lbfgs` (default)
-or `fire`; `--maxstep` is the longest step, default 0.2 A. `--repeat A B C` relaxes a supercell. It prints the
+or `fire`; `--maxstep` is the longest step, default 0.2 A. `--repeat A B C` relaxes a supercell. `--dispersion
+PRESET` (with `--d3-functional NAME` as in `loupmd md`) adds the D3 term to every force call. It prints the
 result, the number of force calls and the time, and exits with 1 when the relaxation did not converge.
 [The CLI reference](../reference/cli.md) lists every flag. The command relaxes at fixed cell only;
 the cell is relaxed from Python.
@@ -30,8 +31,10 @@ print(result)                  # converged after ... steps: largest force ... eV
 relaxed = result.atoms         # with energy and forces on a single-point calculator
 ```
 
-`relax(force_field, atoms, optimizer=None, *, fmax=0.05, steps=100_000_000, skin=0.5, callback=None)`. The input
-`atoms` is not changed. `optimizer` defaults to `LBFGS()`. `callback(step, positions, energy, max_force)` is called
+`relax(force_field, atoms, optimizer=None, *, fmax=0.05, steps=100_000_000, skin=0.5, dispersion=None,
+callback=None)`. The input `atoms` is not changed. `optimizer` defaults to `LBFGS()`. `dispersion` adds the D3 term
+to the energy, forces and stress, as `lm.calc(dispersion=)` does ([dispersion](dispersion.md)); without it the
+relaxation has none, whatever term another calculator on the same force field uses. `callback(step, positions, energy, max_force)` is called
 after every force call. The result is a `RelaxResult` with `atoms`, `steps`, `converged`, `max_force` (eV/A),
 `energy` (eV), `force_calls`, and the time in the force calls (`force_s`) and in the optimiser (`optimizer_s`).
 
@@ -79,8 +82,9 @@ The ASE drop-ins `loupmd.ase.optimize.LBFGS` and `FIRE` take an ASE `Atoms`, or 
 ## Relaxing before MD
 
 `Simulation.relax(optimizer=None, *, fmax=0.05, steps=...)` relaxes the starting structure at fixed cell before the
-first step. The run then starts from the relaxed positions with the structure's velocities; the call is refused
-once the run has started. `lm.md` and `loupmd md` do not relax: a profile's `relax_fmax` is recorded only
+first step, with the run's dispersion term. The run then starts from the relaxed positions with the structure's
+velocities; the call is refused once the run has started, and so is an optimiser with a cell filter (relax the
+cell with `lm.optimize.relax` first and make the `Simulation` from `result.atoms`). `lm.md` and `loupmd md` do not relax: a profile's `relax_fmax` is recorded only
 ([molecular dynamics](md.md)).
 
 ```python
@@ -114,7 +118,8 @@ the defaults:
 | `--optimizer` | `gpu-LBFGS` (also `ase-LBFGS`, `LBFGS`: LoupMD's LBFGS; `gpu-FIRE`, `FIRE`: LoupMD's FIRE) |
 | `--max-steps` | 5,000 optimiser steps per frame |
 
-The model is the run's, loaded again from its `metadata.json`. The run must be complete: a run stopped inside its
+The model is the run's, loaded again from its `metadata.json`, and a run with dispersion is quenched with the
+same D3 term. The run must be complete: a run stopped inside its
 schedule is refused (finish it with `loupmd run --resume DIR`), and so is a run without a schedule or a trajectory.
 The results go into `DIR/quench/` (`--name` chooses another folder):
 

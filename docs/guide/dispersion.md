@@ -123,6 +123,10 @@ against 10.2 ms). To run the more accurate split sum regardless of time, set `lo
 `lm.calc("omat0-medium", dispersion="d3bj")` adds the term to every calculation (energy, forces, stress). It has no
 setup structure, so `long_range="auto"` runs the plain sum there; name `long_range="split"` to use the split sum.
 
+Relaxations take the term the same way: `lm.optimize.relax(ff, atoms, dispersion="d3bj")`, `loupmd relax
+--dispersion d3bj`, and `dispersion=` on the ASE optimisers of `loupmd.ase`. `Simulation.relax` and `loupmd quench`
+use the run's term ([relaxation](relax.md)).
+
 ## Cost
 
 The term walks every pair within 40 bohr (21 A), which is far more pairs than the model's 6 A cutoff: on small cells
