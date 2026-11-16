@@ -967,6 +967,14 @@ Stage 0 -> Stage 1 -+-> Stage 2 -> Stage 3 -+-> Stage 4 (from S4-T10 on needs St
   (PME-style) for POLAR's charge features, a research task of several weeks with its own accuracy validation.
   **First step:** measure POLAR's step time against cell size up to the whole-system limit, to see whether tiling
   alone pays or the mesh must come first.
+  Prior art (16 November 2026): symmetrix 0.3.0 (`wcwitt/symmetrix` `53933df`, `pair_style symmetrix/mace/polar`)
+  runs MACE-POLAR-1's electrostatics as smooth particle-mesh Ewald, with defaults it validated for the model's
+  k-space cutoff of 1.85/A: grid spacing at most 0.7 A, B-splines of order 8, the direct k sum kept as an option.
+  That shortens the mesh's validation; our D3 mesh (`src/dispersion/d3_mesh.cuh`) is the code to start from.
+- After the release (recorded 16 November 2026, from symmetrix's `float32-mixed`): a power-of-two scale per GEMM,
+  taken from a device-side amax, in front of the FP16 hybrid GEMM, so that operands of 32,752 or more no longer
+  overflow its cross term (`gemm-hybrid-cubin`) instead of being guarded. A whole-system scale costs the small
+  values' precision when one contact is extreme, so it needs the 3x gate with a close-contact case on every family.
 - Dispersion, cut by decision O4: D4 (no periodic GPU implementation to build on; its charge solve is a dense
   matrix problem in the reference code), D2, the rare dampings D3(op), D3(CSO) and D3(Z), and every method that
   needs the electron density (MBD, TS, XDM, dDsC, VV10). Reasons in `docs/design/dispersion.md` §6.3.
