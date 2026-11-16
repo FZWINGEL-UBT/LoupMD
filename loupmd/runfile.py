@@ -85,6 +85,8 @@ def to_toml(arguments) -> str:
         shown = value if given else default
         text = f"{key} = {_value(shown)}" if shown is not None else f"{key} ="
         lines.append(f"{'' if given else '# '}{text:<40s} # {_COMMENTS[key]}")
+    if isinstance(arguments.get("schedule"), str):
+        lines.append(f"{'schedule = ' + _value(arguments['schedule']):<40s} # a profile's schedule, not its cadences")
     out = arguments.get("output") or {}
     lines += ["", "[output]"]
     defaults = {"directory": None, "trajectory_every": 20, "thermo_every": 20, "restart_every": 10_000}
@@ -101,7 +103,7 @@ def to_toml(arguments) -> str:
               '# type = "CSVR"                          # "Langevin" (friction_per_fs), "CSVR" (tau_fs) or "NVE"',
               "# tau_fs = 100.0"] if not arguments.get("integrator") else ["", "[integrator]"] + [
                   f"{key} = {_value(value)}" for key, value in arguments["integrator"].items()]
-    for segment in arguments.get("schedule") or []:
+    for segment in (arguments.get("schedule") if isinstance(arguments.get("schedule"), list) else []):
         lines += ["", "[[schedule]]"] + [f"{key} = {_value(value)}" for key, value in segment.items()]
     return "\n".join(lines) + "\n"
 
@@ -164,6 +166,8 @@ def md_options(arguments) -> tuple:
         out.setdefault("trajectory_every", found.trajectory_interval)
         if found.ensemble == "NPT":
             table = _npt_profile(found, arguments, options, table)
+    elif isinstance(arguments.get("schedule"), str):   # FastMACE's spelling: a profile's schedule alone
+        options["schedule"] = protocols.find_profile(arguments["schedule"]).schedule
     elif arguments.get("schedule"):
         options["schedule"] = protocols.Schedule.from_data(arguments["schedule"])
     for key in OFF_WITH_ZERO:              # TOML has no null: 0 turns these files off

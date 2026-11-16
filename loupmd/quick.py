@@ -145,7 +145,8 @@ def md(structure, *, model, head=None, charge=None, spin_multiplicity=None, sha2
       ``checkpoint`` and ``download`` as ``lm.load``; or an ``lm.load`` result (then without those);
     - ``ensemble``: ``"NVT"`` (Langevin) or ``"NVE"`` (velocity Verlet from the structure's momenta, no
       ``temperature_K``). ``integrator=`` chooses an ``lm.integrators`` record explicitly;
-    - ``temperature_K`` or ``schedule`` (an ``lm.protocols`` schedule); ``steps`` (optional with a schedule: the
+    - ``temperature_K`` or ``schedule`` (an ``lm.protocols`` schedule, or a profile's name for its schedule
+      alone, as FastMACE); ``steps`` (optional with a schedule: the
       whole schedule); ``timestep_fs``;
     - ``repeat``: the supercell, ``(1, 1, 1)`` by default (never expanded silently);
     - ``output``: a directory or an ``lm.Output``; default ``./<structure stem>.loupmd/``, or ``./loupmd-run/``
@@ -253,6 +254,10 @@ def md(structure, *, model, head=None, charge=None, spin_multiplicity=None, sha2
         if initial_velocities == "maxwell_boltzmann":
             raise InputError("initial_velocities='maxwell_boltzmann' draws at the starting target, and NVE has none; "
                              "pass a temperature in K, for example initial_velocities=300.0")
+    if isinstance(schedule, str):                   # FastMACE's spelling: a profile's schedule, not its cadences
+        from .protocols import find_profile
+
+        schedule = find_profile(schedule).schedule
     if schedule is not None:
         if not isinstance(schedule, Schedule):
             raise InputError(f"schedule must be an lm.protocols schedule (ramp, hold, +), got "

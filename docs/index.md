@@ -34,5 +34,5 @@ float32 MACE. See [models](guide/models.md) for the supported families and the g
 ## Coming from FastMACE
 
 LoupMD keeps FastMACE's names and arguments wherever a feature exists in both.
-[What LoupMD leaves out](guide/not-in-loupmd.md) lists the FastMACE features that LoupMD refuses, and what to use
-instead.
+[Coming from FastMACE](guide/from-fastmace.md) lists the few changes a FastMACE script needs, and
+[what LoupMD leaves out](guide/not-in-loupmd.md) the FastMACE features that LoupMD refuses.

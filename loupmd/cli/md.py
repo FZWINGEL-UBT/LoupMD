@@ -11,7 +11,9 @@ from ..errors import InputError
 
 def _arguments_parser(parser):
     """The arguments of ``loupmd md``; ``loupmd init md`` takes the same."""
-    parser.add_argument("structure", help="the structure file (anything ASE reads)")
+    parser.add_argument("structure", nargs="?", help="the structure file (anything ASE reads)")
+    parser.add_argument("--structure", metavar="FILE", dest="structure_flag",
+                        help="the structure file, as FastMACE spells it (instead of the positional argument)")
     parser.add_argument("--model", required=True, metavar="MODEL", help="a label (see `loupmd models`), a checkpoint "
                                                                        "path or a URL")
     parser.add_argument("--head", help="the head of a multi-head model")
@@ -62,6 +64,8 @@ def _arguments_parser(parser):
                                                                        "0: only at the end)")
     parser.add_argument("--dispersion", metavar="PRESET", help="a dispersion preset (`loupmd dispersion list`): "
                                                                "the D3 term on every step")
+    parser.add_argument("--d3-functional", metavar="NAME", dest="d3_functional",
+                        help="with --dispersion: the functional whose D3 parameters to use (default: the model's)")
 
 
 def _segments(text) -> list:
@@ -91,7 +95,10 @@ def arguments_of(args) -> dict:
         except ValueError:
             raise InputError(f"--initial-velocities {velocities!r} is not keep, maxwell_boltzmann or a temperature "
                              "in K") from None
-    arguments = {"structure": args.structure, "model": args.model}
+    if (args.structure is None) == (args.structure_flag is None):
+        raise InputError("give the structure file once: as the first argument or as --structure FILE",
+                         next_step="loupmd md STRUCTURE --model M ... (or --structure STRUCTURE)")
+    arguments = {"structure": args.structure or args.structure_flag, "model": args.model}
     if args.skin != "auto":
         try:
             arguments["skin"] = float(args.skin)
@@ -107,6 +114,11 @@ def arguments_of(args) -> dict:
             arguments[key] = getattr(args, key)
     if velocities != "keep":
         arguments["initial_velocities"] = velocities
+    if args.d3_functional is not None:
+        if args.dispersion is None:
+            raise InputError("--d3-functional names the parameters of --dispersion, which is not given",
+                             next_step="Add --dispersion d3bj (or another preset of `loupmd dispersion list`).")
+        arguments["dispersion"] = {"preset": args.dispersion, "functional": args.d3_functional}
     if args.thermostat == "csvr":
         if args.tau_fs is None or args.friction is not None:
             raise InputError("--thermostat csvr takes --tau FS (its time constant, which has no default) and no "

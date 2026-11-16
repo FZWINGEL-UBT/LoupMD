@@ -80,6 +80,7 @@ nav:
       - Monte Carlo: guide/monte-carlo.md
       - Dispersion: guide/dispersion.md
       - Benchmark yourself: guide/benchmark.md
+      - Coming from FastMACE: guide/from-fastmace.md
       - What LoupMD leaves out: guide/not-in-loupmd.md
       - FAQ: faq.md
   - Reference:

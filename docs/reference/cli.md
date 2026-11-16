@@ -179,21 +179,23 @@ loupmd build-kernels [-h] [--checkpoint PATH] [--sha256 HEX] [--trusted] [--arch
 Molecular dynamics on a structure with a MACE model. Writes thermo rows, a trajectory, a restart and metadata.json into the output directory and prints a one-screen report.
 
 ```text
-loupmd md [-h] --model MODEL [--head HEAD] [--checkpoint PATH] [--sha256 HEX] [--trusted]
-                 [--download] [--charge CHARGE] [--spin-multiplicity SPIN_MULTIPLICITY]
-                 [--ensemble ENSEMBLE] [--pressure GPA] [--cell-mode {hydrostatic,full}]
-                 [--thermostat {langevin,csvr}] [--friction PER_FS] [--tau FS] [--temperature K]
-                 [--schedule SEGMENTS] [--profile NAME] [--timestep FS] [--steps STEPS]
-                 [--repeat A B C] [--seed SEED] [--initial-velocities HOW] [--check CHECK]
-                 [--device N] [--capacity {auto,whole,tiled,wavefront}] [--skin A] [--output DIR]
+loupmd md [-h] [--structure FILE] --model MODEL [--head HEAD] [--checkpoint PATH]
+                 [--sha256 HEX] [--trusted] [--download] [--charge CHARGE]
+                 [--spin-multiplicity SPIN_MULTIPLICITY] [--ensemble ENSEMBLE] [--pressure GPA]
+                 [--cell-mode {hydrostatic,full}] [--thermostat {langevin,csvr}]
+                 [--friction PER_FS] [--tau FS] [--temperature K] [--schedule SEGMENTS]
+                 [--profile NAME] [--timestep FS] [--steps STEPS] [--repeat A B C] [--seed SEED]
+                 [--initial-velocities HOW] [--check CHECK] [--device N]
+                 [--capacity {auto,whole,tiled,wavefront}] [--skin A] [--output DIR]
                  [--thermo-every N] [--trajectory-every N] [--restart-every N]
-                 [--dispersion PRESET]
-                 structure
+                 [--dispersion PRESET] [--d3-functional NAME]
+                 [structure]
 ```
 
 | Argument | Meaning |
 | --- | --- |
 | `structure` | the structure file (anything ASE reads) |
+| `--structure` `FILE` | the structure file, as FastMACE spells it (instead of the positional argument) |
 | `--model` `MODEL` | a label (see `loupmd models`), a checkpoint path or a URL |
 | `--head` `HEAD` | the head of a multi-head model |
 | `--checkpoint` `PATH` | the file of a label, when it is not in LOUPMD_MODELS |
@@ -225,6 +227,7 @@ loupmd md [-h] --model MODEL [--head HEAD] [--checkpoint PATH] [--sha256 HEX] [-
 | `--trajectory-every` `N` | trajectory frames every N steps (default 20; 0: none) |
 | `--restart-every` `N` | restart points every N steps (default 10000; 0: only at the end) |
 | `--dispersion` `PRESET` | a dispersion preset (`loupmd dispersion list`): the D3 term on every step |
+| `--d3-functional` `NAME` | with --dispersion: the functional whose D3 parameters to use (default: the model's) |
 
 ### `loupmd init`
 
@@ -239,8 +242,8 @@ loupmd init [-h] KIND ...
 a run file for `loupmd run`
 
 ```text
-loupmd init md [-h] --model MODEL [--head HEAD] [--checkpoint PATH] [--sha256 HEX]
-                      [--trusted] [--download] [--charge CHARGE]
+loupmd init md [-h] [--structure FILE] --model MODEL [--head HEAD] [--checkpoint PATH]
+                      [--sha256 HEX] [--trusted] [--download] [--charge CHARGE]
                       [--spin-multiplicity SPIN_MULTIPLICITY] [--ensemble ENSEMBLE]
                       [--pressure GPA] [--cell-mode {hydrostatic,full}]
                       [--thermostat {langevin,csvr}] [--friction PER_FS] [--tau FS]
@@ -248,13 +251,14 @@ loupmd init md [-h] --model MODEL [--head HEAD] [--checkpoint PATH] [--sha256 HE
                       [--steps STEPS] [--repeat A B C] [--seed SEED] [--initial-velocities HOW]
                       [--check CHECK] [--device N] [--capacity {auto,whole,tiled,wavefront}]
                       [--skin A] [--output DIR] [--thermo-every N] [--trajectory-every N]
-                      [--restart-every N] [--dispersion PRESET]
-                      structure
+                      [--restart-every N] [--dispersion PRESET] [--d3-functional NAME]
+                      [structure]
 ```
 
 | Argument | Meaning |
 | --- | --- |
 | `structure` | the structure file (anything ASE reads) |
+| `--structure` `FILE` | the structure file, as FastMACE spells it (instead of the positional argument) |
 | `--model` `MODEL` | a label (see `loupmd models`), a checkpoint path or a URL |
 | `--head` `HEAD` | the head of a multi-head model |
 | `--checkpoint` `PATH` | the file of a label, when it is not in LOUPMD_MODELS |
@@ -286,6 +290,7 @@ loupmd init md [-h] --model MODEL [--head HEAD] [--checkpoint PATH] [--sha256 HE
 | `--trajectory-every` `N` | trajectory frames every N steps (default 20; 0: none) |
 | `--restart-every` `N` | restart points every N steps (default 10000; 0: only at the end) |
 | `--dispersion` `PRESET` | a dispersion preset (`loupmd dispersion list`): the D3 term on every step |
+| `--d3-functional` `NAME` | with --dispersion: the functional whose D3 parameters to use (default: the model's) |
 
 ### `loupmd run`
 
