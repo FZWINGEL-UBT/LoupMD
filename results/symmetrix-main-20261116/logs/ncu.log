@@ -1,0 +1,13 @@
+local_gpu: reserved /home/fzwin/.fastmace-local-gpu for 'loupmd dev: ncu conv kernels, symmetrix vs LoupMD (SrTiO3 5,000, OMAT-0)' (pid 165412)
+profiled 1 force calls (loup, skin 0.5, 5000 atoms)
+profiled 1 force calls (loup-generic, skin 0.5, 5000 atoms)
+profiled 1 force calls (sx, skin 0.5, 5000 atoms)
+profiled 1 force calls (sx, skin 0.5, 5000 atoms)
+total 96
+drwxrwxrwx 1 fzwin fzwin  4096 Nov 16 19:57 .
+drwxrwxrwx 1 fzwin fzwin  4096 Nov 16 19:57 ..
+-rwxrwxrwx 1 fzwin fzwin 22630 Nov 16 19:57 loup-generic.csv
+-rwxrwxrwx 1 fzwin fzwin 22398 Nov 16 19:57 loup.csv
+-rwxrwxrwx 1 fzwin fzwin 21795 Nov 16 19:57 sx-f32.csv
+-rwxrwxrwx 1 fzwin fzwin 21799 Nov 16 19:57 sx-mix.csv
+SrTiO3 10x10x10 snapshot: directed edges with r < 6 A: 371624

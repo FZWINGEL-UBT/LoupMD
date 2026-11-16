@@ -1,0 +1,1 @@
+SrTiO3 10x10x10 snapshot: directed edges with r < 6 A: 371624

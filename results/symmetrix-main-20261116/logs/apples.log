@@ -1,0 +1,277 @@
+local_gpu: reserved /home/fzwin/.fastmace-local-gpu for 'loupmd dev: symmetrix vs LoupMD equal-skin force calls + nsys profiles (SrTiO3, OMAT-0)' (pid 162337)
+9e866c32dc87df6ea76bf488146ed039265a14d2fa2cf39972b7785e3d085f75  /mnt/d/Margraf/LoupMD/libloupmd.so
+c1cd8d1aa3709c1145020a592c17028af545d5a3b01dac63d0a39495349ae72a  /home/fzwin/src/symmetrix-eval/b907f04/symmetrix/_mace_foundation.cpython-310-x86_64-linux-gnu.so
+{"label": "loup", "impl": "loup", "dtype": null, "skin": 0.5, "n_atoms": 1080, "call_ms": 2.4839799989422318, "call_p10": 2.1935755030426662, "call_p90": 2.734989298915025, "pass_tag": "1"}
+{"label": "loup", "impl": "loup", "dtype": null, "skin": 0.5, "n_atoms": 5000, "call_ms": 8.87307800076087, "call_p10": 8.463689697964583, "call_p90": 9.719275396491867, "pass_tag": "1"}
+{"label": "loup", "impl": "loup", "dtype": null, "skin": 0.5, "n_atoms": 13720, "call_ms": 23.847751501307357, "call_p10": 23.016687201015884, "call_p90": 24.881605002155993, "pass_tag": "1"}
+{"label": "loup-generic", "impl": "loup-generic", "dtype": null, "skin": 0.5, "n_atoms": 1080, "call_ms": 2.4625209989608265, "call_p10": 2.1691114001441747, "call_p90": 2.7286675001960248, "pass_tag": "1"}
+{"label": "loup-generic", "impl": "loup-generic", "dtype": null, "skin": 0.5, "n_atoms": 5000, "call_ms": 8.990436497697374, "call_p10": 8.62437379983021, "call_p90": 9.593311204662314, "pass_tag": "1"}
+{"label": "loup-generic", "impl": "loup-generic", "dtype": null, "skin": 0.5, "n_atoms": 13720, "call_ms": 23.850598503486253, "call_p10": 23.29214490164304, "call_p90": 24.63805079823942, "pass_tag": "1"}
+{"label": "sx-f32", "impl": "sx", "dtype": "float32", "skin": 0.5, "n_atoms": 1080, "call_ms": 3.1883209994703066, "call_p10": 2.981365805317182, "call_p90": 3.5272464039735496, "pass_tag": "1"}
+{"label": "sx-f32", "impl": "sx", "dtype": "float32", "skin": 0.5, "n_atoms": 5000, "call_ms": 13.725654502195539, "call_p10": 13.182388502900722, "call_p90": 14.504755603411468, "pass_tag": "1"}
+{"label": "sx-f32", "impl": "sx", "dtype": "float32", "skin": 0.5, "n_atoms": 13720, "call_ms": 36.310504998255055, "call_p10": 35.829122299765004, "call_p90": 37.042848596320255, "pass_tag": "1"}
+{"label": "sx-mix", "impl": "sx", "dtype": "float32-mixed", "skin": 0.5, "n_atoms": 1080, "call_ms": 2.8229144991200883, "call_p10": 2.6310344008379616, "call_p90": 3.150496202579234, "pass_tag": "1"}
+{"label": "sx-mix", "impl": "sx", "dtype": "float32-mixed", "skin": 0.5, "n_atoms": 5000, "call_ms": 11.956187005125685, "call_p10": 11.428321097628213, "call_p90": 12.705219696363201, "pass_tag": "1"}
+{"label": "sx-mix", "impl": "sx", "dtype": "float32-mixed", "skin": 0.5, "n_atoms": 13720, "call_ms": 32.03338750245166, "call_p10": 31.50252049890696, "call_p90": 32.67304710243479, "pass_tag": "1"}
+{"label": "loup", "impl": "loup", "dtype": null, "skin": 1.0, "n_atoms": 1080, "call_ms": 2.49167999936617, "call_p10": 2.1929801994701847, "call_p90": 2.8429124977265023, "pass_tag": "1"}
+{"label": "loup", "impl": "loup", "dtype": null, "skin": 1.0, "n_atoms": 5000, "call_ms": 8.904846497898689, "call_p10": 8.540814195293933, "call_p90": 9.702538102283143, "pass_tag": "1"}
+{"label": "loup", "impl": "loup", "dtype": null, "skin": 1.0, "n_atoms": 13720, "call_ms": 24.038388502958696, "call_p10": 23.15608690259978, "call_p90": 24.9019891001808, "pass_tag": "1"}
+{"label": "loup-generic", "impl": "loup-generic", "dtype": null, "skin": 1.0, "n_atoms": 1080, "call_ms": 2.626812503876863, "call_p10": 2.3506399018515367, "call_p90": 2.841658597026253, "pass_tag": "1"}
+{"label": "loup-generic", "impl": "loup-generic", "dtype": null, "skin": 1.0, "n_atoms": 5000, "call_ms": 8.9336374985578, "call_p10": 8.374013698630733, "call_p90": 9.46415829603211, "pass_tag": "1"}
+{"label": "loup-generic", "impl": "loup-generic", "dtype": null, "skin": 1.0, "n_atoms": 13720, "call_ms": 24.04938250037958, "call_p10": 23.399597300158348, "call_p90": 24.778549201437272, "pass_tag": "1"}
+{"label": "sx-f32", "impl": "sx", "dtype": "float32", "skin": 1.0, "n_atoms": 1080, "call_ms": 3.3484690029581543, "call_p10": 3.12601740079117, "call_p90": 3.6964896011340898, "pass_tag": "1"}
+{"label": "sx-f32", "impl": "sx", "dtype": "float32", "skin": 1.0, "n_atoms": 5000, "call_ms": 13.814405003358843, "call_p10": 13.30655429919716, "call_p90": 14.273279402550543, "pass_tag": "1"}
+{"label": "sx-f32", "impl": "sx", "dtype": "float32", "skin": 1.0, "n_atoms": 13720, "call_ms": 36.49915150162997, "call_p10": 35.93246269811061, "call_p90": 37.18220429873327, "pass_tag": "1"}
+{"label": "sx-mix", "impl": "sx", "dtype": "float32-mixed", "skin": 1.0, "n_atoms": 1080, "call_ms": 2.8469725002651103, "call_p10": 2.6243546963087283, "call_p90": 3.447066394437571, "pass_tag": "1"}
+{"label": "sx-mix", "impl": "sx", "dtype": "float32-mixed", "skin": 1.0, "n_atoms": 5000, "call_ms": 11.935494501813082, "call_p10": 11.496515697945142, "call_p90": 12.617736098763999, "pass_tag": "1"}
+{"label": "sx-mix", "impl": "sx", "dtype": "float32-mixed", "skin": 1.0, "n_atoms": 13720, "call_ms": 32.13687400057097, "call_p10": 31.48910840318422, "call_p90": 32.71574429963948, "pass_tag": "1"}
+{"label": "sx-mix", "impl": "sx", "dtype": "float32-mixed", "skin": 1.0, "n_atoms": 1080, "call_ms": 2.7447034990473185, "call_p10": 2.567211099085398, "call_p90": 3.117278194258688, "pass_tag": "2"}
+{"label": "sx-mix", "impl": "sx", "dtype": "float32-mixed", "skin": 1.0, "n_atoms": 5000, "call_ms": 11.783991998527199, "call_p10": 11.280547799833585, "call_p90": 12.355975399987074, "pass_tag": "2"}
+{"label": "sx-mix", "impl": "sx", "dtype": "float32-mixed", "skin": 1.0, "n_atoms": 13720, "call_ms": 31.67456799928914, "call_p10": 31.222797605005326, "call_p90": 32.23023219834431, "pass_tag": "2"}
+{"label": "sx-f32", "impl": "sx", "dtype": "float32", "skin": 1.0, "n_atoms": 1080, "call_ms": 3.2880990002013277, "call_p10": 3.05700370008708, "call_p90": 3.6866255977656697, "pass_tag": "2"}
+{"label": "sx-f32", "impl": "sx", "dtype": "float32", "skin": 1.0, "n_atoms": 5000, "call_ms": 13.769717996183317, "call_p10": 13.195762999384897, "call_p90": 14.507161903748056, "pass_tag": "2"}
+{"label": "sx-f32", "impl": "sx", "dtype": "float32", "skin": 1.0, "n_atoms": 13720, "call_ms": 36.39082600057009, "call_p10": 35.834252903441666, "call_p90": 37.19613860012032, "pass_tag": "2"}
+{"label": "loup-generic", "impl": "loup-generic", "dtype": null, "skin": 1.0, "n_atoms": 1080, "call_ms": 2.5149814973701723, "call_p10": 2.279791700129863, "call_p90": 2.793437999935122, "pass_tag": "2"}
+{"label": "loup-generic", "impl": "loup-generic", "dtype": null, "skin": 1.0, "n_atoms": 5000, "call_ms": 8.959105500252917, "call_p10": 8.526946397614665, "call_p90": 9.660496998549206, "pass_tag": "2"}
+{"label": "loup-generic", "impl": "loup-generic", "dtype": null, "skin": 1.0, "n_atoms": 13720, "call_ms": 24.64410049651633, "call_p10": 23.766966403491097, "call_p90": 25.483969700871967, "pass_tag": "2"}
+{"label": "loup", "impl": "loup", "dtype": null, "skin": 1.0, "n_atoms": 1080, "call_ms": 2.571863999037305, "call_p10": 2.2386429001926444, "call_p90": 2.891242998157395, "pass_tag": "2"}
+{"label": "loup", "impl": "loup", "dtype": null, "skin": 1.0, "n_atoms": 5000, "call_ms": 9.104943503189133, "call_p10": 8.62743399993633, "call_p90": 9.75544540269766, "pass_tag": "2"}
+{"label": "loup", "impl": "loup", "dtype": null, "skin": 1.0, "n_atoms": 13720, "call_ms": 24.09876399906352, "call_p10": 23.371339301229455, "call_p90": 25.074105199746555, "pass_tag": "2"}
+{"label": "sx-mix", "impl": "sx", "dtype": "float32-mixed", "skin": 0.5, "n_atoms": 1080, "call_ms": 2.7712874980352353, "call_p10": 2.6211193049675785, "call_p90": 3.1508267042227094, "pass_tag": "2"}
+{"label": "sx-mix", "impl": "sx", "dtype": "float32-mixed", "skin": 0.5, "n_atoms": 5000, "call_ms": 11.844095999549609, "call_p10": 11.221188498166157, "call_p90": 12.856841299071675, "pass_tag": "2"}
+{"label": "sx-mix", "impl": "sx", "dtype": "float32-mixed", "skin": 0.5, "n_atoms": 13720, "call_ms": 31.622518501535524, "call_p10": 31.06724569806829, "call_p90": 32.19911459600553, "pass_tag": "2"}
+{"label": "sx-f32", "impl": "sx", "dtype": "float32", "skin": 0.5, "n_atoms": 1080, "call_ms": 3.2710404993849806, "call_p10": 2.9761056939605623, "call_p90": 3.646568903059233, "pass_tag": "2"}
+{"label": "sx-f32", "impl": "sx", "dtype": "float32", "skin": 0.5, "n_atoms": 5000, "call_ms": 13.82500649560825, "call_p10": 13.268441997934133, "call_p90": 14.478350300487364, "pass_tag": "2"}
+{"label": "sx-f32", "impl": "sx", "dtype": "float32", "skin": 0.5, "n_atoms": 13720, "call_ms": 36.23925400097505, "call_p10": 35.712473998137284, "call_p90": 37.009356696216855, "pass_tag": "2"}
+{"label": "loup-generic", "impl": "loup-generic", "dtype": null, "skin": 0.5, "n_atoms": 1080, "call_ms": 2.508404999389313, "call_p10": 2.074739795352798, "call_p90": 2.8007923981931526, "pass_tag": "2"}
+{"label": "loup-generic", "impl": "loup-generic", "dtype": null, "skin": 0.5, "n_atoms": 5000, "call_ms": 9.078724502614932, "call_p10": 8.618192101130262, "call_p90": 9.883676200115588, "pass_tag": "2"}
+{"label": "loup-generic", "impl": "loup-generic", "dtype": null, "skin": 0.5, "n_atoms": 13720, "call_ms": 24.311913002748042, "call_p10": 23.55817720235791, "call_p90": 24.831216198799666, "pass_tag": "2"}
+{"label": "loup", "impl": "loup", "dtype": null, "skin": 0.5, "n_atoms": 1080, "call_ms": 2.594602497993037, "call_p10": 2.1887422022700775, "call_p90": 2.8819078972446732, "pass_tag": "2"}
+{"label": "loup", "impl": "loup", "dtype": null, "skin": 0.5, "n_atoms": 5000, "call_ms": 8.876756499375915, "call_p10": 8.556215003045509, "call_p90": 9.418184600508539, "pass_tag": "2"}
+{"label": "loup", "impl": "loup", "dtype": null, "skin": 0.5, "n_atoms": 13720, "call_ms": 23.77206300297985, "call_p10": 23.181910298444564, "call_p90": 24.45191430306295, "pass_tag": "2"}
+Capture range started in the application.
+Capture range ended in the application.
+Generating '/tmp/nsys-report-f0c5.qdstrm'
+[1/1] [0%                          ] prof_loup.nsys-repProcessing events...
+[1/1] [0%                          ] prof_loup.nsys-rep[1/1] [6%                          ] prof_loup.nsys-rep[1/1] [11%                         ] prof_loup.nsys-rep[1/1] [===========52%              ] prof_loup.nsys-rep[1/1] [===========53%              ] prof_loup.nsys-rep[1/1] [============54%             ] prof_loup.nsys-rep[1/1] [=============58%            ] prof_loup.nsys-rep[1/1] [========================100%] prof_loup.nsys-rep[1/1] [========================100%] prof_loup.nsys-rep
+profiled 20 force calls (loup, skin 0.5, 5000 atoms)
+Generated:
+	/home/fzwin/src/symmetrix-eval/scratch/prof_loup.nsys-rep
+Generating SQLite file /home/fzwin/src/symmetrix-eval/scratch/prof_loup.sqlite from /home/fzwin/src/symmetrix-eval/scratch/prof_loup.nsys-rep
+Processing [/home/fzwin/src/symmetrix-eval/scratch/prof_loup.sqlite] with [/opt/nvidia/nsight-systems/2026.1.3/target-linux-x64/reports/cuda_gpu_trace.py] to [/home/fzwin/src/symmetrix-eval/scratch/prof_loup_cuda_gpu_trace.csv]... PROCESSED
+
+Processing [/home/fzwin/src/symmetrix-eval/scratch/prof_loup.sqlite] with [/opt/nvidia/nsight-systems/2026.1.3/target-linux-x64/reports/cuda_gpu_kern_sum.py] to [/home/fzwin/src/symmetrix-eval/scratch/prof_loup_cuda_gpu_kern_sum.csv]... PROCESSED
+
+Capture range started in the application.
+Capture range ended in the application.
+Generating '/tmp/nsys-report-a5cf.qdstrm'
+[1/1] [0%                          ] prof_loup-generic.nsys-repProcessing events...
+[1/1] [0%                          ] prof_loup-generic.nsys-rep[1/1] [5%                          ] prof_loup-generic.nsys-rep[1/1] [10%                         ] prof_loup-generic.nsys-rep[1/1] [===========52%              ] prof_loup-generic.nsys-rep[1/1] [===========53%              ] prof_loup-generic.nsys-rep[1/1] [============54%             ] prof_loup-generic.nsys-rep[1/1] [=============58%            ] prof_loup-generic.nsys-rep[1/1] [========================100%] prof_loup-generic.nsys-rep[1/1] [========================100%] prof_loup-generic.nsys-rep
+profiled 20 force calls (loup-generic, skin 0.5, 5000 atoms)
+Generated:
+	/home/fzwin/src/symmetrix-eval/scratch/prof_loup-generic.nsys-rep
+Generating SQLite file /home/fzwin/src/symmetrix-eval/scratch/prof_loup-generic.sqlite from /home/fzwin/src/symmetrix-eval/scratch/prof_loup-generic.nsys-rep
+Processing [/home/fzwin/src/symmetrix-eval/scratch/prof_loup-generic.sqlite] with [/opt/nvidia/nsight-systems/2026.1.3/target-linux-x64/reports/cuda_gpu_trace.py] to [/home/fzwin/src/symmetrix-eval/scratch/prof_loup-generic_cuda_gpu_trace.csv]... PROCESSED
+
+Processing [/home/fzwin/src/symmetrix-eval/scratch/prof_loup-generic.sqlite] with [/opt/nvidia/nsight-systems/2026.1.3/target-linux-x64/reports/cuda_gpu_kern_sum.py] to [/home/fzwin/src/symmetrix-eval/scratch/prof_loup-generic_cuda_gpu_kern_sum.csv]... PROCESSED
+
+Capture range started in the application.
+Capture range ended in the application.
+Generating '/tmp/nsys-report-d39f.qdstrm'
+[1/1] [0%                          ] prof_sx-f32.nsys-repProcessing events...
+[1/1] [0%                          ] prof_sx-f32.nsys-rep[1/1] [7%                          ] prof_sx-f32.nsys-rep[1/1] [13%                         ] prof_sx-f32.nsys-rep[1/1] [===========53%              ] prof_sx-f32.nsys-rep[1/1] [============54%             ] prof_sx-f32.nsys-rep[1/1] [============55%             ] prof_sx-f32.nsys-rep[1/1] [=============60%            ] prof_sx-f32.nsys-rep[1/1] [========================100%] prof_sx-f32.nsys-rep[1/1] [========================100%] prof_sx-f32.nsys-rep
+profiled 20 force calls (sx, skin 0.5, 5000 atoms)
+Generated:
+	/home/fzwin/src/symmetrix-eval/scratch/prof_sx-f32.nsys-rep
+Generating SQLite file /home/fzwin/src/symmetrix-eval/scratch/prof_sx-f32.sqlite from /home/fzwin/src/symmetrix-eval/scratch/prof_sx-f32.nsys-rep
+Processing [/home/fzwin/src/symmetrix-eval/scratch/prof_sx-f32.sqlite] with [/opt/nvidia/nsight-systems/2026.1.3/target-linux-x64/reports/cuda_gpu_trace.py] to [/home/fzwin/src/symmetrix-eval/scratch/prof_sx-f32_cuda_gpu_trace.csv]... PROCESSED
+
+Processing [/home/fzwin/src/symmetrix-eval/scratch/prof_sx-f32.sqlite] with [/opt/nvidia/nsight-systems/2026.1.3/target-linux-x64/reports/cuda_gpu_kern_sum.py] to [/home/fzwin/src/symmetrix-eval/scratch/prof_sx-f32_cuda_gpu_kern_sum.csv]... PROCESSED
+
+Capture range started in the application.
+Capture range ended in the application.
+Generating '/tmp/nsys-report-9299.qdstrm'
+[1/1] [0%                          ] prof_sx-mix.nsys-repProcessing events...
+[1/1] [0%                          ] prof_sx-mix.nsys-rep[1/1] [9%                          ] prof_sx-mix.nsys-rep[1/1] [14%                         ] prof_sx-mix.nsys-rep[1/1] [==20%                       ] prof_sx-mix.nsys-rep[1/1] [============54%             ] prof_sx-mix.nsys-rep[1/1] [============55%             ] prof_sx-mix.nsys-rep[1/1] [============56%             ] prof_sx-mix.nsys-rep[1/1] [============57%             ] prof_sx-mix.nsys-rep[1/1] [===============65%          ] prof_sx-mix.nsys-rep[1/1] [===============66%          ] prof_sx-mix.nsys-rep[1/1] [========================100%] prof_sx-mix.nsys-rep[1/1] [========================100%] prof_sx-mix.nsys-rep
+profiled 20 force calls (sx, skin 0.5, 5000 atoms)
+Generated:
+	/home/fzwin/src/symmetrix-eval/scratch/prof_sx-mix.nsys-rep
+Generating SQLite file /home/fzwin/src/symmetrix-eval/scratch/prof_sx-mix.sqlite from /home/fzwin/src/symmetrix-eval/scratch/prof_sx-mix.nsys-rep
+Processing [/home/fzwin/src/symmetrix-eval/scratch/prof_sx-mix.sqlite] with [/opt/nvidia/nsight-systems/2026.1.3/target-linux-x64/reports/cuda_gpu_trace.py] to [/home/fzwin/src/symmetrix-eval/scratch/prof_sx-mix_cuda_gpu_trace.csv]... PROCESSED
+
+Processing [/home/fzwin/src/symmetrix-eval/scratch/prof_sx-mix.sqlite] with [/opt/nvidia/nsight-systems/2026.1.3/target-linux-x64/reports/cuda_gpu_kern_sum.py] to [/home/fzwin/src/symmetrix-eval/scratch/prof_sx-mix_cuda_gpu_kern_sum.csv]... PROCESSED
+
+## Force call at equal skin (ms, median of 100; pass 1 / pass 2)
+
+skin 0.5 A
+
+| implementation | 1080 atoms | 5000 atoms | 13720 atoms |
+|---|---|---|---|
+| loup | 2.48 / 2.59 | 8.87 / 8.88 | 23.85 / 23.77 |
+| loup-generic | 2.46 / 2.51 (0.98x) | 8.99 / 9.08 (1.02x) | 23.85 / 24.31 (1.01x) |
+| sx-f32 | 3.19 / 3.27 (1.27x) | 13.73 / 13.83 (1.55x) | 36.31 / 36.24 (1.52x) |
+| sx-mix | 2.82 / 2.77 (1.10x) | 11.96 / 11.84 (1.34x) | 32.03 / 31.62 (1.34x) |
+
+skin 1.0 A
+
+| implementation | 1080 atoms | 5000 atoms | 13720 atoms |
+|---|---|---|---|
+| loup | 2.49 / 2.57 | 8.90 / 9.10 | 24.04 / 24.10 |
+| loup-generic | 2.63 / 2.51 (1.02x) | 8.93 / 8.96 (0.99x) | 24.05 / 24.64 (1.01x) |
+| sx-f32 | 3.35 / 3.29 (1.31x) | 13.81 / 13.77 (1.53x) | 36.50 / 36.39 (1.51x) |
+| sx-mix | 2.85 / 2.74 (1.10x) | 11.94 / 11.78 (1.32x) | 32.14 / 31.67 (1.33x) |
+
+## Kernel profile of one force call (nsys, SrTiO3 5,000 atoms)
+
+### loup: 20 calls, device span 8612 us, kernels 8675 us, memcpy / memset 30 us per call
+
+| phase | us per call |
+|---|---|
+| layer 1 conv backward | 2923 |
+| GEMMs | 2348 |
+| layer 1 conv forward | 1924 |
+| other | 1088 |
+| products | 337 |
+| neighbour list / skin / edges | 54 |
+
+| kernel | launches per call | us per call |
+|---|---|---|
+| `wprime_backward_inter1_rcv` | 1 | 2923 |
+| `void spline_forward_inter1<(int)1, (bool)1>(int, const int *, const float *, const float *, const float4 *,...` | 1 | 1924 |
+| `void loup::<unnamed>::sgemm128_kernel<(int)8, (bool)1, (bool)1>(int, int, int, const float *, const float *...` | 13 | 1238 |
+| `loup::tabled_outer_sum0_backward_kernel(const int *, int, int, int, float, float, float, int, float, float,...` | 1 | 570 |
+| `void loup::<unnamed>::sgemm128_kernel<(int)4, (bool)1, (bool)1>(int, int, int, const float *, const float *...` | 10 | 459 |
+| `loup::tabled_outer_sum0_forward_kernel(int, int, int, int, float, float, const int *, const float4 *, const...` | 1 | 246 |
+| `sc0_backward` | 1 | 229 |
+| `sc1_fused` | 1 | 226 |
+| `fm_tf32x3_rr_64x64` | 5 | 207 |
+| `void cutlass::Kernel2<cutlass_80_simt_sgemm_128x128_8x4_nn_align1>(T1::Params)` | 1 | 179 |
+| `void cutlass::Kernel2<cutlass_80_simt_sgemm_128x64_8x5_nn_align1>(T1::Params)` | 3 | 138 |
+| `sc0_forward` | 1 | 108 |
+| `void loup::<unnamed>::sgemm32_kernel<(bool)1>(int, int, int, const float *, const float *, float *, float *...` | 4 | 63 |
+| `loup::scatter_active_edges_kernel(int, float, SplineGrid, int, int, const int *, const int *, const int *, ...` | 1 | 49 |
+| `loup::compute_and_count_active_kernel(int, float, const double *, const int *, const int *, const int *, co...` | 1 | 44 |
+| `void magma_sgemmEx_kernel<float, float, float, (bool)1, (bool)0, (int)6, (int)4, (int)6, (int)3, (int)4>(in...` | 1 | 31 |
+| `void loup::<unnamed>::sgemm32_kernel<(bool)0>(int, int, int, const float *, const float *, float *, float *...` | 2 | 16 |
+| `fm_tf32x3_rr_64x32` | 1 | 12 |
+| `void cutlass::Kernel2<cutlass_80_simt_sgemm_128x32_8x5_tn_align1>(T1::Params)` | 2 | 6 |
+
+### loup-generic: 20 calls, device span 8468 us, kernels 8620 us, memcpy / memset 22 us per call
+
+| phase | us per call |
+|---|---|
+| layer 1 conv backward | 2872 |
+| GEMMs | 2324 |
+| layer 1 conv forward | 2002 |
+| neighbour list / skin / edges | 600 |
+| products | 559 |
+| layer 0 conv forward | 220 |
+| other | 43 |
+
+| kernel | launches per call | us per call |
+|---|---|---|
+| `void gconv_bwd_L1<(bool)1, (int)128, (bool)1>(int, int, int, int, SplineGrid, int, int, const int *, const ...` | 1 | 2872 |
+| `void gconv_fwd_L1<(int)1, (bool)1, (int)256, (bool)1, (int)128>(int, int, int, int, SplineGrid, int, int, c...` | 1 | 2002 |
+| `void loup::<unnamed>::sgemm128_kernel<(int)8, (bool)1, (bool)1>(int, int, int, const float *, const float *...` | 12 | 1213 |
+| `void loup::<unnamed>::first_bwd_edge_kernel<(int)2, (bool)1, (bool)1>(const int *, int, int, int, int, Spli...` | 1 | 546 |
+| `void loup::<unnamed>::sgemm128_kernel<(int)4, (bool)1, (bool)1>(int, int, int, const float *, const float *...` | 10 | 423 |
+| `gprod_bwd_dd662f9d3a2b5b2b` | 1 | 240 |
+| `void gprod_ro1_fused_ae0a447b65f4fcd4<(int)128, (int)4>(int, int, const float *, const float *, const float...` | 1 | 221 |
+| `loup::<unnamed>::first_fwd_kernel(int, int, int, int, int, SplineGrid, int, int, const int *, const int *, ...` | 1 | 220 |
+| `void cutlass::Kernel2<cutlass_80_simt_sgemm_128x128_8x4_nn_align1>(T1::Params)` | 1 | 188 |
+| `fm_tf32x3_rr_64x64` | 5 | 185 |
+| `void cutlass::Kernel2<cutlass_80_simt_sgemm_128x64_8x5_nn_align1>(T1::Params)` | 3 | 135 |
+| `gprod_fwd_dd662f9d3a2b5b2b` | 1 | 98 |
+| `void loup::<unnamed>::sgemm32_kernel<(bool)1>(int, int, int, const float *, const float *, float *, float *...` | 4 | 66 |
+| `loup::scatter_active_edges_kernel(int, float, SplineGrid, int, int, const int *, const int *, const int *, ...` | 1 | 50 |
+| `fm_tf32x3_rc_64x64` | 1 | 48 |
+| `loup::compute_and_count_active_kernel(int, float, const double *, const int *, const int *, const int *, co...` | 1 | 42 |
+| `void magma_sgemmEx_kernel<float, float, float, (bool)1, (bool)0, (int)6, (int)4, (int)6, (int)3, (int)4>(in...` | 1 | 32 |
+| `fm_tf32x3_rr_64x32` | 1 | 18 |
+| `void loup::<unnamed>::sgemm32_kernel<(bool)0>(int, int, int, const float *, const float *, float *, float *...` | 2 | 10 |
+| `void cutlass::Kernel2<cutlass_80_simt_sgemm_128x32_8x5_tn_align1>(T1::Params)` | 2 | 6 |
+
+### sx-f32: 20 calls, device span 13615 us, kernels 13181 us, memcpy / memset 48 us per call
+
+| phase | us per call |
+|---|---|
+| layer 1 conv backward (Phi1_reverse) | 4562 |
+| layer 1 conv forward (Phi1) | 4065 |
+| GEMMs | 2561 |
+| products backward (k_M_reverse) | 453 |
+| layer 0 conv backward (Phi0_reverse) | 446 |
+| neighbour edges (count, scan, fill) | 326 |
+| layer 0 conv forward (Phi0) | 256 |
+| readouts, ZBL, outputs | 223 |
+| products forward (k_M) | 202 |
+| edge -> atom forces | 59 |
+| layer 1 density (scale1) | 29 |
+
+| kernel | launches per call | us per call |
+|---|---|---|
+| `void <unnamed>::k_Phi1_reverse<<unnamed>::Shape<(int)128, (int)1, (int)128, (bool)0>, (bool)0, float>(mace_...` | 1 | 4562 |
+| `void <unnamed>::k_Phi1<<unnamed>::Shape<(int)128, (int)1, (int)128, (bool)0>, (bool)0, float>(mace_foundati...` | 1 | 4065 |
+| `void magma_sgemmEx_kernel<float, float, float, (bool)1, (bool)0, (int)6, (int)4, (int)6, (int)3, (int)4>(in...` | 14 | 1116 |
+| `void magma_sgemmEx_kernel<float, float, float, (bool)0, (bool)0, (int)6, (int)3, (int)5, (int)3, (int)3>(in...` | 4 | 829 |
+| `void <unnamed>::k_Phi0_reverse<(int)64, float>(mace_foundation::Model<T2>, mace_foundation::Graph<T2>)` | 1 | 446 |
+| `void cutlass::Kernel2<cutlass_80_simt_sgemm_128x64_8x5_nn_align1>(T1::Params)` | 10 | 440 |
+| `void <unnamed>::k_Phi0<(int)64, float>(mace_foundation::Model<T2>, mace_foundation::Graph<T2>)` | 1 | 256 |
+| `void <unnamed>::k_M_reverse<<unnamed>::Shape<(int)128, (int)1, (int)128, (bool)0>, (int)0, float>(mace_foun...` | 1 | 248 |
+| `void <unnamed>::k_fill<float>(mace_foundation::Model<T1>, mace_foundation::Graph<T1>, <unnamed>::Atoms)` | 1 | 238 |
+| `void <unnamed>::k_M_reverse<<unnamed>::Shape<(int)128, (int)1, (int)128, (bool)0>, (int)1, float>(mace_foun...` | 1 | 205 |
+| `void <unnamed>::k_sgemm<(int)64, (int)32>(<unnamed>::GemmBatch)` | 2 | 140 |
+| `void <unnamed>::k_outputs<float>(mace_foundation::Graph<T1>, double *, double *)` | 1 | 113 |
+| `void <unnamed>::k_M<<unnamed>::Shape<(int)128, (int)1, (int)128, (bool)0>, (int)1, float>(mace_foundation::...` | 1 | 102 |
+| `void <unnamed>::k_M<<unnamed>::Shape<(int)128, (int)1, (int)128, (bool)0>, (int)0, float>(mace_foundation::...` | 1 | 99 |
+| `void <unnamed>::k_count<float>(mace_foundation::Model<T1>, mace_foundation::Graph<T1>, <unnamed>::Atoms)` | 1 | 86 |
+| `void <unnamed>::k_readouts<<unnamed>::Shape<(int)128, (int)1, (int)128, (bool)0>, float>(mace_foundation::M...` | 1 | 70 |
+| `void <unnamed>::k_forces<float>(mace_foundation::Model<T1>, mace_foundation::Graph<T1>, <unnamed>::Atoms)` | 1 | 59 |
+| `void <unnamed>::k_zbl<float>(mace_foundation::Model<T1>, mace_foundation::Graph<T1>)` | 1 | 40 |
+| `void <unnamed>::k_scale1<float>(mace_foundation::Model<T1>, mace_foundation::Graph<T1>)` | 1 | 29 |
+| `void cutlass::Kernel2<cutlass_80_simt_sgemm_128x64_8x5_tn_align1>(T1::Params)` | 2 | 19 |
+| `void cutlass::Kernel2<cutlass_80_simt_sgemm_128x32_8x5_nn_align1>(T1::Params)` | 2 | 17 |
+
+### sx-mix: 20 calls, device span 11769 us, kernels 11375 us, memcpy / memset 36 us per call
+
+| phase | us per call |
+|---|---|
+| layer 1 conv backward (Phi1_reverse) | 3901 |
+| layer 1 conv forward (Phi1) | 3167 |
+| GEMMs | 2214 |
+| products backward (k_M_reverse) | 487 |
+| layer 0 conv backward (Phi0_reverse) | 454 |
+| neighbour edges (count, scan, fill) | 331 |
+| layer 0 conv forward (Phi0) | 277 |
+| readouts, ZBL, outputs | 238 |
+| products forward (k_M) | 194 |
+| edge -> atom forces | 70 |
+| layer 1 density (scale1) | 28 |
+| gates, biases, amax | 14 |
+
+| kernel | launches per call | us per call |
+|---|---|---|
+| `void <unnamed>::k_Phi1_reverse<<unnamed>::Shape<(int)128, (int)1, (int)128, (bool)0>, (bool)1, float>(mace_...` | 1 | 3901 |
+| `void <unnamed>::k_Phi1<<unnamed>::Shape<(int)128, (int)1, (int)128, (bool)0>, (bool)1, float>(mace_foundati...` | 1 | 3167 |
+| `void <unnamed>::k_gemm<(int)128, (int)128, (int)4, (int)2>(<unnamed>::GemmBatch, const unsigned int *)` | 5 | 1781 |
+| `void <unnamed>::k_Phi0_reverse<(int)64, float>(mace_foundation::Model<T2>, mace_foundation::Graph<T2>)` | 1 | 454 |
+| `void <unnamed>::k_gemm<(int)128, (int)64, (int)4, (int)2>(<unnamed>::GemmBatch, const unsigned int *)` | 1 | 433 |
+| `void <unnamed>::k_Phi0<(int)64, float>(mace_foundation::Model<T2>, mace_foundation::Graph<T2>)` | 1 | 277 |
+| `void <unnamed>::k_M_reverse<<unnamed>::Shape<(int)128, (int)1, (int)128, (bool)0>, (int)0, float>(mace_foun...` | 1 | 264 |
+| `void <unnamed>::k_fill<float>(mace_foundation::Model<T1>, mace_foundation::Graph<T1>, <unnamed>::Atoms)` | 1 | 241 |
+| `void <unnamed>::k_M_reverse<<unnamed>::Shape<(int)128, (int)1, (int)128, (bool)0>, (int)1, float>(mace_foun...` | 1 | 223 |
+| `void <unnamed>::k_outputs<float>(mace_foundation::Graph<T1>, double *, double *)` | 1 | 134 |
+| `void <unnamed>::k_M<<unnamed>::Shape<(int)128, (int)1, (int)128, (bool)0>, (int)0, float>(mace_foundation::...` | 1 | 102 |
+| `void <unnamed>::k_M<<unnamed>::Shape<(int)128, (int)1, (int)128, (bool)0>, (int)1, float>(mace_foundation::...` | 1 | 93 |
+| `void <unnamed>::k_count<float>(mace_foundation::Model<T1>, mace_foundation::Graph<T1>, <unnamed>::Atoms)` | 1 | 87 |
+| `void <unnamed>::k_readouts<<unnamed>::Shape<(int)128, (int)1, (int)128, (bool)0>, float>(mace_foundation::M...` | 1 | 81 |
+| `void <unnamed>::k_forces<float>(mace_foundation::Model<T1>, mace_foundation::Graph<T1>, <unnamed>::Atoms)` | 1 | 70 |
+| `void <unnamed>::k_scale1<float>(mace_foundation::Model<T1>, mace_foundation::Graph<T1>)` | 1 | 28 |
+| `void <unnamed>::k_zbl<float>(mace_foundation::Model<T1>, mace_foundation::Graph<T1>)` | 1 | 23 |
+| `void <unnamed>::k_amax<float>(mace_foundation::Model<T1>, const T1 *, long, int)` | 1 | 14 |
+
+| implementation | calls | device span per call (us) | kernel time per call (us) | memcpy / memset (us) |
+|---|---|---|---|---|
+| loup | 20 | 8612 | 8675 | 30 |
+| loup-generic | 20 | 8468 | 8620 | 22 |
+| sx-f32 | 20 | 13615 | 13181 | 48 |
+| sx-mix | 20 | 11769 | 11375 | 36 |

@@ -1,0 +1,24 @@
+Time (%),Total Time (ns),Instances,Avg (ns),Med (ns),Min (ns),Max (ns),StdDev (ns),Name
+34.6,91240573,20,4562028.7,4589679.0,4277669,4931365,267843.8,"void <unnamed>::k_Phi1_reverse<<unnamed>::Shape<(int)128, (int)1, (int)128, (bool)0>, (bool)0, float>(mace_foundation::Model<T3>, mace_foundation::Graph<T3>)"
+30.8,81307747,20,4065387.4,3909514.5,3896217,4563830,216672.4,"void <unnamed>::k_Phi1<<unnamed>::Shape<(int)128, (int)1, (int)128, (bool)0>, (bool)0, float>(mace_foundation::Model<T3>, mace_foundation::Graph<T3>)"
+8.5,22319622,280,79712.9,38908.0,17540,503912,79729.3,"void magma_sgemmEx_kernel<float, float, float, (bool)1, (bool)0, (int)6, (int)4, (int)6, (int)3, (int)4>(int, int, int, BatchedTensor, int, BatchedTensor, int, BatchedTensor, int, BatchedTensor, int, int, int, const T1 *, const T1 *, T1, T1, int, cublasLtEpilogue_t, int, const void *, long)"
+6.3,16584337,80,207304.2,171217.0,93480,906239,130496.0,"void magma_sgemmEx_kernel<float, float, float, (bool)0, (bool)0, (int)6, (int)3, (int)5, (int)3, (int)3>(int, int, int, BatchedTensor, int, BatchedTensor, int, BatchedTensor, int, BatchedTensor, int, int, int, const T1 *, const T1 *, T1, T1, int, cublasLtEpilogue_t, int, const void *, long)"
+3.4,8928943,20,446447.2,423601.0,419233,868460,99425.6,"void <unnamed>::k_Phi0_reverse<(int)64, float>(mace_foundation::Model<T2>, mace_foundation::Graph<T2>)"
+3.3,8802203,200,44011.0,32171.5,18492,175809,43689.3,void cutlass::Kernel2<cutlass_80_simt_sgemm_128x64_8x5_nn_align1>(T1::Params)
+1.9,5115437,20,255771.9,251447.5,240469,282379,13369.2,"void <unnamed>::k_Phi0<(int)64, float>(mace_foundation::Model<T2>, mace_foundation::Graph<T2>)"
+1.9,4956847,20,247842.4,235099.0,216957,492409,59248.3,"void <unnamed>::k_M_reverse<<unnamed>::Shape<(int)128, (int)1, (int)128, (bool)0>, (int)0, float>(mace_foundation::Model<T3>, mace_foundation::Graph<T3>)"
+1.8,4750953,20,237547.6,237625.0,236370,238754,536.9,"void <unnamed>::k_fill<float>(mace_foundation::Model<T1>, mace_foundation::Graph<T1>, <unnamed>::Atoms)"
+1.6,4107042,20,205352.1,201275.5,187406,236497,15535.5,"void <unnamed>::k_M_reverse<<unnamed>::Shape<(int)128, (int)1, (int)128, (bool)0>, (int)1, float>(mace_foundation::Model<T3>, mace_foundation::Graph<T3>)"
+1.1,2797680,40,69942.0,64947.0,64216,266810,31928.3,"void <unnamed>::k_sgemm<(int)64, (int)32>(<unnamed>::GemmBatch)"
+0.9,2257988,20,112899.4,112911.0,112164,113816,423.9,"void <unnamed>::k_outputs<float>(mace_foundation::Graph<T1>, double *, double *)"
+0.8,2049582,20,102479.1,90398.5,87062,307228,48373.7,"void <unnamed>::k_M<<unnamed>::Shape<(int)128, (int)1, (int)128, (bool)0>, (int)1, float>(mace_foundation::Model<T3>, mace_foundation::Graph<T3>)"
+0.8,1981935,20,99096.8,97070.5,93227,110734,5893.1,"void <unnamed>::k_M<<unnamed>::Shape<(int)128, (int)1, (int)128, (bool)0>, (int)0, float>(mace_foundation::Model<T3>, mace_foundation::Graph<T3>)"
+0.7,1714422,20,85721.1,85695.5,85442,86236,209.5,"void <unnamed>::k_count<float>(mace_foundation::Model<T1>, mace_foundation::Graph<T1>, <unnamed>::Atoms)"
+0.5,1391119,20,69555.9,69650.0,68156,70413,462.0,"void <unnamed>::k_readouts<<unnamed>::Shape<(int)128, (int)1, (int)128, (bool)0>, float>(mace_foundation::Model<T2>, mace_foundation::Graph<T2>)"
+0.4,1183850,20,59192.5,58750.5,58274,62246,1012.6,"void <unnamed>::k_forces<float>(mace_foundation::Model<T1>, mace_foundation::Graph<T1>, <unnamed>::Atoms)"
+0.3,801543,20,40077.2,22926.0,22211,365724,76650.6,"void <unnamed>::k_zbl<float>(mace_foundation::Model<T1>, mace_foundation::Graph<T1>)"
+0.2,580104,20,29005.2,28644.5,27612,31266,1136.9,"void <unnamed>::k_scale1<float>(mace_foundation::Model<T1>, mace_foundation::Graph<T1>)"
+0.1,373384,40,9334.6,9341.5,9024,9787,193.0,void cutlass::Kernel2<cutlass_80_simt_sgemm_128x64_8x5_tn_align1>(T1::Params)
+0.1,334870,40,8371.8,8357.0,7785,9278,371.2,void cutlass::Kernel2<cutlass_80_simt_sgemm_128x32_8x5_nn_align1>(T1::Params)
+0.0,36098,20,1804.9,1811.0,1779,1843,16.6,"void cub::_V_300303_SM_1200::detail::scan::DeviceScanKernel<cub::_V_300303_SM_1200::detail::scan::policy_hub<int, int, int, unsigned int, cuda::std::__4::plus<void>>::Policy1000, int *, int *, cub::_V_300303_SM_1200::ScanTileState<int, (bool)1>, cuda::std::__4::plus<void>, cub::_V_300303_SM_1200::detail::InputValue<int, int *>, unsigned int, int, (bool)0, int>(T2, T3, T4, int, T5, T6, T7)"
+0.0,11345,20,567.3,572.0,508,668,45.3,"void cub::_V_300303_SM_1200::detail::scan::DeviceScanInitKernel<cub::_V_300303_SM_1200::ScanTileState<int, (bool)1>>(T1, int)"
