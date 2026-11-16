@@ -1587,3 +1587,25 @@ Tiled MD at the end of the O31 speed work (library `7be62d11b15db9ec`, commit `b
 device integrator, per step with the list rebuilds of the run): 320,000 atoms NVE 624.0 ms (1.95 us/atom; 697.6 at
 `ae341cc`), Langevin 630.1 ms (1.97; 706.5); 1,081,600 atoms wavefront Langevin 2,283.5 ms (2.11; 2,382.2). The
 whole-system call is 1.65 us/atom at 5,000-40,000 atoms.
+
+Tiled capacity on the RTX 5060 Ti 16 GB after S5-T07 step 1 (planner only, `loup_plan_execution`, OMAT-0 medium,
+rattled SrTiO3 cubes, memory fraction 0.9, 41 GB host with about 38 GB available; `.tmp_o/plan_sizes.py`, no force
+call run at these sizes):
+
+| Atoms | Plain order, device lists | Plain order, host lists | Wavefront, device lists | Wavefront, host lists |
+| --- | --- | --- | --- | --- |
+| 2,026,120 | refused (14.69 GiB state) | fits: cap 24,576, 12.07 GiB device, 7.44 GiB host | fits: cap 8,192, 11.94 GiB device | (device lists suffice) |
+| 3,292,515 | refused (23.84 GiB) | refused (12.85 GiB state + 0.83 workspace > 13.13) | refused (14.93 GiB) | fits: cap 24,576, 10.46 GiB device, 12.09 GiB host |
+| 5,000,000 | refused | refused (19.57 GiB state) | refused | fits: cap 16,384, 11.40 GiB device, 18.37 GiB host |
+| 8,008,065 | refused | refused: lists over half of `MemAvailable` | refused | refused: lists over half of `MemAvailable` |
+
+- Plain order: the limit is the whole-cell layer state on the device, between 2.0M and 3.3M atoms with host lists
+  (below 2.0M without; smaller cubes not planned here). Host lists raise it by roughly half, not more.
+- Wavefront: the row pool holds only the band, so with host lists the device holds 5M atoms with 1.7 GiB to
+  spare; the limit is then the host RAM for the lists (36 B per edge, about 3.7 KB per atom at 6 Å, within half of
+  `MemAvailable`), between 5.0M and 8.0M atoms on this PC. On a host with more RAM the device side would carry the
+  wavefront further (not measured).
+- For comparison (FastMACE's own records, not rerun here): whole system 69,120 OMAT-0 SrTiO3 atoms on a 20 GB RTX
+  4000 Ada; tiled with the state aliased in host memory 70.96M NbCl5 atoms on that card with 250 GB of host;
+  wavefront 179.7M on it and 397.5M on an A100 80 GB. FastMACE keeps every per-atom array in host memory, which is
+  S5-T07 step 2 here.
