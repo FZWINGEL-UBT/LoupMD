@@ -554,6 +554,84 @@ def test_the_split_sums_forces_and_stress_are_the_gradient(monkeypatch, ksum):
     assert abs(only["energies"].sum() - only["energy"]) <= 1e-7 * abs(got["energy"])     # rounding: 1.4e-8 seen
 
 
+# ------------------------------------------------------------------------ the automatic choice (S6-D07, D80)
+
+def _auto():
+    return d.resolve(d.Dispersion(), functional="pbe")
+
+
+@pytest.mark.parametrize("system", ["paracetamol", "srtio3", "nbcl5"])
+def test_auto_chooses_the_fastest_checked_method(system):
+    """On each benchmark system the setup check keeps the plain sum (its own bound) and picks a kept candidate;
+    timed again on their own, the chosen one is the fastest of the kept ones within 5%."""
+    import time
+
+    lib = _lib_or_skip()
+    atoms = _system(system)
+    record = _auto()
+    used, choice = d.choose(record, atoms, evaluate=_d3.evaluate)
+    rows = {row["name"]: row for row in choice["candidates"]}
+    for row in rows.values():
+        print(system, row["name"], {k: row.get(k) for k in ("energy_meV_per_atom", "max_force_eV_per_A",
+                                                                "stress_GPa", "ms", "kept", "why")})
+    print(f"{system}: chosen {choice['chosen']}, setup {choice['setup_s']} s")
+    assert set(rows) == {"none 40", "split 20", "split 25"}
+    assert rows["none 40"]["kept"] and rows[choice["chosen"]]["kept"]
+    assert used.long_range == rows[choice["chosen"]]["long_range"]
+    assert used.pair_cutoff_bohr == rows[choice["chosen"]]["pair_cutoff_bohr"]
+    records = dict(d.candidates(record)[0])
+    kept = [name for name, row in rows.items() if row["kept"]]
+    again = {name: [] for name in kept}
+    for _ in range(3):
+        for name in kept:
+            again[name].append(_d3.evaluate(atoms, records[name], repeat=10, lib=lib)["ms"])
+        time.sleep(0.1)
+    again = {name: min(v) for name, v in again.items()}
+    print(f"{system}: timed again {again}")
+    assert again[choice["chosen"]] <= 1.05 * min(again.values())
+
+
+def test_auto_drops_a_mesh_far_too_coarse():
+    """A candidate made wrong on purpose (a 12 bohr real-space cutoff on a 6 A mesh) is dropped with the reason."""
+    from dataclasses import replace
+
+    _lib_or_skip()
+    atoms = _rattled(suites.srtio3(6))
+    record = _auto()
+    coarse = replace(record, long_range="split", pair_cutoff_bohr=12.0, mesh_spacing_A=6.0, auto_methods=None)
+    used, choice = d.choose(record, atoms, evaluate=_d3.evaluate, extra=[("split 12, 6 A mesh", coarse)])
+    row = {r["name"]: r for r in choice["candidates"]}["split 12, 6 A mesh"]
+    print(row)
+    assert row["kept"] is False and "larger than the plain sum's" in row["why"]
+    assert choice["chosen"] != "split 12, 6 A mesh" and used != coarse
+
+
+def test_lm_md_chooses_the_long_range_method_at_setup(model_path, tmp_path):
+    """lm.md with the preset 'd3bj' (long_range="auto"): the engine gets the chosen method; the metadata and the
+    report list every candidate; a recheck on request gives a choice again."""
+    import loupmd
+
+    _lib_or_skip()
+    ff = loupmd.load(model_path, trusted=True)
+    result = loupmd.md(_oxide(), model=ff, temperature_K=300.0, timestep_fs=1.0, steps=20, seed=2,
+                       dispersion="d3bj", output=str(tmp_path / "run"))
+    entry = result.metadata["dispersion"]
+    choice = entry["long_range_choice"]
+    rows = {row["name"]: row for row in choice["candidates"]}
+    assert set(rows) == {"none 40", "split 20", "split 25"} and choice["left_out"] == []
+    assert entry["long_range_chosen_by"] == "automatic, at setup"
+    assert entry["long_range_used"] == rows[choice["chosen"]]["long_range"]
+    assert result.simulation._engine.dispersion.long_range == entry["long_range_used"]
+    assert "long range checked against the split sum at 30 bohr" in result.summary
+    assert f"{choice['chosen']} (chosen)" in result.summary
+    again = result.simulation.recheck_dispersion()
+    assert again["chosen"] in rows
+    import json
+
+    record = json.loads((tmp_path / "run" / "simulation.json").read_text())
+    assert d.parse(record["dispersion"]).long_range == "auto"        # a resume checks again
+
+
 def test_lm_md_runs_the_split_sum_in_npt(model_path, tmp_path):
     """lm.md with long_range="split" under the barostat: the run completes and the summary names the method."""
     import loupmd

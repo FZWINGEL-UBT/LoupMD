@@ -3,6 +3,7 @@ GPU nor the library; the term's numbers are tests/gpu/test_d3.py's."""
 from __future__ import annotations
 
 import warnings
+from dataclasses import replace
 
 import pytest
 from ase.build import bulk
@@ -162,18 +163,22 @@ def test_lm_md_installs_the_term_and_records_it(ff, tmp_path):
     result = loupmd.md(atoms, model=ff, temperature_K=300, steps=10, seed=1, dispersion="d3bj",
                        output=str(tmp_path / "run"))
     engine = result.simulation._engine
-    assert engine.dispersion == d.resolve("d3bj", functional="pbe")
+    # the engine gets the method chosen at setup; this engine is not the library's, so the plain sum, unchecked
+    assert engine.dispersion == replace(d.resolve("d3bj", functional="pbe"), long_range="none")
     entry = result.metadata["dispersion"]
     assert entry["long_range_used"] == "none" and entry["long_range_chosen_by"] == "automatic, at setup"
+    assert entry["long_range_choice"]["chosen"] == "none 40"
+    assert entry["long_range_choice"]["candidates"][0]["checked"] is False
     assert entry["parameter_source"].startswith("S. Grimme, S. Ehrlich, L. Goerigk")
     assert "dispersion: D3(bj) pbe [s6 1, s8 0.7875, a1 0.4289, a2 4.4407], pairs to 40 bohr" in result.summary
     assert result.metadata["arguments"]["dispersion"] == "d3bj"
     import json
 
     record = json.loads((tmp_path / "run" / "simulation.json").read_text())
-    assert d.parse(record["dispersion"]) == engine.dispersion           # a resume installs the same term
+    user = d.resolve("d3bj", functional="pbe")
+    assert d.parse(record["dispersion"]) == user              # a resume makes the same choice again
     resumed = loupmd.Simulation.resume(tmp_path / "run", force_field=ff)
-    assert resumed.dispersion == engine.dispersion
+    assert resumed.dispersion == user
 
 
 def test_the_three_body_preset_runs_and_is_reported(ff, tmp_path):
@@ -241,9 +246,115 @@ def test_dispersion_list_shows_the_presets_methods_and_limits(capsys):
 def test_the_split_sum_is_runnable_and_auto_still_picks_the_plain_sum():
     assert d.runnable(loupmd.Dispersion(long_range="split")) == "split"
     assert d.runnable(loupmd.Dispersion(long_range="split", three_body=True, three_body_cutoff_bohr=20.0)) == "split"
-    assert d.runnable(loupmd.Dispersion()) == "none"           # until S6-D07 chooses
+    assert d.runnable(loupmd.Dispersion()) == "none"           # without the setup check (S6-D07: choose)
     assert d.runnable(loupmd.Dispersion(auto_methods=("split",))) == "split"
     assert d.runnable(loupmd.Dispersion(long_range="split", mesh_spacing_A=0.8)) == "split"
+
+
+# ------------------------------------------------------------------------------- the automatic choice (S6-D07)
+
+class _FakeD3:
+    """An evaluation per record: the infinite sum's energy is -1 eV per atom; each record's error and time are
+    set by the test (keyed by (long_range, pair cutoff, mesh spacing)); the tight reference has none."""
+
+    def __init__(self, errors, times):
+        self.errors, self.times, self.calls = errors, times, []
+
+    def __call__(self, atoms, record, *, forces=True, stress=True, repeat=0, **_):
+        import numpy as np
+
+        key = (record.long_range, record.pair_cutoff_bohr, record.mesh_spacing_A)
+        self.calls.append((key, repeat))
+        err = 0.0 if key == ("split", 30.0, 0.6) else self.errors[key]
+        n = len(atoms)
+        out = {"energy": -n + n * err, "forces": np.full((n, 3), err), "stress": np.eye(3) * err}
+        if repeat:
+            out["ms"] = self.times[key]
+        return out
+
+
+def _base():
+    return d.resolve("d3bj", functional="pbe")
+
+
+def test_auto_keeps_the_fastest_candidate_within_the_plain_sums_deviation():
+    atoms = bulk("NaCl", "rocksalt", a=5.64, cubic=True)
+    fake = _FakeD3({("none", 40.0, None): 1e-3, ("split", 20.0, None): 2e-3, ("split", 25.0, None): 1e-4},
+                   {("none", 40.0, None): 2.0, ("split", 20.0, None): 1.0, ("split", 25.0, None): 1.5})
+    used, choice = d.choose(_base(), atoms, evaluate=fake)
+    assert (used.long_range, used.pair_cutoff_bohr, used.auto_methods) == ("split", 25.0, None)
+    assert choice["chosen"] == "split 25"
+    rows = {c["name"]: c for c in choice["candidates"]}
+    assert set(rows) == {"none 40", "split 20", "split 25"}
+    assert rows["split 20"]["kept"] is False and "larger than the plain sum's" in rows["split 20"]["why"]
+    assert rows["split 20"].get("ms") is None                      # dropped candidates are not timed
+    assert rows["none 40"]["kept"] and rows["split 25"]["kept"]
+    assert rows["split 25"]["ms"] == 1.5 and rows["none 40"]["ms"] == 2.0
+    assert rows["split 25"]["energy_meV_per_atom"] == pytest.approx(0.1)
+    assert rows["split 25"]["max_force_eV_per_A"] == pytest.approx(1e-4 * 3 ** 0.5)
+    assert "30 bohr" in choice["reference"] and "0.6 A" in choice["reference"]
+
+
+def test_a_candidate_made_wrong_on_purpose_is_dropped():
+    atoms = bulk("NaCl", "rocksalt", a=5.64, cubic=True)
+    coarse = replace(_base(), long_range="split", pair_cutoff_bohr=20.0, mesh_spacing_A=4.0, auto_methods=None)
+    fake = _FakeD3({("none", 40.0, None): 1e-3, ("split", 20.0, None): 1e-4, ("split", 25.0, None): 1e-4,
+                    ("split", 20.0, 4.0): 0.05},
+                   {("none", 40.0, None): 2.0, ("split", 20.0, None): 1.2, ("split", 25.0, None): 1.5,
+                    ("split", 20.0, 4.0): 0.5})
+    used, choice = d.choose(_base(), atoms, evaluate=fake, extra=[("split 20, 4 A mesh", coarse)])
+    rows = {c["name"]: c for c in choice["candidates"]}
+    assert rows["split 20, 4 A mesh"]["kept"] is False
+    assert choice["chosen"] == "split 20" and used.mesh_spacing_A is None
+
+
+def test_auto_methods_restricts_the_candidates_and_a_single_one_is_not_checked():
+    atoms = bulk("NaCl", "rocksalt", a=5.64, cubic=True)
+    fake = _FakeD3({}, {})
+    used, choice = d.choose(replace(_base(), auto_methods=("none",)), atoms, evaluate=fake)
+    assert used.long_range == "none" and used.auto_methods is None
+    assert fake.calls == []
+    assert choice["chosen"] == "none 40" and choice["candidates"][0]["checked"] is False
+
+
+def test_without_cufft_the_split_candidates_are_left_out():
+    atoms = bulk("NaCl", "rocksalt", a=5.64, cubic=True)
+    fake = _FakeD3({}, {})
+    used, choice = d.choose(_base(), atoms, evaluate=fake, cufft=False)
+    assert used.long_range == "none" and fake.calls == []
+    assert choice["left_out"] == [{"method": "split", "why": "cuFFT was not found"}]
+
+
+def test_auto_refuses_when_no_allowed_candidate_meets_the_contract():
+    atoms = bulk("NaCl", "rocksalt", a=5.64, cubic=True)
+    fake = _FakeD3({("none", 40.0, None): 1e-4, ("split", 20.0, None): 1e-3, ("split", 25.0, None): 1e-3}, {})
+    with pytest.raises(PlanRefused, match="none of the candidates"):
+        d.choose(replace(_base(), auto_methods=("split",)), atoms, evaluate=fake)
+
+
+def test_an_explicit_long_range_is_not_checked():
+    atoms = bulk("NaCl", "rocksalt", a=5.64, cubic=True)
+    record = replace(_base(), long_range="split")
+    used, choice = d.choose(record, atoms, evaluate=_FakeD3({}, {}))
+    assert used == record and choice is None
+
+
+def test_the_report_lists_every_candidate():
+    from loupmd import report
+
+    choice = {"chosen": "split 25", "reference": "the split sum at 30 bohr, order 8, 0.6 A mesh",
+              "candidates": [
+                  {"name": "none 40", "kept": True, "checked": True, "energy_meV_per_atom": 0.5,
+                   "max_force_eV_per_A": 6e-6, "stress_GPa": 7e-3, "ms": 2.6},
+                  {"name": "split 20", "kept": False, "checked": True, "energy_meV_per_atom": 0.007,
+                   "max_force_eV_per_A": 7e-6, "stress_GPa": 3e-4, "ms": None,
+                   "why": "its largest force deviation is larger than the plain sum's"},
+                  {"name": "split 25", "kept": True, "checked": True, "energy_meV_per_atom": 0.0008,
+                   "max_force_eV_per_A": 4e-7, "stress_GPa": 1e-4, "ms": 4.4}],
+              "left_out": []}
+    lines = report.dispersion_choice_lines(choice)
+    text = "\n".join(lines)
+    assert "split 25 (chosen)" in text and "none 40" in text and "dropped" in text and "4.40 ms" in text
 
 
 # ----------------------------------------------------------------------------- loupmd validate --dispersion (S6-D10)

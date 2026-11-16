@@ -204,6 +204,9 @@ class Simulation:
         self.dispersion = _dispersion.resolve(dispersion, functional=force_field.functional,
                                               family=force_field.family, model=force_field.name)
         self.dispersion_method = _dispersion.runnable(self.dispersion) if self.dispersion is not None else None
+        # what the engines get: the record with long_range="auto" replaced by the method the setup check chose
+        # (S6-D07, _choose_dispersion), and that check's findings
+        self.dispersion_used, self.dispersion_choice = self.dispersion, None
 
     def _check_tiled_scheme(self):
         if self.config.scheme not in TILED_SCHEMES:
@@ -236,6 +239,7 @@ class Simulation:
             self._skin_probe = {"from": self._resume[1] if self._resume else 0, "hottest_K": hottest}
         engine = self.force_field.new_engine(atoms, self.skin, capacity=self.capacity,
                                              extra_elements=self._extra_elements)
+        self._choose_dispersion(engine, atoms)
         self._install_dispersion(engine)
         self.dispersion_cost = self._time_dispersion(engine, atoms)
         self._bundle = self.force_field.last_bundle
@@ -278,7 +282,45 @@ class Simulation:
         if not hasattr(engine, "set_dispersion"):
             raise PlanRefused("dispersion with this engine", why="it has no set_dispersion",
                               next_step="Run without dispersion.")
-        engine.set_dispersion(self.dispersion)
+        engine.set_dispersion(self.dispersion_used)
+
+    def _choose_dispersion(self, engine, atoms):
+        """``long_range="auto"``: the setup check on ``atoms`` (PLAN.md S6-D07, :func:`loupmd.dispersion.choose`)
+        with the library's engine; with another engine the first allowed built method, unchecked."""
+        if self.dispersion is None:
+            return
+        from . import _core
+        from . import dispersion as _dispersion
+        from .tiled_engine import TiledEngine
+
+        if self.dispersion.long_range != "auto":
+            self.dispersion_used, self.dispersion_choice = self.dispersion, None
+        elif isinstance(engine, (_core.LoupEngine, TiledEngine)):
+            from . import _d3
+
+            self.dispersion_used, self.dispersion_choice = _dispersion.choose(
+                self.dispersion, atoms, evaluate=_d3.evaluate, cufft=_core.ensure_cufft())
+        else:
+            cands, left = _dispersion.candidates(self.dispersion)
+            name, used = cands[0]
+            self.dispersion_used = used
+            self.dispersion_choice = {"reference": None, "left_out": left, "chosen": name, "candidates": [
+                {"name": name, "long_range": used.long_range, "pair_cutoff_bohr": used.pair_cutoff_bohr,
+                 "checked": False, "kept": True, "why": "this engine is not the library's: no setup check"}]}
+        self.dispersion_method = self.dispersion_used.long_range
+
+    def recheck_dispersion(self):
+        """Repeat the setup check of ``long_range="auto"`` on the structure as it is now and install the method it
+        chooses (PLAN.md S6-D07: on request; an event that changes the composition repeats it by itself)."""
+        if self.dispersion is None or self.dispersion.long_range != "auto" or self._engine is None:
+            return self.dispersion_choice
+        atoms = self.atoms
+        atoms.calc = None
+        if self._npt:
+            atoms.set_cell(self._engine.get_cell(), scale_atoms=False)
+        self._choose_dispersion(self._engine, atoms)
+        self._install_dispersion(self._engine)
+        return self.dispersion_choice
 
     def _time_dispersion(self, engine, atoms):
         """The term's time per force evaluation on the starting structure (ms, the mean of three captured replays),
@@ -293,10 +335,10 @@ class Simulation:
 
         from . import _d3
 
-        total = _d3.evaluate(atoms, self.dispersion, repeat=3)["ms"]
+        total = _d3.evaluate(atoms, self.dispersion_used, repeat=3)["ms"]
         cost = {"ms_per_evaluation": round(total, 3)}
         if self.dispersion.three_body:
-            pair = _d3.evaluate(atoms, replace(self.dispersion, three_body=False), repeat=3)["ms"]
+            pair = _d3.evaluate(atoms, replace(self.dispersion_used, three_body=False), repeat=3)["ms"]
             cost["three_body_ms"] = round(max(total - pair, 0.0), 3)
         return cost
 
@@ -937,6 +979,8 @@ class Simulation:
             self._masses = np.array(new_masses, dtype=float)
             if self._chunks is not None:
                 self._writer.submit(self._chunks.set_composition, numbers, new_masses)
+            if self.dispersion is not None and self.dispersion.long_range == "auto":
+                self.recheck_dispersion()      # S6-D07: the choice is made for the composition it was checked on
         self._base = self.step
         if self.output is not None:       # simulation.json names the model's charge: a resume takes the new one
             self._write_record()
@@ -1091,6 +1135,8 @@ def _dispersion_entry(sim):
     from . import dispersion as _dispersion
 
     entry = dict(_dispersion.entry(sim.dispersion), long_range_used=sim.dispersion_method)
+    if getattr(sim, "dispersion_choice", None) is not None:
+        entry["long_range_choice"] = sim.dispersion_choice
     if getattr(sim, "dispersion_cost", None):
         entry["cost"] = sim.dispersion_cost
     return entry

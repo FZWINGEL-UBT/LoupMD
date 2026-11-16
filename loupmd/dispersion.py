@@ -4,9 +4,10 @@
 One argument at three levels: ``dispersion=None`` (off, the default), a preset name, or a :class:`Dispersion`
 record; the CLI's ``--dispersion NAME`` and a run file's ``dispersion = "NAME"`` or ``[dispersion]`` table give the
 same. :func:`resolve` fills in the model's functional and its parameter set, and refuses what cannot be computed
-with the reason and the way out. :func:`runnable` names the summation method a run uses and refuses what is not
-built: the plain real-space pair sum (S6-D04, ``src/dispersion/d3_pair.cu``), the three-body term (S6-D08) and the
-split sum (S6-D06, ``src/dispersion/d3_split.cuh``) are; the tail and mesh methods (S6-D05, S6-D06) are not yet.
+with the reason and the way out. :func:`runnable` refuses what is not built and :func:`choose` makes the setup
+check of ``long_range="auto"`` (S6-D07). Built: the plain real-space pair sum (S6-D04, ``src/dispersion/d3_pair.cu``),
+the three-body term (S6-D08) and the split sum (S6-D06, ``src/dispersion/d3_split.cuh``); the tail and mesh methods
+(S6-D05, S6-D06) are not yet.
 
 Units: cutoffs in bohr (as the reference code and the literature give them), ``mesh_spacing_A`` in A.
 """
@@ -238,6 +239,8 @@ def parse(value):
         data.pop("parameter_source", None)
         data.pop("long_range_chosen_by", None)
         data.pop("long_range_used", None)
+        data.pop("long_range_choice", None)       # what the setup check found: made again at a resume
+        data.pop("cost", None)
         name = data.pop("preset", None)
         base = PRESETS[name][0] if name in PRESETS else {}
         known = {f.name for f in fields(Dispersion)}
@@ -348,15 +351,16 @@ def listing() -> str:
               ", ".join(sorted(_DISPERSION_IN_DATA)) + " data; MACE-POLAR-1), a model of unknown functional "
               "without functional= or parameters=, a damping without a parameter set for the functional.",
               "", "Built in this version: the plain real-space pair sum with every damping and the switch "
-              "(PLAN.md S6-D04), the three-body term (S6-D08) and the split sum (S6-D06). Not yet: the tail and "
-              "mesh methods (S6-D05, S6-D06); runs that ask for them are refused. In the tiled execution the term "
-              "runs for the whole system beside the tiled model (S6-D09)."]
+              "(PLAN.md S6-D04), the three-body term (S6-D08), the split sum (S6-D06) and the automatic choice "
+              "between them (S6-D07). Not yet: the tail and mesh methods (S6-D05, S6-D06); runs that ask for them "
+              "are refused. In the tiled execution the term runs for the whole system beside the tiled model "
+              "(S6-D09)."]
     return "\n".join(lines)
 
 
 def runnable(record: Dispersion) -> str:
-    """The summation method a run with ``record`` uses, or :class:`PlanRefused` for what is not built. ``"auto"``
-    picks among the built methods that ``auto_methods`` allows; today that is the plain sum."""
+    """The summation method a run with ``record`` uses without the setup check, or :class:`PlanRefused` for what is
+    not built. ``"auto"`` gives the first built method ``auto_methods`` allows; :func:`choose` makes the choice."""
     reasons = []
     if record.long_range == "auto":
         allowed = [m for m in (record.auto_methods or AUTO_CANDIDATES) if m in BUILT]
@@ -373,3 +377,117 @@ def runnable(record: Dispersion) -> str:
         raise PlanRefused(reasons, next_step="Use the plain sum (long_range='none' or 'auto'), for example the preset "
                                              "'d3bj'.")
     return method
+
+
+# The automatic choice (PLAN.md S6-D07, D80): the split sum's candidate real-space cutoffs, and the tight split sum
+# every candidate is compared against.
+SPLIT_CUTOFFS_BOHR = (20.0, 25.0)
+REFERENCE_CUTOFF_BOHR = 30.0
+REFERENCE_MESH_A = 0.6
+EV_PER_A3_IN_GPA = 160.21766208
+_DEVIATIONS = (("energy_meV_per_atom", "energy"), ("max_force_eV_per_A", "largest force"), ("stress_GPa", "stress"))
+
+
+def candidates(record: Dispersion, *, cufft=True):
+    """The ``(name, record)`` pairs ``long_range="auto"`` chooses among, and the methods left out with the reason:
+    the plain sum at the record's cutoffs, the split sum at each of :data:`SPLIT_CUTOFFS_BOHR` (its mesh: the
+    record's ``mesh_spacing_A`` or the default), restricted by ``auto_methods`` to what is built."""
+    out, left = [], []
+    for method in [m for m in (record.auto_methods or AUTO_CANDIDATES) if m in BUILT]:
+        if method == "none":
+            out.append((f"none {record.pair_cutoff_bohr:g}",
+                        replace(record, long_range="none", mesh_spacing_A=None, auto_methods=None)))
+        elif method == "split":
+            if not cufft:
+                left.append({"method": "split", "why": "cuFFT was not found"})
+                continue
+            for rc in SPLIT_CUTOFFS_BOHR:
+                out.append((f"split {rc:g}", replace(record, long_range="split", pair_cutoff_bohr=rc,
+                                                     auto_methods=None)))
+    return out, left
+
+
+def _deviation(got, ref, n):
+    import numpy as np
+
+    return {"energy_meV_per_atom": abs(got["energy"] - ref["energy"]) / n * 1000.0,
+            "max_force_eV_per_A": float(np.linalg.norm(got["forces"] - ref["forces"], axis=1).max()),
+            "stress_GPa": float(np.abs(got["stress"] - ref["stress"]).max()) * EV_PER_A3_IN_GPA}
+
+
+def choose(record: Dispersion, atoms, *, evaluate, cufft=True, repeat=3, extra=()):
+    """The setup check of ``long_range="auto"`` (PLAN.md S6-D07, D80) on ``atoms``: every candidate is evaluated
+    once against the split sum at tight settings; one is kept when its energy, largest force and stress deviations
+    from it are each no larger than the plain sum's at the record's cutoffs (the accuracy contract, D73); the kept
+    ones are timed (``repeat`` captured replays, two rounds in opposite order, the faster of the two) and the
+    fastest is used. ``evaluate`` is :func:`loupmd._d3.evaluate`'s signature; ``extra`` adds ``(name, record)``
+    candidates (tests). Returns ``(the record to install, the choice for the metadata)``; an explicit
+    ``long_range`` is returned as given with ``None``."""
+    if record.long_range != "auto":
+        return record, None
+    import time
+
+    started = time.perf_counter()
+    cands, left = candidates(record, cufft=cufft)
+    cands = list(cands) + list(extra)
+    reference = (f"the split sum at {REFERENCE_CUTOFF_BOHR:g} bohr, B-splines of order 8, a "
+                 f"{REFERENCE_MESH_A:g} A mesh")
+    choice = {"reference": reference, "left_out": left, "candidates": []}
+    if not cands:
+        raise PlanRefused([f"auto_methods={record.auto_methods!r}: no candidate can run here"
+                           + (f" ({left[0]['why']})" if left else "")],
+                          next_step="Allow the plain sum (auto_methods with 'none'), or set long_range.")
+    if len(cands) == 1:
+        name, used = cands[0]
+        choice["candidates"].append({"name": name, "long_range": used.long_range,
+                                     "pair_cutoff_bohr": used.pair_cutoff_bohr, "checked": False, "kept": True,
+                                     "why": "the only candidate"})
+        choice["chosen"] = name
+        return used, choice
+    n = len(atoms)
+    ref_record = replace(record, long_range="split", pair_cutoff_bohr=REFERENCE_CUTOFF_BOHR,
+                         mesh_spacing_A=min(REFERENCE_MESH_A, record.mesh_spacing_A or REFERENCE_MESH_A),
+                         auto_methods=None)
+    ref = evaluate(atoms, ref_record)
+    plain_record = replace(record, long_range="none", mesh_spacing_A=None, auto_methods=None)
+    plain = evaluate(atoms, plain_record)      # the bound; the plain candidate is this evaluation, not a second one
+    bound = _deviation(plain, ref, n)
+    choice["bound"] = bound
+    rows = []
+    for name, cand in cands:
+        row = {"name": name, "long_range": cand.long_range, "pair_cutoff_bohr": cand.pair_cutoff_bohr,
+               "mesh_spacing_A": cand.mesh_spacing_A, "checked": True, "ms": None}
+        try:
+            dev = bound if cand == plain_record else _deviation(evaluate(atoms, cand), ref, n)
+        except Exception as error:         # a candidate that cannot run here is dropped with the reason
+            row.update(kept=False, why=f"it did not run: {str(error).splitlines()[0]}")
+            rows.append((row, cand))
+            continue
+        row.update(dev)
+        worse = [what for key, what in _DEVIATIONS if dev[key] > bound[key]]
+        row["kept"] = not worse
+        if worse:
+            listed = worse[0] if len(worse) == 1 else ", ".join(worse[:-1]) + " and " + worse[-1]
+            row["why"] = (f"its {listed} deviation{'s are' if len(worse) > 1 else ' is'} larger than the plain "
+                          "sum's")
+        rows.append((row, cand))
+    kept = [(row, cand) for row, cand in rows if row["kept"]]
+    if not kept:
+        choice["candidates"] = [row for row, _ in rows]
+        raise PlanRefused([f"long_range='auto': none of the candidates ({', '.join(r['name'] for r, _ in rows)}) "
+                           "is within the plain sum's deviation from the tight split sum on this structure"],
+                          next_step="Allow the plain sum (auto_methods with 'none'), or set long_range.")
+    if len(kept) > 1:
+        times = {id(row): [] for row, _ in kept}
+        for order in (kept, kept[::-1]):
+            for row, cand in order:
+                times[id(row)].append(evaluate(atoms, cand, repeat=repeat)["ms"])
+        for row, _ in kept:
+            row["ms"] = round(min(times[id(row)]), 3)
+        best_row, best = min(kept, key=lambda rc: rc[0]["ms"])
+    else:
+        best_row, best = kept[0]
+    choice["candidates"] = [row for row, _ in rows]
+    choice["chosen"] = best_row["name"]
+    choice["setup_s"] = round(time.perf_counter() - started, 3)
+    return best, choice

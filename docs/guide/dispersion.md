@@ -96,9 +96,32 @@ is assumed. The coordination numbers are still summed to `cn_cutoff_bohr`.
 - **Where it fits.** Large cells where the plain sum's truncation matters, for example the pressure or the energy
   per atom of a big cell (1.1 meV/atom on SrTiO3).
 
+## The automatic choice
+
+`long_range="auto"` (the preset `d3bj`) chooses the method at setup, on your starting structure:
+
+1. The reference is the split sum at tight settings: a 30 bohr real-space cutoff and a 0.6 A mesh.
+2. The candidates are the plain sum at the record's cutoffs and the split sum at 20 and 25 bohr with the default
+   mesh. `auto_methods` restricts them. Without cuFFT the split candidates are left out.
+3. Each candidate is evaluated once. It is kept when its energy, largest force and stress deviations from the
+   reference are each no larger than the plain sum's.
+4. The kept candidates are timed, and the fastest is used.
+
+The report and `metadata.json` (`dispersion.long_range_choice`) list every candidate with its deviations, its time,
+and why it was dropped. A change of composition by an event repeats the check, and `Simulation.recheck_dispersion()`
+repeats it on request. A resume checks again, so it may choose differently when two candidates are close in time.
+
+The check costs one tight evaluation, one evaluation per candidate and six timed replays per kept candidate. On the
+RTX 5060 Ti that was 0.35 s at 5,000 atoms, 5.4 s at 98,000 and 45 s at 976,000 (SrTiO3).
+
+The plain sum is its own bound, so it is always kept. The split sum is chosen only where it is also faster: on the
+benchmark cells the plain sum was faster, while on 5,184 atoms of water the split sum at 20 bohr was faster (9.5 ms
+against 10.2 ms). To run the more accurate split sum regardless of time, set `long_range="split"`.
+
 ## The ASE calculator
 
-`lm.calc("omat0-medium", dispersion="d3bj")` adds the term to every calculation (energy, forces, stress).
+`lm.calc("omat0-medium", dispersion="d3bj")` adds the term to every calculation (energy, forces, stress). It has no
+setup structure, so `long_range="auto"` runs the plain sum there; name `long_range="split"` to use the split sum.
 
 ## Cost
 
@@ -108,8 +131,8 @@ lists the time per evaluation on the RTX 5060 Ti.
 
 ## Not in this version
 
-- The tail correction and the mesh sum (S6-D05, S6-D06). `long_range="auto"` uses the plain sum until the
-  automatic choice (S6-D07) is built.
+- The tail correction and the mesh sum (S6-D05, S6-D06), so `long_range="auto"` chooses between the plain and
+  the split sum.
 - Dispersion with open domains. (A cell that does not fit the GPU whole runs the model tiled and the D3 term for
   the whole system beside it: the term needs no neighbour list and about 200 bytes per atom.)
 - D4. Its own ASE calculator (`dftd4.ase.DFTD4`) adds it to `lm.calc` through ASE's `SumCalculator`:

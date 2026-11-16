@@ -1406,3 +1406,36 @@ methods walk 40 bohr twice for the coordination numbers (count and chain rule), 
 atoms (energy only 6.95 ms against the plain sum's 1.40). Tuning ideas are in the ledger (`d3-split-mesh`). The
 1,000,000-atom energies show the size of the plain sum's truncation in a large cell: -0.264539 against -0.265652
 eV/atom, 1.1 meV/atom.
+
+### 6.32 The automatic long-range choice, S6-D07 (16 November 2026)
+
+Measured on the RTX 5060 Ti with `libloupmd_d3h.so` (d1653946c4f82dd5), using `loupmd.dispersion.choose` as D80
+describes it:
+
+- **Reference:** the split sum at 30 bohr, order 8, on a 0.6 A mesh.
+- **Candidates:** plain 40, split 20 and split 25.
+- **Kept:** a candidate whose deviations from the reference (energy per atom, largest per-atom force difference,
+  largest stress component) are each no larger than the plain sum's.
+- **Timing:** each kept candidate in two rounds of three replays; the faster round counts.
+
+| system (atoms) | plain 40: dE meV/atom, dF eV/A, ms | split 20 | split 25 | chosen | setup |
+|---|---|---|---|---|---|
+| paracetamol (80) | 0.153, 8.3e-05, 0.73 | 0.0005, 4.6e-07, 3.03 | 0.00006, 4.1e-08, 3.06 | plain 40 | 0.12 s |
+| SrTiO3 2x2x2 (40) | 1.080, 5.7e-06, 0.68 | 0.032, 5.1e-06, 2.10 | 0.0034, 4.5e-07, 2.12 | plain 40 | 0.12 s |
+| NbCl5 (72) | 0.594, 5.2e-06, 0.85 | 0.0067, 5.9e-06 (dropped: force) | 0.0007, 4.2e-07, 1.56 | plain 40 | 0.10 s |
+| SrTiO3 10^3 (5,000) | 1.081, 6.7e-06, 8.46 | 0.032, 9.6e-06 (dropped: force) | 0.0035, 1.0e-06, 12.97 | plain 40 | 0.35 s |
+| SrTiO3 27^3 (98,415) | 1.081, 8.1e-06, 152.9 | 0.032, 1.4e-05 (dropped: force) | 0.0034, 1.4e-06, 212.8 | plain 40 | 5.4 s |
+| SrTiO3 58^3 (975,560) | 1.081, 9.2e-06, 1492.9 | 0.032, 2.1e-05 (dropped: force) | 0.0034, 2.1e-06, 2081.5 | plain 40 | 44.9 s |
+
+The candidates were also timed separately (three rounds of ten replays, `tests/gpu/test_d3.py`). On all three
+benchmark cells the chosen candidate was the fastest of the kept ones.
+
+A split candidate at 12 bohr on a 6 A mesh, made wrong on purpose, was off by 202 meV/atom and was dropped.
+
+Not measured: a cell where the split sum is chosen. From status 6.31, water 216 2x2x2 should be one: split 20 took
+9.52 ms against 10.20 ms for plain 40, and both are within the contract. No test was run on it.
+
+Reading: under D73's literal contract the plain sum is its own bound and is always kept. The choice is therefore the
+plain sum unless the split sum is also faster. The split sum's accuracy (30 to 2,500 times closer in energy) does
+not count. To make accuracy count, the rule could be "the most accurate candidate within 1.5 times the fastest",
+which would pick split 25 on every row above. That changes the contract, so it is left to the owner.

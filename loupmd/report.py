@@ -119,6 +119,7 @@ def _plan_lines(metadata) -> list:
             if "three_body_ms" in cost:
                 text += f", of which the three-body term {cost['three_body_ms']:.2f} ms"
             lines.append(text)
+        lines += dispersion_choice_lines(disp.get("long_range_choice"))
     skin = metadata.get("skin")
     if skin and skin["mode"] == "auto":
         measured = skin.get("measured_step_A")
@@ -126,6 +127,32 @@ def _plan_lines(metadata) -> list:
                else "estimated; too few steps for a measurement")
         lines.append(f"neighbour skin {skin['skin_A']:g} A (auto: {how})")
     lines.append(plan["precision"])
+    return lines
+
+
+def dispersion_choice_lines(choice) -> list:
+    """The setup check of ``long_range="auto"`` (PLAN.md S6-D07): every candidate with its deviation from the
+    reference, its time and whether it was kept."""
+    if not choice:
+        return []
+    rows = choice.get("candidates") or []
+    if all(not row.get("checked") for row in rows):
+        return [f"long range: {row['name']} not checked ({row.get('why', '')})" for row in rows] + \
+               [f"long range: {left['method']} left out ({left['why']})" for left in choice.get("left_out", [])]
+    lines = [f"long range checked against {choice['reference']}:"]
+    for row in rows:
+        name = row["name"] + (" (chosen)" if row["name"] == choice.get("chosen") else "")
+        if "energy_meV_per_atom" not in row:
+            lines.append(f"  {name}: dropped, {row.get('why', '')}")
+            continue
+        text = (f"  {name}: energy {row['energy_meV_per_atom']:.4f} meV/atom, largest force "
+                f"{row['max_force_eV_per_A']:.1e} eV/A, stress {row['stress_GPa']:.1e} GPa")
+        if row.get("ms") is not None:
+            text += f", {row['ms']:.2f} ms"
+        if not row.get("kept"):
+            text += f"; dropped: {row.get('why', '')}"
+        lines.append(text)
+    lines += [f"  {left['method']}: left out ({left['why']})" for left in choice.get("left_out", [])]
     return lines
 
 
