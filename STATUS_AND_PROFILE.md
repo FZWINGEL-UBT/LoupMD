@@ -1672,3 +1672,18 @@ the next starts): the open cost. Energies: with the same GEMM plans host and dev
 and repeat to 6e-8 eV (no hybrids); the tests bound forces at 1e-5 eV/A. Not done yet: `dx` aliased onto `x`
 (FastMACE's window, half the host memory), compact host lists, the wavefront's row pool on the host, and a force call
 above the device-state limit (estimated, from the plan: plain order to the host RAM's limit, not run).
+
+Two follow-ups on the host state (two-layer models with the pipeline; 320,000 atoms, forced, separate processes, fresh
+plan caches, order a b b a b a a b, median of five kept calls each; `.tmp_o/tiled_ab.py`):
+
+| Change | a (ms) | b (ms) | b / a (medians) |
+| --- | --- | --- | --- |
+| `tile-host-flow`: no drains between phases, tiles ordered by when their inputs are ready | 815.0, 815.7, 824.0, 813.2 | 813.7, 825.9, 834.8, 830.5 | 1.01 (no gain) |
+| `tile-host-alias`: `dx` on `x`'s rows, gradients in window blocks until the last reader | 805.2, 813.9, 818.5, 815.7 | 768.9, 777.5, 791.7, 789.4 | 0.963 |
+
+The flow change gains nothing: the 8 tiles of this cube all neighbour each other, so no tile's inputs are ready
+before the last copy of the phase before, and the gaps were not the cost. The phase times say where it is: the
+last-layer phase takes 515-565 ms (the main thread waits about 410 ms in all for the gradient copies out and the adds
+behind them; the adds themselves 52-100 ms). It stays (neutral; the alias builds on its order). The alias removes the
+separate `dx` array (half the layer state's host memory) and its zeroing per call. Forces 1.5e-6 eV/A apart (the
+host adds' order). Open: the last-layer phase's gradient copies.

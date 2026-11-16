@@ -219,14 +219,16 @@ def test_tile_lists_in_host_memory_give_the_device_lists_result(wavefront, keep_
 
 @pytest.mark.parametrize("model", ["mace-omat-0-small.model", "mace-mp-0b3-medium.model"])
 @pytest.mark.parametrize("host_lists", ["0", "1"])
-@pytest.mark.parametrize("pipe", ["1", "0"])
+@pytest.mark.parametrize("pipe", ["alias", "1", "0"])
 def test_layer_state_in_host_memory_gives_the_device_state_result(model, host_lists, pipe, monkeypatch):
     """O32 (S5-T07 step 2): LOUP_TILE_HOST_STATE=1 keeps the plain order's layer outputs and their gradients in
     pinned host memory, each atom's row in its tile's block of locals; a tile's own rows move as one copy, its ghost
     rows are gathered and its gradient rows added on the host (in row order instead of the device's atomics). Same
     tiles and kernels otherwise: the device state's numbers up to the order of the float32 sums, in the call that
     builds the lists and in a later call that keeps them, with the lists on the device or in host memory, with the
-    copies and host work overlapped with the sweeps (LOUP_TILE_HOST_PIPE=1, the default) or not."""
+    copies and host work overlapped with the sweeps (LOUP_TILE_HOST_PIPE=1, the default) or not; overlapped, the
+    gradients take the rows of the layer outputs once these are read (the default, "alias") or their own array
+    (LOUP_TILE_HOST_ALIAS=0)."""
     at = srtio3(1).repeat((32, 6, 6))                  # 5,760 atoms in a rod: several tiles along it
     at.positions += np.random.default_rng(11).normal(scale=0.04, size=at.positions.shape)
     moved = at.positions + np.random.default_rng(12).normal(scale=0.01, size=at.positions.shape)
@@ -234,7 +236,8 @@ def test_layer_state_in_host_memory_gives_the_device_state_result(model, host_li
     monkeypatch.setenv("LOUP_NO_HYBRID", "1")         # two engines: no hybrid-or-not plan pick between them (D16)
     monkeypatch.setenv("LOUP_TILE_WAVEFRONT", "0")
     monkeypatch.setenv("LOUP_TILE_HOST_LISTS", host_lists)
-    monkeypatch.setenv("LOUP_TILE_HOST_PIPE", pipe)
+    monkeypatch.setenv("LOUP_TILE_HOST_PIPE", "0" if pipe == "0" else "1")
+    monkeypatch.setenv("LOUP_TILE_HOST_ALIAS", "1" if pipe == "alias" else "0")
 
     def run(state):
         monkeypatch.setenv("LOUP_TILE_HOST_STATE", state)

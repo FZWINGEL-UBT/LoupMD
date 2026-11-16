@@ -4712,16 +4712,25 @@ struct StageRing {
     }
 };
 
-// O32: the host state's pipeline. The copy stream moves rows between the host state and two device ring slots
-// (`a`: the forward sweeps' outputs, the last sweep's inputs, the backward sweeps' adjoints; `b`: the last sweep's
+// O32: the host state's pipeline. The copy streams move rows between the host state and two device ring slots
+// (`a`: the last sweep's inputs, the backward sweeps' adjoints; `b`: the forward sweeps' outputs, the last sweep's
 // gradients), host threads gather ghost rows into and add gradient rows from pinned staging, one tile ahead or
-// behind the sweeps; the events order slot reuse.
+// behind the sweeps; the events order slot reuse, `tile_out[i]` marks tile i's forward outputs written to the host.
 struct HostPipe {
     cudaStream_t copy = nullptr, down = nullptr;  // host to device, device to host
     enum { kIn, kInUsed, kG, kGh, kFwd, kOut, kAdjIn, kAdjUsed, kEv };
     cudaEvent_t ev[kEv][2] = {};
     DeviceBufferGuard a[2], b[2];
     HostBufferGuard in[2], out[2];
+    std::vector<cudaEvent_t> tile_out;
+    int tile_events(size_t n) {
+        while (tile_out.size() < n) {
+            cudaEvent_t e = nullptr;
+            if (cudaEventCreateWithFlags(&e, cudaEventDisableTiming) != cudaSuccess) return -1;
+            tile_out.push_back(e);
+        }
+        return 0;
+    }
     HostPipe() = default;
     HostPipe(const HostPipe&) = delete;
     HostPipe& operator=(const HostPipe&) = delete;
@@ -4740,6 +4749,7 @@ struct HostPipe {
         for (auto& e : ev)
             for (auto& x : e)
                 if (x) cudaEventDestroy(x);
+        for (cudaEvent_t x : tile_out) cudaEventDestroy(x);
         if (copy) cudaStreamDestroy(copy);
         if (down) cudaStreamDestroy(down);
     }
@@ -4767,6 +4777,10 @@ struct TiledState {
     // O32: the layer outputs and their gradients in pinned host memory (plain order), rows in tile order
     bool host_state = false;
     std::vector<HostBufferGuard> hx, hdx;
+    // dx takes x's rows (two-layer models with the pipeline; hdx not allocated): a block's gradients are added into
+    // a window (host memory, reused across calls) until the block's last reader has its inputs, then folded into x
+    bool alias = false;
+    std::vector<std::vector<float>> win;
     HostBufferGuard stage_in, stage_out;  // pinned staging: ghost rows in, gradient rows out
     bool pipe = false;                    // the copies and host work overlapped (HostPipe)
     size_t pipe_floats = 0;               // floats per ring slot: the widest tile's rows of a layer's orders
@@ -5042,6 +5056,9 @@ static int plan_execution_impl(LoupHandle* h, int n_atoms, const int* atomic_num
     // whole system, and each kept row a pool row more.
     const int L = h->gen->n_layers();
     double layer_per_atom = 0.0, adj_per_row = 0.0;
+    bool alias_plan = L == 2;  // O32: the host state's dx on x's rows (the call's rule: pipeline, two layers)
+    if (const char* e = std::getenv("LOUP_TILE_HOST_PIPE")) alias_plan = alias_plan && std::atoi(e) != 0;
+    if (const char* e = std::getenv("LOUP_TILE_HOST_ALIAS")) alias_plan = alias_plan && std::atoi(e) != 0;
     for (int l = 0; l < 4; ++l) {
         double widest_l = 0.0;
         for (int t = 0; t + 1 < L; ++t)
@@ -5069,7 +5086,8 @@ static int plan_execution_impl(LoupHandle* h, int n_atoms, const int* atomic_num
         ws = row_b * rows + edge_b * edge_cap(c * epl) + fixed_b + adj_per_row * rows;
         if (hstate) {  // O32: the layer state in host memory, four ring slots on the device (HostPipe)
             ws += 4.0 * ring_per_row * rows;
-            hstate_host = n * layer_per_atom + 6.0 * ring_per_row * rows;
+            hstate_host = (alias_plan ? 0.5 * n * layer_per_atom + std::min(T, 4.0) * c * ring_per_row
+                                      : n * layer_per_atom) + 6.0 * ring_per_row * rows;
             global = n * 3.0 * sizeof(double) + 32.0 * (n + T * (rows - c)) + 4.0 * (n + T) +
                      (host ? 0.0 : 36.0 * n * epl);
             return 0;
@@ -5489,21 +5507,25 @@ static int evaluate_tiled_impl(LoupHandle* h, int n_atoms, const int* atomic_num
             st->host_bytes += (double)bytes;
             return 0;
         };
+        st->pipe = st->host_state;
+        if (const char* e = std::getenv("LOUP_TILE_HOST_PIPE")) st->pipe = st->host_state && std::atoi(e) != 0;
+        // O32: with the pipeline on a two-layer model dx takes x's rows; LOUP_TILE_HOST_ALIAS=0 keeps both arrays
+        st->alias = st->pipe && !st->wave && L == 2;
+        if (const char* e = std::getenv("LOUP_TILE_HOST_ALIAS")) st->alias = st->alias && std::atoi(e) != 0;
         size_t widest_w = 0;
         for (int t = 0; t + 1 < L; ++t)
             for (int l = 0; l <= h->gen->out_lmax(t); ++l) {
                 const size_t bytes = (size_t)layer_rows * width(t, l) * sizeof(float);
                 widest_w = std::max(widest_w, (size_t)width(t, l));
                 if (st->host_state)
-                    fail |= halloc(st->hx[(size_t)t * 4 + l], bytes) | halloc(st->hdx[(size_t)t * 4 + l], bytes);
+                    fail |= halloc(st->hx[(size_t)t * 4 + l], bytes) |
+                            (st->alias ? 0 : halloc(st->hdx[(size_t)t * 4 + l], bytes));
                 else
                     fail |= alloc(st->x[(size_t)t * 4 + l], bytes) | alloc(st->dx[(size_t)t * 4 + l], bytes);
             }
         if (st->host_state)
             fail |= halloc(st->stage_in, (size_t)max_rows * widest_w * sizeof(float)) |
                     halloc(st->stage_out, (size_t)max_rows * widest_w * sizeof(float));
-        st->pipe = st->host_state;
-        if (const char* e = std::getenv("LOUP_TILE_HOST_PIPE")) st->pipe = st->host_state && std::atoi(e) != 0;
         if (st->pipe && !fail) {
             size_t sumw = 0;
             for (int t = 0; t + 1 < L; ++t) {
@@ -5680,7 +5702,7 @@ static int evaluate_tiled_impl(LoupHandle* h, int n_atoms, const int* atomic_num
     };
     if (hs) {
         CUDA_CHECK(cudaStreamSynchronize(h->stream));  // an earlier call's copies out of the host state
-        for (int t = 0; t + 1 < L; ++t)
+        for (int t = 0; !st->alias && t + 1 < L; ++t)
             for (int l = 0; l <= h->gen->out_lmax(t); ++l) {
                 float* d = static_cast<float*>(st->hdx[(size_t)t * 4 + l].p);
                 const int64_t w = width(t, l);
@@ -5709,6 +5731,99 @@ static int evaluate_tiled_impl(LoupHandle* h, int n_atoms, const int* atomic_num
     TileListBorrow borrow(h);  // the sweeps point the handle at each tile's list (restore_tile_list)
     // The sweeps in order (tile, last sweep of the tile), and from them, with use_active's slot rule, the tiles whose
     // sweeps compact active edges, in order: the staging ring copies the k-th one's host lists during the (k-1)-th
+    // O32: the tiles' order in each phase. With the host state's pipeline on a two-layer model (flow) the phases are
+    // not drained: the last sweeps take first the tiles whose ghost rows' tiles (src_t) wrote their outputs out
+    // earliest, the backward sweeps first the tiles whose rows' gradient adds (from the tiles in dep_t) end earliest
+    const bool flow = st->pipe && !wave && L == 2;
+    std::vector<int> ord_f((size_t)T), ord_l((size_t)T), ord_b((size_t)T);
+    std::vector<std::vector<int>> src_t, dep_t, g_own;
+    for (int64_t i = 0; i < T; ++i) ord_f[(size_t)i] = ord_l[(size_t)i] = ord_b[(size_t)i] = (int)i;
+    if (flow) {
+        src_t.assign((size_t)T, {});
+        dep_t.assign((size_t)T, {});
+        g_own.assign((size_t)T, {});
+        std::vector<std::pair<int64_t, int>> base;
+        for (int64_t i = 0; i < T; ++i)
+            if (lists[(size_t)i].n_local > 0) base.push_back({lists[(size_t)i].hbase, (int)i});
+        std::sort(base.begin(), base.end());
+        std::vector<char> seen((size_t)T);
+        for (int64_t k = 0; k < T; ++k) {
+            std::fill(seen.begin(), seen.end(), 0);
+            g_own[(size_t)k].reserve(lists[(size_t)k].h_ghost.size());
+            for (int g : lists[(size_t)k].h_ghost) {
+                const auto it = std::upper_bound(base.begin(), base.end(), std::make_pair((int64_t)g, (int)T));
+                const int j = it == base.begin() ? -1 : std::prev(it)->second;
+                g_own[(size_t)k].push_back(j);
+                if (j < 0) continue;
+                if (j != (int)k && !seen[(size_t)j]) {
+                    seen[(size_t)j] = 1;
+                    src_t[(size_t)k].push_back(j);
+                    dep_t[(size_t)j].push_back((int)k);
+                }
+            }
+        }
+        std::vector<int64_t> ready((size_t)T), pos((size_t)T);
+        for (int64_t k = 0; k < T; ++k) {
+            ready[(size_t)k] = k;
+            for (int j : src_t[(size_t)k]) ready[(size_t)k] = std::max<int64_t>(ready[(size_t)k], j);
+        }
+        std::stable_sort(ord_l.begin(), ord_l.end(), [&](int x, int y) { return ready[(size_t)x] < ready[(size_t)y]; });
+        for (int64_t q = 0; q < T; ++q) pos[(size_t)ord_l[(size_t)q]] = q;
+        for (int64_t i = 0; i < T; ++i) {
+            ready[(size_t)i] = pos[(size_t)i];
+            for (int j : dep_t[(size_t)i]) ready[(size_t)i] = std::max(ready[(size_t)i], pos[(size_t)j]);
+        }
+        std::stable_sort(ord_b.begin(), ord_b.end(), [&](int x, int y) { return ready[(size_t)x] < ready[(size_t)y]; });
+    }
+    // O32 alias: block j's readers and adders in the last sweeps are the same tiles ({j} and dep_t[j]); from the
+    // first of them to the last its gradients go to a window, which the last one folds into x before its own adds
+    std::vector<int64_t> fold_at;
+    std::vector<int> win_of;
+    std::vector<std::vector<int>> folds, opens;
+    int64_t max_local = 0, sum_w = 0;
+    std::vector<int64_t> cum_w(5, 0);
+    if (flow && st->alias) {
+        std::vector<int64_t> pos((size_t)T), first((size_t)T);
+        for (int64_t q = 0; q < T; ++q) pos[(size_t)ord_l[(size_t)q]] = q;
+        fold_at.assign((size_t)T, -1);
+        win_of.assign((size_t)T, -1);
+        folds.assign((size_t)T, {});
+        opens.assign((size_t)T, {});
+        for (int64_t j = 0; j < T; ++j) {
+            first[(size_t)j] = fold_at[(size_t)j] = pos[(size_t)j];
+            for (int k : dep_t[(size_t)j]) {
+                first[(size_t)j] = std::min(first[(size_t)j], pos[(size_t)k]);
+                fold_at[(size_t)j] = std::max(fold_at[(size_t)j], pos[(size_t)k]);
+            }
+            max_local = std::max<int64_t>(max_local, lists[(size_t)j].n_local);
+            if (lists[(size_t)j].n_local == 0) continue;
+            folds[(size_t)fold_at[(size_t)j]].push_back((int)j);
+            if (first[(size_t)j] < fold_at[(size_t)j]) opens[(size_t)first[(size_t)j]].push_back((int)j);
+        }
+        std::vector<int> free_w;
+        int n_win = 0;
+        for (int64_t q = 0; q < T; ++q) {  // a fold frees its window before this tile's opens take one
+            for (int j : folds[(size_t)q])
+                if (win_of[(size_t)j] >= 0) free_w.push_back(win_of[(size_t)j]);
+            for (int j : opens[(size_t)q]) {
+                if (free_w.empty()) free_w.push_back(n_win++);
+                win_of[(size_t)j] = free_w.back();
+                free_w.pop_back();
+            }
+        }
+        for (int l = 0; l <= h->gen->out_lmax(L - 2); ++l) cum_w[(size_t)l + 1] = cum_w[(size_t)l] + width(L - 2, l);
+        sum_w = cum_w[(size_t)h->gen->out_lmax(L - 2) + 1];
+        if ((int)st->win.size() < n_win) st->win.resize((size_t)n_win);
+        for (int w = 0; w < n_win; ++w)
+            if ((int64_t)st->win[(size_t)w].size() < max_local * sum_w) {
+                st->win[(size_t)w].assign((size_t)(max_local * sum_w), 0.0f);
+                st->host_bytes += (double)max_local * sum_w * sizeof(float);
+            }
+    }
+    if (st->pipe && st->hp.tile_events((size_t)T) != 0) {
+        loup::set_error("tile host state: cannot create the copy events");
+        return -1;
+    }
     std::vector<int> comp_tiles;
     size_t next_comp = 0;
     const bool stage = st->stage == 1;
@@ -5718,7 +5833,7 @@ static int evaluate_tiled_impl(LoupHandle* h, int n_atoms, const int* atomic_num
             for (const loup::SweepStep& s : st->steps) seq.push_back({s.tile, s.sweep == 3});
         } else {
             for (int k = 0; k < 2 * (L - 1) + 1; ++k)
-                for (int64_t i = 0; i < T; ++i) seq.push_back({(int)i, k == 2 * (L - 1)});
+                for (int i : k < L - 1 ? ord_f : k == L - 1 ? ord_l : ord_b) seq.push_back({i, k == 2 * (L - 1)});
         }
         std::vector<int> fr = st->act_free, slot(lists.size(), -1);
         std::vector<char> seen(lists.size(), 0);
@@ -5782,7 +5897,7 @@ static int evaluate_tiled_impl(LoupHandle* h, int n_atoms, const int* atomic_num
     };
     // O32: the host state's arrays of layer t, order l
     auto hxp = [&](int t, int l) { return static_cast<float*>(st->hx[(size_t)t * 4 + l].p); };
-    auto hdxp = [&](int t, int l) { return static_cast<float*>(st->hdx[(size_t)t * 4 + l].p); };
+    auto hdxp = [&](int t, int l) { return static_cast<float*>((st->alias ? st->hx : st->hdx)[(size_t)t * 4 + l].p); };
     // O32: n floats from src to dst on the main stream, as a kernel
     auto dcopy = [&](float* dst, const float* src, int64_t n) {
         if (n <= 0) return;
@@ -5800,6 +5915,7 @@ static int evaluate_tiled_impl(LoupHandle* h, int n_atoms, const int* atomic_num
     HostPipe& P = st->hp;
     std::vector<std::future<int>> in_fut(2);
     std::shared_future<int> g_fut[2], g_last;
+    std::vector<std::shared_future<int>> g_tile(flow ? (size_t)T : 0);  // each tile's gradient adds
     int64_t fwd_k = 0;
     // debug: microseconds of the host threads' work (gathers, copy waits, adds) and of the main thread's waits
     std::atomic<long long> us_gather{0}, us_gcopy{0}, us_add{0}, us_wait_in{0}, us_wait_g{0};
@@ -5822,16 +5938,21 @@ static int evaluate_tiled_impl(LoupHandle* h, int n_atoms, const int* atomic_num
         return 0;
     };
     // The last sweep's input for tile i: locals copied from their block, ghosts gathered on a host thread
-    auto issue_in = [&](int64_t i) {
-        if (i >= T) return;
-        const int b = (int)(i % 2);
-        const TileList* tp = &lists[(size_t)i];
+    auto issue_in = [&](int64_t q) {  // q: the position in ord_l
+        if (q >= T) return;
+        const int b = (int)(q % 2), ti = ord_l[(size_t)q];
+        const TileList* tp = &lists[(size_t)ti];
         const int layer = L - 2, dev = h->device_id;
-        in_fut[b] = std::async(std::launch::async, [&, tp, b, layer, dev]() -> int {
+        in_fut[b] = std::async(std::launch::async, [&, tp, b, ti, layer, dev]() -> int {
             const TileList& t = *tp;
             if (cudaSetDevice(dev) != cudaSuccess) return 1;
             if (cudaEventSynchronize(P.ev[HostPipe::kIn][b]) != cudaSuccess) return 1;  // staging b is free
             if (cudaStreamWaitEvent(P.copy, P.ev[HostPipe::kInUsed][b], 0) != cudaSuccess) return 1;
+            // the tile's own rows and its ghosts' tiles' rows are written out (flow: not drained before)
+            if (cudaStreamWaitEvent(P.copy, P.tile_out[(size_t)ti], 0) != cudaSuccess) return 1;
+            if (flow)
+                for (int j : src_t[(size_t)ti])
+                    if (cudaEventSynchronize(P.tile_out[(size_t)j]) != cudaSuccess) return 1;
             float* da = static_cast<float*>(P.a[b].p);
             float* sp = static_cast<float*>(P.in[b].p);
             int64_t off = 0;
@@ -5857,9 +5978,8 @@ static int evaluate_tiled_impl(LoupHandle* h, int n_atoms, const int* atomic_num
             return cudaEventRecord(P.ev[HostPipe::kIn][b], P.copy) != cudaSuccess;
         });
     };
-    auto take_in = [&](const TileList& t) -> int {  // into the layer's buffers, then the next tile's input starts
-        const int64_t i = &t - lists.data();
-        const int b = (int)(i % 2);
+    auto take_in = [&](const TileList& t, int64_t q) -> int {  // into the layer's buffers, then the next input starts
+        const int b = (int)(q % 2);
         const long long w0 = now_us();
         if (in_fut[b].get() != 0) { loup::set_error("tile host state: a host-side copy failed"); return -1; }
         us_wait_in += now_us() - w0;
@@ -5872,19 +5992,21 @@ static int evaluate_tiled_impl(LoupHandle* h, int n_atoms, const int* atomic_num
             off += (int64_t)t.rows * w;
         }
         CUDA_CHECK(cudaEventRecord(P.ev[HostPipe::kInUsed][b], h->stream));
-        issue_in(i + 1);
+        issue_in(q + 1);
         return 0;
     };
     // The last sweep's gradient rows: out through slot b, added on a host thread after the previous tile's adds
-    auto put_grad = [&](const TileList& t) -> int {
+    const bool alias = flow && st->alias;
+    auto put_grad = [&](const TileList& t, int64_t q) -> int {
         const int64_t i = &t - lists.data();
-        const int b = (int)(i % 2);
+        const int b = (int)(q % 2);
         const long long w0 = now_us();
         if (g_fut[b].valid() && g_fut[b].get() != 0) {
             loup::set_error("tile host state: a host-side add failed");
             return -1;
         }
         us_wait_g += now_us() - w0;
+        CUDA_CHECK(cudaStreamWaitEvent(h->stream, P.ev[HostPipe::kOut][b], 0));  // the forward outputs left slot b
         const int layer = L - 2;
         int64_t off = 0;
         for (int l = 0; l <= h->gen->out_lmax(layer); ++l) {
@@ -5896,7 +6018,7 @@ static int evaluate_tiled_impl(LoupHandle* h, int n_atoms, const int* atomic_num
         const TileList* tp = &t;
         const int dev = h->device_id;
         std::shared_future<int> prev = g_last;
-        g_fut[b] = std::async(std::launch::async, [&, tp, b, layer, dev, prev, off]() -> int {
+        g_fut[b] = std::async(std::launch::async, [&, tp, b, layer, dev, prev, off, q]() -> int {
                        const TileList& tt = *tp;
                        if (cudaSetDevice(dev) != cudaSuccess) return 1;
                        if (cudaStreamWaitEvent(P.down, P.ev[HostPipe::kG][b], 0) != cudaSuccess) return 1;
@@ -5912,6 +6034,51 @@ static int evaluate_tiled_impl(LoupHandle* h, int n_atoms, const int* atomic_num
                        const long long a0t = now_us();
                        int64_t o = 0;
                        const int N = tt.n_local;
+                       if (alias) {
+                           const int ti = (int)(tp - lists.data());
+                           for (int j : folds[(size_t)q]) {  // block j's last reader has its inputs
+                               const TileList& tj = lists[(size_t)j];
+                               const int wj = win_of[(size_t)j];
+                               for (int l = 0; l <= h->gen->out_lmax(layer); ++l) {
+                                   const int64_t w = width(layer, l);
+                                   float* xd = hxp(layer, l) + tj.hbase * w;
+                                   const float* ws = wj < 0 ? nullptr : st->win[(size_t)wj].data() + max_local * cum_w[(size_t)l];
+                                   par_rows(tj.n_local, w, [&](int64_t a0, int64_t a1) {
+                                       if (ws) std::memcpy(xd + a0 * w, ws + a0 * w, (size_t)(a1 - a0) * w * 4);
+                                       else std::memset(xd + a0 * w, 0, (size_t)(a1 - a0) * w * 4);
+                                   });
+                               }
+                           }
+                           for (int j : opens[(size_t)q]) {
+                               float* ws = st->win[(size_t)win_of[(size_t)j]].data();
+                               const int64_t nl = lists[(size_t)j].n_local;
+                               for (int l = 0; l <= h->gen->out_lmax(layer); ++l)
+                                   std::memset(ws + max_local * cum_w[(size_t)l], 0,
+                                               (size_t)(nl * width(layer, l)) * 4);
+                           }
+                           const std::vector<int>& own = g_own[(size_t)ti];
+                           for (int l = 0; l <= h->gen->out_lmax(layer); ++l) {
+                               const int64_t w = width(layer, l);
+                               float* xl = hxp(layer, l);
+                               const float* gsrc = so + o;
+                               par_rows(tt.rows, w, [&](int64_t a0, int64_t a1) {
+                                   for (int64_t r = a0; r < a1; ++r) {
+                                       const int j = r < N ? ti : own[(size_t)(r - N)];
+                                       const int64_t at = r < N ? r : (int64_t)tt.h_ghost[(size_t)(r - N)] -
+                                                                          lists[(size_t)j].hbase;
+                                       float* row = fold_at[(size_t)j] <= q
+                                                        ? xl + (lists[(size_t)j].hbase + at) * w
+                                                        : st->win[(size_t)win_of[(size_t)j]].data() +
+                                                              max_local * cum_w[(size_t)l] + at * w;
+                                       const float* g = gsrc + r * w;
+                                       for (int64_t c = 0; c < w; ++c) row[c] += g[c];
+                                   }
+                               });
+                               o += (int64_t)tt.rows * w;
+                           }
+                           us_add += now_us() - a0t;
+                           return 0;
+                       }
                        for (int l = 0; l <= h->gen->out_lmax(layer); ++l) {
                            const int64_t w = width(layer, l);
                            float* d = hdxp(layer, l);
@@ -5929,6 +6096,7 @@ static int evaluate_tiled_impl(LoupHandle* h, int n_atoms, const int* atomic_num
                        return 0;
                    }).share();
         g_last = g_fut[b];
+        if (flow) g_tile[(size_t)i] = g_fut[b];
         return 0;
     };
     // The forward sweeps' outputs: the locals' rows out through slot a
@@ -5938,7 +6106,7 @@ static int evaluate_tiled_impl(LoupHandle* h, int n_atoms, const int* atomic_num
         int64_t off = 0;
         for (int l = 0; l <= h->gen->out_lmax(layer); ++l) {
             const int64_t w = width(layer, l);
-            dcopy(static_cast<float*>(P.a[b].p) + off, h->gen->layer_out(layer, l), (int64_t)t.n_local * w);
+            dcopy(static_cast<float*>(P.b[b].p) + off, h->gen->layer_out(layer, l), (int64_t)t.n_local * w);
             off += (int64_t)t.n_local * w;
         }
         CUDA_CHECK(cudaEventRecord(P.ev[HostPipe::kFwd][b], h->stream));
@@ -5946,19 +6114,30 @@ static int evaluate_tiled_impl(LoupHandle* h, int n_atoms, const int* atomic_num
         off = 0;
         for (int l = 0; l <= h->gen->out_lmax(layer); ++l) {
             const int64_t w = width(layer, l);
-            CUDA_CHECK(cudaMemcpyAsync(hxp(layer, l) + t.hbase * w, static_cast<float*>(P.a[b].p) + off,
+            CUDA_CHECK(cudaMemcpyAsync(hxp(layer, l) + t.hbase * w, static_cast<float*>(P.b[b].p) + off,
                                        (size_t)t.n_local * w * 4, cudaMemcpyDeviceToHost, P.down));
             off += (int64_t)t.n_local * w;
         }
         CUDA_CHECK(cudaEventRecord(P.ev[HostPipe::kOut][b], P.down));
+        CUDA_CHECK(cudaEventRecord(P.tile_out[(size_t)(&t - lists.data())], P.down));
         return 0;
     };
     // The backward sweeps' adjoints: the locals' gradient rows in through slot a, one tile ahead
-    auto issue_adj = [&](int64_t i, int layer) -> int {
-        if (i >= T) return 0;
-        const TileList& t = lists[(size_t)i];
-        const int b = (int)(i % 2);
+    auto issue_adj = [&](int64_t q, int layer) -> int {  // q: the position in ord_b
+        if (q >= T) return 0;
+        const int ti = ord_b[(size_t)q];
+        const TileList& t = lists[(size_t)ti];
+        const int b = (int)(q % 2);
+        if (flow) {  // the adds into the tile's rows: its own and those of the tiles with them as ghosts
+            const long long w0 = now_us();
+            int bad = g_tile[(size_t)ti].valid() ? g_tile[(size_t)ti].get() : 0;
+            for (int j : dep_t[(size_t)ti])
+                if (g_tile[(size_t)j].valid()) bad |= g_tile[(size_t)j].get();
+            us_wait_g += now_us() - w0;
+            if (bad) { loup::set_error("tile host state: a host-side add failed"); return -1; }
+        }
         CUDA_CHECK(cudaStreamWaitEvent(P.copy, P.ev[HostPipe::kAdjUsed][b], 0));
+        CUDA_CHECK(cudaStreamWaitEvent(P.copy, P.ev[HostPipe::kInUsed][b], 0));  // the last sweeps' inputs left slot a
         int64_t off = 0;
         for (int l = 0; l <= h->gen->out_lmax(layer); ++l) {
             const int64_t w = width(layer, l);
@@ -6078,9 +6257,9 @@ static int evaluate_tiled_impl(LoupHandle* h, int n_atoms, const int* atomic_num
         }
         return 0;
     };
-    auto last = [&](const TileList& t) -> int {
+    auto last = [&](const TileList& t, int64_t q) -> int {
         if (restore_tile_list(h, t) != 0) return -1;
-        if ((pipe ? take_in(t) : gather_input(t, L - 2)) != 0) return -1;
+        if ((pipe ? take_in(t, q) : gather_input(t, L - 2)) != 0) return -1;
         DomainSweep sw;
         sw.kind = loup::GenericPassInputs::SweepLast;
         use_active(t, sw, false);
@@ -6088,11 +6267,11 @@ static int evaluate_tiled_impl(LoupHandle* h, int n_atoms, const int* atomic_num
         if (sb == -2) return -1;
         record_force_pass(h, stress, false, &sw);
         if (stage_done(sb) != 0) return -1;
-        if ((pipe ? put_grad(t) : scatter_grad(t, L - 2)) != 0) return -1;
+        if ((pipe ? put_grad(t, q) : scatter_grad(t, L - 2)) != 0) return -1;
         fold_forces(t);
         return 0;
     };
-    auto backward = [&](const TileList& t, int layer) -> int {
+    auto backward = [&](const TileList& t, int layer, int64_t q) -> int {
         if (restore_tile_list(h, t) != 0) return -1;
         if (gather_input(t, layer - 1) != 0) return -1;
         DomainSweep sw;
@@ -6101,8 +6280,7 @@ static int evaluate_tiled_impl(LoupHandle* h, int n_atoms, const int* atomic_num
         for (int l = 0; l <= h->gen->out_lmax(layer); ++l) {
             float* a = static_cast<float*>(adj[l].p);
             if (pipe) {
-                const int64_t i = &t - lists.data();
-                const int bb = (int)(i % 2);
+                const int bb = (int)(q % 2);
                 if (l == 0) CUDA_CHECK(cudaStreamWaitEvent(h->stream, P.ev[HostPipe::kAdjIn][bb], 0));
                 int64_t off = 0;
                 for (int k = 0; k < l; ++k) off += (int64_t)t.n_local * width(layer, k);
@@ -6124,9 +6302,8 @@ static int evaluate_tiled_impl(LoupHandle* h, int n_atoms, const int* atomic_num
         record_force_pass(h, stress, false, &sw);
         if (stage_done(sb) != 0) return -1;
         if (pipe) {  // slot a may take the tile after next; the next tile's adjoints start
-            const int64_t i = &t - lists.data();
-            CUDA_CHECK(cudaEventRecord(P.ev[HostPipe::kAdjUsed][i % 2], h->stream));
-            if (issue_adj(i + 1, layer) != 0) return -1;
+            CUDA_CHECK(cudaEventRecord(P.ev[HostPipe::kAdjUsed][q % 2], h->stream));
+            if (issue_adj(q + 1, layer) != 0) return -1;
         }
         if (scatter_grad(t, layer - 1) != 0) return -1;
         fold_forces(t);
@@ -6138,31 +6315,31 @@ static int evaluate_tiled_impl(LoupHandle* h, int n_atoms, const int* atomic_num
     if (wave) {  // two-layer models: sweep 1 is layer 0 forward, 2 the last layer, 3 layer 0 backward
         for (const loup::SweepStep& s : st->steps) {
             const TileList& t = lists[(size_t)s.tile];
-            if ((s.sweep == 1 ? forward(t, 0) : s.sweep == 2 ? last(t) : backward(t, 0)) != 0) return -1;
+            if ((s.sweep == 1 ? forward(t, 0) : s.sweep == 2 ? last(t, 0) : backward(t, 0, 0)) != 0) return -1;
         }
         tick("wavefront sweeps");
     } else {
         for (int layer = 0; layer + 1 < L; ++layer) {  // forward sweeps
-            for (const TileList& t : lists)
-                if (forward(t, layer) != 0) return -1;
-            if (drain() != 0) return -1;
+            for (int i : ord_f)
+                if (forward(lists[(size_t)i], layer) != 0) return -1;
+            if (!flow && drain() != 0) return -1;
         }
         tick("forward sweeps");
         if (pipe) issue_in(0);
-        for (const TileList& t : lists)  // the last layer
-            if (last(t) != 0) return -1;
-        if (drain() != 0) return -1;
+        for (int64_t q = 0; q < T; ++q)  // the last layer
+            if (last(lists[(size_t)ord_l[(size_t)q]], q) != 0) return -1;
+        if (!flow && drain() != 0) return -1;
+        tick("last-layer sweeps");
+        for (int layer = L - 2; layer >= 0; --layer) {  // backward sweeps
+            if (pipe && issue_adj(0, layer) != 0) return -1;
+            for (int64_t q = 0; q < T; ++q)
+                if (backward(lists[(size_t)ord_b[(size_t)q]], layer, q) != 0) return -1;
+            if (drain() != 0) return -1;
+        }
         if (tile_times && pipe)
             std::fprintf(stderr, "tile host state (ms): gathers %.1f, gradient copy-out waits %.1f, adds %.1f; main "
                                  "waits for inputs %.1f, for adds %.1f\n", us_gather / 1e3, us_gcopy / 1e3,
                          us_add / 1e3, us_wait_in / 1e3, us_wait_g / 1e3);
-        tick("last-layer sweeps");
-        for (int layer = L - 2; layer >= 0; --layer) {  // backward sweeps
-            if (pipe && issue_adj(0, layer) != 0) return -1;
-            for (const TileList& t : lists)
-                if (backward(t, layer) != 0) return -1;
-            if (drain() != 0) return -1;
-        }
         tick("backward sweeps");
     }
     if (note_free() != 0) return -1;
