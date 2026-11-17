@@ -1926,6 +1926,11 @@ to +4.2%, 135,000 +10%). 4 of 35 plans change; tiled, memory-plan, capacity and 
 Kept calls, one run each (two at 1.08M / 0.9): from a million atoms a quarter of the card costs 2-4% of the time at
 0.9. All of `tests/gpu` on the installed library at 97e365d: 413 passed, 8 skipped (the NbCl5 structure).
 
+After the round6-hardening kernels are merged (S110: -18 to -22% VRAM in the whole-system path; not on release/v1 at
+4a5e9c2): the tile workspace estimates and so the planner's caps change. Re-run the plan comparison (135,000 to 8M
+atoms, fractions 0.9 to 0.25) and the kept-call times of the plans that move, and re-check the host-state rules of
+this section (`tile-host-state-window`, `tile-slot-room-limit`, `tile-host-state-larger-cap`) against them.
+
 `tile-wave-host-bus` (O32, NEUTRAL, not adopted; local branch `wip/tile-wave-host-bus`): the wavefront's host pool
 mapped, its ghost gathers, gradient adds (plain adds in rounds of distinct host rows) and block zeroing as kernels on
 the stream instead of host work after a synchronisation. `tests/gpu/test_tiled.py -k "wavefront or host"` 39 passed.
