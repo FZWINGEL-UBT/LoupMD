@@ -79,25 +79,40 @@ gates in that form. Most are read when an engine is made; the MD-loop switches a
 | `LOUP_WPRIME_THREADS` | `256`, `512` | forces the w' backward kernel's block size | `src/engine.cu` |
 | `LOUP_WPRIME_RCV` | `0`, `1` | forces the receiver-owned w' kernel off or on (default: on from 512 atoms) | `src/engine.cu` |
 | `LOUP_REORDER` | `0`, `1` | atom reordering off or on | `src/engine.cu` |
+| `LOUP_ROW_SORT` | `global` | every neighbour row sorted in global scratch, the path of rows over 4,096 edges | `src/engine.cu` |
+| `LOUP_NB_GROUPS` | `0`, `1` | the lane-group neighbour-list kernels off, or on any GPU (default: on for `sm_120` and compute capability 8.0) | `src/engine.cu` |
+| `LOUP_M1_CHUNK` | atoms, `0` | specialised kernels: the receiver chunk of the second layer's messages (`0`: one chunk) | `src/engine.cu` |
 | `LOUP_POLAR_FOLD` | `0` | MACE-POLAR-1: the unfolded SCF and electron-energy GEMMs | `src/polar.cu` |
-| `LOUP_CHAIN_FOLD` | `0` | MACE-OMOL-0 without the skip-chain fold | `src/generic.cu` |
+| `LOUP_CHAIN_FOLD` | `0`, `1` | `0`: whole systems of multi-layer models on the generic kernels without the skip-chain fold (tiled systems never fold); `1`: the fold on GPUs other than `sm_120` and compute capability 8.0 | `src/generic.cu` |
 | `LOUP_SPECIES_TABLES` | `0` | layer 0's species-only GEMMs instead of the per-species tables (OMOL-0, MH-1) | `src/generic.cu` |
 | `LOUP_CONV_FWD_VARIANT` | `0`, `1`, `2` | forces the generic conv forward variant | `src/generic.cu` |
 | `LOUP_CONV_TUNE` | `0`, `1` | per-system timing of the conv forward variants off, or on for any GPU | `src/generic.cu` |
 | `LOUP_NO_HYBRID` | `1` | no tensor-core hybrid GEMM cubin | `src/engine.cu` |
 | `LOUP_HYBRID_CUBIN` | path | loads this GEMM cubin instead of the shipped one | `src/engine.cu` |
 | `LOUP_LR_HYBRID` | `1` | the hybrid cubin for long-range models too | `src/engine.cu` |
+| `LOUP_FORCE_TC` | `1` | every GEMM the tensor-core cubin can take runs on it; no plans are read or stored | `src/engine.cu` |
 | `LOUP_OWN_EXT` | `0`, `1` | the `sm_120` own-SGEMM extensions off, or on any GPU | `src/engine.cu` |
 | `LOUP_DEBUG_HIDE_KERNEL` | signature | hides the library's own kernels of that signature, so a plugin can be tested | `src/generic.cu` |
 | `LOUP_TILE_GEMM_BUCKETS` | `0` | tiled call: times every tile row count's GEMMs | `src/engine.cu` |
 | `LOUP_TILE_WAVEFRONT` | `0`, `1` | tiled call: forces the wavefront schedule off or on | `src/engine.cu` |
+| `LOUP_TILE_KEEP_ACTIVE` | `0`, count | tiled call: no tile keeps its active edges across its sweeps, or at most that many slots | `src/engine.cu` |
+| `LOUP_TILE_KEEP_COMPACT` | `0`, count | tiled call: no compact slots of kept active edges, or at most that many | `src/engine.cu` |
+| `LOUP_TILE_KEEP_L0` | `0`, `1` | tiled call: each tile's first-layer messages kept for its backward sweep, off or on | `src/engine.cu` |
+| `LOUP_TILE_HOST_LISTS` | `0`, `1` | tiled plan: the tile lists' edges on the device, or in pinned host memory | `src/engine.cu` |
+| `LOUP_TILE_HOST_STAGE` | `0`, `1` | tiled call: host lists read over the bus, or copied into device buffers one sweep ahead | `src/engine.cu` |
+| `LOUP_TILE_HOST_STATE` | `0`, `1` | tiled plan: the layer outputs and their gradients never in host memory, or there (a plan that would pin over 90% of the available host memory is refused) | `src/engine.cu` |
+| `LOUP_TILE_HOST_PIPE` | `0` | tiled call: the host state's copies one after another, not overlapped with the sweeps | `src/engine.cu` |
+| `LOUP_TILE_HOST_ALIAS` | `0` | tiled call: a separate gradient array in the host state | `src/engine.cu` |
+| `LOUP_TILE_HOST_COMPACT` | `0` | tiled call: host lists in the full form (28 B per edge) instead of 8 B | `src/engine.cu` |
+| `LOUP_TILE_DEVICE_COMPACT` | `0` | tiled call: device lists in the full form (28 B per edge) instead of 8 B | `src/engine.cu` |
 | `LOUP_VARIABLE_CELL` | `1` | sends a `loup_run` call through the variable-cell step | `src/engine.cu` |
 | `LOUP_DEBUG_CELL_RATE` | number r | scales the cell and positions by 1 + r in every variable-cell step | `src/engine.cu` |
 | `LOUP_MIN_AHEAD` | `0`, `1` | the minimiser's list check before or after the force pass | `src/engine.cu` |
+| `LOUP_MD_REBUILD` | `host`, `fallback` | MD loop: every neighbour rebuild on the host, or the device rebuild's fallback to the host in every rebuild | `src/engine.cu` |
 | `LOUP_D3_KSUM` | `direct` | D3 split sum: the direct k sum instead of the mesh | `src/dispersion/d3_pair.cu` |
 | `LOUP_D3_PME_ORDER` | `4`, `5`, `6`, `8` | D3 mesh: the B-spline order | `src/dispersion/d3_pair.cu` |
 | `LOUP_D3_ATM_PROJ` | `0` | D3 three-body term: the per-triangle C6 table walk | `src/dispersion/d3_pair.cu` |
-| `LOUP_SWEEP_REPLAY` | any value | generic path: the sweep schedule (not for long-range models or with the skip-chain fold) | `src/generic.cu` |
+| `LOUP_SWEEP_REPLAY` | any value | generic path: a whole system runs the sweep schedule of a tiled one, without the skip-chain fold (not for long-range models) | `src/generic.cu` |
 | `LOUP_DEBUG_PACK` | any value | prints the packed tables' relative error per layer | `src/generic.cu`, `src/model_loader.cu` |
 | `LOUP_DEBUG_ERRORS` | any value | prints every library error to standard error | `src/engine.cu` |
 | `LOUP_DEBUG_GRAPHS`, `LOUP_DEBUG_GEMM`, `LOUP_DEBUG_GEMM_BUCKETS`, `LOUP_DEBUG_SPLINE`, `LOUP_DEBUG_TILE_TIMES` | any value | print diagnostics of CUDA graphs, GEMM plans, bucketed GEMM timings, kernel-variant timings and tiled-call phase times | `src/engine.cu`, `src/generic.cu` |

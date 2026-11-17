@@ -268,8 +268,9 @@ def test_generic_models_gate_their_conv_variants_or_only_the_default(setup):
 
 
 def test_the_tiled_gate_runs_every_configuration_tile_by_tile(setup, monkeypatch):
-    """S5-T04: --capacity tiled evaluates through the tiled call, about four tiles per cell, with the skip-chain
-    fold off (the sweeps need every layer's output), and records the mode."""
+    """S5-T04: --capacity tiled evaluates through the tiled call, about four tiles per cell, on default engines
+    (a tiled system leaves the skip-chain fold off itself; the caller's LOUP_CHAIN_FOLD reaches no engine of the
+    gate), and records the mode."""
     GateEngine.specialised = False
     monkeypatch.setenv("LOUP_CHAIN_FOLD", "1")
     record = setup(capacity="tiled")
@@ -277,7 +278,7 @@ def test_the_tiled_gate_runs_every_configuration_tile_by_tile(setup, monkeypatch
     assert {row["variant"] for row in record["rows"]} == {"default"} and len(record["rows"]) == 6
     calls = [call for engine in GateEngine.made for call in engine.tiled]
     assert len(calls) == 6 and all(receivers == -(-n // 4) and skin == 0.5 for n, receivers, skin in calls)
-    assert all(engine.chain_fold == "0" for engine in GateEngine.made)
+    assert all(engine.chain_fold is None for engine in GateEngine.made)
     assert os.environ["LOUP_CHAIN_FOLD"] == "1"                 # the caller's setting is back
     assert setup()["capacity"] == "whole"
     assert "capacity: tiled" in validate.format_gate(record)

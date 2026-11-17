@@ -193,10 +193,10 @@ def run_gate(model, *, head=None, checkpoint=None, sha256=None, trusted=False, d
         elements = tuple(sorted(set(at.get_atomic_numbers().tolist())))
         key = (elements, tuple(sorted(variant.items())))
         if key not in engines:
+            # The gate's engines are default ones: a caller's LOUP_CHAIN_FOLD does not reach them. (A tiled system
+            # leaves the skip-chain fold off itself: its sweeps need every layer's output, which the fold never forms.)
             saved = {k: os.environ.pop(k) for k in VARIANT_KEYS + ("LOUP_CHAIN_FOLD",) if k in os.environ}
             os.environ.update(variant)                      # read by the library when the engine is created
-            if tiled:                                       # the sweeps need every layer's output, which the
-                os.environ["LOUP_CHAIN_FOLD"] = "0"         # skip-chain fold never forms
             try:
                 bundle = ensure_bundle(resolved.path, list(elements), head=use_head, generic=generic, charge=charge,
                                        spin_multiplicity=spin_multiplicity, environ=environ)
