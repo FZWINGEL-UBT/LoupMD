@@ -1890,10 +1890,15 @@ ran the same day without one, and the 1,081,600-atom forced run of 16 November f
 same morning): after the first failure WSL fails in host-state work generally, so the mode is not shown to be the
 cause; WSL or its GPU driver may have stayed unstable after the first failure (not checked: no reboot from this
 session). Cause not found (the distro's logs go with it). Until a clean machine reproduces it or not, treat forced
-host-state runs on WSL with care; no further GPU runs in this session. The local branch `wip/host-adds-by-row`
-(built, not tested) splits the host state's gradient adds over host threads by destination row: a tile's rows can
-hold one host row more than once (grids with one or two tiles along an axis), and the split by tile row could add
-into it from two threads at once in the plain order's pipelined adds, the alias windows and the wavefront host pool.
+host-state runs on WSL with care. A tile's rows can hold one host row more than once (grids with one or two tiles
+along an axis), and the host state's gradient adds, split over host threads by tile row, could add into it from two
+threads at once in the plain order's pipelined adds, the alias windows and the wavefront host pool.
+
+After the owner restarted WSL (`wsl --shutdown`, not a reboot of the machine), the same day: the adds now split over
+host threads by destination host row, so each host row has one writer (O32 race fix, 2b26d33, from the local branch
+`wip/host-adds-by-row`). `tests/gpu/test_tiled.py -k host` 37 passed (the run that failed before the restart),
+the whole file 55 passed, `tests/cpu` 494 passed, `tests/gpu -m "not acceptance"` 397 passed (7 D3 tests skipped:
+`NbCl5_R2SCAN.cif` not present); no WSL failure. No forced large host-pool run was repeated.
 
 `tile-wave-host-bus` (O32, NEUTRAL, not adopted; local branch `wip/tile-wave-host-bus`): the wavefront's host pool
 mapped, its ghost gathers, gradient adds (plain adds in rounds of distinct host rows) and block zeroing as kernels on
