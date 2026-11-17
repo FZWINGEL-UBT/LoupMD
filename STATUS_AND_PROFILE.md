@@ -1864,3 +1864,13 @@ It passed in the suite on `457196c` and in four runs alone and two after the fil
 the 13.14 GiB bound, on this library and the one before the pinned reuse): not reproduced. On `457196c` the
 `LoupMemoryPlan` layout check failed (its C program lacked the O31/O32 fields; fixed in `868793d`) and the ASE
 calculator test failed once (passed on rerun).
+
+`tile-plan-fit` (O32, NEUTRAL, not kept): the planner's tile workspace estimate assumed blocks of `cap` atoms with
+ghosts scaled from the smallest cap, about twice the workspace a call uses at large caps (320,000 atoms: 9.3 GB
+estimated, about 5.1 GB used). A trial ran the grid fit for each candidate cap (wrapped fractions once, counts kept per
+grid) and estimated from the widest piece and its halo: 320,000 atoms 9,329 -> 6,861 MB, 2,560,000 5,678 -> 4,232 MB,
+the 1.08M rod 10,054 -> 10,378 MB; planning +0.1 s at 2.56M and +0.2 s on the rod. Plans changed only where memory is
+short (fraction 0.75): 3,524,845 atoms cap 32,768 -> 49,152, 5,000,000 24,576 -> 32,768, but with the same tiles (125,
+216; the grid fit by rows decides them), the same peak (10.85, 10.83 GiB) and tied times (A B A B: 7,196 / 7,206
+against 7,218 / 7,236 ms; 10,284 / 10,228 against 10,222 / 10,282 ms). Reverted: the better estimate does not change
+what runs.
