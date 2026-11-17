@@ -1898,7 +1898,11 @@ After the owner restarted WSL (`wsl --shutdown`, not a reboot of the machine), t
 host threads by destination host row, so each host row has one writer (O32 race fix, 2b26d33, from the local branch
 `wip/host-adds-by-row`). `tests/gpu/test_tiled.py -k host` 37 passed (the run that failed before the restart),
 the whole file 55 passed, `tests/cpu` 494 passed, `tests/gpu -m "not acceptance"` 397 passed (7 D3 tests skipped:
-`NbCl5_R2SCAN.cif` not present); no WSL failure. No forced large host-pool run was repeated.
+`NbCl5_R2SCAN.cif` not present); no WSL failure. On a freshly started WSL the forced wavefront host pool then ran
+three processes each at 320,000 atoms in a rod (fraction 0.6, 1.5 GB host, 935-953 ms) and 1,081,600 atoms
+(fraction 0.9, 9.0 GB host, 3.35-3.40 s), the two cases that failed after the first failure, without a failure: the
+later failures look like WSL's state after the first one rather than the mode. The 8M forced host-pool run (the first
+failure) was not repeated. No forced large host-pool run was repeated.
 
 `tile-wave-host-bus` (O32, NEUTRAL, not adopted; local branch `wip/tile-wave-host-bus`): the wavefront's host pool
 mapped, its ghost gathers, gradient adds (plain adds in rounds of distinct host rows) and block zeroing as kernels on
