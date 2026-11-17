@@ -1906,6 +1906,9 @@ forced host-pool plan (fraction 0.9, cap 65,536) needs 42.1 GB of pinned host me
 the WSL distro, and `LOUP_TILE_HOST_STATE=1` skipped the plan's 60% check. A plan that would pin more than 90% of
 the available host memory is now refused with a message naming the forced setting (test
 `test_a_forced_host_state_beyond_the_host_memory_is_refused`); the default plans stay within 60% and do not change.
+All of `tests/gpu` on that library (bf595d5): 412 passed, 8 skipped, 1 failed:
+`test_capacity.py::test_auto_tiles_320000_atoms_without_a_user_setting` (peak against the free memory read at the
+call), which passed alone twice and with `test_capacity.py` and `test_tiled.py` twice (62 passed): not reproduced.
 
 `tile-wave-host-bus` (O32, NEUTRAL, not adopted; local branch `wip/tile-wave-host-bus`): the wavefront's host pool
 mapped, its ghost gathers, gradient adds (plain adds in rounds of distinct host rows) and block zeroing as kernels on
