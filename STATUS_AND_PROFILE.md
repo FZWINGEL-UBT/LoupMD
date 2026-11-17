@@ -1945,4 +1945,7 @@ The host state with the lists on the device (`LOUP_TILE_HOST_LISTS=0`, one run e
 cap 49,152 5.28 s against the default's lists in host memory at 32,768 5.25 s (peak 12.38 against 12.84 GiB, cold
 12.9 against 16.9 s); 5,000,000 cap 12,288 10.50 s against 10.26 s (cold 23.5 against 34.0 s). Kept calls tie or
 lose, so the plan stays; the cold calls are 24-31% shorter with device lists, not measured in a tiled MD run's list
-rebuilds (an open question for the rebuild cost).
+rebuilds (an open question for the rebuild cost). Measured (`tile-host-state-device-lists`, NEUTRAL): with
+calls after a move past half the skin, the forced device-lists plan at 49,152 rebuilds in 6.7 s against the
+default's 7.1-10.1 s at the same kept time, but a planner rule for device lists changed 5 of 20 plans to caps no
+larger than before, where kept calls tie or lose up to 2% and rebuilds are mixed; reverted.
