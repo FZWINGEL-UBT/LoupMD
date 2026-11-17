@@ -1885,10 +1885,15 @@ planned, the host path) did the same a few minutes later. A third, at 320,000 at
 1.5 GB host, cap 65,536, 8.2 GB tile workspace), ran three processes and took WSL down in the fourth (bus on; the
 first bus-on process had finished). Three failures in three forced wavefront host-pool timing jobs, at 1.5 to tens of
 GB of host memory, with and without the bus; the small host-pool tests (5,760 and 11,520 atoms) and every other mode
-ran the same day without one, and the 1,081,600-atom forced run of 16 November finished. Cause not found (the
-distro's logs go with it). **Open risk:** the plan chooses the wavefront host pool on its own only where the
-wavefront applies and the plain host state does not fit (pass 3); until this is understood, prefer
-`LOUP_TILE_WAVEFRONT=0` or the device pool for long runs on WSL. No further runs of the mode in this session.
+ran the same day without one, and the 1,081,600-atom forced run of 16 November finished. A fourth failure came during
+`pytest tests/gpu/test_tiled.py -k "host and not wavefront"` (the plain host state, small systems, which passed the
+same morning): after the first failure WSL fails in host-state work generally, so the mode is not shown to be the
+cause; WSL or its GPU driver may have stayed unstable after the first failure (not checked: no reboot from this
+session). Cause not found (the distro's logs go with it). Until a clean machine reproduces it or not, treat forced
+host-state runs on WSL with care; no further GPU runs in this session. The local branch `wip/host-adds-by-row`
+(built, not tested) splits the host state's gradient adds over host threads by destination row: a tile's rows can
+hold one host row more than once (grids with one or two tiles along an axis), and the split by tile row could add
+into it from two threads at once in the plain order's pipelined adds, the alias windows and the wavefront host pool.
 
 `tile-wave-host-bus` (O32, NEUTRAL, not adopted; local branch `wip/tile-wave-host-bus`): the wavefront's host pool
 mapped, its ghost gathers, gradient adds (plain adds in rounds of distinct host rows) and block zeroing as kernels on
