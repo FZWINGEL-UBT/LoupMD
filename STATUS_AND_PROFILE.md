@@ -1787,3 +1787,18 @@ lose the pairs no sweep reads (36 B per edge). `LOUP_TILE_KEEP_COMPACT=0|k`. Lib
 compact slots, 7.31 / 7.23 s (b / a about 0.975); 320,000 atoms 587.5, 595.0 -> 582.4, 581.7 ms; the wavefront at
 1,081,600 atoms covers its 5 tiles in flight (3 full and 2 compact, or 5 full) instead of 3-4 (times not captured).
 The 2,560,000-atom default plan leaves no memory for any slot (unchanged, 5.71-5.72 s).
+
+`tile-plan-slot-room` (O32): what the 2,560,000-atom plan's choices cost (library `19477a6c`, cube, fraction 0.9,
+median of five kept calls): the device plan at cap 4,096 (891 tiles, no slot) 5.73-5.75 s; the plain host state at
+65,536 (54 tiles) 6.49 s, at 49,152 5.24 s (38 full and 26 compact slots), at 32,768 5.26 s (125 full slots). At
+65,536 the call found no memory left for any slot (`cudaMemGetInfo` 0 MB at the slots) although the plan's estimate
+(191 MB state, 10,578 MB workspace) left 4 GB; at 49,152 the estimate (8,352 MB) was above what the call used (7,954 MB
+free at the slots). So the planner now (1) tries the plain host state's caps first with room for compact slots for
+every tile (1.5 x 8 B per list edge: each slot holds the largest tile's list, 1.4x the edges' bytes at 65,536), and
+(2) takes the host state at 4x to 8x the device plan's cap where that plan needs caps under 16,384 and 256 tiles or
+more and the host state fits there with that room. Library `6ed34416` against `19477a6c` (A B B A, 2,560,000 atoms,
+default plan): 5,750.6 / 5,760.9 ms -> 5,247.3 / 5,234.9 ms (b / a 0.911; cap 32,768, host lists and state, 125
+tiles), peak 12.95 -> 12.84 GiB; 320,000 atoms unchanged (cap 65,536 on the device, 589.6 / 592.7 ms); 3,524,845
+atoms at fraction 0.75 now cap 32,768 with 89 compact slots, kept call 7.22 s (cap 65,536: 7.26 s; one call each).
+The 256-tile and 8x limits are where it was measured (2,560,000 atoms only); a host state at 65,536 with no slot
+(6.49 s) is the plan it avoids.

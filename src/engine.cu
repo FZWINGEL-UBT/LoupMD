@@ -5380,6 +5380,10 @@ static int plan_execution_impl(LoupHandle* h, int n_atoms, const int* atomic_num
     int cap = 0;
     bool host = host_force == 1;
     double global = 0.0, ws = 0.0;
+    // O32: compact slots of kept active edges for every tile in flight (the plain order: all), 8 B per list edge; each
+    // slot holds the largest tile's list, so the slots of all tiles come to about 1.4x the edges' 8 B (2,560,000 atoms
+    // at cap 65,536: 54 slots of 53 MB for 2,039 MB of compact edges); 1.5x with margin
+    const double slot_room = 1.5 * 8.0 * n * epl;
     double shown_g = 0.0, shown_w = 0.0;  // the last estimate tried (for the refusal's message)
     bool host_short = false;              // a host state step was left out for the host memory
     auto fits = [&](double c) {  // the tile's own list stays within the edge limit, with 10% for its densest region
@@ -5423,11 +5427,36 @@ static int plan_execution_impl(LoupHandle* h, int n_atoms, const int* atomic_num
             if (pass == 3 && !wave) break;
             host = pass >= 1 ? host_force != 0 : false;
             hstate = pass >= 2 ? pass - 1 : 0;
+            // the plain host state: first the caps that leave compact slots room for every tile (slot_room), then any
+            for (int need_slots = pass == 2 ? 1 : 0; need_slots >= 0 && cap == 0; --need_slots)
+                for (int c : kCaps) {
+                    if (pass >= 2 && hs_force != 1 && !hs_room(c, hstate)) continue;
+                    if (tiled_at(c, host, global, ws, hstate) != 0) return -1;
+                    if (fits(c) && (!need_slots || global + ws + slot_room <= allowed)) {
+                        cap = c;
+                        break;
+                    }
+                }
+        }
+        // O32: a device plan in small tiles loses to the plain host state in tiles four times larger or more with
+        // room for the slots (2,560,000 atoms: cap 4,096 on the device 5.73-5.75 s, the host state at 49,152 5.23 s;
+        // at 65,536 without slot room 6.49 s; status §6.34), measured with 625 tiles and more only: few tiles keep the
+        // device plan
+        if (cap > 0 && cap < 16384 && n >= 256.0 * cap && hstate == 0 && hs_force != 0 && hs_first == 1) {
+            // at most 8x: at 65,536 the call found no memory left for any slot although the plan's estimate left
+            // 4 GB (54 tiles, 6.50 s); 49,152 and 32,768 ran with 64 / 125 slots (5.24 / 5.26 s)
             for (int c : kCaps) {
-                if (pass >= 2 && hs_force != 1 && !hs_room(c, hstate)) continue;
-                if (tiled_at(c, host, global, ws, hstate) != 0) return -1;
-                if (fits(c)) {
+                if (c > 8 * cap) continue;
+                if (c < 4 * cap) break;
+                if (hs_force != 1 && !hs_room(c, 1)) continue;
+                double g = 0.0, w = 0.0;
+                if (tiled_at(c, host_force != 0, g, w, 1) != 0) return -1;
+                if (g + w + slot_room <= allowed && std::min<double>(c, n) * epl * 1.1 <= (double)h->edge_limit) {
                     cap = c;
+                    hstate = 1;
+                    host = host_force != 0;
+                    global = g;
+                    ws = w;
                     break;
                 }
             }
@@ -5993,7 +6022,8 @@ static int evaluate_tiled_impl(LoupHandle* h, int n_atoms, const int* atomic_num
             }
             st->cact_keep = got_c;
             if (tile_times)
-                std::fprintf(stderr, "tile compact active slots: %d (%.0f MB each)\n", got_c, cslot_bytes / 1e6);
+                std::fprintf(stderr, "tile compact active slots: %d (%.0f MB each; %.0f MB free less %.0f MB reserve)\n",
+                             got_c, cslot_bytes / 1e6, (double)free_b / 1e6, reserve / 1e6);
         }
         // Layer 0's forward results per tile, after the slots, within the same reserve: plain order only (the
         // wavefront's tiles in flight would need them too, and it runs where memory is short). LOUP_TILE_KEEP_L0=0|1.
