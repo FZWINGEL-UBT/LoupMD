@@ -1,0 +1,121 @@
+### Starting TaskPrologue of job 5014425 on a0701 at Tue Nov 17 05:51:12 AM CET 2026
+Running on cores 112-127 with governor schedutil
+Tue Nov 17 05:51:12 2026       
++-----------------------------------------------------------------------------------------+
+| NVIDIA-SMI 615.71.10              KMD Version: 615.71.10     CUDA UMD Version: 13.4     |
++-----------------------------------------+------------------------+----------------------+
+| GPU  Name                 Persistence-M | Bus-Id          Disp.A | Volatile Uncorr. ECC |
+| Fan  Temp   Perf          Pwr:Usage/Cap |           Memory-Usage | GPU-Util  Compute M. |
+|                                         |                        |               MIG M. |
+|=========================================+========================+======================|
+|   0  NVIDIA A100-SXM4-40GB          On  |   00000000:CC:00.0 Off |                    0 |
+| N/A   33C    P0             52W /  400W |       0MiB /  40960MiB |      0%      Default |
+|                                         |                        |             Disabled |
++-----------------------------------------+------------------------+----------------------+
+
++-----------------------------------------------------------------------------------------+
+| Processes:                                                                              |
+|  GPU   GI   CI              PID   Type   Process name                        GPU Memory |
+|        ID   ID                                                               Usage      |
+|=========================================================================================|
+|  No running processes found                                                             |
++-----------------------------------------------------------------------------------------+
+### Finished TaskPrologue
+
+=== 2026-11-17 05:51:19 a0701
+f8304b7c5ea65695
+51e7b9af55159773
+9e4867439a454cf4
+--- s93b
+MEAN mace-omat-0-medium.model srtio3 generic: b/a 0.9856 (a-first 0.9866, b-first 0.9846)  a=libloupmd_s86.so b=libloupmd_s93b.so
+MEAN 2023-12-03-mace-128-L1_epoch-199.model srtio3: b/a 0.9836 (a-first 0.9835, b-first 0.9838)  a=libloupmd_s86.so b=libloupmd_s93b.so
+MEAN MACE-OFF23_medium.model water216: b/a 1.0150 (a-first 1.0232, b-first 1.0067)  a=libloupmd_s86.so b=libloupmd_s93b.so
+--- s93a
+MEAN mace-omat-0-medium.model srtio3 generic: b/a 1.0002 (a-first 0.9999, b-first 1.0006)  a=libloupmd_s86.so b=libloupmd_s93a.so
+MEAN 2023-12-03-mace-128-L1_epoch-199.model srtio3: b/a 0.9977 (a-first 0.9958, b-first 0.9996)  a=libloupmd_s86.so b=libloupmd_s93a.so
+MEAN MACE-OFF23_medium.model water216: b/a 1.0034 (a-first 1.0029, b-first 1.0038)  a=libloupmd_s86.so b=libloupmd_s93a.so
+##### done 2026-11-17 06:03:44
+=== JOB_STATISTICS ===
+=== current date     : Tue Nov 17 06:03:44 CET 2026
+= Job-ID             : 5014425 on alex
+= Job-Name           : loup-s93c
+= Job-Command        : /home/atuin/v130cb/v130cb18/loup-s64/alex64/s93c.sh
+= Initial workdir    : /home/atuin/v130cb/v130cb18/loup-s64
+= Queue/Partition    : a100
+= Slurm account      : v130cb with QOS=normal
+= Features           : a100_40
+= Requested resources:  for 01:00:00
+= Elapsed runtime    : 00:12:39
+= Total RAM usage    : 1.9 GiB of assigned  GiB (%)
+= Node list          : a0701
+= Subm/Elig/Start/End: 2026-11-16T12:01:25 / 2026-11-16T12:01:25 / 2026-11-17T05:51:05 / 2026-11-17T06:03:44
+======================
+=== Quota infos ======
+    Path                 Used     SoftQ    HardQ    Gracetime  Filec    FileQ    FiHaQ    FileGrace    
+    /home/hpc              66.2G   104.9G   209.7G        N/A   2,787      300K     400K        N/A    
+    /home/vault             0.0K  1048.6G  2097.2G        N/A       1      200K     400K        N/A    
+    /home/atuin            30.6G     0.0K     0.0K        N/A     101K                          N/A    
+    /lustre                 4.0K     0.0K     0.0K        N/A       1       80K     250K        N/A    
+======================
+=== GPU utilization ==
+gpu_name, gpu_bus_id, pid, gpu_utilization [%], mem_utilization [%], max_memory_usage [MiB], time [ms]
+NVIDIA A100-SXM4-40GB, 00000000:CC:00.0, 808111, 51 %, 12 %, 1178 MiB, 15477 ms
+NVIDIA A100-SXM4-40GB, 00000000:CC:00.0, 808375, 55 %, 13 %, 1178 MiB, 12390 ms
+NVIDIA A100-SXM4-40GB, 00000000:CC:00.0, 808490, 59 %, 14 %, 1174 MiB, 12603 ms
+NVIDIA A100-SXM4-40GB, 00000000:CC:00.0, 808621, 61 %, 15 %, 1174 MiB, 11873 ms
+NVIDIA A100-SXM4-40GB, 00000000:CC:00.0, 808709, 64 %, 15 %, 1174 MiB, 11761 ms
+NVIDIA A100-SXM4-40GB, 00000000:CC:00.0, 808843, 61 %, 14 %, 1174 MiB, 12135 ms
+NVIDIA A100-SXM4-40GB, 00000000:CC:00.0, 808939, 63 %, 15 %, 1174 MiB, 12544 ms
+NVIDIA A100-SXM4-40GB, 00000000:CC:00.0, 809030, 53 %, 13 %, 1174 MiB, 13655 ms
+NVIDIA A100-SXM4-40GB, 00000000:CC:00.0, 809102, 59 %, 14 %, 1174 MiB, 12406 ms
+NVIDIA A100-SXM4-40GB, 00000000:CC:00.0, 809196, 63 %, 15 %, 1174 MiB, 11820 ms
+NVIDIA A100-SXM4-40GB, 00000000:CC:00.0, 809281, 44 %, 12 %, 1362 MiB, 16881 ms
+NVIDIA A100-SXM4-40GB, 00000000:CC:00.0, 809395, 54 %, 14 %, 1362 MiB, 14301 ms
+NVIDIA A100-SXM4-40GB, 00000000:CC:00.0, 809496, 55 %, 15 %, 1362 MiB, 14279 ms
+NVIDIA A100-SXM4-40GB, 00000000:CC:00.0, 809579, 55 %, 15 %, 1362 MiB, 14116 ms
+NVIDIA A100-SXM4-40GB, 00000000:CC:00.0, 809684, 50 %, 14 %, 1362 MiB, 14129 ms
+NVIDIA A100-SXM4-40GB, 00000000:CC:00.0, 809764, 51 %, 14 %, 1362 MiB, 14238 ms
+NVIDIA A100-SXM4-40GB, 00000000:CC:00.0, 809931, 52 %, 14 %, 1362 MiB, 14335 ms
+NVIDIA A100-SXM4-40GB, 00000000:CC:00.0, 809987, 53 %, 14 %, 1362 MiB, 14053 ms
+NVIDIA A100-SXM4-40GB, 00000000:CC:00.0, 810093, 55 %, 15 %, 1362 MiB, 14046 ms
+NVIDIA A100-SXM4-40GB, 00000000:CC:00.0, 810172, 50 %, 13 %, 1362 MiB, 14184 ms
+NVIDIA A100-SXM4-40GB, 00000000:CC:00.0, 810316, 29 %, 2 %, 572 MiB, 2973 ms
+NVIDIA A100-SXM4-40GB, 00000000:CC:00.0, 810354, 17 %, 1 %, 572 MiB, 2796 ms
+NVIDIA A100-SXM4-40GB, 00000000:CC:00.0, 810431, 35 %, 3 %, 570 MiB, 2834 ms
+NVIDIA A100-SXM4-40GB, 00000000:CC:00.0, 810470, 26 %, 2 %, 570 MiB, 2812 ms
+NVIDIA A100-SXM4-40GB, 00000000:CC:00.0, 810508, 34 %, 3 %, 570 MiB, 2746 ms
+NVIDIA A100-SXM4-40GB, 00000000:CC:00.0, 810548, 23 %, 2 %, 570 MiB, 2699 ms
+NVIDIA A100-SXM4-40GB, 00000000:CC:00.0, 810617, 13 %, 1 %, 570 MiB, 2770 ms
+NVIDIA A100-SXM4-40GB, 00000000:CC:00.0, 810675, 35 %, 3 %, 570 MiB, 2818 ms
+NVIDIA A100-SXM4-40GB, 00000000:CC:00.0, 810721, 31 %, 2 %, 570 MiB, 2730 ms
+NVIDIA A100-SXM4-40GB, 00000000:CC:00.0, 810760, 40 %, 4 %, 570 MiB, 2699 ms
+NVIDIA A100-SXM4-40GB, 00000000:CC:00.0, 810801, 73 %, 17 %, 1178 MiB, 10347 ms
+NVIDIA A100-SXM4-40GB, 00000000:CC:00.0, 810896, 72 %, 17 %, 1178 MiB, 10271 ms
+NVIDIA A100-SXM4-40GB, 00000000:CC:00.0, 810957, 70 %, 17 %, 1178 MiB, 10329 ms
+NVIDIA A100-SXM4-40GB, 00000000:CC:00.0, 811063, 63 %, 15 %, 1178 MiB, 10842 ms
+NVIDIA A100-SXM4-40GB, 00000000:CC:00.0, 811302, 63 %, 15 %, 1178 MiB, 10281 ms
+NVIDIA A100-SXM4-40GB, 00000000:CC:00.0, 811477, 70 %, 17 %, 1178 MiB, 10302 ms
+NVIDIA A100-SXM4-40GB, 00000000:CC:00.0, 811634, 71 %, 17 %, 1178 MiB, 10332 ms
+NVIDIA A100-SXM4-40GB, 00000000:CC:00.0, 811792, 72 %, 17 %, 1178 MiB, 10198 ms
+NVIDIA A100-SXM4-40GB, 00000000:CC:00.0, 811962, 73 %, 18 %, 1178 MiB, 10123 ms
+NVIDIA A100-SXM4-40GB, 00000000:CC:00.0, 812113, 75 %, 18 %, 1178 MiB, 10260 ms
+NVIDIA A100-SXM4-40GB, 00000000:CC:00.0, 812253, 51 %, 14 %, 1362 MiB, 15379 ms
+NVIDIA A100-SXM4-40GB, 00000000:CC:00.0, 812490, 54 %, 14 %, 1362 MiB, 14484 ms
+NVIDIA A100-SXM4-40GB, 00000000:CC:00.0, 812721, 53 %, 14 %, 1362 MiB, 14277 ms
+NVIDIA A100-SXM4-40GB, 00000000:CC:00.0, 812922, 53 %, 14 %, 1362 MiB, 14257 ms
+NVIDIA A100-SXM4-40GB, 00000000:CC:00.0, 813146, 54 %, 15 %, 1362 MiB, 14222 ms
+NVIDIA A100-SXM4-40GB, 00000000:CC:00.0, 813195, 55 %, 15 %, 1362 MiB, 14254 ms
+NVIDIA A100-SXM4-40GB, 00000000:CC:00.0, 813259, 56 %, 15 %, 1362 MiB, 14240 ms
+NVIDIA A100-SXM4-40GB, 00000000:CC:00.0, 813302, 50 %, 13 %, 1362 MiB, 14130 ms
+NVIDIA A100-SXM4-40GB, 00000000:CC:00.0, 813359, 52 %, 14 %, 1362 MiB, 14171 ms
+NVIDIA A100-SXM4-40GB, 00000000:CC:00.0, 813410, 53 %, 14 %, 1362 MiB, 14192 ms
+NVIDIA A100-SXM4-40GB, 00000000:CC:00.0, 813540, 40 %, 3 %, 572 MiB, 2994 ms
+NVIDIA A100-SXM4-40GB, 00000000:CC:00.0, 813595, 27 %, 2 %, 572 MiB, 2809 ms
+NVIDIA A100-SXM4-40GB, 00000000:CC:00.0, 813688, 44 %, 4 %, 570 MiB, 2757 ms
+NVIDIA A100-SXM4-40GB, 00000000:CC:00.0, 813727, 29 %, 3 %, 570 MiB, 2672 ms
+NVIDIA A100-SXM4-40GB, 00000000:CC:00.0, 813766, 32 %, 2 %, 570 MiB, 2692 ms
+NVIDIA A100-SXM4-40GB, 00000000:CC:00.0, 813804, 11 %, 0 %, 570 MiB, 2683 ms
+NVIDIA A100-SXM4-40GB, 00000000:CC:00.0, 813842, 34 %, 3 %, 570 MiB, 2717 ms
+NVIDIA A100-SXM4-40GB, 00000000:CC:00.0, 813881, 25 %, 2 %, 570 MiB, 2640 ms
+NVIDIA A100-SXM4-40GB, 00000000:CC:00.0, 813933, 26 %, 2 %, 570 MiB, 2652 ms
+NVIDIA A100-SXM4-40GB, 00000000:CC:00.0, 813971, 41 %, 4 %, 570 MiB, 2692 ms

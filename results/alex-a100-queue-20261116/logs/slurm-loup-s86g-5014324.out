@@ -1,0 +1,88 @@
+### Starting TaskPrologue of job 5014324 on a0701 at Tue Nov 17 05:44:57 AM CET 2026
+Running on cores 96-111 with governor schedutil
+Tue Nov 17 05:44:57 2026       
++-----------------------------------------------------------------------------------------+
+| NVIDIA-SMI 615.71.10              KMD Version: 615.71.10     CUDA UMD Version: 13.4     |
++-----------------------------------------+------------------------+----------------------+
+| GPU  Name                 Persistence-M | Bus-Id          Disp.A | Volatile Uncorr. ECC |
+| Fan  Temp   Perf          Pwr:Usage/Cap |           Memory-Usage | GPU-Util  Compute M. |
+|                                         |                        |               MIG M. |
+|=========================================+========================+======================|
+|   0  NVIDIA A100-SXM4-40GB          On  |   00000000:D1:00.0 Off |                    0 |
+| N/A   37C    P0             55W /  400W |       0MiB /  40960MiB |      0%      Default |
+|                                         |                        |             Disabled |
++-----------------------------------------+------------------------+----------------------+
+
++-----------------------------------------------------------------------------------------+
+| Processes:                                                                              |
+|  GPU   GI   CI              PID   Type   Process name                        GPU Memory |
+|        ID   ID                                                               Usage      |
+|=========================================================================================|
+|  No running processes found                                                             |
++-----------------------------------------------------------------------------------------+
+### Finished TaskPrologue
+
+=== 2026-11-17 05:45:05 a0701 lib /home/atuin/v130cb/v130cb18/loup-s64/src/libloupmd_s86.so
+--- /home/atuin/v130cb/v130cb18/loup-s64/models/MACE-POLAR-1-M.model --set crystals 05:45:08
+crystals set: NaCl_c0 (216), NaCl_c1 (216), NaNbO3_c0 (360), NaNbO3_c1 (360), NbCl5_c0 (216), NbCl5_c1 (216)
+NaCl_c0            default                  |       0.00008 |     2.998e-06   0.90 |      1.085e-08   0.27 | PASS
+NaCl_c0            conv_fwd_variant=1       |       0.00003 |     2.844e-06   0.85 |      1.168e-08   0.29 | PASS
+NaCl_c0            conv_fwd_variant=2       |       0.00004 |     2.573e-06   0.77 |      1.076e-08   0.27 | PASS
+NaCl_c1            default                  |       0.00009 |     3.500e-06   0.72 |      1.957e-08   0.36 | PASS
+NaCl_c1            conv_fwd_variant=1       |       0.00010 |     3.572e-06   0.74 |      2.045e-08   0.38 | PASS
+NaCl_c1            conv_fwd_variant=2       |       0.00010 |     3.562e-06   0.73 |      2.007e-08   0.37 | PASS
+NaNbO3_c0          default                  |       0.00000 |     1.299e-04   0.73 |      2.134e-07   1.49 | PASS
+NaNbO3_c0          conv_fwd_variant=1       |       0.00002 |     1.202e-04   0.67 |      2.056e-07   1.44 | PASS
+NaNbO3_c0          conv_fwd_variant=2       |       0.00002 |     1.199e-04   0.67 |      2.111e-07   1.48 | PASS
+NaNbO3_c1          default                  |       0.00042 |     2.351e-04   1.26 |      1.334e-07   0.20 | PASS
+NaNbO3_c1          conv_fwd_variant=1       |       0.00040 |     2.382e-04   1.28 |      1.558e-07   0.23 | PASS
+NaNbO3_c1          conv_fwd_variant=2       |       0.00040 |     2.397e-04   1.29 |      1.590e-07   0.24 | PASS
+NbCl5_c0           default                  |       0.00044 |     1.064e-05   0.59 |      9.477e-09   0.28 | PASS
+NbCl5_c0           conv_fwd_variant=1       |       0.00044 |     1.045e-05   0.58 |      9.410e-09   0.28 | PASS
+NbCl5_c0           conv_fwd_variant=2       |       0.00039 |     1.110e-05   0.61 |      1.006e-08   0.30 | PASS
+NbCl5_c1           default                  |       0.00019 |     1.238e-05   0.38 |      3.424e-09   0.10 | PASS
+NbCl5_c1           conv_fwd_variant=1       |       0.00019 |     1.360e-05   0.42 |      4.494e-09   0.13 | PASS
+NbCl5_c1           conv_fwd_variant=2       |       0.00019 |     1.335e-05   0.41 |      4.706e-09   0.14 | PASS
+--- /home/atuin/v130cb/v130cb18/loup-s64/models/MACE-POLAR-1-L.model --set crystals 05:52:12
+crystals set: NaCl_c0 (216), NaCl_c1 (216), NaNbO3_c0 (360), NaNbO3_c1 (360), NbCl5_c0 (216), NbCl5_c1 (216)
+NaCl_c0            default                  |       0.00022 |     1.949e-06   0.58 |      6.588e-09   0.20 | PASS
+NaCl_c1            default                  |       0.00004 |     3.876e-06   0.70 |      4.571e-09   0.14 | PASS
+NaNbO3_c0          default                  |       0.01702 |     2.286e-02   0.52 |      9.486e-05   0.47 | PASS
+NaNbO3_c1          default                  |       0.00007 |     7.394e-05   1.20 |      3.549e-07   0.27 | PASS
+NbCl5_c0           default                  |       0.00013 |     1.606e-05   0.62 |      1.056e-08   0.32 | PASS
+NbCl5_c1           default                  |       0.00000 |     1.811e-04   1.32 |      3.622e-08   0.80 | PASS
+--- /home/atuin/v130cb/v130cb18/loup-s64/models/MACE-POLAR-1-S.model --set crystals 05:58:03
+crystals set: NaCl_c0 (216), NaCl_c1 (216), NaNbO3_c1 (360), NbCl5_c0 (216), NbCl5_c1 (216)
+NaCl_c0            default                  |       0.00017 |     1.403e-06   0.32 |      5.428e-09   0.10 | PASS
+NaCl_c1            default                  |       0.00022 |     2.994e-06   0.47 |      2.731e-08   0.72 | PASS
+NaNbO3_c1          default                  |       0.00218 |     2.660e-03   0.16 |      9.125e-06   0.16 | PASS
+NbCl5_c0           default                  |       0.00002 |     9.315e-06   0.45 |      5.959e-09   0.18 | PASS
+NbCl5_c1           default                  |       0.00001 |     8.724e-06   0.24 |      3.446e-09   0.10 | PASS
+##### gates done 2026-11-17 06:03:16: 0 failing gate runs
+=== JOB_STATISTICS ===
+=== current date     : Tue Nov 17 06:03:16 CET 2026
+= Job-ID             : 5014324 on alex
+= Job-Name           : loup-s86g
+= Job-Command        : /home/atuin/v130cb/v130cb18/loup-s64/alex64/s86g.sh
+= Initial workdir    : /home/atuin/v130cb/v130cb18/loup-s64
+= Queue/Partition    : a100
+= Slurm account      : v130cb with QOS=normal
+= Features           : a100_40
+= Requested resources:  for 01:00:00
+= Elapsed runtime    : 00:18:44
+= Total RAM usage    : 5.1 GiB of assigned  GiB (%)
+= Node list          : a0701
+= Subm/Elig/Start/End: 2026-11-16T11:31:50 / 2026-11-16T11:31:50 / 2026-11-17T05:44:32 / 2026-11-17T06:03:16
+======================
+=== Quota infos ======
+    Path                 Used     SoftQ    HardQ    Gracetime  Filec    FileQ    FiHaQ    FileGrace    
+    /home/hpc              66.2G   104.9G   209.7G        N/A   2,787      300K     400K        N/A    
+    /home/vault             0.0K  1048.6G  2097.2G        N/A       1      200K     400K        N/A    
+    /home/atuin            30.6G     0.0K     0.0K        N/A     101K                          N/A    
+    /lustre                 4.0K     0.0K     0.0K        N/A       1       80K     250K        N/A    
+======================
+=== GPU utilization ==
+gpu_name, gpu_bus_id, pid, gpu_utilization [%], mem_utilization [%], max_memory_usage [MiB], time [ms]
+NVIDIA A100-SXM4-40GB, 00000000:D1:00.0, 806083, 0 %, 0 %, 4324 MiB, 383794 ms
+NVIDIA A100-SXM4-40GB, 00000000:D1:00.0, 808290, 0 %, 0 %, 2944 MiB, 326539 ms
+NVIDIA A100-SXM4-40GB, 00000000:D1:00.0, 810215, 0 %, 0 %, 1036 MiB, 304222 ms

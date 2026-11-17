@@ -1,0 +1,82 @@
+### Starting TaskPrologue of job 5012939 on a0701 at Tue Nov 17 04:51:36 AM CET 2026
+Running on cores 32-47 with governor schedutil
+Tue Nov 17 04:51:36 2026       
++-----------------------------------------------------------------------------------------+
+| NVIDIA-SMI 615.71.10              KMD Version: 615.71.10     CUDA UMD Version: 13.4     |
++-----------------------------------------+------------------------+----------------------+
+| GPU  Name                 Persistence-M | Bus-Id          Disp.A | Volatile Uncorr. ECC |
+| Fan  Temp   Perf          Pwr:Usage/Cap |           Memory-Usage | GPU-Util  Compute M. |
+|                                         |                        |               MIG M. |
+|=========================================+========================+======================|
+|   0  NVIDIA A100-SXM4-40GB          On  |   00000000:90:00.0 Off |                    0 |
+| N/A   33C    P0             53W /  400W |       0MiB /  40960MiB |      0%      Default |
+|                                         |                        |             Disabled |
++-----------------------------------------+------------------------+----------------------+
+
++-----------------------------------------------------------------------------------------+
+| Processes:                                                                              |
+|  GPU   GI   CI              PID   Type   Process name                        GPU Memory |
+|        ID   ID                                                               Usage      |
+|=========================================================================================|
+|  No running processes found                                                             |
++-----------------------------------------------------------------------------------------+
+### Finished TaskPrologue
+
+=== 2026-11-17 04:55:08 a0701 lib /home/atuin/v130cb/v130cb18/loup-s64/src/libloupmd_s81.so
+--- mace-omat-0-medium.model srtio3 --generic 04:55:08
+mace-omat-0-medium.model srtio3 (5000 atoms) side 1 [-] vs 0: dE/atom 4.35e-07 meV, dF 8.25e-07 eV/A (|F|max 0.00), dS 2.15e-10
+mace-omat-0-medium.model srtio3 (5000 atoms) side 2 [LOUP_CONV_TUNE=1] vs 0: dE/atom 1.06e-06 meV, dF 7.68e-07 eV/A (|F|max 0.00), dS 1.21e-09
+generic layer 1 conv forward us: 0: 1026.0 1: 1018.9 2: 1074.2 -> 0
+mace-omat-0-medium.model srtio3 (5000 atoms) side 0 [-]: 4.5850 ms/step  ratio to side 0: 1.0000 (forward order 1.0000, reverse 1.0000)
+mace-omat-0-medium.model srtio3 (5000 atoms) side 1 [-]: 4.5947 ms/step  ratio to side 0: 1.0021 (forward order 1.0022, reverse 1.0020)
+mace-omat-0-medium.model srtio3 (5000 atoms) side 2 [LOUP_CONV_TUNE=1]: 4.5970 ms/step  ratio to side 0: 1.0026 (forward order 1.0034, reverse 1.0025)
+--- 2023-12-03-mace-128-L1_epoch-199.model srtio3 04:55:29
+2023-12-03-mace-128-L1_epoch-199.model srtio3 (5000 atoms) side 1 [-] vs 0: dE/atom 3.31e-07 meV, dF 7.62e-07 eV/A (|F|max 0.00), dS 4.42e-10
+2023-12-03-mace-128-L1_epoch-199.model srtio3 (5000 atoms) side 2 [LOUP_CONV_TUNE=1] vs 0: dE/atom 2.77e-07 meV, dF 6.75e-07 eV/A (|F|max 0.00), dS 7.73e-10
+generic layer 1 conv forward us: 0: 1043.5 1: 1016.8 2: 1080.3 -> 1
+2023-12-03-mace-128-L1_epoch-199.model srtio3 (5000 atoms) side 0 [-]: 4.6545 ms/step  ratio to side 0: 1.0000 (forward order 1.0000, reverse 1.0000)
+2023-12-03-mace-128-L1_epoch-199.model srtio3 (5000 atoms) side 1 [-]: 4.6469 ms/step  ratio to side 0: 0.9984 (forward order 0.9978, reverse 0.9985)
+2023-12-03-mace-128-L1_epoch-199.model srtio3 (5000 atoms) side 2 [LOUP_CONV_TUNE=1]: 4.6428 ms/step  ratio to side 0: 0.9975 (forward order 0.9975, reverse 0.9972)
+--- MACE-OFF24_medium.model water 04:56:01
+MACE-OFF24_medium.model water (5184 atoms) side 1 [-] vs 0: dE/atom 2.98e-07 meV, dF 3.73e-07 eV/A (|F|max 1.26), dS 4.48e-11
+MACE-OFF24_medium.model water (5184 atoms) side 2 [LOUP_CONV_TUNE=1] vs 0: dE/atom 2.30e-07 meV, dF 3.35e-07 eV/A (|F|max 1.26), dS 4.47e-11
+generic layer 1 conv forward us: 0: 1201.2 1: 1189.9 2: 1241.1 -> 0
+MACE-OFF24_medium.model water (5184 atoms) side 0 [-]: 5.3447 ms/step  ratio to side 0: 1.0000 (forward order 1.0000, reverse 1.0000)
+MACE-OFF24_medium.model water (5184 atoms) side 1 [-]: 5.3273 ms/step  ratio to side 0: 0.9967 (forward order 0.9990, reverse 0.9967)
+MACE-OFF24_medium.model water (5184 atoms) side 2 [LOUP_CONV_TUNE=1]: 5.3210 ms/step  ratio to side 0: 0.9956 (forward order 0.9995, reverse 0.9949)
+--- MACE-OFF23_medium.model water216 04:56:20
+MACE-OFF23_medium.model water216 (648 atoms) side 1 [-] vs 0: dE/atom 0.00e+00 meV, dF 3.86e-07 eV/A (|F|max 1.24), dS 3.93e-10
+MACE-OFF23_medium.model water216 (648 atoms) side 2 [LOUP_CONV_TUNE=1] vs 0: dE/atom 8.14e-06 meV, dF 4.38e-07 eV/A (|F|max 1.24), dS 4.87e-10
+generic layer 1 conv forward us: 0: 118.8 1: 113.7 2: 164.9 -> 1
+MACE-OFF23_medium.model water216 (648 atoms) side 0 [-]: 0.6907 ms/step  ratio to side 0: 1.0000 (forward order 1.0000, reverse 1.0000)
+MACE-OFF23_medium.model water216 (648 atoms) side 1 [-]: 0.6994 ms/step  ratio to side 0: 1.0126 (forward order 1.0125, reverse 1.0105)
+MACE-OFF23_medium.model water216 (648 atoms) side 2 [LOUP_CONV_TUNE=1]: 0.7070 ms/step  ratio to side 0: 1.0236 (forward order 1.0238, reverse 1.0270)
+##### done 2026-11-17 04:56:26
+=== JOB_STATISTICS ===
+=== current date     : Tue Nov 17 04:56:26 CET 2026
+= Job-ID             : 5012939 on alex
+= Job-Name           : loup-s83t
+= Job-Command        : /home/atuin/v130cb/v130cb18/loup-s64/alex64/s83t.sh
+= Initial workdir    : /home/atuin/v130cb/v130cb18/loup-s64
+= Queue/Partition    : a100
+= Slurm account      : v130cb with QOS=normal
+= Features           : a100_40
+= Requested resources:  for 01:00:00
+= Elapsed runtime    : 00:05:09
+= Total RAM usage    : 14.3 GiB of assigned  GiB (%)
+= Node list          : a0701
+= Subm/Elig/Start/End: 2026-11-16T07:57:17 / 2026-11-16T07:57:17 / 2026-11-17T04:51:17 / 2026-11-17T04:56:26
+======================
+=== Quota infos ======
+    Path                 Used     SoftQ    HardQ    Gracetime  Filec    FileQ    FiHaQ    FileGrace    
+    /home/hpc              66.2G   104.9G   209.7G        N/A   2,787      300K     400K        N/A    
+    /home/vault             0.0K  1048.6G  2097.2G        N/A       1      200K     400K        N/A    
+    /home/atuin            30.6G     0.0K     0.0K        N/A     101K                          N/A    
+    /lustre                 4.0K     0.0K     0.0K        N/A       1       80K     250K        N/A    
+======================
+=== GPU utilization ==
+gpu_name, gpu_bus_id, pid, gpu_utilization [%], mem_utilization [%], max_memory_usage [MiB], time [ms]
+NVIDIA A100-SXM4-40GB, 00000000:90:00.0, 695596, 63 %, 14 %, 2510 MiB, 19221 ms
+NVIDIA A100-SXM4-40GB, 00000000:90:00.0, 695663, 42 %, 11 %, 3058 MiB, 31487 ms
+NVIDIA A100-SXM4-40GB, 00000000:90:00.0, 696129, 79 %, 16 %, 2406 MiB, 18278 ms
+NVIDIA A100-SXM4-40GB, 00000000:90:00.0, 696194, 35 %, 3 %, 874 MiB, 5485 ms
