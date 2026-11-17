@@ -1814,3 +1814,11 @@ wavefront at 1,081,600 2,168.4 / 2,170.0 -> 2,169.1 / 2,168.9 ms (19 tiles eithe
 state forced at cap 65,536: 54 tiles, 6.49 s, no slot -> 64 tiles, 5.23 s, 38 full and 26 compact slots; the default
 plan unchanged (cap 32,768, 5.24 s). The plan's workspace estimate (rows = cap + halo) now overstates the largest caps
 (10.6 GB estimated, about 5 GB used at 65,536).
+
+`tile-slot-block` (O32): the 2,560,000-atom default plan's 125 slots of kept active edges (74 MB each by the slot's
+own count) took 10.6 GB, 1.4 GB more: six allocations per slot, each rounded up. The call then had 522 MB free
+against a 1,566 MB reserve. A slot is now one allocation cut at 256 B boundaries (full and compact slots alike):
+1,659 MB free after the slots. Library `253b3a5b` against `a8885e3a` (fresh plan folders): 320,000 atoms 586.2 /
+586.8 -> 586.2 / 585.7 ms; the wavefront at 1,081,600 (A B B A, then B A A B) 2,164.4 / 2,166.6 -> 2,173.1 / 2,172.6
+and 2,168.6 / 2,173.0 -> 2,157.0 / 2,164.1 ms (a tie); 2,560,000 atoms 5,243.5 -> 5,285.3 (one each), then A B B A
+5,236.5 / 5,239.7 -> 5,252.9 / 5,249.0 ms (b / a about 1.003-1.004, at the noise). Tiled tests 55 passed.

@@ -28,6 +28,7 @@
 #include <tuple>
 #include <algorithm>
 #include <cmath>
+#include <initializer_list>
 #include <limits>
 #include <cstring>
 #include <atomic>
@@ -4791,14 +4792,37 @@ struct HostPipe {
 };
 
 // One tile's active edges, sized for the longest list (TileList::act_slot)
+// O32: a slot is one allocation (blk) cut into its arrays at 256 B boundaries: six allocations per slot each took
+// about 2 MB more than asked (2,560,000 atoms: 125 slots of 74 MB took 10.6 GB, 1.4 GB beyond the plan, into the
+// reserve)
+struct SlotView {
+    void* p = nullptr;  // within the slot's blk, not owned
+};
 struct ActiveSlot {
-    DeviceBufferGuard row_ptr, senders, receivers, pairs, vec_len, slab, t_sx;
+    DeviceBufferGuard blk;
+    SlotView row_ptr, senders, receivers, vec_len, slab, t_sx;
 };
 // O32: a compact slot (tiles of compact lists): the active edges' row pointers, senders and integer image shifts, 8 B
 // per edge instead of ActiveSlot's 40; a later sweep restores the rest (tile_restore_active_kernel)
 struct CompactSlot {
-    DeviceBufferGuard row_ptr, senders, code;
+    DeviceBufferGuard blk;
+    SlotView row_ptr, senders, code;
 };
+// cuts blk into views of the given sizes (each at a 256 B boundary); false when the allocation fails
+inline bool alloc_slot(DeviceBufferGuard& blk, std::initializer_list<std::pair<SlotView*, size_t>> parts) {
+    size_t total = 0;
+    for (const auto& pt : parts) total += (pt.second + 255) / 256 * 256;
+    if (cudaMalloc(&blk.p, std::max<size_t>(total, 256)) != cudaSuccess) {
+        blk.p = nullptr;
+        return false;
+    }
+    size_t off = 0;
+    for (const auto& pt : parts) {
+        pt.first->p = static_cast<char*>(blk.p) + off;
+        off += (pt.second + 255) / 256 * 256;
+    }
+    return true;
+}
 
 // The tiled call's state kept on the handle between calls (S5-T06). Never copied: its buffers free themselves.
 struct TiledState {
@@ -5983,16 +6007,12 @@ static int evaluate_tiled_impl(LoupHandle* h, int n_atoms, const int* atomic_num
         int got = 0;
         for (int64_t k = 0; k < want; ++k) {
             ActiveSlot& sl = st->act_slots[(size_t)k];
-            bool ok = true;
-            auto get = [&](DeviceBufferGuard& g, size_t bytes) {
-                if (ok && cudaMalloc(&g.p, bytes) != cudaSuccess) { g.p = nullptr; ok = false; }
-            };
-            get(sl.row_ptr, (size_t)(st->max_rows + 1) * sizeof(int));
-            get(sl.senders, E * sizeof(int));
-            get(sl.receivers, E * sizeof(int));
-            get(sl.slab, E * sizeof(int));  // O32: no pairs (the generic sweeps do not read them)
-            get(sl.vec_len, E * sizeof(float4));
-            get(sl.t_sx, E * sizeof(float2));
+            const bool ok = alloc_slot(sl.blk, {{&sl.row_ptr, (size_t)(st->max_rows + 1) * sizeof(int)},
+                                                {&sl.senders, E * sizeof(int)},
+                                                {&sl.receivers, E * sizeof(int)},
+                                                {&sl.slab, E * sizeof(int)},  // O32: no pairs (no sweep reads them)
+                                                {&sl.vec_len, E * sizeof(float4)},
+                                                {&sl.t_sx, E * sizeof(float2)}});
             if (!ok) {  // out of memory after all: the slots so far (the rest free their buffers with the state)
                 (void)cudaGetLastError();
                 break;
@@ -6013,13 +6033,9 @@ static int evaluate_tiled_impl(LoupHandle* h, int n_atoms, const int* atomic_num
             st->cact_slots = std::vector<CompactSlot>((size_t)std::max<int64_t>(want_c, 0));
             int got_c = 0;
             for (CompactSlot& cs : st->cact_slots) {
-                bool ok = true;
-                auto get = [&](DeviceBufferGuard& g, size_t bytes) {
-                    if (ok && cudaMalloc(&g.p, bytes) != cudaSuccess) { g.p = nullptr; ok = false; }
-                };
-                get(cs.row_ptr, (size_t)(st->max_rows + 1) * sizeof(int));
-                get(cs.senders, E * sizeof(int));
-                get(cs.code, E * sizeof(char4));
+                const bool ok = alloc_slot(cs.blk, {{&cs.row_ptr, (size_t)(st->max_rows + 1) * sizeof(int)},
+                                                    {&cs.senders, E * sizeof(int)},
+                                                    {&cs.code, E * sizeof(char4)}});
                 if (!ok) {
                     (void)cudaGetLastError();
                     break;
@@ -6062,6 +6078,7 @@ static int evaluate_tiled_impl(LoupHandle* h, int n_atoms, const int* atomic_num
         if (tile_times)
             std::fprintf(stderr, "tile active edges: %d slots, %lld tiles in flight (%.0f MB each, free %.0f MB)\n",
                          st->act_keep, (long long)in_flight, slot_bytes / 1e6, (double)free_b / 1e6);
+        tick("slots set up");
     }
     for (const TileList& t : lists) t.act_slot = t.cact_slot = -1;  // a failed call may have left slots taken
     st->act_free.clear();
