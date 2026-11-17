@@ -1924,7 +1924,7 @@ to +4.2%, 135,000 +10%). 4 of 35 plans change; tiled, memory-plan, capacity and 
 | 5,000,000 | 10.27 s, 13.05 GiB | 10.39 s, 7.22 GiB | 10.59 s, 5.04 GiB | 10.69 s, 3.62 GiB |
 
 Kept calls, one run each (two at 1.08M / 0.9): from a million atoms a quarter of the card costs 2-4% of the time at
-0.9.
+0.9. All of `tests/gpu` on the installed library at 97e365d: 413 passed, 8 skipped (the NbCl5 structure).
 
 `tile-wave-host-bus` (O32, NEUTRAL, not adopted; local branch `wip/tile-wave-host-bus`): the wavefront's host pool
 mapped, its ghost gathers, gradient adds (plain adds in rounds of distinct host rows) and block zeroing as kernels on
