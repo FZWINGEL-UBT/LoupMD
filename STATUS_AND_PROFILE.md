@@ -1874,3 +1874,19 @@ short (fraction 0.75): 3,524,845 atoms cap 32,768 -> 49,152, 5,000,000 24,576 ->
 216; the grid fit by rows decides them), the same peak (10.85, 10.83 GiB) and tied times (A B A B: 7,196 / 7,206
 against 7,218 / 7,236 ms; 10,284 / 10,228 against 10,222 / 10,282 ms). Reverted: the better estimate does not change
 what runs.
+
+8,008,065 atoms (SrTiO3 117^3, fraction 0.9, library `7f0bf882`): the default plan is the device wavefront at cap 6,144
+(2,016 tiles, row pool 1.83M rows, host lists), kept call 17,243 ms, peak 13.10 GiB. The plain host state forced
+(`LOUP_TILE_HOST_STATE=1`) plans cap 16,384 (512 tiles, 23.9 GB pinned host memory) and runs 16,592 ms, peak 12.97 GiB:
+3.8% faster in one run each. The plan does not take it because the host state's 23.9 GB is at the 60% of
+`MemAvailable` the plan allows (40 GB in this WSL); left as is. The forced wavefront host pool at this size took the
+WSL distro down (the force skips the host-memory check), and a second forced host-pool run at 1,081,600 atoms (2.7 GB
+planned, the host path) did the same a few minutes later; no forced host-pool runs after that.
+
+`tile-wave-host-bus` (O32, not adopted; local branch `wip/tile-wave-host-bus`): the wavefront's host pool mapped, its
+ghost gathers, gradient adds (plain adds in rounds of distinct host rows) and block zeroing as kernels on the stream
+instead of host work after a synchronisation. `tests/gpu/test_tiled.py -k "wavefront or host"` 39 passed; not timed
+(the WSL failures above). While writing it: the host path's gradient adds split a tile's rows over host threads, and a
+tile whose ghosts hold an image of one of its own rows (grids with one tile along an axis) can add into one host row
+from two threads at once. Not seen in a result (the wavefront host pool runs only forced or where the plain host state
+does not fit); the branch's rounds avoid it.
