@@ -1822,3 +1822,17 @@ against a 1,566 MB reserve. A slot is now one allocation cut at 256 B boundaries
 586.8 -> 586.2 / 585.7 ms; the wavefront at 1,081,600 (A B B A, then B A A B) 2,164.4 / 2,166.6 -> 2,173.1 / 2,172.6
 and 2,168.6 / 2,173.0 -> 2,157.0 / 2,164.1 ms (a tie); 2,560,000 atoms 5,243.5 -> 5,285.3 (one each), then A B B A
 5,236.5 / 5,239.7 -> 5,252.9 / 5,249.0 ms (b / a about 1.003-1.004, at the noise). Tiled tests 55 passed.
+Correction: the 1.14 GB did not repeat. Later runs of the same library had 537-541 MB free after the slots, and
+cudaMalloc alone (125 slots of the same sizes) takes 9,456 MB as six allocations each and 9,437 MB as one: about
+20 MB apart. The free memory read in the call moves by about a gigabyte between runs; `tile-list-arena` below
+compares two runs per side.
+
+`tile-list-arena` (O32): cudaMalloc alone on the RTX 5060 Ti (WSL) takes about 1.3 MB more than asked per allocation
+of a few MB, cut or not: 891 tile lists of the 2,560,000-atom device plan's sizes 2,606 MB asked, 3,737 MB used. The
+tile lists' device arrays now come from chunks of 128 MB (an arena on the tiled state), and all full slots from one
+chunk, all compact slots from another (one allocation each where that fails). Library `1ce7922d` against `253b3a5b`
+(two runs each): the device plan's list builds 3,072 -> 2,550 MB, free after the slots 0 -> 468-471 MB; the default
+plan (125 tiles, host state) free after the slots 537-541 -> 1,860 MB (both runs). Times: 2,560,000 atoms device plan
+5,739.7 / 5,754.4 -> 5,738.7 / 5,734.7 ms, default plan 5,249.3 / 5,247.0 -> 5,238.8 / 5,242.8 ms; 320,000 atoms
+585.0 / 589.6 -> 585.7 / 585.6 ms; the wavefront at 1,081,600 2,163.1 / 2,145.4 -> 2,168.8 / 2,163.9 ms (within its
+2,145-2,173 ms spread across this session's runs). Tiled tests 55 passed.

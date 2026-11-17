@@ -4695,11 +4695,69 @@ static int reshape_domain(LoupHandle* h, int n_local, int n_ghost, const int* at
 
 // A tile's list, kept on the device for the sweeps of one call: everything a sweep reads of the handle's domain.
 namespace {
+// O32: a view into one allocation cut into several arrays (alloc_slot): not owned. One allocation instead of several
+// because each cudaMalloc here took about 2 MB more than asked (tile-slot-block).
+struct SlotView {
+    void* p = nullptr;
+};
+// O32: the tile lists' device arrays from a few large chunks instead of an allocation per tile: each allocation of a
+// few MB took about 1.3 MB more than asked on the RTX 5060 Ti (WSL), 891 lists of the 2,560,000-atom device plan 1.1
+// GB (cudaMalloc alone: 2,606 MB asked, 3,737 MB used; tile-list-arena)
+struct DeviceArena {
+    std::vector<std::unique_ptr<DeviceBufferGuard>> chunks;
+    size_t used = 0, cap = 0;
+    size_t chunk = (size_t)128 << 20;  // the size of a new chunk (or the request, when larger)
+    void* get(size_t bytes) {  // nullptr when the device is out of memory
+        bytes = (bytes + 255) / 256 * 256;
+        if (chunks.empty() || used + bytes > cap) {
+            const size_t want = std::max<size_t>(bytes, chunk);
+            auto g = std::make_unique<DeviceBufferGuard>();
+            if (cudaMalloc(&g->p, want) != cudaSuccess) {
+                g->p = nullptr;
+                (void)cudaGetLastError();
+                return nullptr;
+            }
+            chunks.push_back(std::move(g));
+            used = 0;
+            cap = want;
+        }
+        void* p = static_cast<char*>(chunks.back()->p) + used;
+        used += bytes;
+        return p;
+    }
+};
+// cuts one allocation (blk, or from the arena when one is given) into views of the given sizes (each at a 256 B
+// boundary); false when the device is out of memory
+inline bool alloc_slot(DeviceBufferGuard& blk, std::initializer_list<std::pair<SlotView*, size_t>> parts,
+                       DeviceArena* arena = nullptr) {
+    size_t total = 0;
+    for (const auto& pt : parts) total += (pt.second + 255) / 256 * 256;
+    total = std::max<size_t>(total, 256);
+    char* base = nullptr;
+    if (arena) {
+        base = static_cast<char*>(arena->get(total));
+        if (!base) return false;
+    } else {
+        if (cudaMalloc(&blk.p, total) != cudaSuccess) {
+            blk.p = nullptr;
+            return false;
+        }
+        base = static_cast<char*>(blk.p);
+    }
+    size_t off = 0;
+    for (const auto& pt : parts) {
+        pt.first->p = base + off;
+        off += (pt.second + 255) / 256 * 256;
+    }
+    return true;
+}
 struct TileList {
     int n_local = 0, rows = 0, E = 0;
     double e0 = 0.0, box[9] = {0, 0, 0, 0, 0, 0, 0, 0, 0};
     std::vector<int> perm, species_start, species_count;
-    DeviceBufferGuard species, pos, row_ptr, senders, receivers, pairs, shift, row_atom;
+    // O32: one allocation (blk) cut into the arrays below (tile-slot-block's rounding: about 2 MB per allocation)
+    DeviceBufferGuard blk;
+    SlotView species, pos, row_ptr, senders, receivers, pairs, shift, row_atom;
     // O31 (S5-T07): with host lists the edge arrays (senders, receivers, pairs, shifts: 36 B per edge) live in one
     // block of mapped pinned host memory instead of `senders` ... `shift`, and the pointers below are its device view
     HostBufferGuard host_edges;
@@ -4710,8 +4768,8 @@ struct TileList {
     bool compact = false;
     const int* h_csnd = nullptr;  // device views: of host_edges, or of senders and ccode (device lists, compact)
     const char4* h_ccode = nullptr;
-    DeviceBufferGuard ccode;      // a compact device list's integer image shifts
-    DeviceBufferGuard offset;  // [rows, 3] a row's place in the tile less its atom's position at the build
+    SlotView ccode;      // a compact device list's integer image shifts
+    SlotView offset;  // [rows, 3] a row's place in the tile less its atom's position at the build
     DeviceBufferGuard row_slot;  // the wavefront (S5-T08): [rows] each row's atom's row in the pool of x and dx
     // The active edges (r < r_max) of this call's positions: compacted in the tile's first sweep of a call into a
     // slot of TiledState::act_slots when one is free, read from it by its later sweeps (O31: the compaction ran in
@@ -4795,9 +4853,6 @@ struct HostPipe {
 // O32: a slot is one allocation (blk) cut into its arrays at 256 B boundaries: six allocations per slot each took
 // about 2 MB more than asked (2,560,000 atoms: 125 slots of 74 MB took 10.6 GB, 1.4 GB beyond the plan, into the
 // reserve)
-struct SlotView {
-    void* p = nullptr;  // within the slot's blk, not owned
-};
 struct ActiveSlot {
     DeviceBufferGuard blk;
     SlotView row_ptr, senders, receivers, vec_len, slab, t_sx;
@@ -4808,21 +4863,6 @@ struct CompactSlot {
     DeviceBufferGuard blk;
     SlotView row_ptr, senders, code;
 };
-// cuts blk into views of the given sizes (each at a 256 B boundary); false when the allocation fails
-inline bool alloc_slot(DeviceBufferGuard& blk, std::initializer_list<std::pair<SlotView*, size_t>> parts) {
-    size_t total = 0;
-    for (const auto& pt : parts) total += (pt.second + 255) / 256 * 256;
-    if (cudaMalloc(&blk.p, std::max<size_t>(total, 256)) != cudaSuccess) {
-        blk.p = nullptr;
-        return false;
-    }
-    size_t off = 0;
-    for (const auto& pt : parts) {
-        pt.first->p = static_cast<char*>(blk.p) + off;
-        off += (pt.second + 255) / 256 * 256;
-    }
-    return true;
-}
 
 // The tiled call's state kept on the handle between calls (S5-T06). Never copied: its buffers free themselves.
 struct TiledState {
@@ -4855,6 +4895,8 @@ struct TiledState {
     HostPipe hp;
     StageRing ring;
     std::vector<int> z;
+    DeviceArena list_arena;  // O32: the lists' device arrays (tile-list-arena)
+    DeviceArena slot_arena, cslot_arena;  // O32: the slots' (act_slots, cact_slots)
     std::vector<TileList> lists;
     DeviceBufferGuard whole_pos, ref_pos, disp2;  // [n, 3] this call's and the build's positions; one 64-bit word
     std::vector<DeviceBufferGuard> x, dx;         // [(L - 1) * 4] layer outputs and their gradients, whole system
@@ -5015,7 +5057,7 @@ static bool device_compact() {
 
 // Sets the workspace up as `t`'s domain, builds its list and keeps a copy of it in `out`.
 static int build_tile_list(LoupHandle* h, const TileDomain& t, const double* positions, TileList& out,
-                           bool host_lists) {
+                           bool host_lists, DeviceArena* arena) {
     if (reshape_domain(h, t.n_local, t.n_ghost(), t.z.data()) != 0) return -1;
     if (upload_positions(h, t.place.data(), t.box) < 0) return -1;
     if (rebuild_neighbors(h) != 0) return -1;
@@ -5023,32 +5065,49 @@ static int build_tile_list(LoupHandle* h, const TileDomain& t, const double* pos
     out.n_local = N; out.rows = rows; out.E = E; out.e0 = h->e0_total;
     std::copy(t.box, t.box + 9, out.box);
     out.perm = h->perm; out.species_start = h->species_start; out.species_count = h->species_count;
-    auto keep = [&](DeviceBufferGuard& g, const void* src, size_t bytes) -> int {
-        CUDA_CHECK(cudaMalloc(&g.p, std::max<size_t>(bytes, 1)));
+    auto keep = [&](SlotView& g, const void* src, size_t bytes) -> int {
         if (bytes) CUDA_CHECK(cudaMemcpyAsync(g.p, src, bytes, cudaMemcpyDeviceToDevice, h->stream));
         return 0;
     };
-    if (keep(out.species, h->d_species, (size_t)rows * sizeof(int)) ||
-        keep(out.pos, h->d_pos64, (size_t)rows * 3 * sizeof(double)) ||
-        keep(out.row_ptr, h->d_row_ptr, (size_t)(N + 1) * sizeof(int)))
-        return -1;
-    if (!host_lists && device_compact() && E > 0) {  // O32: compact on the device too, where every shift fits
-        CUDA_CHECK(cudaMalloc(&out.ccode.p, (size_t)E * 4));
+    // O32: compact on the device too, where every shift fits: the codes first into a scratch buffer, then the tile's
+    // one allocation in the form found
+    DeviceBufferGuard dcode;
+    bool dev_compact = false;
+    if (!host_lists && device_compact() && E > 0) {
+        CUDA_CHECK(cudaMalloc(&dcode.p, (size_t)E * 4));
         CUDA_CHECK(cudaMemsetAsync(h->d_order_err, 0, sizeof(int), h->stream));
         tile_encode_edges_kernel<<<(E + 255) / 256, 256, 0, h->stream>>>(
-            E, h->cell, h->d_shift_cart, static_cast<char4*>(out.ccode.p), h->d_order_err);
+            E, h->cell, h->d_shift_cart, static_cast<char4*>(dcode.p), h->d_order_err);
         int bad = 0;
         CUDA_CHECK(cudaMemcpyAsync(&bad, h->d_order_err, sizeof(int), cudaMemcpyDeviceToHost, h->stream));
         CUDA_CHECK(cudaStreamSynchronize(h->stream));
-        if (bad) {
-            cudaFree(out.ccode.p);
-            out.ccode.p = nullptr;
-        } else {
-            if (keep(out.senders, h->d_senders, (size_t)E * sizeof(int))) return -1;
-            out.h_csnd = static_cast<const int*>(out.senders.p);
-            out.h_ccode = static_cast<const char4*>(out.ccode.p);
-            out.compact = true;
-        }
+        dev_compact = !bad;
+    }
+    const size_t eb = (size_t)E * sizeof(int), row_b = (size_t)rows * sizeof(int);
+    const bool full_dev = !host_lists && !dev_compact;
+    if (!alloc_slot(out.blk, {{&out.species, row_b},
+                              {&out.pos, (size_t)rows * 3 * sizeof(double)},
+                              {&out.row_ptr, (size_t)(N + 1) * sizeof(int)},
+                              {&out.row_atom, row_b},
+                              {&out.offset, (size_t)rows * 3 * sizeof(double)},
+                              {&out.senders, (dev_compact || full_dev) ? eb : 0},
+                              {&out.ccode, dev_compact ? eb : 0},
+                              {&out.receivers, full_dev ? eb : 0},
+                              {&out.pairs, full_dev ? eb : 0},
+                              {&out.shift, full_dev ? (size_t)E * 3 * sizeof(double) : 0}},
+                    arena)) {
+        (void)cudaGetLastError();
+        loup::set_error("tile list: out of device memory");
+        return -1;
+    }
+    if (keep(out.species, h->d_species, row_b) || keep(out.pos, h->d_pos64, (size_t)rows * 3 * sizeof(double)) ||
+        keep(out.row_ptr, h->d_row_ptr, (size_t)(N + 1) * sizeof(int)))
+        return -1;
+    if (dev_compact) {
+        if (keep(out.ccode, dcode.p, eb) || keep(out.senders, h->d_senders, eb)) return -1;
+        out.h_csnd = static_cast<const int*>(out.senders.p);
+        out.h_ccode = static_cast<const char4*>(out.ccode.p);
+        out.compact = true;
     }
     if (host_lists && host_compact() && E > 0) {  // O32: the compact form where every shift fits
         DeviceBufferGuard code;
@@ -5107,11 +5166,9 @@ static int build_tile_list(LoupHandle* h, const TileDomain& t, const double* pos
         for (int c = 0; c < 3; ++c)
             offset[(size_t)dst * 3 + c] = t.place[(size_t)src * 3 + c] - positions[(int64_t)map[dst] * 3 + c];
     }
-    CUDA_CHECK(cudaMalloc(&out.row_atom.p, (size_t)rows * sizeof(int)));
     CUDA_CHECK(cudaMemcpyAsync(out.row_atom.p, map.data(), (size_t)rows * sizeof(int), cudaMemcpyHostToDevice,
                                h->stream));
     out.h_row_atom = map;
-    CUDA_CHECK(cudaMalloc(&out.offset.p, offset.size() * sizeof(double)));
     CUDA_CHECK(cudaMemcpyAsync(out.offset.p, offset.data(), offset.size() * sizeof(double), cudaMemcpyHostToDevice,
                                h->stream));
     CUDA_CHECK(cudaStreamSynchronize(h->stream));  // `map` and `offset` go out of scope
@@ -5705,7 +5762,7 @@ static int evaluate_tiled_impl(LoupHandle* h, int n_atoms, const int* atomic_num
         int max_edges = 0;
         for (int64_t k = 0; k < T; ++k) {
             TileList& tl = st->lists[(size_t)k];
-            if (build_tile_list(h, tiles[(size_t)k], positions, tl, host_lists) != 0) {
+            if (build_tile_list(h, tiles[(size_t)k], positions, tl, host_lists, &st->list_arena) != 0) {
                 release_tiled_state(h);
                 return -1;
             }
@@ -6005,14 +6062,24 @@ static int evaluate_tiled_impl(LoupHandle* h, int n_atoms, const int* atomic_num
         st->act_slots = std::vector<ActiveSlot>((size_t)want);
         const size_t E = (size_t)std::max(st->max_edges, 1);
         int got = 0;
+        // O32: all slots in one chunk where it fits, else one each (tile-list-arena)
+        st->slot_arena.chunk = (size_t)std::max<int64_t>(want, 0) * (size_t)(slot_bytes + 6 * 256);
         for (int64_t k = 0; k < want; ++k) {
             ActiveSlot& sl = st->act_slots[(size_t)k];
-            const bool ok = alloc_slot(sl.blk, {{&sl.row_ptr, (size_t)(st->max_rows + 1) * sizeof(int)},
-                                                {&sl.senders, E * sizeof(int)},
-                                                {&sl.receivers, E * sizeof(int)},
-                                                {&sl.slab, E * sizeof(int)},  // O32: no pairs (no sweep reads them)
-                                                {&sl.vec_len, E * sizeof(float4)},
-                                                {&sl.t_sx, E * sizeof(float2)}});
+            auto take = [&] {
+                return alloc_slot(sl.blk, {{&sl.row_ptr, (size_t)(st->max_rows + 1) * sizeof(int)},
+                                           {&sl.senders, E * sizeof(int)},
+                                           {&sl.receivers, E * sizeof(int)},
+                                           {&sl.slab, E * sizeof(int)},  // O32: no pairs (no sweep reads them)
+                                           {&sl.vec_len, E * sizeof(float4)},
+                                           {&sl.t_sx, E * sizeof(float2)}},
+                                  &st->slot_arena);
+            };
+            bool ok = take();
+            if (!ok && st->slot_arena.chunks.empty()) {
+                st->slot_arena.chunk = 0;
+                ok = take();
+            }
             if (!ok) {  // out of memory after all: the slots so far (the rest free their buffers with the state)
                 (void)cudaGetLastError();
                 break;
@@ -6032,10 +6099,19 @@ static int evaluate_tiled_impl(LoupHandle* h, int n_atoms, const int* atomic_num
                 want_c = any_compact ? std::min<int64_t>(in_flight - got, std::max(0LL, std::atoll(e))) : 0;
             st->cact_slots = std::vector<CompactSlot>((size_t)std::max<int64_t>(want_c, 0));
             int got_c = 0;
+            st->cslot_arena.chunk = st->cact_slots.size() * (size_t)(cslot_bytes + 3 * 256);
             for (CompactSlot& cs : st->cact_slots) {
-                const bool ok = alloc_slot(cs.blk, {{&cs.row_ptr, (size_t)(st->max_rows + 1) * sizeof(int)},
-                                                    {&cs.senders, E * sizeof(int)},
-                                                    {&cs.code, E * sizeof(char4)}});
+                auto take = [&] {
+                    return alloc_slot(cs.blk, {{&cs.row_ptr, (size_t)(st->max_rows + 1) * sizeof(int)},
+                                               {&cs.senders, E * sizeof(int)},
+                                               {&cs.code, E * sizeof(char4)}},
+                                      &st->cslot_arena);
+                };
+                bool ok = take();
+                if (!ok && st->cslot_arena.chunks.empty()) {
+                    st->cslot_arena.chunk = 0;
+                    ok = take();
+                }
                 if (!ok) {
                     (void)cudaGetLastError();
                     break;
