@@ -4967,12 +4967,17 @@ static bool pinned_take(LoupHandle* h, HostBufferGuard& g, size_t bytes, bool ma
         v.erase(v.begin() + (std::ptrdiff_t)best);
         return true;
     }
-    if (cudaHostAlloc(&g.p, bytes, mapped ? cudaHostAllocMapped : cudaHostAllocDefault) != cudaSuccess) {
+    // a new buffer has 1/32 room to grow: the first list rebuild after the atoms moved asks a little more than the
+    // first call's buffers and found no spare (2,560,000 atoms: 10.22 s, 2.47 s of it host windows and 0.56 s state
+    // buffers, against 7.06 s with the room; later rebuilds 7.1-7.2 s either way; tile-pinned-headroom). The plan's
+    // host estimate does not count it (3%).
+    const size_t want = bytes + bytes / 32;
+    if (cudaHostAlloc(&g.p, want, mapped ? cudaHostAllocMapped : cudaHostAllocDefault) != cudaSuccess) {
         g.p = nullptr;
         (void)cudaGetLastError();
         return false;
     }
-    g.n = bytes;
+    g.n = want;
     return true;
 }
 

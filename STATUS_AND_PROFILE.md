@@ -1949,3 +1949,9 @@ rebuilds (an open question for the rebuild cost). Measured (`tile-host-state-dev
 calls after a move past half the skin, the forced device-lists plan at 49,152 rebuilds in 6.7 s against the
 default's 7.1-10.1 s at the same kept time, but a planner rule for device lists changed 5 of 20 plans to caps no
 larger than before, where kept calls tie or lose up to 2% and rebuilds are mixed; reverted.
+
+`tile-pinned-headroom` (O32, ADOPTED, 5060 Ti only): the first list rebuild after the atoms moved found no spare pinned
+buffer large enough and allocated anew (2,560,000 atoms: 10.22 s against 7.1-7.2 s for later rebuilds; 2.47 s host
+windows, 0.56 s state buffers). New pinned buffers now have 1/32 room: first rebuild 7.06 / 7.09 s, kept calls
+unchanged (5.23-5.25 s); 8M atoms first / second rebuild 23.06 / 22.79 s. Pinned host memory +3%, not in the plan's
+host estimate. Tiled, memory-plan and tiled-MD tests 71 passed.
