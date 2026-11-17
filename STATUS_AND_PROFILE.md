@@ -1954,4 +1954,6 @@ larger than before, where kept calls tie or lose up to 2% and rebuilds are mixed
 buffer large enough and allocated anew (2,560,000 atoms: 10.22 s against 7.1-7.2 s for later rebuilds; 2.47 s host
 windows, 0.56 s state buffers). New pinned buffers now have 1/32 room: first rebuild 7.06 / 7.09 s, kept calls
 unchanged (5.23-5.25 s); 8M atoms first / second rebuild 23.06 / 22.79 s. Pinned host memory +3%, not in the plan's
-host estimate. Tiled, memory-plan and tiled-MD tests 71 passed.
+host estimate. Tiled, memory-plan and tiled-MD tests 71 passed; on the installed library at f0406bf with the
+kernel-plugin test's bounds at the gate's floors (b5a0b62) all of `tests/gpu` (fast, full and acceptance) 412 passed,
+8 skipped (the NbCl5 structure).
