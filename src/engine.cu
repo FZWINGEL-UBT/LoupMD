@@ -512,9 +512,13 @@ struct LoupHandle {
         }
         if (ovr.wp_threads) wp_threads = ovr.wp_threads;
     }
-    // S96: on cc 12.0 the receiver-owned w' also wins below 512 atoms (SrTiO3 40 / 135 / 320 atoms 0.984 / 0.953 /
-    // 0.967 of the step); other GPUs keep the S3 threshold (the edge-tiled kernel there is unmeasured against it).
-    bool use_wprime_rcv_at(int n) const { return ovr.wprime_rcv >= 0 ? ovr.wprime_rcv == 1 : (is_sm120 || n >= 512); }
+    // Receiver-owned w' below 512 atoms too (`wprime_rcv_small`): it wins there on cc 12.0 (S96: SrTiO3 40 / 135 / 320
+    // atoms 0.984 / 0.953 / 0.967 of the step) and cc 8.0 (S114, A100: 0.994 / 0.989 / 0.968); other GPUs keep the S3
+    // threshold (the edge-tiled kernel there is unmeasured against it).
+    bool wprime_rcv_small = false;
+    bool use_wprime_rcv_at(int n) const {
+        return ovr.wprime_rcv >= 0 ? ovr.wprime_rcv == 1 : (wprime_rcv_small || n >= 512);
+    }
     bool use_wprime_rcv() const { return use_wprime_rcv_at(N); }
     bool variants_tuned = false;  // tune_rebuild_variants ran for this system
     struct DiskPlan {
@@ -1942,6 +1946,7 @@ LoupHandle* loup_create(const char* loup_path, int device_id) {
                 own_ext_env = true;
             }
             h->nb_groups_ok = h->is_sm120 || cc80;
+            h->wprime_rcv_small = h->is_sm120 || cc80;
             if (const char* e = std::getenv("LOUP_NB_GROUPS"); e && (e[0] == '0' || e[0] == '1')) h->nb_groups_ok = e[0] == '1';
             if (const char* e = std::getenv("LOUP_FORCE_TC"); e && e[0] == '1') h->force_tc = true;
         }

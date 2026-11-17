@@ -102,10 +102,10 @@ In the A/B rows, the two values in brackets are the two run orders.
 | --- | --- | --- | --- |
 | `s83t` | Tuner against the default, with a second default side as noise: OMAT-0 generic SrTiO3 `1.003` (noise `1.002`), MP-0 medium SrTiO3 `0.998` (`0.998`), OFF24-M water `0.996` (`0.997`), OFF23-M water216 `1.024` (`1.013`). R5 was the slowest variant on every system. | Not faster on these families: the tuner stays on `sm_120` only. | `gen-conv-fwd-variants` |
 | `s84c` | POLAR-1-S / M / L NaCl216 `0.795` (`0.796` / `0.794`), `0.802` (`0.809` / `0.795`), `0.814` (`0.814` / `0.814`). Control OFF23-S water216 `1.001` (`1.018` / `0.983`). | Faster in both orders: S82-S84 stay on cc 8.0. | `pol-dot-fold`, `a100-own-ext-nb-groups` |
-| `s86c` | POLAR-1-S `0.989` (`0.988` / `0.989`), M `0.988` (`0.979` / `0.997`), L `1.011` (`1.018` / `1.005`). | S and M faster. L is slower in both orders, so the "not slower" condition fails for L. Not acted on. | `pol-bias-ln-fuse` |
+| `s86c` | POLAR-1-S `0.989` (`0.988` / `0.989`), M `0.988` (`0.979` / `0.997`), L `1.011` (`1.018` / `1.005`). | S and M faster. L is slower in both orders, so the "not slower" condition fails for L. Kept on by the owner's decision (17 November). | `pol-bias-ln-fuse` |
 | `s86g` | 29 rows, none failing. Worst force / stress: POLAR-1-M 1.29 / 1.49 (18 rows), L 1.32 / 0.80 (6), S 0.47 / 0.72 (5; NaNbO3_c0 left out as unstable). | No failing row: no bisect needed. | `pol-bias-ln-fuse` |
 | `s93c` | `s93b`: OMAT-0 generic `0.986` (`0.987` / `0.985`), MP-0 medium `0.984` (`0.984` / `0.984`), OFF23-M water216 `1.015` (`1.023` / `1.007`). `s93a`: `1.000`, `0.998`, `1.003`. | Not faster on all three: dropped. | `s93-sm80-caps` |
-| `s96c` | Receiver-owned `w'` against the default: 40 / 135 / 320 atoms `0.994` (`0.996` / `0.992`), `0.989` (`0.988` / `0.989`), `0.968` (`0.969` / `0.967`). | Faster in both orders at every size, so the criterion for extending `use_wprime_rcv()` to cc 8.0 is met. Not changed yet. | `wp-receiver-owned` |
+| `s96c` | Receiver-owned `w'` against the default: 40 / 135 / 320 atoms `0.994` (`0.996` / `0.992`), `0.989` (`0.988` / `0.989`), `0.968` (`0.969` / `0.967`). | Faster in both orders at every size, so the criterion for extending `use_wprime_rcv()` to cc 8.0 is met. Done in S114 (owner's decision, 17 November). | `wp-receiver-owned` |
 
 Still pending at 08:18 CET (reason `Priority`): `s100c` and the twelve `s106*` jobs. Slurm's estimated starts were
 18 November 04:55 (`s100c`) to 08:02 CET; `s106g8`-`s106g10` had no estimate yet.
