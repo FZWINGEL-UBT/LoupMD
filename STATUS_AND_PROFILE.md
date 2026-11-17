@@ -1934,4 +1934,7 @@ skip).
 of every tile at any cost in cap. 5,000,000 atoms at fraction 0.5 got cap 4,096 (1,362 tiles, 11.26 / 11.24 s, peak
 7.26 GiB) where 32,768 fits (216 tiles, 10.44 / 10.39 s, 7.22 GiB). The search now drops the slot room when it costs
 more than 4x in cap; where it costs 1.3x-2x (5M at 0.9 and 0.75, 2.56M at 0.5) the two tie within 0.7%, so those keep
-it. Of 20 plans only 5M at 0.5 changes; the tiled, memory-plan, large-box and capacity tests 70 passed.
+it. Of 20 plans only 5M at 0.5 changes; the tiled, memory-plan, large-box and capacity tests 70 passed; on the
+installed library at b8d302f `tests/gpu -m "not acceptance"` 397 passed (7 D3 skips), `-m acceptance` 15 passed (1
+NbCl5 skip). 2,560,000 atoms at fraction 0.35 (cap 8,192, 343 tiles) 5.38 s against 5.32 / 5.39 s forced at 16,384 /
+24,576: a tie, kept; at 4.98 GiB peak it is 3% slower than at fraction 0.9 (5.24 s, 12.84 GiB).
