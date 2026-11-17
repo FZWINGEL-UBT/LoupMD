@@ -1881,12 +1881,22 @@ what runs.
 3.8% faster in one run each. The plan does not take it because the host state's 23.9 GB is at the 60% of
 `MemAvailable` the plan allows (40 GB in this WSL); left as is. The forced wavefront host pool at this size took the
 WSL distro down (the force skips the host-memory check), and a second forced host-pool run at 1,081,600 atoms (2.7 GB
-planned, the host path) did the same a few minutes later; no forced host-pool runs after that.
+planned, the host path) did the same a few minutes later. A third, at 320,000 atoms in a rod (160 x 20 x 20 cells,
+1.5 GB host, cap 65,536, 8.2 GB tile workspace), ran three processes and took WSL down in the fourth (bus on; the
+first bus-on process had finished). Three failures in three forced wavefront host-pool timing jobs, at 1.5 to tens of
+GB of host memory, with and without the bus; the small host-pool tests (5,760 and 11,520 atoms) and every other mode
+ran the same day without one, and the 1,081,600-atom forced run of 16 November finished. Cause not found (the
+distro's logs go with it). **Open risk:** the plan chooses the wavefront host pool on its own only where the
+wavefront applies and the plain host state does not fit (pass 3); until this is understood, prefer
+`LOUP_TILE_WAVEFRONT=0` or the device pool for long runs on WSL. No further runs of the mode in this session.
 
-`tile-wave-host-bus` (O32, not adopted; local branch `wip/tile-wave-host-bus`): the wavefront's host pool mapped, its
-ghost gathers, gradient adds (plain adds in rounds of distinct host rows) and block zeroing as kernels on the stream
-instead of host work after a synchronisation. `tests/gpu/test_tiled.py -k "wavefront or host"` 39 passed; not timed
-(the WSL failures above). While writing it: the host path's gradient adds split a tile's rows over host threads, and a
+`tile-wave-host-bus` (O32, NEUTRAL, not adopted; local branch `wip/tile-wave-host-bus`): the wavefront's host pool
+mapped, its ghost gathers, gradient adds (plain adds in rounds of distinct host rows) and block zeroing as kernels on
+the stream instead of host work after a synchronisation. `tests/gpu/test_tiled.py -k "wavefront or host"` 39 passed.
+320,000 atoms in a rod at fraction 0.6 (9 tiles, 5 blocks of 46,000 rows; up to 4 add rounds): kept call bus on
+928.8 ms against the host work 939.7 / 931.6 ms, peak 7.73 / 7.72 GiB, energies within 2e-8 eV / atom; the
+synchronisations are not where the host pool's time goes (its copies are). Not adopted (one run on its side, no
+gain to weigh against a new path). While writing it: the host path's gradient adds split a tile's rows over host threads, and a
 tile whose ghosts hold an image of one of its own rows (grids with one tile along an axis) can add into one host row
 from two threads at once. Not seen in a result (the wavefront host pool runs only forced or where the plain host state
 does not fit); the branch's rounds avoid it.
