@@ -14,7 +14,7 @@ import os
 
 import numpy as np
 import pytest
-from gpu_support import find_model, srtio3
+from gpu_support import find_model, srtio3, unfolded
 
 from loupmd import BackendError, LoupEngine, ensure_loup_bundle
 from loupmd import _core
@@ -91,7 +91,9 @@ def _evaluate_domain(eng, n_local, z_all, positions, cell, ghost_of):
 
 
 def _periodic(bundle, at):
-    eng = LoupEngine(bundle)
+    """The periodic call without the skip-chain fold: the operations a domain runs (gpu_support.unfolded)."""
+    with unfolded():
+        eng = LoupEngine(bundle)
     eng.set_system(at.get_atomic_numbers(), at.get_masses(), skin=SKIN)
     e, f, s = eng.evaluate(at.positions, at.cell.array)
     return e, f, s, eng.info().r_max
@@ -111,9 +113,8 @@ IDS = [c[0].split(".model")[0] for c in CASES]
 @pytest.mark.parametrize("model,structure,generic,layers", CASES, ids=IDS)
 @pytest.mark.full
 def test_a_cell_as_an_open_domain_with_its_images_as_ghosts(model, structure, generic, layers, monkeypatch):
-    if layers == 3:
-        monkeypatch.setenv("LOUP_CHAIN_FOLD", "0")   # the fold never forms the layer outputs a sweep hands on
-    at = structure()
+    monkeypatch.delenv("LOUP_CHAIN_FOLD", raising=False)   # the domain's engine is a default one: it builds the
+    at = structure()                                       # fold and leaves it off for the domain
     n = len(at)
     zs = sorted(set(at.get_atomic_numbers().tolist()))
     bundle = ensure_loup_bundle(find_model(model), zs, generic=generic if "omat-0-medium" in model else None)
@@ -152,7 +153,8 @@ def test_a_cell_as_an_open_domain_with_its_images_as_ghosts(model, structure, ge
 
 
 def test_sweeps_on_a_periodic_system_without_ghosts():
-    """n_ghost = 0: the same driver on an ordinary periodic cell."""
+    """n_ghost = 0: the same driver on an ordinary periodic cell (a default engine: the fold built, off for the
+    domain) against the periodic call without the fold."""
     at = _oxide()
     bundle = ensure_loup_bundle(find_model("mace-omat-0-small.model"), [8, 22, 38])
     e_ref, f_ref, s_ref, _ = _periodic(bundle, at)

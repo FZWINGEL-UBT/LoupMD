@@ -51,5 +51,7 @@ def test_auto_lets_water_run_in_the_pipelined_loop():
           f"{record_['measured_step_A']:.3f} A, skin {record_['skin_A']} A: {auto.pipelined_steps} of 800 pipelined, "
           f"{auto.ms_per_step:.3f} ms/step")
     assert record_["mode"] == "auto" and record_["measured_step_A"] > 0.05 and auto_sim.skin >= 0.8
-    assert auto.pipelined_steps > 600 and fixed.pipelined_steps < 200
+    # Since the round6 merge every step is checked on the device and most rebuilds run there too, so the skin no
+    # longer decides whether a step is pipelined; the larger automatic skin still rebuilds less often.
+    assert auto.pipelined_steps > 600 and auto.rebuilds < fixed.rebuilds, (auto.rebuilds, fixed.rebuilds)
     assert auto.dangerous_builds == 0 and fixed.dangerous_builds == 0

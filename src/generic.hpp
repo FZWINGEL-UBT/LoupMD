@@ -103,6 +103,13 @@ public:
     int out_lmax(int t) const;
     // Sweeps need every layer's output to exist: not with the long range, nor with the skip-chain fold.
     bool sweeps_available() const { return lr_ == nullptr && !chain_fold_; }
+    // Whether the model can sweep once the fold is off (use_chain_fold(false)): every model without long range.
+    bool sweeps_possible() const { return lr_ == nullptr; }
+    // The skip-chain fold (S57, S73) of the systems allocated from now on: on only where setup_chain_fold built it.
+    // The fold's composed weights sit beside the plain ones, so a handle switches per system: whole systems fold,
+    // tile domains (which sweep) do not. Call with no system allocated (before alloc_system).
+    void use_chain_fold(bool on);
+    bool chain_fold_built() const { return chain_fold_built_; }
     // O31: whether layer 0's backward sweep reads nothing of its forward but msgf[0..3] and D (the density layer 0
     // with the hidden table, skip folded, linear readout: MACE-MP-0b3 / MPA-0 / OMAT-0 / MatPES), so a domain can
     // keep them (GenericPassInputs::keep0) instead of the replay; and their floats for N receivers.
@@ -142,10 +149,12 @@ private:
     int conv_var_override_ = -1;  // S64: LOUP_CONV_FWD_VARIANT (test override), -1 none
     int conv_tune_env_ = -1;      // LOUP_CONV_TUNE at load: -1 unset (sm_120 only), 0 off, 1 any GPU (tests)
     void free_model();
-    // S57 skip-chain fold (sm_120; LOUP_CHAIN_FOLD=0 disables): see setup_chain_fold in generic.cu.
+    // S57 skip-chain fold (sm_120, cc 8.0; LOUP_CHAIN_FOLD=0 disables): see setup_chain_fold in generic.cu.
     void setup_chain_fold(const Bundle& b);
-    bool chain_fold_ = false;
-    // S59 layer-0 species tables (sm_120; LOUP_SPECIES_TABLES=0 disables): see setup_species_tables in generic.cu.
+    bool chain_fold_ = false;        // the fold of the allocated system (use_chain_fold)
+    bool chain_fold_built_ = false;  // setup_chain_fold composed the fold's weights
+    void update_h0_read();           // h0_read_ for the current chain_fold_ (S97)
+    // S59 layer-0 species tables (sm_120, cc 8.0; LOUP_SPECIES_TABLES=0 disables): see setup_species_tables.
     void setup_species_tables(const Bundle& b);
     bool species_tables_ = false;
     int S_ = 0, n_layers_ = 0, sh_perm_ = 0, has_zbl_ = 0;
@@ -173,6 +182,7 @@ private:
     void* d_zero_slab_ = nullptr;
     size_t zero_slab_bytes_ = 0;
     float* d_h0_ = nullptr;         // [N, C0] layer-0 node features
+    bool h0_read_ = true;           // S97: some consumer reads d_h0_ (else record skips its gather)
     float* d_scratch_ = nullptr;    // gradient scratch
     size_t scratch_floats_ = 0;
 };

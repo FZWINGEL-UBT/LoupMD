@@ -9,7 +9,7 @@ import re
 
 import numpy as np
 import pytest
-from gpu_support import find_model, srtio3, water_box
+from gpu_support import find_model, srtio3, unfolded, water_box
 
 from loupmd import BackendError, LoupEngine, ensure_loup_bundle
 from loupmd import _core
@@ -79,20 +79,23 @@ IDS = [c[0].split(".model")[0] for c in CASES]
 @pytest.mark.parametrize("model,structure,receivers,layers", CASES, ids=IDS)
 @pytest.mark.full
 def test_the_tiled_call_gives_the_whole_system_result(model, structure, receivers, layers, monkeypatch):
-    if layers == 3:
-        monkeypatch.setenv("LOUP_CHAIN_FOLD", "0")   # the fold never forms the layer outputs a sweep hands on
+    monkeypatch.delenv("LOUP_CHAIN_FOLD", raising=False)   # the tiled engines are default ones: the fold built, off
     at = structure()
     n = len(at)
     zs = sorted(set(at.get_atomic_numbers().tolist()))
     bundle = ensure_loup_bundle(find_model(model), zs)
-    e_a, f_a, s_a = _whole(bundle, at)
+    # The whole-system references run without the skip-chain fold, the operations the tiles run
+    # (gpu_support.unfolded): the bounds below are those of the same operations on other GEMM row counts.
+    with unfolded():
+        e_a, f_a, s_a = _whole(bundle, at)
     e_t, f_t, s_t, tiles = _tiled(bundle, at, receivers)
     assert tiles >= 2
     # The tensor-core hybrid GEMMs are chosen per GEMM shape, and a tile's GEMMs have other row counts than the
     # whole system's: where one side gets a hybrid kernel and the other a float32 one, the energies differ by the
     # hybrid's rounding (PLAN.md D16). Without hybrids on either side the plan's bounds apply.
     monkeypatch.setenv("LOUP_NO_HYBRID", "1")
-    e_c, f_c, s_c = _whole(bundle, at)
+    with unfolded():
+        e_c, f_c, s_c = _whole(bundle, at)
     e_n, f_n, s_n, _ = _tiled(bundle, at, receivers)
     monkeypatch.delenv("LOUP_NO_HYBRID")
 
@@ -186,7 +189,8 @@ def test_tile_lists_in_host_memory_give_the_device_lists_result(wavefront, keep_
     LOUP_TILE_KEEP_ACTIVE=0 none, =1 one slot for all tiles) reads them from a device buffer they were copied into
     on a copy stream one compaction ahead (LOUP_TILE_HOST_STAGE=1, the default where it fits), or over the bus
     (=0). The host lists are compact (O32: senders and integer image shifts, 8 B per edge, the rest rebuilt on
-    the device per compaction) unless LOUP_TILE_HOST_COMPACT=0 ("36": the 36 B form, staged). Same tiles, same
+    the device per compaction) unless LOUP_TILE_HOST_COMPACT=0 ("36": the full form, staged; 28 B per edge since the
+    merge of round6-hardening 13d6337, 36 B before). Same tiles, same
     kernels: the device lists' numbers up to the order of the float32 atomic sums, in the call that builds the
     lists and in a later call that keeps them."""
     at = srtio3(1).repeat((32, 6, 6))                  # 5,760 atoms in a rod: several layers of tiles along it
@@ -228,7 +232,8 @@ def test_tile_lists_in_host_memory_give_the_device_lists_result(wavefront, keep_
 def test_compact_device_lists_give_the_full_device_lists_result(wavefront, keep_active, monkeypatch, capfd):
     """O32: device tile lists keep their edges as senders and integer image shifts (8 B per edge) and the active-edge
     compaction's inputs are decoded from them on the device, as with compact host lists; LOUP_TILE_DEVICE_COMPACT=0
-    keeps the 36 B form. Same tiles and kernels: the 36 B lists' numbers up to the order of the float32 atomic sums,
+    keeps the full form (28 B per edge). Same tiles and kernels: the full lists' numbers up to the order of the
+    float32 atomic sums,
     in the building call and a kept one, with kept active edges or a compaction in every sweep."""
     at = srtio3(1).repeat((32, 6, 6))                  # 5,760 atoms in a rod
     at.positions += np.random.default_rng(18).normal(scale=0.04, size=at.positions.shape)

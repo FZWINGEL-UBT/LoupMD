@@ -73,9 +73,8 @@ __global__ void fill_neighbors_kernel(int N, int S, CellMat64 cell, int nx, int 
                                       const double* __restrict__ bin_pos, const float4* __restrict__ bin_pos_f32,
                                       const int* __restrict__ bin_wrap,
                                       const int* __restrict__ bin_sp, const int* __restrict__ row_ptr,
-                                      int* __restrict__ tmp_snd, int* __restrict__ tmp_rcv,
-                                      int* __restrict__ tmp_shifts, int* __restrict__ tmp_pairs,
-                                     uint32_t* __restrict__ sort_keys, int* __restrict__ sort_vals);
+                                      int* __restrict__ tmp_snd, int* __restrict__ tmp_shifts,
+                                      uint32_t* __restrict__ sort_keys, const int* __restrict__ go);
 __global__ void count_neighbors_scalar_kernel(int N, CellMat64 cell, int nx, int ny, int nz,
                                               int rx, int ry, int rz, double r_list2, float r_lo2_f32, float r_hi2_f32,
                                               const double* __restrict__ pos_wrapped, const int* __restrict__ atom_bin,
@@ -90,33 +89,112 @@ __global__ void fill_neighbors_scalar_kernel(int N, int S, CellMat64 cell, int n
                                              const double* __restrict__ bin_pos, const float4* __restrict__ bin_pos_f32,
                                              const int* __restrict__ bin_wrap,
                                              const int* __restrict__ bin_sp, const int* __restrict__ row_ptr,
-                                             int* __restrict__ tmp_snd, int* __restrict__ tmp_rcv,
-                                             int* __restrict__ tmp_shifts, int* __restrict__ tmp_pairs,
-                                             uint32_t* __restrict__ sort_keys, int* __restrict__ sort_vals);
-__global__ void gather_sorted_edges_kernel(int E, CellMat64 cell, const int* __restrict__ sort_vals,
-                                           const int* __restrict__ tmp_snd, const int* __restrict__ tmp_rcv,
-                                           const int* __restrict__ tmp_shifts, const int* __restrict__ tmp_pairs,
-                                           int* __restrict__ senders, int* __restrict__ receivers,
-                                           double* __restrict__ shift_cart, int* __restrict__ pairs);
-__global__ void check_row_species_order_kernel(int E, const int* __restrict__ senders,
-                                               const int* __restrict__ receivers, const int* __restrict__ species,
-                                               int* __restrict__ err);
+                                             int* __restrict__ tmp_snd, int* __restrict__ tmp_shifts,
+                                             uint32_t* __restrict__ sort_keys, const int* __restrict__ go);
+__global__ void max_degree_kernel(int N, const int* __restrict__ deg, int* __restrict__ out);
+__global__ void sort_gather_rows_kernel(
+    CellMat64 cell, const int* __restrict__ row_ptr, const uint32_t* __restrict__ sort_keys,
+    const int* __restrict__ tmp_snd, const int* __restrict__ tmp_shifts, const int* __restrict__ species,
+    int* __restrict__ senders, double* __restrict__ shift_cart,
+    int* __restrict__ order_err, const int* __restrict__ go);
+__global__ void sort_gather_rows_global_kernel(
+    CellMat64 cell, const int* __restrict__ row_ptr, const uint32_t* __restrict__ sort_keys,
+    const int* __restrict__ tmp_snd, const int* __restrict__ tmp_shifts, const int* __restrict__ species,
+    int* __restrict__ senders, double* __restrict__ shift_cart,
+    int* __restrict__ order_err, unsigned long long* __restrict__ scratch);
 __global__ void compute_and_count_active_kernel(
     int N, float r_max, const double* __restrict__ pos64,
-    const int* __restrict__ row_ptr, const int* __restrict__ senders,
-    const int* __restrict__ receivers, const double* __restrict__ shift_cart,
+    const int* __restrict__ row_ptr, const int* __restrict__ senders, const double* __restrict__ shift_cart,
     float4* __restrict__ tmp_vec_len, int* __restrict__ act_deg);
 __global__ void scatter_active_edges_kernel(
     int N, float r_max, SplineGrid grid, int S, int pair_sym, const int* __restrict__ species,
     const int* __restrict__ row_ptr, const int* __restrict__ act_row_ptr,
-    const int* __restrict__ senders, const int* __restrict__ receivers, const int* __restrict__ pairs,
-    const float4* __restrict__ tmp_vec_len,
+    const int* __restrict__ senders, const float4* __restrict__ tmp_vec_len,
     int* __restrict__ act_senders, int* __restrict__ act_receivers, int* __restrict__ act_pairs,
     float4* __restrict__ act_vec_len,
     int* __restrict__ act_slab, float2* __restrict__ act_t_sx);
-__global__ void check_skin_kernel(int N, double half_skin, int lag, int lag_switch, const double* __restrict__ pos64,
-                                  const double* __restrict__ ref_pos64, const unsigned int* __restrict__ max_step_disp2,
-                                  int* __restrict__ need_rebuild);
+__global__ void check_skin_kernel(int N, double half_skin, const double* __restrict__ pos64,
+                                  const double* __restrict__ ref_pos64, int* __restrict__ need_rebuild);
+// Publications to mapped pinned host memory: the next value of a device counter selects one of four slots (so two
+// publications of one MD step cannot overwrite each other before the host reads them), the slot gets the three
+// values and then the counter value, which the host polls (wait_published) instead of calling cudaStreamSynchronize,
+// whose wake-up leaves the GPU idle for 0.1-0.2 ms under WSL2. One thread; a stream-ordered (or graph-ordered)
+// launch sees every earlier write of the stream.
+__device__ __forceinline__ void publish3(unsigned int* counter, int* pub, int a, int b, int c) {
+    const unsigned int seq = *counter + 1u;
+    *counter = seq;
+    volatile int* p = pub + 4 * (seq & 3u);
+    p[1] = a;
+    p[2] = b;
+    p[3] = c;
+    __threadfence_system();
+    reinterpret_cast<volatile unsigned int*>(p)[0] = seq;
+}
+
+__global__ void publish_kernel(const int* __restrict__ a, const int* __restrict__ b, const int* __restrict__ c,
+                               unsigned int* __restrict__ counter, int* __restrict__ pub) {
+    publish3(counter, pub, a ? *a : 0, b ? *b : 0, c ? *c : 0);
+}
+
+// The MD step's hinge (run_md_loop): publishes the skin-check flag and the last rebuild's row-order flag, and picks the
+// body of the step graph's SWITCH node: 0 the rest (force pass + second half) when no rebuild is needed, 1 the rebuild
+// branch (has_rebuild) when one is, none when the rows are invalid or the host rebuilds. The host queues the next step
+// while this one's forces run instead of reading the flag at an idle GPU. One SWITCH node rather than an IF node per
+// body: every conditional node a step evaluates costs time even when its body does not run.
+__global__ void guard_step_kernel(cudaGraphConditionalHandle cond, int has_rebuild, const int* __restrict__ need_rebuild,
+                                  const int* __restrict__ order_err, unsigned int* __restrict__ counter,
+                                  int* __restrict__ pub) {
+    const int flag = *need_rebuild;
+    const int bad_rows = *order_err;
+    publish3(counter, pub, flag, bad_rows, 0);
+    cudaGraphSetConditional(cond, bad_rows ? 2u : !flag ? 0u : has_rebuild ? 1u : 2u);
+}
+
+// The step graph's rebuild branch after nl_count: publishes the edge count, the longest row and whether the new list
+// fits what the graph was captured for (edge capacity / bucket, row-sort width), and stores that verdict in *go: the
+// branch's fill, sort and commit kernels run only then (one nesting level less than an IF node around them);
+// otherwise the host finishes the rebuild.
+__global__ void rebuild_gate_kernel(const int* __restrict__ row_ptr_end, const int* __restrict__ max_deg, int E_lim,
+                                    int P_cap, int* __restrict__ go, unsigned int* __restrict__ counter,
+                                    int* __restrict__ pub) {
+    const int E = *row_ptr_end;
+    const int m = *max_deg;
+    const int fits = E > 0 && E <= E_lim && m <= P_cap;
+    *go = fits;
+    publish3(counter, pub, E, m, fits);
+}
+
+// After a rebuild in MD: the force pass (the IF node's body) runs only if the rebuild's rows passed the order check,
+// which the host reads with the next step's publication, and (go, the step graph's rebuild branch) were built.
+__global__ void rest_guard_kernel(cudaGraphConditionalHandle cond, const int* __restrict__ order_err,
+                                  const int* __restrict__ go) {
+    cudaGraphSetConditional(cond, (*order_err || (go && !*go)) ? 0u : 1u);
+}
+
+// Neighbour-rebuild bookkeeping (nl_bin, nl_count, nl_commit) as kernels rather than memset / memcpy nodes.
+__global__ void nl_reset_kernel(int n_bins, int* __restrict__ bin_counts, int* __restrict__ deg_end,
+                                int* __restrict__ order_err, int* __restrict__ max_deg) {
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i <= n_bins) bin_counts[i] = 0;  // [n_bins] too: the bin scan's total
+    if (i == 0) {
+        *deg_end = 0;  // the row scan's total
+        *order_err = 0;
+        *max_deg = 0;
+    }
+}
+
+__global__ void copy_ints_kernel(int n, const int* __restrict__ src, int* __restrict__ dst) {
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) dst[i] = src[i];
+}
+
+__global__ void nl_commit_kernel(int n, const double* __restrict__ pos, double* __restrict__ ref_pos,
+                                 int* __restrict__ need_rebuild, const int* __restrict__ go) {
+    if (go && !*go) return;
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) ref_pos[i] = pos[i];
+    if (i == 0) *need_rebuild = 0;
+}
 
 __global__ void tabled_outer_sum0_forward_kernel(
     int N, int S, int pieces0, int n_bins0, float r_lo0, float bin_scale0,
@@ -157,7 +235,7 @@ __global__ void nve_first_half_kernel(int N, double dt_ase, const double* __rest
                                       unsigned int* __restrict__ max_step_disp2);
 __global__ void nve_second_half_kernel(int N, double dt_ase, const double* __restrict__ forces,
                                        const double* __restrict__ inv_masses, double* __restrict__ vel64);
-__global__ void rotate_step_disp_kernel(unsigned int* __restrict__ max_step_disp2, int* __restrict__ need_rebuild);
+__global__ void rotate_step_disp_kernel(unsigned int* __restrict__ max_step_disp2);
 __global__ void langevin_first_half_kernel(
     int N, double dt_ase, double c1, double c2,
     const double* __restrict__ target, unsigned long long seed, const unsigned long long* __restrict__ step_counter,
@@ -314,18 +392,21 @@ static uint64_t fnv1a_file(const char* path) {
 // Tensor-core GEMM cubin (GEMM autotune candidates). Two formats: the shipped FastMACE builds (cubins/tf32x3_hyb_*,
 // fm_tf32x3_info: tiles 64x64, 32x64, 64x32, beta 0 only) and LoupMD's own (cubins/src/gemm_tc.cu,
 // loup_gemm_tc_info: math, beta support and up to kMaxTiles tiles; through LOUP_HYBRID_CUBIN for now). Tiles 0-2 are
-// the same shapes in both, so a stored plan's tile index means the same kernel shape.
+// the same shapes in both, so a stored plan's tile index means the same kernel shape. Own format 1 passes beta at run
+// time to every entry; format 2 fixes it at 0 in the plain entries (tiles 0-2 SASS-identical to the FastMACE ones)
+// and adds loup_gemm_tc_{rrb,rcb}_<t> for beta != 0.
 struct HybCubin {
     static constexpr int kMaxTiles = 8;
     bool loaded = false;
-    bool own_format = false;  // loup_gemm_tc_info: entries take beta
+    bool own_format = false;  // loup_gemm_tc_info
     bool beta_ok = false;     // C = A B + beta C may use it
     int ntiles = 0;
     uint64_t cubin_hash = 0;  // the loaded cubin file's FNV-1a hash (keys the GEMM plan cache)
     std::string path_loaded;  // for diagnostics (the cubin's math: its build, see cubins/src)
     void* lib = nullptr;
     CUmodule mod = nullptr;
-    CUfunction fn[kMaxTiles][2] = {};  // [tile][transB ? 1 : 0]
+    CUfunction fn[kMaxTiles][2] = {};   // [tile][transB ? 1 : 0]: C = A B (format 1: any beta)
+    CUfunction fnb[kMaxTiles][2] = {};  // beta != 0 (format 1: the fn entries)
     int threads[kMaxTiles] = {};
     int smem[kMaxTiles][2] = {};
     int tile_m[kMaxTiles] = {};
@@ -345,7 +426,10 @@ struct HybCubin {
         if (cudaDeviceGetAttribute(&maj, cudaDevAttrComputeCapabilityMajor, device_id) != cudaSuccess) return;
         if (cudaDeviceGetAttribute(&min, cudaDevAttrComputeCapabilityMinor, device_id) != cudaSuccess) return;
         const char* cname = nullptr;
-        if (maj == 8) cname = "tf32x3_hyb_sm80.cubin";
+        // cc 8.0 (A100): LoupMD's own format-2 cubin (cubins/src/gemm_tc.cu: the shipped three tiles SASS-identical
+        // plus three larger ones and compile-time beta variants), faster or equal on every family measured (S74a) and
+        // gated (S75g); other 8.x GPUs, not measured with it, keep the FastMACE cubin.
+        if (maj == 8) cname = (min == 0) ? "gemm_tc_hyb_sm80.cubin" : "tf32x3_hyb_sm80.cubin";
         else if (maj == 9) cname = "tf32x3_hyb_sm90.cubin";
         else if (maj == 12) cname = "tf32x3_hyb_sm120.cubin";
         else return;
@@ -388,7 +472,10 @@ struct HybCubin {
         CUdeviceptr gptr = 0; size_t gsz = 0;
         if (p_cuModuleGetGlobal(&gptr, &gsz, mod, "loup_gemm_tc_info") == CUDA_SUCCESS && gsz >= 4 * sizeof(int)) {
             std::vector<int> info(gsz / sizeof(int));
-            if (p_cuMemcpyDtoH(info.data(), gptr, gsz) != CUDA_SUCCESS || info[0] != 1) { destroy(); return; }
+            if (p_cuMemcpyDtoH(info.data(), gptr, gsz) != CUDA_SUCCESS || (info[0] != 1 && info[0] != 2)) {
+                destroy();
+                return;
+            }
             own_format = true;
             beta_ok = info[2] != 0;
             ntiles = info[3];
@@ -400,6 +487,11 @@ struct HybCubin {
                     char name[48];
                     snprintf(name, sizeof(name), "loup_gemm_tc_%s_%d", b ? "rc" : "rr", t);
                     if (p_cuModuleGetFunction(&fn[t][b], mod, name) != CUDA_SUCCESS) { destroy(); return; }
+                    fnb[t][b] = fn[t][b];
+                    if (beta_ok && info[0] == 2) {
+                        snprintf(name, sizeof(name), "loup_gemm_tc_%s_%d", b ? "rcb" : "rrb", t);
+                        if (p_cuModuleGetFunction(&fnb[t][b], mod, name) != CUDA_SUCCESS) { destroy(); return; }
+                    }
                 }
             }
         } else {
@@ -425,7 +517,8 @@ struct HybCubin {
         for (int t = 0; t < ntiles; ++t)
             for (int b = 0; b < 2; ++b)
                 if (smem[t][b] > 48 * 1024)
-                    p_cuFuncSetAttribute(fn[t][b], CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES, smem[t][b]);
+                    for (CUfunction f : {fn[t][b], fnb[t][b]})
+                        if (f) p_cuFuncSetAttribute(f, CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES, smem[t][b]);
         loaded = true;
     }
 
@@ -442,7 +535,7 @@ struct HybCubin {
         unsigned gx = (unsigned)((M + tile_m[tile] - 1) / tile_m[tile]);
         unsigned gy = (unsigned)((N + tile_n[tile] - 1) / tile_n[tile]);
         CUresult rc = p_cuLaunchKernel(
-            fn[tile][transB ? 1 : 0], gx, gy, 1,
+            (beta != 0.0f ? fnb : fn)[tile][transB ? 1 : 0], gx, gy, 1,
             (unsigned)threads[tile], 1, 1, (unsigned)smem[tile][transB ? 1 : 0],
             (CUstream)stream, args, nullptr);  // the legacy entries take the first 9 arguments only
         if (rc != CUDA_SUCCESS) throw std::runtime_error("cuLaunchKernel hybrid failed");
@@ -458,13 +551,17 @@ struct HybCubin {
 // FNV-1a over this library's own file: GEMM plans are keyed by it, so a rebuilt library (new kernels, other tile
 // code) never reuses plans timed against an older build.
 // Test overrides (LOUP_SPLINE_VARIANT=R1|R1p|R4|R4p|R5, LOUP_WPRIME_THREADS=256|512, LOUP_WPRIME_RCV=0|1,
-// LOUP_REORDER=0|1): pin a kernel variant or path that tuning or a size threshold would otherwise pick, so the
-// gate can cover every one. Parsed by hand (no strtol: the library must link against older glibc).
+// LOUP_REORDER=0|1, LOUP_ROW_SORT=global, LOUP_MD_REBUILD=host|fallback, LOUP_M1_CHUNK=<atoms>|0): pin a kernel
+// variant or path that tuning or a size threshold would otherwise pick, so the gate and the tests can cover every one.
+// Parsed by hand (no strtol: the library must link against older glibc).
 struct VariantOverrides {
     int spline_var = -1;  // index into tune_rebuild_variants' table
     int wp_threads = 0;
     int wprime_rcv = -1;
     int reorder = -1;
+    bool row_sort_global = false;  // neighbour rows sorted in global scratch (else only rows over 4096 edges)
+    int md_rebuild = 0;  // MD rebuilds: 0 on the GPU in the step graph, 1 host-driven, 2 counted on the GPU, finished on the host
+    int m1_chunk = -1;   // receivers per m1 chunk (0: one chunk; -1: kM1ChunkAtoms)
     VariantOverrides() {
         static const char* const names[5] = {"R1", "R1p", "R4", "R4p", "R5"};
         if (const char* s = std::getenv("LOUP_SPLINE_VARIANT"))
@@ -476,11 +573,20 @@ struct VariantOverrides {
         }
         if (const char* s = std::getenv("LOUP_WPRIME_RCV")) wprime_rcv = (s[0] == '1') ? 1 : (s[0] == '0') ? 0 : -1;
         if (const char* s = std::getenv("LOUP_REORDER")) reorder = (s[0] == '1') ? 1 : (s[0] == '0') ? 0 : -1;
+        if (const char* s = std::getenv("LOUP_ROW_SORT")) row_sort_global = strcmp(s, "global") == 0;
+        if (const char* s = std::getenv("LOUP_MD_REBUILD")) md_rebuild = strcmp(s, "host") == 0 ? 1 : strcmp(s, "fallback") == 0 ? 2 : 0;
+        if (const char* s = std::getenv("LOUP_M1_CHUNK")) {
+            int v = 0;
+            for (; *s >= '0' && *s <= '9' && v < 100000000; ++s) v = v * 10 + (*s - '0');
+            m1_chunk = v;
+        }
     }
 };
 static constexpr int kSplineVar = 5;
 static constexpr int kSplineVarR[kSplineVar] = {1, 1, 4, 4, 5};
 static constexpr bool kSplineVarPair[kSplineVar] = {false, true, false, true, false};
+// Above twice this many atoms m1 / dm1 (20 KB per atom) run in receiver chunks of at most this many (S112).
+static constexpr int kM1ChunkAtoms = 8192;
 
 static uint64_t library_build_hash() {
     static uint64_t cached = 0;
@@ -510,14 +616,27 @@ struct LoupHandle {
     int device_id = 0;
     int l2_bytes = 0;
     bool is_sm120 = false;
-    // The own-SGEMM extensions measured on the 5060 Ti (sgemm64 / sgemm32 + split-K candidates, the narrow-N rules,
-    // N-fastest rasterisation and the N = 96 kernel of sgemm128): on for sm_120; LOUP_OWN_EXT=0|1 forces them (tests).
+    // The own-SGEMM extensions (sgemm64 / sgemm32 + split-K candidates, the narrow-N rules, N-fastest rasterisation and
+    // the N = 96 kernel of sgemm128): on for sm_120 (5060 Ti), and on compute capability 8.0 when no tensor-core cubin
+    // is loaded (long-range models, float32 SIMT GEMMs: A100, S82: POLAR-1-S NaCl216 0.870, POLAR-1-M 0.959); with
+    // the cubin they lose there (S80: OFF23-S water216 1.034, OMOL-0 1.008). LOUP_OWN_EXT=0|1 forces them (tests).
     bool own_ext = false;
+    // The lane-group neighbour count / fill kernels: on for sm_120 and compute capability 8.0 (A100, S80: OFF23-S
+    // water216 0.843, OFF23-M water216 0.885, MH-1 NaCl216 0.965, large cells 0.990-0.995; the same lists, so the same
+    // forces); LOUP_NB_GROUPS=0|1 forces them (tests).
+    bool nb_groups_ok = false;
+    // LOUP_FORCE_TC=1 (tests): every GEMM the tensor-core cubin can take runs its fastest cubin tile (no cuBLASLt or own
+    // SGEMM candidates), so gates cover the cubin's arithmetic on every eligible shape; no plans are loaded or saved.
+    bool force_tc = false;
     cudaStream_t stream = nullptr;
     cublasHandle_t cublas = nullptr;
     cublasLtHandle_t cublas_lt = nullptr;
-    int* h_reb_pinned = nullptr;
-    cudaEvent_t ev_reb[2] = {nullptr, nullptr};
+    // Host polling of stream positions (loup::publish_kernel, wait_published): mapped pinned words [0] = counter,
+    // [1..3] = published values; the device counter's mirror on the host.
+    int* h_pub = nullptr;
+    int* d_pub = nullptr;
+    unsigned int* d_pub_counter = nullptr;
+    unsigned int pub_count = 0;
     void* d_cublas_ws = nullptr;
     HybCubin hyb;
     size_t cublas_ws_bytes = 4 << 20;
@@ -529,6 +648,7 @@ struct LoupHandle {
     void* side_ws[kSide] = {};
     cudaEvent_t ev_fork = nullptr;
     cudaEvent_t ev_join[kSide] = {};
+    cudaEvent_t ev_m1[2][4] = {};  // per m1 buffer: its lin1 GEMMs on lanes 0-3 are done (S112 chunk pipeline)
     cudaStream_t gemm_stream = nullptr;  // stream sgemm_rm launches on (main stream outside fork groups)
     void* gemm_ws = nullptr;
     bool fork_ok = true;
@@ -554,7 +674,14 @@ struct LoupHandle {
         }
         if (ovr.wp_threads) wp_threads = ovr.wp_threads;
     }
-    bool use_wprime_rcv() const { return ovr.wprime_rcv >= 0 ? ovr.wprime_rcv == 1 : N >= 512; }
+    // Receiver-owned w' below 512 atoms too (`wprime_rcv_small`): it wins there on cc 12.0 (S96: SrTiO3 40 / 135 / 320
+    // atoms 0.984 / 0.953 / 0.967 of the step) and cc 8.0 (S114, A100: 0.994 / 0.989 / 0.968); other GPUs keep the S3
+    // threshold (the edge-tiled kernel there is unmeasured against it).
+    bool wprime_rcv_small = false;
+    bool use_wprime_rcv_at(int n) const {
+        return ovr.wprime_rcv >= 0 ? ovr.wprime_rcv == 1 : (wprime_rcv_small || n >= 512);
+    }
+    bool use_wprime_rcv() const { return use_wprime_rcv_at(N); }
     bool variants_tuned = false;  // tune_rebuild_variants ran for this system
     struct DiskPlan {
         int M, N, K;
@@ -571,6 +698,7 @@ struct LoupHandle {
     bool gemm_buckets = true;
     bool disk_dirty = false;
     void load_disk_plans(int device_id) {
+        if (force_tc) return;  // forced picks must not reach (or come from) the plan cache
         const char* cdir = std::getenv("LOUP_CACHE_DIR");
         std::string dir;
         if (cdir && cdir[0]) dir = cdir;
@@ -697,11 +825,13 @@ struct LoupHandle {
     double cell_vol = 0.0;
     double cell_heights[3] = {0, 0, 0};
     // The variable cell (cell.hpp), from the handle's first variable-cell run on: the cell on the device, which the
-    // captured step reads and writes, and the edges' integer image shifts in the edges' order, kept in the
-    // rebuild's scratch arrays (d_tmp_snd, d_tmp_rcv, d_tmp_pairs). Every rebuild refreshes both from the host's
-    // cell; the host's cell follows the device's before a rebuild inside such a run and at the end of the call.
+    // captured step reads and writes, and the edges' integer image shifts in the edges' order (d_cell_codes, 4 B per
+    // edge, cell_shift_codes_kernel). Every rebuild refreshes both from the host's cell; the host's cell follows the
+    // device's before a rebuild inside such a run and at the end of the call.
     bool var_cell = false;
     loup::CellDev* d_celldev = nullptr;
+    char4* d_cell_codes = nullptr;
+    int cell_codes_cap = 0;
     // The dispersion term (S6-D04, loup_set_dispersion), added to every whole-system force pass. It reads the cell
     // on the device: d_disp_cell, which follows the host's cell, or the device's own cell inside a variable-cell
     // step (disp_cell_dev while that step is recorded). disp_ready: prepared for this system (the first positions
@@ -728,7 +858,8 @@ struct LoupHandle {
     double* d_rnd_vel = nullptr;
     int* d_need_rebuild = nullptr;
     // Maximum of the squared per-step displacements (float bits) in two windows, [0] current and [1] previous;
-    // readers take the larger. disp_window_steps: steps since the current window began.
+    // readers take the larger (loup_get_step_displacement, the saved state). disp_window_steps: steps since the
+    // current window began.
     unsigned int* d_max_step_disp2 = nullptr;
     int disp_window_steps = 0;
     unsigned long long* d_step_counter = nullptr;
@@ -783,16 +914,13 @@ struct LoupHandle {
     int E_skin = 0;
     int E_graph = 0;
     int E_cap = 0;
+    // Candidate edges (within r_max + skin), row i holding the edges whose receiver is i (S113: no per-edge receiver
+    // or pair index)
     int* d_senders = nullptr;
-    int* d_receivers = nullptr;
     double* d_shift_cart = nullptr;  // [E, 3] shift @ cell of each skin edge (float64), set at rebuild
-    int* d_pairs = nullptr;
     int* d_tmp_snd = nullptr;
-    int* d_tmp_rcv = nullptr;
     int* d_tmp_shifts = nullptr;
-    int* d_tmp_pairs = nullptr;
     uint32_t* d_sort_keys = nullptr;
-    int* d_sort_vals = nullptr;
     float4* d_act_vec_len = nullptr;
     int* d_act_senders = nullptr;
     int* d_act_receivers = nullptr;
@@ -822,14 +950,14 @@ struct LoupHandle {
     float* d_h0_0 = nullptr; float* d_h0_1 = nullptr;
     float* d_sc_skip16 = nullptr;
     float* d_x0 = nullptr;   float* d_x1 = nullptr;
-    float* d_m1_0 = nullptr; float* d_m1_1 = nullptr; float* d_m1_2 = nullptr; float* d_m1_3 = nullptr;
+    // m1 / dm1 (aliased) per receiver chunk. With chunks the two buffers alternate (S112); else only [0] exists.
+    float* d_m1[2][4] = {};
     float* d_D1 = nullptr;
+    int m1_rows = 0;  // receivers per m1 buffer: N, or the chunk size
     float* d_b0 = nullptr;   float* d_b1 = nullptr;   float* d_b2 = nullptr;   float* d_b3 = nullptr;
-    float* d_y1 = nullptr;
     float* d_hidden16 = nullptr;  // d(energy)/d(hidden16) [N, 16], written by sc1_fused for the skip backward
     float* d_db0 = nullptr;  float* d_db1 = nullptr;  float* d_db2 = nullptr;  float* d_db3 = nullptr;
     float* d_dD1 = nullptr;
-    float* d_dm1_0 = nullptr; float* d_dm1_1 = nullptr; float* d_dm1_2 = nullptr; float* d_dm1_3 = nullptr;
     float* d_dh0_0 = nullptr; float* d_dh0_1 = nullptr;
     float* d_dm0_0 = nullptr; float* d_dm0_1 = nullptr; float* d_dm0_2 = nullptr; float* d_dm0_3 = nullptr;
     float* d_dD0 = nullptr;
@@ -845,12 +973,17 @@ struct LoupHandle {
     cudaGraphExec_t energy_graph_exec = nullptr;
     double* pass_atom_energy = nullptr;  // a per-atom energy pass (S6-T08) is being recorded: its [N] buffer
 
-    cudaGraph_t md_graph = nullptr;  // pipelined loop: move + check + forces + second half
-    cudaGraphExec_t md_graph_exec = nullptr;
-    // Unpipelined loop: move + check, then (after a rebuild if flagged) forces + second half.
-    cudaGraph_t md_move_graph = nullptr, md_rest_graph = nullptr;
-    cudaGraphExec_t md_move_exec = nullptr, md_rest_exec = nullptr;
-    int md_graph_kind = -1;  // 0=NVE, 1=Langevin
+    // MD step: first half + skin check + guard_step_kernel + one SWITCH node: body 0 the rest (forces + second half)
+    // when the list is complete and its rows valid, body 1 (when md_dev_rebuild) the rebuild branch: count +
+    // rebuild_gate_kernel, then fill + commit + IF (fits, valid rows) rest. The rebuild runs on the GPU without a host
+    // round trip unless the new list outgrows the captured sizes.
+    cudaGraph_t md_step_graph = nullptr;
+    cudaGraphExec_t md_step_exec = nullptr;
+    bool md_dev_rebuild = false;
+    // Checked rest, launched after a host-driven rebuild: rest_guard_kernel + IF (valid rows) {forces + second half}.
+    cudaGraph_t md_checked_graph = nullptr;
+    cudaGraphExec_t md_checked_exec = nullptr;
+    int md_graph_kind = -1;  // the run_md_loop kind the graphs are for
     double md_graph_dt = 0.0;
     double md_graph_fr = 0.0;
     double md_graph_tau = 0.0;
@@ -881,17 +1014,17 @@ struct LoupHandle {
         invalidate_md_graphs();
     }
     void invalidate_md_graphs() {
-        if (md_graph_exec) { cudaGraphExecDestroy(md_graph_exec); md_graph_exec = nullptr; }
-        if (md_graph) { cudaGraphDestroy(md_graph); md_graph = nullptr; }
-        if (md_move_exec) { cudaGraphExecDestroy(md_move_exec); md_move_exec = nullptr; }
-        if (md_move_graph) { cudaGraphDestroy(md_move_graph); md_move_graph = nullptr; }
-        if (md_rest_exec) { cudaGraphExecDestroy(md_rest_exec); md_rest_exec = nullptr; }
-        if (md_rest_graph) { cudaGraphDestroy(md_rest_graph); md_rest_graph = nullptr; }
-        md_graph_kind = -1;
+        if (md_step_exec) { cudaGraphExecDestroy(md_step_exec); md_step_exec = nullptr; }
+        if (md_step_graph) { cudaGraphDestroy(md_step_graph); md_step_graph = nullptr; }
+        if (md_checked_exec) { cudaGraphExecDestroy(md_checked_exec); md_checked_exec = nullptr; }
+        if (md_checked_graph) { cudaGraphDestroy(md_checked_graph); md_checked_graph = nullptr; }
+        md_dev_rebuild = false;
     }
 
     int n_rebuilds = 0;     // rebuilds since set_system (atom reorder cadence)
-    int* d_order_err = nullptr;
+    int* d_order_err = nullptr;  // set by sort_gather_rows_kernel when a row breaks the species-run contract
+    int* d_max_deg = nullptr;    // [0] longest neighbour row of the current rebuild, [1] the MD rebuild gate's verdict
+    int max_deg_last = 0;        // longest row of the last rebuild (sizes the MD step graph's row sort)
     bool nl_valid = false;  // neighbour list built for the current system (ref positions and shifts are set)
     // d_forces_f64 and d_energy_f64 belong to the positions in d_pos64: the last call was a force evaluation or a
     // completed run, with no new positions since. A run then starts without a force pass of its own.
@@ -938,15 +1071,17 @@ struct LoupHandle {
         md_steps = 0;
         thermo_pending = 0;
         freep(d_pos_wrapped); freep(d_atom_wrap); freep(d_atom_bin);
-        freep(d_ro_keys); freep(d_ro_vals); freep(d_ro_tmp); freep(d_order_err);
+        freep(d_ro_keys); freep(d_ro_vals); freep(d_ro_tmp); freep(d_order_err); freep(d_max_deg);
         freep(d_bin_counts); freep(d_bin_offsets); freep(d_bin_cursor);
         freep(d_bin_atom_id); freep(d_bin_pos); freep(d_bin_pos_f32); freep(d_bin_wrap); freep(d_bin_sp);
         freep(d_deg); freep(d_edge_total); freep(d_row_ptr); freep(d_cub_tmp); cub_tmp_bytes = 0;
         freep(d_act_deg); freep(d_act_row_ptr);
 
-        freep(d_senders); freep(d_receivers); freep(d_shift_cart); freep(d_pairs);
-        freep(d_tmp_snd); freep(d_tmp_rcv); freep(d_tmp_shifts); freep(d_tmp_pairs);
-        freep(d_sort_keys); freep(d_sort_vals);
+        freep(d_senders); freep(d_shift_cart);
+        freep(d_cell_codes); cell_codes_cap = 0;
+        // views into d_tmp_vec_len / d_edge_force_1 (ensure_edge_capacity), freed with them
+        d_tmp_snd = d_tmp_shifts = nullptr;
+        d_sort_keys = nullptr;
         freep(d_act_vec_len);
         freep(d_act_senders); freep(d_act_receivers); freep(d_act_pairs);
         freep(d_act_slab); freep(d_act_t_sx);
@@ -958,13 +1093,16 @@ struct LoupHandle {
         freep(d_m0_0); freep(d_m0_1); freep(d_m0_2); freep(d_m0_3);
         freep(d_h0_0); freep(d_h0_1); freep(d_sc_skip16);
         freep(d_x0); freep(d_x1);
-        freep(d_m1_0); freep(d_m1_1); freep(d_m1_2); freep(d_m1_3); freep(d_D1);
-        freep(d_b0); freep(d_b1); freep(d_b2); freep(d_b3);
-        freep(d_y1); freep(d_hidden16);
-        freep(d_db0); freep(d_db1); freep(d_db2); freep(d_db3); freep(d_dD1);
-        d_dm1_0 = d_dm1_1 = d_dm1_2 = d_dm1_3 = nullptr;  // aliased onto d_m1_*
+        for (auto& buf : d_m1)
+            for (float*& p : buf) freep(p);
+        freep(d_D1);
+        d_b0 = d_b1 = d_b2 = d_b3 = nullptr;              // views into d_zero_slab (the S0 regions)
+        freep(d_hidden16);
+        d_db0 = d_db1 = d_db2 = d_db3 = nullptr;          // aliased onto d_b_*
+        freep(d_dD1);
         d_dh0_0 = d_dh0_1 = nullptr;                      // aliased onto d_h0_*
-        freep(d_dm0_0); freep(d_dm0_1); freep(d_dm0_2); freep(d_dm0_3); freep(d_dD0);
+        d_dm0_0 = d_dm0_1 = d_dm0_2 = d_dm0_3 = nullptr;  // aliased onto d_m0_*
+        freep(d_dD0);
         d_dS0_0 = d_dS0_1 = d_dS0_2 = d_dS0_3 = nullptr;  // aliased onto d_S0_*
     }
 };
@@ -1183,7 +1321,10 @@ static inline void sgemm_rm(
                     second_ms = std::min(second_ms, ms);
                     return false;
                 };
-                for (int r = 0; r < n_res; ++r) {
+                const bool tc_ok = alpha == 1.0f && h->hyb.takes(beta) && (K & 3) == 0 && (N & 3) == 0 &&
+                                   ((((uintptr_t)A | (uintptr_t)B | (uintptr_t)d_tmpC) & 15) == 0);
+                const bool only_tc = h->force_tc && tc_ok;
+                for (int r = 0; r < (only_tc ? 0 : n_res); ++r) {
                     cublasStatus_t st = cublasLtMatmul(
                         lt_h, plan.desc, &alpha, B, plan.layA, A, plan.layB, &beta,
                         d_tmpC, plan.layC, d_tmpC, plan.layC, &res[r].algo, ws_p, h->cublas_ws_bytes, strm);
@@ -1195,14 +1336,13 @@ static inline void sgemm_rm(
                     });
                     if (consider(ms)) { plan.algo = res[r].algo; plan.use_hyb = false; }
                 }
-                if (alpha == 1.0f && h->hyb.takes(beta) && (K & 3) == 0 && (N & 3) == 0 &&
-                    ((((uintptr_t)A | (uintptr_t)B | (uintptr_t)d_tmpC) & 15) == 0)) {
+                if (tc_ok) {
                     for (int t = 0; t < h->hyb.ntiles; ++t) {
                         const float ms = time_min([&] { h->hyb.launch(t, transB, M, N, K, A, lda, B, ldb, d_tmpC, ldc, beta, strm); });
                         if (consider(ms)) { plan.use_hyb = true; plan.hyb_tile = t; }
                     }
                 }
-                if (own_ok && (((uintptr_t)d_tmpC & 15) == 0)) {
+                if (!only_tc && own_ok && (((uintptr_t)d_tmpC & 15) == 0)) {
                     const float* Bkn = own_b();
                     const float ms128 = time_min([&] { loup::sgemm128(M, N, K, A, Bkn, d_tmpC, beta, h->own_ext, strm); });
                     if (consider(ms128)) { plan.own_mode = 1; plan.use_hyb = false; }
@@ -1288,15 +1428,12 @@ static int ensure_edge_capacity(LoupHandle* h, int needed) {
         return cudaMalloc(&p, (size_t)cap * elem_sz);
     };
     CUDA_CHECK(reallocp(h->d_senders, sizeof(int)));
-    CUDA_CHECK(reallocp(h->d_receivers, sizeof(int)));
     CUDA_CHECK(reallocp(h->d_shift_cart, 3 * sizeof(double)));
-    CUDA_CHECK(reallocp(h->d_pairs, sizeof(int)));
-    CUDA_CHECK(reallocp(h->d_tmp_snd, sizeof(int)));
-    CUDA_CHECK(reallocp(h->d_tmp_rcv, sizeof(int)));
-    CUDA_CHECK(reallocp(h->d_tmp_shifts, 3 * sizeof(int)));
-    CUDA_CHECK(reallocp(h->d_tmp_pairs, sizeof(int)));
-    CUDA_CHECK(reallocp(h->d_sort_keys, sizeof(uint32_t)));
-    CUDA_CHECK(reallocp(h->d_sort_vals, sizeof(int)));
+    // The rebuild's fill / sort temporaries are views into arrays a force pass rewrites before reading and that are
+    // dead during a rebuild: senders and sort keys in d_tmp_vec_len (8 of its 16 B per edge), the shifts in
+    // d_edge_force_1.
+    h->d_tmp_snd = h->d_tmp_shifts = nullptr;
+    h->d_sort_keys = nullptr;
     CUDA_CHECK(reallocp(h->d_act_vec_len, sizeof(float4)));
     CUDA_CHECK(reallocp(h->d_act_senders, sizeof(int)));
     CUDA_CHECK(reallocp(h->d_act_receivers, sizeof(int)));
@@ -1305,14 +1442,31 @@ static int ensure_edge_capacity(LoupHandle* h, int needed) {
     CUDA_CHECK(reallocp(h->d_act_t_sx, sizeof(float2)));
     CUDA_CHECK(reallocp(h->d_tmp_vec_len, sizeof(float4)));
     CUDA_CHECK(reallocp(h->d_edge_force_1, 3 * sizeof(float)));
+    int* tmp4 = reinterpret_cast<int*>(h->d_tmp_vec_len);
+    h->d_tmp_snd = tmp4;
+    h->d_sort_keys = reinterpret_cast<uint32_t*>(tmp4 + (size_t)cap);
+    h->d_tmp_shifts = reinterpret_cast<int*>(h->d_edge_force_1);
     if (h->gen) h->gen->ensure_edges(cap);
     h->E_cap = cap;
     return 0;
 }
 
+// The variable-cell step's integer image shifts (d_cell_codes, 4 B per edge), allocated only by variable-cell runs.
+// Outside capture; captured graphs bake the pointer in.
+static int ensure_cell_codes(LoupHandle* h) {
+    if (h->cell_codes_cap >= h->E_cap && h->d_cell_codes) return 0;
+    h->invalidate_graphs();
+    if (h->d_cell_codes) cudaFree(h->d_cell_codes);
+    h->d_cell_codes = nullptr;
+    h->cell_codes_cap = 0;
+    CUDA_CHECK(cudaMalloc(&h->d_cell_codes, (size_t)h->E_cap * sizeof(char4)));
+    h->cell_codes_cap = h->E_cap;
+    return 0;
+}
+
 static int ensure_cub_tmp(LoupHandle* h, size_t bytes) {
     if (bytes <= h->cub_tmp_bytes) return 0;
-    // Queued work (a scan earlier in this rebuild, or the in-flight step of the pipelined loop) may still use the old
+    // Queued work (a scan earlier in this rebuild, or the MD step still in flight) may still use the old
     // buffer: wait for it before the free. Growth is rare (only the first rebuilds of a system reach it).
     CUDA_CHECK(cudaStreamSynchronize(h->stream));
     if (h->d_cub_tmp) cudaFree(h->d_cub_tmp);
@@ -1404,36 +1558,247 @@ __global__ void sum_degrees_kernel(int n, const int* __restrict__ deg, unsigned 
 }
 }  // extern "C++"
 
-static int rebuild_neighbors(LoupHandle* h) {
+// Queue loup::publish_kernel(a, b, c) on the main stream (outside capture); returns the counter value it will post.
+static unsigned int publish(LoupHandle* h, const int* a, const int* b, const int* c) {
+    loup::publish_kernel<<<1, 1, 0, h->stream>>>(a, b, c, h->d_pub_counter, h->d_pub);
+    return ++h->pub_count;
+}
+
+// Polls the mapped publish slot of publication `want` until it has landed, then copies its values to out[0..2]. The
+// stream is queried every few thousand polls so a failed kernel or an emptied queue cannot hang the host.
+static int wait_published(LoupHandle* h, unsigned int want, int out[3]) {
+    volatile int* p = h->h_pub + 4 * (want & 3u);
+    volatile unsigned int* seq = reinterpret_cast<volatile unsigned int*>(p);
+    for (unsigned int spins = 1; *seq != want; ++spins) {
+        if ((spins & 4095) == 0) {
+            const cudaError_t e = cudaStreamQuery(h->stream);
+            if (e == cudaSuccess && *seq != want) {
+                fprintf(stderr, "loupmd: publish %u never landed (slot has %u)\n", want, *seq);
+                return -1;
+            }
+            if (e != cudaSuccess && e != cudaErrorNotReady) CUDA_CHECK(e);
+        }
+        __builtin_ia32_pause();
+    }
+    __atomic_thread_fence(__ATOMIC_ACQUIRE);
+    out[0] = p[1];
+    out[1] = p[2];
+    out[2] = p[3];
+    return 0;
+}
+
+// Reads up to three device ints at the current end of the main stream (polling the mapped publish words).
+static int read_device_ints(LoupHandle* h, const int* a, const int* b, const int* c, int out[3]) {
+    return wait_published(h, publish(h, a, b, c), out);
+}
+
+static int order_error() {
+    fprintf(stderr, "LoupMD: neighbour rows are not grouped by ascending sender species\n");
+    return -1;
+}
+
+// Geometry of one neighbour-list build for the current cell, skin and N: bin grid, scan ranges, kernel shapes. An
+// open domain's ghosts (rows N .. NT - 1) are binned and found as senders like every atom (gridNT); only the first N
+// rows are receivers (count, fill and sort).
+struct NlGeom {
+    int nx, ny, nz, n_bins, rx, ry, rz, gridN, gridNT, NT, blkN, gridNb;
+    bool nb_groups;
+    size_t nb_smem;
+    double r_list2;
+    float r_lo2_f32, r_hi2_f32;
+};
+static constexpr int kNlBlk = 128;
+
+static NlGeom nl_geom(const LoupHandle* h) {
+    NlGeom g;
+    const int N = h->N;
+    const double r_list = (double)h->cutoff() + h->skin;
+    g.r_list2 = r_list * r_list;
+    g.nx = std::max(1, (int)std::floor(h->cell_heights[0] / 3.25));
+    g.ny = std::max(1, (int)std::floor(h->cell_heights[1] / 3.25));
+    g.nz = std::max(1, (int)std::floor(h->cell_heights[2] / 3.25));
+    while ((int64_t)g.nx * g.ny * g.nz > h->max_bins) {
+        if (g.nx >= g.ny && g.nx >= g.nz && g.nx > 1) --g.nx;
+        else if (g.ny >= g.nx && g.ny >= g.nz && g.ny > 1) --g.ny;
+        else if (g.nz > 1) --g.nz;
+        else break;
+    }
+    g.n_bins = g.nx * g.ny * g.nz;
+    g.rx = (int)std::ceil(r_list * g.nx / h->cell_heights[0]);
+    g.ry = (int)std::ceil(r_list * g.ny / h->cell_heights[1]);
+    g.rz = (int)std::ceil(r_list * g.nz / h->cell_heights[2]);
+    g.gridN = (N + kNlBlk - 1) / kNlBlk;
+    g.NT = N + h->n_ghost;
+    g.gridNT = (g.NT + kNlBlk - 1) / kNlBlk;
+    const double max_h = std::max({h->cell_heights[0], h->cell_heights[1], h->cell_heights[2]});
+    const float margin = std::max(0.01f, 1e-4f * (float)max_h);
+    const float r_lo_f = std::max(0.0f, (float)r_list - margin);
+    const float r_hi_f = (float)r_list + margin;
+    g.r_lo2_f32 = r_lo_f * r_lo_f;
+    g.r_hi2_f32 = r_hi_f * r_hi_f;
+    // count / fill: on sm_120 kNeighborLanes lanes per atom (128-thread blocks hold whole lane groups; fill keeps one
+    // nscan-int bin-offset table per atom in shared memory); elsewhere, or when that table would exceed 48 KB, the
+    // one-thread-per-atom kernels (32-thread blocks), which the lane-group kernels were not measured against.
+    const int nscan = (2 * g.rx + 1) * (2 * g.ry + 1) * (2 * g.rz + 1);
+    g.nb_smem = (size_t)(128 / loup::kNeighborLanes) * nscan * sizeof(int);
+    g.nb_groups = h->nb_groups_ok && g.nb_smem <= 48 * 1024;
+    g.blkN = g.nb_groups ? 128 : 32;
+    g.gridNb = (int)(((int64_t)N * (g.nb_groups ? loup::kNeighborLanes : 1) + g.blkN - 1) / g.blkN);
+    return g;
+}
+
+// Scratch of nl_count's two scans.
+static size_t nl_cub_bytes(LoupHandle* h, const NlGeom& g) {
+    size_t scan_bytes = 0, scanN_bytes = 0;
+    cub::DeviceScan::ExclusiveSum(nullptr, scan_bytes, h->d_bin_counts, h->d_bin_offsets, g.n_bins + 1, h->stream);
+    cub::DeviceScan::ExclusiveSum(nullptr, scanN_bytes, h->d_deg, h->d_row_ptr, h->N + 1, h->stream);
+    return std::max(scan_bytes, scanN_bytes);
+}
+
+// Wrapped positions and per-bin atom counts; zeroes the scans' totals, the row-order flag and the longest-row slot
+// (kernels, not memset / memcpy nodes: the MD step graph launches this branch from the device, where copy nodes cost
+// tens of microseconds each under WSL2).
+static int nl_bin(LoupHandle* h, const NlGeom& g) {
+    loup::nl_reset_kernel<<<(g.n_bins + 1 + 255) / 256, 256, 0, h->stream>>>(
+        g.n_bins, h->d_bin_counts, h->d_deg + h->N, h->d_order_err, h->d_max_deg);
+    loup::wrap_and_bin_kernel<<<g.gridNT, kNlBlk, 0, h->stream>>>(
+        g.NT, h->cell, g.nx, g.ny, g.nz, h->d_pos64, h->d_pos_wrapped, h->d_atom_wrap, h->d_atom_bin, h->d_bin_counts);
+    return 0;
+}
+
+// Bin offsets and slots, neighbour counts, row_ptr (edge count in row_ptr[N]) and the longest row. No host round
+// trip (d_cub_tmp must hold nl_cub_bytes), so run_md_loop captures it.
+static int nl_count(LoupHandle* h, const NlGeom& g) {
+    const int N = h->N;
+    size_t scan_bytes = h->cub_tmp_bytes;
+    cub::DeviceScan::ExclusiveSum(h->d_cub_tmp, scan_bytes, h->d_bin_counts, h->d_bin_offsets, g.n_bins + 1, h->stream);
+    loup::copy_ints_kernel<<<(g.n_bins + 255) / 256, 256, 0, h->stream>>>(g.n_bins, h->d_bin_offsets, h->d_bin_cursor);
+    loup::scatter_bins_kernel<<<g.gridNT, kNlBlk, 0, h->stream>>>(
+        g.NT, h->d_pos_wrapped, h->d_atom_wrap, h->d_species, h->d_atom_bin, h->d_bin_cursor,
+        h->d_bin_atom_id, h->d_bin_pos, h->d_bin_pos_f32, h->d_bin_wrap, h->d_bin_sp);
+    if (g.nb_groups)
+        loup::count_neighbors_kernel<<<g.gridNb, g.blkN, 0, h->stream>>>(
+            N, h->cell, g.nx, g.ny, g.nz, g.rx, g.ry, g.rz, g.r_list2, g.r_lo2_f32, g.r_hi2_f32, h->d_pos_wrapped,
+            h->d_atom_bin, h->d_bin_offsets, h->d_bin_atom_id, h->d_bin_pos, h->d_bin_pos_f32, h->d_deg);
+    else
+        loup::count_neighbors_scalar_kernel<<<g.gridNb, g.blkN, 0, h->stream>>>(
+            N, h->cell, g.nx, g.ny, g.nz, g.rx, g.ry, g.rz, g.r_list2, g.r_lo2_f32, g.r_hi2_f32, h->d_pos_wrapped,
+            h->d_atom_bin, h->d_bin_offsets, h->d_bin_atom_id, h->d_bin_pos, h->d_bin_pos_f32, h->d_deg);
+    size_t scanN_bytes = h->cub_tmp_bytes;
+    cub::DeviceScan::ExclusiveSum(h->d_cub_tmp, scanN_bytes, h->d_deg, h->d_row_ptr, N + 1, h->stream);
+    loup::max_degree_kernel<<<(N + 255) / 256, 256, 0, h->stream>>>(N, h->d_deg, h->d_max_deg);
+    return 0;
+}
+
+// Smallest power of two >= n (the row sort's width).
+static int pow2_at_least(int n) {
+    int p = 1;
+    while (p < n) p <<= 1;
+    return p;
+}
+
+// Fills the rows into the edge arrays (capacity >= the edge count), then sorts each receiver's row by key
+// (sym_pair << 19 | length bits), ties in fill order, and gathers it. Contract: for a fixed receiver sym_pair grows
+// with the sender species, so every row ends up grouped by ascending sender species, which the receiver-owned
+// tabled_outer_sum0_forward_kernel relies on (it stores one slot per species run); the sort kernel flags a row that
+// breaks it (a changed key or sym_pair would otherwise corrupt S0 silently). P: the sort width, a power of two >= the
+// longest row; rows of P <= 4096 sort in shared memory. go: the MD step graph's rebuild verdict (nullptr: always).
+static int nl_fill(LoupHandle* h, const NlGeom& g, int P, const int* go = nullptr) {
+    const int N = h->N;
+    const int S = h->n_species();
+    if (g.nb_groups)
+        loup::fill_neighbors_kernel<<<g.gridNb, g.blkN, g.nb_smem, h->stream>>>(
+            N, S, h->cell, g.nx, g.ny, g.nz, g.rx, g.ry, g.rz, g.r_list2, g.r_lo2_f32, g.r_hi2_f32,
+            h->d_pos_wrapped, h->d_atom_wrap, h->d_species, h->d_atom_bin,
+            h->d_bin_offsets, h->d_bin_atom_id, h->d_bin_pos, h->d_bin_pos_f32, h->d_bin_wrap, h->d_bin_sp,
+            h->d_row_ptr, h->d_tmp_snd, h->d_tmp_shifts, h->d_sort_keys, go);
+    else
+        loup::fill_neighbors_scalar_kernel<<<g.gridNb, g.blkN, 0, h->stream>>>(
+            N, S, h->cell, g.nx, g.ny, g.nz, g.rx, g.ry, g.rz, g.r_list2, g.r_lo2_f32, g.r_hi2_f32,
+            h->d_pos_wrapped, h->d_atom_wrap, h->d_species, h->d_atom_bin,
+            h->d_bin_offsets, h->d_bin_atom_id, h->d_bin_pos, h->d_bin_pos_f32, h->d_bin_wrap, h->d_bin_sp,
+            h->d_row_ptr, h->d_tmp_snd, h->d_tmp_shifts, h->d_sort_keys, go);
+    const int threads = std::min(256, std::max(32, P / 2));
+    if (P <= 4096 && !h->ovr.row_sort_global)
+        loup::sort_gather_rows_kernel<<<N, threads, P * sizeof(unsigned long long), h->stream>>>(
+            h->cell, h->d_row_ptr, h->d_sort_keys, h->d_tmp_snd, h->d_tmp_shifts, h->d_species, h->d_senders,
+            h->d_shift_cart, h->d_order_err, go);
+    else  // scratch: act_vec_len (16 B per edge) is per-step data, free during a rebuild
+        loup::sort_gather_rows_global_kernel<<<N, threads, 0, h->stream>>>(
+            h->cell, h->d_row_ptr, h->d_sort_keys, h->d_tmp_snd, h->d_tmp_shifts, h->d_species, h->d_senders,
+            h->d_shift_cart, h->d_order_err,
+            reinterpret_cast<unsigned long long*>(h->d_act_vec_len));
+    return 0;
+}
+
+// The list is now the one built at the current positions: they become the reference, and the skin flag clears.
+static int nl_commit(LoupHandle* h, const int* go = nullptr) {
+    const int n = (h->N + h->n_ghost) * 3;
+    loup::nl_commit_kernel<<<(n + 255) / 256, 256, 0, h->stream>>>(n, h->d_pos64, h->d_ref_pos64, h->d_need_rebuild,
+                                                                   go);
+    return 0;
+}
+
+// Host decisions after nl_count (edge capacity, the graphs' edge bucket), then fill, sort and commit.
+static int nl_finish(LoupHandle* h, const NlGeom& g, int E_new, int max_deg, bool check_order) {
+    h->E_skin = E_new;
+    h->max_deg_last = max_deg;
+    if (E_new > 0) {
+        if (ensure_edge_capacity(h, E_new) != 0) return -1;
+        if (E_new > h->E_graph || h->E_graph > E_new + 32768) {
+            h->E_graph = std::min(h->E_cap, ((E_new + 8191) & ~8191));
+            if (h->E_graph < E_new) h->E_graph = E_new;
+            h->invalidate_graphs();
+        }
+        if (nl_fill(h, g, pow2_at_least(max_deg)) != 0) return -1;
+        if (check_order) {
+            int vals[3];
+            if (read_device_ints(h, h->d_order_err, nullptr, nullptr, vals) != 0) return -1;
+            if (vals[0]) return order_error();
+        }
+    } else if (h->E_graph != 0) {
+        h->E_graph = 0;
+        h->invalidate_graphs();
+    }
+    if (h->var_cell && E_new > 0) {
+        // The variable-cell step forms the Cartesian shifts from the device's cell every step (shift_cart_kernel):
+        // the integer image shifts in the edges' order, from the sorted Cartesian ones and the list's cell.
+        if (ensure_cell_codes(h) != 0) return -1;
+        CUDA_CHECK(cudaMemsetAsync(h->d_order_err + 2, 0, sizeof(int), h->stream));
+        loup::Mat3 inv;
+        for (int k = 0; k < 9; ++k) inv.m[k] = h->cell.inv[k];
+        loup::cell_shift_codes_kernel<<<(E_new + 255) / 256, 256, 0, h->stream>>>(
+            E_new, inv, h->d_shift_cart, h->d_cell_codes, h->d_order_err + 2);
+        int vals[3];
+        if (read_device_ints(h, h->d_order_err + 2, nullptr, nullptr, vals) != 0) return -1;
+        if (vals[0]) {
+            loup::set_error("variable cell: an image shift of the neighbour list exceeds 127 cells");
+            return -1;
+        }
+    }
+    if (nl_commit(h) != 0) return -1;
+    if (h->var_cell && upload_cell_dev(h) != 0) return -1;
+    h->cell_ref_stale = false;
+    CUDA_CHECK(cudaGetLastError());
+    h->nl_valid = true;
+    return 0;
+}
+
+// Whether rebuilds reorder the atoms spatially (see rebuild_neighbors): a host round trip, so such systems keep the
+// host-driven rebuild in MD.
+static bool reorder_atoms(const LoupHandle* h) {
+    if (h->n_ghost > 0) return false;  // a domain's rows are its caller's
+    return h->ovr.reorder >= 0 ? h->ovr.reorder == 1 : (int64_t)h->N * 4096 > (int64_t)h->l2_bytes;
+}
+
+// check_order = false (run_md_loop) leaves the sort's contract flag in d_order_err for the caller's next read.
+static int rebuild_neighbors(LoupHandle* h, bool check_order = true) {
     h->nl_valid = false;  // set again only when the rebuild completes
     const int N = h->N;
     const int S = h->n_species();
-    const double r_list = (double)h->cutoff() + h->skin;
-    const double r_list2 = r_list * r_list;
-
-    int nx = std::max(1, (int)std::floor(h->cell_heights[0] / 3.25));
-    int ny = std::max(1, (int)std::floor(h->cell_heights[1] / 3.25));
-    int nz = std::max(1, (int)std::floor(h->cell_heights[2] / 3.25));
-    while ((int64_t)nx * ny * nz > h->max_bins) {
-        if (nx >= ny && nx >= nz && nx > 1) --nx;
-        else if (ny >= nx && ny >= nz && ny > 1) --ny;
-        else if (nz > 1) --nz;
-        else break;
-    }
-    const int n_bins = nx * ny * nz;
-    const int rx = (int)std::ceil(r_list * nx / h->cell_heights[0]);
-    const int ry = (int)std::ceil(r_list * ny / h->cell_heights[1]);
-    const int rz = (int)std::ceil(r_list * nz / h->cell_heights[2]);
-
-    // An open domain's ghosts (rows N .. NT - 1) are binned and found as senders like every atom; only the first N
-    // rows are receivers (the count, fill and sort below).
-    const int NT = N + h->n_ghost;
-    const int blk = 128;
-    const int gridN = (NT + blk - 1) / blk;
-
-    CUDA_CHECK(cudaMemsetAsync(h->d_bin_counts, 0, n_bins * sizeof(int), h->stream));
-    loup::wrap_and_bin_kernel<<<gridN, blk, 0, h->stream>>>(
-        NT, h->cell, nx, ny, nz, h->d_pos64, h->d_pos_wrapped, h->d_atom_wrap, h->d_atom_bin, h->d_bin_counts);
+    const NlGeom g = nl_geom(h);
+    if (ensure_cub_tmp(h, nl_cub_bytes(h, g)) != 0) return -1;
+    if (nl_bin(h, g) != 0) return -1;
 
     // Reorder atoms inside each species group by the Morton code of their bin, once the per-atom sender working set
     // (x0/x1 rows and their gradients, ~4 KB per atom) outgrows L2: then sender rows and sender-gradient atomics stay
@@ -1442,15 +1807,13 @@ static int rebuild_neighbors(LoupHandle* h) {
     // Atoms near a bin boundary flip bins thermally, so the order is refreshed only on every 16th rebuild (diffusion
     // is slow on that scale). Per-atom state (positions, velocities, forces, masses) is gathered in place, so every
     // buffer address and every captured graph stays valid; only the host permutation changes.
-    const bool reorder = h->n_ghost == 0 &&
-                         (h->ovr.reorder >= 0 ? h->ovr.reorder == 1 : (int64_t)N * 4096 > (int64_t)h->l2_bytes);
-    if (reorder && !h->suppress_reorder && (h->n_rebuilds++ % 16) == 0) {
+    if (reorder_atoms(h) && !h->suppress_reorder && (h->n_rebuilds++ % 16) == 0) {
         unsigned long long* keys_in = h->d_ro_keys;
         unsigned long long* keys_out = h->d_ro_keys + N;
         int* vals_in = h->d_ro_vals;
         int* vals_out = h->d_ro_vals + N;
-        loup::atom_order_keys_kernel<<<gridN, blk, 0, h->stream>>>(
-            N, nx, ny, nz, h->d_species, h->d_atom_bin, keys_in, vals_in);
+        loup::atom_order_keys_kernel<<<g.gridN, kNlBlk, 0, h->stream>>>(
+            N, g.nx, g.ny, g.nz, h->d_species, h->d_atom_bin, keys_in, vals_in);
         int species_bits = 0;
         while ((1 << species_bits) < S) ++species_bits;
         const int end_bit = 48 + species_bits;  // Morton code in bits 0..47, species above
@@ -1470,7 +1833,7 @@ static int rebuild_neighbors(LoupHandle* h) {
                                            cudaMemcpyDeviceToDevice, h->stream));
                 return 0;
             };
-            // d_rnd_vel: a rebuild in an unpipelined Langevin step falls between the half-kicks, and the second one
+            // d_rnd_vel: a rebuild in a Langevin step falls between the half-kicks, and the second one
             // must reuse the noise the first drew for the same atom.
             if (gather(h->d_pos64, 3) || gather(h->d_vel64, 3) || gather(h->d_forces_f64, 3) ||
                 gather(h->d_masses, 1) || gather(h->d_inv_masses, 1) || gather(h->d_sqrt_inv_masses, 1) ||
@@ -1478,135 +1841,27 @@ static int rebuild_neighbors(LoupHandle* h) {
             std::vector<int> old_perm = h->perm;
             for (int i = 0; i < N; ++i) h->perm[i] = old_perm[h->h_order[i]];
             ++h->pos_epoch;  // per-atom state kept outside this function (loup_minimize's) is in the old order
-            CUDA_CHECK(cudaMemsetAsync(h->d_bin_counts, 0, n_bins * sizeof(int), h->stream));
-            loup::wrap_and_bin_kernel<<<gridN, blk, 0, h->stream>>>(
-                N, h->cell, nx, ny, nz, h->d_pos64, h->d_pos_wrapped, h->d_atom_wrap, h->d_atom_bin, h->d_bin_counts);
+            if (nl_bin(h, g) != 0) return -1;
         }
     }
 
-    size_t scan_bytes = 0;
-    cub::DeviceScan::ExclusiveSum(nullptr, scan_bytes, h->d_bin_counts, h->d_bin_offsets, n_bins + 1, h->stream);
-    if (ensure_cub_tmp(h, scan_bytes) != 0) return -1;
-    // Set bin_counts[n_bins] = 0 so exclusive sum gives total N in bin_offsets[n_bins]
-    CUDA_CHECK(cudaMemsetAsync(h->d_bin_counts + n_bins, 0, sizeof(int), h->stream));
-    cub::DeviceScan::ExclusiveSum(h->d_cub_tmp, scan_bytes, h->d_bin_counts, h->d_bin_offsets, n_bins + 1, h->stream);
-    CUDA_CHECK(cudaMemcpyAsync(h->d_bin_cursor, h->d_bin_offsets, n_bins * sizeof(int), cudaMemcpyDeviceToDevice, h->stream));
-
-    const double max_h = std::max({h->cell_heights[0], h->cell_heights[1], h->cell_heights[2]});
-    const float margin = std::max(0.01f, 1e-4f * (float)max_h);
-    const float r_lo_f = std::max(0.0f, (float)r_list - margin);
-    const float r_hi_f = (float)r_list + margin;
-    const float r_lo2_f32 = r_lo_f * r_lo_f;
-    const float r_hi2_f32 = r_hi_f * r_hi_f;
-    // count / fill: on sm_120 kNeighborLanes lanes per atom (128-thread blocks hold whole lane groups; fill keeps one
-    // nscan-int bin-offset table per atom in shared memory); elsewhere, or when that table would exceed 48 KB, the
-    // one-thread-per-atom kernels (32-thread blocks), which the lane-group kernels were not measured against.
-    const int nscan = (2 * rx + 1) * (2 * ry + 1) * (2 * rz + 1);
-    const size_t nb_smem = (size_t)(128 / loup::kNeighborLanes) * nscan * sizeof(int);
-    const bool nb_groups = h->is_sm120 && nb_smem <= 48 * 1024;
-    const int blkN = nb_groups ? 128 : 32;
-    const int gridNb = (int)(((int64_t)N * (nb_groups ? loup::kNeighborLanes : 1) + blkN - 1) / blkN);
-    loup::scatter_bins_kernel<<<gridN, blk, 0, h->stream>>>(
-        NT, h->d_pos_wrapped, h->d_atom_wrap, h->d_species, h->d_atom_bin, h->d_bin_cursor,
-        h->d_bin_atom_id, h->d_bin_pos, h->d_bin_pos_f32, h->d_bin_wrap, h->d_bin_sp);
-
-    if (nb_groups)
-        loup::count_neighbors_kernel<<<gridNb, blkN, 0, h->stream>>>(
-            N, h->cell, nx, ny, nz, rx, ry, rz, r_list2, r_lo2_f32, r_hi2_f32, h->d_pos_wrapped, h->d_atom_bin,
-            h->d_bin_offsets, h->d_bin_atom_id, h->d_bin_pos, h->d_bin_pos_f32, h->d_deg);
-    else
-        loup::count_neighbors_scalar_kernel<<<gridNb, blkN, 0, h->stream>>>(
-            N, h->cell, nx, ny, nz, rx, ry, rz, r_list2, r_lo2_f32, r_hi2_f32, h->d_pos_wrapped, h->d_atom_bin,
-            h->d_bin_offsets, h->d_bin_atom_id, h->d_bin_pos, h->d_bin_pos_f32, h->d_deg);
-
-    CUDA_CHECK(cudaMemsetAsync(h->d_deg + N, 0, sizeof(int), h->stream));
+    if (nl_count(h, g) != 0) return -1;
+    // The 64-bit edge total: row_ptr's int scan wraps past 2^31 edges.
     if (!h->d_edge_total) CUDA_CHECK(cudaMalloc(&h->d_edge_total, sizeof(unsigned long long)));
     CUDA_CHECK(cudaMemsetAsync(h->d_edge_total, 0, sizeof(unsigned long long), h->stream));
     sum_degrees_kernel<<<(N + 255) / 256, 256, 0, h->stream>>>(N, h->d_deg, h->d_edge_total);
-    size_t scanN_bytes = 0;
-    cub::DeviceScan::ExclusiveSum(nullptr, scanN_bytes, h->d_deg, h->d_row_ptr, N + 1, h->stream);
-    if (ensure_cub_tmp(h, scanN_bytes) != 0) return -1;
-    cub::DeviceScan::ExclusiveSum(h->d_cub_tmp, scanN_bytes, h->d_deg, h->d_row_ptr, N + 1, h->stream);
-
-    int E_new = 0;
-    unsigned long long E_total = 0;
-    CUDA_CHECK(cudaMemcpyAsync(&E_new, h->d_row_ptr + N, sizeof(int), cudaMemcpyDeviceToHost, h->stream));
-    CUDA_CHECK(cudaMemcpyAsync(&E_total, h->d_edge_total, sizeof(E_total), cudaMemcpyDeviceToHost, h->stream));
-    CUDA_CHECK(cudaStreamSynchronize(h->stream));
+    int vals[3], tot[3];
+    if (read_device_ints(h, h->d_row_ptr + N, h->d_max_deg, nullptr, vals) != 0) return -1;
+    const int* et = reinterpret_cast<const int*>(h->d_edge_total);
+    if (read_device_ints(h, et, et + 1, nullptr, tot) != 0) return -1;
+    const unsigned long long E_total =
+        (unsigned long long)(unsigned)tot[0] | ((unsigned long long)(unsigned)tot[1] << 32);
     if (E_total > (unsigned long long)h->edge_limit) {
-        h->nl_valid = false;
         loup::set_error("the neighbour list has %llu edges, more than the %lld one call can index; run the system "
                         "in tiles (capacity 'auto' or 'tiled')", E_total, h->edge_limit);
         return -1;
     }
-
-    h->E_skin = E_new;
-    if (E_new > 0) {
-        if (ensure_edge_capacity(h, E_new) != 0) return -1;
-        if (E_new > h->E_graph || h->E_graph > E_new + 32768) {
-            h->E_graph = std::min(h->E_cap, ((E_new + 8191) & ~8191));
-            if (h->E_graph < E_new) h->E_graph = E_new;
-            h->invalidate_graphs();
-        }
-        if (nb_groups)
-            loup::fill_neighbors_kernel<<<gridNb, blkN, nb_smem, h->stream>>>(
-                N, S, h->cell, nx, ny, nz, rx, ry, rz, r_list2, r_lo2_f32, r_hi2_f32,
-                h->d_pos_wrapped, h->d_atom_wrap, h->d_species, h->d_atom_bin,
-                h->d_bin_offsets, h->d_bin_atom_id, h->d_bin_pos, h->d_bin_pos_f32, h->d_bin_wrap, h->d_bin_sp,
-                h->d_row_ptr, h->d_tmp_snd, h->d_tmp_rcv, h->d_tmp_shifts, h->d_tmp_pairs,
-                h->d_sort_keys, h->d_sort_vals);
-        else
-            loup::fill_neighbors_scalar_kernel<<<gridNb, blkN, 0, h->stream>>>(
-                N, S, h->cell, nx, ny, nz, rx, ry, rz, r_list2, r_lo2_f32, r_hi2_f32,
-                h->d_pos_wrapped, h->d_atom_wrap, h->d_species, h->d_atom_bin,
-                h->d_bin_offsets, h->d_bin_atom_id, h->d_bin_pos, h->d_bin_pos_f32, h->d_bin_wrap, h->d_bin_sp,
-                h->d_row_ptr, h->d_tmp_snd, h->d_tmp_rcv, h->d_tmp_shifts, h->d_tmp_pairs,
-                h->d_sort_keys, h->d_sort_vals);
-
-        // Sort each receiver's row by key (sym_pair << 19 | length bits). Contract: for a fixed receiver sym_pair grows
-        // with the sender species, so every row ends up grouped by ascending sender species, which the receiver-owned
-        // tabled_outer_sum0_forward_kernel relies on (it stores one slot per species run). Rows are ~100 edges:
-        // DeviceSegmentedSort sorts small segments in warps/blocks instead of radix passes over every segment;
-        // stable, so ties keep fill order.
-        size_t sort_bytes = 0;
-        // Key scratch: edge_force_1 ([E, 3] floats) is per-step data, free during a rebuild.
-        cub::DoubleBuffer<uint32_t> d_keys(h->d_sort_keys, reinterpret_cast<uint32_t*>(h->d_edge_force_1));
-        cub::DoubleBuffer<int> d_vals(h->d_sort_vals, reinterpret_cast<int*>(h->d_act_vec_len));
-        cub::DeviceSegmentedSort::StableSortPairs(
-            nullptr, sort_bytes, d_keys, d_vals, E_new, N, h->d_row_ptr, h->d_row_ptr + 1, h->stream);
-        if (ensure_cub_tmp(h, sort_bytes) != 0) return -1;
-        cub::DeviceSegmentedSort::StableSortPairs(
-            h->d_cub_tmp, sort_bytes, d_keys, d_vals, E_new, N, h->d_row_ptr, h->d_row_ptr + 1, h->stream);
-        const int gridE = (E_new + 255) / 256;
-        loup::gather_sorted_edges_kernel<<<gridE, 256, 0, h->stream>>>(
-            E_new, h->cell, d_vals.Current(), h->d_tmp_snd, h->d_tmp_rcv, h->d_tmp_shifts, h->d_tmp_pairs,
-            h->d_senders, h->d_receivers, h->d_shift_cart, h->d_pairs);
-        // Enforce the contract above (a changed key or sym_pair would otherwise corrupt S0 silently).
-        CUDA_CHECK(cudaMemsetAsync(h->d_order_err, 0, sizeof(int), h->stream));
-        loup::check_row_species_order_kernel<<<gridE, 256, 0, h->stream>>>(
-            E_new, h->d_senders, h->d_receivers, h->d_species, h->d_order_err);
-        int order_err = 0;
-        CUDA_CHECK(cudaMemcpyAsync(&order_err, h->d_order_err, sizeof(int), cudaMemcpyDeviceToHost, h->stream));
-        CUDA_CHECK(cudaStreamSynchronize(h->stream));
-        if (order_err) {
-            loup::set_error("internal error: neighbour rows are not grouped by ascending sender species");
-            return -1;
-        }
-        if (h->var_cell) {  // the integer shifts in the edges' order; the scratch arrays are free until the next rebuild
-            loup::sorted_shifts_kernel<<<gridE, 256, 0, h->stream>>>(
-                E_new, d_vals.Current(), h->d_tmp_shifts, h->d_tmp_snd, h->d_tmp_rcv, h->d_tmp_pairs);
-        }
-    } else if (h->E_graph != 0) {
-        h->E_graph = 0;
-        h->invalidate_graphs();
-    }
-    CUDA_CHECK(cudaMemcpyAsync(h->d_ref_pos64, h->d_pos64, (size_t)NT * 3 * sizeof(double), cudaMemcpyDeviceToDevice, h->stream));
-    CUDA_CHECK(cudaMemsetAsync(h->d_need_rebuild, 0, sizeof(int), h->stream));
-    if (h->var_cell && upload_cell_dev(h) != 0) return -1;
-    h->cell_ref_stale = false;
-    CUDA_CHECK(cudaGetLastError());
-    h->nl_valid = true;
-    return 0;
+    return nl_finish(h, g, vals[0], vals[1], check_order);
 }
 
 // Fork: side streams wait for everything queued on the main stream so far.
@@ -1634,27 +1889,58 @@ static void gemm_join(LoupHandle* h) {
     h->gemm_ws = nullptr;
 }
 
-static void launch_wprime_rcv(LoupHandle* h, int threads) {
-    const int N = h->N;
-    wprime_backward_inter1_rcv<<<N, threads, 0, h->stream>>>(
-        N, h->d_act_row_ptr + N, h->d_x0, h->d_x1, h->d_act_vec_len,
-        h->d_act_senders, h->d_act_row_ptr,
+// Receiver chunks of the m1 / dm1 buffers in order: fn(c, a0, n) for chunk c = [a0, a0 + n), whose buffer is c & 1
+// (one chunk, the whole system, unless set_system_impl chose chunks).
+template <class F>
+static void for_each_m1_chunk(const LoupHandle* h, F&& fn) {
+    for (int c = 0, a0 = 0; a0 < h->N; ++c, a0 += h->m1_rows) fn(c, a0, std::min(h->m1_rows, h->N - a0));
+}
+
+// m1 chunk pipeline (S112). Odd chunks' spline and w' run on side stream kM1OddStream, even ones on the main stream,
+// so each chunk's kernel fills the tail of the previous one; lanes 0-3 run the lin1 GEMMs. m1_fork_lanes: lanes 0-3
+// wait for everything queued on `st`; m1_lanes_done: they record that the GEMMs into buffer `buf` are done;
+// m1_wait_lanes: `st` waits for that. Without forked GEMMs (autotune pass) everything runs in order on the main stream.
+static constexpr int kM1OddStream = 4;
+
+static void m1_fork_lanes(LoupHandle* h, cudaStream_t st) {
+    if (!h->fork_ok) return;
+    CUDA_CHECK_THROW(cudaEventRecord(h->ev_fork, st));
+    for (int l = 0; l < 4; ++l) CUDA_CHECK_THROW(cudaStreamWaitEvent(h->side[l], h->ev_fork, 0));
+}
+
+static void m1_lanes_done(LoupHandle* h, int buf) {
+    if (!h->fork_ok) return;
+    for (int l = 0; l < 4; ++l) CUDA_CHECK_THROW(cudaEventRecord(h->ev_m1[buf][l], h->side[l]));
+}
+
+static void m1_wait_lanes(LoupHandle* h, int buf, cudaStream_t st) {
+    if (!h->fork_ok) return;
+    for (int l = 0; l < 4; ++l) CUDA_CHECK_THROW(cudaStreamWaitEvent(st, h->ev_m1[buf][l], 0));
+}
+
+// The receiver-owned kernels index receivers through row_ptr and their per-receiver rows only, so a chunk is the
+// shifted row_ptr / D1 / dD1 with chunk-local m1 / dm1 rows; senders, edges and dx0 / dx1 stay global.
+static void launch_wprime_rcv(LoupHandle* h, int threads, int a0, int n, int buf, cudaStream_t st) {
+    float* const* dm1 = h->d_m1[buf];
+    wprime_backward_inter1_rcv<<<n, threads, 0, st>>>(
+        n, h->d_act_row_ptr + h->N, h->d_x0, h->d_x1, h->d_act_vec_len,
+        h->d_act_senders, h->d_act_row_ptr + a0,
         h->d_act_slab, h->d_act_t_sx,
-        h->d_dm1_0, h->d_dm1_1, h->d_dm1_2, h->d_dm1_3, h->d_dD1,
+        dm1[0], dm1[1], dm1[2], dm1[3], h->d_dD1 + a0,
         h->model.d_cubic_packed8_1, h->model.d_density_table_1, h->model.cubic_bias_shift,
         h->d_dx0, h->d_dx1, h->d_edge_force_1);
 }
 
-static void launch_spline(LoupHandle* h, int rpb, bool pair) {
-    const int N = h->N;
+static void launch_spline(LoupHandle* h, int rpb, bool pair, int a0, int n, int buf, cudaStream_t st) {
+    float* const* m1 = h->d_m1[buf];
     auto* kernel = rpb == 5 ? spline_forward_inter1<5, false>
                  : rpb == 4 ? (pair ? spline_forward_inter1<4, true> : spline_forward_inter1<4, false>)
                             : (pair ? spline_forward_inter1<1, true> : spline_forward_inter1<1, false>);
-    kernel<<<(N + rpb - 1) / rpb, 128 * rpb, 0, h->stream>>>(
-        N, h->d_act_row_ptr + N, h->d_x0, h->d_x1, h->d_act_vec_len, h->d_act_senders, h->d_act_row_ptr,
+    kernel<<<(n + rpb - 1) / rpb, 128 * rpb, 0, st>>>(
+        n, h->d_act_row_ptr + h->N, h->d_x0, h->d_x1, h->d_act_vec_len, h->d_act_senders, h->d_act_row_ptr + a0,
         h->d_act_slab, h->d_act_t_sx, h->model.d_cubic_packed8_1, h->model.d_density_table_1,
         h->model.cubic_bias_shift,
-        h->d_m1_0, h->d_m1_1, h->d_m1_2, h->d_m1_3, h->d_D1);
+        m1[0], m1[1], m1[2], m1[3], h->d_D1 + a0);
 }
 
 // Kernel variants whose ranking depends on the system, timed once per system at the first MD rebuild (thermalised
@@ -1663,7 +1949,8 @@ static void launch_spline(LoupHandle* h, int rpb, bool pair) {
 // rewritten (m1, D1, edge forces) or re-zeroed (dx0, dx1) by every force pass before use. The w' launches read
 // dm1/dD1, which alias m1/D1 and so hold the spline timings' forward values by then: harmless for timing (same
 // shapes, same access pattern), and nothing reads w' outputs from these launches. The time spent here is reported as
-// LoupMDStats::tune_ms and excluded from step_ms.
+// LoupMDStats::tune_ms and excluded from step_ms. Both kernels are timed over every m1 chunk, as the force pass runs
+// them.
 //   spline: the 4- and 5-receiver blocks win where consecutive receivers share table slabs and lose where they rarely
 //   do (5060 Ti: SrTiO3 -8%, NbCl5 +6.8%); the paired-edge decode depends on how many consecutive edges share a slab.
 //   The ideal starting lattice of a run shows neither.
@@ -1701,7 +1988,11 @@ static void tune_rebuild_variants(LoupHandle* h) {
     float best[kSplineVar] = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
     if (h->ovr.spline_var < 0) {
         for (int v = 0; v < kSplineVar; ++v)
-            best[v] = time_best_of_3(h, e0, e1, [&] { launch_spline(h, kSplineVarR[v], kSplineVarPair[v]); });
+            best[v] = time_best_of_3(h, e0, e1, [&] {
+                for_each_m1_chunk(h, [&](int c, int a0, int n) {
+                    launch_spline(h, kSplineVarR[v], kSplineVarPair[v], a0, n, c & 1, h->stream);
+                });
+            });
         int cur = 0;
         for (int v = 0; v < kSplineVar; ++v)
             if (kSplineVarR[v] == h->spline_rpb && kSplineVarPair[v] == h->spline_pair) cur = v;
@@ -1717,8 +2008,12 @@ static void tune_rebuild_variants(LoupHandle* h) {
 
     float wp[2] = {0.0f, 0.0f};
     if (h->use_wprime_rcv() && !h->ovr.wp_threads) {  // the receiver-owned w' (else the edge-tiled kernel)
-        wp[0] = time_best_of_3(h, e0, e1, [&] { launch_wprime_rcv(h, 256); });
-        wp[1] = time_best_of_3(h, e0, e1, [&] { launch_wprime_rcv(h, 512); });
+        for (int t = 0; t < 2; ++t)
+            wp[t] = time_best_of_3(h, e0, e1, [&] {
+                for_each_m1_chunk(h, [&](int c, int a0, int n) {
+                    launch_wprime_rcv(h, t ? 512 : 256, a0, n, c & 1, h->stream);
+                });
+            });
         const int cur_t = h->wp_threads == 512 ? 1 : 0;
         if (wp[1 - cur_t] < 0.98f * wp[cur_t]) {
             h->wp_threads = cur_t == 1 ? 256 : 512;
@@ -1829,14 +2124,14 @@ static void record_force_pass(LoupHandle* h, int compute_stress, bool energy_onl
             sweep->restore_code, h->d_act_receivers, h->d_act_vec_len, h->d_act_slab, h->d_act_t_sx);
     } else if (!(sweep && sweep->active_ready)) {
         loup::compute_and_count_active_kernel<<<warpGridN, 128, 0, h->stream>>>(
-            N, r_max, h->d_pos64, h->d_row_ptr, h->d_senders, h->d_receivers, h->d_shift_cart,
+            N, r_max, h->d_pos64, h->d_row_ptr, h->d_senders, h->d_shift_cart,
             h->d_tmp_vec_len, h->d_act_deg);
         size_t act_scan_bytes = h->cub_tmp_bytes;
         cub::DeviceScan::ExclusiveSum(
             h->d_cub_tmp, act_scan_bytes, h->d_act_deg, h->d_act_row_ptr, N + 1, h->stream);
         loup::scatter_active_edges_kernel<<<warpGridN, 128, 0, h->stream>>>(
-            N, r_max, sg, S, sg_psym, h->d_species, h->d_row_ptr, h->d_act_row_ptr, h->d_senders, h->d_receivers,
-            h->d_pairs, h->d_tmp_vec_len, h->d_act_senders, h->d_act_receivers, h->d_act_pairs, h->d_act_vec_len,
+            N, r_max, sg, S, sg_psym, h->d_species, h->d_row_ptr, h->d_act_row_ptr, h->d_senders,
+            h->d_tmp_vec_len, h->d_act_senders, h->d_act_receivers, h->d_act_pairs, h->d_act_vec_len,
             h->d_act_slab, h->d_act_t_sx);
         if (sweep && sweep->pack_out)
             tile_pack_active_codes_kernel<<<warpGridN, 128, 0, h->stream>>>(
@@ -1934,17 +2229,33 @@ static void record_force_pass(LoupHandle* h, int compute_stress, bool energy_onl
     sgemm_rm(h, false, false, N * 3, 128, 128, 1.0f, h->d_h0_1, 128, h->model.d_W_up_1, 128, 0.0f, h->d_x1, 128);
     gemm_join(h);
 
-    launch_spline(h, h->spline_rpb, h->spline_pair);
-
-    gemm_fork(h);
-    gemm_lane(h, 0);
-    sgemm_rm(h, false, false, N, 128, 256, 1.0f, h->d_m1_0, 256, h->model.d_W_lin1[0], 128, 0.0f, h->d_b0, 128);
-    gemm_lane(h, 1);
-    sgemm_rm(h, false, false, N * 3, 128, 384, 1.0f, h->d_m1_1, 384, h->model.d_W_lin1[1], 128, 0.0f, h->d_b1, 128);
-    gemm_lane(h, 2);
-    sgemm_rm(h, false, false, N * 5, 128, 384, 1.0f, h->d_m1_2, 384, h->model.d_W_lin1[2], 128, 0.0f, h->d_b2, 128);
-    gemm_lane(h, 3);
-    sgemm_rm(h, false, false, N * 7, 128, 256, 1.0f, h->d_m1_3, 256, h->model.d_W_lin1[3], 128, 0.0f, h->d_b3, 128);
+    // 4b. Spline forward + linear1 per m1 chunk (S112). With chunks the two m1 buffers alternate and so do the
+    // spline streams (m1_fork_lanes); chunk c's lin1 GEMMs (lanes 0-3) follow its spline, and chunk c + 2's spline
+    // waits for them.
+    const int n_chunks = (N + h->m1_rows - 1) / h->m1_rows;
+    const bool alternate = n_chunks > 1 && h->fork_ok;
+    auto chunk_stream = [&](int c) { return alternate && (c & 1) ? h->side[kM1OddStream] : h->stream; };
+    if (alternate) gemm_fork(h);  // the odd chunks' stream after x0 / x1
+    for_each_m1_chunk(h, [&](int c, int a0, int n) {
+        float* const* m1 = h->d_m1[c & 1];
+        const cudaStream_t st = chunk_stream(c);
+        if (c >= 2) m1_wait_lanes(h, c & 1, st);
+        launch_spline(h, h->spline_rpb, h->spline_pair, a0, n, c & 1, st);
+        m1_fork_lanes(h, st);
+        gemm_lane(h, 0);
+        sgemm_rm(h, false, false, n, 128, 256, 1.0f, m1[0], 256, h->model.d_W_lin1[0], 128, 0.0f,
+                 h->d_b0 + (size_t)a0 * 128, 128);
+        gemm_lane(h, 1);
+        sgemm_rm(h, false, false, n * 3, 128, 384, 1.0f, m1[1], 384, h->model.d_W_lin1[1], 128, 0.0f,
+                 h->d_b1 + (size_t)a0 * 3 * 128, 128);
+        gemm_lane(h, 2);
+        sgemm_rm(h, false, false, n * 5, 128, 384, 1.0f, m1[2], 384, h->model.d_W_lin1[2], 128, 0.0f,
+                 h->d_b2 + (size_t)a0 * 5 * 128, 128);
+        gemm_lane(h, 3);
+        sgemm_rm(h, false, false, n * 7, 128, 256, 1.0f, m1[3], 256, h->model.d_W_lin1[3], 128, 0.0f,
+                 h->d_b3 + (size_t)a0 * 7 * 128, 128);
+        m1_lanes_done(h, c & 1);
+    });
     gemm_join(h);
 
     // 5-6. Product 1 + Readout 1 forward and backward (one block per atom)
@@ -1952,7 +2263,7 @@ static void record_force_pass(LoupHandle* h, int compute_stress, bool energy_onl
         N, h->d_b0, h->d_b1, h->d_b2, h->d_b3, h->d_D1,
         h->model.d_w1_factored, h->d_species,
         h->d_sc_skip16, h->model.d_W_p1_ro1, h->model.d_W_ro1_2,
-        h->d_y1, h->d_hidden16, h->d_energy_f64,
+        h->d_hidden16, h->d_energy_f64,
         h->d_db0, h->d_db1, h->d_db2, h->d_db3, h->d_dD1);
 
     if (energy_only) {
@@ -1966,29 +2277,50 @@ static void record_force_pass(LoupHandle* h, int compute_stress, bool energy_onl
         record_dispersion(h, compute_stress, true);
         return;
     }
-    // 7. Backward: Interaction 1
-    gemm_fork(h);
-    gemm_lane(h, 0);
-    sgemm_rm(h, false, true, N, 256, 128, 1.0f, h->d_db0, 128, h->model.d_W_lin1[0], 128, 0.0f, h->d_dm1_0, 256);
-    gemm_lane(h, 1);
-    sgemm_rm(h, false, true, N * 3, 384, 128, 1.0f, h->d_db1, 128, h->model.d_W_lin1[1], 128, 0.0f, h->d_dm1_1, 384);
-    gemm_lane(h, 2);
-    sgemm_rm(h, false, true, N * 5, 384, 128, 1.0f, h->d_db2, 128, h->model.d_W_lin1[2], 128, 0.0f, h->d_dm1_2, 384);
-    gemm_lane(h, 3);
-    sgemm_rm(h, false, true, N * 7, 256, 128, 1.0f, h->d_db3, 128, h->model.d_W_lin1[3], 128, 0.0f, h->d_dm1_3, 256);
+    // 7. Backward: linear1 + w' per m1 chunk. Chunk c + 1's lin1 GEMMs (lanes 0-3) overlap chunk c's w', which runs
+    // on the chunk's stream; chunk c + 2's GEMMs, into the same buffer as chunk c's, are forked after that w'. Chunks
+    // exist only with the receiver-owned w' (set_system_impl): the edge-tiled kernel indexes dm1 by global receiver.
+    auto lin1_backward = [&](int c) {
+        const int a0 = c * h->m1_rows, n = std::min(h->m1_rows, N - a0);
+        float* const* dm1 = h->d_m1[c & 1];
+        gemm_lane(h, 0);
+        sgemm_rm(h, false, true, n, 256, 128, 1.0f, h->d_db0 + (size_t)a0 * 128, 128, h->model.d_W_lin1[0], 128, 0.0f,
+                 dm1[0], 256);
+        gemm_lane(h, 1);
+        sgemm_rm(h, false, true, n * 3, 384, 128, 1.0f, h->d_db1 + (size_t)a0 * 3 * 128, 128, h->model.d_W_lin1[1], 128,
+                 0.0f, dm1[1], 384);
+        gemm_lane(h, 2);
+        sgemm_rm(h, false, true, n * 5, 384, 128, 1.0f, h->d_db2 + (size_t)a0 * 5 * 128, 128, h->model.d_W_lin1[2], 128,
+                 0.0f, dm1[2], 384);
+        gemm_lane(h, 3);
+        sgemm_rm(h, false, true, n * 7, 256, 128, 1.0f, h->d_db3 + (size_t)a0 * 7 * 128, 128, h->model.d_W_lin1[3], 128,
+                 0.0f, dm1[3], 256);
+        m1_lanes_done(h, c & 1);
+    };
+    gemm_fork(h);  // lanes and the odd chunks' stream after sc1_fused
+    lin1_backward(0);
+    if (n_chunks > 1) lin1_backward(1);
+    for_each_m1_chunk(h, [&](int c, int a0, int n) {
+        const cudaStream_t st = chunk_stream(c);
+        m1_wait_lanes(h, c & 1, st);
+        if (!h->use_wprime_rcv()) {
+            float* const* dm1 = h->d_m1[0];
+            wprime_backward_inter1<<<gridE64, 256, 0, h->stream>>>(
+                N, d_E_act, h->d_x0, h->d_x1, h->d_act_vec_len,
+                h->d_act_senders, h->d_act_receivers,
+                h->d_act_slab, h->d_act_t_sx,
+                dm1[0], dm1[1], dm1[2], dm1[3], h->d_dD1,
+                h->model.d_cubic_packed8_1, h->model.d_density_table_1, h->model.cubic_bias_shift,
+                h->d_dx0, h->d_dx1, h->d_edge_force_1);
+        } else {
+            launch_wprime_rcv(h, h->wp_threads, a0, n, c & 1, st);
+        }
+        if (c + 2 < n_chunks) {
+            m1_fork_lanes(h, st);
+            lin1_backward(c + 2);
+        }
+    });
     gemm_join(h);
-
-    if (!h->use_wprime_rcv()) {
-        wprime_backward_inter1<<<gridE64, 256, 0, h->stream>>>(
-            N, d_E_act, h->d_x0, h->d_x1, h->d_act_vec_len,
-            h->d_act_senders, h->d_act_receivers,
-            h->d_act_slab, h->d_act_t_sx,
-            h->d_dm1_0, h->d_dm1_1, h->d_dm1_2, h->d_dm1_3, h->d_dD1,
-            h->model.d_cubic_packed8_1, h->model.d_density_table_1, h->model.cubic_bias_shift,
-            h->d_dx0, h->d_dx1, h->d_edge_force_1);
-    } else {
-        launch_wprime_rcv(h, h->wp_threads);
-    }
 
     // dh0_0 = dx0 @ W_up_0^T, then the skip backward accumulates into it (same lane keeps that order)
     gemm_fork(h);
@@ -2195,26 +2527,40 @@ LoupHandle* loup_create(const char* loup_path, int device_id) {
         h = new LoupHandle();
         h->device_id = device_id;
         CUDA_CHECK_THROW(cudaDeviceGetAttribute(&h->l2_bytes, cudaDevAttrL2CacheSize, device_id));
+        bool own_ext_env = false, cc80 = false;
         {
             int cc_maj = 0, cc_min = 0;
             CUDA_CHECK_THROW(cudaDeviceGetAttribute(&cc_maj, cudaDevAttrComputeCapabilityMajor, device_id));
             CUDA_CHECK_THROW(cudaDeviceGetAttribute(&cc_min, cudaDevAttrComputeCapabilityMinor, device_id));
             h->is_sm120 = (cc_maj == 12 && cc_min == 0);
+            cc80 = cc_maj == 8 && cc_min == 0;
             h->own_ext = h->is_sm120;
-            if (const char* e = std::getenv("LOUP_OWN_EXT"); e && (e[0] == '0' || e[0] == '1')) h->own_ext = e[0] == '1';
+            if (const char* e = std::getenv("LOUP_OWN_EXT"); e && (e[0] == '0' || e[0] == '1')) {
+                h->own_ext = e[0] == '1';
+                own_ext_env = true;
+            }
+            h->nb_groups_ok = h->is_sm120 || cc80;
+            h->wprime_rcv_small = h->is_sm120 || cc80;
+            if (const char* e = std::getenv("LOUP_NB_GROUPS"); e && (e[0] == '0' || e[0] == '1')) h->nb_groups_ok = e[0] == '1';
+            if (const char* e = std::getenv("LOUP_FORCE_TC"); e && e[0] == '1') h->force_tc = true;
         }
         CUDA_CHECK_THROW(cudaStreamCreate(&h->stream));
         CUBLAS_CHECK_THROW(cublasCreate(&h->cublas));
         CUBLAS_CHECK_THROW(cublasLtCreate(&h->cublas_lt));
         CUDA_CHECK_THROW(cudaMalloc(&h->d_cublas_ws, h->cublas_ws_bytes));
         cublas_bind(h, h->stream, h->d_cublas_ws);
-        CUDA_CHECK_THROW(cudaMallocHost(&h->h_reb_pinned, 4 * sizeof(int)));  // [0..1] flags, [2..3] step-disp bits
-        CUDA_CHECK_THROW(cudaEventCreateWithFlags(&h->ev_reb[0], cudaEventDisableTiming));
-        CUDA_CHECK_THROW(cudaEventCreateWithFlags(&h->ev_reb[1], cudaEventDisableTiming));
+        // Mapped pinned words for polling stream positions (publish_kernel, guard_step_kernel).
+        CUDA_CHECK_THROW(cudaHostAlloc(&h->h_pub, 16 * sizeof(int), cudaHostAllocMapped));
+        memset(h->h_pub, 0, 16 * sizeof(int));
+        CUDA_CHECK_THROW(cudaHostGetDevicePointer(reinterpret_cast<void**>(&h->d_pub), h->h_pub, 0));
+        CUDA_CHECK_THROW(cudaMalloc(&h->d_pub_counter, sizeof(unsigned int)));
+        CUDA_CHECK_THROW(cudaMemset(h->d_pub_counter, 0, sizeof(unsigned int)));
         CUDA_CHECK_THROW(cudaEventCreateWithFlags(&h->ev_fork, cudaEventDisableTiming));
         for (int i = 0; i < LoupHandle::kSide; ++i) {
             CUDA_CHECK_THROW(cudaStreamCreateWithFlags(&h->side[i], cudaStreamNonBlocking));
             CUDA_CHECK_THROW(cudaEventCreateWithFlags(&h->ev_join[i], cudaEventDisableTiming));
+            if (i < 4)
+                for (auto& ev : h->ev_m1) CUDA_CHECK_THROW(cudaEventCreateWithFlags(&ev[i], cudaEventDisableTiming));
             CUDA_CHECK_THROW(cudaMalloc(&h->side_ws[i], h->cublas_ws_bytes));
         }
         {
@@ -2226,13 +2572,14 @@ LoupHandle* loup_create(const char* loup_path, int device_id) {
                 h->model.load(bundle, loup_path);
             }
         }
-        // MACE-POLAR-1's charge updates amplify GEMM rounding: with the 3xTF32 tensor-core GEMMs (~4x float32's
-        // rounding per product) the RTX 4000 Ada's float32 stress and NaNbO3 forces failed the 3x gate that plain
-        // float32 GEMMs pass, so long-range models run on float32 SIMT GEMMs only.
+        // Tensor-core GEMM implementations have failed full-model POLAR accuracy gates. Their rounding depends on
+        // the operands and MMA accumulation, not a fixed multiple of FP32 error. Keep long-range models on FP32
+        // until a candidate clears both accuracy and performance qualification (see gemm-tc-rounded-polar in the ledger).
         // LOUP_LR_HYBRID=1 (tests): load the GEMM cubin for long-range models too (e.g. a true 3xTF32 build through
         // LOUP_HYBRID_CUBIN, gated before any adoption).
         const char* lr_hyb = std::getenv("LOUP_LR_HYBRID");
         if (!(h->gen && h->gen->has_lr()) || (lr_hyb && lr_hyb[0] == '1')) h->hyb.init(device_id);
+        if (cc80 && !h->hyb.loaded && !own_ext_env) h->own_ext = true;  // float32 SIMT GEMMs only (see own_ext)
         h->load_disk_plans(device_id);
         if (const char* b = std::getenv("LOUP_TILE_GEMM_BUCKETS")) h->gemm_buckets = std::atoi(b) != 0;
         tune_l1(device_id);
@@ -2256,15 +2603,17 @@ void loup_destroy(LoupHandle* h) {
     release_tiled_md(h);
     h->free_system();
     h->model.free_gpu();
-    if (h->ev_reb[0]) cudaEventDestroy(h->ev_reb[0]);
-    if (h->ev_reb[1]) cudaEventDestroy(h->ev_reb[1]);
     if (h->ev_fork) cudaEventDestroy(h->ev_fork);
     for (int i = 0; i < LoupHandle::kSide; ++i) {
         if (h->ev_join[i]) cudaEventDestroy(h->ev_join[i]);
+        if (i < 4)
+            for (auto& ev : h->ev_m1)
+                if (ev[i]) cudaEventDestroy(ev[i]);
         if (h->side_ws[i]) cudaFree(h->side_ws[i]);
         if (h->side[i]) cudaStreamDestroy(h->side[i]);
     }
-    if (h->h_reb_pinned) cudaFreeHost(h->h_reb_pinned);
+    if (h->h_pub) cudaFreeHost(h->h_pub);
+    if (h->d_pub_counter) cudaFree(h->d_pub_counter);
     if (h->d_celldev) cudaFree(h->d_celldev);
     h->disp.reset();
     if (h->d_disp_cell) cudaFree(h->d_disp_cell);
@@ -2287,8 +2636,10 @@ static cudaError_t counted_malloc(size_t& counter, void** p, size_t bytes) {
 #define cudaMalloc(p, bytes) counted_malloc(h->sys_atom_bytes, (void**)(p), (bytes))
 // n_ghost > 0 makes the last n_ghost atoms ghosts of an open domain (see LoupHandle::n_ghost): the locals are grouped
 // by species as always, the ghosts keep their order behind them, and every per-atom buffer has a row for each.
+// domain (set_domain_impl: open domains and tiles, which sweep): the generic model's skip-chain fold stays off for
+// this system, as sweeps need every layer's output; whole systems fold where the fold was built.
 static int set_system_impl(LoupHandle* h, int n_atoms, const int* atomic_numbers, const double* masses_amu, double skin,
-                           int n_ghost = 0) {
+                           int n_ghost = 0, bool domain = false) {
     if (!h) return -1;
     if (n_atoms <= 0) { loup::set_error("n_atoms must be positive, got %d", n_atoms); return -1; }
     if (!atomic_numbers) { loup::set_error("atomic_numbers is NULL"); return -1; }
@@ -2304,9 +2655,8 @@ static int set_system_impl(LoupHandle* h, int n_atoms, const int* atomic_numbers
         const char* lim = std::getenv("LOUP_DEBUG_EDGE_LIMIT");
         h->edge_limit = (lim && *lim) ? std::max(1LL, std::atoll(lim)) : 536870911LL;
     }
-    if (n_ghost > 0 && !(h->gen && h->gen->sweeps_available())) {
-        loup::set_error("an open domain needs a bundle of the generic path without long range, and "
-                        "LOUP_CHAIN_FOLD=0 where the skip-chain fold applies");
+    if ((n_ghost > 0 || domain) && !(h->gen && h->gen->sweeps_possible())) {
+        loup::set_error("an open domain needs a bundle of the generic path without long range");
         return -1;
     }
     const int n_local = n_atoms - n_ghost;
@@ -2338,6 +2688,14 @@ static int set_system_impl(LoupHandle* h, int n_atoms, const int* atomic_numbers
         if (i < n_local) e0_total += h->species_e0(found);
     }
     h->free_system();  // sets N = 0
+    if (h->gen) {
+        try {
+            h->gen->use_chain_fold(!domain);
+        } catch (const std::exception& e) {
+            loup::set_error("%s", e.what());
+            return -1;
+        }
+    }
     h->disp_ready = false;
     h->skin = skin;
     h->e0_total = e0_total;
@@ -2409,7 +2767,10 @@ static int set_system_impl(LoupHandle* h, int n_atoms, const int* atomic_numbers
     CUDA_CHECK(cudaMalloc(&h->d_ro_keys, (size_t)n_atoms * 2 * sizeof(unsigned long long)));
     CUDA_CHECK(cudaMalloc(&h->d_ro_vals, (size_t)n_atoms * 2 * sizeof(int)));
     CUDA_CHECK(cudaMalloc(&h->d_ro_tmp, (size_t)n_atoms * 3 * sizeof(double)));
-    CUDA_CHECK(cudaMalloc(&h->d_order_err, sizeof(int)));
+    // [0] the rows' order flag, [2] the variable-cell shift-code flag (nl_finish)
+    CUDA_CHECK(cudaMalloc(&h->d_order_err, 4 * sizeof(int)));
+    CUDA_CHECK(cudaMemset(h->d_order_err, 0, 4 * sizeof(int)));
+    CUDA_CHECK(cudaMalloc(&h->d_max_deg, 2 * sizeof(int)));
     CUDA_CHECK(cudaMalloc(&h->d_bin_counts, (h->max_bins + 1) * sizeof(int)));
     CUDA_CHECK(cudaMalloc(&h->d_bin_offsets, (h->max_bins + 1) * sizeof(int)));
     CUDA_CHECK(cudaMalloc(&h->d_bin_cursor, (h->max_bins + 1) * sizeof(int)));
@@ -2451,15 +2812,18 @@ static int set_system_impl(LoupHandle* h, int n_atoms, const int* atomic_numbers
         return 0;
     }
 
-    // Zero-initialized per-step slab
+    // Zero-initialized per-step slab. b / db (16 x 128 floats per atom) overlay the S0 regions (S111): S0 is dead from
+    // the C0 GEMMs that read it to the dS0 GEMMs that overwrite it, and b / db live only between lin1's forward and
+    // backward GEMMs inside that window. Each S0_l region therefore holds max(K0, 128) floats per row.
     const size_t K0 = (size_t)S * 64;
+    const size_t K0r = std::max<size_t>(K0, 128);
     const size_t nN = (size_t)n_atoms;
     auto align256 = [](size_t b) { return (b + 255) & ~size_t(255); };
     size_t off_S0_0 = 0;
-    size_t off_S0_1 = off_S0_0 + align256(nN * 1 * K0 * sizeof(float));
-    size_t off_S0_2 = off_S0_1 + align256(nN * 3 * K0 * sizeof(float));
-    size_t off_S0_3 = off_S0_2 + align256(nN * 5 * K0 * sizeof(float));
-    size_t off_D0   = off_S0_3 + align256(nN * 7 * K0 * sizeof(float));
+    size_t off_S0_1 = off_S0_0 + align256(nN * 1 * K0r * sizeof(float));
+    size_t off_S0_2 = off_S0_1 + align256(nN * 3 * K0r * sizeof(float));
+    size_t off_S0_3 = off_S0_2 + align256(nN * 5 * K0r * sizeof(float));
+    size_t off_D0   = off_S0_3 + align256(nN * 7 * K0r * sizeof(float));
     size_t off_dx0  = off_D0   + align256(nN * sizeof(float));
     size_t off_dx1  = off_dx0  + align256(nN * 128 * sizeof(float));
     size_t off_en   = off_dx1  + align256(nN * 3 * 128 * sizeof(float));
@@ -2473,6 +2837,10 @@ static int set_system_impl(LoupHandle* h, int n_atoms, const int* atomic_numbers
     h->d_S0_1 = reinterpret_cast<float*>(base + off_S0_1);
     h->d_S0_2 = reinterpret_cast<float*>(base + off_S0_2);
     h->d_S0_3 = reinterpret_cast<float*>(base + off_S0_3);
+    h->d_b0 = h->d_S0_0;
+    h->d_b1 = h->d_S0_1;
+    h->d_b2 = h->d_S0_2;
+    h->d_b3 = h->d_S0_3;
     h->d_D0   = reinterpret_cast<float*>(base + off_D0);
     h->d_dx0  = reinterpret_cast<float*>(base + off_dx0);
     h->d_dx1  = reinterpret_cast<float*>(base + off_dx1);
@@ -2491,33 +2859,37 @@ static int set_system_impl(LoupHandle* h, int n_atoms, const int* atomic_numbers
     CUDA_CHECK(allocf(h->d_sc_skip16, nN * 16));
     CUDA_CHECK(allocf(h->d_x0, nN * 128));
     CUDA_CHECK(allocf(h->d_x1, nN * 3 * 128));
-    CUDA_CHECK(allocf(h->d_m1_0, nN * 1 * 256));
-    CUDA_CHECK(allocf(h->d_m1_1, nN * 3 * 384));
-    CUDA_CHECK(allocf(h->d_m1_2, nN * 5 * 384));
-    CUDA_CHECK(allocf(h->d_m1_3, nN * 7 * 256));
+    // m1 / dm1 run in receiver chunks above 2 x kM1ChunkAtoms atoms (S112; LOUP_M1_CHUNK=<atoms> forces chunks of at
+    // most that size whenever there are more atoms, 0 keeps one chunk): equal chunks rounded up to 20 receivers (whole
+    // blocks of every spline variant) in two alternating buffers. Only with the receiver-owned w': the edge-tiled
+    // kernel indexes dm1 by global receiver.
+    const int chunk_max = h->ovr.m1_chunk >= 0 ? h->ovr.m1_chunk : kM1ChunkAtoms;
+    const int chunk_above = h->ovr.m1_chunk >= 0 ? chunk_max : 2 * chunk_max;
+    h->m1_rows = n_atoms;
+    if (chunk_max > 0 && n_atoms > chunk_above && h->use_wprime_rcv_at(n_atoms)) {
+        const int n_chunks = (n_atoms + chunk_max - 1) / chunk_max;
+        h->m1_rows = std::min(n_atoms, ((n_atoms + n_chunks - 1) / n_chunks + 19) / 20 * 20);
+    }
+    const size_t nM = (size_t)h->m1_rows;
+    const size_t m1_row_floats[4] = {1 * 256, 3 * 384, 5 * 384, 7 * 256};
+    for (int b = 0; b < (h->m1_rows < n_atoms ? 2 : 1); ++b)
+        for (int l = 0; l < 4; ++l) CUDA_CHECK(allocf(h->d_m1[b][l], nM * m1_row_floats[l]));
     CUDA_CHECK(allocf(h->d_D1, nN));
-    CUDA_CHECK(allocf(h->d_b0, nN * 1 * 128));
-    CUDA_CHECK(allocf(h->d_b1, nN * 3 * 128));
-    CUDA_CHECK(allocf(h->d_b2, nN * 5 * 128));
-    CUDA_CHECK(allocf(h->d_b3, nN * 7 * 128));
-    CUDA_CHECK(allocf(h->d_y1, nN * 128));
     CUDA_CHECK(allocf(h->d_hidden16, nN * 16));
-    CUDA_CHECK(allocf(h->d_db0, nN * 1 * 128));
-    CUDA_CHECK(allocf(h->d_db1, nN * 3 * 128));
-    CUDA_CHECK(allocf(h->d_db2, nN * 5 * 128));
-    CUDA_CHECK(allocf(h->d_db3, nN * 7 * 128));
     CUDA_CHECK(allocf(h->d_dD1, nN));
     // Alias backward buffers whose forward counterparts are dead before backward writes them (~34 KB/atom saved).
-    h->d_dm1_0 = h->d_m1_0;
-    h->d_dm1_1 = h->d_m1_1;
-    h->d_dm1_2 = h->d_m1_2;
-    h->d_dm1_3 = h->d_m1_3;
     h->d_dh0_0 = h->d_h0_0;
     h->d_dh0_1 = h->d_h0_1;
-    CUDA_CHECK(allocf(h->d_dm0_0, nN * 1 * 128));
-    CUDA_CHECK(allocf(h->d_dm0_1, nN * 3 * 128));
-    CUDA_CHECK(allocf(h->d_dm0_2, nN * 5 * 128));
-    CUDA_CHECK(allocf(h->d_dm0_3, nN * 7 * 128));
+    // In place (S110, 16 KB/atom): sc1_fused writes db over its own inputs b and sc0_backward dm0 over m0, each thread
+    // over the 16 values of its channel it has just read; b and m0 are dead after those kernels.
+    h->d_db0 = h->d_b0;
+    h->d_db1 = h->d_b1;
+    h->d_db2 = h->d_b2;
+    h->d_db3 = h->d_b3;
+    h->d_dm0_0 = h->d_m0_0;
+    h->d_dm0_1 = h->d_m0_1;
+    h->d_dm0_2 = h->d_m0_2;
+    h->d_dm0_3 = h->d_m0_3;
     CUDA_CHECK(allocf(h->d_dD0, nN));
     h->d_dS0_0 = h->d_S0_0;
     h->d_dS0_1 = h->d_S0_1;
@@ -2697,12 +3069,11 @@ static int prepare_evaluate(LoupHandle* h, const double* positions, const double
     if (!rebuild) {
         const double half_skin = 0.5 * h->skin;
         CUDA_CHECK(cudaMemsetAsync(h->d_need_rebuild, 0, sizeof(int), h->stream));
-        loup::check_skin_kernel<<<(h->N + 255) / 256, 256, 0, h->stream>>>(
-            h->N, half_skin, 0, 0, h->d_pos64, h->d_ref_pos64, h->d_max_step_disp2, h->d_need_rebuild);
-        int flag = 0;
-        CUDA_CHECK(cudaMemcpyAsync(&flag, h->d_need_rebuild, sizeof(int), cudaMemcpyDeviceToHost, h->stream));
-        CUDA_CHECK(cudaStreamSynchronize(h->stream));
-        rebuild = flag != 0;
+        loup::check_skin_kernel<<<(h->N + 255) / 256, 256, 0, h->stream>>>(h->N, half_skin, h->d_pos64,
+                                                                          h->d_ref_pos64, h->d_need_rebuild);
+        int v[3];
+        if (read_device_ints(h, h->d_need_rebuild, nullptr, nullptr, v) != 0) return -1;
+        rebuild = v[0] != 0;
     }
     if (rebuild && rebuild_neighbors(h) != 0) return -1;
     return 0;
@@ -2899,8 +3270,8 @@ static int run_md_loop(
     const double dt_ase = dt_fs * loup::ASE_FS;
     const double half_skin = 0.5 * h->skin;
     // The variable-cell step (cell.hpp): the cell on the device, the Cartesian shifts formed from the integer ones
-    // in every step, stress in every force pass, the list check against the deformed reference. One host wait per
-    // step: it does not pipeline. The first such run of a handle rebuilds the list once, which brings the cell and
+    // in every step, stress in every force pass, the list check against the deformed reference. Its rebuilds run on
+    // the host (the cell must come back first). The first such run of a handle rebuilds the list once, which brings the cell and
     // the sorted integer shifts onto the device; a fixed-cell run after a cell change rebuilds for its plain check.
     const bool var_cell = h->req_var_cell;
     const double cell_rate = var_cell ? h->req_cell_rate : 0.0;
@@ -2932,32 +3303,26 @@ static int run_md_loop(
         ctrl.capacity = loup::kThermoCapacity;
         CUDA_CHECK(cudaMemcpy(h->d_thermo_ctrl, &ctrl, sizeof(ctrl), cudaMemcpyHostToDevice));
     }
-    // Two loop modes. Unpipelined: each step's skin check is read before its force pass, so the force always uses a
-    // list built within skin/2 of the current positions (exact for any skin, including 0), at one host sync per step.
-    // Pipelined: step k + 1 is launched before step k's check is read, so two force calls follow each check; the
-    // check lowers its threshold by three times the largest per-step displacement seen (two for the lag, one of
-    // margin for a displacement larger than any so far: check_skin_kernel). That is only sound while the per-step
-    // displacement is well below the skin, so the loop starts unpipelined, switches to pipelining once
-    // 4 x max step displacement < skin/2, and drops back if that stops holding or a step is found to have run on an
-    // incomplete list (counted in dangerous_builds).
-    const bool allow_pipeline = (h->skin > 0.1 && n_steps > 1) && !var_cell;
-    constexpr int kPipeLag = 3;  // steps by which the pipelined check lowers its threshold (two of lag, one of margin)
-    auto bits_to_disp = [](int bits) {
-        float d2;
-        memcpy(&d2, &bits, sizeof(d2));
-        return std::sqrt((double)d2);
-    };
-    // The step-displacement maximum decays in two windows (integrator.cu). A window ends at a neighbour rebuild once
-    // it holds kDispWindowMin steps, so the previous window always stands for that many steps of every atom, and
-    // after kDispWindowMax steps without a rebuild, so a system too cold to rebuild forgets a fast start as well.
+    // The step-displacement maximum (loup_get_step_displacement, the saved state, the automatic skin) decays in two
+    // windows (integrator.cu); the loop itself does not read it. A window ends at a neighbour rebuild once it holds
+    // kDispWindowMin steps, so the previous window always stands for that many steps of every atom, and after
+    // kDispWindowMax steps without a rebuild, so a system too cold to rebuild forgets a fast start as well. The host
+    // ends windows between step launches (a rebuild inside the step graph counts at the step whose flag shows it).
     constexpr int kDispWindowMin = 32, kDispWindowMax = 512;
     auto rotate_disp = [&] {
-        loup::rotate_step_disp_kernel<<<1, 1, 0, h->stream>>>(h->d_max_step_disp2, h->d_need_rebuild);
+        loup::rotate_step_disp_kernel<<<1, 1, 0, h->stream>>>(h->d_max_step_disp2);
         h->disp_window_steps = 0;
     };
     auto note_step = [&] {
         if (++h->disp_window_steps >= kDispWindowMax) rotate_disp();
     };
+    // One loop. Each step is one launch of the step graph: first half + skin check + guard_step_kernel + an IF node
+    // whose body is the rest (force pass + second half). The guard publishes the check's flag to mapped host memory
+    // and lets the force pass run only while the list is complete, i.e. no atom has moved more than skin/2 since the
+    // last rebuild (exact for any skin, including 0). The host polls the flag, which lands before the force pass
+    // starts, and queues the next step while the force pass runs, so the GPU waits for the host only at a rebuild:
+    // the guard has skipped the force pass, the host rebuilds the list at the new positions and launches the checked
+    // rest graph (rest_guard_kernel + IF (valid rows) rest).
 
     // Forces at step 0. They are already on the device when the last call on this handle was a force evaluation or
     // a completed run at these positions, so a run made of many short calls pays one force pass per step and none
@@ -3090,7 +3455,7 @@ static int run_md_loop(
     }
     h->fix_com = fix_com;
 
-    auto record_move = [&](int lag) {
+    auto record_move = [&] {
         if (kind == 1 && fix_com) {
             // (No CUDA_CHECK inside this lambda: a failed node fails the capture, which is checked.)
             (void)cudaMemsetAsync(h->d_com, 0, 6 * sizeof(double), h->stream);
@@ -3170,9 +3535,9 @@ static int run_md_loop(
                 N, dt_ase, h->d_int_work, h->d_forces_f64, h->d_inv_masses, h->d_pos64, h->d_vel64,
                 h->d_max_step_disp2);
         } else {
-            // 32-thread blocks: the FP64 Box-Muller (3 curand_normal2_double per atom) is FP64-throughput bound on
-            // consumer GPUs, so spread the atoms over every SM instead of N / 256 of them.
-            loup::langevin_first_half_kernel<<<(N + 31) / 32, 32, 0, h->stream>>>(
+            // 32 atoms per block: the FP64 Box-Muller (3 curand_normal2_double per atom) is FP64-throughput bound on
+            // consumer GPUs, so spread the atoms over every SM instead of N / 256 of them; S106: one thread per draw.
+            loup::langevin_first_half_kernel<<<(N + 31) / 32, 96, 0, h->stream>>>(
                 N, dt_ase, c1, c2, h->d_langevin_target, seed, h->d_step_counter,
                 h->d_forces_f64, h->d_inv_masses, h->d_sqrt_inv_masses,
                 h->d_pos64, h->d_vel64, h->d_rnd_vel, h->d_max_step_disp2);
@@ -3186,18 +3551,16 @@ static int run_md_loop(
             }
             loup::cell_derive_kernel<<<1, 1, 0, h->stream>>>(h->d_celldev, h->d_need_rebuild);
             loup::check_skin_cell_kernel<<<gridN, 256, 0, h->stream>>>(
-                N, lag, 0, h->d_pos64, h->d_ref_pos64, h->d_celldev, h->d_max_step_disp2, h->d_need_rebuild);
+                N, h->d_pos64, h->d_ref_pos64, h->d_celldev, h->d_need_rebuild);
             return;
         }
-        // The unpipelined check (lag 0) also reports whether the list is still young enough for the pipelined loop.
-        loup::check_skin_kernel<<<gridN, 256, 0, h->stream>>>(
-            N, half_skin, lag, lag == 0 ? kPipeLag : 0, h->d_pos64, h->d_ref_pos64, h->d_max_step_disp2,
-            h->d_need_rebuild);
+        loup::check_skin_kernel<<<gridN, 256, 0, h->stream>>>(N, half_skin, h->d_pos64, h->d_ref_pos64,
+                                                              h->d_need_rebuild);
     };
     auto record_rest = [&]() {
         if (var_cell && h->E_graph > 0) {  // the edges' Cartesian shifts in the cell of this step
             loup::shift_cart_kernel<<<(h->E_graph + 255) / 256, 256, 0, h->stream>>>(
-                h->d_row_ptr + N, h->d_celldev, h->d_tmp_snd, h->d_tmp_rcv, h->d_tmp_pairs, h->d_shift_cart);
+                h->d_row_ptr + N, h->d_celldev, h->d_cell_codes, h->d_shift_cart);
         }
         h->disp_cell_dev = var_cell;
         record_force_pass(h, var_cell ? 1 : 0);
@@ -3247,13 +3610,61 @@ static int run_md_loop(
                                npt ? (double)npt->full : 0.0,
                                npt ? (double)(npt->mask[0] + 2 * npt->mask[1] + 4 * npt->mask[2]) : 0.0,
                                npt ? (double)npt->pchain : 0.0, npt ? (double)npt->ploop : 0.0};
-    auto capture = [&](cudaGraph_t& g, cudaGraphExec_t& ge, auto&& body) -> int {
+    // Captures into graph g: prologue(conds) with one new conditional handle per body, then one IF node per handle
+    // after the prologue, then each body into its IF node's graph (a body may nest this call). Each level's capture
+    // ends before its bodies are captured, as the force pass records on h->stream.
+    using Prologue = std::function<void(const cudaGraphConditionalHandle*)>;
+    using Body = std::function<int(cudaGraph_t)>;
+    std::function<int(cudaGraph_t, const Prologue&, const std::vector<Body>&)> capture_ifs =
+        [&](cudaGraph_t g, const Prologue& prologue, const std::vector<Body>& bodies) -> int {
+        const size_t n = bodies.size();
+        std::vector<cudaGraphConditionalHandle> conds(n);
+        for (size_t i = 0; i < n; ++i) CUDA_CHECK(cudaGraphConditionalHandleCreate(&conds[i], g, 0, 0));
+        CUDA_CHECK(cudaStreamBeginCaptureToGraph(h->stream, g, nullptr, nullptr, 0, cudaStreamCaptureModeGlobal));
+        prologue(conds.data());
+        cudaStreamCaptureStatus status;
+        const cudaGraphNode_t* deps_p = nullptr;
+        size_t n_deps = 0;
+        CUDA_CHECK(cudaStreamGetCaptureInfo(h->stream, &status, nullptr, nullptr, &deps_p, nullptr, &n_deps));
+        const std::vector<cudaGraphNode_t> deps(deps_p, deps_p + n_deps);
+        std::vector<cudaGraphNode_t> nodes(n);
+        std::vector<cudaGraph_t> body_graphs(n);
+        for (size_t i = 0; i < n; ++i) {
+            cudaGraphNodeParams cp = {};
+            cp.type = cudaGraphNodeTypeConditional;
+            cp.conditional.handle = conds[i];
+            cp.conditional.type = cudaGraphCondTypeIf;
+            cp.conditional.size = 1;
+            CUDA_CHECK(cudaGraphAddNode(&nodes[i], g, deps.data(), nullptr, deps.size(), &cp));
+            body_graphs[i] = cp.conditional.phGraph_out[0];
+        }
+        CUDA_CHECK(cudaStreamUpdateCaptureDependencies(h->stream, nodes.data(), nullptr, n,
+                                                       cudaStreamSetCaptureDependencies));
+        cudaGraph_t captured = nullptr;
+        CUDA_CHECK(cudaStreamEndCapture(h->stream, &captured));
+        for (size_t i = 0; i < n; ++i)
+            if (bodies[i](body_graphs[i]) != 0) return -1;
+        return 0;
+    };
+    const Body rest_body = [&](cudaGraph_t g) -> int {
+        CUDA_CHECK(cudaStreamBeginCaptureToGraph(h->stream, g, nullptr, nullptr, 0, cudaStreamCaptureModeGlobal));
+        record_rest();
+        cudaGraph_t captured = nullptr;
+        CUDA_CHECK(cudaStreamEndCapture(h->stream, &captured));
+        return 0;
+    };
+    // The checked rest: rest_guard_kernel + IF (valid rows) rest.
+    const Body checked_rest_body = [&](cudaGraph_t g) -> int {
+        return capture_ifs(g, [&](const cudaGraphConditionalHandle* c) {
+            loup::rest_guard_kernel<<<1, 1, 0, h->stream>>>(c[0], h->d_order_err, nullptr);
+        }, {rest_body});
+    };
+    auto instantiate = [&](cudaGraph_t& g, cudaGraphExec_t& ge, const Body& body) -> int {
         if (ge) { cudaGraphExecDestroy(ge); ge = nullptr; }
         if (g) { cudaGraphDestroy(g); g = nullptr; }
         if (debug_graphs) fputs("loupmd: MD graph capture\n", stderr);
-        CUDA_CHECK(cudaStreamBeginCapture(h->stream, cudaStreamCaptureModeGlobal));
-        body();
-        CUDA_CHECK(cudaStreamEndCapture(h->stream, &g));
+        CUDA_CHECK(cudaGraphCreate(&g, 0));
+        if (body(g) != 0) return -1;
         CUDA_CHECK(cudaGraphInstantiate(&ge, g, nullptr, nullptr, 0));
         return 0;
     };
@@ -3271,16 +3682,68 @@ static int run_md_loop(
         h->md_graph_cellrate = cell_rate;
         memcpy(h->md_graph_npt, npt_key, sizeof(npt_key));
     };
-    auto ensure_piped = [&]() -> int {
-        if (h->md_graph_exec) return 0;
-        if (capture(h->md_graph, h->md_graph_exec, [&] { record_move(kPipeLag); record_rest(); }) != 0) return -1;
-        note_params();
-        return 0;
+    // The step graph's rebuild branch needs fixed sizes: the edge bucket and a row-sort width with a quarter of headroom
+    // over the last rebuild's longest row. Systems whose rebuilds reorder the atoms (a host round trip) or sort rows in
+    // global scratch keep the host-driven rebuild, as does a system's first rebuild (it times kernel variants), and a
+    // variable-cell run (its rebuild needs the device's cell on the host first; its bin grid follows the cell).
+    const NlGeom nl_g = nl_geom(h);
+    auto rebuild_width = [&] { return pow2_at_least(std::max(32, h->max_deg_last + h->max_deg_last / 4 + 1)); };
+    auto device_rebuild_ok = [&] {
+        return h->ovr.md_rebuild != 1 && h->variants_tuned && h->E_graph > 0 && !reorder_atoms(h) &&
+               !h->ovr.row_sort_global && rebuild_width() <= 4096 && !var_cell;
     };
-    auto ensure_unpiped = [&]() -> int {
-        if (h->md_move_exec && h->md_rest_exec) return 0;
-        if (capture(h->md_move_graph, h->md_move_exec, [&] { record_move(0); }) != 0) return -1;
-        if (capture(h->md_rest_graph, h->md_rest_exec, record_rest) != 0) return -1;
+    auto ensure_graphs = [&]() -> int {
+        if (h->md_step_exec && h->md_checked_exec) return 0;
+        const bool dev = device_rebuild_ok();
+        if (dev && ensure_cub_tmp(h, nl_cub_bytes(h, nl_g)) != 0) return -1;
+        const int E_lim = h->ovr.md_rebuild == 2 ? 0 : h->E_graph;  // fallback (tests): never fits
+        const int P_cap = rebuild_width();
+        // The rebuild branch: count, gate (its verdict in go = d_max_deg + 1), then fill, sort and commit, which skip
+        // themselves on a negative verdict, and the checked rest, also gated by the verdict.
+        const int* go = h->d_max_deg + 1;
+        const Body rebuild_body = [&](cudaGraph_t g) -> int {
+            return capture_ifs(g, [&](const cudaGraphConditionalHandle* c) {
+                nl_bin(h, nl_g);
+                nl_count(h, nl_g);
+                loup::rebuild_gate_kernel<<<1, 1, 0, h->stream>>>(h->d_row_ptr + N, h->d_max_deg, E_lim, P_cap,
+                                                                   h->d_max_deg + 1, h->d_pub_counter, h->d_pub);
+                nl_fill(h, nl_g, P_cap, go);
+                nl_commit(h, go);
+                loup::rest_guard_kernel<<<1, 1, 0, h->stream>>>(c[0], h->d_order_err, go);
+            }, {rest_body});
+        };
+        // The step graph: move + check + guard_step_kernel, then one SWITCH node (body 0 the rest, body 1 the rebuild
+        // branch when dev).
+        const Body step_body = [&](cudaGraph_t g) -> int {
+            cudaGraphConditionalHandle c;
+            CUDA_CHECK(cudaGraphConditionalHandleCreate(&c, g, 0, 0));
+            CUDA_CHECK(cudaStreamBeginCaptureToGraph(h->stream, g, nullptr, nullptr, 0, cudaStreamCaptureModeGlobal));
+            record_move();
+            loup::guard_step_kernel<<<1, 1, 0, h->stream>>>(c, dev ? 1 : 0, h->d_need_rebuild, h->d_order_err,
+                                                             h->d_pub_counter, h->d_pub);
+            cudaStreamCaptureStatus status;
+            const cudaGraphNode_t* deps_p = nullptr;
+            size_t n_deps = 0;
+            CUDA_CHECK(cudaStreamGetCaptureInfo(h->stream, &status, nullptr, nullptr, &deps_p, nullptr, &n_deps));
+            const std::vector<cudaGraphNode_t> deps(deps_p, deps_p + n_deps);
+            cudaGraphNodeParams cp = {};
+            cp.type = cudaGraphNodeTypeConditional;
+            cp.conditional.handle = c;
+            cp.conditional.type = cudaGraphCondTypeSwitch;
+            cp.conditional.size = dev ? 2 : 1;
+            cudaGraphNode_t node;
+            CUDA_CHECK(cudaGraphAddNode(&node, g, deps.data(), nullptr, deps.size(), &cp));
+            CUDA_CHECK(cudaStreamUpdateCaptureDependencies(h->stream, &node, nullptr, 1,
+                                                           cudaStreamSetCaptureDependencies));
+            cudaGraph_t captured = nullptr;
+            CUDA_CHECK(cudaStreamEndCapture(h->stream, &captured));
+            if (rest_body(cp.conditional.phGraph_out[0]) != 0) return -1;
+            if (dev && rebuild_body(cp.conditional.phGraph_out[1]) != 0) return -1;
+            return 0;
+        };
+        if (instantiate(h->md_step_graph, h->md_step_exec, step_body) != 0) return -1;
+        if (instantiate(h->md_checked_graph, h->md_checked_exec, checked_rest_body) != 0) return -1;
+        h->md_dev_rebuild = dev;
         note_params();
         return 0;
     };
@@ -3297,29 +3760,9 @@ static int run_md_loop(
         h->invalidate_md_graphs();
     }
 
-    int rebuilds = 0, dangerous = 0;
+    int rebuilds = 0;
     double tune_ms = 0.0;
-    // The per-system variant timing (first rebuild only) is not part of the steps: it is timed and excluded.
-    auto rebuild = [&](int flag) -> int {
-        ++rebuilds;
-        if (flag & 2) ++dangerous;
-        if (!h->variants_tuned) {
-            const auto t0 = std::chrono::steady_clock::now();
-            tune_rebuild_variants(h);
-            tune_ms += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
-        }
-        if (rebuild_neighbors(h) != 0) return -1;
-        if (h->disp_window_steps >= kDispWindowMin) rotate_disp();
-        return 0;
-    };
-    int* flags = h->h_reb_pinned;
-    auto copy_disp = [&] {
-        CUDA_CHECK(cudaMemcpyAsync(&flags[2], h->d_max_step_disp2, 2 * sizeof(int), cudaMemcpyDeviceToHost, h->stream));
-        return 0;
-    };
-    auto step_disp = [&] {  // of the last copy_disp: the larger of the two windows
-        return bits_to_disp((unsigned)flags[2] > (unsigned)flags[3] ? flags[2] : flags[3]);
-    };
+    int host_rebuilds = 0;  // rebuilds the host finished (the GPU waited for them): LoupMDStats::pipelined_steps
 
     if (bao_start) {  // LangevinBAOAB.__init__: the cell force of the forces, stress and velocities it starts from
         loup::kinetic_tensor_kernel<<<gridN, 256, 0, h->stream>>>(N, h->d_masses, h->d_vel64, h->d_int_work);
@@ -3331,83 +3774,61 @@ static int run_md_loop(
     cudaEvent_t ev0 = evg.e0, ev1 = evg.e1;
     CUDA_CHECK(cudaEventRecord(ev0, h->stream));
 
-    int launched = 0, pipelined_steps = 0;
-    bool piped = false;
-    while (launched < n_steps) {
-        if (!piped) {
-            if (ensure_unpiped() != 0) return -1;
-            CUDA_CHECK(cudaGraphLaunch(h->md_move_exec, h->stream));
-            flags[0] = 0;
-            CUDA_CHECK(cudaMemcpyAsync(&flags[0], h->d_need_rebuild, sizeof(int), cudaMemcpyDeviceToHost, h->stream));
-            copy_disp();
-            CUDA_CHECK(cudaStreamSynchronize(h->stream));
-            if (var_cell && (flags[0] & 8)) {  // cell_derive_kernel: the volume left its limits
-                loup::CellDev c;
-                if (download_cell_dev(h, &c) != 0) return -1;
-                h->cell_ref_stale = true;
-                loup::set_error("the cell diverged: its volume is %g A^3, outside [V0 / 20, 20 V0] with V0 = %g A^3 "
-                                "(step %lld of the trajectory); the state on the handle is that step's",
-                                c.volume, c.v0, (long long)(h->md_steps + launched + 1));
-                return -1;
-            }
-            // Rebuilt before this step's forces, so bit 2 (already beyond skin/2) is not a violation here.
-            if (flags[0] & 1) {
-                if (var_cell && download_cell_dev(h) != 0) return -1;  // the list is built in the cell of now
-                if (rebuild(1) != 0) return -1;
-                if (ensure_unpiped() != 0) return -1;
-            }
-            CUDA_CHECK(cudaGraphLaunch(h->md_rest_exec, h->stream));
-            ++launched;
+    for (int step = 0; step < n_steps; ++step) {
+        if (ensure_graphs() != 0) return -1;
+        CUDA_CHECK(cudaGraphLaunch(h->md_step_exec, h->stream));
+        int v[3];
+        if (wait_published(h, ++h->pub_count, v) != 0) return -1;
+        if (v[1]) return order_error();
+        if (!v[0]) {
             note_step();
-            // The first pipelined force calls run on the current list before any flag is read. They are covered
-            // only if the list was rebuilt in this step or no atom is beyond the pipelined (lowered) threshold
-            // (bit 4). Without this, a list aged by unpipelined steps (single-step calls, evaluate()) was used up to
-            // two steps past skin/2: 9 such steps in 60 switches of tests/test_engine.py's switch test.
-            const bool list_young = (flags[0] & 1) || !(flags[0] & 4);
-            piped = allow_pipeline && n_steps - launched >= 2 && 4.0 * step_disp() < half_skin && list_young;
             continue;
         }
-        if (ensure_piped() != 0) return -1;
-        int prev = 0;
-        flags[0] = 0;
-        CUDA_CHECK(cudaGraphLaunch(h->md_graph_exec, h->stream));
-        CUDA_CHECK(cudaMemcpyAsync(&flags[0], h->d_need_rebuild, sizeof(int), cudaMemcpyDeviceToHost, h->stream));
-        CUDA_CHECK(cudaEventRecord(h->ev_reb[0], h->stream));
-        ++launched;
-        ++pipelined_steps;
+        if (var_cell && (v[0] & 8)) {  // cell_derive_kernel: the volume left its limits
+            loup::CellDev c;
+            if (download_cell_dev(h, &c) != 0) return -1;
+            h->cell_ref_stale = true;
+            loup::set_error("the cell diverged: its volume is %g A^3, outside [V0 / 20, 20 V0] with V0 = %g A^3 "
+                            "(step %lld of the trajectory); the state on the handle is that step's",
+                            c.volume, c.v0, (long long)(h->md_steps + step + 1));
+            return -1;
+        }
+        ++rebuilds;
+        if (h->disp_window_steps >= kDispWindowMin) rotate_disp();
         note_step();
-        bool leave = false;
-        while (launched < n_steps && !leave) {
-            const int cur = prev ^ 1;
-            flags[cur] = 0;
-            CUDA_CHECK(cudaGraphLaunch(h->md_graph_exec, h->stream));
-            CUDA_CHECK(cudaMemcpyAsync(&flags[cur], h->d_need_rebuild, sizeof(int), cudaMemcpyDeviceToHost, h->stream));
-            CUDA_CHECK(cudaEventRecord(h->ev_reb[cur], h->stream));
-            ++launched;
-            ++pipelined_steps;
-            note_step();
-            CUDA_CHECK(cudaEventSynchronize(h->ev_reb[prev]));
-            if (flags[prev] & 1) {
-                const int before = dangerous;
-                if (rebuild(flags[prev]) != 0) return -1;
-                // rebuild_neighbors synchronised the stream, so the in-flight step's flag copy has landed: that step
-                // also ran on the old list.
-                if ((flags[cur] & 2) && !(flags[prev] & 2)) ++dangerous;
-                flags[cur] = 0;
-                copy_disp();
-                CUDA_CHECK(cudaStreamSynchronize(h->stream));
-                leave = dangerous != before || 4.0 * step_disp() >= half_skin;
-                if (!leave && ensure_piped() != 0) return -1;
+        if (h->md_dev_rebuild) {
+            // The step graph's rebuild branch has counted the new rows; it went on to fill them and run the checked
+            // rest on the GPU if they fit its captured sizes.
+            int w[3];
+            if (wait_published(h, ++h->pub_count, w) != 0) return -1;
+            h->E_skin = w[0];
+            h->max_deg_last = w[1];
+            if (w[2]) continue;
+            // They did not: once the step graph has drained, finish the rebuild on the host from the counted rows and
+            // recapture the graphs for the new sizes.
+            int z[3];
+            if (read_device_ints(h, nullptr, nullptr, nullptr, z) != 0) return -1;
+            ++host_rebuilds;
+            h->nl_valid = false;
+            if (nl_finish(h, nl_g, w[0], w[1], false) != 0) return -1;
+            h->invalidate_md_graphs();
+        } else {
+            ++host_rebuilds;
+            // The per-system variant timing (first rebuild only) is not part of the steps: it is timed and excluded.
+            if (!h->variants_tuned) {
+                const auto t0 = std::chrono::steady_clock::now();
+                tune_rebuild_variants(h);
+                tune_ms += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
             }
-            prev = cur;
+            if (var_cell && download_cell_dev(h) != 0) return -1;  // the list is built in the cell of now
+            // The row-order flag is read with the next step's publication (or at the end of the block); until then
+            // the checked rest's guard keeps the force pass off rows that failed it.
+            if (rebuild_neighbors(h, false) != 0) return -1;
+            if (device_rebuild_ok()) h->invalidate_md_graphs();  // the step graph gains its rebuild branch
         }
-        if (!leave) {
-            CUDA_CHECK(cudaEventSynchronize(h->ev_reb[prev]));
-            if ((flags[prev] & 1) && rebuild(flags[prev]) != 0) return -1;
-        }
-        piped = false;
+        if (ensure_graphs() != 0) return -1;
+        CUDA_CHECK(cudaGraphLaunch(h->md_checked_exec, h->stream));
     }
-
     CUDA_CHECK(cudaEventRecord(ev1, h->stream));
     CUDA_CHECK(cudaEventSynchronize(ev1));
     float ms = 0.0f;
@@ -3416,8 +3837,11 @@ static int run_md_loop(
     // The block's last energy (forces feed it every step): non-finite means the run is lost; with the hybrid GEMMs
     // loaded they are dropped first, so a run restarted from a saved state does not hit the same overflow.
     double inter_e = 0.0;
+    int order_err = 0;  // a rebuild in the block's last step is not followed by a flag read
     CUDA_CHECK(cudaMemcpyAsync(&inter_e, h->d_energy_f64, sizeof(double), cudaMemcpyDeviceToHost, h->stream));
+    CUDA_CHECK(cudaMemcpyAsync(&order_err, h->d_order_err, sizeof(int), cudaMemcpyDeviceToHost, h->stream));
     CUDA_CHECK(cudaStreamSynchronize(h->stream));
+    if (order_err) return order_error();
     if (!std::isfinite(inter_e)) {
         drop_hybrid(h);
         loup::set_error("non-finite potential energy after the MD block: the state is lost; restart from a saved "
@@ -3443,9 +3867,9 @@ static int run_md_loop(
         out_stats->final_potential_energy_ev = h->e0_total + inter_e;
         out_stats->final_kinetic_energy_ev = ke;
         out_stats->final_temperature_k = (2.0 * ke) / ((double)h->kinetic_dof() * loup::ASE_KB);
-        out_stats->dangerous_builds = dangerous;
+        out_stats->dangerous_builds = 0;  // every force pass follows its own list check
+        out_stats->pipelined_steps = n_steps - host_rebuilds;
         out_stats->tune_ms = tune_ms;
-        out_stats->pipelined_steps = pipelined_steps;
     }
     h->forces_current = true;
     h->md_steps += n_steps;
@@ -4359,12 +4783,11 @@ static int set_domain_impl(LoupHandle* h, int n_local, int n_ghost, const int* a
         loup::set_error("n_local must be positive and n_ghost not negative, got %d and %d", n_local, n_ghost);
         return -1;
     }
-    if (!(h->gen && h->gen->sweeps_available())) {
-        loup::set_error("an open domain needs a bundle of the generic path without long range, and "
-                        "LOUP_CHAIN_FOLD=0 where the skip-chain fold applies");
+    if (!(h->gen && h->gen->sweeps_possible())) {
+        loup::set_error("an open domain needs a bundle of the generic path without long range");
         return -1;
     }
-    return set_system_impl(h, n_local + n_ghost, atomic_numbers, nullptr, skin, n_ghost);
+    return set_system_impl(h, n_local + n_ghost, atomic_numbers, nullptr, skin, n_ghost, true);
 }
 
 static int evaluate_domain_impl(LoupHandle* h, const double* positions, const double* cell, const int* ghost_of,
@@ -4511,13 +4934,17 @@ static int domain_edges_impl(LoupHandle* h, const double* positions, const doubl
         CUDA_CHECK(cudaStreamSynchronize(h->stream));
     }
     if (capacity < E || E == 0) return 0;
-    std::vector<int> rcv(E), snd(E);
+    std::vector<int> rcv(E), snd(E), row_ptr((size_t)N + 1);
     std::vector<double> sh((size_t)E * 3);
-    CUDA_CHECK(cudaMemcpyAsync(rcv.data(), h->d_receivers, (size_t)E * sizeof(int), cudaMemcpyDeviceToHost, h->stream));
+    // Row i of the list holds the edges whose receiver is i (no per-edge receiver array is kept).
+    CUDA_CHECK(cudaMemcpyAsync(row_ptr.data(), h->d_row_ptr, ((size_t)N + 1) * sizeof(int), cudaMemcpyDeviceToHost,
+                               h->stream));
     CUDA_CHECK(cudaMemcpyAsync(snd.data(), h->d_senders, (size_t)E * sizeof(int), cudaMemcpyDeviceToHost, h->stream));
     CUDA_CHECK(cudaMemcpyAsync(sh.data(), h->d_shift_cart, (size_t)E * 3 * sizeof(double), cudaMemcpyDeviceToHost,
                                h->stream));
     CUDA_CHECK(cudaStreamSynchronize(h->stream));
+    for (int i = 0; i < N; ++i)
+        for (int e = row_ptr[i]; e < row_ptr[i + 1]; ++e) rcv[e] = i;
     for (int e = 0; e < E; ++e) {
         if (out_receivers) out_receivers[e] = h->perm[rcv[e]];
         if (out_senders) out_senders[e] = h->perm[snd[e]];
@@ -4771,19 +5198,23 @@ inline bool alloc_slot(DeviceBufferGuard& blk, std::initializer_list<std::pair<S
     }
     return true;
 }
+// The full (not compact) form of a tile list's edges: the Cartesian shift (24 B) and the sender (4 B). A row is one
+// receiver's edges and the pair index follows from the species, so neither is stored per edge (S113 of the main
+// list; 36 B per edge before the merge of round6-hardening).
+constexpr int kTileFullEdgeB = 28;
 struct TileList {
     int n_local = 0, rows = 0, E = 0;
     double e0 = 0.0, box[9] = {0, 0, 0, 0, 0, 0, 0, 0, 0};
     std::vector<int> perm, species_start, species_count;
     // O32: one allocation (blk) cut into the arrays below (tile-slot-block's rounding: about 2 MB per allocation)
     DeviceBufferGuard blk;
-    SlotView species, pos, row_ptr, senders, receivers, pairs, shift, row_atom;
-    // O31 (S5-T07): with host lists the edge arrays (senders, receivers, pairs, shifts: 36 B per edge) live in one
-    // block of mapped pinned host memory instead of `senders` ... `shift`, and the pointers below are its device view
+    SlotView species, pos, row_ptr, senders, shift, row_atom;
+    // O31 (S5-T07): with host lists the edge arrays (senders, shifts: kTileFullEdgeB per edge) live in one block of
+    // mapped pinned host memory instead of `senders` and `shift`, and the pointers below are its device view
     HostBufferGuard host_edges;
-    int *h_senders = nullptr, *h_receivers = nullptr, *h_pairs = nullptr;
+    int* h_senders = nullptr;
     double* h_shift = nullptr;
-    // O32: the compact form (LOUP_TILE_HOST_COMPACT=0: the 36 B form above): the senders and each edge's integer image
+    // O32: the compact form (LOUP_TILE_HOST_COMPACT=0: the full form above): the senders and each edge's integer image
     // shift, 8 B per edge; the compaction's inputs are rebuilt from them on the device (tile_decode_edges_kernel)
     bool compact = false;
     const int* h_csnd = nullptr;  // device views: of host_edges, or of senders and ccode (device lists, compact)
@@ -5019,7 +5450,7 @@ __device__ __forceinline__ double tile_shift_comp(const loup::CellMat64& cell, d
 
 // O32: compact host lists. The integer image shift of each edge from its Cartesian shift (the box's inverse), kept
 // only when it fits a signed byte and gives the Cartesian shift back bit for bit (tile_shift_comp against the list
-// build's own value, gather_sorted_edges_kernel); `bad` is set otherwise and the tile keeps the 36 B form.
+// build's own value, sort_gather_rows_kernel); `bad` is set otherwise and the tile keeps the full form.
 __global__ void tile_encode_edges_kernel(int E, loup::CellMat64 cell, const double* __restrict__ shift,
                                          char4* __restrict__ code, int* __restrict__ bad) {
     const int e = blockIdx.x * blockDim.x + threadIdx.x;
@@ -5039,21 +5470,16 @@ __global__ void tile_encode_edges_kernel(int E, loup::CellMat64 cell, const doub
 }
 
 // The compaction's inputs of a compact host list: one warp per receiver row.
-__global__ void tile_decode_edges_kernel(int N, int S, loup::CellMat64 cell, const int* __restrict__ row_ptr,
-                                         const int* __restrict__ species, const int* __restrict__ snd,
-                                         const char4* __restrict__ code, int* __restrict__ senders,
-                                         int* __restrict__ receivers, int* __restrict__ pairs,
-                                         double* __restrict__ shift) {
+__global__ void tile_decode_edges_kernel(int N, loup::CellMat64 cell, const int* __restrict__ row_ptr,
+                                         const int* __restrict__ snd, const char4* __restrict__ code,
+                                         int* __restrict__ senders, double* __restrict__ shift) {
     const int tid = blockIdx.x * blockDim.x + threadIdx.x;
     const int i = tid >> 5, lane = tid & 31;
     if (i >= N) return;
-    const int sp_i = species[i];
     for (int e = row_ptr[i] + lane; e < row_ptr[i + 1]; e += 32) {
         const int j = snd[e];
         const char4 c = code[e];
         senders[e] = j;
-        receivers[e] = i;
-        pairs[e] = loup::sym_pair(species[j], sp_i, S);
         const double sx = (double)c.x, sy = (double)c.y, sz = (double)c.z;
         for (int k = 0; k < 3; ++k) shift[(int64_t)e * 3 + k] = tile_shift_comp(cell, sx, sy, sz, k);
     }
@@ -5123,7 +5549,7 @@ static bool host_compact() {
 }
 
 // O32: device lists in the same compact form (senders and integer image shifts on the device, decoded per
-// compaction); LOUP_TILE_DEVICE_COMPACT=0 keeps the 36 B form there
+// compaction); LOUP_TILE_DEVICE_COMPACT=0 keeps the full form (kTileFullEdgeB) there
 static bool device_compact() {
     const char* e = std::getenv("LOUP_TILE_DEVICE_COMPACT");
     return !(e && e[0] && std::atoi(e) == 0);
@@ -5166,8 +5592,6 @@ static int build_tile_list(LoupHandle* h, const TileDomain& t, const double* pos
                               {&out.offset, (size_t)rows * 3 * sizeof(double)},
                               {&out.senders, (dev_compact || full_dev) ? eb : 0},
                               {&out.ccode, dev_compact ? eb : 0},
-                              {&out.receivers, full_dev ? eb : 0},
-                              {&out.pairs, full_dev ? eb : 0},
                               {&out.shift, full_dev ? (size_t)E * 3 * sizeof(double) : 0}},
                     arena)) {
         (void)cudaGetLastError();
@@ -5212,10 +5636,10 @@ static int build_tile_list(LoupHandle* h, const TileDomain& t, const double* pos
     }
     if (out.compact) {
     } else if (host_lists) {
-        // shifts first (8-byte aligned), then the three index arrays
+        // shifts first (8-byte aligned), then the senders
         const size_t e = (size_t)E;
-        if (!pinned_take(h, out.host_edges, e * 36, true)) {
-            loup::set_error("tile list: %.2f GB of pinned host memory not available", e * 36 / 1e9);
+        if (!pinned_take(h, out.host_edges, e * kTileFullEdgeB, true)) {
+            loup::set_error("tile list: %.2f GB of pinned host memory not available", e * kTileFullEdgeB / 1e9);
             return -1;
         }
         void* dev = nullptr;
@@ -5224,17 +5648,11 @@ static int build_tile_list(LoupHandle* h, const TileDomain& t, const double* pos
         char* dp = static_cast<char*>(dev);
         out.h_shift = reinterpret_cast<double*>(dp);
         out.h_senders = reinterpret_cast<int*>(dp + e * 24);
-        out.h_receivers = reinterpret_cast<int*>(dp + e * 28);
-        out.h_pairs = reinterpret_cast<int*>(dp + e * 32);
         if (E) {
             CUDA_CHECK(cudaMemcpyAsync(hp, h->d_shift_cart, e * 24, cudaMemcpyDeviceToHost, h->stream));
             CUDA_CHECK(cudaMemcpyAsync(hp + e * 24, h->d_senders, e * 4, cudaMemcpyDeviceToHost, h->stream));
-            CUDA_CHECK(cudaMemcpyAsync(hp + e * 28, h->d_receivers, e * 4, cudaMemcpyDeviceToHost, h->stream));
-            CUDA_CHECK(cudaMemcpyAsync(hp + e * 32, h->d_pairs, e * 4, cudaMemcpyDeviceToHost, h->stream));
         }
     } else if (keep(out.senders, h->d_senders, (size_t)E * sizeof(int)) ||
-               keep(out.receivers, h->d_receivers, (size_t)E * sizeof(int)) ||
-               keep(out.pairs, h->d_pairs, (size_t)E * sizeof(int)) ||
                keep(out.shift, h->d_shift_cart, (size_t)E * 3 * sizeof(double))) {
         return -1;
     }
@@ -5260,14 +5678,14 @@ static int build_tile_list(LoupHandle* h, const TileDomain& t, const double* pos
 // exit (also on an error path), before anything that rebuilds a list or frees the handle's buffers can run.
 struct TileListBorrow {
     LoupHandle* h;
-    int *species, *row_ptr, *senders, *receivers, *pairs;
+    int *species, *row_ptr, *senders;
     double *pos64, *shift_cart;
     int *act_row_ptr, *act_senders, *act_receivers, *act_pairs, *act_slab;
     float4* act_vec_len;
     float2* act_t_sx;
     explicit TileListBorrow(LoupHandle* h_)
         : h(h_), species(h_->d_species), row_ptr(h_->d_row_ptr), senders(h_->d_senders),
-          receivers(h_->d_receivers), pairs(h_->d_pairs), pos64(h_->d_pos64), shift_cart(h_->d_shift_cart),
+          pos64(h_->d_pos64), shift_cart(h_->d_shift_cart),
           act_row_ptr(h_->d_act_row_ptr), act_senders(h_->d_act_senders), act_receivers(h_->d_act_receivers),
           act_pairs(h_->d_act_pairs), act_slab(h_->d_act_slab), act_vec_len(h_->d_act_vec_len),
           act_t_sx(h_->d_act_t_sx) {}
@@ -5286,8 +5704,6 @@ struct TileListBorrow {
         h->d_species = species;
         h->d_row_ptr = row_ptr;
         h->d_senders = senders;
-        h->d_receivers = receivers;
-        h->d_pairs = pairs;
         h->d_pos64 = pos64;
         h->d_shift_cart = shift_cart;
         h->nl_valid = false;  // the handle's own buffers hold whatever list was built last, not the last tile's
@@ -5313,8 +5729,6 @@ static int restore_tile_list(LoupHandle* h, const TileList& t) {
     h->d_row_ptr = static_cast<int*>(t.row_ptr.p);
     const bool host = t.host_edges.p != nullptr;  // O31: only the active-edge compaction reads these
     h->d_senders = host ? t.h_senders : static_cast<int*>(t.senders.p);
-    h->d_receivers = host ? t.h_receivers : static_cast<int*>(t.receivers.p);
-    h->d_pairs = host ? t.h_pairs : static_cast<int*>(t.pairs.p);
     h->d_shift_cart = host ? t.h_shift : static_cast<double*>(t.shift.p);
     // a compact list's are decoded into the handle's own buffers before the compaction (the tiled call's stage_use)
     h->E_skin = t.E;
@@ -5324,7 +5738,8 @@ static int restore_tile_list(LoupHandle* h, const TileList& t) {
     return 0;
 }
 
-static bool can_tile(const LoupHandle* h) { return h->gen && h->gen->sweeps_available() && h->gen->n_layers() >= 2; }
+// Tiles are domains: their systems do not fold (set_system_impl), so only the long range rules the sweeps out.
+static bool can_tile(const LoupHandle* h) { return h->gen && h->gen->sweeps_possible() && h->gen->n_layers() >= 2; }
 
 // loup_plan_execution (see the header).
 // The wavefront (S5-T08) for a tiled call of n atoms: LOUP_TILE_WAVEFRONT=1|0 forces it on or off, else the
@@ -5376,7 +5791,7 @@ static int plan_execution_impl(LoupHandle* h, int n_atoms, const int* atomic_num
     if (!(skin >= 0.0) || !std::isfinite(skin)) { loup::set_error("skin must be finite and not negative"); return -1; }
     if ((h->exec_mode == LOUP_EXEC_TILED || h->exec_mode == LOUP_EXEC_WAVEFRONT) && !can_tile(h)) {
         loup::set_error("the tiled mode needs a bundle of the generic path without long range and with two or more "
-                        "layers, and LOUP_CHAIN_FOLD=0 where the skip-chain fold applies");
+                        "layers");
         return -1;
     }
     if (h->exec_mode == LOUP_EXEC_WAVEFRONT && h->gen->n_layers() != 2) {
@@ -5460,8 +5875,8 @@ static int plan_execution_impl(LoupHandle* h, int n_atoms, const int* atomic_num
     bool wave_forced = false;
     const bool wave = wave_try(h, n_atoms, &wave_forced);
     const double ghost0 = (double)widest_rows - c0;
-    // O32: the device lists' edge arrays per edge: 8 B compact (10% over, as the host lists'), else 36 B
-    const double dev_edge_b = device_compact() ? 8.0 * 1.1 : 36.0;
+    // O32: the device lists' edge arrays per edge: 8 B compact (10% over, as the host lists'), else kTileFullEdgeB
+    const double dev_edge_b = device_compact() ? 8.0 * 1.1 : (double)kTileFullEdgeB;
     double hstate_host = 0.0;  // the host memory of the layer state and its staging at the last cap tried
     auto tiled_at = [&](double c, bool host, double& global, double& ws, int hstate = 0) -> int {
         c = std::min(c, n);
@@ -5493,7 +5908,7 @@ static int plan_execution_impl(LoupHandle* h, int n_atoms, const int* atomic_num
                      (host ? 0.0 : dev_edge_b * n * epl);
             return 0;
         }
-        // with host lists (O31) the edges' 36 B leave the device
+        // with host lists (O31) the edges' arrays leave the device
         double kept = 32.0 * (n + T * (rows - c)) + 4.0 * (n + T) + (host ? 0.0 : dev_edge_b * n * epl);
         double layer_rows = n;
         if (wave) {
@@ -5515,7 +5930,7 @@ static int plan_execution_impl(LoupHandle* h, int n_atoms, const int* atomic_num
     static const int kCaps[] = {65536, 49152, 32768, 24576, 16384, 12288, 8192, 6144, 4096};
     // O31 (S5-T07): the lists' edge arrays go to pinned host memory only when no cap fits with them on the device,
     // and only within half of the host memory available now (MemAvailable); LOUP_TILE_HOST_LISTS=1|0 forces it.
-    const double host_need = (host_compact() ? 8.0 : 36.0) * n * epl * 1.1;  // O32: compact unless turned off
+    const double host_need = (host_compact() ? 8.0 : (double)kTileFullEdgeB) * n * epl * 1.1;  // O32: compact unless turned off
     double host_avail = 0.0;
     {
         FILE* f = std::fopen("/proc/meminfo", "r");
@@ -5727,9 +6142,8 @@ static int evaluate_tiled_impl(LoupHandle* h, int n_atoms, const int* atomic_num
         loup::set_error("n_atoms must be positive and atomic_numbers, positions and cell given");
         return -1;
     }
-    if (!(h->gen && h->gen->sweeps_available())) {
-        loup::set_error("the tiled call needs a bundle of the generic path without long range, and "
-                        "LOUP_CHAIN_FOLD=0 where the skip-chain fold applies");
+    if (!(h->gen && h->gen->sweeps_possible())) {
+        loup::set_error("the tiled call needs a bundle of the generic path without long range");
         return -1;
     }
     const int L = h->gen->n_layers();
@@ -5902,8 +6316,8 @@ static int evaluate_tiled_impl(LoupHandle* h, int n_atoms, const int* atomic_num
             }
             max_edges = std::max(max_edges, tl.E);
             st->bytes += (double)tl.rows * (4 + 24 + 4 + 24) + (double)(tl.n_local + 1) * 4;
-            if (host_lists) st->host_bytes += (double)tl.E * (tl.compact ? 8 : 36);
-            else st->bytes += (double)tl.E * (tl.compact ? 8 : 36);
+            if (host_lists) st->host_bytes += (double)tl.E * (tl.compact ? 8 : kTileFullEdgeB);
+            else st->bytes += (double)tl.E * (tl.compact ? 8 : kTileFullEdgeB);
         }
         if (max_edges > h->E_cap) {
             release_tiled_state(h);
@@ -6150,7 +6564,7 @@ static int evaluate_tiled_impl(LoupHandle* h, int n_atoms, const int* atomic_num
         if (st->host_lists) {
             bool all_compact = true;
             for (const TileList& tl : st->lists) all_compact = all_compact && tl.compact;
-            const size_t stage_b = (size_t)std::max(st->max_edges, 1) * (all_compact ? 8 : 36);
+            const size_t stage_b = (size_t)std::max(st->max_edges, 1) * (all_compact ? 8 : kTileFullEdgeB);
             bool on = 2.0 * (double)stage_b <= avail;
             if (const char* e = std::getenv("LOUP_TILE_HOST_STAGE")) on = std::atoi(e) != 0;
             StageRing& r = st->ring;
@@ -6542,7 +6956,7 @@ static int evaluate_tiled_impl(LoupHandle* h, int n_atoms, const int* atomic_num
         const int b = (int)(k % 2);
         CUDA_CHECK(cudaStreamWaitEvent(r.copy, r.used[b], 0));
         if (t.E)
-            CUDA_CHECK(cudaMemcpyAsync(r.buf[b].p, t.host_edges.p, (size_t)t.E * (t.compact ? 8 : 36),
+            CUDA_CHECK(cudaMemcpyAsync(r.buf[b].p, t.host_edges.p, (size_t)t.E * (t.compact ? 8 : kTileFullEdgeB),
                                        cudaMemcpyHostToDevice, r.copy));
         CUDA_CHECK(cudaEventRecord(r.copied[b], r.copy));
         return 0;
@@ -6551,12 +6965,9 @@ static int evaluate_tiled_impl(LoupHandle* h, int n_atoms, const int* atomic_num
     // O32: a compact host list's compaction inputs, decoded into the handle's own list buffers on the stream
     auto host_decode = [&](const TileList& t, const int* snd, const char4* code) {
         tile_decode_edges_kernel<<<(unsigned)((t.n_local + 3) / 4), 128, 0, h->stream>>>(
-            t.n_local, h->n_species(), h->cell, static_cast<const int*>(t.row_ptr.p),
-            static_cast<const int*>(t.species.p), snd, code, borrow.senders, borrow.receivers, borrow.pairs,
+            t.n_local, h->cell, static_cast<const int*>(t.row_ptr.p), snd, code, borrow.senders,
             borrow.shift_cart);
         h->d_senders = borrow.senders;
-        h->d_receivers = borrow.receivers;
-        h->d_pairs = borrow.pairs;
         h->d_shift_cart = borrow.shift_cart;
     };
     // A sweep that compacts reads its tile's edges from the staged buffer: returns the buffer (-1 none, -2 error)
@@ -6585,8 +6996,6 @@ static int evaluate_tiled_impl(LoupHandle* h, int n_atoms, const int* atomic_num
         } else {
             h->d_shift_cart = reinterpret_cast<double*>(dp);
             h->d_senders = reinterpret_cast<int*>(dp + e * 24);
-            h->d_receivers = reinterpret_cast<int*>(dp + e * 28);
-            h->d_pairs = reinterpret_cast<int*>(dp + e * 32);
         }
         if (stage_copy(k + 1) != 0) return -2;
         return b;
@@ -7344,7 +7753,7 @@ static int tiled_run_impl(LoupHandle* h, const LoupIntegrator* it, int n_steps, 
             loup::langevin_first_half_fixcom_kernel<<<gridN, 256, 0, h->stream>>>(
                 N, dt_ase, c1, c2, inv_total_mass, com, frc, inv_m, rnd_pos, rnd_vel, pos, vel, disp);
         } else if (kind == LOUP_LANGEVIN) {
-            loup::langevin_first_half_kernel<<<grid32, 32, 0, h->stream>>>(
+            loup::langevin_first_half_kernel<<<grid32, 96, 0, h->stream>>>(  // S106: 32 atoms, 96 threads per block
                 N, dt_ase, c1, c2, target, seed, step, frc, inv_m, sqrt_inv_m, pos, vel, rnd_vel, disp);
         } else if (kind == LOUP_NVE) {
             loup::nve_first_half_kernel<<<gridN, 256, 0, h->stream>>>(N, dt_ase, frc, inv_m, pos, vel, disp);

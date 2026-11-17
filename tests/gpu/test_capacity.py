@@ -8,7 +8,7 @@ import gc
 
 import numpy as np
 import pytest
-from gpu_support import find_model, srtio3
+from gpu_support import find_model, srtio3, unfolded
 
 from loupmd import LoupEngine, PlanRefused, capacity, ensure_loup_bundle
 from loupmd.config import CapacityConfig
@@ -58,7 +58,8 @@ def test_tiled_with_a_set_receiver_cap_keeps_it(monkeypatch):
     at = srtio3(10)
     at.positions += np.random.default_rng(4).normal(scale=0.03, size=at.positions.shape)
     bundle = _bundle()
-    e0, f0, _ = _whole(bundle, at)
+    with unfolded():                              # the tiles run without the skip-chain fold (gpu_support.unfolded)
+        e0, f0, _ = _whole(bundle, at)
     eng = LoupEngine(bundle)
     try:
         res = capacity.evaluate(eng, at, CapacityConfig(mode="tiled", receivers=2000), skin=SKIN)
@@ -137,7 +138,7 @@ def test_the_wavefront_mode_refuses_a_three_layer_model(monkeypatch):
 
     from loupmd import BackendError
 
-    monkeypatch.setenv("LOUP_CHAIN_FOLD", "0")
+    monkeypatch.delenv("LOUP_CHAIN_FOLD", raising=False)   # a default engine: a tiled system leaves the fold off
     at = water_box()
     eng = LoupEngine(ensure_loup_bundle(find_model("MACE-omol-0-extra-large-1024.model"),
                                         sorted(set(at.numbers.tolist()))))

@@ -10,7 +10,7 @@ __global__ void __launch_bounds__(MAX_T) gconv_fwd_L0(
     const int* __restrict__ row_ptr, const int* __restrict__ senders, const float4* __restrict__ vec_len,
     const int* __restrict__ act_slab, const float2* __restrict__ act_t_sx,
     const int* __restrict__ species, const uint2* __restrict__ packed_table, const float4* __restrict__ density_table,
-    unsigned bias_shift, const float* __restrict__ x0, float* __restrict__ mid0, float* __restrict__ mid1, float* __restrict__ mid2, float* __restrict__ mid3, float* __restrict__ D) {
+    unsigned bias_shift, const float* __restrict__ x0, float* __restrict__ mid0, float* __restrict__ mid1, float* __restrict__ mid2, float* __restrict__ mid3, float* __restrict__ D, float* __restrict__ zx0) {
   const int C = C_FIX ? C_FIX : C_arg;
   constexpr int TILE = 32, ED = 16;
   static_assert(R >= 1 && R <= 15, "bar.sync id limit");
@@ -21,6 +21,10 @@ __global__ void __launch_bounds__(MAX_T) gconv_fwd_L0(
   const int half = R == 1 ? 0 : (threadIdx.x >> 7), ch = R == 1 ? threadIdx.x : (threadIdx.x & 127);
   const int rcv = blockIdx.x * R + half;
   if (rcv >= N) return;
+  {  // S99: before the edge loop, so the zero targets are dead during it (no register pressure there)
+    const int tpr = R == 1 ? (int)blockDim.x : 128;
+    if (zx0) for (int i = ch; i < 1 * C; i += tpr) zx0[(int64_t)rcv * 1 * C + i] = 0.0f;
+  }
   int* s_snd = s_snd_all[half];
   float4* s_pw = s_pw_all[half];
   int64_t* s_tq = s_tq_all[half];
@@ -266,7 +270,8 @@ __global__ void __launch_bounds__(512) gconv_bwd_L0(
     const int* __restrict__ row_ptr, const int* __restrict__ senders, const float4* __restrict__ vec_len,
     const int* __restrict__ act_slab, const float2* __restrict__ act_t_sx,
     const int* __restrict__ species, const uint2* __restrict__ packed_table, const float4* __restrict__ density_table,
-    unsigned bias_shift, const float* __restrict__ x0_p, const float* __restrict__ dmid0, const float* __restrict__ dmid1, const float* __restrict__ dmid2, const float* __restrict__ dmid3, const float* __restrict__ dD, float* __restrict__ dx0_p, float* __restrict__ edge_dvec) {
+    unsigned bias_shift, const float* __restrict__ x0_p, const float* __restrict__ dmid0, const float* __restrict__ dmid1, const float* __restrict__ dmid2, const float* __restrict__ dmid3, const float* __restrict__ dD, float* __restrict__ dx0_p, float* __restrict__ edge_dvec,
+    int dvec_assign) {
   extern __shared__ float s_q[];
   const int C = C_FIX ? C_FIX : C_arg;
   const int rcv = blockIdx.x, tid = threadIdx.x, wid = tid >> 5, lane = tid & 31, n_warps = blockDim.x >> 5;
@@ -442,6 +447,11 @@ __global__ void __launch_bounds__(512) gconv_bwd_L0(
       float fy = fmaf(ny, rad - fn * inv_d, pull_Gy * inv_d);
       float fz = fmaf(nz, rad - fn * inv_d, pull_Gz * inv_d);
       if (sh_perm) { const float tx = fx, ty = fy, tz = fz; fx = tz; fy = tx; fz = ty; }
+      if (dvec_assign) {
+      edge_dvec[(int64_t)e * 3 + 0] = fx;
+      edge_dvec[(int64_t)e * 3 + 1] = fy;
+      edge_dvec[(int64_t)e * 3 + 2] = fz;
+      } else {
 #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ == 1200
       atomicAdd(edge_dvec + (int64_t)e * 3 + 0, fx);
       atomicAdd(edge_dvec + (int64_t)e * 3 + 1, fy);
@@ -451,6 +461,7 @@ __global__ void __launch_bounds__(512) gconv_bwd_L0(
       edge_dvec[(int64_t)e * 3 + 1] += fy;
       edge_dvec[(int64_t)e * 3 + 2] += fz;
 #endif
+      }
     }
   }
 }
@@ -461,7 +472,7 @@ __global__ void __launch_bounds__(MAX_T) gconv_fwd_L1(
     const int* __restrict__ row_ptr, const int* __restrict__ senders, const float4* __restrict__ vec_len,
     const int* __restrict__ act_slab, const float2* __restrict__ act_t_sx,
     const int* __restrict__ species, const uint2* __restrict__ packed_table, const float4* __restrict__ density_table,
-    unsigned bias_shift, const float* __restrict__ x0, const float* __restrict__ x1, float* __restrict__ mid0, float* __restrict__ mid1, float* __restrict__ mid2, float* __restrict__ mid3, float* __restrict__ D) {
+    unsigned bias_shift, const float* __restrict__ x0, const float* __restrict__ x1, float* __restrict__ mid0, float* __restrict__ mid1, float* __restrict__ mid2, float* __restrict__ mid3, float* __restrict__ D, float* __restrict__ zx0, float* __restrict__ zx1) {
   const int C = C_FIX ? C_FIX : C_arg;
   constexpr int TILE = 32, ED = 36;
   static_assert(R >= 1 && R <= 15, "bar.sync id limit");
@@ -472,6 +483,11 @@ __global__ void __launch_bounds__(MAX_T) gconv_fwd_L1(
   const int half = R == 1 ? 0 : (threadIdx.x >> 7), ch = R == 1 ? threadIdx.x : (threadIdx.x & 127);
   const int rcv = blockIdx.x * R + half;
   if (rcv >= N) return;
+  {  // S99: before the edge loop, so the zero targets are dead during it (no register pressure there)
+    const int tpr = R == 1 ? (int)blockDim.x : 128;
+    if (zx0) for (int i = ch; i < 1 * C; i += tpr) zx0[(int64_t)rcv * 1 * C + i] = 0.0f;
+    if (zx1) for (int i = ch; i < 3 * C; i += tpr) zx1[(int64_t)rcv * 3 * C + i] = 0.0f;
+  }
   int* s_snd = s_snd_all[half];
   float4* s_pw = s_pw_all[half];
   int64_t* s_tq = s_tq_all[half];
@@ -1141,7 +1157,8 @@ __global__ void __launch_bounds__(512) gconv_bwd_L1(
     const int* __restrict__ row_ptr, const int* __restrict__ senders, const float4* __restrict__ vec_len,
     const int* __restrict__ act_slab, const float2* __restrict__ act_t_sx,
     const int* __restrict__ species, const uint2* __restrict__ packed_table, const float4* __restrict__ density_table,
-    unsigned bias_shift, const float* __restrict__ x0_p, const float* __restrict__ x1_p, const float* __restrict__ dmid0, const float* __restrict__ dmid1, const float* __restrict__ dmid2, const float* __restrict__ dmid3, const float* __restrict__ dD, float* __restrict__ dx0_p, float* __restrict__ dx1_p, float* __restrict__ edge_dvec) {
+    unsigned bias_shift, const float* __restrict__ x0_p, const float* __restrict__ x1_p, const float* __restrict__ dmid0, const float* __restrict__ dmid1, const float* __restrict__ dmid2, const float* __restrict__ dmid3, const float* __restrict__ dD, float* __restrict__ dx0_p, float* __restrict__ dx1_p, float* __restrict__ edge_dvec,
+    int dvec_assign) {
   extern __shared__ float s_q[];
   const int C = C_FIX ? C_FIX : C_arg;
   const int rcv = blockIdx.x, tid = threadIdx.x, wid = tid >> 5, lane = tid & 31, n_warps = blockDim.x >> 5;
@@ -1499,9 +1516,21 @@ __global__ void __launch_bounds__(512) gconv_bwd_L1(
       float fy = fmaf(ny, rad - fn * inv_d, pull_Gy * inv_d);
       float fz = fmaf(nz, rad - fn * inv_d, pull_Gz * inv_d);
       if (sh_perm) { const float tx = fx, ty = fy, tz = fz; fx = tz; fy = tx; fz = ty; }
+      if (dvec_assign) {
+      edge_dvec[(int64_t)e * 3 + 0] = fx;
+      edge_dvec[(int64_t)e * 3 + 1] = fy;
+      edge_dvec[(int64_t)e * 3 + 2] = fz;
+      } else {
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ == 1200
+      atomicAdd(edge_dvec + (int64_t)e * 3 + 0, fx);
+      atomicAdd(edge_dvec + (int64_t)e * 3 + 1, fy);
+      atomicAdd(edge_dvec + (int64_t)e * 3 + 2, fz);
+#else
       edge_dvec[(int64_t)e * 3 + 0] += fx;
       edge_dvec[(int64_t)e * 3 + 1] += fy;
       edge_dvec[(int64_t)e * 3 + 2] += fz;
+#endif
+      }
     }
   }
 }
@@ -1512,7 +1541,7 @@ __global__ void __launch_bounds__(MAX_T) gconv_fwd_L2a(
     const int* __restrict__ row_ptr, const int* __restrict__ senders, const float4* __restrict__ vec_len,
     const int* __restrict__ act_slab, const float2* __restrict__ act_t_sx,
     const int* __restrict__ species, const uint2* __restrict__ packed_table, const float4* __restrict__ density_table,
-    unsigned bias_shift, const float* __restrict__ x0, const float* __restrict__ x1, const float* __restrict__ x2, float* __restrict__ mid0, float* __restrict__ mid1, float* __restrict__ mid2, float* __restrict__ mid3, float* __restrict__ D) {
+    unsigned bias_shift, const float* __restrict__ x0, const float* __restrict__ x1, const float* __restrict__ x2, float* __restrict__ mid0, float* __restrict__ mid1, float* __restrict__ mid2, float* __restrict__ mid3, float* __restrict__ D, float* __restrict__ zx0, float* __restrict__ zx1, float* __restrict__ zx2) {
   const int C = C_FIX ? C_FIX : C_arg;
   constexpr int TILE = 32, ED = 36;
   static_assert(R >= 1 && R <= 15, "bar.sync id limit");
@@ -1523,6 +1552,12 @@ __global__ void __launch_bounds__(MAX_T) gconv_fwd_L2a(
   const int half = R == 1 ? 0 : (threadIdx.x >> 7), ch = R == 1 ? threadIdx.x : (threadIdx.x & 127);
   const int rcv = blockIdx.x * R + half;
   if (rcv >= N) return;
+  {  // S99: before the edge loop, so the zero targets are dead during it (no register pressure there)
+    const int tpr = R == 1 ? (int)blockDim.x : 128;
+    if (zx0) for (int i = ch; i < 1 * C; i += tpr) zx0[(int64_t)rcv * 1 * C + i] = 0.0f;
+    if (zx1) for (int i = ch; i < 3 * C; i += tpr) zx1[(int64_t)rcv * 3 * C + i] = 0.0f;
+    if (zx2) for (int i = ch; i < 5 * C; i += tpr) zx2[(int64_t)rcv * 5 * C + i] = 0.0f;
+  }
   int* s_snd = s_snd_all[half];
   float4* s_pw = s_pw_all[half];
   int64_t* s_tq = s_tq_all[half];
@@ -2192,7 +2227,7 @@ __global__ void __launch_bounds__(MAX_T) gconv_fwd_L2b(
     const int* __restrict__ row_ptr, const int* __restrict__ senders, const float4* __restrict__ vec_len,
     const int* __restrict__ act_slab, const float2* __restrict__ act_t_sx,
     const int* __restrict__ species, const uint2* __restrict__ packed_table, const float4* __restrict__ density_table,
-    unsigned bias_shift, const float* __restrict__ x0, const float* __restrict__ x1, const float* __restrict__ x2, float* __restrict__ mid0, float* __restrict__ mid1, float* __restrict__ mid2, float* __restrict__ mid3, float* __restrict__ D) {
+    unsigned bias_shift, const float* __restrict__ x0, const float* __restrict__ x1, const float* __restrict__ x2, float* __restrict__ mid0, float* __restrict__ mid1, float* __restrict__ mid2, float* __restrict__ mid3, float* __restrict__ D, float* __restrict__ zx0, float* __restrict__ zx1, float* __restrict__ zx2) {
   const int C = C_FIX ? C_FIX : C_arg;
   constexpr int TILE = 32, ED = 64;
   static_assert(R >= 1 && R <= 15, "bar.sync id limit");
@@ -2203,6 +2238,12 @@ __global__ void __launch_bounds__(MAX_T) gconv_fwd_L2b(
   const int half = R == 1 ? 0 : (threadIdx.x >> 7), ch = R == 1 ? threadIdx.x : (threadIdx.x & 127);
   const int rcv = blockIdx.x * R + half;
   if (rcv >= N) return;
+  {  // S99: before the edge loop, so the zero targets are dead during it (no register pressure there)
+    const int tpr = R == 1 ? (int)blockDim.x : 128;
+    if (zx0) for (int i = ch; i < 1 * C; i += tpr) zx0[(int64_t)rcv * 1 * C + i] = 0.0f;
+    if (zx1) for (int i = ch; i < 3 * C; i += tpr) zx1[(int64_t)rcv * 3 * C + i] = 0.0f;
+    if (zx2) for (int i = ch; i < 5 * C; i += tpr) zx2[(int64_t)rcv * 5 * C + i] = 0.0f;
+  }
   int* s_snd = s_snd_all[half];
   float4* s_pw = s_pw_all[half];
   int64_t* s_tq = s_tq_all[half];
@@ -3000,7 +3041,8 @@ __global__ void __launch_bounds__(512) gconv_bwd_L2lp(
     const int* __restrict__ row_ptr, const int* __restrict__ senders, const float4* __restrict__ vec_len,
     const int* __restrict__ act_slab, const float2* __restrict__ act_t_sx,
     const int* __restrict__ species, const uint2* __restrict__ packed_table, const float4* __restrict__ density_table,
-    unsigned bias_shift, const float* __restrict__ x0_p, const float* __restrict__ x1_p, const float* __restrict__ dmid0, const float* __restrict__ dmid1, const float* __restrict__ dmid2, const float* __restrict__ dmid3, const float* __restrict__ dD, float* __restrict__ dx0_p, float* __restrict__ dx1_p, float* __restrict__ edge_dvec) {
+    unsigned bias_shift, const float* __restrict__ x0_p, const float* __restrict__ x1_p, const float* __restrict__ dmid0, const float* __restrict__ dmid1, const float* __restrict__ dmid2, const float* __restrict__ dmid3, const float* __restrict__ dD, float* __restrict__ dx0_p, float* __restrict__ dx1_p, float* __restrict__ edge_dvec,
+    int dvec_assign) {
   extern __shared__ float s_q[];
   const int C = C_FIX ? C_FIX : C_arg;
   const int rcv = blockIdx.x, tid = threadIdx.x, wid = tid >> 5, lane = tid & 31, n_warps = blockDim.x >> 5;
@@ -3358,9 +3400,21 @@ __global__ void __launch_bounds__(512) gconv_bwd_L2lp(
       float fy = fmaf(ny, rad - fn * inv_d, pull_Gy * inv_d);
       float fz = fmaf(nz, rad - fn * inv_d, pull_Gz * inv_d);
       if (sh_perm) { const float tx = fx, ty = fy, tz = fz; fx = tz; fy = tx; fz = ty; }
+      if (dvec_assign) {
+      edge_dvec[(int64_t)e * 3 + 0] = fx;
+      edge_dvec[(int64_t)e * 3 + 1] = fy;
+      edge_dvec[(int64_t)e * 3 + 2] = fz;
+      } else {
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ == 1200
+      atomicAdd(edge_dvec + (int64_t)e * 3 + 0, fx);
+      atomicAdd(edge_dvec + (int64_t)e * 3 + 1, fy);
+      atomicAdd(edge_dvec + (int64_t)e * 3 + 2, fz);
+#else
       edge_dvec[(int64_t)e * 3 + 0] += fx;
       edge_dvec[(int64_t)e * 3 + 1] += fy;
       edge_dvec[(int64_t)e * 3 + 2] += fz;
+#endif
+      }
     }
   }
 }
@@ -3925,15 +3979,22 @@ __global__ void __launch_bounds__(128) gconv_bwd_L2(
       float fy = fmaf(ny, rad - dot * inv_d, gy * inv_d);
       float fz = fmaf(nz, rad - dot * inv_d, gz * inv_d);
       if (sh_perm) { const float tx = fx, ty = fy, tz = fz; fx = tz; fy = tx; fz = ty; }
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ == 1200
+      atomicAdd(edge_dvec + (int64_t)e * 3 + 0, fx);
+      atomicAdd(edge_dvec + (int64_t)e * 3 + 1, fy);
+      atomicAdd(edge_dvec + (int64_t)e * 3 + 2, fz);
+#else
       edge_dvec[(int64_t)e * 3 + 0] += fx;
       edge_dvec[(int64_t)e * 3 + 1] += fy;
       edge_dvec[(int64_t)e * 3 + 2] += fz;
+#endif
     }
   }
 }
 
 extern "C" __global__ void __launch_bounds__(128) gprod_fwd_dd662f9d3a2b5b2b(
-    int N, int C, const float* __restrict__ m0, const float* __restrict__ m1, const float* __restrict__ m2, const float* __restrict__ m3, const float* __restrict__ D, const float* __restrict__ w, int64_t w_stride, const int* __restrict__ sp, float* __restrict__ y0, float* __restrict__ y1) {
+    int N, int C, const float* __restrict__ m0, const float* __restrict__ m1, const float* __restrict__ m2, const float* __restrict__ m3, const float* __restrict__ D, const float* __restrict__ w, int64_t w_stride, const int* __restrict__ sp, float* __restrict__ y0, float* __restrict__ y1,
+    const float* __restrict__ ro_w, double* __restrict__ energy) {
   const int a = blockIdx.x, c = blockIdx.y * blockDim.x + threadIdx.x;
   const float s = D ? 1.0f / (D[a] + 1.0f) : 1.0f;
   const float* wr = w + (int64_t)sp[a] * w_stride + c;
@@ -4307,11 +4368,24 @@ extern "C" __global__ void __launch_bounds__(128) gprod_fwd_dd662f9d3a2b5b2b(
   y1[((int64_t)a * 3 + 0) * C + c] = o1;
   y1[((int64_t)a * 3 + 1) * C + c] = o2;
   y1[((int64_t)a * 3 + 2) * C + c] = o3;
+  if (ro_w) {
+    double e = (double)o0 * (double)__ldg(ro_w + c);
+    #pragma unroll
+    for (int off = 16; off > 0; off >>= 1) e += __shfl_xor_sync(0xffffffffu, e, off);
+    __shared__ double s_e[4];
+    if ((threadIdx.x & 31) == 0) s_e[threadIdx.x >> 5] = e;
+    __syncthreads();
+    if (threadIdx.x == 0) {
+      double t = 0.0;
+      for (int i = 0; i < (int)(blockDim.x >> 5); ++i) t += s_e[i];
+      atomicAdd(energy, t);
+    }
+  }
 }
 
 extern "C" __global__ void __launch_bounds__(128) gprod_bwd_dd662f9d3a2b5b2b(
     int N, int C, const float* __restrict__ m0, const float* __restrict__ m1, const float* __restrict__ m2, const float* __restrict__ m3, const float* __restrict__ D, const float* __restrict__ w, int64_t w_stride, const int* __restrict__ sp, const float* __restrict__ gin0, const float* __restrict__ gin1,
-    float* __restrict__ dm0, float* __restrict__ dm1, float* __restrict__ dm2, float* __restrict__ dm3, float* __restrict__ dD) {
+    float* __restrict__ dm0, float* __restrict__ dm1, float* __restrict__ dm2, float* __restrict__ dm3, float* __restrict__ dD, const float* __restrict__ gseed) {
   const int a = blockIdx.x, c = blockIdx.y * blockDim.x + threadIdx.x;
   const float s = D ? 1.0f / (D[a] + 1.0f) : 1.0f;
   const float* wr = w + (int64_t)sp[a] * w_stride + c;
@@ -4331,7 +4405,7 @@ extern "C" __global__ void __launch_bounds__(128) gprod_bwd_dd662f9d3a2b5b2b(
   const float x13 = __ldg(m3 + ((int64_t)a * 7 + 4) * C + c) * s;
   const float x14 = __ldg(m3 + ((int64_t)a * 7 + 5) * C + c) * s;
   const float x15 = __ldg(m3 + ((int64_t)a * 7 + 6) * C + c) * s;
-  const float g0 = __ldg(gin0 + ((int64_t)a * 1 + 0) * C + c);
+  const float g0 = __ldg(gin0 + ((int64_t)a * 1 + 0) * C + c) + (gseed ? __ldg(gseed + c) : 0.0f);
   const float g1 = __ldg(gin1 + ((int64_t)a * 3 + 0) * C + c);
   const float g2 = __ldg(gin1 + ((int64_t)a * 3 + 1) * C + c);
   const float g3 = __ldg(gin1 + ((int64_t)a * 3 + 2) * C + c);
@@ -5339,7 +5413,8 @@ extern "C" __global__ void __launch_bounds__(128) gprod_bwd_dd662f9d3a2b5b2b(
 }
 
 extern "C" __global__ void __launch_bounds__(128) gprod_fwd_ae0a447b65f4fcd4(
-    int N, int C, const float* __restrict__ m0, const float* __restrict__ m1, const float* __restrict__ m2, const float* __restrict__ m3, const float* __restrict__ D, const float* __restrict__ w, int64_t w_stride, const int* __restrict__ sp, float* __restrict__ y0) {
+    int N, int C, const float* __restrict__ m0, const float* __restrict__ m1, const float* __restrict__ m2, const float* __restrict__ m3, const float* __restrict__ D, const float* __restrict__ w, int64_t w_stride, const int* __restrict__ sp, float* __restrict__ y0,
+    const float* __restrict__ ro_w, double* __restrict__ energy) {
   const int a = blockIdx.x, c = blockIdx.y * blockDim.x + threadIdx.x;
   const float s = D ? 1.0f / (D[a] + 1.0f) : 1.0f;
   const float* wr = w + (int64_t)sp[a] * w_stride + c;
@@ -5500,11 +5575,24 @@ extern "C" __global__ void __launch_bounds__(128) gprod_fwd_ae0a447b65f4fcd4(
     o0 = fmaf(wb, v99, o0);
   }
   y0[((int64_t)a * 1 + 0) * C + c] = o0;
+  if (ro_w) {
+    double e = (double)o0 * (double)__ldg(ro_w + c);
+    #pragma unroll
+    for (int off = 16; off > 0; off >>= 1) e += __shfl_xor_sync(0xffffffffu, e, off);
+    __shared__ double s_e[4];
+    if ((threadIdx.x & 31) == 0) s_e[threadIdx.x >> 5] = e;
+    __syncthreads();
+    if (threadIdx.x == 0) {
+      double t = 0.0;
+      for (int i = 0; i < (int)(blockDim.x >> 5); ++i) t += s_e[i];
+      atomicAdd(energy, t);
+    }
+  }
 }
 
 extern "C" __global__ void __launch_bounds__(128) gprod_bwd_ae0a447b65f4fcd4(
     int N, int C, const float* __restrict__ m0, const float* __restrict__ m1, const float* __restrict__ m2, const float* __restrict__ m3, const float* __restrict__ D, const float* __restrict__ w, int64_t w_stride, const int* __restrict__ sp, const float* __restrict__ gin0,
-    float* __restrict__ dm0, float* __restrict__ dm1, float* __restrict__ dm2, float* __restrict__ dm3, float* __restrict__ dD) {
+    float* __restrict__ dm0, float* __restrict__ dm1, float* __restrict__ dm2, float* __restrict__ dm3, float* __restrict__ dD, const float* __restrict__ gseed) {
   const int a = blockIdx.x, c = blockIdx.y * blockDim.x + threadIdx.x;
   const float s = D ? 1.0f / (D[a] + 1.0f) : 1.0f;
   const float* wr = w + (int64_t)sp[a] * w_stride + c;
@@ -5524,7 +5612,7 @@ extern "C" __global__ void __launch_bounds__(128) gprod_bwd_ae0a447b65f4fcd4(
   const float x13 = __ldg(m3 + ((int64_t)a * 7 + 4) * C + c) * s;
   const float x14 = __ldg(m3 + ((int64_t)a * 7 + 5) * C + c) * s;
   const float x15 = __ldg(m3 + ((int64_t)a * 7 + 6) * C + c) * s;
-  const float g0 = __ldg(gin0 + ((int64_t)a * 1 + 0) * C + c);
+  const float g0 = __ldg(gin0 + ((int64_t)a * 1 + 0) * C + c) + (gseed ? __ldg(gseed + c) : 0.0f);
   const float v0 = x0 * x0;
   const float v1 = x0 * v0;
   const float v2 = x1 * x1;
@@ -6467,7 +6555,8 @@ __global__ void __launch_bounds__(MAX_B, MIN_BLK) gprod_ro1_fused_ae0a447b65f4fc
 }
 
 extern "C" __global__ void __launch_bounds__(128) gprod_fwd_00dc9085957f7969(
-    int N, int C, const float* __restrict__ m0, const float* __restrict__ m1, const float* __restrict__ m2, const float* __restrict__ m3, const float* __restrict__ D, const float* __restrict__ w, int64_t w_stride, const int* __restrict__ sp, float* __restrict__ y0, float* __restrict__ y1, float* __restrict__ y2) {
+    int N, int C, const float* __restrict__ m0, const float* __restrict__ m1, const float* __restrict__ m2, const float* __restrict__ m3, const float* __restrict__ D, const float* __restrict__ w, int64_t w_stride, const int* __restrict__ sp, float* __restrict__ y0, float* __restrict__ y1, float* __restrict__ y2,
+    const float* __restrict__ ro_w, double* __restrict__ energy) {
   const int a = blockIdx.x, c = blockIdx.y * blockDim.x + threadIdx.x;
   const float s = D ? 1.0f / (D[a] + 1.0f) : 1.0f;
   const float* wr = w + (int64_t)sp[a] * w_stride + c;
@@ -7091,11 +7180,24 @@ extern "C" __global__ void __launch_bounds__(128) gprod_fwd_00dc9085957f7969(
   y2[((int64_t)a * 5 + 2) * C + c] = o6;
   y2[((int64_t)a * 5 + 3) * C + c] = o7;
   y2[((int64_t)a * 5 + 4) * C + c] = o8;
+  if (ro_w) {
+    double e = (double)o0 * (double)__ldg(ro_w + c);
+    #pragma unroll
+    for (int off = 16; off > 0; off >>= 1) e += __shfl_xor_sync(0xffffffffu, e, off);
+    __shared__ double s_e[4];
+    if ((threadIdx.x & 31) == 0) s_e[threadIdx.x >> 5] = e;
+    __syncthreads();
+    if (threadIdx.x == 0) {
+      double t = 0.0;
+      for (int i = 0; i < (int)(blockDim.x >> 5); ++i) t += s_e[i];
+      atomicAdd(energy, t);
+    }
+  }
 }
 
 extern "C" __global__ void __launch_bounds__(128) gprod_bwd_00dc9085957f7969(
     int N, int C, const float* __restrict__ m0, const float* __restrict__ m1, const float* __restrict__ m2, const float* __restrict__ m3, const float* __restrict__ D, const float* __restrict__ w, int64_t w_stride, const int* __restrict__ sp, const float* __restrict__ gin0, const float* __restrict__ gin1, const float* __restrict__ gin2,
-    float* __restrict__ dm0, float* __restrict__ dm1, float* __restrict__ dm2, float* __restrict__ dm3, float* __restrict__ dD) {
+    float* __restrict__ dm0, float* __restrict__ dm1, float* __restrict__ dm2, float* __restrict__ dm3, float* __restrict__ dD, const float* __restrict__ gseed) {
   const int a = blockIdx.x, c = blockIdx.y * blockDim.x + threadIdx.x;
   const float s = D ? 1.0f / (D[a] + 1.0f) : 1.0f;
   const float* wr = w + (int64_t)sp[a] * w_stride + c;
@@ -7115,7 +7217,7 @@ extern "C" __global__ void __launch_bounds__(128) gprod_bwd_00dc9085957f7969(
   const float x13 = __ldg(m3 + ((int64_t)a * 7 + 4) * C + c) * s;
   const float x14 = __ldg(m3 + ((int64_t)a * 7 + 5) * C + c) * s;
   const float x15 = __ldg(m3 + ((int64_t)a * 7 + 6) * C + c) * s;
-  const float g0 = __ldg(gin0 + ((int64_t)a * 1 + 0) * C + c);
+  const float g0 = __ldg(gin0 + ((int64_t)a * 1 + 0) * C + c) + (gseed ? __ldg(gseed + c) : 0.0f);
   const float g1 = __ldg(gin1 + ((int64_t)a * 3 + 0) * C + c);
   const float g2 = __ldg(gin1 + ((int64_t)a * 3 + 1) * C + c);
   const float g3 = __ldg(gin1 + ((int64_t)a * 3 + 2) * C + c);
@@ -8672,7 +8774,8 @@ extern "C" __global__ void __launch_bounds__(128) gprod_bwd_00dc9085957f7969(
 }
 
 extern "C" __global__ void __launch_bounds__(128) gprod_fwd_6f194247389dfa5c(
-    int N, int C, const float* __restrict__ m0, const float* __restrict__ m1, const float* __restrict__ m2, const float* __restrict__ m3, const float* __restrict__ D, const float* __restrict__ w, int64_t w_stride, const int* __restrict__ sp, float* __restrict__ y0, float* __restrict__ y1, float* __restrict__ y2) {
+    int N, int C, const float* __restrict__ m0, const float* __restrict__ m1, const float* __restrict__ m2, const float* __restrict__ m3, const float* __restrict__ D, const float* __restrict__ w, int64_t w_stride, const int* __restrict__ sp, float* __restrict__ y0, float* __restrict__ y1, float* __restrict__ y2,
+    const float* __restrict__ ro_w, double* __restrict__ energy) {
   const int a = blockIdx.x, c = blockIdx.y * blockDim.x + threadIdx.x;
   const float s = D ? 1.0f / (D[a] + 1.0f) : 1.0f;
   const float* wr = w + (int64_t)sp[a] * w_stride + c;
@@ -8918,11 +9021,24 @@ extern "C" __global__ void __launch_bounds__(128) gprod_fwd_6f194247389dfa5c(
   y2[((int64_t)a * 5 + 2) * C + c] = o6;
   y2[((int64_t)a * 5 + 3) * C + c] = o7;
   y2[((int64_t)a * 5 + 4) * C + c] = o8;
+  if (ro_w) {
+    double e = (double)o0 * (double)__ldg(ro_w + c);
+    #pragma unroll
+    for (int off = 16; off > 0; off >>= 1) e += __shfl_xor_sync(0xffffffffu, e, off);
+    __shared__ double s_e[4];
+    if ((threadIdx.x & 31) == 0) s_e[threadIdx.x >> 5] = e;
+    __syncthreads();
+    if (threadIdx.x == 0) {
+      double t = 0.0;
+      for (int i = 0; i < (int)(blockDim.x >> 5); ++i) t += s_e[i];
+      atomicAdd(energy, t);
+    }
+  }
 }
 
 extern "C" __global__ void __launch_bounds__(128) gprod_bwd_6f194247389dfa5c(
     int N, int C, const float* __restrict__ m0, const float* __restrict__ m1, const float* __restrict__ m2, const float* __restrict__ m3, const float* __restrict__ D, const float* __restrict__ w, int64_t w_stride, const int* __restrict__ sp, const float* __restrict__ gin0, const float* __restrict__ gin1, const float* __restrict__ gin2,
-    float* __restrict__ dm0, float* __restrict__ dm1, float* __restrict__ dm2, float* __restrict__ dm3, float* __restrict__ dD) {
+    float* __restrict__ dm0, float* __restrict__ dm1, float* __restrict__ dm2, float* __restrict__ dm3, float* __restrict__ dD, const float* __restrict__ gseed) {
   const int a = blockIdx.x, c = blockIdx.y * blockDim.x + threadIdx.x;
   const float s = D ? 1.0f / (D[a] + 1.0f) : 1.0f;
   const float* wr = w + (int64_t)sp[a] * w_stride + c;
@@ -8942,7 +9058,7 @@ extern "C" __global__ void __launch_bounds__(128) gprod_bwd_6f194247389dfa5c(
   const float x13 = __ldg(m3 + ((int64_t)a * 7 + 4) * C + c) * s;
   const float x14 = __ldg(m3 + ((int64_t)a * 7 + 5) * C + c) * s;
   const float x15 = __ldg(m3 + ((int64_t)a * 7 + 6) * C + c) * s;
-  const float g0 = __ldg(gin0 + ((int64_t)a * 1 + 0) * C + c);
+  const float g0 = __ldg(gin0 + ((int64_t)a * 1 + 0) * C + c) + (gseed ? __ldg(gseed + c) : 0.0f);
   const float g1 = __ldg(gin1 + ((int64_t)a * 3 + 0) * C + c);
   const float g2 = __ldg(gin1 + ((int64_t)a * 3 + 1) * C + c);
   const float g3 = __ldg(gin1 + ((int64_t)a * 3 + 2) * C + c);
@@ -9523,7 +9639,8 @@ extern "C" __global__ void __launch_bounds__(128) gprod_bwd_6f194247389dfa5c(
 }
 
 extern "C" __global__ void __launch_bounds__(128) gprod_fwd_4715eda4cc3ebda5(
-    int N, int C, const float* __restrict__ m0, const float* __restrict__ m1, const float* __restrict__ m2, const float* __restrict__ m3, const float* __restrict__ D, const float* __restrict__ w, int64_t w_stride, const int* __restrict__ sp, float* __restrict__ y0) {
+    int N, int C, const float* __restrict__ m0, const float* __restrict__ m1, const float* __restrict__ m2, const float* __restrict__ m3, const float* __restrict__ D, const float* __restrict__ w, int64_t w_stride, const int* __restrict__ sp, float* __restrict__ y0,
+    const float* __restrict__ ro_w, double* __restrict__ energy) {
   const int a = blockIdx.x, c = blockIdx.y * blockDim.x + threadIdx.x;
   const float s = D ? 1.0f / (D[a] + 1.0f) : 1.0f;
   const float* wr = w + (int64_t)sp[a] * w_stride + c;
@@ -9579,11 +9696,24 @@ extern "C" __global__ void __launch_bounds__(128) gprod_fwd_4715eda4cc3ebda5(
     o0 = fmaf(wb, v18, o0);
   }
   y0[((int64_t)a * 1 + 0) * C + c] = o0;
+  if (ro_w) {
+    double e = (double)o0 * (double)__ldg(ro_w + c);
+    #pragma unroll
+    for (int off = 16; off > 0; off >>= 1) e += __shfl_xor_sync(0xffffffffu, e, off);
+    __shared__ double s_e[4];
+    if ((threadIdx.x & 31) == 0) s_e[threadIdx.x >> 5] = e;
+    __syncthreads();
+    if (threadIdx.x == 0) {
+      double t = 0.0;
+      for (int i = 0; i < (int)(blockDim.x >> 5); ++i) t += s_e[i];
+      atomicAdd(energy, t);
+    }
+  }
 }
 
 extern "C" __global__ void __launch_bounds__(128) gprod_bwd_4715eda4cc3ebda5(
     int N, int C, const float* __restrict__ m0, const float* __restrict__ m1, const float* __restrict__ m2, const float* __restrict__ m3, const float* __restrict__ D, const float* __restrict__ w, int64_t w_stride, const int* __restrict__ sp, const float* __restrict__ gin0,
-    float* __restrict__ dm0, float* __restrict__ dm1, float* __restrict__ dm2, float* __restrict__ dm3, float* __restrict__ dD) {
+    float* __restrict__ dm0, float* __restrict__ dm1, float* __restrict__ dm2, float* __restrict__ dm3, float* __restrict__ dD, const float* __restrict__ gseed) {
   const int a = blockIdx.x, c = blockIdx.y * blockDim.x + threadIdx.x;
   const float s = D ? 1.0f / (D[a] + 1.0f) : 1.0f;
   const float* wr = w + (int64_t)sp[a] * w_stride + c;
@@ -9603,7 +9733,7 @@ extern "C" __global__ void __launch_bounds__(128) gprod_bwd_4715eda4cc3ebda5(
   const float x13 = __ldg(m3 + ((int64_t)a * 7 + 4) * C + c) * s;
   const float x14 = __ldg(m3 + ((int64_t)a * 7 + 5) * C + c) * s;
   const float x15 = __ldg(m3 + ((int64_t)a * 7 + 6) * C + c) * s;
-  const float g0 = __ldg(gin0 + ((int64_t)a * 1 + 0) * C + c);
+  const float g0 = __ldg(gin0 + ((int64_t)a * 1 + 0) * C + c) + (gseed ? __ldg(gseed + c) : 0.0f);
   const float v0 = x0 * x0;
   const float v1 = x1 * x1;
   const float v2 = x2 * x2;
@@ -9934,75 +10064,83 @@ int conv_fwd_variants(int lx, int C) { return (lx == 1 && C == 128) ? 3 : 1; }
 void launch_conv_fwd(int lx, cudaStream_t st, int N, int C, int S, int I, const SplineGrid& sg, int perm, int psym,
                      const int* rp, const int* snd, const float4* vl, const int* act_slab, const float2* act_t_sx,
                      bool preloc, const int* sp, const uint2* packed, const float4* dens, unsigned bias_shift,
-                     float* const* x, float* const* mid, float* D, int var) {
+                     float* const* x, float* const* mid, float* D, int var, float* const* zx) {
+    // S99: zx (nullable) = the layer's x gradient rows, zeroed by the (first) forward kernel of each receiver
+    float* z0 = zx ? zx[0] : nullptr;
+    float* z1 = (zx && lx >= 1) ? zx[1] : nullptr;
+    float* z2 = (zx && lx >= 2) ? zx[2] : nullptr;
     if (lx == 0) {
         if (C == 128) {
             auto fn = preloc ? gconv_fwd_L0<1, true, 256, true, 128> : gconv_fwd_L0<1, true, 256, false, 128>;
             fn<<<N, 128, 0, st>>>(N, C, S, I, sg, perm, psym, rp, snd, vl, act_slab, act_t_sx, sp, packed, dens,
-                                  bias_shift, x[0], mid[0], mid[1], mid[2], mid[3], D);
+                                  bias_shift, x[0], mid[0], mid[1], mid[2], mid[3], D, z0);
         } else if (C <= 256) {
             auto fn = preloc ? gconv_fwd_L0<1, false, 256, true> : gconv_fwd_L0<1, false, 256, false>;
             fn<<<N, C, 0, st>>>(N, C, S, I, sg, perm, psym, rp, snd, vl, act_slab, act_t_sx, sp, packed, dens,
-                                bias_shift, x[0], mid[0], mid[1], mid[2], mid[3], D);
+                                bias_shift, x[0], mid[0], mid[1], mid[2], mid[3], D, z0);
         } else {
             auto fn = preloc ? gconv_fwd_L0<1, false, 512, true> : gconv_fwd_L0<1, false, 512, false>;
             fn<<<N, C, 0, st>>>(N, C, S, I, sg, perm, psym, rp, snd, vl, act_slab, act_t_sx, sp, packed, dens,
-                                bias_shift, x[0], mid[0], mid[1], mid[2], mid[3], D);
+                                bias_shift, x[0], mid[0], mid[1], mid[2], mid[3], D, z0);
         }
     } else if (lx == 1) {
         if (C == 128) {
             if (var == 2) {
                 auto fn = preloc ? gconv_fwd_L1<5, false, 640, true, 128> : gconv_fwd_L1<5, false, 640, false, 128>;
                 fn<<<(N + 4) / 5, 640, 0, st>>>(N, C, S, I, sg, perm, psym, rp, snd, vl, act_slab, act_t_sx, sp, packed,
-                                                dens, bias_shift, x[0], x[1], mid[0], mid[1], mid[2], mid[3], D);
+                                                dens, bias_shift, x[0], x[1], mid[0], mid[1], mid[2], mid[3], D, z0, z1);
             } else {
                 auto fn = var == 1 ? (preloc ? gconv_fwd_L1<1, false, 256, true, 128> : gconv_fwd_L1<1, false, 256, false, 128>)
                                    : (preloc ? gconv_fwd_L1<1, true, 256, true, 128> : gconv_fwd_L1<1, true, 256, false, 128>);
                 fn<<<N, 128, 0, st>>>(N, C, S, I, sg, perm, psym, rp, snd, vl, act_slab, act_t_sx, sp, packed, dens,
-                                      bias_shift, x[0], x[1], mid[0], mid[1], mid[2], mid[3], D);
+                                      bias_shift, x[0], x[1], mid[0], mid[1], mid[2], mid[3], D, z0, z1);
             }
         } else if (C == 256) {
             auto fn = preloc ? gconv_fwd_L1<1, false, 256, true, 256> : gconv_fwd_L1<1, false, 256, false, 256>;
             fn<<<N, 256, 0, st>>>(N, C, S, I, sg, perm, psym, rp, snd, vl, act_slab, act_t_sx, sp, packed, dens,
-                                  bias_shift, x[0], x[1], mid[0], mid[1], mid[2], mid[3], D);
+                                  bias_shift, x[0], x[1], mid[0], mid[1], mid[2], mid[3], D, z0, z1);
         } else if (C <= 256) {
             auto fn = preloc ? gconv_fwd_L1<1, false, 256, true> : gconv_fwd_L1<1, false, 256, false>;
             fn<<<N, C, 0, st>>>(N, C, S, I, sg, perm, psym, rp, snd, vl, act_slab, act_t_sx, sp, packed, dens,
-                                bias_shift, x[0], x[1], mid[0], mid[1], mid[2], mid[3], D);
+                                bias_shift, x[0], x[1], mid[0], mid[1], mid[2], mid[3], D, z0, z1);
         } else {
             auto fn = preloc ? gconv_fwd_L1<1, false, 512, true> : gconv_fwd_L1<1, false, 512, false>;
             fn<<<N, C, 0, st>>>(N, C, S, I, sg, perm, psym, rp, snd, vl, act_slab, act_t_sx, sp, packed, dens,
-                                bias_shift, x[0], x[1], mid[0], mid[1], mid[2], mid[3], D);
+                                bias_shift, x[0], x[1], mid[0], mid[1], mid[2], mid[3], D, z0, z1);
         }
     } else {
         if (C == 128) {
             auto fa = preloc ? gconv_fwd_L2a<1, true, 128, true, 128> : gconv_fwd_L2a<1, true, 128, false, 128>;
             auto fb = preloc ? gconv_fwd_L2b<1, true, 128, true, 128> : gconv_fwd_L2b<1, true, 128, false, 128>;
             fa<<<N, 128, 0, st>>>(N, C, S, I, sg, perm, psym, rp, snd, vl, act_slab, act_t_sx, sp, packed, dens,
-                                  bias_shift, x[0], x[1], x[2], mid[0], mid[1], mid[2], mid[3], D);
+                                  bias_shift, x[0], x[1], x[2], mid[0], mid[1], mid[2], mid[3], D, z0, z1, z2);
             fb<<<N, 128, 0, st>>>(N, C, S, I, sg, perm, psym, rp, snd, vl, act_slab, act_t_sx, sp, packed, nullptr,
-                                  bias_shift, x[0], x[1], x[2], mid[0], mid[1], mid[2], mid[3], D);
+                                  bias_shift, x[0], x[1], x[2], mid[0], mid[1], mid[2], mid[3], D, nullptr, nullptr,
+                                  nullptr);
         } else if (C == 224) {
             auto fa = preloc ? gconv_fwd_L2a<1, true, 256, true, 224> : gconv_fwd_L2a<1, true, 256, false, 224>;
             auto fb = preloc ? gconv_fwd_L2b<1, true, 256, true, 224> : gconv_fwd_L2b<1, true, 256, false, 224>;
             fa<<<N, 224, 0, st>>>(N, C, S, I, sg, perm, psym, rp, snd, vl, act_slab, act_t_sx, sp, packed, dens,
-                                  bias_shift, x[0], x[1], x[2], mid[0], mid[1], mid[2], mid[3], D);
+                                  bias_shift, x[0], x[1], x[2], mid[0], mid[1], mid[2], mid[3], D, z0, z1, z2);
             fb<<<N, 224, 0, st>>>(N, C, S, I, sg, perm, psym, rp, snd, vl, act_slab, act_t_sx, sp, packed, nullptr,
-                                  bias_shift, x[0], x[1], x[2], mid[0], mid[1], mid[2], mid[3], D);
+                                  bias_shift, x[0], x[1], x[2], mid[0], mid[1], mid[2], mid[3], D, nullptr, nullptr,
+                                  nullptr);
         } else if (C <= 256) {
             auto fa = preloc ? gconv_fwd_L2a<1, true, 256, true> : gconv_fwd_L2a<1, true, 256, false>;
             auto fb = preloc ? gconv_fwd_L2b<1, true, 256, true> : gconv_fwd_L2b<1, true, 256, false>;
             fa<<<N, C, 0, st>>>(N, C, S, I, sg, perm, psym, rp, snd, vl, act_slab, act_t_sx, sp, packed, dens,
-                                bias_shift, x[0], x[1], x[2], mid[0], mid[1], mid[2], mid[3], D);
+                                bias_shift, x[0], x[1], x[2], mid[0], mid[1], mid[2], mid[3], D, z0, z1, z2);
             fb<<<N, C, 0, st>>>(N, C, S, I, sg, perm, psym, rp, snd, vl, act_slab, act_t_sx, sp, packed, nullptr,
-                                bias_shift, x[0], x[1], x[2], mid[0], mid[1], mid[2], mid[3], D);
+                                bias_shift, x[0], x[1], x[2], mid[0], mid[1], mid[2], mid[3], D, nullptr, nullptr,
+                                nullptr);
         } else {
             auto fa = preloc ? gconv_fwd_L2a<1, false, 512, true> : gconv_fwd_L2a<1, false, 512, false>;
             auto fb = preloc ? gconv_fwd_L2b<1, false, 512, true> : gconv_fwd_L2b<1, false, 512, false>;
             fa<<<N, C, 0, st>>>(N, C, S, I, sg, perm, psym, rp, snd, vl, act_slab, act_t_sx, sp, packed, dens,
-                                bias_shift, x[0], x[1], x[2], mid[0], mid[1], mid[2], mid[3], D);
+                                bias_shift, x[0], x[1], x[2], mid[0], mid[1], mid[2], mid[3], D, z0, z1, z2);
             fb<<<N, C, 0, st>>>(N, C, S, I, sg, perm, psym, rp, snd, vl, act_slab, act_t_sx, sp, packed, nullptr,
-                                bias_shift, x[0], x[1], x[2], mid[0], mid[1], mid[2], mid[3], D);
+                                bias_shift, x[0], x[1], x[2], mid[0], mid[1], mid[2], mid[3], D, nullptr, nullptr,
+                                nullptr);
         }
     }
 }
@@ -10011,7 +10149,7 @@ void launch_conv_bwd(int lx, cudaStream_t st, int N, int C, int S, int I, const 
                      const int* rp, const int* snd, const float4* vl, const int* act_slab, const float2* act_t_sx,
                      bool preloc, const int* sp, const uint2* packed, const float4* dens, unsigned bias_shift,
                      float* const* x, float* const* dmid, const float* dD, float* const* dx, bool want_dx,
-                     float* edge_dvec) {
+                     float* edge_dvec, bool dvec_assign) {
     if (lx == 0) {
         const size_t smem = (size_t)C * 20 * sizeof(float);
         auto pick = [&](auto f_p, auto f_n) { return preloc ? f_p : f_n; };
@@ -10023,7 +10161,8 @@ void launch_conv_bwd(int lx, cudaStream_t st, int N, int C, int S, int I, const 
                                         : pick(gconv_bwd_L0<false, 0, true>, gconv_bwd_L0<false, 0, false>));
         if (smem > 48000) check_cuda(cudaFuncSetAttribute((const void*)fn, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)smem));
         fn<<<N, 256, smem, st>>>(N, C, S, I, sg, perm, psym, rp, snd, vl, act_slab, act_t_sx, sp, packed, dens,
-                                 bias_shift, x[0], dmid[0], dmid[1], dmid[2], dmid[3], dD, dx[0], edge_dvec);
+                                 bias_shift, x[0], dmid[0], dmid[1], dmid[2], dmid[3], dD, dx[0], edge_dvec,
+                                 (int)dvec_assign);
     } else if (lx == 1) {
         const size_t smem = (size_t)C * 44 * sizeof(float);
         auto pick = [&](auto f_p, auto f_n) { return preloc ? f_p : f_n; };
@@ -10038,7 +10177,7 @@ void launch_conv_bwd(int lx, cudaStream_t st, int N, int C, int S, int I, const 
         if (smem > 48000) check_cuda(cudaFuncSetAttribute((const void*)fn, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)smem));
         fn<<<N, C == 256 ? 512 : 256, smem, st>>>(N, C, S, I, sg, perm, psym, rp, snd, vl, act_slab, act_t_sx, sp, packed, dens,
                                  bias_shift, x[0], x[1], dmid[0], dmid[1], dmid[2], dmid[3], dD, dx[0], dx[1],
-                                 edge_dvec);
+                                 edge_dvec, (int)dvec_assign);
     } else {
         const size_t smem = (size_t)C * 44 * sizeof(float), smem_g = (size_t)C * kGconvBwdL2GS * sizeof(float);
         auto pick_lp = [&](auto f_p, auto f_n) { return preloc ? f_p : f_n; };
@@ -10058,7 +10197,7 @@ void launch_conv_bwd(int lx, cudaStream_t st, int N, int C, int S, int I, const 
         if (smem_g > 48000) check_cuda(cudaFuncSetAttribute((const void*)fg, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)smem_g));
         flp<<<N, C == 224 ? 512 : 256, smem, st>>>(N, C, S, I, sg, perm, psym, rp, snd, vl, act_slab, act_t_sx, sp, packed, dens,
                                   bias_shift, x[0], x[1], dmid[0], dmid[1], dmid[2], dmid[3], dD, dx[0], dx[1],
-                                  edge_dvec);
+                                  edge_dvec, (int)dvec_assign);
         fg<<<N, 128, smem_g, st>>>(N, C, S, I, sg, perm, psym, rp, snd, vl, act_slab, act_t_sx, sp, packed, dens,
                                    bias_shift, x[0], x[1], x[2], dmid[0], dmid[1], dmid[2], dmid[3],
                                    nullptr, dx[0], dx[1], dx[2], edge_dvec);
@@ -10066,7 +10205,9 @@ void launch_conv_bwd(int lx, cudaStream_t st, int N, int C, int S, int I, const 
 }
 
 void launch_prod(const GProdKernels* k, bool backward, cudaStream_t st, int N, int C, float* const* m, const float* D,
-                 const float* w, int64_t w_stride, const int* sp, float* const* y_or_g, float* const* dm, float* dD) {
+                 const float* w, int64_t w_stride, const int* sp, float* const* y_or_g, float* const* dm, float* dD,
+                 const float* ro_w, double* energy) {
+    // S100: ro_w (nullable): forward, E += y0 . ro_w into energy; backward, ro_w is the seed added to g0
     std::vector<void*> args;
     args.push_back(&N);
     args.push_back(&C);
@@ -10079,6 +10220,10 @@ void launch_prod(const GProdKernels* k, bool backward, cudaStream_t st, int N, i
     if (backward) {
         for (int l = 0; l < 4; ++l) args.push_back((void*)&dm[l]);
         args.push_back(&dD);
+        args.push_back(&ro_w);
+    } else {
+        args.push_back(&ro_w);
+        args.push_back(&energy);
     }
     const int blk = (C % 128 == 0) ? 128 : 32;
     check_cuda(cudaLaunchKernel(backward ? k->bwd : k->fwd, dim3(N, C / blk), dim3(blk), args.data(), 0, st));

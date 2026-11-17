@@ -14,6 +14,16 @@
 // 2t+9 at k = t + 4, with B's slots (Bl', Bh) at the same k: a k permutation shared by A and B.
 // Range: Ah and Al' are float16, so every |element| of A and B must stay below 32752 (|Al'| < 2 |x|); above it the
 // cross term overflows to inf. Below 2^-14 the cross term loses bits (at most ~2^-36 |x| |y| per term).
+// Experiments (-D, default 0): LOUP_TC_SPLIT_RN=1 rounds Ah to nearest, ties away from zero. The residual can have
+// either sign and its magnitude bound is halved; this reduces the dropped Al Bl term but does not make it unbiased
+// for arbitrary/correlated operands. LOUP_TC_ACC_RN=1 forms Ah Bh from zero and adds it to D with FP32 RN arithmetic.
+
+#ifndef LOUP_TC_SPLIT_RN
+#define LOUP_TC_SPLIT_RN 0
+#endif
+#ifndef LOUP_TC_ACC_RN
+#define LOUP_TC_ACC_RN 0
+#endif
 
 #include <cutlass/gemm/warp/mma_tensor_op_fast_f32.h>
 #include <cutlass/gemm/warp/default_mma_tensor_op.h>
@@ -57,6 +67,11 @@ class MmaTensorOpHybridF16
     return d;
   }
 
+  /// TF32 big part: top 11 significand bits, truncated or rounded to nearest (ties away from zero).
+  static CUTLASS_DEVICE float big(float x) {
+    return __uint_as_float((__float_as_uint(x) + (LOUP_TC_SPLIT_RN ? 0x1000u : 0u)) & 0xffffe000u);
+  }
+
   /// big: Ah / Bh as TF32 (first half of the transformed fragment); second half: the packed FP16 pairs, one 32-bit
   /// word per element of the big half (A: (Ah, Al'), B: (Bl', Bh)).
   CUTLASS_DEVICE
@@ -67,14 +82,14 @@ class MmaTensorOpHybridF16
     CUTLASS_PRAGMA_UNROLL
     for (int i = 0; i < FragmentA::kElements; ++i) {
       float const x = A[i];
-      float const h = __uint_as_float(__float_as_uint(x) & 0xffffe000u);
+      float const h = big(x);
       a[i] = __float_as_uint(h);
       a[FragmentA::kElements + i] = pack(h, (x - h) * 2048.0f);
     }
     CUTLASS_PRAGMA_UNROLL
     for (int i = 0; i < FragmentB::kElements; ++i) {
       float const x = B[i];
-      float const h = __uint_as_float(__float_as_uint(x) & 0xffffe000u);
+      float const h = big(x);
       b[i] = __float_as_uint(h);
       b[FragmentB::kElements + i] = pack((x - h) * 2048.0f, h);
     }
@@ -86,7 +101,14 @@ class MmaTensorOpHybridF16
     AccessTypeFragmentA const *ptr_A = reinterpret_cast<AccessTypeFragmentA const *>(&A);
     AccessTypeFragmentB const *ptr_B = reinterpret_cast<AccessTypeFragmentB const *>(&B);
     D = C;
+#if LOUP_TC_ACC_RN
+    FragmentC Z;
+    Z.clear();
+    this->mma_operator(Z, ptr_A[0], ptr_B[0], Z);  // big * big, TF32, from zero
+    float const *z = reinterpret_cast<float const *>(&Z);
+#else
     this->mma_operator(D, ptr_A[0], ptr_B[0], D);  // big * big, TF32
+#endif
     uint32_t const *ha = reinterpret_cast<uint32_t const *>(&A) + FragmentA::kElements;
     uint32_t const *hb = reinterpret_cast<uint32_t const *>(&B) + FragmentB::kElements;
     float *d = reinterpret_cast<float *>(&D);
@@ -102,10 +124,17 @@ class MmaTensorOpHybridF16
             : "=f"(t0), "=f"(t1), "=f"(t2), "=f"(t3)
             : "r"(ha[m * 4 + 0]), "r"(ha[m * 4 + 1]), "r"(ha[m * 4 + 2]), "r"(ha[m * 4 + 3]), "r"(hb[n * 2 + 0]),
               "r"(hb[n * 2 + 1]), "f"(0.0f));
+#if LOUP_TC_ACC_RN
+        d[idx * 4 + 0] += fmaf(t0, 4.8828125e-4f, z[idx * 4 + 0]);
+        d[idx * 4 + 1] += fmaf(t1, 4.8828125e-4f, z[idx * 4 + 1]);
+        d[idx * 4 + 2] += fmaf(t2, 4.8828125e-4f, z[idx * 4 + 2]);
+        d[idx * 4 + 3] += fmaf(t3, 4.8828125e-4f, z[idx * 4 + 3]);
+#else
         d[idx * 4 + 0] = fmaf(t0, 4.8828125e-4f, d[idx * 4 + 0]);
         d[idx * 4 + 1] = fmaf(t1, 4.8828125e-4f, d[idx * 4 + 1]);
         d[idx * 4 + 2] = fmaf(t2, 4.8828125e-4f, d[idx * 4 + 2]);
         d[idx * 4 + 3] = fmaf(t3, 4.8828125e-4f, d[idx * 4 + 3]);
+#endif
       }
     }
   }

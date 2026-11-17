@@ -11,22 +11,25 @@ Tensor-core GEMM kernels that the engine loads at run time as autotune candidate
 for models with long-range terms). They are compiled from NVIDIA CUTLASS headers (BSD-3-Clause, © 2017-2026
 NVIDIA CORPORATION & AFFILIATES, <https://github.com/NVIDIA/cutlass>; licence text in `cubins/LICENSE.cutlass`).
 
-Two sets are tracked. The `tf32x3_hyb_*` cubins are the ones the engine loads by default; they were built from
-FastMACE's sources `fastmace/kernels/cutlass/tf32x3_sm80.cu` and `hybrid_f16.h` (MIT, © 2026 Fabian Zwingel)
-with `-DFM_HYBRID_F16`. The `gemm_tc_*` cubins are LoupMD's own builds from `cubins/src/gemm_tc.cu` and
-`cubins/src/hybrid_f16.h` (derived from the same FastMACE sources), with their recipe in
-`cubins/src/build_gemm_tc.sh` and its record in `cubins/src/gemm_tc.build.txt`; the engine loads one of them only
-when `LOUP_HYBRID_CUBIN` names it (testing, until they are gated and adopted).
+Two sets are tracked. The `tf32x3_hyb_*` cubins are the ones the engine loads by default on every GPU but those
+of compute capability 8.0; they were built from FastMACE's sources `fastmace/kernels/cutlass/tf32x3_sm80.cu` and
+`hybrid_f16.h` (MIT, © 2026 Fabian Zwingel) with `-DFM_HYBRID_F16`. The `gemm_tc_*` cubins are LoupMD's own
+builds from `cubins/src/gemm_tc.cu` and `cubins/src/hybrid_f16.h` (derived from the same FastMACE sources), with
+their recipe in `cubins/src/build_gemm_tc.sh` and its record in `cubins/src/gemm_tc.build.txt`.
+`gemm_tc_hyb_sm80.cubin` is the default on compute capability 8.0 (the A100); the engine loads the others only
+when `LOUP_HYBRID_CUBIN` names them (testing, until they are gated and adopted). `cubins/src/fastf32_rn.h`
+(a 3xTF32 variant that rounds the split to nearest; it derives a class from CUTLASS's `MmaTensorOpFastF32`) is
+compiled into none of the tracked cubins: the recipe does not set `LOUP_TC_SPLIT_RN`.
 
 | File | SHA-256 | Origin | Build record |
 | --- | --- | --- | --- |
 | `cubins/tf32x3_hyb_sm80.cubin` | `c5dd8728d23987ad8ae3883f5968956f665cd7a9ecabe7b8de27499a865e4d14` | byte-identical to FastMACE's `fastmace/kernels/cutlass/tf32x3_hyb_sm80.cubin` | FastMACE `tf32x3_sm80.build.txt`: CUTLASS v4.8.1, commit `2c85f497547eb441f0fe80bfb0fb2e6f9add1719`; nvcc 13.3 (V13.3.33); 11 November 2026 |
 | `cubins/tf32x3_hyb_sm90.cubin` | `c4f97a4002dc53a4e2f7fc6c3afa7ac42edc04ff5b9e5b471f1d2d6e4cac7cd7` | byte-identical to FastMACE's `tf32x3_hyb_sm90.cubin` | as above |
 | `cubins/tf32x3_hyb_sm120.cubin` | `9a949b7065906f5284e1190a0994576d1d186e3f723592488b54f81d59396f1f` | the same sources compiled for `sm_120`; not in FastMACE | **none.** `gemm_tc_hyb_sm120.cubin` below is its recorded rebuild; the default switches to it once it is gated (`PLAN.md` §1.3, D6) |
-| `cubins/gemm_tc_hyb_sm80.cubin` | `62c046fa0ff8a3f20d070b1a8e3398d767f9cb16690c81ca6fb167a0ecd9ca39` | `cubins/src/gemm_tc.cu`: TF32 + FP16 hybrid, 6 tiles, with beta | `cubins/src/gemm_tc.build.txt`: CUTLASS commit `2c85f497547eb441f0fe80bfb0fb2e6f9add1719` (v4.8.1); nvcc 13.3 (V13.3.33) |
-| `cubins/gemm_tc_3x_sm80.cubin` | `ec3767d5d0bfd486f70ac1640477bd0f42b5584eca319eba437307ce97f3f42e` | `cubins/src/gemm_tc.cu`: 3xTF32, 6 tiles, with beta | as above |
-| `cubins/gemm_tc_hyb_sm90.cubin` | `640b2c1c2a471bfd3fb5125fa31fb44fb00b75ed71f08a73832c616f86d763c4` | `cubins/src/gemm_tc.cu`: TF32 + FP16 hybrid, 3 tiles | as above |
-| `cubins/gemm_tc_hyb_sm120.cubin` | `7b6816a69d42a3f5375af98a049afcd26ced6549f7ddb8a3a083cfb5a75e8f75` | `cubins/src/gemm_tc.cu`: TF32 + FP16 hybrid, 3 tiles | as above |
+| `cubins/gemm_tc_hyb_sm80.cubin` | `065d1a89b39fd6b60236f0dd6b120443ce0b484f74270862a2578e3f6a45892e` | `cubins/src/gemm_tc.cu`: TF32 + FP16 hybrid, 6 tiles, with beta | `cubins/src/gemm_tc.build.txt`: CUTLASS commit `2c85f497547eb441f0fe80bfb0fb2e6f9add1719` (v4.8.1); nvcc 13.3 (V13.3.33) |
+| `cubins/gemm_tc_3x_sm80.cubin` | `d816cb2a75dc8f1f9c3713e253f33633d03f89cc5b246135da76471b850aec08` | `cubins/src/gemm_tc.cu`: 3xTF32, 6 tiles, with beta | as above |
+| `cubins/gemm_tc_hyb_sm90.cubin` | `c244a049203e158230a261c4467521cd3041140812f22036959684c9acf38668` | `cubins/src/gemm_tc.cu`: TF32 + FP16 hybrid, 3 tiles | as above |
+| `cubins/gemm_tc_hyb_sm120.cubin` | `c40b86ddacf3da3252e6d4594888c0fc01a1de9b41cdc2eb21f8a0d4e1ff46b5` | `cubins/src/gemm_tc.cu`: TF32 + FP16 hybrid, 3 tiles | as above |
 
 What the hybrid kernels compute: the product of two float32 matrices, each element split into an 11-bit high
 part and a low part. The high-by-high products run on TF32 tensor cores and the two cross products in one FP16

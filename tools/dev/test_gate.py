@@ -9,10 +9,11 @@ The MACE references are cached (LOUP_GATE_CACHE, default ~/.cache/loupmd/gate_re
 
 Structure sets: "oxide" (NaCl, SrTiO3, NbCl5; the default), "organic" (urea, naphthalene, paracetamol, the
 648-atom water box; MACE-OFF's set) and "crystals" (NaCl, NaNbO3, NbCl5 R2SCAN cells; FastMACE's MH-1 / POLAR set).
-For the specialised OMAT-0-medium bundle every structure is evaluated with the default kernel choices; the NbCl5 2x2x2 cell (576 atoms, above the 512-atom
-switch to the receiver-owned w' kernel) is also evaluated with every forced spline variant, both w' block sizes and the
-Morton atom reorder on and off, and the small cells with the receiver-owned w' forced, so every kernel path the
-engine can pick is gated (the per-system tuning otherwise only picks one of them per run).
+For the specialised OMAT-0-medium bundle every structure is evaluated with the default kernel choices; the NbCl5 2x2x2
+cell (576 atoms, above the 512-atom switch to the receiver-owned w' kernel on GPUs other than sm_120) is also evaluated
+with every forced spline variant, both w' block sizes and the Morton atom reorder on and off, and the small cells with
+each w' kernel forced (edge-tiled, receiver-owned at both block sizes), so every kernel path the engine can pick is gated
+(the per-system tuning otherwise only picks one of them per run).
 """
 from __future__ import annotations
 
@@ -30,11 +31,13 @@ from ase.io import read as ase_read
 from mace.calculators import MACECalculator
 
 from loupmd import LoupEngine, _model_digest, ensure_loup_bundle
+import polar_reference
 
-# MACE references (float64, float32, and PolarMACE's finite-difference stress) do not depend on LoupMD, so they are
-# cached: repeat gates of the large models (CPU references, ~30 min for POLAR-1-L) take seconds, and the float32
-# bound (MACE's own run-to-run noise) is the same in every run. The key covers everything a reference depends on.
-REF_CACHE_FORMAT = "gate-refs-1"
+# MACE references and complete POLAR strain targets are cached. Cached yardsticks remain fixed between
+# comparisons; fresh float32 reductions can differ between evaluations. The key includes the model,
+# configuration, device, package versions and reference protocol.
+REF_CACHE_FORMAT = "gate-refs-3-polar-strain-autograd"
+# Initial step for independent FD diagnostics only; production POLAR targets use strain autograd.
 FD_STRESS_H = 1e-5
 
 
@@ -60,7 +63,7 @@ def ref_cache_path(model_path, head, set_name, ref_device, configs, charge_spin=
 
     h = hashlib.sha256()
     for part in (REF_CACHE_FORMAT, _model_digest(model_path), str(head), set_name, ref_device_tag(ref_device),
-                 getattr(mace, "__version__", "?"), torch.__version__, repr(FD_STRESS_H)):
+                 getattr(mace, "__version__", "?"), torch.__version__):
         h.update(part.encode() + b"\0")
     if charge_spin is not None and charge_spin != (None, None):  # OMOL-0 settings (keys of other runs unchanged)
         h.update(f"charge={charge_spin[0]}|spin={charge_spin[1]}".encode() + b"\0")
@@ -112,15 +115,19 @@ DATA_ROOTS = [r for r in (os.environ.get("LOUP_DATA_ROOT"), "/mnt/d/Margraf", "/
 NBCL5_CIFS = [f"{r}/FastMACE/fastmace/protocols/data/NbCl5_R2SCAN.cif" for r in DATA_ROOTS]
 
 # Forced kernel paths (environment read at engine creation, see include/loupmd.h).
+# LOUP_M1_CHUNK forces the S112 receiver chunks of m1 / dm1 (by default above 16,384 atoms) onto these small cells,
+# with a shorter last chunk.
 LARGE_VARIANTS = (
     [{"LOUP_SPLINE_VARIANT": v} for v in ("R1", "R1p", "R4", "R4p", "R5")]
-    + [{"LOUP_WPRIME_THREADS": "512"}, {"LOUP_REORDER": "1"}, {"LOUP_REORDER": "0"}]
+    + [{"LOUP_WPRIME_THREADS": "512"}, {"LOUP_REORDER": "1"}, {"LOUP_REORDER": "0"}, {"LOUP_M1_CHUNK": "100"}]
 )
-SMALL_VARIANTS = [{"LOUP_WPRIME_RCV": "1"}, {"LOUP_WPRIME_RCV": "1", "LOUP_WPRIME_THREADS": "512"}]
+SMALL_VARIANTS = [{"LOUP_WPRIME_RCV": "0"}, {"LOUP_WPRIME_RCV": "1"}, {"LOUP_WPRIME_RCV": "1", "LOUP_WPRIME_THREADS": "512"},
+                  {"LOUP_WPRIME_RCV": "1", "LOUP_M1_CHUNK": "40"}]
 # Generic models: the conv forward variants of lx 1 layers at C 128 (GenericModel::tune_conv_variants picks one per
 # system on sm_120; each is gated forced, on every configuration)
 GENERIC_VARIANTS = [{"LOUP_CONV_FWD_VARIANT": v} for v in ("1", "2")]
-VARIANT_KEYS = ("LOUP_SPLINE_VARIANT", "LOUP_WPRIME_THREADS", "LOUP_WPRIME_RCV", "LOUP_REORDER", "LOUP_CONV_FWD_VARIANT")
+VARIANT_KEYS = ("LOUP_SPLINE_VARIANT", "LOUP_WPRIME_THREADS", "LOUP_WPRIME_RCV", "LOUP_REORDER", "LOUP_CONV_FWD_VARIANT",
+                "LOUP_M1_CHUNK")
 
 
 def has_conv_variants(meta) -> bool:
@@ -238,33 +245,6 @@ def eval_mace(model_path: str, dtype: str, configs, head=None, device="cuda", ch
     return out
 
 
-def fd_stress(model_path, configs, device="cuda", h=FD_STRESS_H):
-    """Stress as the float64 MACE energy's central difference under symmetric strain (positions and cell strained,
-    so the reciprocal cell and the volume follow). For PolarMACE this is the corrected stress (MACE PR 1718, as
-    FastMACE): the installed PolarMACE's autograd stress leaves out the k-space terms' cell dependence."""
-    calc = MACECalculator(model_paths=model_path, device=device, default_dtype="float64")
-    out = []
-    for _, at in configs:
-        def energy(eps):
-            a = at.copy()
-            F = np.eye(3) + eps
-            a.set_cell(at.cell.array @ F, scale_atoms=False)
-            a.positions = at.positions @ F
-            a.calc = calc
-            return a.get_potential_energy()
-
-        V = at.get_volume()
-        s = np.zeros((3, 3))
-        for i in range(3):
-            for j in range(i, 3):
-                e = np.zeros((3, 3))
-                e[i, j] = e[j, i] = h
-                d = (energy(e) - energy(-e)) / (2 * h) / V / (1 if i == j else 2)
-                s[i, j] = s[j, i] = d
-        out.append(s)
-    return out
-
-
 def main():
     import argparse
 
@@ -316,13 +296,12 @@ def main():
         print("Running MACE float32 reference...")
         ref32 = eval_mace(model_path, "float32", configs, head, args.ref_device, *cs)
         polar = type(torch.load(model_path, map_location="cpu", weights_only=False)).__name__ == "PolarMACE"
-        # Stress reference per config: MACE float64 autograd, or for PolarMACE the corrected float64 stress (finite
-        # differences); the float32 noise level stays the MACE float32-vs-float64 autograd difference (both carry the
-        # same local float32 rounding).
+        # POLAR's target differentiates the native energy through all cell-dependent geometry. Keep the
+        # existing float32-vs-float64 autograd yardstick unchanged: this fixes the target, not the allowance.
         stress_ref = [s for _, _, s in ref64]
         if polar:
-            print("PolarMACE: stress reference from float64 energy differences (corrected k-space cell dependence)")
-            stress_ref = fd_stress(model_path, configs, args.ref_device)
+            print("PolarMACE: float64 native-energy strain gradient (complete cell dependence)")
+            stress_ref = polar_reference.stress_reference(model_path, configs, device=args.ref_device)
         save_refs(cache, ref64, ref32, stress_ref)
         print(f"MACE references saved to {cache}")
     if torch.cuda.is_available():

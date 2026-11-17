@@ -5,6 +5,7 @@ Model files are found in one place only: the folder ``LOUPMD_MODELS`` names. Str
 """
 from __future__ import annotations
 
+import contextlib
 import os
 from pathlib import Path
 
@@ -28,6 +29,25 @@ def find_model(name: str) -> str:
     if not path.is_file():
         pytest.skip(f"{name} is not in {MODELS_VARIABLE} ({folder})")
     return str(path)
+
+
+@contextlib.contextmanager
+def unfolded():
+    """Engines created inside run without the skip-chain fold (``LOUP_CHAIN_FOLD=0``, read when the engine loads the
+    bundle): the whole-system reference for a tiled, domain or sweep result at float32-rounding bounds. Whole systems
+    fold by default since the merge of round6-hardening ``13d6337``; a tiled or domain system never does (a sweep
+    hands on the layer outputs the fold never forms). The fold is another order of float32 operations: on SrTiO3
+    3x3x3 it moves the energy by 2-5e-8 eV/atom, forces by 1.8-2.5e-6 eV/A and stress by 0.6-2e-8 eV/A^3 (OMAT-0 small
+    and medium, 17 November 2026), against 1e-6 eV/A and 6e-9 eV/A^3 between a domain and the unfolded call."""
+    old = os.environ.get("LOUP_CHAIN_FOLD")
+    os.environ["LOUP_CHAIN_FOLD"] = "0"
+    try:
+        yield
+    finally:
+        if old is None:
+            os.environ.pop("LOUP_CHAIN_FOLD", None)
+        else:
+            os.environ["LOUP_CHAIN_FOLD"] = old
 
 
 def srtio3(rep: int):

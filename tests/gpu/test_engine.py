@@ -17,27 +17,25 @@ def _rattled(atoms, sigma: float, seed: int):
     return at
 
 
-def test_nve_energy_conserved_and_no_dangerous_builds(sto_engine):
+def test_nve_energy_conserved(sto_engine):
     at = _rattled(srtio3(4), 0.03, 1)  # 320 atoms
     eng = sto_engine
     eng.set_system(at.get_atomic_numbers(), at.get_masses(), skin=0.5)
     eng.set_state(at.positions, maxwell_velocities(at, 600.0, 2), at.cell.array)
-    energies, rebuilds, dangerous = [], 0, 0
+    energies, rebuilds = [], 0
     for _ in range(20):  # 2 ps at 1 fs
         st = eng.run_nve(100, 1.0)
         energies.append(st.final_potential_energy_ev + st.final_kinetic_energy_ev)
         rebuilds += st.rebuilds
-        dangerous += st.dangerous_builds
     e = (np.array(energies) - energies[0]) * 1000.0 / len(at)  # meV/atom
     slope = np.polyfit(np.arange(len(e)) * 0.1, e, 1)[0]  # meV/atom/ps
     assert rebuilds > 0
-    assert dangerous == 0
     assert abs(slope) < 0.05, f"NVE drift {slope:.4f} meV/atom/ps"
     assert np.abs(e).max() < 0.5, f"NVE excursion {np.abs(e).max():.3f} meV/atom"
 
 
 def test_skin_list_matches_rebuild_every_step(sto_bundle):
-    """Pipelined skin list (skin 0.5) vs a list rebuilt before every force call (skin 0): same trajectory."""
+    """Skin list (skin 0.5) vs a list rebuilt before every force call (skin 0): same trajectory."""
     at = _rattled(srtio3(3), 0.03, 3)
     v0 = maxwell_velocities(at, 900.0, 4)
     finals = []
@@ -46,7 +44,6 @@ def test_skin_list_matches_rebuild_every_step(sto_bundle):
         eng.set_system(at.get_atomic_numbers(), at.get_masses(), skin=skin)
         eng.set_state(at.positions, v0, at.cell.array)
         st = eng.run_nve(60, 1.0)
-        assert st.dangerous_builds == 0
         finals.append(eng.get_state())
     (p_a, v_a, f_a, e_a), (p_b, v_b, f_b, e_b) = finals
     # Same edge set, different summation order: agreement to float32 noise amplified over 60 steps.
@@ -55,15 +52,28 @@ def test_skin_list_matches_rebuild_every_step(sto_bundle):
     assert abs(e_a - e_b) / len(at) < 1e-5
 
 
-def test_small_skin_hot_langevin_stays_unpipelined(sto_engine):
-    """Steps that are large against the skin never pipeline: every force call follows its own skin check."""
-    at = srtio3(4)
-    eng = sto_engine
-    eng.set_system(at.get_atomic_numbers(), at.get_masses(), skin=0.2)
-    eng.set_state(at.positions, maxwell_velocities(at, 2000.0, 5), at.cell.array)
-    st = eng.run_langevin(400, 2.0, temp_k=2000.0, friction_per_fs=0.02, seed=7)
-    assert st.rebuilds > 5
-    assert st.pipelined_steps == 0 and st.dangerous_builds == 0
+@pytest.mark.parametrize("rebuild", ["device", "host", "fallback"])
+def test_langevin_skin_list_matches_rebuild_every_step(sto_bundle, monkeypatch, rebuild):
+    """Langevin with a small skin (a rebuild every few steps) vs a list rebuilt before every force call, with the
+    rebuilds on the GPU inside the step graph, host-driven (the step's force pass skipped, the list rebuilt, the
+    checked rest run), or counted on the GPU and finished on the host (LOUP_MD_REBUILD): same noise sequence, same
+    trajectory."""
+    if rebuild != "device":
+        monkeypatch.setenv("LOUP_MD_REBUILD", rebuild)
+    at = _rattled(srtio3(3), 0.03, 5)
+    v0 = maxwell_velocities(at, 1500.0, 6)
+    finals = []
+    for skin in (0.2, 0.0):
+        eng = LoupEngine(sto_bundle)
+        eng.set_system(at.get_atomic_numbers(), at.get_masses(), skin=skin)
+        eng.set_state(at.positions, v0, at.cell.array)
+        st = eng.run_langevin(60, 1.0, temp_k=1500.0, friction_per_fs=0.02, seed=7)
+        assert st.rebuilds > (59 if skin == 0.0 else 5)
+        finals.append(eng.get_state())
+    (p_a, v_a, f_a, e_a), (p_b, v_b, f_b, e_b) = finals
+    assert np.abs(p_a - p_b).max() < 1e-5
+    assert np.abs(f_a - f_b).max() < 1e-3
+    assert abs(e_a - e_b) / len(at) < 1e-5
 
 
 def test_tuning_time_reported_separately(sto_engine):
@@ -144,46 +154,6 @@ def test_wrong_shaped_arrays_rejected_before_the_library_reads_them(sto_engine, 
         else:
             eng.set_state(at.positions, np.zeros((len(at) - 1, 3)), at.cell.array)
     _assert_still_usable(eng, at)
-
-
-def test_switch_to_pipelined_loop_never_uses_an_incomplete_list(sto_engine):
-    """Single-step calls run unpipelined and let the list age up to skin/2; the longer run that follows switches to
-    the pipelined loop and must not compute forces on a list that is already too old."""
-    at = _rattled(srtio3(4), 0.03, 11)
-    eng = sto_engine
-    eng.set_system(at.get_atomic_numbers(), at.get_masses(), skin=0.5)
-    eng.set_state(at.positions, maxwell_velocities(at, 900.0, 12), at.cell.array)
-    dangerous = pipelined = 0
-    for cycle in range(60):
-        for _ in range(1 + cycle % 9):
-            eng.run_nve(1, 1.0)
-        st = eng.run_nve(8, 1.0)
-        dangerous += st.dangerous_builds
-        pipelined += st.pipelined_steps
-    assert dangerous == 0
-    assert pipelined > 60  # the longer runs do still switch (most of them: a few wait for the next rebuild)
-
-
-def test_pipelined_steps_are_reported(sto_engine):
-    at = _rattled(srtio3(4), 0.03, 1)
-    eng = sto_engine
-    eng.set_system(at.get_atomic_numbers(), at.get_masses(), skin=0.5)
-    eng.set_state(at.positions, maxwell_velocities(at, 300.0, 2), at.cell.array)
-    st = eng.run_nve(100, 1.0)
-    assert 0 < st.pipelined_steps < 100  # starts unpipelined, then switches
-    eng.set_system(at.get_atomic_numbers(), at.get_masses(), skin=0.0)
-    eng.set_state(at.positions, maxwell_velocities(at, 300.0, 2), at.cell.array)
-    assert eng.run_nve(20, 1.0).pipelined_steps == 0  # a list rebuilt before every force call is never pipelined
-
-
-def test_hot_langevin_in_the_pipelined_loop_has_no_dangerous_builds(sto_engine):
-    at = srtio3(4)
-    eng = sto_engine
-    eng.set_system(at.get_atomic_numbers(), at.get_masses(), skin=0.5)
-    eng.set_state(at.positions, maxwell_velocities(at, 1200.0, 5), at.cell.array)
-    st = eng.run_langevin(400, 1.0, temp_k=1200.0, friction_per_fs=0.02, seed=7)
-    assert st.pipelined_steps > 200 and st.rebuilds > 5
-    assert st.dangerous_builds == 0
 
 
 @pytest.mark.parametrize("bad", ["zero", "nan", "negative"])

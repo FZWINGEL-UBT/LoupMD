@@ -74,8 +74,8 @@ def main():
         ms = statistics.median(r.step_ms for r in runs)
         T = runs[-1].final_temperature_k
         print(f"{Path(a.model).stem:28s} {name:7s} {len(at):6d} atoms  {ms:8.3f} ms/step  "
-              f"({ms * 1e3 / len(at):.2f} us/atom-step, T {T:.0f} K, dangerous builds "
-              f"{sum(r.dangerous_builds for r in runs)})" + ("" if np.isfinite(T) else "  UNSTABLE: timing not valid"),
+              f"({ms * 1e3 / len(at):.2f} us/atom-step, T {T:.0f} K, rebuilds {sum(r.rebuilds for r in runs)})"
+              + ("" if np.isfinite(T) else "  UNSTABLE: timing not valid"),
               flush=True)
         del eng
 

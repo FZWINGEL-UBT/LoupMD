@@ -67,10 +67,13 @@ def test_sweep_schedule_reproduces_the_ordinary_pass(model, structure, generic, 
     at = structure()
     zs = sorted(set(at.get_atomic_numbers().tolist()))
     bundle = ensure_loup_bundle(find_model(model), zs, generic=generic if "omat-0-medium" in model else None)
-    plain = {"LOUP_CHAIN_FOLD": "0"} if layers == 3 else {}   # the fold never forms the layer outputs (OMOL-0)
+    # The ordinary pass without the skip-chain fold, which never forms the layer outputs a sweep hands on (every
+    # multi-layer model folds by default since the merge of round6-hardening 13d6337). The replay's engine is a
+    # default one: LOUP_SWEEP_REPLAY turns the fold off itself.
+    plain = {"LOUP_CHAIN_FOLD": "0"}
     a = _evaluate(bundle, at, monkeypatch, plain)
     b = _evaluate(bundle, at, monkeypatch, plain)
-    r = _evaluate(bundle, at, monkeypatch, dict(plain, LOUP_SWEEP_REPLAY="1"))
+    r = _evaluate(bundle, at, monkeypatch, {"LOUP_SWEEP_REPLAY": "1"})
     assert a[3] == layers
     n = len(at)
     assert np.isfinite(r[0]) and np.isfinite(r[1]).all() and np.isfinite(r[2]).all()
@@ -102,13 +105,22 @@ def test_sweep_schedule_in_md_conserves_energy(monkeypatch):
     assert last.pipelined_steps > 300
 
 
-@pytest.mark.parametrize("model,zs,env", [
-    ("MACE-POLAR-1-S.model", [11, 17], {}),
-    ("MACE-omol-0-extra-large-1024.model", [1, 8], {}),
-])
-def test_sweep_schedule_is_refused_where_it_does_not_apply(model, zs, env, monkeypatch):
-    bundle = ensure_loup_bundle(find_model(model), zs)
+def test_sweep_schedule_is_refused_for_a_long_range_model(monkeypatch):
+    bundle = ensure_loup_bundle(find_model("MACE-POLAR-1-S.model"), [11, 17])
     monkeypatch.delenv("LOUP_CHAIN_FOLD", raising=False)
     monkeypatch.setenv("LOUP_SWEEP_REPLAY", "1")
     with pytest.raises(BackendError, match="LOUP_SWEEP_REPLAY: the sweep schedule is not available"):
         LoupEngine(bundle)
+
+
+def test_sweep_schedule_runs_a_chain_folded_model_without_the_fold(monkeypatch):
+    """A model whose whole-system pass folds the skip chain (OMOL-0 extra large; refused with the fold before the
+    merge of round6-hardening 13d6337): the replay's engine leaves the fold off and gives the unfolded pass."""
+    at = _water()
+    bundle = ensure_loup_bundle(find_model("MACE-omol-0-extra-large-1024.model"), [1, 8])
+    a = _evaluate(bundle, at, monkeypatch, {"LOUP_CHAIN_FOLD": "0"})
+    r = _evaluate(bundle, at, monkeypatch, {"LOUP_SWEEP_REPLAY": "1"})
+    assert a[3] == r[3] == 3
+    # the floors of the full tier's test_sweep_schedule_reproduces_the_ordinary_pass, with one ordinary engine
+    assert abs(r[0] - a[0]) / len(at) <= 1e-7 and np.abs(r[1] - a[1]).max() <= 1e-5
+    assert np.abs(r[2] - a[2]).max() <= 1e-7

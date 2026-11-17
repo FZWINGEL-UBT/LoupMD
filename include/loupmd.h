@@ -24,10 +24,12 @@ typedef struct {
     double final_potential_energy_ev;
     double final_kinetic_energy_ev;
     double final_temperature_k;
-    int dangerous_builds;              // rebuilds triggered after an atom had already moved more than skin/2 while the
-                                       // old list was in use (pipelined loop only; should be 0, else raise the skin)
+    int dangerous_builds;              // steps whose force pass ran on a list an atom had left by more than skin/2:
+                                       // always 0 (every step checks its list before its force pass); kept for the
+                                       // layout of LOUP_ABI_VERSION 1
     double tune_ms;                    // one-time per-system kernel-variant timing at the first rebuild (not in step_ms)
-    int pipelined_steps;               // steps of this call run in the pipelined loop (the rest: one host sync each)
+    int pipelined_steps;               // steps of this call the GPU ran without waiting for the host: all but those
+                                       // whose neighbour rebuild the host finished
 } LoupMDStats;
 
 // All int-returning calls return 0 on success and -1 on failure (no C++ exception escapes); loup_last_error gives
@@ -125,7 +127,8 @@ int loup_set_fixed_atoms(LoupHandle* h, const int* fixed);
 // A run may be split into calls of any length at no extra cost: the captured step graphs are kept while the
 // timestep, thermostat settings and seed stay the same, and a call that follows a run or an evaluation at the same
 // positions starts from the forces already on the device.
-// Run NVE Velocity-Verlet steps (`dt_fs` in fs). Rebuilds skin neighbour list only when max_disp > skin/2.
+// Run NVE Velocity-Verlet steps (`dt_fs` in fs). Every step checks the skin list against its new positions before
+// its force pass and rebuilds it only when an atom has moved more than skin/2.
 int loup_run_nve(LoupHandle* h, int n_steps, double dt_fs, LoupMDStats* out_stats);
 
 // Run Langevin steps (ASE's Vanden-Eijnden-Ciccotti scheme; `dt_fs` in fs, `temp_k` in K, `friction_per_fs` in 1/fs,
@@ -520,18 +523,36 @@ void loup_d3_destroy(LoupD3* term);
 //                   the runner-up by less than 3% are not persisted.
 //   LOUP_RETUNE     if set, ignore the plan cache and re-time every GEMM shape (results are still saved).
 //   LOUP_SPLINE_VARIANT, LOUP_WPRIME_THREADS, LOUP_REORDER  force kernel variants (testing; see tools/dev/test_gate.py).
-//   LOUP_POLAR_FOLD=0  POLAR long range without the load-time dot^T weight fold (testing the path other GPUs take).
-//   LOUP_CHAIN_FOLD=0  generic models (OMOL-0) without the load-time skip-chain fold (testing the path other GPUs take).
-//   LOUP_SPECIES_TABLES=0  generic models (OMOL-0, MH-1) with layer 0's species-only GEMMs instead of per-species tables.
+//   LOUP_WPRIME_RCV=0|1  specialised OMAT-0 path: the edge-tiled (0) or receiver-owned (1) w' backward (testing; the
+//                   receiver-owned kernel is the default on sm_120 and compute capability 8.0, and on other GPUs from
+//                   512 atoms).
+//   LOUP_M1_CHUNK=<atoms>|0  specialised OMAT-0 path: chunks of at most this many receivers for the interaction-1
+//                   message buffers whenever the system is larger (default: chunks of at most 8,192 above 16,384
+//                   atoms, in two alternating buffers; 0 = always one chunk) (testing).
+//   LOUP_ROW_SORT=global  sort every neighbour row in global scratch, the path of rows over 4,096 edges (testing).
+//   LOUP_MD_REBUILD=host|fallback  MD neighbour rebuilds host-driven, or counted on the GPU and always finished on the
+//                   host, instead of inside the step graph (testing).
+//   LOUP_POLAR_FOLD=0|1  POLAR long range without (0) the load-time dot^T weight fold, testing the path other GPUs take,
+//                   or with it (1) on any GPU (sm_120 and cc 8.0 fold by default).
+//   LOUP_CHAIN_FOLD=0|1  generic models (OMOL-0, MH-1, the OMAT-0 / MP-0 / MPtrj / OFF families on the generic path):
+//                   0 skips the load-time skip-chain fold (the path other GPUs take), 1 folds on any GPU (testing;
+//                   sm_120 and cc 8.0 fold by default).
+//   LOUP_SPECIES_TABLES=0|1  generic models (OMOL-0, MH-1): 0 keeps layer 0's species-only GEMMs instead of per-species
+//                   tables, 1 builds the tables on any GPU (testing; sm_120 and cc 8.0 build them by default).
 //   LOUP_CONV_TUNE=0|1  generic models: 0 keeps the default conv forward variant (no per-system timing at the first
 //                   rebuild); 1 times the variants on any GPU (testing; sm_120 times them by default).
 //   LOUP_CONV_FWD_VARIANT=0|1|2  force a generic conv forward variant (testing; see tools/dev/test_gate.py).
 //   LOUP_NO_HYBRID=1  no tensor-core GEMM cubin (float32 SIMT GEMMs only).
-//   LOUP_HYBRID_CUBIN=path  load this GEMM cubin instead of cubins/tf32x3_hyb_sm<arch>.cubin (testing; LoupMD's own
-//                   cubins/src/gemm_tc.cu builds add tiles and beta support). GEMM plans are keyed by the cubin file.
+//   LOUP_HYBRID_CUBIN=path  load this GEMM cubin instead of the default (cubins/gemm_tc_hyb_sm80.cubin, LoupMD's own
+//                   cubins/src/gemm_tc.cu build with more tiles and beta support, on cc 8.0; FastMACE's
+//                   cubins/tf32x3_hyb_sm<arch>.cubin elsewhere) (testing). GEMM plans are keyed by the cubin file.
 //   LOUP_LR_HYBRID=1  load the GEMM cubin for long-range models too (testing; they run float32 SIMT GEMMs by default).
 //   LOUP_OWN_EXT=0|1  force the own-SGEMM extensions (sgemm64 / sgemm32 candidates, N-fastest rasterisation; testing;
-//                   on for sm_120 by default).
+//                   on by default for sm_120, and for cc 8.0 when no GEMM cubin is loaded, e.g. long-range models).
+//   LOUP_NB_GROUPS=0|1  force the lane-group neighbour-list kernels (testing; on for sm_120 and compute capability 8.0
+//                   by default).
+//   LOUP_FORCE_TC=1  every GEMM the tensor-core cubin can take runs on it (testing the cubin's accuracy on every
+//                   eligible shape; no GEMM plans are loaded or saved).
 //   LOUP_DEBUG_SPLINE, LOUP_DEBUG_GEMM  print the variant / GEMM tuning decisions to stderr.
 //   LOUP_DEBUG_ERRORS  print every failure's message (loup_last_error) to stderr as well.
 //   LOUP_DEBUG_GRAPHS  print a line to stderr for every capture of an MD step graph and for every force pass a run

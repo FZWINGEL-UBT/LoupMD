@@ -146,7 +146,7 @@ The `sm_89` stacks are frames without spills (`ptxas -v`: 0 bytes spill stores/l
 9. **Side-stream GEMM fork/join**: 8 non-blocking side streams with per-stream 4 MB cuBLASLt workspaces.
 10. **Non-destructive `evaluate()`**: keeps velocities, skips rebuilds when `max_disp < skin/2` and cell unchanged.
 11. **GEMM autotuning**: up to 32 cuBLASLt candidates + 3 hybrid tiles; fork disabled during autotune.
-12. **1-receiver-per-block `wprime_backward_inter1_rcv`** (`N >= 512`; edge-tiled kernel kept for `N < 512`): stages the receiver's q once per block; -170 us on both GPUs.
+12. **1-receiver-per-block `wprime_backward_inter1_rcv`** (`N >= 512`, and every `N` on `sm_120` since S96; the edge-tiled kernel stays for `N < 512` on other GPUs): stages the receiver's q once per block; -170 us on both GPUs.
 13. **Packed edge arrays**: `act_vec_len` (`float4` x, y, z, r) and `act_t_sx` (`float2`).
 14. **i0 backward fused with force/virial assembly (T5)**: `force_virial_assemble_kernel`, `d_dsh0`, `d_dr0` removed; 32-edge warp chunks.
 15. **Float32 pre-test + 32-thread blocks in `count`/`fill_neighbors` (T3)**: borderline pairs re-checked in float64; rebuild 1,222 -> 510 us (5060 Ti), 1,121 -> 684 us (Ada).
@@ -242,7 +242,7 @@ All 13 ideas of the previous list are resolved: adopted (2, 5, 7, 9, 10, 13 = it
 |---|---|---|---|
 | **1** | **Fuse `lin1` into the interaction-1 kernels** | `m1`/`dm1` are `N x 4864` floats (97 MB at 5k atoms) written by spline / `lin1^T` and read back by `lin1` / `w'`; the `lin1` groups are 529 + 597 us on 5060 Ti `SrTiO3` | Not feasible inside the current one-receiver-per-block spline: each block would read all 655 KB of `W_lin1` (~3.3 GB extra L2 traffic per step for an already L2-bound kernel), and sharing it across R receivers needs R x 38 accumulator registers (spline is at 96-122). Needs a different decomposition (e.g. a receiver-tiled tensor-core GEMM consuming spline output tiles from shared memory). |
 | **2** | **Ada performance counters** | all Ada tuning so far is timing-only | `ERR_NVGPUCTRPERM` on `leeloo`; needs `NVreg_RestrictProfilingToAdminUsers=0` (admin) before Ada-specific `ncu` work (`w'` is 9% slower on Ada than on the 5060 Ti although Ada has 33% more SMs; spline gained 10% from L1 slab sharing there, so Ada looks L2-sensitive). |
-| **3** | **Small-system latency (< ~1,000 atoms)** | 135-atom `SrTiO3` step 358 us (median span): GEMM groups 115 us (32%; ~25 tiny products, each ~6-13 us in the graph regardless of size), edge-tiled `w'` 100 us, spline 58 us (135 one-receiver blocks), i0 backward 28 us | Split-K for the own SGEMM (partials per K slice, last block of a tile sums them in z order) was tried: the isolated autotune cannot rank such products (every candidate times 6-14 us, launch-bound), and forcing split 2 / 4 for every eligible product raised the 135-atom GEMM groups 123 -> 147 / 158 us (step 367 -> 392 / 409 us), so the per-GEMM floor in the graph is launch/completion latency, not the K pipeline. Grouped launches were tried too: products of a fork group collected and, when each has fewer tiles than SMs, issued as one own-SGEMM launch (problem table, 64 x 64 tiles below two blocks per SM): 135-atom GEMM groups 114 -> 101 us (step 355 -> 345 us on the 5060 Ti, wall time -3% to -5%; 320 atoms within noise; Ada 135 atoms +2%), but the refactored kernel cost the 5060 Ti benchmarks +1.2% / +0.9% (`NbCl5`) and +0.3% / +0.2% (`SrTiO3`); dropped. The spline is not the problem: even at 135 atoms its 135 blocks keep ~15 warps per SM issuing (R4 picked, 64 us); an edge-split variant (one receiver per block, edges over 2 / 4 thread groups, fixed-order shared-memory reduction) measured 98 / 82 us there and 1.4-1.6x slower at 5,000 atoms. |
+| **3** | **Small-system latency (< ~1,000 atoms)** | 135-atom `SrTiO3` step 358 us (median span): GEMM groups 115 us (32%; ~25 tiny products, each ~6-13 us in the graph regardless of size), edge-tiled `w'` 100 us, spline 58 us (135 one-receiver blocks), i0 backward 28 us | Split-K for the own SGEMM (partials per K slice, last block of a tile sums them in z order) was tried: the isolated autotune cannot rank such products (every candidate times 6-14 us, launch-bound), and forcing split 2 / 4 for every eligible product raised the 135-atom GEMM groups 123 -> 147 / 158 us (step 367 -> 392 / 409 us), so the per-GEMM floor in the graph is launch/completion latency, not the K pipeline. Grouped launches were tried too: products of a fork group collected and, when each has fewer tiles than SMs, issued as one own-SGEMM launch (problem table, 64 x 64 tiles below two blocks per SM): 135-atom GEMM groups 114 -> 101 us (step 355 -> 345 us on the 5060 Ti, wall time -3% to -5%; 320 atoms within noise; Ada 135 atoms +2%), but the refactored kernel cost the 5060 Ti benchmarks +1.2% / +0.9% (`NbCl5`) and +0.3% / +0.2% (`SrTiO3`); dropped. The spline is not the problem: even at 135 atoms its 135 blocks keep ~15 warps per SM issuing (R4 picked, 64 us); an edge-split variant (one receiver per block, edges over 2 / 4 thread groups, fixed-order shared-memory reduction) measured 98 / 82 us there and 1.4-1.6x slower at 5,000 atoms. S96: on `sm_120` the receiver-owned `w'` now runs below 512 atoms too (135 / 320-atom SrTiO3 steps `0.974` / `0.963`; `wp-receiver-owned`). |
 | **4** | **Larger / adaptive skin (`T10`)** | 0.5-1.5% at 5,000 atoms, ~10% at 135 atoms | Changes the benchmark configuration; owner decision. |
 | **5** | **Generic path (section 5): gate in the GEMM epilogue** | MH-1 SrTiO3 (5060 Ti): gate forward + backward 15% of the step, ~1 GB of DRAM traffic per call; GEMMs ~50% | The gate reads the `linear_2`-side rows a GEMM just wrote and writes rows the next GEMM reads; fusing it into the own SGEMM's epilogue / prologue removes one round trip per direction. Falsifier: gate kernels already at ~DRAM bandwidth, so the ceiling is their full time (~7 ms of 47); stop if the fused GEMM loses more than it saves. |
 
@@ -310,7 +310,7 @@ kernels of sections 1-4 (`LOUP_GENERIC=1` forces the generic path, used to cross
   k-space Coulomb energy, forward and reverse. Neutral singlet systems in zero external field, fully periodic.
   The stress includes the k-space terms' cell dependence (MACE PR 1718, as FastMACE): the installed PolarMACE
   (0.3.16) hands those terms the unstrained geometry, so its autograd stress misses up to 2e-5 eV/A^3 (NaCl); the
-  gate's stress reference for POLAR is the float64 energy's finite difference.
+  gate now differentiates the native float64 energy through all strained geometry (`python/polar_reference.py`), avoiding both the missing cell terms and finite-difference truncation.
 
 ### 5.2 Gates (`python/test_gate.py MODEL --set ...`; 3x MACE float32-vs-float64 rule, cells strained / rattled)
 Sets as FastMACE's: `oxide` (NaCl, SrTiO3), `organic` (urea 3x3x3, naphthalene 2x2x2, paracetamol 2x2x2,
@@ -457,6 +457,33 @@ S59 (`gen-species-tables`, 14 November, 5060 Ti only):
 - Layer 0's species-only products (its input is the embedding row) become per-species tables composed in double at load and gathered per atom: the gated block's residual and, under S57, the skip terms. OMOL-0 XL water216 `23.78 -> 23.26 ms/step` (`0.978`), reversed `0.977`; MH-1 NaCl216 `0.988` / `0.991`, NbCl5 `0.997` / `0.996`. POLAR-1-L showed no win in the tables-first order, so the long-range models keep the GEMMs. Gates pass (OMOL-0 at four charge / spin settings, MH-1 crystals both heads and `omol` organic); kernels SASS-identical; `pytest` 71 passed; `LOUP_SPECIES_TABLES=0` disables.
 S64 (`gen-conv-fwd-variants`, 15 November, 5060 Ti only):
 - The generic `gconv_fwd_L1` at `C = 128` now has the specialised spline forward's receivers-per-block choice: R1 paired (old), R1 unpaired, R5 (640 threads), timed per layer and system at the first MD rebuild. Kernel up to -21% (OMAT-0 medium generic SrTiO3 2,200 -> 1,742 us; OFF24-M water 2,723 -> 2,437). Full-step ABBA tuned / old, both orders: MP-0 medium SrTiO3 `0.968` / `0.967`, OFF24-M water `0.978` / `0.978`, OFF23-M water `0.975` / `0.980`, MH-1 SrTiO3 `0.988` / `0.991`; small cells (216-648 atoms) and POLAR-1-M tie. Gates pass for both forced variants on all seven families; existing kernels SASS-identical; `LOUP_CONV_TUNE=0` disables.
+S72 (`gen-res0-table-read`, `s72-omat0-limiters`, 16 November, 5060 Ti):
+- The gate kernels read layer 0's residual from the S59 species table instead of a per-atom copy: MH-1 SrTiO3 `0.993` / `0.991` (ABBA both orders), NaCl216 `0.987` / `0.983`, OMOL-0 water216 `0.998` / `0.997`; gates pass with the tables on and off.
+- OMAT-0 medium generic SrTiO3 measured kernel by kernel (`ncu`): every kernel family sits at an issue, L2 or DRAM limit (conv backward issue 75% and L2 75%, SGEMMs 65-70% FMA pipe, products 78-92% of DRAM peak), so the remaining levers are byte and FLOP removal between kernels, not kernel tuning. Rejected falsifiers: sliced conv kernels (`gen-conv-sliced`), the decode bias as an OR (no gain).
+S73 (`gen-chain-fold-ext`, 16 November, 5060 Ti only):
+- The S57 skip-chain fold now covers every multi-layer generic model without long range (any layer kind, linear non-last readouts, per-species skips), not only OMOL-0. In-process A/B plain / fold, both orders: MH-1 NaCl216 `1.075`, SrTiO3 `1.053` (34.86 -> 33.11 ms/step); MPtrj SrTiO3 `1.040`; OMAT-0 medium generic SrTiO3 `1.017` (8.17 -> 8.03, the specialised path's time); MP-0 medium SrTiO3 `1.017`; OFF24-M water `1.015`. Exact to the noise side; 3x gates pass on every folded family; `LOUP_CHAIN_FOLD=0` disables.
+S75 (`md-guarded-loop`, `nl-row-sort`, 16 November, 5060 Ti and A100):
+- One exact MD loop replaces the unpipelined / pipelined pair: each step's graph ends with a guard kernel that publishes the skin check to mapped host memory and an IF node holding the force pass, so the host queues the next step while the force pass runs and the GPU waits for the host only at a rebuild; host reads poll mapped memory instead of `cudaStreamSynchronize`; neighbour rows are sorted, gathered and order-checked by one block-per-row kernel (no `cub::DeviceSegmentedSort` round trip), and in MD the order flag is read with the next step's publication behind a checked-rest IF node. Every force pass follows its own skin check (no lagged threshold, no incomplete list): `LoupMDStats::dangerous_builds` and `pipelined_steps` are gone. 5060 Ti library ABBA new / HEAD: `OFF23-M` water216 1.262 -> **1.010 ms/step** (`0.800`), `OFF23-S` water216 0.662 -> **0.463** (`0.700`), `OFF24-M` water `0.961`, MH-1 NaCl216 `0.990`, OMAT-0 medium NbCl5 `0.994`, SrTiO3 `0.998`, MH-1 SrTiO3 `1.000`. A100: polling gains 6-9% on water216 in-process; the conditional step ties the polled old loop there (the IF node costs ~11 us per step against a ~10 us native round trip). Force-path kernels SASS-identical; row order identical to the stable sort.
+S76 (`md-device-rebuild`, 16 November, 5060 Ti):
+- The neighbour rebuild runs inside the MD step graph: a second IF node after the guard holds bin + count + a gate kernel and, when the new list fits the captured edge bucket and row-sort width, fill + sort + commit + the checked rest. A rebuild step no longer waits for the host (two round trips of ~150-200 us each under WSL2 before). Library ABBA over S75: `OFF23-M` water216 `0.939`, `OFF23-S` water216 `0.862`, `OFF24-M` water `0.992`, MH-1 NaCl216 `0.998`, OMAT-0 SrTiO3 `0.998`. Lists that outgrow the captured sizes are finished on the host and the graphs recaptured; reordering systems keep the host-driven rebuild.
+S77 / S78 (`md-device-rebuild`, 16 November, 5060 Ti):
+- Every conditional node a step evaluates costs time on this driver even when its body does not run. The step graph now ends in one SWITCH node (body 0 the force pass, body 1 the rebuild) instead of two IF nodes (`OFF23-S` water216 `0.951`, `OFF23-M` `0.992`, MH-1 NaCl216 `1.000`; a flat layout of four IF nodes lost 4-19%), and the rebuild branch's fill / sort / commit read the gate's verdict instead of sitting behind an IF node (`OFF23-S` `0.991`). Rebuild steps no longer idle the GPU (`nsys`: `OFF23-S` water216 steady-state gaps 10.4 ms per 100 steps after S75 -> 0.85 ms; traced step 0.535 -> 0.428 ms).
+S77 A100 defaults (`a100-cc80-defaults`, 16 November, NHR Alex A100-SXM4-40GB):
+- Compute capability 8.0 now runs the generic chain fold and species tables and LoupMD's own format-2 six-tile cubin (`cubins/gemm_tc_hyb_sm80.cubin`) by default. In-process A/B on the committed tree (job `loup-s74a`), new / old: OMOL-0 XL water216 `0.752`, MH-1 NaCl216 `0.875`, MH-1 SrTiO3 `0.889`, MPtrj SrTiO3 `0.935`, OFF23-M water216 `0.959`, OMAT-0 medium generic SrTiO3 `0.977`, MP-0 medium SrTiO3 `0.979`, OMAT-0 medium specialised SrTiO3 `0.998`. 3x gates (job `loup-s75g`): 19 runs over every non-POLAR family, none failing (worst OMAT-0 medium specialised oxide stress 2.78). The S70 SGEMM / neighbour switches: next paragraph.
+S80-S84 A100 (`a100-own-ext-nb-groups`, `pol-dot-fold`, 16 November, NHR Alex A100-SXM4-40GB):
+- The S75-S78 MD loop at the S77 cc 8.0 defaults against the HEAD-era build (library ABBA, s73c -> s78, job `loup-s80a`): OFF23-S water216 `0.936`, OFF23-M water216 `0.945`, MH-1 NaCl216 `0.894`, MH-1 SrTiO3 `0.883`, OMAT-0 medium generic SrTiO3 `0.981`, specialised `0.995`. Gates at those defaults pass (`loup-s80g`: OMAT-0 medium generic / specialised oxide 2.01 / 2.95 and 1.72 / 2.88, MH-1 crystals, OMOL-0 organic).
+- Lane-group neighbour kernels on cc 8.0 (S80; they build the same lists): library ABBA on shared GEMM plans OFF23-S water216 `0.830`, OFF23-M water216 `0.914`, OFF24-M water `0.982`; oxide gates unchanged (`loup-s83g`).
+- POLAR on cc 8.0 (float32 SIMT GEMMs there): the S52 dot fold, and the own-SGEMM extensions whenever no GEMM cubin is loaded. In-process A/B (`loup-s82a`), fold / extensions / both: POLAR-1-S NaCl216 `0.922` / `0.870` / `0.801`, POLAR-1-M NaCl216 `0.892` / `0.959` / `0.840`, POLAR-1-L NaCl216 `0.887` / `0.926` / `0.842`, POLAR-1-M NbCl5 `0.885` / `0.996` / `0.880`. Crystal gates with both (`loup-s82g`): POLAR-1-S worst 0.47 / 0.72, POLAR-1-M 1.28 / 1.49, POLAR-1-L 1.20 / 0.61, none failing.
+- Not adopted on cc 8.0: the own-SGEMM extensions with the GEMM cubin loaded (OFF23-S water216 `1.034`, OMOL-0 `1.008`; they also move the oxide stress row, one forced variant at 3.02).
+S85 / S86 (`pol-bias-ln-fuse`, 16 November, 5060 Ti):
+- POLAR's small cells run 300+ kernels per step (`POLAR-1-M` `NaCl216`: about 5% of the step idles between them). The MLPs' bias add now runs inside the LayerNorm-SiLU forward and the SCF `q` copy + add as one kernel, with the same float sums: library ABBA on shared GEMM plans, S84 -> S86, `POLAR-1-S` / `-M` / `-L` `NaCl216` `0.990` / `0.995` / `0.994`; crystal gates pass. Three further backward node trims (S87) tied and an in-kernel split-K reduction (S88) was slower; both reverted.
+S96-S106 (`wp-receiver-owned`, `gen-pass-glue`, `gen-conv-bwd-l0-red`, `gen-first-fwd-cols`, `md-langevin-draw-threads`, 16 November, 5060 Ti):
+- S96: the specialised OMAT-0 path's receiver-owned `w'` now runs below 512 atoms too on `sm_120` (SrTiO3 135 / 320 atoms `0.974` / `0.963`); the two OMAT-0 medium paths are now within 2% at every size from 135 to 5,000 atoms.
+- S97-S100 (generic path): no layer-0 embedding gather when every consumer reads a species table, the folded readout's gradient seed assigned (S97) and then its energy and seed folded into the layer's product kernels (S100), the top conv layer's backward assigns the per-edge force vectors (no zero fill, no read-add-store), and each forward conv kernel zeroes its layer's `dx` rows instead of the pass's memset. Library ABBA on shared plans, both orders, S96 -> S100 (product of the steps): OMAT-0 medium generic SrTiO3 `0.989`, MP-0 medium SrTiO3 `0.986`, OFF23-M water216 `0.968`, OFF23-S water216 `0.987`, MH-1 NaCl216 `0.992`; gates pass for every family touched.
+- S101: the remaining accumulating per-edge updates (lower conv layers, `gconv_bwd_L2`) use RED on `sm_120` (OMOL-0 water216 `0.999`, lx 2 models tie).
+- With S97-S101 the generic path leads the specialised one for OMAT-0 medium on this GPU at every size tested (separate processes, generic / specialised: SrTiO3 5,000 atoms `0.989`, NbCl5 `0.984`, 1,080 atoms `0.993`, 320 atoms `0.964`); the default stays specialised pending the A100 comparison (job `s100c`) and the owner's call. Full gate sweep on the S100 library: 20 runs, none failing; S101's families (OFF23-L, OMOL-0, POLAR-1-L) gated again on S101; 77 tests pass on the installed S101 library.
+- S105 / S106: `first_fwd_kernel` without its density-only warp (warp 0 sums the density in the former order: `S0` and `D` bitwise unchanged; kernel 255-260 -> 240-245 us on OMAT-0 generic SrTiO3) and the Langevin first half with one thread per normal pair (the same Philox words, noise bitwise unchanged; 7.8 -> 3.6 us on water216). Library ABBA S101 -> S106 on shared plans, both orders: OMAT-0 generic SrTiO3 `0.9985`, OFF23-M water216 `0.991`, MH-1 NaCl216 `0.993`; gates pass; 77 tests pass on the installed S106 library.
+- A100 validation of S81-S106 (19 jobs on NHR Alex, queued 16 November, none started at 18:40): job list, libraries, decision rules and the checker in [results/alex-a100-queue-20261116](results/alex-a100-queue-20261116/README.md).
 
 ### 5.4 Fixes Found by the Family Work
 - **POLAR LayerNorm-MLP reverse wrote its GEMM output over its own input** (`mlp_bwd`: after the first hidden layer
@@ -469,8 +496,10 @@ S64 (`gen-conv-fwd-variants`, 15 November, 5060 Ti only):
   perfect lattice: residual force 3.0e-4 -> 8.7e-5 eV/A).
 - **Long-range models use float32 SIMT GEMMs only**: with the 3xTF32 hybrid GEMMs the RTX 4000 Ada failed the
   POLAR-1-S / -L stress gates (NaCl stress ratios 3.4-5.2, POLAR-1-L NaNbO3 up to 6.3) and POLAR-1-S NaNbO3_c0
-  returned NaN; with SIMT GEMMs every POLAR configuration passes on both GPUs (5.2). Other families keep the
-  hybrid GEMMs (their gates pass on both GPUs).
+  returned NaN; with SIMT GEMMs every checked configuration in the **original crystal gate** passes on both GPUs (5.2). This does not claim that every structure passes: the expanded S71 screen has a separate FP32 failure on S NaTaO3_c0. Other families keep the hybrid GEMMs (their original gates pass on both GPUs).
+  POLAR's production default remains FP32; the rounded-split experiment is not adopted.
+- **POLAR stress references needed two corrections**: reciprocal-cutoff crossings created discrete energy jumps in finite differences; freezing the integer index set removed those jumps but did not remove finite-step truncation on highly curved energies. Production now differentiates the native float64 energy through all strained geometry; frozen-set FD remains a convergence diagnostic. Cache namespace `gate-refs-3-polar-strain-autograd` invalidates the old targets. No yardstick, gate limit or absolute floor was relaxed. [Reference protocol and verification](OPTIMISATION_LEDGER.md#gate-polar-strain-autograd).
+- **Tensor-core arithmetic has a separate error source**: rounded splitting plus isolated accumulation reduces the original split bias, but exact-TF32-input probes still show downward MMA accumulation bias. The original 90/90 local S/M and 58 original-crystal A100 passes used fixed-step stress targets. Expanded-screen diagnosis found additional FD truncation error: correcting only the target changes A100 S/Nb2O5 TC stress 3.722 -> 2.975 and S/Ta2O5 3.151 -> 0.644. L/Na2O remains a real TC failure: force 4.565 and corrected stress 4.749, while its FP32 baseline passes. M/NbCl5 is about 20% faster on A100 in both construction orders, but **no POLAR TC default is enabled**. [Arithmetic and scope](OPTIMISATION_LEDGER.md#gemm-tc-rounded-polar); [reference correction and local diagnosis](OPTIMISATION_LEDGER.md#gate-polar-strain-autograd).
 - **Pipelined MD margin** (section 3.2, M1): 1 of ~1,600 steps of three 300 K benchmarks had run on an
   incomplete list with a two-step margin; three steps: 0 in every run.
 
@@ -1930,6 +1959,48 @@ After the round6-hardening kernels are merged (S110: -18 to -22% VRAM in the who
 4a5e9c2): the tile workspace estimates and so the planner's caps change. Re-run the plan comparison (135,000 to 8M
 atoms, fractions 0.9 to 0.25) and the kept-call times of the plans that move, and re-check the host-state rules of
 this section (`tile-host-state-window`, `tile-slot-room-limit`, `tile-host-state-larger-cap`) against them.
+
+`tile-host-state-larger-cap` on `MACE-OMAT-0 small` (measured on release/v1 before the merge, kept calls, one or
+two runs each, 5060 Ti only): at fraction 0.9 the plan does not change (1,080,000 atoms 1.199-1.221 s, 2,560,000
+atoms 2.94-2.97 s). At fraction 0.5, 1,080,000 atoms: default (cap 49,152, host state) 1.216 / 1.217 s against the
+host state off (cap 32,768) 1.247 / 1.234 s, about -1.6%; 2,560,000 atoms: default (cap 32,768) 2.913 s against off
+(cap 16,384) 3.083 / 3.101 s, about -5.8%. Peaks 7.23 against 7.18 GiB and 7.29 against 7.24 GiB.
+
+Merge of round6-hardening 13d6337 into release/v1 (17 November 2026; PLAN.md D84 and D85; 5060 Ti only).
+Decisions: the ABI-1 `LoupMDStats` fields stay (`dangerous_builds` is always 0; `pipelined_steps` now counts the
+steps the GPU ran without waiting for a host-finished rebuild); the decaying step-displacement tracker stays only
+for `loup_get_step_displacement`, the saved state and the automatic skin (ledger `md-disp-decay` superseded); the
+chain fold is chosen per system (whole systems fold, tiled and domain systems do not, so the sweeps stay available,
+and MACE-OMOL-0 extra large runs tiled without `LOUP_CHAIN_FOLD=0`); the tile lists' full form drops receivers and
+pairs as S113 did for the whole system (36 -> 28 B per edge, `kTileFullEdgeB`); the variable cell keeps integer image
+shifts as one `char4` per edge (4 B) formed after each rebuild; variable-cell runs take every rebuild on the host.
+`results/` is not merged (local paths).
+
+What the per-system fold does to a comparison of a tiled with a whole-system result (measured, `SrTiO3` 3x3x3,
+three engines a side, differences in eV/atom, eV/A, eV/A^3):
+
+| pair | OMAT-0 small | OMAT-0 medium (generic) |
+| --- | --- | --- |
+| whole, fold against fold | 0-3e-9, 6-8e-7, 2-6e-9 | 0-4e-9, 6-8e-7, 2-4e-9 |
+| whole, no fold against no fold | 0, 6-9e-7, 2-3e-9 | 0-8e-9, 6-8e-7, 3-5e-9 |
+| whole, fold against no fold | 2.4-2.8e-8, 1.8-2.1e-6, 1.4-1.8e-8 | 4.1-4.5e-8, 2.0-2.5e-6, 6-7e-9 |
+| domain (no fold) against whole with the fold | 2.6-3.5e-8, 1.8-2.0e-6, 1.5-1.8e-8 | 2.9-3.4e-8, 2.0-2.4e-6, 6e-9-1.1e-8 |
+| domain against whole without the fold | 1e-9-1.0e-8, 7-9e-7, 2-4e-9 | 9e-9-1.6e-8, 8e-7-1.0e-6, 5-6e-9 |
+
+The fold is another order of float32 operations, a quarter of the gate's force floor (1e-5 eV/A) and a fifth of its
+stress floor (1e-7 eV/A^3) at most. The tests whose bounds are those of the same operations (1e-7 eV/atom,
+3e-6 or 1e-5 eV/A, 1e-8 or 3e-8 eV/A^3) take their whole-system reference without the fold
+(`tests/gpu/gpu_support.py`, `unfolded`); with the folded reference `test_sweeps_on_a_periodic_system_without_ghosts`
+failed once in the fast tier and passed alone.
+
+Before the merge commit (library sha256 `74612462`): the merged tree built at the first compile;
+`codegen/gen_generic.py` and `codegen/gen_kernels.py` reproduce `src/generated_generic.cu`, `.cuh`, the manifest,
+`src/generated_kernels.cuh` and its signature byte for byte; `tests/cpu` 490 passed, 5 skipped; `tests/gpu -m fast`
+352 passed, 2 failed (the fold's two premises above, both corrected in the tests), 7 skipped (the NbCl5 structure);
+then every file of the full tier passed with the corrected tests (domain, sweeps, capacity and large box 25, tiled,
+tile lists and memory plan 64, tiled MD 10, the integrators' full tests 12) and `-m acceptance` 15 passed, 1 skipped:
+the default gate (OMAT-0 medium on the generic kernels, 18 rows) worst force ratio 2.05, stress 1.93.
+The tile plans and times above are from before the merge and must be measured again.
 
 `tile-wave-host-bus` (O32, NEUTRAL, not adopted; local branch `wip/tile-wave-host-bus`): the wavefront's host pool
 mapped, its ghost gathers, gradient adds (plain adds in rounds of distinct host rows) and block zeroing as kernels on

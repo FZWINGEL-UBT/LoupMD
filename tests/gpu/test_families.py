@@ -154,14 +154,12 @@ def test_generic_family_conserves_energy_in_nve(model, base):
     eng = LoupEngine(ensure_loup_bundle(path, sorted(set(at.get_atomic_numbers().tolist()))))
     eng.set_system(at.get_atomic_numbers(), at.get_masses(), skin=0.5)
     eng.set_state(at.positions, maxwell_velocities(at, 300.0, 43), at.cell.array)
-    energies, dangerous = [], 0
+    energies = []
     for _ in range(10):  # 1,000 steps
         st = eng.run_nve(100, dt)
         energies.append(st.final_potential_energy_ev + st.final_kinetic_energy_ev)
-        dangerous += st.dangerous_builds
     e = (np.array(energies) - energies[0]) * 1000.0 / len(at)  # meV/atom
     slope = np.polyfit(np.arange(len(e)) * 0.1 * dt, e, 1)[0]  # meV/atom/ps
     print(f"{model}: drift {slope:+.4f} meV/atom/ps, largest excursion {np.abs(e).max():.4f} meV/atom")
-    assert dangerous == 0
     assert abs(slope) < 0.2, f"NVE drift {slope:.4f} meV/atom/ps"
     assert np.abs(e).max() < 0.5, f"NVE excursion {np.abs(e).max():.3f} meV/atom"

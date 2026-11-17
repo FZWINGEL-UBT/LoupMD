@@ -57,9 +57,8 @@ __global__ void cell_derive_kernel(CellDev* __restrict__ cell, int* __restrict__
 }
 
 __global__ void check_skin_cell_kernel(
-    int N, int lag, int lag_switch,
-    const double* __restrict__ pos64, const double* __restrict__ ref_pos64, const CellDev* __restrict__ cell,
-    const unsigned int* __restrict__ max_step_disp2, int* __restrict__ need_rebuild
+    int N, const double* __restrict__ pos64, const double* __restrict__ ref_pos64, const CellDev* __restrict__ cell,
+    int* __restrict__ need_rebuild
 ) {
     const int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= N) return;
@@ -69,41 +68,35 @@ __global__ void check_skin_cell_kernel(
     const double dy = pos64[i * 3 + 1] - (x0 * f[1] + y0 * f[4] + z0 * f[7]);
     const double dz = pos64[i * 3 + 2] - (x0 * f[2] + y0 * f[5] + z0 * f[8]);
     const double d2 = dx * dx + dy * dy + dz * dz;
-    const unsigned int step_bits = max_step_disp2[0] > max_step_disp2[1] ? max_step_disp2[0] : max_step_disp2[1];
-    const double step = sqrt((double)__uint_as_float(step_bits));
     const double limit = cell->thr;
-    const double thr = limit - lag * step;
-    int flag = 0;
-    if (thr <= 0.0 || d2 > thr * thr) flag |= 1;
-    if (limit <= 0.0 || d2 > limit * limit) flag |= 2;
-    if (lag_switch > 0) {
-        const double thr_switch = limit - lag_switch * step;
-        if (thr_switch <= 0.0 || d2 > thr_switch * thr_switch) flag |= 4;
-    }
-    if (flag) atomicOr(need_rebuild, flag);
+    // atomicOr, not a store: cell_derive_kernel's bit 8 (the cell diverged) must survive.
+    if (limit <= 0.0 || d2 > limit * limit) atomicOr(need_rebuild, 1);
 }
 
-__global__ void sorted_shifts_kernel(
-    int E, const int* __restrict__ sort_vals, const int* __restrict__ tmp_shifts,
-    int* __restrict__ sx, int* __restrict__ sy, int* __restrict__ sz
-) {
+__global__ void cell_shift_codes_kernel(int E, Mat3 inv, const double* __restrict__ shift_cart,
+                                        char4* __restrict__ code, int* __restrict__ bad) {
     const int e = blockIdx.x * blockDim.x + threadIdx.x;
     if (e >= E) return;
-    const int src = sort_vals[e];
-    sx[e] = tmp_shifts[src * 3 + 0];
-    sy[e] = tmp_shifts[src * 3 + 1];
-    sz[e] = tmp_shifts[src * 3 + 2];
+    const double v0 = shift_cart[(size_t)e * 3 + 0], v1 = shift_cart[(size_t)e * 3 + 1],
+                 v2 = shift_cart[(size_t)e * 3 + 2];
+    double n[3];
+    for (int k = 0; k < 3; ++k) n[k] = rint(v0 * inv.m[k] + v1 * inv.m[3 + k] + v2 * inv.m[6 + k]);
+    if (fabs(n[0]) > 127.0 || fabs(n[1]) > 127.0 || fabs(n[2]) > 127.0) {
+        *bad = 1;
+        return;
+    }
+    code[e] = make_char4((signed char)n[0], (signed char)n[1], (signed char)n[2], 0);
 }
 
 __global__ void shift_cart_kernel(
     const int* __restrict__ n_edges, const CellDev* __restrict__ cell,
-    const int* __restrict__ sx, const int* __restrict__ sy, const int* __restrict__ sz,
-    double* __restrict__ shift_cart
+    const char4* __restrict__ code, double* __restrict__ shift_cart
 ) {
     const int e = blockIdx.x * blockDim.x + threadIdx.x;
     if (e >= n_edges[0]) return;
     const double* c = cell->h;
-    const double x = (double)sx[e], y = (double)sy[e], z = (double)sz[e];
+    const char4 s = code[e];
+    const double x = (double)s.x, y = (double)s.y, z = (double)s.z;
     shift_cart[e * 3 + 0] = x * c[0] + y * c[3] + z * c[6];
     shift_cart[e * 3 + 1] = x * c[1] + y * c[4] + z * c[7];
     shift_cart[e * 3 + 2] = x * c[2] + y * c[5] + z * c[8];

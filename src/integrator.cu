@@ -11,7 +11,8 @@ constexpr double ASE_FS = 0.09822694788464063;
 constexpr double ASE_KB = 8.617330337217213e-5;
 
 // Maximum over atoms and steps of the squared per-step displacement, as float bits (ordered like the floats
-// themselves for non-negative values). check_skin_kernel lowers the rebuild threshold by it. It decays in windows:
+// themselves for non-negative values), for loup_get_step_displacement (the skin choice of loupmd.simulation) and
+// the saved state; the MD loop itself checks every step's list exactly and does not read it. It decays in windows:
 // max_step_disp2[0] is the maximum of the current window, [1] that of the previous one, and readers take the larger,
 // so one fast step is forgotten two windows later (review item S2) while the value never falls below what the
 // current window has seen. rotate_step_disp_kernel ends a window (run_md_loop decides when).
@@ -21,13 +22,9 @@ __device__ __forceinline__ void record_step_disp2(double d2, unsigned int* max_s
     if ((threadIdx.x & 31) == 0 && m != 0u) atomicMax(max_step_disp2, m);
 }
 
-// Ending a window also clears bit 4 of the skin check's flag word ("list too old to switch to the pipelined loop"):
-// that bit was set against the old maximum and otherwise stays until a rebuild, which a cold system never has. The
-// next unpipelined check sets it again if it still holds. Bits 1 and 2 are not touched.
-__global__ void rotate_step_disp_kernel(unsigned int* __restrict__ max_step_disp2, int* __restrict__ need_rebuild) {
+__global__ void rotate_step_disp_kernel(unsigned int* __restrict__ max_step_disp2) {
     max_step_disp2[1] = max_step_disp2[0];
     max_step_disp2[0] = 0u;
-    need_rebuild[0] &= ~4;
 }
 
 __global__ void nve_first_half_kernel(
@@ -74,9 +71,14 @@ __global__ void nve_second_half_kernel(
 
 // The noise coefficients of this step come from the device (target[2..4]: ASE's c3, c4, c5 without the mass
 // factor, for the step's target temperature), so a ramp can move them every step and a changed temperature needs
-// no new graph. The second half-kick's first thread forms them for the next step: per atom this kernel does what
-// it did when they were baked in.
-__global__ void langevin_first_half_kernel(
+// no new graph. The second half-kick's first thread forms them for the next step.
+// S106: 32 atoms per 96-thread block. Thread (atom i, c) draws the c-th normal pair of atom i at Philox offset
+// step * 16 + 4 c: the same 32-bit words, and so the same noise, as the three sequential curand_normal2_double calls
+// of the former one-thread-per-atom kernel (each consumes 4 words from an aligned position; langevin_noise_kernel
+// still draws them so), in a third of the double-precision latency chain. The same thread then updates component c
+// of atom i (contiguous across the block). Offset counts 32-bit outputs; the three pairs consume 3 x 4 = 12, so 16
+// per step keeps consecutive steps on disjoint words.
+__global__ void __launch_bounds__(96) langevin_first_half_kernel(
     int N, double dt_ase, double c1, double c2, const double* __restrict__ target,
     unsigned long long seed, const unsigned long long* __restrict__ step_counter,
     const double* __restrict__ forces,
@@ -87,40 +89,38 @@ __global__ void langevin_first_half_kernel(
     double* __restrict__ rnd_vel_save,
     unsigned int* __restrict__ max_step_disp2
 ) {
-    int i = blockIdx.x * blockDim.x + threadIdx.x;
-    double d2 = 0.0;
+    __shared__ double s_n[32][6];  // per atom: xi[0..2], eta[0..2] = the three pairs in draw order
+    __shared__ double s_d2[32][3];
+    const int t = threadIdx.x, a = t / 3, c = t - 3 * a;
+    const int i = blockIdx.x * 32 + a;
     if (i < N) {
-    unsigned long long step = *step_counter;
-    curandStatePhilox4_32_10_t rng;
-    // Offset counts 32-bit outputs; the three curand_normal2_double calls consume 3 x 4 = 12, so 16 per step keeps
-    // consecutive steps on disjoint words.
-    curand_init(seed, (unsigned long long)i, step * 16ULL, &rng);
-    double2 n0 = curand_normal2_double(&rng);
-    double2 n1 = curand_normal2_double(&rng);
-    double2 n2 = curand_normal2_double(&rng);
-    double xi[3]  = {n0.x, n0.y, n1.x};
-    double eta[3] = {n1.y, n2.x, n2.y};
-
-    double im = inv_masses[i];
-    double sim = sqrt_inv_masses[i];
-    double c3 = target[2] * sim;
-    double c4 = target[3] * sim;
-    double c5 = target[4] * sim;
-
-    #pragma unroll
-    for (int c = 0; c < 3; ++c) {
-        int idx = i * 3 + c;
-        double rnd_p = c5 * eta[c];
-        double rnd_v = c3 * xi[c] - c4 * eta[c];
+        curandStatePhilox4_32_10_t rng;
+        curand_init(seed, (unsigned long long)i, *step_counter * 16ULL + 4ULL * c, &rng);
+        const double2 n = curand_normal2_double(&rng);
+        s_n[a][2 * c] = n.x;
+        s_n[a][2 * c + 1] = n.y;
+    }
+    __syncthreads();
+    double dx = 0.0;
+    if (i < N) {
+        const double xi = s_n[a][c], eta = s_n[a][3 + c];
+        const double im = inv_masses[i];
+        const double sim = sqrt_inv_masses[i];
+        const double c3 = target[2] * sim;
+        const double c4 = target[3] * sim;
+        const double c5 = target[4] * sim;
+        const int idx = i * 3 + c;
+        const double rnd_p = c5 * eta;
+        const double rnd_v = c3 * xi - c4 * eta;
         rnd_vel_save[idx] = rnd_v;
-        double v = vel64[idx] + c1 * forces[idx] * im - c2 * vel64[idx] + rnd_v;
-        double dx = dt_ase * v + rnd_p;
+        const double v = vel64[idx] + c1 * forces[idx] * im - c2 * vel64[idx] + rnd_v;
+        dx = dt_ase * v + rnd_p;
         pos64[idx] += dx;
         vel64[idx] = (dx - rnd_p) / dt_ase;
-        d2 += dx * dx;
     }
-    }
-    record_step_disp2(d2, max_step_disp2);
+    s_d2[a][c] = dx * dx;
+    __syncthreads();
+    if (t < 32) record_step_disp2(s_d2[t][0] + s_d2[t][1] + s_d2[t][2], max_step_disp2);
 }
 
 // ---- fix_com: the noise of a step conditioned on a centre of mass at rest ----

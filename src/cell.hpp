@@ -39,21 +39,15 @@ __global__ void cell_move_positions_kernel(int N, const CellDev* __restrict__ ce
 __global__ void cell_derive_kernel(CellDev* __restrict__ cell, int* __restrict__ need_rebuild);
 
 // check_skin_kernel for a variable cell: the displacement is measured from where the cell's deformation has taken
-// the list's reference position, and the threshold is cell->thr. Bits as in check_skin_kernel.
-__global__ void check_skin_cell_kernel(int N, int lag, int lag_switch, const double* __restrict__ pos64,
-                                       const double* __restrict__ ref_pos64, const CellDev* __restrict__ cell,
-                                       const unsigned int* __restrict__ max_step_disp2,
-                                       int* __restrict__ need_rebuild);
+// the list's reference position, and the threshold is cell->thr. Sets bit 1 of need_rebuild, as check_skin_kernel.
+__global__ void check_skin_cell_kernel(int N, const double* __restrict__ pos64, const double* __restrict__ ref_pos64,
+                                       const CellDev* __restrict__ cell, int* __restrict__ need_rebuild);
 
-// At a rebuild: the integer image shifts of the edges in the edges' sorted order, one array per component.
-__global__ void sorted_shifts_kernel(int E, const int* __restrict__ sort_vals, const int* __restrict__ tmp_shifts,
-                                     int* __restrict__ sx, int* __restrict__ sy, int* __restrict__ sz);
-
-// In every step: shift_cart = shift h, as gather_sorted_edges_kernel forms it at a rebuild. The launch covers the
-// edge bucket a captured graph is made for; n_edges[0] is the list's edge count now.
+// In every step: shift_cart = shift h, as sort_gather_rows_kernel forms it at a rebuild, from the edges' integer
+// image shifts (cell_shift_codes_kernel). The launch covers the edge bucket a captured graph is made for; n_edges[0]
+// is the list's edge count now.
 __global__ void shift_cart_kernel(const int* __restrict__ n_edges, const CellDev* __restrict__ cell,
-                                  const int* __restrict__ sx, const int* __restrict__ sy,
-                                  const int* __restrict__ sz, double* __restrict__ shift_cart);
+                                  const char4* __restrict__ code, double* __restrict__ shift_cart);
 
 // Berendsen NPT (ASE 3.27's NPTBerendsen and Inhomogeneous_NPTBerendsen), between the thermostat's scale and
 // the half-kick. kinetic_diag_kernel sums m v_a^2 per axis into out[0..2] (the ideal-gas part of the stress's
@@ -75,5 +69,10 @@ struct Mat3 {
     double m[9];
 };
 __global__ void positions_times_matrix_kernel(int N, Mat3 m, double* __restrict__ pos64);
+
+// At a rebuild (nl_finish): each edge's integer image shift n = rint(shift_cart inv), inv the list's cell's inverse
+// (frac = x inv), into code (x, y, z); sets *bad when a component does not fit a signed byte.
+__global__ void cell_shift_codes_kernel(int E, Mat3 inv, const double* __restrict__ shift_cart,
+                                        char4* __restrict__ code, int* __restrict__ bad);
 
 }  // namespace loup

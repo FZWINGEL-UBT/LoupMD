@@ -10,12 +10,15 @@
 // Tiles (-DLOUP_TC_TILESET): 3 = 64x64, 32x64, 64x32 (warp 32x32x16, 4 stages; FastMACE's three, the tiles of the
 // cubins LoupMD shipped before); 6 = those plus 128x64 and 64x128 (warp 32x32, 8 warps) and 128x128 (warp 64x32, 8 warps),
 // 3 stages (64x64 warps, CUTLASS example 27, spill with the 3xTF32 fragments: 368 B of stack on sm_80).
-// Beta (-DLOUP_TC_BETA=1): the loader may also offer the cubin for C = A @ B + beta C (CUTLASS's epilogue reads C).
+// Beta (-DLOUP_TC_BETA=1): the cubin also has entries for C = A @ B + beta C (CUTLASS's epilogue reads C).
 //
-// Self-description for the loader: loup_gemm_tc_info = {format 1, math, beta_ok, tiles, then per tile: tile M,
+// Self-description for the loader: loup_gemm_tc_info = {format 2, math, beta_ok, tiles, then per tile: tile M,
 // tile N, threads, dynamic shared bytes (B row-major), dynamic shared bytes (B column-major)}.
 // Entries loup_gemm_tc_rr_<t> (B row-major [K, N]) and loup_gemm_tc_rc_<t> (B column-major: the transpose of a
-// row-major [N, K]), (M, N, K, A, lda, B, ldb, C, ldc, beta); grid ceil(M / tile M) x ceil(N / tile N).
+// row-major [N, K]) compute C = A @ B with beta fixed at 0 at compile time, so their epilogue has no source path
+// (format 1 builds passed beta at run time to every entry: the same results, a slower epilogue on short K); with
+// beta_ok, loup_gemm_tc_rrb_<t> / loup_gemm_tc_rcb_<t> take beta at run time. All entries (M, N, K, A, lda, B, ldb,
+// C, ldc, beta); grid ceil(M / tile M) x ceil(N / tile N).
 // Alignment 4 (128-bit accesses): lda, ldb, ldc multiples of 4, every pointer 16-byte aligned; the caller checks.
 // No split-K: each output's K sum runs in one order, the same in every tile.
 
@@ -23,6 +26,9 @@
 #if LOUP_TC_MATH == 1
 #include "hybrid_f16.h"
 #define LOUP_TC_OP cutlass::arch::OpMultiplyAddHybridF16
+#elif LOUP_TC_MATH == 0 && defined(LOUP_TC_SPLIT_RN) && LOUP_TC_SPLIT_RN
+#include "fastf32_rn.h"
+#define LOUP_TC_OP cutlass::arch::OpMultiplyAddFastF32RN
 #elif LOUP_TC_MATH == 0
 #define LOUP_TC_OP cutlass::arch::OpMultiplyAddFastF32
 #else
@@ -53,7 +59,7 @@ using GemmKernel = typename cutlass::gemm::kernel::DefaultGemm<
     cutlass::gemm::threadblock::GemmIdentityThreadblockSwizzle<1>, Stages, false,
     LOUP_TC_OP>::GemmKernel;
 
-template <typename Kernel>
+template <typename Kernel, bool kBeta>
 __device__ __forceinline__ void run(int m, int n, int k, float const *a, int lda, float const *b, int ldb, float *c,
                                     int ldc, float beta) {
   extern __shared__ __align__(16) char storage[];
@@ -65,7 +71,7 @@ __device__ __forceinline__ void run(int m, int n, int k, float const *a, int lda
       {const_cast<float *>(b), typename Kernel::Mma::IteratorB::Layout(ldb)},
       {c, typename Kernel::Epilogue::OutputTileIterator::Layout(ldc)},
       {c, typename Kernel::Epilogue::OutputTileIterator::Layout(ldc)},
-      typename Kernel::OutputOp::Params(1.0f, beta));
+      typename Kernel::OutputOp::Params(1.0f, kBeta ? beta : 0.0f));
   Kernel op;
   op(params, *reinterpret_cast<typename Kernel::SharedStorage *>(storage));
 }
@@ -93,32 +99,34 @@ using RC5 = GemmKernel<cutlass::layout::ColumnMajor, 128, 128, 64, 32, 3>;
 extern "C" {
 
 __constant__ int loup_gemm_tc_info[4 + 5 * LOUP_TC_TILESET] = {
-    1, LOUP_TC_MATH, LOUP_TC_BETA, LOUP_TC_TILESET,
+    2, LOUP_TC_MATH, LOUP_TC_BETA, LOUP_TC_TILESET,
     LOUP_TC_TILE_INFO(RR0, RC0, 64, 64), LOUP_TC_TILE_INFO(RR1, RC1, 32, 64), LOUP_TC_TILE_INFO(RR2, RC2, 64, 32),
 #if LOUP_TC_TILESET == 6
     LOUP_TC_TILE_INFO(RR3, RC3, 128, 64), LOUP_TC_TILE_INFO(RR4, RC4, 64, 128), LOUP_TC_TILE_INFO(RR5, RC5, 128, 128),
 #endif
 };
 
-#define LOUP_TC_ENTRY(name, Kernel)                                                                               \
+#define LOUP_TC_ENTRY(name, Kernel, kBeta)                                                                        \
   __global__ void __launch_bounds__(Kernel::kThreadCount)                                                         \
   name(int m, int n, int k, float const *a, int lda, float const *b, int ldb, float *c, int ldc, float beta) {    \
-    run<Kernel>(m, n, k, a, lda, b, ldb, c, ldc, beta);                                                           \
+    run<Kernel, kBeta>(m, n, k, a, lda, b, ldb, c, ldc, beta);                                                    \
   }
+#if LOUP_TC_BETA
+#define LOUP_TC_ENTRIES(t, RR, RC)                                                                                \
+  LOUP_TC_ENTRY(loup_gemm_tc_rr_##t, RR, false) LOUP_TC_ENTRY(loup_gemm_tc_rc_##t, RC, false)                     \
+  LOUP_TC_ENTRY(loup_gemm_tc_rrb_##t, RR, true) LOUP_TC_ENTRY(loup_gemm_tc_rcb_##t, RC, true)
+#else
+#define LOUP_TC_ENTRIES(t, RR, RC)                                                                                \
+  LOUP_TC_ENTRY(loup_gemm_tc_rr_##t, RR, false) LOUP_TC_ENTRY(loup_gemm_tc_rc_##t, RC, false)
+#endif
 
-LOUP_TC_ENTRY(loup_gemm_tc_rr_0, RR0)
-LOUP_TC_ENTRY(loup_gemm_tc_rc_0, RC0)
-LOUP_TC_ENTRY(loup_gemm_tc_rr_1, RR1)
-LOUP_TC_ENTRY(loup_gemm_tc_rc_1, RC1)
-LOUP_TC_ENTRY(loup_gemm_tc_rr_2, RR2)
-LOUP_TC_ENTRY(loup_gemm_tc_rc_2, RC2)
+LOUP_TC_ENTRIES(0, RR0, RC0)
+LOUP_TC_ENTRIES(1, RR1, RC1)
+LOUP_TC_ENTRIES(2, RR2, RC2)
 #if LOUP_TC_TILESET == 6
-LOUP_TC_ENTRY(loup_gemm_tc_rr_3, RR3)
-LOUP_TC_ENTRY(loup_gemm_tc_rc_3, RC3)
-LOUP_TC_ENTRY(loup_gemm_tc_rr_4, RR4)
-LOUP_TC_ENTRY(loup_gemm_tc_rc_4, RC4)
-LOUP_TC_ENTRY(loup_gemm_tc_rr_5, RR5)
-LOUP_TC_ENTRY(loup_gemm_tc_rc_5, RC5)
+LOUP_TC_ENTRIES(3, RR3, RC3)
+LOUP_TC_ENTRIES(4, RR4, RC4)
+LOUP_TC_ENTRIES(5, RR5, RC5)
 #endif
 
 }  // extern "C"

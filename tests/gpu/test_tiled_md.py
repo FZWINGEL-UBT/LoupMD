@@ -7,7 +7,7 @@ import gc
 
 import numpy as np
 import pytest
-from gpu_support import find_model, maxwell_velocities, srtio3
+from gpu_support import find_model, maxwell_velocities, srtio3, unfolded
 
 from loupmd import LoupEngine, capacity, ensure_loup_bundle
 from loupmd.config import CapacityConfig
@@ -55,7 +55,8 @@ def test_kept_lists_give_the_whole_system_result_until_an_atom_moves_half_the_sk
     assert kept.lists_kept and kept.list_builds == first.list_builds
     assert not rebuilt.lists_kept and rebuilt.list_builds == first.list_builds + 1 and rebuilt.receivers == 1000
     for (e, f, s), pos in (((e1, f1, s1), moved), ((e2, f2, s2), jumped)):
-        e0, f0, s0 = _whole(bundle, at, pos)
+        with unfolded():                          # the tiles run without the skip-chain fold (gpu_support.unfolded)
+            e0, f0, s0 = _whole(bundle, at, pos)
         assert abs(e - e0) / n <= 1e-7
         assert np.abs(f - f0).max() <= 1e-5
         assert np.abs(s - s0).max() <= 1e-8
