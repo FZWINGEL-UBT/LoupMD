@@ -170,8 +170,9 @@ def test_without_a_reach_there_are_no_ghosts_and_the_grid_can_be_given(planner):
 
 
 def test_the_grid_is_the_one_with_the_fewest_pieces(planner):
-    """FastMACE's ``fit_grid``: of the rule's grid and six finer ones, the grid whose blocks make the fewest tiles
-    (the coarser one on a tie). On a crystal the rule's blocks can sit just above the cap, and each then splits."""
+    """FastMACE's ``fit_grid`` (without a reach): of the rule's grid and six finer ones, the grid whose blocks make
+    the fewest tiles (the coarser one on a tie). On a crystal the rule's blocks can sit just above the cap, and each
+    then splits."""
     positions, cell = srtio3(24, rattle=0.0, strays=False)       # 69,120 atoms
     n, receivers = len(positions), 4096
     counts = {}
@@ -183,6 +184,42 @@ def test_the_grid_is_the_one_with_the_fewest_pieces(planner):
     best = min(counts.values())
     assert fitted["tiles"] == best and fitted["grid"] == next(g for g, c in counts.items() if c == best)
     assert best <= counts[rule_grid(cell, n, receivers)]
+
+
+def _grid_rows(positions, cell, grid, receivers, reach):
+    """The fit's rows of a grid: every piece of a block counts the block's atoms and its halo (the mean density over
+    the block's shell `reach` thick)."""
+    frac = positions @ np.linalg.inv(cell)
+    frac -= np.floor(frac)
+    k = np.asarray(grid)
+    b = np.minimum((frac * k).astype(np.int64), k - 1)
+    counts = np.bincount((b[:, 0] * k[1] + b[:, 1]) * k[2] + b[:, 2], minlength=int(np.prod(k)))
+    sides = spacings(cell) / k
+    halo = len(positions) / abs(np.linalg.det(cell)) * (np.prod(sides + 2 * reach) - np.prod(sides))
+    pieces = -(-counts // receivers)
+    return float(np.sum(pieces * (counts + halo)))
+
+
+def test_with_a_reach_the_grid_is_the_one_with_the_fewest_rows(planner):
+    """O32: with a reach, the grid whose pieces have the fewest rows (locals and halo; a piece of a split block takes
+    about the whole block). Here the rule's 3 x 3 x 3 blocks of 2,560 atoms split at the cap of 2,048 into 54
+    pieces whose domains are their whole block; 4 x 4 x 4 makes more tiles (64) but fewer rows and smaller domains
+    (2,560,000 atoms at cap 65,536 the same: a 12.6 GB workspace against 5 GB)."""
+    positions, cell = srtio3(24, rattle=0.0, strays=False)       # 69,120 atoms
+    n, receivers = len(positions), 2048
+    assert rule_grid(cell, n, receivers) == (3, 3, 3)
+    rows = {}
+    for scale in GRID_FIT_SCALES:
+        grid = rule_grid(cell, n, receivers, scale)
+        rows.setdefault(grid, _grid_rows(positions, cell, grid, receivers, REACH))
+    fewest = planner(positions, cell, receivers)
+    fitted = planner(positions, cell, receivers, reach=REACH)
+    assert fewest["grid"] == (3, 3, 3) and fewest["tiles"] == 54
+    assert fitted["grid"] == min(rows, key=rows.get) == (4, 4, 4) and fitted["tiles"] == 64
+    widest = {name: max(np.diff(p["local_ptr"]) + np.diff(p["ghost_ptr"]))
+              for name, p in (("fewest", planner(positions, cell, receivers, reach=REACH, shape=(3, 3, 3))),
+                              ("fitted", fitted))}
+    assert widest["fitted"] < 0.8 * widest["fewest"]               # 4,429 against 6,050 rows
 
 
 def test_the_edge_cap_splits_a_block_as_fastmace_does(planner):

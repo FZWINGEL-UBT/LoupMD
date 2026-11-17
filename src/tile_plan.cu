@@ -88,9 +88,15 @@ void rule_grid(const Geometry& g, int64_t n, int receivers, double scale, int k[
 // FastMACE's fit_grid: of the rule's grid and finer ones, the grid with the fewest pieces of at most `receivers`
 // atoms; the coarser one on a tie. The rule aims at `receivers` atoms per block on average, so on a crystal most
 // blocks can sit just above the cap and split into a full tile and a small remainder with a large halo.
-void fit_grid(const Geometry& g, const double* positions, int64_t n, int receivers, int k[3]) {
+//
+// O32: with a reach, the grid with the fewest rows instead (the coarser one on a tie): a piece of a split block takes
+// the atoms in atom order, so its domain is about the whole block and its halo, and every piece counts as
+// (block atoms + halo), the halo at the system's mean density over the block's shell `reach` thick. 2,560,000 atoms
+// at cap 65,536: the fewest pieces were 3 x 3 x 3 blocks of 95,000 split in two (54 tiles, the widest domain 65,536
+// locals and 69,464 ghosts: a 12.6 GB workspace); 4 x 4 x 4 (64 tiles of 40,000 and 26,000 ghosts) has fewer rows.
+void fit_grid(const Geometry& g, const double* positions, int64_t n, int receivers, double reach, int k[3]) {
     static const double scales[] = {1.0, 1.04, 1.08, 1.12, 1.17, 1.22, 1.28};
-    int64_t best = -1;
+    double best = -1.0;
     int seen[7][3];
     int n_seen = 0;
     std::vector<int64_t> counts;
@@ -108,10 +114,24 @@ void fit_grid(const Geometry& g, const double* positions, int64_t n, int receive
             wrapped(g, positions, a, f, whole);
             counts[static_cast<size_t>(cell_index(f, trial))]++;
         }
-        int64_t pieces = 0;
-        for (int64_t c : counts) pieces += (c + receivers - 1) / receivers;
-        if (best < 0 || pieces < best) {
-            best = pieces;
+        double halo = 0.0;  // ghosts of a block: the mean density over the shell `reach` thick around it
+        if (reach > 0.0) {
+            double inner = 1.0, outer = 1.0;
+            for (int i = 0; i < 3; i++) {
+                const double side = g.spacing[i] / trial[i];
+                inner *= side;
+                outer *= side + 2.0 * reach;
+            }
+            halo = static_cast<double>(n) / g.volume * (outer - inner);
+        }
+        double score = 0.0;
+        for (int64_t c : counts) {
+            const int64_t pieces = (c + receivers - 1) / receivers;
+            score += reach > 0.0 ? static_cast<double>(pieces) * (static_cast<double>(c) + halo)
+                                 : static_cast<double>(pieces);
+        }
+        if (best < 0.0 || score < best) {
+            best = score;
             std::memcpy(k, trial, sizeof(trial));
         }
     }
@@ -135,7 +155,7 @@ TilePlan plan_tiles(const double* positions, int64_t n, const double* cell, int 
     if (shape) {
         std::memcpy(plan.grid, shape, sizeof(plan.grid));
     } else {
-        fit_grid(g, positions, n, receivers, plan.grid);
+        fit_grid(g, positions, n, receivers, reach, plan.grid);
     }
     const int* k = plan.grid;
     if (!(boundary_skin >= 0.0) || !std::isfinite(boundary_skin))

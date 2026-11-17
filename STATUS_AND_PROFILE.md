@@ -1802,3 +1802,15 @@ tiles), peak 12.95 -> 12.84 GiB; 320,000 atoms unchanged (cap 65,536 on the devi
 atoms at fraction 0.75 now cap 32,768 with 89 compact slots, kept call 7.22 s (cap 65,536: 7.26 s; one call each).
 The 256-tile and 8x limits are where it was measured (2,560,000 atoms only); a host state at 65,536 with no slot
 (6.49 s) is the plan it avoids.
+
+`tile-grid-rows` (O32): why 65,536 found no memory. The call's free memory per phase (2,560,000 atoms, host state):
+the workspace set-up took 12.6 GB at cap 65,536 (plan estimate 10.6 GB) and 5.0 GB at 49,152 (estimate 8.2 GB). The
+grid fit (FastMACE's `fit_grid`: the fewest pieces) chose 3 x 3 x 3 blocks of about 95,000 atoms, each split in two
+in atom order, so each piece's domain is its whole block and halo: the widest 65,536 locals and 69,464 ghosts
+(54 tiles). 4 x 4 x 4 (64 tiles) has 39,957 + 25,778. With a reach the fit now takes the grid with the fewest rows
+(each piece counting its block's atoms and the halo at the mean density over a shell `reach` thick). Library
+`95ade41c` against `6ed34416` (A B B A): 320,000 atoms 585.2 / 587.6 -> 586.7 / 586.3 ms (8 tiles either way), the
+wavefront at 1,081,600 2,168.4 / 2,170.0 -> 2,169.1 / 2,168.9 ms (19 tiles either way); 2,560,000 atoms with the host
+state forced at cap 65,536: 54 tiles, 6.49 s, no slot -> 64 tiles, 5.23 s, 38 full and 26 compact slots; the default
+plan unchanged (cap 32,768, 5.24 s). The plan's workspace estimate (rows = cap + halo) now overstates the largest caps
+(10.6 GB estimated, about 5 GB used at 65,536).

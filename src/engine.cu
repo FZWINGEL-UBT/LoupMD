@@ -5444,7 +5444,8 @@ static int plan_execution_impl(LoupHandle* h, int n_atoms, const int* atomic_num
         // device plan
         if (cap > 0 && cap < 16384 && n >= 256.0 * cap && hstate == 0 && hs_force != 0 && hs_first == 1) {
             // at most 8x: at 65,536 the call found no memory left for any slot although the plan's estimate left
-            // 4 GB (54 tiles, 6.50 s); 49,152 and 32,768 ran with 64 / 125 slots (5.24 / 5.26 s)
+            // 4 GB (54 tiles, 6.50 s; the grid fit's split blocks, fixed since by tile-grid-rows: 64 tiles, 5.23 s);
+            // 49,152 and 32,768 ran with 64 / 125 slots (5.24 / 5.26 s), 32,768 at the lower peak
             for (int c : kCaps) {
                 if (c > 8 * cap) continue;
                 if (c < 4 * cap) break;
@@ -5588,8 +5589,10 @@ static int evaluate_tiled_impl(LoupHandle* h, int n_atoms, const int* atomic_num
         if (!tile_times) return;
         cudaStreamSynchronize(h->stream);
         const auto now = std::chrono::steady_clock::now();
-        std::fprintf(stderr, "tile times: %-28s %9.2f ms\n", what,
-                     std::chrono::duration<double, std::milli>(now - tick_last).count());
+        size_t f = 0, t = 0;
+        cudaMemGetInfo(&f, &t);
+        std::fprintf(stderr, "tile times: %-28s %9.2f ms (%.0f MB free)\n", what,
+                     std::chrono::duration<double, std::milli>(now - tick_last).count(), (double)f / 1e6);
         tick_last = now;
     };
     if (!keep) {
@@ -5633,6 +5636,10 @@ static int evaluate_tiled_impl(LoupHandle* h, int n_atoms, const int* atomic_num
             h->tile_workspace = true;
         }
         tick("workspace set-up");
+        if (tile_times)
+            std::fprintf(stderr, "tile workspace: widest domain %d locals + %d ghosts (%lld tiles, grid %d x %d x %d)\n",
+                         alls[widest].n_local, alls[widest].n_ghost(), (long long)T, plan.grid[0], plan.grid[1],
+                         plan.grid[2]);
         for (int64_t k = 0; k < T; ++k) {
             TileDomain& all = alls[(size_t)k];
             TileDomain& t = tiles[(size_t)k];
