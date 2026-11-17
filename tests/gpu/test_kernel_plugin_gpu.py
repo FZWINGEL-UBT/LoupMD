@@ -41,8 +41,11 @@ def test_a_plugin_s_kernels_give_the_library_s_results(sto_bundle, tmp_path, mon
     print("kernel plugins of mace-omat-0-medium built with nvcc: "
           + "; ".join(f"{sig} ({sizes[sig]} bytes): energy within {w[0]:.1e} eV/atom, forces {w[1]:.1e} eV/A, "
                       f"stress {w[2]:.1e} eV/A^3 of the library's own kernels" for sig, w in worst.items()))
+    # forces and stress at the gate's floors (AGENTS.md section 3), energy at 3e-6 eV/atom: plugin and library differ
+    # here by up to 3.4e-6 eV/A and 1.3e-6 eV/atom from run to run (float32 order, GEMM plans), which the earlier
+    # 3e-6 / 1e-6 bounds failed now and then
     for dE, dF, dS in worst.values():
-        assert dE < 1e-6 and dF < 3e-6 and dS < 1e-7
+        assert dE < 3e-6 and dF < 1e-5 and dS < 1e-7
 
     # Without a plugin a hidden signature is an error that names the command. (A loaded plugin stays loaded, so
     # the engine is pointed at another, empty folder.)
@@ -51,4 +54,4 @@ def test_a_plugin_s_kernels_give_the_library_s_results(sto_bundle, tmp_path, mon
         LoupEngine(sto_bundle)
     assert "loupmd build-kernels MODEL" in str(caught.value) and "loupmd-kernels-" in str(caught.value)
     monkeypatch.delenv("LOUP_DEBUG_HIDE_KERNEL")
-    assert _evaluate(sto_bundle, at)[0] == pytest.approx(e_ref, abs=1e-6 * len(at))
+    assert _evaluate(sto_bundle, at)[0] == pytest.approx(e_ref, abs=3e-6 * len(at))
