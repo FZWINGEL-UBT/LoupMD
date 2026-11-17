@@ -1959,6 +1959,7 @@ After the round6-hardening kernels are merged (S110: -18 to -22% VRAM in the who
 4a5e9c2): the tile workspace estimates and so the planner's caps change. Re-run the plan comparison (135,000 to 8M
 atoms, fractions 0.9 to 0.25) and the kept-call times of the plans that move, and re-check the host-state rules of
 this section (`tile-host-state-window`, `tile-slot-room-limit`, `tile-host-state-larger-cap`) against them.
+(Done on 17 November 2026: "The tiled mode after the merge" below.)
 
 `tile-host-state-larger-cap` on `MACE-OMAT-0 small` (measured on release/v1 before the merge, kept calls, one or
 two runs each, 5060 Ti only): at fraction 0.9 the plan does not change (1,080,000 atoms 1.199-1.221 s, 2,560,000
@@ -2000,7 +2001,71 @@ Before the merge commit (library sha256 `74612462`): the merged tree built at th
 then every file of the full tier passed with the corrected tests (domain, sweeps, capacity and large box 25, tiled,
 tile lists and memory plan 64, tiled MD 10, the integrators' full tests 12) and `-m acceptance` 15 passed, 1 skipped:
 the default gate (OMAT-0 medium on the generic kernels, 18 rows) worst force ratio 2.05, stress 1.93.
-The tile plans and times above are from before the merge and must be measured again.
+All tiers again on d0d149f (the merge 09d6daa and the gate's follow-up; the same library): `tests/cpu` 490 passed,
+5 skipped; `tests/gpu -m fast` 354 passed, 7 skipped; `-m full` 48 passed; `-m acceptance` 15 passed, 1 skipped
+(417 passed, 8 skipped: the NbCl5 structure is not in the folder). `loupmd validate --capacity tiled` on default
+engines: OMAT-0 small oxide worst force / stress ratio 1.29 / 1.47, OMAT-0 medium oxide 1.84 / 1.24 (wavefront
+1.84 / 1.35, whole 1.92 / 1.38), OMOL-0 extra large organic 0.85 / 0.81.
+
+The tiled mode after the merge (17 November 2026, 5060 Ti only): the merged library (sha256 `74612462`, commit
+09d6daa) against the library of 97e365d, SrTiO3 cubes with 0.04 A of noise, skin 0.5 A, no stress. Plans
+(`plan_execution` only): OMAT-0 medium and small, 135,000 / 320,000 / 1,080,000 / 2,560,000 / 3,524,845 / 5,000,000 /
+8,008,065 atoms at fractions 0.9 / 0.75 / 0.5 / 0.35 / 0.25, 70 plans a library. The tile workspace is 2-4% smaller
+for OMAT-0 medium (cap 65,536 at 320,000 atoms: 8.69 -> 8.38 GiB) and 3-5% for OMAT-0 small (6.78 -> 6.47 GiB); the
+whole-system count is 4.7% and 5.7% smaller (135,000 atoms: 13.50 -> 12.87 GiB and 10.79 -> 10.17 GiB), not the 18-22%
+of S110-S112, which are the specialised path's. 4 of 70 plans move, each to a larger cap at the same mode: OMAT-0
+medium 1,080,000 atoms at 0.75 (49,152 -> 65,536); OMAT-0 small 320,000 at 0.5 and 1,080,000 at 0.5 (49,152 ->
+65,536) and 5,000,000 at 0.25 (16,384 -> 24,576). No plan changes between device lists, host lists and host state.
+
+Kept calls, each library in its own process with a fresh plan directory, order A B B A (5,000,000 atoms: A B in
+one job, B A in the next), three kept calls a run up to 1,080,000 atoms and two above; the two runs of a side are
+given, and the ratio is of their sums. OMAT-0 medium:
+
+| atoms | fraction | cap, tiles | before the merge (s) | merged (s) | merged / before | peak (GiB) |
+| --- | --- | --- | --- | --- | --- | --- |
+| 320,000 | 0.9 | 65,536, 8 | 0.585 / 0.586 | 0.579 / 0.577 | 0.987 | 11.26 -> 11.07 |
+| 320,000 | 0.5 | 32,768, 27 | 0.640 / 0.643 | 0.584 / 0.588 | 0.914 | 4.78 -> 7.17 |
+| 320,000 | 0.35 | 24,576, 27 | 0.641 / 0.644 | 0.633 / 0.636 | 0.988 | 4.78 -> 4.72 |
+| 320,000 | 0.25 | 12,288, 28 | 0.669 / 0.674 | 0.662 / 0.663 | 0.987 | 3.64 -> 3.59 |
+| 1,080,000 | 0.9 | 65,536, 27 | 2.193 / 2.194 | 2.174 / 2.164 | 0.989 | 10.56 -> 10.37 |
+| 1,080,000 | 0.75 | 49,152 -> 65,536, 27 | 2.209 / 2.195 | 2.160 / 2.167 | 0.983 | 10.56 -> 10.37-10.40 |
+| 1,080,000 | 0.5 | 32,768, 64 | 2.218 / 2.213 | 2.189 / 2.179 | 0.986 | 7.06 -> 6.98 |
+| 1,080,000 | 0.35 | 16,384, 125 | 2.283 / 2.260 | 2.226 / 2.230 | 0.981 | 5.06 -> 5.09 |
+| 1,080,000 | 0.25 | 12,288, 125 | 2.287 / 2.286 | 2.247 / 2.248 | 0.983 | 3.62 -> 3.63 |
+| 2,560,000 | 0.9 | 32,768, 125 | 5.255 / 5.227 | 5.170 / 5.166 | 0.986 | 12.84 -> 12.74 |
+| 2,560,000 | 0.5 | 24,576, 125 | 5.318 / 5.287 | 5.217 / 5.213 | 0.983 | 7.23 -> 7.24 |
+| 2,560,000 | 0.35 | 8,192, 343 | 5.404 / 5.397 | 5.320 / 5.311 | 0.984 | 4.98 -> 4.99 |
+| 2,560,000 | 0.25 | 16,384, 216 | 5.451 / 5.430 | 5.369 / 5.376 | 0.988 | 3.52 -> 3.52 |
+| 5,000,000 | 0.9 | 32,768, 216 | 10.291 / 10.285 | 10.116 / 10.165 | 0.986 | 13.05 -> 13.06 |
+| 5,000,000 | 0.5 | 32,768, 216 | 10.440 / 10.469 | 10.270 / 10.298 | 0.984 | 7.22 -> 7.22 |
+| 5,000,000 | 0.35 | 24,576, 216 | 10.624 / 10.617 | 10.472 / 10.479 | 0.986 | 5.04 -> 5.03 |
+| 5,000,000 | 0.25 | 16,384, 343 | 10.720 / 10.709 | 10.583 / 10.565 | 0.987 | 3.62 -> 3.62 |
+| 8,008,065 | 0.9 | 6,144, 2,016 (wavefront) | 17.326 / 17.310 | 16.965 / 17.002 | 0.981 | 13.10 -> 13.10-13.11 |
+
+OMAT-0 small:
+
+| atoms | fraction | cap, tiles | before the merge (s) | merged (s) | merged / before | peak (GiB) |
+| --- | --- | --- | --- | --- | --- | --- |
+| 320,000 | 0.5 | 49,152 -> 65,536, 8 | 0.352 / 0.354 | 0.347 / 0.346 | 0.982 | 6.49 -> 6.31 |
+| 1,080,000 | 0.9 | 65,536, 45 | 1.213 / 1.206 | 1.182 / 1.200 | 0.985 | 12.80 -> 12.63 |
+| 1,080,000 | 0.5 | 49,152 -> 65,536, 27 (host state) | 1.218 / 1.219 | 1.199 / 1.204 | 0.986 | 7.23 -> 7.15 |
+| 2,560,000 | 0.9 | 65,536, 96 | 2.968 / 2.965 | 2.900 / 2.897 | 0.977 | 12.70 -> 12.74 |
+
+Every plan is 1.1-2.3% faster with the merged library at an equal or slightly lower peak, in both orders. The one
+larger step, 320,000 atoms of OMAT-0 medium at fraction 0.5 (-8.6%), is the lists: with 28 B per edge every tile's
+full slot of kept active edges fits the budget (the peak rises to the fraction's 7.17 GiB), where 36 B left the tiles
+compacting in every sweep. Energies agree to 1e-7 eV/atom between the libraries up to 5,000,000 atoms and to
+3e-7 at 8,008,065 (where two runs of one library differ by 2e-7).
+
+The host-state rules of this section against the merged plans: `tile-host-state-larger-cap` and
+`tile-slot-room-limit` pick the plans they picked before (1,080,000 atoms at 0.9: the host state at 65,536;
+5,000,000 at 0.5: 32,768). `tile-host-state-window`'s plan for 8,008,065 atoms at 0.9 (the host state at 16,384,
+23.9 GB of pinned host memory) was not taken by either library in these runs: both planned the device wavefront at
+6,144 at 0.9 and at 0.75 (the table's row; the host state was 3.8% faster when it was measured). `MemAvailable` was
+40.3 GB before the process started, and the host state may pin 60% of what is available when the plan is made:
+23.9 GB is 59% of 40.3 GB, so on this WSL (39 GiB) that plan sits at the limit and a few hundred MB decide it.
+Why these runs fell on the other side was not examined (a guess: the process's own arrays for 8M atoms); the
+limit is not changed here.
 
 `tile-wave-host-bus` (O32, NEUTRAL, not adopted; local branch `wip/tile-wave-host-bus`): the wavefront's host pool
 mapped, its ghost gathers, gradient adds (plain adds in rounds of distinct host rows) and block zeroing as kernels on
