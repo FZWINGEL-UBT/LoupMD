@@ -265,6 +265,47 @@ def test_compact_device_lists_give_the_full_device_lists_result(wavefront, keep_
         assert abs(e1 - e0) / len(at) <= 1e-8 and np.abs(f1 - f0).max() <= 1e-5 and np.abs(s1 - s0).max() <= 1e-8
 
 
+@pytest.mark.parametrize("wavefront", ["0", "1"])
+@pytest.mark.parametrize("host_lists", ["0", "1"])
+def test_compact_active_slots_give_the_compaction_result(wavefront, host_lists, monkeypatch, capfd):
+    """O32: a tile of a compact list that finds no full slot of kept active edges takes a compact one (row pointers,
+    senders and integer image shifts, 8 B per edge): its first sweep packs the shifts after the compaction, its
+    later sweeps restore the receivers, vectors and spline locators from it instead of compacting again. Against a
+    compaction in every sweep (LOUP_TILE_KEEP_ACTIVE=0, LOUP_TILE_KEEP_COMPACT=0): compact slots only, and one full
+    and one compact slot; device lists and staged host lists; the building call and a kept one."""
+    at = srtio3(1).repeat((32, 6, 6))                  # 5,760 atoms in a rod
+    at.positions += np.random.default_rng(20).normal(scale=0.04, size=at.positions.shape)
+    moved = at.positions + np.random.default_rng(21).normal(scale=0.01, size=at.positions.shape)
+    bundle = ensure_loup_bundle(find_model("mace-omat-0-small.model"), [8, 22, 38])
+    monkeypatch.setenv("LOUP_NO_HYBRID", "1")
+    monkeypatch.setenv("LOUP_TILE_WAVEFRONT", wavefront)
+    monkeypatch.setenv("LOUP_TILE_HOST_LISTS", host_lists)
+    monkeypatch.setenv("LOUP_TILE_HOST_STATE", "0")
+    monkeypatch.setenv("LOUP_DEBUG_TILE_TIMES", "1")
+
+    def run(full, compact):
+        monkeypatch.setenv("LOUP_TILE_KEEP_ACTIVE", full)
+        monkeypatch.setenv("LOUP_TILE_KEEP_COMPACT", compact)
+        eng = LoupEngine(bundle)
+        try:
+            capfd.readouterr()
+            out = [eng.evaluate_tiled(at.numbers, x, at.cell.array, 400, skin=SKIN) for x in (at.positions, moved)]
+            err = capfd.readouterr().err
+            said = [x for x in err.splitlines() if x.startswith("tile compact active slots:")]
+            assert "staging out of step" not in err
+            return out, int(said[0].split(":")[1].split()[0])
+        finally:
+            del eng
+            gc.collect()
+
+    (ref, n0), (comp, n1), (mixed, n2) = run("0", "0"), run("0", "99"), run("1", "1")
+    assert n0 == 0 and n1 >= 2 and n2 == 1
+    for other in (comp, mixed):
+        for (e0, f0, s0, t0), (e1, f1, s1, t1) in zip(ref, other):
+            assert t0 == t1 >= 4
+            assert abs(e1 - e0) / len(at) <= 1e-8 and np.abs(f1 - f0).max() <= 1e-5 and np.abs(s1 - s0).max() <= 1e-8
+
+
 @pytest.mark.parametrize("model", ["mace-omat-0-small.model", "mace-mp-0b3-medium.model"])
 @pytest.mark.parametrize("host_lists", ["0", "1"])
 @pytest.mark.parametrize("pipe", ["alias", "1", "0"])

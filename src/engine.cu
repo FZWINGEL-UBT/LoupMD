@@ -1717,7 +1717,23 @@ struct DomainSweep {
     const float* adjoint[4] = {nullptr, nullptr, nullptr, nullptr};
     bool active_ready = false;  // the handle's active-edge buffers already hold this domain's (a tile's later sweep)
     float* keep0 = nullptr;     // O31: the domain's buffer of layer 0's msgf and D (GenericPassInputs::keep0)
+    // O32 compact slots: after the compaction, pack each active edge's integer image shift (from the list's `pack_in`)
+    // into `pack_out`; or, instead of the compaction, restore the active edges from row pointers and senders already
+    // in the handle's active buffers and the shifts in `restore_code`
+    const char4* pack_in = nullptr;
+    char4* pack_out = nullptr;
+    const char4* restore_code = nullptr;
 };
+__global__ void tile_pack_active_codes_kernel(int N, float r_max, const int* __restrict__ row_ptr,
+                                              const int* __restrict__ act_row_ptr,
+                                              const float4* __restrict__ tmp_vec_len,
+                                              const char4* __restrict__ code, char4* __restrict__ act_code);
+__global__ void tile_restore_active_kernel(int N, SplineGrid grid, int S, int pair_sym, loup::CellMat64 cell,
+                                           const double* __restrict__ pos64, const int* __restrict__ species,
+                                           const int* __restrict__ act_row_ptr, const int* __restrict__ act_senders,
+                                           const char4* __restrict__ act_code, int* __restrict__ act_receivers,
+                                           float4* __restrict__ act_vec_len, int* __restrict__ act_slab,
+                                           float2* __restrict__ act_t_sx);
 
 static_assert(offsetof(loup::CellDev, h) == 0, "record_dispersion reads the device cell at the start of CellDev");
 
@@ -1786,7 +1802,11 @@ static void record_force_pass(LoupHandle* h, int compute_stress, bool energy_onl
 
     // 1. Compute edge vectors, compact active edges (r < r_max) with their spline locator
     const int warpGridN = (N + 3) / 4;  // 4 warps per 128-thread block (1 warp per atom)
-    if (!(sweep && sweep->active_ready)) {
+    if (sweep && sweep->restore_code) {
+        tile_restore_active_kernel<<<warpGridN, 128, 0, h->stream>>>(
+            N, sg, S, sg_psym, h->cell, h->d_pos64, h->d_species, h->d_act_row_ptr, h->d_act_senders,
+            sweep->restore_code, h->d_act_receivers, h->d_act_vec_len, h->d_act_slab, h->d_act_t_sx);
+    } else if (!(sweep && sweep->active_ready)) {
         loup::compute_and_count_active_kernel<<<warpGridN, 128, 0, h->stream>>>(
             N, r_max, h->d_pos64, h->d_row_ptr, h->d_senders, h->d_receivers, h->d_shift_cart,
             h->d_tmp_vec_len, h->d_act_deg);
@@ -1797,6 +1817,9 @@ static void record_force_pass(LoupHandle* h, int compute_stress, bool energy_onl
             N, r_max, sg, S, sg_psym, h->d_species, h->d_row_ptr, h->d_act_row_ptr, h->d_senders, h->d_receivers,
             h->d_pairs, h->d_tmp_vec_len, h->d_act_senders, h->d_act_receivers, h->d_act_pairs, h->d_act_vec_len,
             h->d_act_slab, h->d_act_t_sx);
+        if (sweep && sweep->pack_out)
+            tile_pack_active_codes_kernel<<<warpGridN, 128, 0, h->stream>>>(
+                N, r_max, h->d_row_ptr, h->d_act_row_ptr, h->d_tmp_vec_len, sweep->pack_in, sweep->pack_out);
     }
 
     const int* d_E_act = h->d_act_row_ptr + N;
@@ -4693,6 +4716,7 @@ struct TileList {
     // slot of TiledState::act_slots when one is free, read from it by its later sweeps (O31: the compaction ran in
     // every sweep); the slot goes back at the tile's last sweep.
     mutable int act_slot = -1;        // the slot, -1 none
+    mutable int cact_slot = -1;       // O32: or a compact slot (TiledState::cact_slots), -1 none
     mutable long long act_call = -1;  // the call in whose first sweep the tile took it
     // O31: layer 0's msgf and D from the tile's forward sweep of layer 0, read by its backward sweep of layer 0
     // instead of the replay (GenericModel::sweep_keep_layer0); allocated when the memory allows
@@ -4770,14 +4794,22 @@ struct HostPipe {
 struct ActiveSlot {
     DeviceBufferGuard row_ptr, senders, receivers, pairs, vec_len, slab, t_sx;
 };
+// O32: a compact slot (tiles of compact lists): the active edges' row pointers, senders and integer image shifts, 8 B
+// per edge instead of ActiveSlot's 40; a later sweep restores the rest (tile_restore_active_kernel)
+struct CompactSlot {
+    DeviceBufferGuard row_ptr, senders, code;
+};
 
 // The tiled call's state kept on the handle between calls (S5-T06). Never copied: its buffers free themselves.
 struct TiledState {
     int n = 0, receivers = 0, max_rows = 0, max_edges = 0;
     int act_keep = -1;     // the slots of kept active edges: -1 not decided yet, else their number
+    int cact_keep = 0;     // O32: the compact slots
     long long calls = 0;   // tiled calls on these lists
     std::vector<ActiveSlot> act_slots;
     std::vector<int> act_free;  // the slots no tile holds
+    std::vector<CompactSlot> cact_slots;  // O32: compact slots for the tiles in flight beyond the full ones
+    std::vector<int> cact_free;
     int keep_l0 = -1;           // the tiles keep layer 0's forward results (TileList::keep0): -1 not decided
     int64_t T = 0;
     double skin = 0.0, cell[9] = {0, 0, 0, 0, 0, 0, 0, 0, 0};
@@ -4839,9 +4871,15 @@ static void release_tiled_state(LoupHandle* h) {
 }
 }  // extern "C++"
 
+// O32: an edge's Cartesian shift from its integer image shift, component k, with explicit rounding (no FMA
+// contraction) so that the encode check, the decode and the compact slots' restore give the same bits.
+__device__ __forceinline__ double tile_shift_comp(const loup::CellMat64& cell, double sx, double sy, double sz, int k) {
+    return __dadd_rn(__dadd_rn(__dmul_rn(sx, cell.c[k]), __dmul_rn(sy, cell.c[3 + k])), __dmul_rn(sz, cell.c[6 + k]));
+}
+
 // O32: compact host lists. The integer image shift of each edge from its Cartesian shift (the box's inverse), kept
-// only when it fits a signed byte and gives the Cartesian shift back bit for bit by the list build's own expression
-// (gather_sorted_edges_kernel); `bad` is set otherwise and the tile keeps the 36 B form.
+// only when it fits a signed byte and gives the Cartesian shift back bit for bit (tile_shift_comp against the list
+// build's own value, gather_sorted_edges_kernel); `bad` is set otherwise and the tile keeps the 36 B form.
 __global__ void tile_encode_edges_kernel(int E, loup::CellMat64 cell, const double* __restrict__ shift,
                                          char4* __restrict__ code, int* __restrict__ bad) {
     const int e = blockIdx.x * blockDim.x + threadIdx.x;
@@ -4851,9 +4889,8 @@ __global__ void tile_encode_edges_kernel(int E, loup::CellMat64 cell, const doub
     for (int k = 0; k < 3; ++k) n[k] = rint(v0 * cell.inv[k] + v1 * cell.inv[3 + k] + v2 * cell.inv[6 + k]);
     const double sx = n[0], sy = n[1], sz = n[2];
     const bool fits = fabs(sx) <= 127.0 && fabs(sy) <= 127.0 && fabs(sz) <= 127.0;
-    const bool same = sx * cell.c[0] + sy * cell.c[3] + sz * cell.c[6] == v0 &&
-                      sx * cell.c[1] + sy * cell.c[4] + sz * cell.c[7] == v1 &&
-                      sx * cell.c[2] + sy * cell.c[5] + sz * cell.c[8] == v2;
+    const bool same = tile_shift_comp(cell, sx, sy, sz, 0) == v0 && tile_shift_comp(cell, sx, sy, sz, 1) == v1 &&
+                      tile_shift_comp(cell, sx, sy, sz, 2) == v2;
     if (!(fits && same)) {
         *bad = 1;
         return;
@@ -4878,11 +4915,67 @@ __global__ void tile_decode_edges_kernel(int N, int S, loup::CellMat64 cell, con
         receivers[e] = i;
         pairs[e] = loup::sym_pair(species[j], sp_i, S);
         const double sx = (double)c.x, sy = (double)c.y, sz = (double)c.z;
-        shift[(int64_t)e * 3 + 0] = sx * cell.c[0] + sy * cell.c[3] + sz * cell.c[6];
-        shift[(int64_t)e * 3 + 1] = sx * cell.c[1] + sy * cell.c[4] + sz * cell.c[7];
-        shift[(int64_t)e * 3 + 2] = sx * cell.c[2] + sy * cell.c[5] + sz * cell.c[8];
+        for (int k = 0; k < 3; ++k) shift[(int64_t)e * 3 + k] = tile_shift_comp(cell, sx, sy, sz, k);
     }
 }
+
+extern "C++" {  // declared before record_force_pass, outside this file's C linkage block
+// O32 compact slots: after a compaction of a compact list (scatter_active_edges_kernel's order), each active edge's
+// integer image shift, beside the senders and row pointers the compaction wrote into the slot.
+__global__ void tile_pack_active_codes_kernel(int N, float r_max, const int* __restrict__ row_ptr,
+                                              const int* __restrict__ act_row_ptr,
+                                              const float4* __restrict__ tmp_vec_len,
+                                              const char4* __restrict__ code, char4* __restrict__ act_code) {
+    const int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    const int i = tid >> 5, lane = tid & 31;
+    if (i >= N) return;
+    const int eb = row_ptr[i], ee = row_ptr[i + 1];
+    int out = act_row_ptr[i];
+    for (int base = eb; base < ee; base += 32) {
+        const int e = base + lane;
+        const bool act = e < ee && tmp_vec_len[e].w < r_max;
+        const unsigned mask = __ballot_sync(0xffffffffu, act);
+        if (act) act_code[out + __popc(mask & ((1u << lane) - 1u))] = code[e];
+        out += __popc(mask);
+    }
+}
+
+// O32 compact slots: a later sweep's active edges from the slot (row pointers, senders, integer image shifts): the
+// receivers, vectors and spline locators of scatter_active_edges_kernel, bit for bit (the vector as
+// compute_and_count_active_kernel forms it, the shift as the decode does).
+__global__ void tile_restore_active_kernel(int N, SplineGrid grid, int S, int pair_sym, loup::CellMat64 cell,
+                                           const double* __restrict__ pos64, const int* __restrict__ species,
+                                           const int* __restrict__ act_row_ptr, const int* __restrict__ act_senders,
+                                           const char4* __restrict__ act_code, int* __restrict__ act_receivers,
+                                           float4* __restrict__ act_vec_len, int* __restrict__ act_slab,
+                                           float2* __restrict__ act_t_sx) {
+    const int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    const int i = tid >> 5, lane = tid & 31;
+    if (i >= N) return;
+    const double rx = pos64[i * 3 + 0], ry = pos64[i * 3 + 1], rz = pos64[i * 3 + 2];
+    const int sp_i = species[i];
+    for (int k = act_row_ptr[i] + lane; k < act_row_ptr[i + 1]; k += 32) {
+        const int s = act_senders[k];
+        const char4 c = act_code[k];
+        const double sx = (double)c.x, sy = (double)c.y, sz = (double)c.z;
+        const double vx = (rx - pos64[s * 3 + 0]) + tile_shift_comp(cell, sx, sy, sz, 0);
+        const double vy = (ry - pos64[s * 3 + 1]) + tile_shift_comp(cell, sx, sy, sz, 1);
+        const double vz = (rz - pos64[s * 3 + 2]) + tile_shift_comp(cell, sx, sy, sz, 2);
+        const float fx = (float)vx, fy = (float)vy, fz = (float)vz;
+        const float len = sqrtf(fx * fx + fy * fy + fz * fz);
+        const float4 vl = make_float4(fx, fy, fz, len);
+        const int sp_s = species[s];
+        const int p_slab = pair_sym ? loup::sym_pair(sp_s, sp_i, S) : (sp_s * S + sp_i);
+        act_receivers[k] = i;
+        act_vec_len[k] = vl;
+        int iv;
+        float t, sx_inv;
+        locate_spline(grid, vl.w, iv, t, sx_inv);
+        act_slab[k] = p_slab * grid.total_intervals + iv;
+        act_t_sx[k] = make_float2(t, (vl.w >= grid.starts[0]) ? sx_inv : -sx_inv);
+    }
+}
+}  // extern "C++"
 
 static bool host_compact() {
     const char* e = std::getenv("LOUP_TILE_HOST_COMPACT");
@@ -5790,7 +5883,7 @@ static int evaluate_tiled_impl(LoupHandle* h, int n_atoms, const int* atomic_num
             in_flight = std::max(in_flight, open);
         }
         const double slot_bytes =
-            (double)std::max(st->max_edges, 1) * (16 + 4 * 4 + 8) + (double)(st->max_rows + 1) * 4;
+            (double)std::max(st->max_edges, 1) * (16 + 3 * 4 + 8) + (double)(st->max_rows + 1) * 4;
         size_t free_b = 0, total_b = 0;
         CUDA_CHECK(cudaMemGetInfo(&free_b, &total_b));
         // within the free memory less a reserve of max(256 MB, 2% of the card): the wavefront at 1,081,600 atoms
@@ -5834,7 +5927,18 @@ static int evaluate_tiled_impl(LoupHandle* h, int n_atoms, const int* atomic_num
                 std::fprintf(stderr, "tile host lists staged: %s (2 x %.0f MB)%s\n", st->stage ? "yes" : "no",
                              (double)stage_b / 1e6, all_compact ? ", compact" : "");
         }
-        int64_t want = std::min<int64_t>(in_flight, (int64_t)(std::max(0.0, avail) / slot_bytes));
+        // O32: where full slots cannot cover every tile in flight, compact slots (8 B per edge) cover more: the most
+        // full slots that leave compact ones for all the others, else compact slots only
+        bool any_compact = false;
+        for (const TileList& tl : st->lists) any_compact = any_compact || tl.compact;
+        const double cslot_bytes = (double)std::max(st->max_edges, 1) * 8 + (double)(st->max_rows + 1) * 4;
+        const double room = std::max(0.0, avail);
+        int64_t want = std::min<int64_t>(in_flight, (int64_t)(room / slot_bytes));
+        if (any_compact && want < in_flight)
+            want = (double)in_flight * cslot_bytes <= room
+                       ? std::min<int64_t>(in_flight, (int64_t)((room - (double)in_flight * cslot_bytes) /
+                                                               (slot_bytes - cslot_bytes)))
+                       : 0;
         if (const char* e = std::getenv("LOUP_TILE_KEEP_ACTIVE"))
             want = std::min<int64_t>(in_flight, std::max(0LL, std::atoll(e)));
         // Built in place: DeviceBufferGuard has no move, so the vector must never copy or grow
@@ -5850,8 +5954,7 @@ static int evaluate_tiled_impl(LoupHandle* h, int n_atoms, const int* atomic_num
             get(sl.row_ptr, (size_t)(st->max_rows + 1) * sizeof(int));
             get(sl.senders, E * sizeof(int));
             get(sl.receivers, E * sizeof(int));
-            get(sl.pairs, E * sizeof(int));
-            get(sl.slab, E * sizeof(int));
+            get(sl.slab, E * sizeof(int));  // O32: no pairs (the generic sweeps do not read them)
             get(sl.vec_len, E * sizeof(float4));
             get(sl.t_sx, E * sizeof(float2));
             if (!ok) {  // out of memory after all: the slots so far (the rest free their buffers with the state)
@@ -5862,6 +5965,36 @@ static int evaluate_tiled_impl(LoupHandle* h, int n_atoms, const int* atomic_num
             st->bytes += slot_bytes;
         }
         st->act_keep = got;
+        // O32: compact slots (8 B per edge) for the tiles in flight beyond the full slots, in what is left; tiles of
+        // compact lists only. LOUP_TILE_KEEP_COMPACT=0|k (none, or at most k); none where LOUP_TILE_KEEP_ACTIVE is set
+        // and this is not.
+        {
+            const double left = std::max(0.0, avail - (double)got * slot_bytes);
+            int64_t want_c = any_compact ? std::min<int64_t>(in_flight - got, (int64_t)(left / cslot_bytes)) : 0;
+            if (std::getenv("LOUP_TILE_KEEP_ACTIVE")) want_c = 0;
+            if (const char* e = std::getenv("LOUP_TILE_KEEP_COMPACT"))
+                want_c = any_compact ? std::min<int64_t>(in_flight - got, std::max(0LL, std::atoll(e))) : 0;
+            st->cact_slots = std::vector<CompactSlot>((size_t)std::max<int64_t>(want_c, 0));
+            int got_c = 0;
+            for (CompactSlot& cs : st->cact_slots) {
+                bool ok = true;
+                auto get = [&](DeviceBufferGuard& g, size_t bytes) {
+                    if (ok && cudaMalloc(&g.p, bytes) != cudaSuccess) { g.p = nullptr; ok = false; }
+                };
+                get(cs.row_ptr, (size_t)(st->max_rows + 1) * sizeof(int));
+                get(cs.senders, E * sizeof(int));
+                get(cs.code, E * sizeof(char4));
+                if (!ok) {
+                    (void)cudaGetLastError();
+                    break;
+                }
+                ++got_c;
+                st->bytes += cslot_bytes;
+            }
+            st->cact_keep = got_c;
+            if (tile_times)
+                std::fprintf(stderr, "tile compact active slots: %d (%.0f MB each)\n", got_c, cslot_bytes / 1e6);
+        }
         // Layer 0's forward results per tile, after the slots, within the same reserve: plain order only (the
         // wavefront's tiles in flight would need them too, and it runs where memory is short). LOUP_TILE_KEEP_L0=0|1.
         st->keep_l0 = 0;
@@ -5893,8 +6026,10 @@ static int evaluate_tiled_impl(LoupHandle* h, int n_atoms, const int* atomic_num
             std::fprintf(stderr, "tile active edges: %d slots, %lld tiles in flight (%.0f MB each, free %.0f MB)\n",
                          st->act_keep, (long long)in_flight, slot_bytes / 1e6, (double)free_b / 1e6);
     }
-    for (const TileList& t : lists) t.act_slot = -1;  // a failed call may have left slots taken
+    for (const TileList& t : lists) t.act_slot = t.cact_slot = -1;  // a failed call may have left slots taken
     st->act_free.clear();
+    st->cact_free.clear();
+    for (int k = st->cact_keep - 1; k >= 0; --k) st->cact_free.push_back(k);
     for (int k = st->act_keep - 1; k >= 0; --k) st->act_free.push_back(k);
     const long long call = st->calls;
     const bool wave = st->wave;  // the pool's rows are zeroed tile by tile at each tile's sweep 1
@@ -6094,7 +6229,9 @@ static int evaluate_tiled_impl(LoupHandle* h, int n_atoms, const int* atomic_num
             for (int k = 0; k < 2 * (L - 1) + 1; ++k)
                 for (int i : k < L - 1 ? ord_f : k == L - 1 ? ord_l : ord_b) seq.push_back({i, k == 2 * (L - 1)});
         }
-        std::vector<int> fr = st->act_free, slot(lists.size(), -1);
+        // use_active's rule: a full slot if one is free, else (compact lists) a compact slot; either keeps the
+        // tile's later sweeps from compacting
+        std::vector<int> fr = st->act_free, cfr = st->cact_free, slot(lists.size(), -1), cslot(lists.size(), -1);
         std::vector<char> seen(lists.size(), 0);
         for (const auto& [i, is_last] : seq) {
             bool comp;
@@ -6102,11 +6239,13 @@ static int evaluate_tiled_impl(LoupHandle* h, int n_atoms, const int* atomic_num
                 seen[(size_t)i] = 1;
                 comp = true;
                 if (!fr.empty()) { slot[(size_t)i] = fr.back(); fr.pop_back(); }
+                else if (lists[(size_t)i].compact && !cfr.empty()) { cslot[(size_t)i] = cfr.back(); cfr.pop_back(); }
             } else {
-                comp = slot[(size_t)i] < 0;
+                comp = slot[(size_t)i] < 0 && cslot[(size_t)i] < 0;
             }
             if (comp) comp_tiles.push_back(i);
             if (is_last && slot[(size_t)i] >= 0) { fr.push_back(slot[(size_t)i]); slot[(size_t)i] = -1; }
+            if (is_last && cslot[(size_t)i] >= 0) { cfr.push_back(cslot[(size_t)i]); cslot[(size_t)i] = -1; }
         }
         // the buffers are free once the stream reaches here (an earlier call's sweeps read them)
         for (int b = 0; b < 2; ++b) CUDA_CHECK(cudaEventRecord(st->ring.used[b], h->stream));
@@ -6136,10 +6275,13 @@ static int evaluate_tiled_impl(LoupHandle* h, int n_atoms, const int* atomic_num
         h->d_shift_cart = borrow.shift_cart;
     };
     // A sweep that compacts reads its tile's edges from the staged buffer: returns the buffer (-1 none, -2 error)
-    auto stage_use = [&](const TileList& t, const DomainSweep& sw) -> int {
-        if (sw.active_ready) return -1;
+    auto stage_use = [&](const TileList& t, DomainSweep& sw) -> int {
+        if (sw.active_ready || sw.restore_code) return -1;
         if (!stage) {  // over the bus: a compact list's 8 B per edge, read once by the decode
-            if (t.compact) host_decode(t, t.h_csnd, t.h_ccode);
+            if (t.compact) {
+                host_decode(t, t.h_csnd, t.h_ccode);
+                sw.pack_in = t.h_ccode;
+            }
             return -1;
         }
         const size_t k = next_comp++;
@@ -6154,6 +6296,7 @@ static int evaluate_tiled_impl(LoupHandle* h, int n_atoms, const int* atomic_num
         const size_t e = (size_t)t.E;
         if (t.compact) {
             host_decode(t, reinterpret_cast<const int*>(dp), reinterpret_cast<const char4*>(dp + e * 4));
+            sw.pack_in = reinterpret_cast<const char4*>(dp + e * 4);
         } else {
             h->d_shift_cart = reinterpret_cast<double*>(dp);
             h->d_senders = reinterpret_cast<int*>(dp + e * 24);
@@ -6495,25 +6638,41 @@ static int evaluate_tiled_impl(LoupHandle* h, int n_atoms, const int* atomic_num
     // The active edges: the tile's kept buffers (compacted in its first sweep of the call, read by the others) or
     // the handle's own (compacted in every sweep)
     auto use_active = [&](const TileList& t, DomainSweep& sw, bool last_sweep) {
+        bool first = false;
         if (t.act_call != call) {  // the tile's first sweep of this call: take a slot if one is free
             t.act_call = call;
-            t.act_slot = -1;
+            t.act_slot = t.cact_slot = -1;
+            first = true;
             if (!st->act_free.empty()) {
                 t.act_slot = st->act_free.back();
                 st->act_free.pop_back();
+            } else if (t.compact && !st->cact_free.empty()) {  // O32: else a compact slot
+                t.cact_slot = st->cact_free.back();
+                st->cact_free.pop_back();
             }
         } else if (t.act_slot >= 0) {
             sw.active_ready = true;
         }
         if (t.act_slot < 0) {
             borrow.own_active();
+            if (t.cact_slot >= 0) {  // row pointers and senders in the slot, the rest in the handle's buffers
+                const CompactSlot& cs = st->cact_slots[(size_t)t.cact_slot];
+                h->d_act_row_ptr = static_cast<int*>(cs.row_ptr.p);
+                h->d_act_senders = static_cast<int*>(cs.senders.p);
+                if (first) sw.pack_out = static_cast<char4*>(cs.code.p);  // pack_in: stage_use
+                else sw.restore_code = static_cast<const char4*>(cs.code.p);
+                if (last_sweep) {
+                    st->cact_free.push_back(t.cact_slot);
+                    t.cact_slot = -1;
+                }
+            }
             return;
         }
         const ActiveSlot& sl = st->act_slots[(size_t)t.act_slot];
         h->d_act_row_ptr = static_cast<int*>(sl.row_ptr.p);
         h->d_act_senders = static_cast<int*>(sl.senders.p);
         h->d_act_receivers = static_cast<int*>(sl.receivers.p);
-        h->d_act_pairs = static_cast<int*>(sl.pairs.p);
+        h->d_act_pairs = borrow.act_pairs;  // written by the compaction, read by no sweep: the handle's own
         h->d_act_slab = static_cast<int*>(sl.slab.p);
         h->d_act_vec_len = static_cast<float4*>(sl.vec_len.p);
         h->d_act_t_sx = static_cast<float2*>(sl.t_sx.p);

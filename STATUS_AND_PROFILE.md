@@ -1767,3 +1767,23 @@ the hybrid). The plan counts 8.8 B per device edge. Capacity (planner, the same 
 38.2 GiB): 1,080,000 atoms cap 49,152 on the device (12.12 GiB); 2,560,000 cap 4,096 with lists and state on the
 device (12.92 GiB; host lists before); 5,000,000 host lists and host state as before; 8.64M and 13.72M the wavefront
 with host lists as before; 20,480,000 refused (the host state beyond 60% of `MemAvailable`).
+
+Where the tiled call's choices cost time at 2,560,000 atoms (library `1f9796ba`, cube, five kept calls each, shared
+plan cache): the plan's cap 4,096 all on the device 5.70-5.80 s (wavefront or plain order); plain order with the
+host state at caps 24,576 / 32,768 / 49,152: 5.39 / 5.35 / 5.40 s (16,384: 6.42, one noisy run, min 5.50); the
+wavefront with host lists at cap 8,192: 5.41 s. The kept active-edge slots are worth 4.5% (plain host state at
+32,768: 116 slots 5.34 s, none 5.58 s) but took about 9 GB there (40 B per edge each). Caps above 65,536 give
+nothing at 320,000 atoms (8 tiles at 65,536 and 80,000: 593.6 / 598.3 ms; 110,000 runs out of memory). A list
+rebuild after warm-up costs about 300 ms at 320,000 atoms (626 ms kept call), 700 ms at 1,081,600 (2.43 s) and
+4.6 s at 2,560,000 with 891 tiles (6.15 s; candidate and list builds 3.5 s of it).
+
+`tile-compact-slots` (O32): a tile of a compact list that gets no full slot takes a compact one (row pointers,
+senders and integer image shifts, 8 B per edge); its first sweep packs the shifts after the compaction, its later
+sweeps restore the receivers, vectors and spline locators from them (`tile_restore_active_kernel`, bit for bit: the
+shift arithmetic with explicit rounding in encode, decode and restore). The mix: all full slots where they cover the
+tiles in flight, else the most full slots that leave compact ones for the rest, else compact slots only. Full slots
+lose the pairs no sweep reads (36 B per edge). `LOUP_TILE_KEEP_COMPACT=0|k`. Library `19477a6c` against `1f9796ba`:
+3,524,845 atoms (fraction 0.75, host lists and host state; A B B A): 8 full slots, kept call 7.44 / 7.45 s -> 40
+compact slots, 7.31 / 7.23 s (b / a about 0.975); 320,000 atoms 587.5, 595.0 -> 582.4, 581.7 ms; the wavefront at
+1,081,600 atoms covers its 5 tiles in flight (3 full and 2 compact, or 5 full) instead of 3-4 (times not captured).
+The 2,560,000-atom default plan leaves no memory for any slot (unchanged, 5.71-5.72 s).
