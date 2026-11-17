@@ -662,15 +662,18 @@ struct LoupHandle {
     // instead of new cudaHostAlloc calls (2,560,000 atoms: about 3.8 s of a 7.7 s list rebuild); freed at the end of
     // that set-up when not taken, and with the handle (tile-pinned-reuse)
     struct PinnedSpare {
-        std::vector<std::pair<size_t, void*>> bufs;
+        std::vector<std::pair<size_t, void*>> bufs, mapped;  // cudaHostAllocDefault; cudaHostAllocMapped
         double bytes() const {
             double b = 0.0;
             for (const auto& x : bufs) b += (double)x.first;
+            for (const auto& x : mapped) b += (double)x.first;
             return b;
         }
         void clear() {
             for (const auto& x : bufs) cudaFreeHost(x.second);
+            for (const auto& x : mapped) cudaFreeHost(x.second);
             bufs.clear();
+            mapped.clear();
         }
         ~PinnedSpare() { clear(); }
     } pinned_spare;
@@ -4950,9 +4953,9 @@ static void release_tiled_md(LoupHandle* h) {
 
 // O32: pinned host memory (cudaHostAllocDefault) for the tiled state: a spare of the handle's of at least `bytes` and
 // at most 25% (and 1 MB) more when there is one, else a new allocation; false when none is to be had
-static bool pinned_take(LoupHandle* h, HostBufferGuard& g, size_t bytes) {
+static bool pinned_take(LoupHandle* h, HostBufferGuard& g, size_t bytes, bool mapped = false) {
     bytes = std::max<size_t>(bytes, 1);
-    auto& v = h->pinned_spare.bufs;
+    auto& v = mapped ? h->pinned_spare.mapped : h->pinned_spare.bufs;
     size_t best = v.size();
     for (size_t i = 0; i < v.size(); ++i)
         if (v[i].first >= bytes && v[i].first <= bytes + bytes / 4 + ((size_t)1 << 20) &&
@@ -4964,7 +4967,7 @@ static bool pinned_take(LoupHandle* h, HostBufferGuard& g, size_t bytes) {
         v.erase(v.begin() + (std::ptrdiff_t)best);
         return true;
     }
-    if (cudaHostAlloc(&g.p, bytes, cudaHostAllocDefault) != cudaSuccess) {
+    if (cudaHostAlloc(&g.p, bytes, mapped ? cudaHostAllocMapped : cudaHostAllocDefault) != cudaSuccess) {
         g.p = nullptr;
         (void)cudaGetLastError();
         return false;
@@ -4992,6 +4995,11 @@ static void release_tiled_state(LoupHandle* h) {
         }
         for (auto& w : st->win)
             if (w) keep(*w);
+        for (TileList& t : st->lists)  // the host lists' edges (mapped)
+            if (t.host_edges.p && t.host_edges.n) {
+                h->pinned_spare.mapped.push_back({t.host_edges.n, t.host_edges.p});
+                t.host_edges.p = nullptr;
+            }
     }
     delete h->tiled_state;
     h->tiled_state = nullptr;
@@ -5181,7 +5189,10 @@ static int build_tile_list(LoupHandle* h, const TileDomain& t, const double* pos
         CUDA_CHECK(cudaStreamSynchronize(h->stream));
         if (!bad) {
             const size_t e = (size_t)E;
-            CUDA_CHECK(cudaHostAlloc(&out.host_edges.p, e * 8, cudaHostAllocMapped));
+            if (!pinned_take(h, out.host_edges, e * 8, true)) {
+                loup::set_error("tile list: %.2f GB of pinned host memory not available", e * 8 / 1e9);
+                return -1;
+            }
             void* dev = nullptr;
             CUDA_CHECK(cudaHostGetDevicePointer(&dev, out.host_edges.p, 0));
             char* hp = static_cast<char*>(out.host_edges.p);
@@ -5198,7 +5209,10 @@ static int build_tile_list(LoupHandle* h, const TileDomain& t, const double* pos
     } else if (host_lists) {
         // shifts first (8-byte aligned), then the three index arrays
         const size_t e = (size_t)E;
-        CUDA_CHECK(cudaHostAlloc(&out.host_edges.p, std::max<size_t>(e * 36, 1), cudaHostAllocMapped));
+        if (!pinned_take(h, out.host_edges, e * 36, true)) {
+            loup::set_error("tile list: %.2f GB of pinned host memory not available", e * 36 / 1e9);
+            return -1;
+        }
         void* dev = nullptr;
         CUDA_CHECK(cudaHostGetDevicePointer(&dev, out.host_edges.p, 0));
         char* hp = static_cast<char*>(out.host_edges.p);

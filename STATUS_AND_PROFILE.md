@@ -1852,3 +1852,7 @@ more, and frees the rest at the end of its set-up (the planner counts the spares
 Library `e14ae3bc` against `b4c57d9d`: state allocations 1,483-1,517 -> 37-39 ms; host windows 2,234-2,261 -> 41 ms
 (the first rebuild 2,390: its windows found no spare of their size); rebuild call 12,991 / 12,937 -> 11,289 / 8,497 ms;
 kept calls 5,439 / 5,470 -> 5,436 / 5,492 ms. Tiled, tiled-MD and tile-list tests 67 passed.
+Then the host lists' mapped pinned edges the same way (library `7f0bf882` against `e14ae3bc`): list builds at a
+rebuild 1,724 / 1,569 -> 892 / 801 ms; rebuild calls 11,511 / 8,129 -> 10,412 / 7,165 ms (the first rebuild's windows
+still allocate); kept calls 5,442 / 5,531 -> 5,450 / 5,503 ms. 67 tests passed. A rebuild now costs about 1.7 s over a
+kept call (7.2 against 5.5 s; 7.5 s before `tile-pinned-reuse`).
