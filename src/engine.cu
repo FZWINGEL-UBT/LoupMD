@@ -6252,6 +6252,27 @@ static int evaluate_tiled_impl(LoupHandle* h, int n_atoms, const int* atomic_num
         for (int i = 0; i < k; ++i) th.emplace_back(fn, n * i / k, n * (i + 1) / k);
         for (auto& t : th) t.join();
     };
+    // O32: the gradient adds of a tile's rows r in [0, n) over a few host threads, split by destination (`key`: the
+    // row's host row; a tile's rows may hold one host row more than once where its ghosts are images of its own rows
+    // or of one atom, and a split by tile row would add into it from two threads at once). Each host row's adds run on
+    // one thread in tile row order, as on one thread.
+    auto par_adds = [](int64_t n, int64_t w, const std::function<int64_t(int64_t)>& key,
+                       const std::function<void(int64_t)>& add) {
+        const int64_t work = n * w;
+        int k = (int)std::min<int64_t>(8, std::max<int64_t>(1, work / (1 << 20)));
+        k = std::min<int>(k, (int)std::max(1u, std::thread::hardware_concurrency()));
+        if (k <= 1) {
+            for (int64_t r = 0; r < n; ++r) add(r);
+            return;
+        }
+        std::vector<std::thread> th;
+        for (int i = 0; i < k; ++i)
+            th.emplace_back([&, i] {
+                for (int64_t r = 0; r < n; ++r)
+                    if ((key(r) >> 6) % k == i) add(r);
+            });
+        for (auto& t : th) t.join();
+    };
     if (hs) {
         CUDA_CHECK(cudaStreamSynchronize(h->stream));  // an earlier call's copies out of the host state
         for (int t = 0; !st->alias && !wave && t + 1 < L; ++t)  // the wavefront's blocks: zeroed at each sweep 1
@@ -6700,8 +6721,14 @@ static int evaluate_tiled_impl(LoupHandle* h, int n_atoms, const int* atomic_num
                                const int64_t w = width(layer, l);
                                float* xl = hxp(layer, l);
                                const float* gsrc = so + o;
-                               par_rows(tt.rows - r0, w, [&](int64_t a0, int64_t a1) {
-                                   for (int64_t r = a0 + r0; r < a1 + r0; ++r) {
+                               par_adds(
+                                   tt.rows - r0, w,
+                                   [&](int64_t i) {
+                                       const int64_t r = i + r0;
+                                       return r < N ? tt.hbase + r : (int64_t)tt.h_ghost[(size_t)(r - N)];
+                                   },
+                                   [&](int64_t i) {
+                                       const int64_t r = i + r0;
                                        const int j = r < N ? ti : own[(size_t)(r - N)];
                                        const int64_t at = r < N ? r : (int64_t)tt.h_ghost[(size_t)(r - N)] -
                                                                           lists[(size_t)j].hbase;
@@ -6710,8 +6737,7 @@ static int evaluate_tiled_impl(LoupHandle* h, int n_atoms, const int* atomic_num
                                                         : win_p(j) + max_local * cum_w[(size_t)l] + at * w;
                                        const float* g = gsrc + r * w;
                                        for (int64_t c = 0; c < w; ++c) row[c] += g[c];
-                                   }
-                               });
+                                   });
                                o += (int64_t)tt.rows * w;
                            }
                            us_add += now_us() - a0t;
@@ -6722,12 +6748,14 @@ static int evaluate_tiled_impl(LoupHandle* h, int n_atoms, const int* atomic_num
                            const int64_t w = width(layer, l);
                            float* d = hdxp(layer, l);
                            const float* gsrc = so + o;
-                           par_rows(tt.rows - r0, w, [&](int64_t a0, int64_t a1) {
-                               for (int64_t r = a0 + r0; r < a1 + r0; ++r) {
-                                   float* row = d + (r < N ? tt.hbase + r : (int64_t)tt.h_ghost[(size_t)(r - N)]) * w;
-                                   const float* g = gsrc + r * w;
-                                   for (int64_t c = 0; c < w; ++c) row[c] += g[c];
-                               }
+                           auto hrow = [&](int64_t i) {
+                               const int64_t r = i + r0;
+                               return r < N ? tt.hbase + r : (int64_t)tt.h_ghost[(size_t)(r - N)];
+                           };
+                           par_adds(tt.rows - r0, w, hrow, [&](int64_t i) {
+                               float* row = d + hrow(i) * w;
+                               const float* g = gsrc + (i + r0) * w;
+                               for (int64_t c = 0; c < w; ++c) row[c] += g[c];
                            });
                            o += (int64_t)tt.rows * w;
                        }
@@ -6834,12 +6862,11 @@ static int evaluate_tiled_impl(LoupHandle* h, int n_atoms, const int* atomic_num
             CUDA_CHECK(cudaStreamSynchronize(h->stream));
             float* d = hdxp(layer, l);
             const int N = t.n_local;
-            par_rows(t.rows, w, [&](int64_t a, int64_t b) {
-                for (int64_t r = a; r < b; ++r) {
-                    float* row = d + (r < N ? t.hbase + r : (int64_t)t.h_ghost[(size_t)(r - N)]) * w;
-                    const float* g = sp + r * w;
-                    for (int64_t c = 0; c < w; ++c) row[c] += g[c];
-                }
+            auto hrow = [&](int64_t r) { return r < N ? t.hbase + r : (int64_t)t.h_ghost[(size_t)(r - N)]; };
+            par_adds(t.rows, w, hrow, [&](int64_t r) {
+                float* row = d + hrow(r) * w;
+                const float* g = sp + r * w;
+                for (int64_t c = 0; c < w; ++c) row[c] += g[c];
             });
         }
         return 0;
