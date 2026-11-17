@@ -1937,4 +1937,7 @@ more than 4x in cap; where it costs 1.3x-2x (5M at 0.9 and 0.75, 2.56M at 0.5) t
 it. Of 20 plans only 5M at 0.5 changes; the tiled, memory-plan, large-box and capacity tests 70 passed; on the
 installed library at b8d302f `tests/gpu -m "not acceptance"` 397 passed (7 D3 skips), `-m acceptance` 15 passed (1
 NbCl5 skip). 2,560,000 atoms at fraction 0.35 (cap 8,192, 343 tiles) 5.38 s against 5.32 / 5.39 s forced at 16,384 /
-24,576: a tie, kept; at 4.98 GiB peak it is 3% slower than at fraction 0.9 (5.24 s, 12.84 GiB).
+24,576: a tie, kept; at 4.98 GiB peak it is 3% slower than at fraction 0.9 (5.24 s, 12.84 GiB). 8M at fraction
+0.75 (device, cap 6,144, 17.58 s, 10.91 GiB, one run): the host state forced at 12,288 with the lists on the device
+17.28 s, 10.58 GiB; at 8,192 17.44 s (one run each). The window down to 2x changed none of 20 plans (it takes the
+lists to host memory and wants slot room, which does not fit there); not pursued for 1.7% in one run.
