@@ -5605,10 +5605,12 @@ static int plan_execution_impl(LoupHandle* h, int n_atoms, const int* atomic_num
         if (cap > 0 && cap < 16384 && n >= 256.0 * cap && hstate == 0 && hs_force != 0 && hs_first == 1) {
             // at most 8x: at 65,536 the call found no memory left for any slot although the plan's estimate left
             // 4 GB (54 tiles, 6.50 s; the grid fit's split blocks, fixed since by tile-grid-rows: 64 tiles, 5.23 s);
-            // 49,152 and 32,768 ran with 64 / 125 slots (5.24 / 5.26 s), 32,768 at the lower peak
+            // 49,152 and 32,768 ran with 64 / 125 slots (5.24 / 5.26 s), 32,768 at the lower peak. Down to 2.5x where
+            // nothing from 4x fits: 8,008,065 atoms, device cap 6,144 (2,016 tiles) 17.29 / 17.28 s, the host state
+            // at 16,384 (512 tiles) 16.60 / 16.64 s, A B B A (tile-host-state-window, status §6.34)
             for (int c : kCaps) {
                 if (c > 8 * cap) continue;
-                if (c < 4 * cap) break;
+                if (2 * c < 5 * cap) break;
                 if (hs_force != 1 && !hs_room(c, 1)) continue;
                 double g = 0.0, w = 0.0;
                 if (tiled_at(c, host_force != 0, g, w, 1) != 0) return -1;

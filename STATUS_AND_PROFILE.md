@@ -1910,3 +1910,16 @@ gain to weigh against a new path). While writing it: the host path's gradient ad
 tile whose ghosts hold an image of one of its own rows (grids with one tile along an axis) can add into one host row
 from two threads at once. Not seen in a result (the wavefront host pool runs only forced or where the plain host state
 does not fit); the branch's rounds avoid it.
+
+`tile-host-state-window` (O32, ADOPTED, 5060 Ti only): 8,008,065 atoms (SrTiO3 117^3, OMAT-0 medium, fraction 0.9).
+The device plan's cap 6,144 (2,016 tiles, wavefront) left the plain host state only 4x-8x that cap, where nothing
+fits; at 16,384 (2.67x, 512 tiles, 23.9 GB host) it is faster, A B B A, two kept calls each:
+
+| plan | kept (s) | cold (s) | peak (GiB) |
+| --- | --- | --- | --- |
+| device, cap 6,144 (old default) | 17.29 / 17.28 | 49.4 / 49.0 | 13.10 |
+| host state, cap 16,384 (forced) | 16.60 / 16.64 | 40.6 / 39.0 | 12.97 |
+| host state, new default (one run, cold GEMM plans) | 16.70 | 50.8 | 12.98 |
+
+The search now takes 2.5x-4x after 8x-4x. Of 15 plans (320,000 to 8M atoms, fractions 0.9 / 0.75 / 0.5) only 8M at
+0.9 changes. `tests/gpu/test_tiled.py`, `test_memory_plan.py`, `test_large_box.py` 64 passed.
