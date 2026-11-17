@@ -1836,3 +1836,10 @@ plan (125 tiles, host state) free after the slots 537-541 -> 1,860 MB (both runs
 5,739.7 / 5,754.4 -> 5,738.7 / 5,734.7 ms, default plan 5,249.3 / 5,247.0 -> 5,238.8 / 5,242.8 ms; 320,000 atoms
 585.0 / 589.6 -> 585.7 / 585.6 ms; the wavefront at 1,081,600 2,163.1 / 2,145.4 -> 2,168.8 / 2,163.9 ms (within its
 2,145-2,173 ms spread across this session's runs). Tiled tests 55 passed.
+
+Compact slots only (`LOUP_TILE_KEEP_ACTIVE=0 LOUP_TILE_KEEP_COMPACT=999`, library `1ce7922d`, A B B A against the
+default): 2,560,000 atoms default plan 5,251.4 / 5,249.1 -> 5,314.0 / 5,338.4 ms (+1.5%) with the peak 12.84 ->
+6.16 GiB (125 compact slots of 17 MB instead of 125 full of 74 MB); 320,000 atoms 584.6 / 585.4 -> 598.2 / 596.0 ms
+(+2.1%); the wavefront at 1,081,600 2,170.2 / 2,169.8 -> 2,189.3 / 2,176.8 ms (+0.6%). Not the default (slower); the
+setting for half the device memory at about 1.5% of the time. The restores write the receivers, vectors and spline
+locators back into the handle's buffers each later sweep (about 28 B per edge written and read again).
