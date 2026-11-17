@@ -1941,3 +1941,8 @@ NbCl5 skip). 2,560,000 atoms at fraction 0.35 (cap 8,192, 343 tiles) 5.38 s agai
 0.75 (device, cap 6,144, 17.58 s, 10.91 GiB, one run): the host state forced at 12,288 with the lists on the device
 17.28 s, 10.58 GiB; at 8,192 17.44 s (one run each). The window down to 2x changed none of 20 plans (it takes the
 lists to host memory and wants slot room, which does not fit there); not pursued for 1.7% in one run.
+The host state with the lists on the device (`LOUP_TILE_HOST_LISTS=0`, one run each, fraction 0.9): 2,560,000 atoms
+cap 49,152 5.28 s against the default's lists in host memory at 32,768 5.25 s (peak 12.38 against 12.84 GiB, cold
+12.9 against 16.9 s); 5,000,000 cap 12,288 10.50 s against 10.26 s (cold 23.5 against 34.0 s). Kept calls tie or
+lose, so the plan stays; the cold calls are 24-31% shorter with device lists, not measured in a tiled MD run's list
+rebuilds (an open question for the rebuild cost).
