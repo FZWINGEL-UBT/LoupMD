@@ -38,6 +38,7 @@ int main(void) {
     printf("LoupMemoryPlan %zu\n", sizeof(LoupMemoryPlan));
     F(LoupMemoryPlan, whole_bytes); F(LoupMemoryPlan, tiled_global_bytes); F(LoupMemoryPlan, tile_workspace_bytes);
     F(LoupMemoryPlan, free_bytes); F(LoupMemoryPlan, receivers); F(LoupMemoryPlan, mode);
+    F(LoupMemoryPlan, host_lists); F(LoupMemoryPlan, host_bytes); F(LoupMemoryPlan, host_state);
     printf("LoupThermoRow %zu\n", sizeof(LoupThermoRow));
     F(LoupThermoRow, step); F(LoupThermoRow, e_pot); F(LoupThermoRow, e_kin); F(LoupThermoRow, temp_k);
     F(LoupThermoRow, pressure_gpa); F(LoupThermoRow, volume_a3); F(LoupThermoRow, conserved);
