@@ -658,6 +658,22 @@ struct LoupHandle {
     double exec_fraction = 0.9;
     LoupExecution last_exec{};
     TiledState* tiled_state = nullptr;  // the tiled call's plan, kept lists and state buffers (S5-T06)
+    // O32: the pinned host buffers of a released tiled state (bytes, pointer), taken again by the next state's set-up
+    // instead of new cudaHostAlloc calls (2,560,000 atoms: about 3.8 s of a 7.7 s list rebuild); freed at the end of
+    // that set-up when not taken, and with the handle (tile-pinned-reuse)
+    struct PinnedSpare {
+        std::vector<std::pair<size_t, void*>> bufs;
+        double bytes() const {
+            double b = 0.0;
+            for (const auto& x : bufs) b += (double)x.first;
+            return b;
+        }
+        void clear() {
+            for (const auto& x : bufs) cudaFreeHost(x.second);
+            bufs.clear();
+        }
+        ~PinnedSpare() { clear(); }
+    } pinned_spare;
     // The state of tiled MD on the device (loup_tiled_set_state, PLAN.md O31): positions, velocities, masses, forces
     // and the integrator's scalars of a system run tile by tile. It outlives the tiled state (rebuilt at a list
     // rebuild) and the workspace (each tile's domain); loup_set_system and loup_destroy free it.
@@ -968,6 +984,7 @@ struct DeviceBufferGuard {
 // Pinned host memory mapped into the device's address space (cudaHostAllocMapped): kernels read it over the bus
 struct HostBufferGuard {
     void* p = nullptr;
+    size_t n = 0;  // O32: the bytes, where pinned_take set it (such a buffer goes back to the handle's spares)
     ~HostBufferGuard() { if (p) cudaFreeHost(p); }
 };
 struct EventPairGuard {
@@ -4931,7 +4948,51 @@ static void release_tiled_md(LoupHandle* h) {
     h->tiled_md = nullptr;
 }
 
+// O32: pinned host memory (cudaHostAllocDefault) for the tiled state: a spare of the handle's of at least `bytes` and
+// at most 25% (and 1 MB) more when there is one, else a new allocation; false when none is to be had
+static bool pinned_take(LoupHandle* h, HostBufferGuard& g, size_t bytes) {
+    bytes = std::max<size_t>(bytes, 1);
+    auto& v = h->pinned_spare.bufs;
+    size_t best = v.size();
+    for (size_t i = 0; i < v.size(); ++i)
+        if (v[i].first >= bytes && v[i].first <= bytes + bytes / 4 + ((size_t)1 << 20) &&
+            (best == v.size() || v[i].first < v[best].first))
+            best = i;
+    if (best < v.size()) {
+        g.p = v[best].second;
+        g.n = v[best].first;
+        v.erase(v.begin() + (std::ptrdiff_t)best);
+        return true;
+    }
+    if (cudaHostAlloc(&g.p, bytes, cudaHostAllocDefault) != cudaSuccess) {
+        g.p = nullptr;
+        (void)cudaGetLastError();
+        return false;
+    }
+    g.n = bytes;
+    return true;
+}
+
 static void release_tiled_state(LoupHandle* h) {
+    if (TiledState* st = h->tiled_state) {  // O32: its pinned buffers become the handle's spares
+        cudaDeviceSynchronize();             // no copy may still read or write them
+        auto keep = [&](HostBufferGuard& g) {
+            if (g.p && g.n) {
+                h->pinned_spare.bufs.push_back({g.n, g.p});
+                g.p = nullptr;
+            }
+        };
+        for (HostBufferGuard& g : st->hx) keep(g);
+        for (HostBufferGuard& g : st->hdx) keep(g);
+        keep(st->stage_in);
+        keep(st->stage_out);
+        for (int k = 0; k < 2; ++k) {
+            keep(st->hp.in[k]);
+            keep(st->hp.out[k]);
+        }
+        for (auto& w : st->win)
+            if (w) keep(*w);
+    }
     delete h->tiled_state;
     h->tiled_state = nullptr;
 }
@@ -5442,7 +5503,11 @@ static int plan_execution_impl(LoupHandle* h, int n_atoms, const int* atomic_num
         char line[256];
         while (f && std::fgets(line, sizeof(line), f)) {
             long long kb = 0;
-            if (std::sscanf(line, "MemAvailable: %lld kB", &kb) == 1) { host_avail = (double)kb * 1024.0; break; }
+            // O32: with the handle's spare pinned buffers (the next state's set-up takes or frees them)
+            if (std::sscanf(line, "MemAvailable: %lld kB", &kb) == 1) {
+                host_avail = (double)kb * 1024.0 + h->pinned_spare.bytes();
+                break;
+            }
         }
         if (f) std::fclose(f);
         if (host_avail <= 0.0) host_avail = (double)sysconf(_SC_AVPHYS_PAGES) * (double)sysconf(_SC_PAGESIZE);
@@ -5912,9 +5977,7 @@ static int evaluate_tiled_impl(LoupHandle* h, int n_atoms, const int* atomic_num
             st->hdx = std::vector<HostBufferGuard>((size_t)(L - 1) * 4);
         }
         auto halloc = [&](HostBufferGuard& g, size_t bytes) -> int {
-            if (cudaHostAlloc(&g.p, std::max<size_t>(bytes, 1), cudaHostAllocDefault) != cudaSuccess) {
-                g.p = nullptr;
-                (void)cudaGetLastError();
+            if (!pinned_take(h, g, bytes)) {
                 loup::set_error("tile host state: %.2f GB of pinned host memory not available", bytes / 1e9);
                 return 1;
             }
@@ -5970,6 +6033,7 @@ static int evaluate_tiled_impl(LoupHandle* h, int n_atoms, const int* atomic_num
         st->act_keep = -1;
         st->act_slots.clear();
         ++h->tile_list_builds;
+        tick("state allocations");
     } else {
         for (TileList& t : st->lists)
             tile_place_rows_kernel<<<blocks((int64_t)t.rows * 3), 256, 0, h->stream>>>(
@@ -6330,19 +6394,20 @@ static int evaluate_tiled_impl(LoupHandle* h, int n_atoms, const int* atomic_num
                 HostBufferGuard& g = *st->win[(size_t)w];
                 if (g.p) cudaFreeHost(g.p);
                 g.p = nullptr;
+                g.n = 0;
                 st->host_bytes -= (double)st->win_floats[(size_t)w] * sizeof(float);
                 st->win_floats[(size_t)w] = 0;
                 const size_t bytes = (size_t)(max_local * sum_w) * sizeof(float);
-                if (cudaHostAlloc(&g.p, bytes, cudaHostAllocDefault) != cudaSuccess) {
-                    g.p = nullptr;
-                    (void)cudaGetLastError();
+                if (!pinned_take(h, g, bytes)) {
                     loup::set_error("tile host state: %.2f GB of pinned host memory not available", bytes / 1e9);
                     return -1;
                 }
                 st->win_floats[(size_t)w] = (size_t)(max_local * sum_w);
                 st->host_bytes += (double)bytes;
             }
+        tick("host windows");
     }
+    h->pinned_spare.clear();  // O32: the spares this state's set-up did not take
     auto win_p = [&](int j) { return static_cast<float*>(st->win[(size_t)win_of[(size_t)j]]->p); };
     if (st->pipe && st->hp.tile_events((size_t)T) != 0) {
         loup::set_error("tile host state: cannot create the copy events");

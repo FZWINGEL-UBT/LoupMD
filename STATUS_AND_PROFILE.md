@@ -1843,3 +1843,12 @@ default): 2,560,000 atoms default plan 5,251.4 / 5,249.1 -> 5,314.0 / 5,338.4 ms
 (+2.1%); the wavefront at 1,081,600 2,170.2 / 2,169.8 -> 2,189.3 / 2,176.8 ms (+0.6%). Not the default (slower); the
 setting for half the device memory at about 1.5% of the time. The restores write the receivers, vectors and spline
 locators back into the handle's buffers each later sweep (about 28 B per edge written and read again).
+
+`tile-pinned-reuse` (O32): a list rebuild at 2,560,000 atoms (default plan, host state; `rebuild_cost.py 80`) costs
+7.5 s over a kept call (12.96 against 5.46 s): plan 0.19 s, candidates 0.45-0.64, list builds 1.5, the state's
+allocations 1.5 (pinned host layer state) and the host windows 2.25 (pinned). A released tiled state's pinned host
+buffers now stay on the handle as spares; the next state's set-up takes one of at least the size and at most 25%
+more, and frees the rest at the end of its set-up (the planner counts the spares as available host memory).
+Library `e14ae3bc` against `b4c57d9d`: state allocations 1,483-1,517 -> 37-39 ms; host windows 2,234-2,261 -> 41 ms
+(the first rebuild 2,390: its windows found no spare of their size); rebuild call 12,991 / 12,937 -> 11,289 / 8,497 ms;
+kept calls 5,439 / 5,470 -> 5,436 / 5,492 ms. Tiled, tiled-MD and tile-list tests 67 passed.
