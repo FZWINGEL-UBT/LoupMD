@@ -1855,4 +1855,12 @@ kept calls 5,439 / 5,470 -> 5,436 / 5,492 ms. Tiled, tiled-MD and tile-list test
 Then the host lists' mapped pinned edges the same way (library `7f0bf882` against `e14ae3bc`): list builds at a
 rebuild 1,724 / 1,569 -> 892 / 801 ms; rebuild calls 11,511 / 8,129 -> 10,412 / 7,165 ms (the first rebuild's windows
 still allocate); kept calls 5,442 / 5,531 -> 5,450 / 5,503 ms. 67 tests passed. A rebuild now costs about 1.7 s over a
-kept call (7.2 against 5.5 s; 7.5 s before `tile-pinned-reuse`).
+kept call (7.2 against 5.5 s; 7.5 s before `tile-pinned-reuse`). At 320,000 atoms a rebuild costs 236 ms over a
+618 ms kept call (plan 16, candidates 44, lists 78, state 26, slots 50 ms).
+
+Suites on `b05fd9e` (library `7f0bf882`, built from it): `tests/cpu` 494 passed, 1 skipped; `tests/gpu -m "not
+acceptance"` 396 passed, 1 failed: `test_auto_tiles_320000_atoms_without_a_user_setting` (the message was not kept).
+It passed in the suite on `457196c` and in four runs alone and two after the files before it (peak 12.42 GiB against
+the 13.14 GiB bound, on this library and the one before the pinned reuse): not reproduced. On `457196c` the
+`LoupMemoryPlan` layout check failed (its C program lacked the O31/O32 fields; fixed in `868793d`) and the ASE
+calculator test failed once (passed on rerun).
