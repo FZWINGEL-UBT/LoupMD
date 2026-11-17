@@ -1926,4 +1926,6 @@ fits; at 16,384 (2.67x, 512 tiles, 23.9 GB host) it is faster, A B B A, two kept
 | host state, new default (one run, cold GEMM plans) | 16.70 | 50.8 | 12.98 |
 
 The search now takes 2.5x-4x after 8x-4x. Of 15 plans (320,000 to 8M atoms, fractions 0.9 / 0.75 / 0.5) only 8M at
-0.9 changes. `tests/gpu/test_tiled.py`, `test_memory_plan.py`, `test_large_box.py` 64 passed.
+0.9 changes. `tests/gpu/test_tiled.py`, `test_memory_plan.py`, `test_large_box.py` 64 passed; on the installed
+library at 7774638 `tests/gpu -m "not acceptance"` 397 passed (7 D3 skips) and `-m acceptance` 15 passed (1 NbCl5
+skip).
