@@ -1910,6 +1910,22 @@ All of `tests/gpu` on that library (bf595d5): 412 passed, 8 skipped, 1 failed:
 `test_capacity.py::test_auto_tiles_320000_atoms_without_a_user_setting` (peak against the free memory read at the
 call), which passed alone twice and with `test_capacity.py` and `test_tiled.py` twice (62 passed): not reproduced.
 
+`tile-host-state-larger-cap` (O32, ADOPTED, 5060 Ti only): from 2^20 atoms a device plan below the largest cap gives
+way to the plain host state where that reaches a larger cap. 1,080,000 atoms at fraction 0.9: device 49,152 (45 tiles)
+2.285 / 2.271 s, 11.6-11.9 GiB -> host state 65,536 (27 tiles) 2.196 / 2.195 s, 10.56 GiB; at 0.75 / 0.5 -2.7% /
+-4.7%; 8,008,065 at 0.75: 6,144 (wavefront) 17.58 / 17.60 s -> 16,384 16.79 / 16.67 s. Below 2^20 it lost (320,000 up
+to +4.2%, 135,000 +10%). 4 of 35 plans change; tiled, memory-plan, capacity and tiled-MD tests 78 passed.
+
+| atoms | fraction 0.9 | 0.5 | 0.35 | 0.25 |
+| --- | --- | --- | --- | --- |
+| 320,000 | 0.583 s, 11.26 GiB | 0.636 s, 4.78 GiB | 0.647 s, 4.78 GiB | 0.670 s, 3.64 GiB |
+| 1,080,000 (this change) | 2.196 s, 10.56 GiB | 2.214 s, 7.06 GiB | 2.259 s, 5.06 GiB | 2.282 s, 3.62 GiB |
+| 2,560,000 | 5.24 s, 12.84 GiB | 5.28 s, 7.23 GiB | 5.38 s, 4.98 GiB | 5.45 s, 3.52 GiB |
+| 5,000,000 | 10.27 s, 13.05 GiB | 10.39 s, 7.22 GiB | 10.59 s, 5.04 GiB | 10.69 s, 3.62 GiB |
+
+Kept calls, one run each (two at 1.08M / 0.9): from a million atoms a quarter of the card costs 2-4% of the time at
+0.9.
+
 `tile-wave-host-bus` (O32, NEUTRAL, not adopted; local branch `wip/tile-wave-host-bus`): the wavefront's host pool
 mapped, its ghost gathers, gradient adds (plain adds in rounds of distinct host rows) and block zeroing as kernels on
 the stream instead of host work after a synchronisation. `tests/gpu/test_tiled.py -k "wavefront or host"` 39 passed.

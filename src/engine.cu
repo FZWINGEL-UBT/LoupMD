@@ -5637,6 +5637,36 @@ static int plan_execution_impl(LoupHandle* h, int n_atoms, const int* atomic_num
                 }
             }
         }
+        // O32: a device plan held below the largest cap by the device memory gives way to the plain host state where
+        // that reaches a larger cap (the cap search of pass 2): 1,080,000 atoms at fraction 0.9, device 49,152 (45
+        // tiles) 2.285 / 2.271 s, peak 11.6-11.9 GiB, the host state at 65,536 (27 tiles) 2.196 / 2.195 s, 10.56 GiB;
+        // at 0.75 / 0.5 -2.7% / -4.7%; 8,008,065 at 0.75 6,144 -> 16,384 17.51 -> 16.68 s. From 2^20 atoms only: below,
+        // the host copies cost more than the larger tiles save (320,000 at 0.5 / 0.35 +4.2% / +2.9%, 135,000 at 0.25
+        // +10%; at the same cap 320,000 at 0.9: 0.613 against 0.593 s): tile-host-state-larger-cap
+        if (cap > 0 && cap < kCaps[0] && n >= 1048576.0 && hstate == 0 && hs_force != 0 && hs_first == 1) {
+            int any = 0, with_slots = 0;
+            double g = 0.0, w = 0.0;
+            for (int c : kCaps) {
+                if (c <= cap) break;
+                if (hs_force != 1 && !hs_room(c, 1)) continue;
+                if (tiled_at(c, host_force != 0, g, w, 1) != 0) return -1;
+                if (!(g + w <= allowed && std::min<double>(c, n) * epl * 1.1 <= (double)h->edge_limit)) continue;
+                if (!any) any = c;
+                if (g + w + slot_room <= allowed) {
+                    with_slots = c;
+                    break;
+                }
+            }
+            const int pick = with_slots && 4 * with_slots >= any ? with_slots : any;
+            if (pick > cap) {
+                if (tiled_at(pick, host_force != 0, g, w, 1) != 0) return -1;
+                cap = pick;
+                hstate = 1;
+                host = host_force != 0;
+                global = g;
+                ws = w;
+            }
+        }
     }
     h->tile_host_lists = (cap > 0 && host) ? 1 : 0;
     h->tile_host_state = (cap > 0 && hstate) ? hstate : 0;  // 2: the wavefront's row pool (the call's rule)
