@@ -5587,16 +5587,24 @@ static int plan_execution_impl(LoupHandle* h, int n_atoms, const int* atomic_num
             if (pass == 3 && !wave) break;
             host = pass >= 1 ? host_force != 0 : false;
             hstate = pass >= 2 ? pass - 1 : 0;
-            // the plain host state: first the caps that leave compact slots room for every tile (slot_room), then any
-            for (int need_slots = pass == 2 ? 1 : 0; need_slots >= 0 && cap == 0; --need_slots)
-                for (int c : kCaps) {
-                    if (pass >= 2 && hs_force != 1 && !hs_room(c, hstate)) continue;
-                    if (tiled_at(c, host, global, ws, hstate) != 0) return -1;
-                    if (fits(c) && (!need_slots || global + ws + slot_room <= allowed)) {
-                        cap = c;
-                        break;
-                    }
+            // the plain host state: the largest cap that leaves compact slots room for every tile (slot_room), unless
+            // that is more than 4x below the largest cap that fits at all (5,000,000 atoms at fraction 0.5: slot room
+            // at 4,096, 1,362 tiles, 11.24 s; 32,768 fits, 216 tiles, 10.44 s at the same peak; where the slot room
+            // costs 1.3x-2x in cap the two tie: tile-slot-room-limit, status §6.34); other passes: the largest that fits
+            int any = 0, with_slots = 0;
+            for (int c : kCaps) {
+                if (pass >= 2 && hs_force != 1 && !hs_room(c, hstate)) continue;
+                if (tiled_at(c, host, global, ws, hstate) != 0) return -1;
+                if (!fits(c)) continue;
+                if (!any) any = c;
+                if (pass != 2 || global + ws + slot_room <= allowed) {
+                    with_slots = c;
+                    break;
                 }
+            }
+            const int pick = with_slots && 4 * with_slots >= any ? with_slots : any;
+            if (pick && tiled_at(pick, host, global, ws, hstate) != 0) return -1;
+            cap = pick;
         }
         // O32: a device plan in small tiles loses to the plain host state in tiles four times larger or more with
         // room for the slots (2,560,000 atoms: cap 4,096 on the device 5.73-5.75 s, the host state at 49,152 5.23 s;

@@ -1929,3 +1929,9 @@ The search now takes 2.5x-4x after 8x-4x. Of 15 plans (320,000 to 8M atoms, frac
 0.9 changes. `tests/gpu/test_tiled.py`, `test_memory_plan.py`, `test_large_box.py` 64 passed; on the installed
 library at 7774638 `tests/gpu -m "not acceptance"` 397 passed (7 D3 skips) and `-m acceptance` 15 passed (1 NbCl5
 skip).
+
+`tile-slot-room-limit` (O32, ADOPTED, 5060 Ti only): the plain host state's cap search wanted room for compact slots
+of every tile at any cost in cap. 5,000,000 atoms at fraction 0.5 got cap 4,096 (1,362 tiles, 11.26 / 11.24 s, peak
+7.26 GiB) where 32,768 fits (216 tiles, 10.44 / 10.39 s, 7.22 GiB). The search now drops the slot room when it costs
+more than 4x in cap; where it costs 1.3x-2x (5M at 0.9 and 0.75, 2.56M at 0.5) the two tie within 0.7%, so those keep
+it. Of 20 plans only 5M at 0.5 changes; the tiled, memory-plan, large-box and capacity tests 70 passed.
