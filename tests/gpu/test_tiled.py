@@ -591,6 +591,30 @@ def test_the_plan_moves_the_layer_state_to_host_memory_only_when_the_lists_there
     assert abs(e1 - e0) / len(at) <= 1e-8 and np.abs(f1 - f0).max() <= 1e-5 and np.abs(s1 - s0).max() <= 1e-8
 
 
+@pytest.mark.full
+def test_a_forced_host_state_beyond_the_host_memory_is_refused(monkeypatch):
+    """O32: LOUP_TILE_HOST_STATE=1 skips the plan's 60% limit, but a plan that would pin more than 90% of the available
+    host memory is refused instead of pinning it (8,008,065 atoms with the wavefront's host pool forced planned 42.1 GB
+    against 40.1 GB available and took the WSL distro down). Skips where the host has room for that plan."""
+    with open("/proc/meminfo") as f:
+        avail = next(int(line.split()[1]) * 1024 for line in f if line.startswith("MemAvailable:"))
+    if avail > 45e9:
+        pytest.skip(f"{avail / 1e9:.0f} GB of host memory available: the forced plan of 42 GB would fit")
+    at = srtio3(117)
+    bundle = ensure_loup_bundle(find_model("mace-omat-0-medium.model"), [8, 22, 38])
+    monkeypatch.setenv("LOUP_TILE_HOST_STATE", "1")
+    monkeypatch.setenv("LOUP_TILE_WAVEFRONT", "1")
+    eng = LoupEngine(bundle)
+    try:
+        eng.set_execution(_core.LOUP_EXEC_TILED, 0, 0.9)
+        with pytest.raises(BackendError, match="pinned host memory") as caught:
+            eng.plan_execution(at.numbers, at.positions, at.cell.array, skin=SKIN)
+        assert "LOUP_TILE_HOST_STATE=1" in str(caught.value)
+    finally:
+        del eng
+        gc.collect()
+
+
 def test_the_tiled_call_is_refused_for_long_range_models():
     at = _oxide(1)
     bundle = ensure_loup_bundle(find_model("MACE-POLAR-1-S.model"), [8, 22, 38])

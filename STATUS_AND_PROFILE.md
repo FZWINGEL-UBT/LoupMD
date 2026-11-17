@@ -1901,8 +1901,11 @@ the whole file 55 passed, `tests/cpu` 494 passed, `tests/gpu -m "not acceptance"
 `NbCl5_R2SCAN.cif` not present); no WSL failure. On a freshly started WSL the forced wavefront host pool then ran
 three processes each at 320,000 atoms in a rod (fraction 0.6, 1.5 GB host, 935-953 ms) and 1,081,600 atoms
 (fraction 0.9, 9.0 GB host, 3.35-3.40 s), the two cases that failed after the first failure, without a failure: the
-later failures look like WSL's state after the first one rather than the mode. The 8M forced host-pool run (the first
-failure) was not repeated. No forced large host-pool run was repeated.
+later failures look like WSL's state after the first one rather than the mode. The first failure's cause: the 8M
+forced host-pool plan (fraction 0.9, cap 65,536) needs 42.1 GB of pinned host memory against 40.1 GB available in
+the WSL distro, and `LOUP_TILE_HOST_STATE=1` skipped the plan's 60% check. A plan that would pin more than 90% of
+the available host memory is now refused with a message naming the forced setting (test
+`test_a_forced_host_state_beyond_the_host_memory_is_refused`); the default plans stay within 60% and do not change.
 
 `tile-wave-host-bus` (O32, NEUTRAL, not adopted; local branch `wip/tile-wave-host-bus`): the wavefront's host pool
 mapped, its ghost gathers, gradient adds (plain adds in rounds of distinct host rows) and block zeroing as kernels on

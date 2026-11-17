@@ -5667,6 +5667,16 @@ static int plan_execution_impl(LoupHandle* h, int n_atoms, const int* atomic_num
                                    : "");
         return -1;
     }
+    // A forced host state skips the 60% check (hs_room), but no plan may pin more than 90% of the available host
+    // memory: 8,008,065 atoms with the wavefront's host pool forced planned 42.1 GB against 40.1 GB available, and
+    // pinning it took the WSL distro down (status §6.34)
+    if (plan.mode == LOUP_EXEC_TILED && (double)plan.host_bytes > 0.9 * host_avail) {
+        loup::set_error("%d atoms in tiles of %d receivers need %.1f GB of pinned host memory against %.1f GB "
+                        "available (at most 90%%)%s", n_atoms, cap, (double)plan.host_bytes / 1e9, host_avail / 1e9,
+                        hs_force == 1 ? "; LOUP_TILE_HOST_STATE=1 forces the host state past the plan's own limit"
+                                      : "");
+        return -1;
+    }
     *out = plan;
     return 0;
 }
