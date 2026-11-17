@@ -2637,7 +2637,8 @@ static cudaError_t counted_malloc(size_t& counter, void** p, size_t bytes) {
 // n_ghost > 0 makes the last n_ghost atoms ghosts of an open domain (see LoupHandle::n_ghost): the locals are grouped
 // by species as always, the ghosts keep their order behind them, and every per-atom buffer has a row for each.
 // domain (set_domain_impl: open domains and tiles, which sweep): the generic model's skip-chain fold stays off for
-// this system, as sweeps need every layer's output; whole systems fold where the fold was built.
+// this system, as sweeps need every layer's output; whole systems fold where the fold was built. A domain's layers
+// share one arena for their own buffers (GenericModel::share_layer_buffers).
 static int set_system_impl(LoupHandle* h, int n_atoms, const int* atomic_numbers, const double* masses_amu, double skin,
                            int n_ghost = 0, bool domain = false) {
     if (!h) return -1;
@@ -2691,6 +2692,7 @@ static int set_system_impl(LoupHandle* h, int n_atoms, const int* atomic_numbers
     if (h->gen) {
         try {
             h->gen->use_chain_fold(!domain);
+            h->gen->share_layer_buffers(domain);  // a domain only sweeps: one arena for its layers' own buffers
         } catch (const std::exception& e) {
             loup::set_error("%s", e.what());
             return -1;
@@ -5834,8 +5836,13 @@ static int plan_execution_impl(LoupHandle* h, int n_atoms, const int* atomic_num
     // Bytes per row (locals and ghosts alike), per edge of capacity, and those that do not scale; kPlanAllowance as
     // in loup_plan_memory.
     constexpr double kPlanAllowance = 32.0 * 1024.0 * 1024.0;
-    const double row_b = ((double)h->sys_atom_bytes + (double)h->gen->system_bytes() + (double)h->cub_tmp_bytes) /
-                         h->atom_cap;
+    // tile-shared-layers: a row is counted with every layer's buffers its own, as a whole system has them and as
+    // the tile workspace had them when the caps below were measured; the workspace's layers share one arena, so
+    // it takes less than the plan counts (OMAT-0 medium a third less). What that leaves goes to the kept slots and
+    // to a lower peak. Counting the shared size instead moved device plans to larger caps without room for their
+    // slots: 320,000 atoms at fraction 0.5 0.581 -> 0.627 s (ledger tile-shared-layers, with a second variant).
+    const double row_b = ((double)h->sys_atom_bytes + (double)h->gen->system_bytes_unshared() +
+                          (double)h->cub_tmp_bytes) / h->atom_cap;
     const double edge_b = ((double)h->sys_edge_bytes + (double)h->gen->edge_bytes()) / h->E_cap;
     const double fixed_b = (double)h->sys_fixed_bytes + (double)h->weight_copy_bytes + kPlanAllowance;
     const double epl = (double)h->E_skin / d.n_local;  // edges per receiver

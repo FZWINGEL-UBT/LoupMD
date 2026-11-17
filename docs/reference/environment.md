@@ -105,6 +105,7 @@ gates in that form. Most are read when an engine is made; the MD-loop switches a
 | `LOUP_TILE_HOST_ALIAS` | `0` | tiled call: a separate gradient array in the host state | `src/engine.cu` |
 | `LOUP_TILE_HOST_COMPACT` | `0` | tiled call: host lists in the full form (28 B per edge) instead of 8 B | `src/engine.cu` |
 | `LOUP_TILE_DEVICE_COMPACT` | `0` | tiled call: device lists in the full form (28 B per edge) instead of 8 B | `src/engine.cu` |
+| `LOUP_TILE_SHARE_LAYERS` | `0` | tiled call: every layer's buffers its own instead of one arena the layers share | `src/generic.cu` |
 | `LOUP_VARIABLE_CELL` | `1` | sends a `loup_run` call through the variable-cell step | `src/engine.cu` |
 | `LOUP_DEBUG_CELL_RATE` | number r | scales the cell and positions by 1 + r in every variable-cell step | `src/engine.cu` |
 | `LOUP_MIN_AHEAD` | `0`, `1` | the minimiser's list check before or after the force pass | `src/engine.cu` |

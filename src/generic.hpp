@@ -94,6 +94,9 @@ public:
     // Bytes of the per-system buffers (alloc_system) and of the edge buffers (ensure_edges), for loup_plan_memory.
     // The long-range part's buffers (polar.cu) are not counted.
     size_t system_bytes() const { return sys_bytes_; }
+    // The same with every layer's buffers its own: what a whole system of as many rows allocates where this one
+    // shares them (share_layer_buffers); equal to system_bytes() otherwise.
+    size_t system_bytes_unshared() const { return sys_bytes_unshared_; }
     size_t edge_bytes() const { return edge_bytes_; }
     // For a sweep driver: layer t's output rows of degree l ([rows, 2l + 1, out_width(t)]; nullptr when the model
     // does not form them) and the buffer the next layer's sweep leaves their gradient in.
@@ -110,6 +113,14 @@ public:
     // tile domains (which sweep) do not. Call with no system allocated (before alloc_system).
     void use_chain_fold(bool on);
     bool chain_fold_built() const { return chain_fold_built_; }
+    // The layers' own buffers of the systems allocated from now on in one shared arena (tile-shared-layers): a sweep
+    // runs one layer and needs nothing of another layer but its output and that output's gradient, which stay
+    // buffers of their own, so the arena is as large as the largest layer instead of all of them. Such a system runs
+    // sweeps and energy-only passes, not the whole pass (its backward of a layer would read what a later layer's
+    // forward overwrote). Only without the fold and the long range, from two layers; LOUP_TILE_SHARE_LAYERS=0 keeps
+    // every buffer its own. Call with no system allocated (before alloc_system).
+    void share_layer_buffers(bool on);
+    bool layers_shared() const { return layers_shared_; }
     // O31: whether layer 0's backward sweep reads nothing of its forward but msgf[0..3] and D (the density layer 0
     // with the hidden table, skip folded, linear readout: MACE-MP-0b3 / MPA-0 / OMAT-0 / MatPES), so a domain can
     // keep them (GenericPassInputs::keep0) instead of the replay; and their floats for N receivers.
@@ -153,6 +164,10 @@ private:
     void setup_chain_fold(const Bundle& b);
     bool chain_fold_ = false;        // the fold of the allocated system (use_chain_fold)
     bool chain_fold_built_ = false;  // setup_chain_fold composed the fold's weights
+    bool share_layers_ = false;      // asked for the systems to come (share_layer_buffers)
+    bool share_layers_env_ = true;   // LOUP_TILE_SHARE_LAYERS != 0, read at load
+    bool layers_shared_ = false;     // the allocated system's layers share their arena
+    size_t sys_bytes_unshared_ = 0;  // sys_bytes_ with every layer's buffers its own
     void update_h0_read();           // h0_read_ for the current chain_fold_ (S97)
     // S59 layer-0 species tables (sm_120, cc 8.0; LOUP_SPECIES_TABLES=0 disables): see setup_species_tables.
     void setup_species_tables(const Bundle& b);

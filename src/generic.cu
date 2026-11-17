@@ -1380,6 +1380,9 @@ void GenericModel::load(const Bundle& b) {
         sweep_replay_ = true;
         chain_fold_ = chain_fold_built_ = false;  // the sweeps hand on every layer's output, which the fold never forms
     }
+    // tile-shared-layers (alloc_system): LOUP_TILE_SHARE_LAYERS=0 keeps every layer's buffers its own (tests, A/B)
+    share_layers_env_ = true;
+    if (const char* e = std::getenv("LOUP_TILE_SHARE_LAYERS"); e && e[0] == '0') share_layers_env_ = false;
     CUDA_CHECK_THROW(cudaMalloc(&d_energy_sink_, sizeof(double)));
     update_h0_read();
 }
@@ -1402,6 +1405,11 @@ void GenericModel::use_chain_fold(bool on) {
     if (N_ > 0) throw std::logic_error("generic: use_chain_fold with a system allocated");
     chain_fold_ = on && chain_fold_built_;
     update_h0_read();
+}
+
+void GenericModel::share_layer_buffers(bool on) {
+    if (N_ > 0) throw std::logic_error("generic: share_layer_buffers with a system allocated");
+    share_layers_ = on;
 }
 
 // S59 species tables. Layer 0's input h_in[0] is the species embedding row, so every product of it alone is a
@@ -1625,6 +1633,8 @@ void GenericModel::free_system() {
     for (void* p : sys_allocs_) cudaFree(p);
     sys_allocs_.clear();
     sys_alloc_bytes_.clear();
+    layers_shared_ = false;
+    sys_bytes_unshared_ = 0;
     if (d_zero_slab_) cudaFree(d_zero_slab_);
     d_zero_slab_ = nullptr;
     zero_slab_bytes_ = 0;
@@ -1678,49 +1688,82 @@ void GenericModel::alloc_system(int N) {
         return p;
     };
     d_h0_ = alloc(n * C0_);
-    for (int t = 0; t < n_layers_; ++t) {
+    // tile-shared-layers: a layer's own buffers come from `own`. Where the system only sweeps (share_layer_buffers,
+    // LOUP_SWEEP_REPLAY) they are carved from one arena, each layer from its start: a sweep runs one layer, and of
+    // another layer it reads and writes only the output (hout) and its gradient (dhout, in the zero slab), which
+    // keep buffers of their own. A first walk of the layers sizes the arena (the largest layer), a second assigns.
+    layers_shared_ = (share_layers_ || sweep_replay_) && share_layers_env_ && n_layers_ >= 2 && !lr_ && !chain_fold_;
+    char* arena = nullptr;
+    size_t arena_off = 0, arena_bytes = 0, layers_sum = 0;
+    bool sizing = false;
+    auto own = [&](size_t floats) -> float* {
+        if (!layers_shared_) return alloc(floats);
+        float* p = sizing ? nullptr : reinterpret_cast<float*>(arena + arena_off);
+        arena_off += align256(std::max<size_t>(floats, 1) * sizeof(float));
+        return p;
+    };
+    auto layout_layer = [&](int t) {
         GenericLayer* L = layers_[t];
         for (int l = 0; l <= L->lmax_x; ++l) {
-            L->x[l] = alloc(n * dimL(l) * L->C_x);
-            L->dx[l] = (t > 0) ? alloc(n * dimL(l) * L->C_x) : nullptr;
+            L->x[l] = own(n * dimL(l) * L->C_x);
+            L->dx[l] = (t > 0) ? own(n * dimL(l) * L->C_x) : nullptr;
         }
         if (L->first_hidden)
-            for (int l = 0; l < 4; ++l) L->S0[l] = alloc(n * dimL(l) * (size_t)L->K0);
+            for (int l = 0; l < 4; ++l) L->S0[l] = own(n * dimL(l) * (size_t)L->K0);
         for (int l = 0; l < 4; ++l) {
-            L->mid[l] = L->first_hidden ? nullptr : alloc(n * dimL(l) * L->n_l3[l] * L->C_x);
+            L->mid[l] = L->first_hidden ? nullptr : own(n * dimL(l) * L->n_l3[l] * L->C_x);
             if (L->skip_folded) {
                 L->lin[l] = nullptr;
                 L->dlin[l] = nullptr;
-                L->msgf[l] = alloc(n * dimL(l) * L->C_msg);
+                L->msgf[l] = own(n * dimL(l) * L->C_msg);
             } else {
-                L->lin[l] = alloc(n * dimL(l) * L->lin_cols[l]);
-                L->dlin[l] = alloc(n * dimL(l) * L->lin_cols[l]);
-                L->msgf[l] = (L->kind == 1 || L->kind == 3) ? L->lin[l] : alloc(n * dimL(l) * L->C_msg);
+                L->lin[l] = own(n * dimL(l) * L->lin_cols[l]);
+                L->dlin[l] = own(n * dimL(l) * L->lin_cols[l]);
+                L->msgf[l] = (L->kind == 1 || L->kind == 3) ? L->lin[l] : own(n * dimL(l) * L->C_msg);
             }
-            L->dmsgf[l] = alloc(n * dimL(l) * L->C_msg);
+            L->dmsgf[l] = own(n * dimL(l) * L->C_msg);
             if (L->kind == 4) {
-                L->gout[l] = alloc(n * dimL(l) * L->C_msg);
-                L->dgout[l] = alloc(n * dimL(l) * L->C_msg);
-                L->dpre[l] = (t > 0 && l <= L->lmax_x) ? alloc(n * dimL(l) * L->lin_cols[l]) : nullptr;
+                L->gout[l] = own(n * dimL(l) * L->C_msg);
+                L->dgout[l] = own(n * dimL(l) * L->C_msg);
+                L->dpre[l] = (t > 0 && l <= L->lmax_x) ? own(n * dimL(l) * L->lin_cols[l]) : nullptr;
             }
         }
         if (L->kind == 4)  // with the S59 table the gates read res[0] from it
             for (int l = 0; l <= L->lmax_x; ++l)
-                L->res[l] = (l == 0 && L->res0_table) ? nullptr : alloc(n * dimL(l) * L->lin_cols[l]);
-        L->D = alloc(n);
+                L->res[l] = (l == 0 && L->res0_table) ? nullptr : own(n * dimL(l) * L->lin_cols[l]);
+        L->D = own(n);
+        for (int l = 0; l <= L->lmax_out; ++l) {
+            L->y[l] = own(n * dimL(l) * L->C_out);
+            L->dy[l] = own(n * dimL(l) * L->C_out);
+        }
+        if (L->ro_H) {
+            L->hid = own(n * L->ro_H);
+            L->hid2 = own(n * L->ro_H);
+            L->dhid = own(n * L->ro_H);
+            L->dhid2 = own(n * L->ro_H);
+        }
+    };
+    if (layers_shared_) {
+        sizing = true;
+        for (int t = 0; t < n_layers_; ++t) {
+            arena_off = 0;
+            layout_layer(t);
+            arena_bytes = std::max(arena_bytes, arena_off);
+            layers_sum += arena_off;
+        }
+        sizing = false;
+        arena = reinterpret_cast<char*>(alloc((arena_bytes + sizeof(float) - 1) / sizeof(float)));
+    }
+    for (int t = 0; t < n_layers_; ++t) {
+        GenericLayer* L = layers_[t];
+        arena_off = 0;
+        layout_layer(t);
+        // What sweeps carry from layer to layer, and the zero slab's accumulators: never in the arena.
         L->dD = (L->kind >= 2) ? zalloc(n) : nullptr;
         for (int l = 0; l <= L->lmax_out; ++l) {
-            L->y[l] = alloc(n * dimL(l) * L->C_out);
-            L->dy[l] = alloc(n * dimL(l) * L->C_out);
             const bool no_hout = L->ro_folded || (chain_fold_ && t < n_layers_ - 1);  // S57: never formed
             L->hout[l] = no_hout ? nullptr : alloc(n * dimL(l) * L->C_out);
             L->dhout[l] = no_hout ? nullptr : zalloc(n * dimL(l) * L->C_out);
-        }
-        if (L->ro_H) {
-            L->hid = alloc(n * L->ro_H);
-            L->hid2 = alloc(n * L->ro_H);
-            L->dhid = alloc(n * L->ro_H);
-            L->dhid2 = alloc(n * L->ro_H);
         }
     }
     for (int t = 0; t < n_layers_; ++t) {
@@ -1734,6 +1777,7 @@ void GenericModel::alloc_system(int N) {
             }
         }
     }
+    sys_bytes_unshared_ = sys_bytes_ + (layers_shared_ ? layers_sum - arena_bytes : 0);
     if (lr_) lr_->alloc_system(N);
     N_ = N;
 }
@@ -1842,6 +1886,9 @@ void GenericModel::record(const GenericPassInputs& in) {
             throw std::logic_error("generic: a sweep was asked of a model or a pass that has none");
         const bool layer_ok = sweep == GenericPassInputs::SweepLast || (sweep_t >= 0 && sweep_t < n_layers_ - 1);
         if (!layer_ok) throw std::logic_error("generic: sweep layer out of range");
+    } else if (layers_shared_ && !sweep_replay_ && !in.energy_only) {
+        // tile-shared-layers: a layer's backward would read forward results a later layer's forward overwrote
+        throw std::logic_error("generic: the whole pass was asked of a system whose layers share their buffers");
     }
     const bool runs_layer0 = sweep == GenericPassInputs::SweepAll ||
                              (sweep == GenericPassInputs::SweepLast ? n_layers_ == 1 : sweep_t == 0);

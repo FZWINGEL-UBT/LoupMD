@@ -671,3 +671,42 @@ def test_tile_gemm_buckets_time_fewer_shapes_and_keep_the_result(tmp_path):
     assert t1 == t0 >= 4
     assert n1 <= 0.6 * n0
     assert abs(e1 - e0) <= 1e-7 and np.abs(f1 - f0).max() <= 1e-5
+
+
+@pytest.mark.parametrize("model,structure,receivers,saved_mib", [
+    ("mace-omat-0-small.model", lambda: _oxide(16), 5000, 64),                    # 20,480 atoms
+    ("MACE-omol-0-extra-large-1024.model", lambda: _water((2, 1, 1)), 400, 0),   # three layers: five sweeps
+], ids=["omat-0-small", "omol-0-xl"])
+def test_a_tiles_layers_share_one_arena_and_give_the_same_result(model, structure, receivers, saved_mib, monkeypatch):
+    """tile-shared-layers: a sweep runs one layer, so a tiled system keeps its layers' own buffers in one arena as
+    large as the largest layer; LOUP_TILE_SHARE_LAYERS=0 gives every buffer its own memory. Same kernels and
+    operations: the numbers agree up to the order of the float32 atomic sums, in the building call and a kept one.
+    The plan is the same (it counts every layer's buffers, as a whole system has them) and the call's device peak
+    is lower: by 38 KiB per receiver of the cap for OMAT-0 small, about 190 MiB at 5,000. (The peak is read from the
+    device's free memory, which other programs move by tens of MiB: asked only where the saving is far above that.)"""
+    at = structure()
+    moved = at.positions + np.random.default_rng(23).normal(scale=0.01, size=at.positions.shape)
+    bundle = ensure_loup_bundle(find_model(model), sorted(set(at.get_atomic_numbers().tolist())))
+    monkeypatch.setenv("LOUP_NO_HYBRID", "1")
+
+    def run(share):
+        monkeypatch.setenv("LOUP_TILE_SHARE_LAYERS", share)
+        eng = LoupEngine(bundle)
+        try:
+            eng.set_execution(_core.LOUP_EXEC_TILED, receivers, 0.9)
+            plan = eng.plan_execution(at.numbers, at.positions, at.cell.array, skin=SKIN)
+            out = [eng.evaluate_tiled(at.numbers, x, at.cell.array, receivers, skin=SKIN)
+                   for x in (at.positions, moved)]
+            return plan, out, eng.last_execution().peak_bytes
+        finally:
+            del eng
+            gc.collect()
+
+    (plan_own, own, peak_own), (plan_shared, shared, peak_shared) = run("0"), run("1")
+    assert abs(plan_shared.tile_workspace_bytes - plan_own.tile_workspace_bytes) <= 0.01 * plan_own.tile_workspace_bytes
+    assert abs(plan_shared.whole_bytes - plan_own.whole_bytes) <= 0.01 * plan_own.whole_bytes
+    if saved_mib:
+        assert peak_own - peak_shared > saved_mib * 2**20, (peak_shared, peak_own)
+    for (e0, f0, s0, t0), (e1, f1, s1, t1) in zip(own, shared):
+        assert t0 == t1 >= 2
+        assert abs(e1 - e0) / len(at) <= 1e-8 and np.abs(f1 - f0).max() <= 1e-5 and np.abs(s1 - s0).max() <= 1e-8
