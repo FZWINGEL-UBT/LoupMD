@@ -1,7 +1,10 @@
 site_name: LoupMD
 site_description: Molecular dynamics with MACE potentials on a C++/CUDA engine
-# Plan task S7-T01. Build with `mkdocs build --strict` (MkDocs Material and mkdocstrings[python]); deployment is a
-# separate step that waits for the owner (S7-T08).
+# Plan task S7-T01. Build with `mkdocs build --strict` (the tools of tools/docs/requirements.txt). The site is
+# published on GitHub Pages by .github/workflows/docs.yml (the owner's request of 18 November 2026).
+site_url: https://fzwingel-ubt.github.io/LoupMD/
+repo_url: https://github.com/FZWINGEL-UBT/LoupMD
+repo_name: FZWINGEL-UBT/LoupMD
 strict: true
 docs_dir: docs
 

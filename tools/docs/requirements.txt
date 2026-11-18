@@ -1,0 +1,6 @@
+# The tools that build the documentation site (`mkdocs build --strict`; .github/workflows/docs.yml). The versions
+# are those the site was written and checked with; the `docs` extra of pyproject.toml gives their lower bounds.
+mkdocs==1.6.1
+mkdocs-material==9.8.1
+mkdocstrings==1.0.8
+mkdocstrings-python==2.0.11
