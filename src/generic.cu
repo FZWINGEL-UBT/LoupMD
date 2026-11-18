@@ -20,6 +20,8 @@ struct GenericLayer {
     int lmax_in = 0, lmax_x = 0, lmax_out = 0;
     int C_in = 0, C_x = 0, C_msg = 0, C_out = 0;
     int n_paths = 0, n_l3[4] = {0, 0, 0, 0};
+    // pair_sym: radial tables per unordered pair (1), per ordered pair (0), or one table for every pair (2, S116: the
+    // bundle's per-pair tables are byte-identical, as in the MACE-OFF bundles; loup::table_pair)
     int intervals = 0, Q1 = 0, pair_sym = 0;
     int first_hidden = 0, J = 0, K0 = 0;  // layer 0 outer sum over J columns; K0 = S * (J - 1) padded to 16
     float* C0[4] = {};                    // [K0, lin_cols] (per species when skip_folded)
@@ -378,7 +380,7 @@ __global__ void __launch_bounds__(256) first_fwd_kernel(
         float acc[16];
         #pragma unroll
         for (int m = 0; m < 16; ++m) acc[m] = 0.0f;
-        const int pr = pair_sym ? loup::sym_pair(s, sa, S) : s * S + sa;
+        const int pr = loup::table_pair(pair_sym, s, sa, S);
         for (int base = e_cur; base < e_s_end; base += 32) {
             const int cnt = (e_s_end - base < 32) ? (e_s_end - base) : 32;
             if (tid < cnt) {
@@ -476,7 +478,7 @@ __global__ void __launch_bounds__(256) first_bwd_kernel(
         const int e = valid ? base + half : base;
         const float4 vl = __ldg(vec_len + e);
         const int s = species[senders[e]];
-        const int pr = pair_sym ? loup::sym_pair(s, sa, S) : s * S + sa;
+        const int pr = loup::table_pair(pair_sym, s, sa, S);
         int iv; float t, sxi;
         locate_spline(grid, vl.w, iv, t, sxi);
         const float ux = sh_perm ? vl.y : vl.x, uy = sh_perm ? vl.z : vl.y, uz = sh_perm ? vl.x : vl.z;
@@ -604,7 +606,7 @@ __global__ void __launch_bounds__(128, COLS == 2 ? LOUP_FIRST_BWD_EDGE_MINB2 : 0
             m_snd = senders[e];
             m_sp = species[m_snd];
             m_rcv_sp = species[m_rcv];
-            m_pr = pair_sym ? loup::sym_pair(m_sp, m_rcv_sp, S) : m_sp * S + m_rcv_sp;
+            m_pr = loup::table_pair(pair_sym, m_sp, m_rcv_sp, S);
         }
         __syncwarp();
 
@@ -1109,8 +1111,16 @@ void GenericModel::load(const Bundle& b) {
             if (off != L->intervals) throw std::runtime_error("generic bundle: spline intervals mismatch");
             const int Ptab = L->pair_sym ? S_ * (S_ + 1) / 2 : P;
             const std::vector<float> tab = b.f32(p + "spline", {Ptab, L->intervals, L->Q1, 4});
+            // One table for every pair when the bundle's per-pair tables are byte-identical (S116): the radial chain
+            // does not read the species (MACE-OFF), so the copies only cost memory and cache footprint.
+            const size_t pair_floats = (size_t)L->intervals * L->Q1 * 4;
+            bool one_table = Ptab > 1;
+            for (int pr = 1; pr < Ptab && one_table; ++pr)
+                one_table = memcmp(tab.data(), tab.data() + pr * pair_floats, pair_floats * sizeof(float)) == 0;
+            if (one_table) L->pair_sym = 2;
+            const int Pt = one_table ? 1 : Ptab;
             if (L->first_hidden) {
-                const size_t PI = (size_t)Ptab * L->intervals;
+                const size_t PI = (size_t)Pt * L->intervals;
                 const float4* src = reinterpret_cast<const float4*>(tab.data());
                 std::vector<float4> host(PI * L->J);
                 if (L->J == L->Q1) {
@@ -1124,7 +1134,7 @@ void GenericModel::load(const Bundle& b) {
                 L->table = upload(W, host);
             } else {
                 const int Q = L->n_paths * L->C_x;
-                const size_t PI = (size_t)Ptab * L->intervals;
+                const size_t PI = (size_t)Pt * L->intervals;
                 const size_t sp_n = PI * Q;
                 const float4* src = reinterpret_cast<const float4*>(tab.data());
                 if (L->kind >= 2) {

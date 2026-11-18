@@ -326,7 +326,7 @@ __global__ void __launch_bounds__(MAX_T) {name}(
           t = __ldg(act_t_sx + e).x;
         }} else {{
           const float4 vl = __ldg(vec_len + e);
-          const int pr = pair_sym ? loup::sym_pair(species[snd], sa, S) : species[snd] * S + sa;
+          const int pr = loup::table_pair(pair_sym, species[snd], sa, S);
           int iv; float sxi;
           locate_spline(grid, vl.w, iv, t, sxi);
           slab = (int64_t)pr * I + iv;
@@ -585,7 +585,7 @@ __global__ void __launch_bounds__(512) {name}(
     }} else {{
       int iv;
       locate_spline(grid, vl.w, iv, t, sxi);
-      const int pr = pair_sym ? loup::sym_pair(species[snd], sa, S) : species[snd] * S + sa;
+      const int pr = loup::table_pair(pair_sym, species[snd], sa, S);
       slab = (int64_t)pr * I + iv;
     }}
     const float s = t - 0.5f, s_sq = s * s;
@@ -761,7 +761,7 @@ __global__ void __launch_bounds__(128) gconv_bwd_L2(
     }} else {{
       int iv;
       locate_spline(grid, vl.w, iv, t, sxi);
-      const int pr = pair_sym ? loup::sym_pair(species[snd], sa, S) : species[snd] * S + sa;
+      const int pr = loup::table_pair(pair_sym, species[snd], sa, S);
       slab = (int64_t)pr * I + iv;
     }}
     const float s = t - 0.5f, s_sq = s * s;

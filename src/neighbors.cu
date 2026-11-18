@@ -630,7 +630,7 @@ __global__ void scatter_active_edges_kernel(
             const int dst = out_cursor + __popc(mask & ((1u << lane) - 1u));
             const int snd = senders[e];
             const int p = sym_pair(species[snd], sp_i, S);
-            const int p_slab = pair_sym ? p : (species[snd] * S + sp_i);
+            const int p_slab = table_pair(pair_sym, species[snd], sp_i, S);
             act_senders[dst] = snd;
             act_receivers[dst] = i;
             act_pairs[dst] = p;

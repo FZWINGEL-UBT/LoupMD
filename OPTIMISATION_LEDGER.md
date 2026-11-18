@@ -84,6 +84,7 @@ Conventions:
 | [wp-persistent](#wp-persistent) | SM-local persistent blocks with `%smid` cursors | – | spec | REJECTED | – | 3,014 -> 3,240 us | [§3.3][s33] |
 | [wp-no-allocate](#wp-no-allocate) | Table loads with `L1::no_allocate` | – | spec | REJECTED | – | 3,022 -> 3,120 us | [§3.3][s33] |
 | [wp-decode-bias-fold](#wp-decode-bias-fold) | Fold the four `- hb` subtractions of the cubic decode into the polynomials | `LOUP_GEN_DECODE_FOLD` (generator, on) | spec | DEFAULT (13 Nov) | – | 5060 Ti `SrTiO3` 0.9929 / 0.9948 / 0.9925, `NbCl5` 0.9951 / 0.9938 / 0.9965; Ada tie; -24 / -16 instructions | this file |
+| [wp-scalar3-quad](#wp-scalar3-quad) | Scalar rank-three path `(0, 3, 3)` contracted with the five quadratics of the edge direction (three five-term sums) instead of eight three-term dots plus the trace | `LOUP_GEN_SCALAR3_U` (generator, reverted) | spec | REJECTED (5060 Ti) | S117 | all three variants spill in `wprime_backward_inter1_rcv` (64 registers, 48 B stack; HEAD none): `w'` SrTiO3 2,785-2,788 -> 3,025-3,116 us (+9-12%), NbCl5 429-430 -> 468-475 us (+9-11%) | this file |
 
 ### Interaction 0 and the symmetric contractions
 
@@ -252,6 +253,7 @@ Conventions:
 | [gen-chain-fold-ext](#gen-chain-fold-ext) | S57's skip-chain fold for every multi-layer generic model without long range: any layer kind, a non-last linear readout (its gradient a constant seed of `dy_t[0]`), per-species skips (per-species composed weights, species-grouped GEMMs) | `GenericModel::setup_chain_fold` (eligibility, `FoldTarget::ns` / `ns_h`, energy targets `dest_layer = -2`), `record`, `species_energy_kernel` (`sm_120` and cc 8.0; `LOUP_CHAIN_FOLD=0` disables, `=1` forces elsewhere) | gen (now also MH-1, OMAT-0 / MPA-0 / MP-0b3 / MatPES / OMAT-0 small on the generic path, MP-0 medium, MPtrj, OFF23 / OFF23b / OFF24) | DEFAULT (5060 Ti; A100 since S77) | S73 | in-process plain / fold, both orders, noise side <= 0.2%: MH-1 NaCl216 `1.075`, SrTiO3 `1.053` (34.86 -> 33.11 ms); MPtrj SrTiO3 `1.040`; OMAT-0 generic SrTiO3 `1.017` (8.17 -> 8.03, the specialised path's time); MP-0 SrTiO3 `1.017`; OFF24-M water `1.015` | [below](#gen-chain-fold-ext) |
 | [gen-pass-glue](#gen-pass-glue) | Per-pass glue on the generic path: the layer-0 embedding gather only when a consumer reads it, and a folded linear readout assigning its gradient seed (so that buffer leaves the zero slab) (S97); the top conv layer's backward assigning the per-edge force vectors instead of a zero fill plus read-add-store (S98); each conv layer's `dx` zeroed per receiver at the start of its forward conv kernel instead of in the pass's memset (S99); the folded linear readout inside the layer's product kernels (energy in the forward, gradient seed in the backward) instead of its own kernel (S100) | `GenericModel::h0_read_`, `ro_linear_kernel(assign)`, `launch_conv_bwd(..., dvec_assign)`, `launch_conv_fwd(..., zx)`, `launch_prod(..., ro_w, energy)` | gen | DEFAULT | S97-S100 | library ABBA on shared plans, both orders, S97: OMAT-0 generic SrTiO3 `0.998`, MP-0 medium SrTiO3 `0.999`, OFF23-M water216 `0.991`; S98: OMAT-0 generic `0.995`, MP-0 `0.992`, OFF23-M water216 `0.993`, OFF23-S water216 `0.989`, MH-1 NaCl216 `0.999`, OMOL-0 water216 `1.000`; S99: OMAT-0 generic `0.997`, MP-0 `0.996`, OFF23-M water216 `0.996`, MH-1 NaCl216 `0.993`, OFF23-S water216 `1.000`; S100: OFF23-M water216 `0.987`, MP-0 `0.999`, OMAT-0 generic `1.000`, OFF23-S water216 `0.999` | [below](#gen-pass-glue) |
 | [gen-first-fwd-cols](#gen-first-fwd-cols) | `first_fwd_kernel` with one thread per radial column: warp 0 sums the density column (one lane per staged edge, added in edge order) instead of a warp of its own with one active lane | `src/generic.cu` `first_fwd_kernel`, `max(J - 1, 64)` threads | gen (layer 0 of every generic model) | DEFAULT | S105 | kernel 255-260 -> 240-245 us (OMAT-0 generic `SrTiO3`); ABBA over S101 OMAT-0 generic `0.9991`, MH-1 `NaCl216` `0.9973` (both orders), OFF23-M water216 tie | this file |
+| [gen-single-table](#gen-single-table) | One radial table for every species pair when all pair slabs of a conv layer are byte-identical at load (the radial MLP does not see the species): `pair_sym = 2`, `loup::table_pair` maps every pair to slab 0 | `src/generic.cu` loader (`memcmp`), `loup::table_pair` (`kernels_common.cuh`), `gen_generic.py`, `neighbors.cu` | gen (conv layers: OFF23 / OFF23b / OFF24, MP-0 medium, MPtrj) | DEFAULT (5060 Ti only) | S116 | VRAM OFF23-M water216 206 -> 192 MiB, OFF23-L water216 306 -> 274, MP-0 medium SrTiO3 876 -> 718, MPtrj SrTiO3 1,148 -> 1,056; library ABBA on shared plans OFF23-S / -M / -L water216 `0.996` / `0.991` / `0.996`, MPtrj SrTiO3 `0.998` (both orders below 1), MP-0 medium SrTiO3 `0.9996` (a tie); gates pass | this file |
 
 ### MACE-POLAR-1 long range (`src/polar.cu`)
 
@@ -608,6 +610,16 @@ Each entry has the same fields. Unless stated, the system is OMAT-0 medium on th
 - Measured: L1 hit 9.7% -> 1.3%, L2 5.06 -> 5.53 GB, 3,022 -> 3,120 us (5060 Ti).
 - Why: adjacent warps do re-read table rows through L1.
 - Sources: [§3.3][s33].
+
+<a id="wp-scalar3-quad"></a>
+#### wp-scalar3-quad: the scalar rank-three path with direction quadratics
+- Switch (reverted): `python/gen_kernels.py` `_emit_wprime_backward1`, scalar `L = 3` branch; `LOUP_GEN_SCALAR3_U` chose where the quadratics live.
+- Stage: S117 (18 November 2026), 5060 Ti. From the owner's review list of 17 November.
+- What: the scalar path `(0, 3, 3)` needs `v_a = T_abc n_b n_c` and `h = n . v` only. With T symmetric and traceless (stored q0..q6; q7 = -q0 - q3, q8 = -q1 - q5) and the five quadratics `u = (nx^2 - nz^2, ny^2 - nz^2, 2 nx ny, 2 nx nz, 2 ny nz)`, each `v_a` is one five-term sum: 15 FMAs and two adds per channel instead of eight three-term dots (`Q_ab = T_abc n_c`, then `v = Q n`) plus the trace, about 26. Three variants: u per edge in registers (`regs`), staged per edge in shared memory and read through a volatile pointer inside the path (`shared`), and computed inside the path (`path`; the compiler hoisted it out of the channel loop).
+- Measured (5060 Ti): `cuobjdump --dump-resource-usage`: `wprime_backward_inter1_rcv` 64 registers with 48 B stack in all three variants (HEAD: 64, no stack; the cap comes from `__launch_bounds__(512, 2)`), the tiled kernel 40 B stack (`regs`, `path`) or none (`shared`). `w'` time from the tuner at the first MD rebuild, two rounds alternating with HEAD: SrTiO3 (256 threads) HEAD 2,788 / 2,785 us, `regs` 3,030 / 3,069, `shared` 3,032 / 3,025, `path` 3,116 / 3,086; NbCl5 HEAD 429 / 430, `regs` 474 / 474, `shared` 468 / 468, `path` 475 / 474: 9-12% slower in every case.
+- Why: the receiver-owned kernel already sits at its 64-register cap; the quadratics (live across the channel loop, or their loads and q7 / q8 inside it) push it into local-memory spills that cost more than the ~9 instructions per channel saved.
+- Status: REJECTED. The generator and `src/generated_kernels.cuh` are back at HEAD (regenerated, byte-identical).
+- Sources: this file.
 
 ### Interaction 0 and the symmetric contractions
 
@@ -2066,6 +2078,17 @@ POLAR-1 NaCl 3x3x3 (216) and POLAR-1-M `NbCl5` 3x3x3 (1,944).
 - Gates (final S105 + S106 library): OMAT-0 medium generic oxide 2.00 / 1.80, POLAR-1-M crystals 2.43 / 0.98; the first version also passed OFF23-M organic 0.35 / 0.56 and MH-1 crystals 0.86 / 0.31. `pytest`: 77 passed.
 - A100: queued (job `s106c` and the `s106g*` gate sweep, [results/alex-a100-queue-20261116](results/alex-a100-queue-20261116/README.md)).
 - Status: DEFAULT.
+- Sources: this file.
+
+<a id="gen-single-table"></a>
+#### gen-single-table: one radial table when every pair's table is the same
+- Switch: `src/generic.cu` loader (each conv layer's packed pair slabs compared with pair 0 by `memcmp`; all equal: `pair_sym = 2` and one slab uploaded); `loup::table_pair(pair_sym, s, t, S)` (`src/kernels_common.cuh`; 2: slab 0 for every pair), used by the generated conv kernels (`python/gen_generic.py`, three template sites; regenerated `src/generated_generic.cu`), `src/generic.cu`'s pre-location kernels and the `src/neighbors.cu` slab scatter.
+- Stage: S116 (18 November 2026), 5060 Ti. From the owner's review list of 17 November.
+- What: the exporter writes one radial table per species pair. Where the radial MLP does not take the species, every pair slab is byte-identical, so the device held S(S+1)/2 copies of one table. A survey of the cached bundles found identical slabs in every conv layer of OFF23 / OFF23b / OFF24, MACE-MP-0 medium and MACE_MPtrj_2022.9, and distinct slabs in POLAR-1, MH-1, OMAT-0, MPA-0, MP-0b3, MatPES and OMOL-0.
+- Measured (5060 Ti, HEAD `13d6337` -> S116; the build also had S115, which these models do not run): VRAM (bundle + system + first evaluate) OFF23-M water216 206 -> 192 MiB, OFF23-L water216 306 -> 274, OFF23-M water 624 -> 608, MP-0 medium SrTiO3 876 -> 718, MPtrj SrTiO3 1,148 -> 1,056. Library ABBA on shared plans (first / second order): OFF23-S water216 `0.9956` (`0.9975` / `0.9936`), OFF23-M `0.9908` (`0.9912` / `0.9903`), OFF23-L `0.9961` (`0.9966` / `0.9955`), MPtrj SrTiO3 `0.9979` (`0.9990` / `0.9968`), MP-0 medium SrTiO3 `0.9996` (`1.0011` / `0.9981`, a tie).
+- Results against HEAD (rattled cell, one evaluate; HEAD against itself in brackets): max dF OFF23-S 2.2e-6 (1.1e-6), OFF23-M 1.8e-6 (1.6e-6), OFF23-L 2.0e-6 (6.1e-7), MP-0 medium 1.1e-6 (1.2e-6), MPtrj 8.6e-7 (6.2e-7) eV/A; MH-1 (distinct slabs, unchanged path) 1.7e-7 (8.6e-8). The table bytes are the same, so only GEMM plans and atomic order differ.
+- Gates: OFF23-S organic 8 / 8, OFF23-M organic 24 / 24, MH-1 crystals 18 / 18, MP-0 medium crystals 18 / 18, MPtrj crystals 6 / 6.
+- Status: DEFAULT (5060 Ti only; cc 8.0 runs the same code, not measured).
 - Sources: this file.
 
 ### MACE-POLAR-1 long range

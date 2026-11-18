@@ -47,6 +47,12 @@ __device__ __forceinline__ int sym_pair(int s, int t, int S) {
     return a * S - (a * (a - 1)) / 2 + (b - a);
 }
 
+// Radial-table pair of an edge (sender species s, receiver species t): one table per unordered pair (pair_sym 1), per
+// ordered pair (0), or a single table for every pair (2: the bundle's per-pair tables are byte-identical, S116).
+__device__ __forceinline__ int table_pair(int pair_sym, int s, int t, int S) {
+    return pair_sym == 2 ? 0 : pair_sym ? sym_pair(s, t, S) : s * S + t;
+}
+
 // e3nn component-normalized l <= 3 spherical harmonics of the edge vector (vx, vy, vz) of length len (16 values).
 // Computed where an edge is staged (i0 forward/backward, spline forward) instead of stored per edge.
 __device__ __forceinline__ void edge_sh16(float vx, float vy, float vz, float len, float4 out[4]) {
