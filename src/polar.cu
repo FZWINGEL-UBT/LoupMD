@@ -51,12 +51,15 @@ __device__ __forceinline__ void kphase(const float* nk, unsigned s1, unsigned s2
 // Structure factors per k over atoms: SC[k][j] = sum_a X[a][j] cos(theta_ak), SS likewise with sin (NC = 4, 8, 16).
 // Accumulates in float32 over 1024-atom chunks (<= 8 terms per thread) and folds into double at each chunk boundary,
 // avoiding 1/64-rate FP64 adds in the inner loop while matching feat_pass_kernel / grad_pass_kernel precision.
-template <int NC, int TK>
+// NL < NC (S118, `mono`): only the NL columns 4 j are nonzero in X; the others are written as 0 without a pass.
+template <int NC, int TK, int NL = NC>
 __global__ void __launch_bounds__(TK * 32) sf_kernel_tiled(
     int N, int K, const float* __restrict__ kinfo, const unsigned* __restrict__ frac,
     const float* __restrict__ X, double* __restrict__ SC, double* __restrict__ SS) {
     constexpr int TILE = 128;
     constexpr int N4 = NC / 4;
+    constexpr int LS = NL == NC ? 1 : 4;  // column stride of the live channels
+    static_assert(NL == NC || NL * 4 <= NC, "live channels: all, or the columns 4 j");
     const int tid = threadIdx.x, lane = tid & 31, warp = tid >> 5;
     const int k = blockIdx.x * TK + warp;
     const bool valid_k = k < K;
@@ -66,29 +69,36 @@ __global__ void __launch_bounds__(TK * 32) sf_kernel_tiled(
         n0 = (int)nk[0]; n1 = (int)nk[1]; n2 = (int)nk[2];
     }
     __shared__ unsigned s_frac[3][TILE + 1];
-    __shared__ float s_X[NC][TILE + 1];
-    __shared__ double s_tot[TK][2 * NC];
-    if (lane < 2 * NC) s_tot[warp][lane] = 0.0;
-    const float4* X4 = reinterpret_cast<const float4*>(X);
+    __shared__ float s_X[NL][TILE + 1];
+    __shared__ double s_tot[TK][2 * NL];
+    if (lane < 2 * NL) s_tot[warp][lane] = 0.0;
 
     for (int chunk = 0; chunk < N; chunk += 1024) {
         const int chunk_end = min(N, chunk + 1024);
-        float fc[NC], fs[NC];
+        float fc[NL], fs[NL];
         #pragma unroll
-        for (int j = 0; j < NC; ++j) fc[j] = fs[j] = 0.0f;
+        for (int j = 0; j < NL; ++j) fc[j] = fs[j] = 0.0f;
 
         for (int base = chunk; base < chunk_end; base += TILE) {
             const int cnt = min(TILE, chunk_end - base);
             __syncthreads();
             for (int i = tid; i < cnt * 3; i += TK * 32)
                 s_frac[i % 3][i / 3] = __ldg(frac + (size_t)base * 3 + i);
-            for (int i = tid; i < cnt * N4; i += TK * 32) {
-                const int al = i / N4, q = (i % N4) * 4;
-                const float4 v = __ldg(X4 + (int64_t)base * N4 + i);
-                s_X[q + 0][al] = v.x;
-                s_X[q + 1][al] = v.y;
-                s_X[q + 2][al] = v.z;
-                s_X[q + 3][al] = v.w;
+            if constexpr (NL == NC) {
+                const float4* X4 = reinterpret_cast<const float4*>(X);
+                for (int i = tid; i < cnt * N4; i += TK * 32) {
+                    const int al = i / N4, q = (i % N4) * 4;
+                    const float4 v = __ldg(X4 + (int64_t)base * N4 + i);
+                    s_X[q + 0][al] = v.x;
+                    s_X[q + 1][al] = v.y;
+                    s_X[q + 2][al] = v.z;
+                    s_X[q + 3][al] = v.w;
+                }
+            } else {
+                for (int i = tid; i < cnt * NL; i += TK * 32) {
+                    const int al = i / NL, j = i % NL;
+                    s_X[j][al] = __ldg(X + (int64_t)(base + al) * NC + j * LS);
+                }
             }
             __syncthreads();
             if (valid_k) {
@@ -100,7 +110,7 @@ __global__ void __launch_bounds__(TK * 32) sf_kernel_tiled(
                         float s, c;
                         sincospif(2.0f * ((float)(int)ph * 2.3283064365386963e-10f), &s, &c);
                         #pragma unroll
-                        for (int j = 0; j < NC; ++j) {
+                        for (int j = 0; j < NL; ++j) {
                             const float v = s_X[j][al];
                             fc[j] = fmaf(v, c, fc[j]);
                             fs[j] = fmaf(v, s, fs[j]);
@@ -111,7 +121,7 @@ __global__ void __launch_bounds__(TK * 32) sf_kernel_tiled(
         }
         if (valid_k) {
             #pragma unroll
-            for (int j = 0; j < NC; ++j) {
+            for (int j = 0; j < NL; ++j) {
                 double dc = (double)fc[j], ds = (double)fs[j];
                 #pragma unroll
                 for (int off = 16; off > 0; off >>= 1) {
@@ -120,40 +130,42 @@ __global__ void __launch_bounds__(TK * 32) sf_kernel_tiled(
                 }
                 if (lane == 0) {
                     s_tot[warp][j] += dc;
-                    s_tot[warp][NC + j] += ds;
+                    s_tot[warp][NL + j] += ds;
                 }
             }
         }
     }
     __syncwarp();
     if (valid_k && lane < NC) {
-        SC[(int64_t)k * NC + lane] = s_tot[warp][lane];
-        SS[(int64_t)k * NC + lane] = s_tot[warp][NC + lane];
+        const bool live = lane % LS == 0 && lane / LS < NL;
+        SC[(int64_t)k * NC + lane] = live ? s_tot[warp][lane / LS] : 0.0;
+        SS[(int64_t)k * NC + lane] = live ? s_tot[warp][NL + lane / LS] : 0.0;
     }
 }
 
-template <int NC>
+template <int NC, int NL = NC>
 __global__ void __launch_bounds__(128) sf_kernel_1(int N, int K, const float* __restrict__ kinfo,
                                                    const unsigned* __restrict__ frac, const float* __restrict__ X,
                                                    double* __restrict__ SC, double* __restrict__ SS) {
     static_assert(NC % 4 == 0, "NC must be a multiple of 4 for float4 loads");
+    static_assert(NL == NC || NL * 4 <= NC, "live channels: all, or the columns 4 j");
     constexpr int BLK = 128;
     constexpr int N4 = NC / 4;
+    constexpr int LS = NL == NC ? 1 : 4;  // column stride of the live channels
     const int k = blockIdx.x;
     if (k >= K) return;
     const float* nk = kinfo + k * KI;
     const float n0 = nk[0], n1 = nk[1], n2 = nk[2];
-    const float4* X4 = reinterpret_cast<const float4*>(X);
     __shared__ unsigned s_frac[BLK * 3];
-    __shared__ double red[4][2 * NC];
-    __shared__ double tot[2 * NC];
+    __shared__ double red[4][2 * NL];
+    __shared__ double tot[2 * NL];
     const int tid = threadIdx.x, lane = tid & 31, warp = tid >> 5;
-    if (tid < 2 * NC) tot[tid] = 0.0;
+    if (tid < 2 * NL) tot[tid] = 0.0;
     for (int chunk = 0; chunk < N; chunk += BLK * 8) {
         const int chunk_end = min(N, chunk + BLK * 8);
-        float fc[NC], fs[NC];
+        float fc[NL], fs[NL];
         #pragma unroll
-        for (int j = 0; j < NC; ++j) fc[j] = fs[j] = 0.0f;
+        for (int j = 0; j < NL; ++j) fc[j] = fs[j] = 0.0f;
         for (int base = chunk; base < chunk_end; base += BLK) {
             const int cnt = min(BLK, chunk_end - base);
             __syncthreads();
@@ -165,22 +177,32 @@ __global__ void __launch_bounds__(128) sf_kernel_1(int N, int K, const float* __
                 float s, c;
                 sincospif(2.0f * ((float)(int)ph * 2.3283064365386963e-10f), &s, &c);
                 const int a = base + tid;
-                #pragma unroll
-                for (int q = 0; q < N4; ++q) {
-                    const float4 v = __ldg(X4 + (int64_t)a * N4 + q);
-                    fc[4 * q + 0] = fmaf(v.x, c, fc[4 * q + 0]);
-                    fs[4 * q + 0] = fmaf(v.x, s, fs[4 * q + 0]);
-                    fc[4 * q + 1] = fmaf(v.y, c, fc[4 * q + 1]);
-                    fs[4 * q + 1] = fmaf(v.y, s, fs[4 * q + 1]);
-                    fc[4 * q + 2] = fmaf(v.z, c, fc[4 * q + 2]);
-                    fs[4 * q + 2] = fmaf(v.z, s, fs[4 * q + 2]);
-                    fc[4 * q + 3] = fmaf(v.w, c, fc[4 * q + 3]);
-                    fs[4 * q + 3] = fmaf(v.w, s, fs[4 * q + 3]);
+                if constexpr (NL == NC) {
+                    const float4* X4 = reinterpret_cast<const float4*>(X);
+                    #pragma unroll
+                    for (int q = 0; q < N4; ++q) {
+                        const float4 v = __ldg(X4 + (int64_t)a * N4 + q);
+                        fc[4 * q + 0] = fmaf(v.x, c, fc[4 * q + 0]);
+                        fs[4 * q + 0] = fmaf(v.x, s, fs[4 * q + 0]);
+                        fc[4 * q + 1] = fmaf(v.y, c, fc[4 * q + 1]);
+                        fs[4 * q + 1] = fmaf(v.y, s, fs[4 * q + 1]);
+                        fc[4 * q + 2] = fmaf(v.z, c, fc[4 * q + 2]);
+                        fs[4 * q + 2] = fmaf(v.z, s, fs[4 * q + 2]);
+                        fc[4 * q + 3] = fmaf(v.w, c, fc[4 * q + 3]);
+                        fs[4 * q + 3] = fmaf(v.w, s, fs[4 * q + 3]);
+                    }
+                } else {
+                    #pragma unroll
+                    for (int j = 0; j < NL; ++j) {
+                        const float v = __ldg(X + (int64_t)a * NC + j * LS);
+                        fc[j] = fmaf(v, c, fc[j]);
+                        fs[j] = fmaf(v, s, fs[j]);
+                    }
                 }
             }
         }
         #pragma unroll
-        for (int j = 0; j < NC; ++j) {
+        for (int j = 0; j < NL; ++j) {
             double dc = (double)fc[j], ds = (double)fs[j];
             #pragma unroll
             for (int off = 16; off > 0; off >>= 1) {
@@ -189,11 +211,11 @@ __global__ void __launch_bounds__(128) sf_kernel_1(int N, int K, const float* __
             }
             if (lane == 0) {
                 red[warp][j] = dc;
-                red[warp][NC + j] = ds;
+                red[warp][NL + j] = ds;
             }
         }
         __syncthreads();
-        if (tid < 2 * NC) {
+        if (tid < 2 * NL) {
             double v = 0.0;
             #pragma unroll
             for (int w = 0; w < 4; ++w) v += red[w][tid];
@@ -201,16 +223,19 @@ __global__ void __launch_bounds__(128) sf_kernel_1(int N, int K, const float* __
         }
     }
     __syncthreads();
-    if (tid < NC) SC[(int64_t)k * NC + tid] = tot[tid];
-    else if (tid < 2 * NC) SS[(int64_t)k * NC + tid - NC] = tot[tid];
+    if (tid < 2 * NC) {
+        const int j = tid % NC;
+        const bool live = j % LS == 0 && j / LS < NL;
+        (tid < NC ? SC : SS)[(int64_t)k * NC + j] = live ? tot[(tid < NC ? 0 : NL) + j / LS] : 0.0;
+    }
 }
 
-template <int NC>
+template <int NC, int NL = NC>
 static void launch_sf(cudaStream_t st, int N, int K, const float* kinfo, const unsigned* frac, const float* X,
                       double* SC, double* SS) {
-    if (K >= 288) sf_kernel_tiled<NC, 8><<<(K + 7) / 8, 256, 0, st>>>(N, K, kinfo, frac, X, SC, SS);
-    else if (K >= 144) sf_kernel_tiled<NC, 4><<<(K + 3) / 4, 128, 0, st>>>(N, K, kinfo, frac, X, SC, SS);
-    else sf_kernel_1<NC><<<K, 128, 0, st>>>(N, K, kinfo, frac, X, SC, SS);
+    if (K >= 288) sf_kernel_tiled<NC, 8, NL><<<(K + 7) / 8, 256, 0, st>>>(N, K, kinfo, frac, X, SC, SS);
+    else if (K >= 144) sf_kernel_tiled<NC, 4, NL><<<(K + 3) / 4, 128, 0, st>>>(N, K, kinfo, frac, X, SC, SS);
+    else sf_kernel_1<NC, NL><<<K, 128, 0, st>>>(N, K, kinfo, frac, X, SC, SS);
 }
 
 // Forward feature coefficients per k and spin channel: rho from the structure factors, V = kappa rho,
@@ -242,12 +267,18 @@ __global__ void feat_coef_kernel(int K, const float* __restrict__ kinfo, float a
 // blockIdx.y takes the k range [y kc, (y + 1) kc): with one thread per atom a few thousand atoms fill under one
 // warp per scheduler, so the k sum is split over blocks. With gridDim.y > 1 each chunk writes its double sums to
 // part[y][a][16] and k_reduce_kernel adds the chunks in order (deterministic).
+// MONO (S118, `mono`): only the raw features j = 0, 4 (the two widths' potentials) reach a nonzero weight; they are
+// summed as before and the other 12 are written as 0.
+template <bool MONO>
 __global__ void __launch_bounds__(128) feat_pass_kernel(int N, int K, int kc, const float* __restrict__ kinfo,
                                                         const unsigned* __restrict__ frac, const float* __restrict__ AB,
                                                         float* __restrict__ f, double* __restrict__ part) {
     constexpr int TK = 64;
+    constexpr int FPC = MONO ? 2 : 8;  // summed features per channel: raw j = i JS
+    constexpr int JS = MONO ? 4 : 1;
+    constexpr int NF = 2 * FPC;
     __shared__ float sk[TK][3];
-    __shared__ float sab[TK][32];
+    __shared__ float sab[TK][2 * NF];  // per k: [ch][A | B][FPC]
     const int a = blockIdx.x * blockDim.x + threadIdx.x;
     unsigned s1 = 0, s2 = 0, s3 = 0;
     if (a < N) {
@@ -255,37 +286,42 @@ __global__ void __launch_bounds__(128) feat_pass_kernel(int N, int K, int kc, co
         s2 = frac[3 * a + 1];
         s3 = frac[3 * a + 2];
     }
-    double accd[16];
+    double accd[NF];
     #pragma unroll
-    for (int j = 0; j < 16; ++j) accd[j] = 0.0;
+    for (int j = 0; j < NF; ++j) accd[j] = 0.0;
     const int kb = blockIdx.y * kc, ke = min(K, kb + kc);
     for (int k0 = kb; k0 < ke; k0 += TK) {
         const int nk = min(TK, ke - k0);
         __syncthreads();
         for (int i = threadIdx.x; i < nk * 3; i += blockDim.x) sk[i / 3][i % 3] = kinfo[(k0 + i / 3) * KI + i % 3];
-        for (int i = threadIdx.x; i < nk * 32; i += blockDim.x) sab[i / 32][i % 32] = AB[(int64_t)(k0 + i / 32) * 32 + i % 32];
+        for (int i = threadIdx.x; i < nk * 2 * NF; i += blockDim.x) {
+            const int r = i % (2 * NF), ch = r / (2 * FPC), ab = (r / FPC) % 2, fi = r % FPC;
+            sab[i / (2 * NF)][r] = AB[(int64_t)(k0 + i / (2 * NF)) * 32 + ch * 16 + ab * 8 + fi * JS];
+        }
         __syncthreads();
-        float acc[16];  // per-tile partial sums, folded into double accumulators
+        float acc[NF];  // per-tile partial sums, folded into double accumulators
         #pragma unroll
-        for (int j = 0; j < 16; ++j) acc[j] = 0.0f;
+        for (int j = 0; j < NF; ++j) acc[j] = 0.0f;
         for (int kk = 0; kk < nk; ++kk) {
             float s, c;
             kphase(sk[kk], s1, s2, s3, s, c);
             #pragma unroll
             for (int ch = 0; ch < 2; ++ch)
                 #pragma unroll
-                for (int j = 0; j < 8; ++j) acc[ch * 8 + j] = fmaf(sab[kk][ch * 16 + j], c, fmaf(sab[kk][ch * 16 + 8 + j], s, acc[ch * 8 + j]));
+                for (int j = 0; j < FPC; ++j)
+                    acc[ch * FPC + j] = fmaf(sab[kk][ch * 2 * FPC + j], c,
+                                             fmaf(sab[kk][ch * 2 * FPC + FPC + j], s, acc[ch * FPC + j]));
         }
         #pragma unroll
-        for (int j = 0; j < 16; ++j) accd[j] += (double)acc[j];
+        for (int j = 0; j < NF; ++j) accd[j] += (double)acc[j];
     }
     if (a < N) {
-        if (gridDim.y == 1) {
-            #pragma unroll
-            for (int j = 0; j < 16; ++j) f[(int64_t)a * 16 + j] = (float)accd[j];
-        } else {
-            #pragma unroll
-            for (int j = 0; j < 16; ++j) part[((int64_t)blockIdx.y * N + a) * 16 + j] = accd[j];
+        #pragma unroll
+        for (int j = 0; j < 16; ++j) {
+            const int ch = j / 8, jr = j % 8;
+            const double v = jr % JS == 0 && jr / JS < FPC ? accd[ch * FPC + jr / JS] : 0.0;
+            if (gridDim.y == 1) f[(int64_t)a * 16 + j] = (float)v;
+            else part[((int64_t)blockIdx.y * N + a) * 16 + j] = v;
         }
     }
 }
@@ -452,7 +488,10 @@ __global__ void lr_virial_kernel(int K, int energy_mode, const float* __restrict
 // + sum_j g (-A s + B c) (receiver side, features mode); forces[a] -= sum_k dtheta k.
 // k range over blockIdx.y as in feat_pass_kernel; with gridDim.y > 1 the chunk's dq sums (NCH * 4) and force terms
 // (3) go to part[y][a][11] and k_reduce_kernel applies them in chunk order.
-template <int NCH, bool RECV>
+// MONO (S118, `mono`): q is nonzero on the monopoles only, g on the raw features j = 0, 4 only, and the dipoles' dq
+// reaches only zero weights: the sums run over those columns (the dropped terms were fma(0, x, dth) = dth), dq is
+// updated on the monopoles only.
+template <int NCH, bool RECV, bool MONO = false>
 __global__ void __launch_bounds__(128) grad_pass_kernel(int N, int K, int kc, const float* __restrict__ kinfo,
                                                         const unsigned* __restrict__ frac, const float* __restrict__ q,
                                                         int q_stride, const float* __restrict__ dk,
@@ -460,14 +499,17 @@ __global__ void __launch_bounds__(128) grad_pass_kernel(int N, int K, int kc, co
                                                         float* __restrict__ dq, int dq_stride, double* __restrict__ forces,
                                                         double* __restrict__ part) {
     constexpr int TK = 32;
+    constexpr int NM = MONO ? 1 : 4;  // charge components per channel
+    constexpr int GF = MONO ? 2 : 8;  // feature-gradient columns per channel: raw j = f GS
+    constexpr int GS = MONO ? 4 : 1;
     __shared__ float sk[TK][6];
-    __shared__ float sd[TK][NCH * 8];
-    __shared__ float sab[TK][RECV ? 32 : 1];
+    __shared__ float sd[TK][NCH * 2 * NM];        // per k: [ch][D | E][NM]
+    __shared__ float sab[TK][RECV ? 4 * GF : 1];  // per k: [ch][A | B][GF]
     const int a = blockIdx.x * blockDim.x + threadIdx.x;
     unsigned s1 = 0, s2 = 0, s3 = 0;
-    float qa[NCH * 4], ga[RECV ? 16 : 1];
+    float qa[NCH * NM], ga[RECV ? 2 * GF : 1];
     #pragma unroll
-    for (int j = 0; j < NCH * 4; ++j) qa[j] = 0.0f;
+    for (int j = 0; j < NCH * NM; ++j) qa[j] = 0.0f;
     if (a < N) {
         s1 = frac[3 * a];
         s2 = frac[3 * a + 1];
@@ -475,27 +517,32 @@ __global__ void __launch_bounds__(128) grad_pass_kernel(int N, int K, int kc, co
         #pragma unroll
         for (int ch = 0; ch < NCH; ++ch)
             #pragma unroll
-            for (int m = 0; m < 4; ++m) qa[ch * 4 + m] = q[(int64_t)a * q_stride + ch * 4 + m];
+            for (int m = 0; m < NM; ++m) qa[ch * NM + m] = q[(int64_t)a * q_stride + ch * 4 + m];
         if (RECV)
             #pragma unroll
-            for (int j = 0; j < 16; ++j) ga[j] = g[(int64_t)a * 16 + j];
+            for (int j = 0; j < 2 * GF; ++j) ga[j] = g[(int64_t)a * 16 + (j / GF) * 8 + (j % GF) * GS];
     }
-    double dqd[NCH * 4], fxd = 0.0, fyd = 0.0, fzd = 0.0;
+    double dqd[NCH * NM], fxd = 0.0, fyd = 0.0, fzd = 0.0;
     #pragma unroll
-    for (int j = 0; j < NCH * 4; ++j) dqd[j] = 0.0;
+    for (int j = 0; j < NCH * NM; ++j) dqd[j] = 0.0;
     const int kb = blockIdx.y * kc, ke = min(K, kb + kc);
     for (int k0 = kb; k0 < ke; k0 += TK) {
-        float dqa[NCH * 4];  // per-tile partial sums, folded into double accumulators
+        float dqa[NCH * NM];  // per-tile partial sums, folded into double accumulators
         #pragma unroll
-        for (int j = 0; j < NCH * 4; ++j) dqa[j] = 0.0f;
+        for (int j = 0; j < NCH * NM; ++j) dqa[j] = 0.0f;
         float fx = 0.0f, fy = 0.0f, fz = 0.0f;
         const int nk = min(TK, ke - k0);
         __syncthreads();
         for (int i = threadIdx.x; i < nk * 6; i += blockDim.x) sk[i / 6][i % 6] = kinfo[(k0 + i / 6) * KI + i % 6];
-        for (int i = threadIdx.x; i < nk * NCH * 8; i += blockDim.x)
-            sd[i / (NCH * 8)][i % (NCH * 8)] = dk[(int64_t)(k0 + i / (NCH * 8)) * NCH * 8 + i % (NCH * 8)];
+        for (int i = threadIdx.x; i < nk * NCH * 2 * NM; i += blockDim.x) {
+            const int r = i % (NCH * 2 * NM), ch = r / (2 * NM), de = (r / NM) % 2, m = r % NM;
+            sd[i / (NCH * 2 * NM)][r] = dk[(int64_t)(k0 + i / (NCH * 2 * NM)) * NCH * 8 + ch * 8 + de * 4 + m];
+        }
         if (RECV)
-            for (int i = threadIdx.x; i < nk * 32; i += blockDim.x) sab[i / 32][i % 32] = AB[(int64_t)(k0 + i / 32) * 32 + i % 32];
+            for (int i = threadIdx.x; i < nk * 4 * GF; i += blockDim.x) {
+                const int r = i % (4 * GF), ch = r / (2 * GF), ab = (r / GF) % 2, f = r % GF;
+                sab[i / (4 * GF)][r] = AB[(int64_t)(k0 + i / (4 * GF)) * 32 + ch * 16 + ab * 8 + f * GS];
+            }
         __syncthreads();
         for (int kk = 0; kk < nk; ++kk) {
             float s, c;
@@ -504,24 +551,25 @@ __global__ void __launch_bounds__(128) grad_pass_kernel(int N, int K, int kc, co
             #pragma unroll
             for (int ch = 0; ch < NCH; ++ch)
                 #pragma unroll
-                for (int m = 0; m < 4; ++m) {
-                    const float D = sd[kk][ch * 8 + m], Ee = sd[kk][ch * 8 + 4 + m];
-                    dqa[ch * 4 + m] = fmaf(D, c, fmaf(Ee, s, dqa[ch * 4 + m]));
-                    dth = fmaf(qa[ch * 4 + m], Ee * c - D * s, dth);
+                for (int m = 0; m < NM; ++m) {
+                    const float D = sd[kk][ch * 2 * NM + m], Ee = sd[kk][ch * 2 * NM + NM + m];
+                    dqa[ch * NM + m] = fmaf(D, c, fmaf(Ee, s, dqa[ch * NM + m]));
+                    dth = fmaf(qa[ch * NM + m], Ee * c - D * s, dth);
                 }
             if (RECV) {
                 #pragma unroll
                 for (int ch = 0; ch < 2; ++ch)
                     #pragma unroll
-                    for (int j = 0; j < 8; ++j)
-                        dth = fmaf(ga[ch * 8 + j], sab[kk][ch * 16 + 8 + j] * c - sab[kk][ch * 16 + j] * s, dth);
+                    for (int j = 0; j < GF; ++j)
+                        dth = fmaf(ga[ch * GF + j], sab[kk][ch * 2 * GF + GF + j] * c - sab[kk][ch * 2 * GF + j] * s,
+                                   dth);
             }
             fx = fmaf(dth, sk[kk][3], fx);
             fy = fmaf(dth, sk[kk][4], fy);
             fz = fmaf(dth, sk[kk][5], fz);
         }
         #pragma unroll
-        for (int j = 0; j < NCH * 4; ++j) dqd[j] += (double)dqa[j];
+        for (int j = 0; j < NCH * NM; ++j) dqd[j] += (double)dqa[j];
         fxd += fx;
         fyd += fy;
         fzd += fz;
@@ -531,14 +579,14 @@ __global__ void __launch_bounds__(128) grad_pass_kernel(int N, int K, int kc, co
             #pragma unroll
             for (int ch = 0; ch < NCH; ++ch)
                 #pragma unroll
-                for (int m = 0; m < 4; ++m) dq[(int64_t)a * dq_stride + ch * 4 + m] += (float)dqd[ch * 4 + m];
+                for (int m = 0; m < NM; ++m) dq[(int64_t)a * dq_stride + ch * 4 + m] += (float)dqd[ch * NM + m];
             atomicAdd(forces + 3 * a, -fxd);
             atomicAdd(forces + 3 * a + 1, -fyd);
             atomicAdd(forces + 3 * a + 2, -fzd);
         } else {
             double* p = part + ((int64_t)blockIdx.y * N + a) * 11;
             #pragma unroll
-            for (int j = 0; j < NCH * 4; ++j) p[j] = dqd[j];
+            for (int j = 0; j < NCH * 4; ++j) p[j] = j % 4 < NM ? dqd[(j / 4) * NM + j % 4] : 0.0;
             p[8] = fxd;
             p[9] = fyd;
             p[10] = fzd;
@@ -1065,6 +1113,10 @@ struct PolarLR::Impl {
     // `fold` it is composed with tpo_l (`tpo_W`, `tpo_b`, S115), so P_l comes from the last hidden layer (H columns)
     // and nl is never formed. Otherwise the unfolded weights and products.
     bool fold = false;
+    // S118: lmax 0, and the weights' structural zeros certified at load (PolarLR::load): only the monopoles
+    // q[ch * 4] are nonzero, and only the raw features ch * 8 + {0, 4} (the two widths' potentials) reach a nonzero
+    // weight. The k-space passes then run on 2 + 2 + 1 + 4 + 4 channels instead of 8 + 8 + 4 + 16 + 16 (POLAR-1-S).
+    bool mono = false;
     struct Update {
         float *Wpot = nullptr, *Wq = nullptr, *Wnf[3] = {}, *dot[3] = {};              // unfolded
         float *Wpot_dot = nullptr, *Wq_dot = nullptr, *Wnf_dot[3] = {};                // folded
@@ -1353,6 +1405,40 @@ void PolarLR::load(const Bundle& b, int S, int n_layers) {
     }
     P.load_mlp(b, "LR.le_mlp_", b.meta_int("LR.le_mlp_n"), P.le_mlp);
     if (P.le_mlp.in[0] != 2 * C || P.le_mlp.out.back() != 1) throw std::runtime_error("polar bundle: electron MLP shape");
+    // S118 (`mono`): the sources' and the readouts' dipole columns q[ch * 4 + m], m = 1..3, are exactly zero (lmax 0:
+    // the readout reads its scalar rows only; the Fukui constraint and the SCF add write the monopoles only), so the
+    // charges stay monopoles; and every pot row that reads a raw feature other than ch * 8 + {0, 4} is exactly zero
+    // in each update's Wpot and in le_Wv (the folded weights inherit the zero rows), so those features, and their
+    // gradients, never reach a nonzero weight. LOUP_POLAR_MONO=0 disables it (tests, A/B).
+    P.mono = P.lmax == 0;
+    {
+        auto dip = [](int m) { return m % 4 != 0; };
+        for (int t = 0; t < n_layers && P.mono; ++t) {
+            const std::vector<float> src = b.f32("LR.src_" + std::to_string(t), {R, 8});
+            for (size_t i = 0; i < src.size(); ++i)
+                if (dip((int)(i % 8)) && src[i] != 0.0f) P.mono = false;
+        }
+        auto dead_rows_zero = [&](const std::vector<float>& W) {  // W [16, R]: row ch * 8 + j reads raw perm[j]
+            for (int r = 0; r < 16; ++r)
+                if (P.fc.perm[r % 8] % 4 != 0)
+                    for (int c = 0; c < R; ++c)
+                        if (W[(size_t)r * R + c] != 0.0f) return false;
+            return true;
+        };
+        for (int i = 0; i < P.n_rec && P.mono; ++i) {
+            const std::string p = "LR.u" + std::to_string(i) + ".";
+            const std::vector<float> W2 = b.f32(p + "ro_W2", {128, 10}), b2 = b.f32(p + "ro_b2", {10});
+            for (int m = 0; m < 8; ++m) {
+                if (!dip(m)) continue;
+                if (b2[m] != 0.0f) P.mono = false;
+                for (int k = 0; k < 32; ++k)
+                    if (W2[(size_t)k * 10 + m] != 0.0f) P.mono = false;
+            }
+            if (!dead_rows_zero(b.f32(p + "Wpot", {16, R}))) P.mono = false;
+        }
+        if (P.mono && P.add_le && !dead_rows_zero(b.f32("LR.le_Wv", {16, R}))) P.mono = false;
+        if (const char* e = std::getenv("LOUP_POLAR_MONO"); e && e[0] == '0') P.mono = false;
+    }
 }
 
 // k-vectors as graph_longrange.compute_k_vectors_flat (rcell = 2 pi inv(cell^T)), with the GTO basis per k
@@ -1637,12 +1723,19 @@ void PolarLR::record(cudaStream_t st, int N, const GemmFn& gemm,
     fk_fwd_kernel<<<blocks_for(N, 4), 128, 0, st>>>(N, P.fk_act, P.fx1, P.fk_Wm, P.fk_bm, P.fk_W2, P.fk_b2, P.fz2, P.fk);
     fukui_sums_kernel<<<blocks_for(N), 256, 0, st>>>(N, P.qsrc, P.fk, 2, red_f0);
     fukui_apply_kernel<<<blocks_for((int64_t)N * 8), 256, 0, st>>>(N, P.qsrc, P.fk, 2, red_f0, P.q0);
+    // S118 (`mono`): the passes on the live channels only (the others written as 0), same sums
+    const auto sf8 = P.mono ? &launch_sf<8, 2> : &launch_sf<8>;
+    const auto sf4 = P.mono ? &launch_sf<4, 1> : &launch_sf<4>;
+    const auto sf16 = P.mono ? &launch_sf<16, 4> : &launch_sf<16>;
+    const auto feat_pass = P.mono ? &feat_pass_kernel<true> : &feat_pass_kernel<false>;
+    const auto grad_pass_e = P.mono ? &grad_pass_kernel<1, false, true> : &grad_pass_kernel<1, false>;
+    const auto grad_pass_f = P.mono ? &grad_pass_kernel<2, true, true> : &grad_pass_kernel<2, true>;
     auto features = [&](const float* q, double* SFq, float* AB, float* pot) {
         double* SCq = SFq;
         double* SSq = SFq + (size_t)P.K_cap * 8;
-        launch_sf<8>(st, N, K, P.kinfo, P.fracu, q, SCq, SSq);
+        sf8(st, N, K, P.kinfo, P.fracu, q, SCq, SSq);
         feat_coef_kernel<<<blocks_for(K), 256, 0, st>>>(K, P.kinfo, alpha, beta, SCq, SSq, AB);
-        feat_pass_kernel<<<kgrid, 128, 0, st>>>(N, K, kc, P.kinfo, P.fracu, AB, P.f16, P.kpart);
+        feat_pass<<<kgrid, 128, 0, st>>>(N, K, kc, P.kinfo, P.fracu, AB, P.f16, P.kpart);
         if (kgrid.y > 1)
             k_reduce_kernel<<<blocks_for((int64_t)N * 16), 256, 0, st>>>(N, (int)kgrid.y, 16, 0, P.kpart, P.f16, 16,
                                                                           nullptr);
@@ -1800,7 +1893,7 @@ void PolarLR::record(cudaStream_t st, int N, const GemmFn& gemm,
     }
     // ---------------- Coulomb energy
     qtot_kernel<<<blocks_for((int64_t)N * 4), 256, 0, st>>>(N, P.qfin, P.qt);
-    launch_sf<4>(st, N, K, P.kinfo, P.fracu, P.qt, P.SC, P.SS);
+    sf4(st, N, K, P.kinfo, P.fracu, P.qt, P.SC, P.SS);
     energy_kernel<<<blocks_for(K), 256, 0, st>>>(K, P.kinfo, alpha, e_scale, P.SC, P.SS, energy);
 
     // ================= backward
@@ -1811,8 +1904,8 @@ void PolarLR::record(cudaStream_t st, int N, const GemmFn& gemm,
     if (compute_stress)
         lr_virial_kernel<<<blocks_for(K), 256, 0, st>>>(K, 1, P.kinfo, P.bc, alpha, beta, e_scale, P.SC, P.SS, nullptr,
                                                         nullptr, virial);
-    grad_pass_kernel<1, false><<<kgrid, 128, 0, st>>>(N, K, kc, P.kinfo, P.fracu, P.qt, 4, P.dk, nullptr,
-                                                      nullptr, P.dq2, 8, forces, P.kpart);
+    grad_pass_e<<<kgrid, 128, 0, st>>>(N, K, kc, P.kinfo, P.fracu, P.qt, 4, P.dk, nullptr, nullptr, P.dq2, 8, forces,
+                                       P.kpart);
     if (kgrid.y > 1)
         k_reduce_kernel<<<blocks_for((int64_t)N * 11), 256, 0, st>>>(N, (int)kgrid.y, 11, 4, P.kpart, P.dq2, 8, forces);
     // dq2[:, 0:4] holds dE/dqt: both spins get it
@@ -1922,15 +2015,15 @@ void PolarLR::record(cudaStream_t st, int N, const GemmFn& gemm,
         }
         // pot = (features(q_in) - si(q_in)) / norms
         pot_bwd_kernel<<<blocks_for((int64_t)N * 2), 256, 0, st>>>(N, P.fc, P.dpot, P.g16, P.dq2);
-        launch_sf<16>(st, N, K, P.kinfo, P.fracu, P.g16, P.SC, P.SS);
+        sf16(st, N, K, P.kinfo, P.fracu, P.g16, P.SC, P.SS);
         // features_from_q again for rho is not needed: the backward coefficients take GA/GB only
         bwd_coef_kernel<<<blocks_for(K), 256, 0, st>>>(K, 2, 0, P.kinfo, alpha, beta, e_scale, P.SC, P.SS, nullptr,
                                                        nullptr, P.dk);
         if (compute_stress)
             lr_virial_kernel<<<blocks_for(K), 256, 0, st>>>(K, 0, P.kinfo, P.bc, alpha, beta, e_scale, s.SFq,
                                                             s.SFq + (size_t)P.K_cap * 8, P.SC, P.SS, virial);
-        grad_pass_kernel<2, true><<<kgrid, 128, 0, st>>>(N, K, kc, P.kinfo, P.fracu, s.qin, 8, P.dk, P.g16,
-                                                         s.AB, P.dq2, 8, forces, P.kpart);
+        grad_pass_f<<<kgrid, 128, 0, st>>>(N, K, kc, P.kinfo, P.fracu, s.qin, 8, P.dk, P.g16, s.AB, P.dq2, 8, forces,
+                                           P.kpart);
         if (kgrid.y > 1)
             k_reduce_kernel<<<blocks_for((int64_t)N * 11), 256, 0, st>>>(N, (int)kgrid.y, 11, 8, P.kpart, P.dq2, 8,
                                                                           forces);
