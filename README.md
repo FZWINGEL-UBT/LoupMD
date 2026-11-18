@@ -37,6 +37,10 @@ Linux x86_64 (glibc 2.28 or newer) or WSL2, an NVIDIA GPU of compute capability 
 CUDA 13, and Python 3.10 or newer. Exporting a model the first time needs the `export` extra (PyTorch and MACE);
 see `docs/install.md`.
 
+This pre-release (0.1.0a1) has been verified on an RTX 5060 Ti (compute capability 12.0) only. The wheel also
+holds code for compute capability 8.0, 8.6, 8.9, 9.0 and 10.0, which is untested in this release
+(`docs/validation/release-0.1.0.md`).
+
 ## Documentation
 
 The documentation is in `docs/` and builds with `mkdocs build --strict` (`pip install -e ".[docs]"`): install,

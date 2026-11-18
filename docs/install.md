@@ -15,6 +15,11 @@ WSL2 on Windows. It needs Python 3.10 or newer. The runtime needs no PyTorch and
 The tensor-core GEMM kernels ship for compute capability 8.x, 9.x and 12.x. On a 10.x GPU the engine runs on its
 other GEMMs, somewhat slower, and `loupmd doctor` prints a warning.
 
+The 0.1.0a1 wheel has been run on one GPU only, an RTX 5060 Ti (compute capability 12.0):
+[the release verification](validation/release-0.1.0.md) has the results. Its code for compute capability 8.0, 8.6,
+8.9, 9.0 and 10.0 is compiled from the same sources and has not been run from the wheel. On any GPU,
+`loupmd validate` compares a model with MACE float64 on that machine.
+
 ## Install the wheel
 
 The release wheel is built from a commit of this repository with `tools/release/build_wheel.sh` (it needs docker
