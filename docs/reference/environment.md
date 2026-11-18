@@ -16,6 +16,7 @@ the [FAQ](../faq.md).
 | `LOUP_LIB` | path to a `libloupmd.so` | unset | the library this process loads, instead of the one shipped in the package (`loupmd/_lib/libloupmd.so`) or, in a source checkout, the one `make` installs at its root | `loupmd/_core.py` |
 | `LOUP_KERNEL_PATH` | directories separated like `PATH` | `<cache root>/lib` is appended | folders the engine searches for kernel plugins `loupmd-kernels-<signature>.so` when a bundle needs kernels the library was not built with | `loupmd/kernels.py`, `src/generic.cu` |
 | `LOUP_GATE_CACHE` | directory | `<cache root>/gate_refs` | where the accuracy gate keeps its cached MACE references | `loupmd/validate/references.py` |
+| `CUDA_HOME`, `CUDA_PATH` | CUDA toolkit root | unset | where `loupmd build-kernels` looks for `bin/nvcc` after the `PATH` and before `/usr/local/cuda` | `loupmd/kernels.py` |
 | `LOUP_RETUNE` | any value | unset | the engine times every GEMM again instead of reading its plan file; the new plans still overwrite the file | `src/engine.cu` |
 
 `LOUP_LIB` must name a library with the package's C interface version. Another version raises `BackendError` with
@@ -43,7 +44,7 @@ with the environment.
 | --- | --- | --- | --- |
 | `models` | `<root>/models/` | downloaded checkpoints (`--download`) | only with `--kind models` |
 | `bundles` | `<root>/bundles/` | exported `.loup` bundles, one per model contents and path, element set, head, charge and spin, and exporter sources | yes |
-| `plans` | `<root>/plans/`, and `plans_*.bin` files in the root | GEMM plans: the timed choice of GEMM kernel per shape and GPU | yes |
+| `plans` | `plans_*.bin` files in the root itself (and a `<root>/plans/` folder, which no current version writes) | GEMM plans: the timed choice of GEMM kernel per shape and GPU | yes |
 | `gate_refs` | `<root>/gate_refs/` | MACE float64 and float32 references of the accuracy gate | yes |
 | `lib` | `<root>/lib/` | kernel plugins built by `loupmd build-kernels` | only with `--kind lib` |
 
@@ -52,8 +53,8 @@ with the environment.
 leaves files another process holds a lock on. Bundles and plans are made
 again when they are missing; models are downloaded again only with `--download`.
 
-`.loup` bundles and `plans_*.bin` files in the root itself are files of the layout before the sub-directories;
-`loupmd cache` counts them as `bundles` and `plans`.
+The engine writes its `plans_*.bin` files into the root itself, and `ensure_loup_bundle` (the flat cache of a
+source checkout) keeps its `.loup` bundles there; `loupmd cache` counts them as `plans` and `bundles`.
 
 ### GEMM plan files
 
@@ -77,14 +78,14 @@ gates in that form. Most are read when an engine is made; the MD-loop switches a
 | `LOUP_GENERIC` | `0`, `1` | `0`: MACE-OMAT-0 medium runs its specialised kernels instead of the generic ones | `loupmd/bundles.py` |
 | `LOUP_SPLINE_VARIANT` | `R1`, `R1p`, `R4`, `R4p`, `R5` | forces the specialised path's spline kernel variant | `src/engine.cu` |
 | `LOUP_WPRIME_THREADS` | `256`, `512` | forces the w' backward kernel's block size | `src/engine.cu` |
-| `LOUP_WPRIME_RCV` | `0`, `1` | forces the receiver-owned w' kernel off or on (default: on from 512 atoms) | `src/engine.cu` |
+| `LOUP_WPRIME_RCV` | `0`, `1` | forces the receiver-owned w' kernel off or on (default: on at every size on `sm_120` and compute capability 8.0, on other GPUs from 512 atoms) | `src/engine.cu` |
 | `LOUP_REORDER` | `0`, `1` | atom reordering off or on | `src/engine.cu` |
 | `LOUP_ROW_SORT` | `global` | every neighbour row sorted in global scratch, the path of rows over 4,096 edges | `src/engine.cu` |
 | `LOUP_NB_GROUPS` | `0`, `1` | the lane-group neighbour-list kernels off, or on any GPU (default: on for `sm_120` and compute capability 8.0) | `src/engine.cu` |
 | `LOUP_M1_CHUNK` | atoms, `0` | specialised kernels: the receiver chunk of the second layer's messages (`0`: one chunk) | `src/engine.cu` |
-| `LOUP_POLAR_FOLD` | `0` | MACE-POLAR-1: the unfolded SCF and electron-energy GEMMs | `src/polar.cu` |
+| `LOUP_POLAR_FOLD` | `0`, `1` | MACE-POLAR-1: `0`: the unfolded SCF and electron-energy GEMMs; `1`: the fold on GPUs other than `sm_120` and compute capability 8.0 | `src/polar.cu` |
 | `LOUP_CHAIN_FOLD` | `0`, `1` | `0`: whole systems of multi-layer models on the generic kernels without the skip-chain fold (tiled systems never fold); `1`: the fold on GPUs other than `sm_120` and compute capability 8.0 | `src/generic.cu` |
-| `LOUP_SPECIES_TABLES` | `0` | layer 0's species-only GEMMs instead of the per-species tables (OMOL-0, MH-1) | `src/generic.cu` |
+| `LOUP_SPECIES_TABLES` | `0`, `1` | `0`: layer 0's species-only GEMMs instead of the per-species tables (OMOL-0, MH-1); `1`: the tables on GPUs other than `sm_120` and compute capability 8.0 | `src/generic.cu` |
 | `LOUP_CONV_FWD_VARIANT` | `0`, `1`, `2` | forces the generic conv forward variant | `src/generic.cu` |
 | `LOUP_CONV_TUNE` | `0`, `1` | per-system timing of the conv forward variants off, or on for any GPU | `src/generic.cu` |
 | `LOUP_NO_HYBRID` | `1` | no tensor-core hybrid GEMM cubin | `src/engine.cu` |
@@ -116,7 +117,9 @@ gates in that form. Most are read when an engine is made; the MD-loop switches a
 | `LOUP_SWEEP_REPLAY` | any value | generic path: a whole system runs the sweep schedule of a tiled one, without the skip-chain fold (not for long-range models) | `src/generic.cu` |
 | `LOUP_DEBUG_PACK` | any value | prints the packed tables' relative error per layer | `src/generic.cu`, `src/model_loader.cu` |
 | `LOUP_DEBUG_ERRORS` | any value | prints every library error to standard error | `src/engine.cu` |
-| `LOUP_DEBUG_GRAPHS`, `LOUP_DEBUG_GEMM`, `LOUP_DEBUG_GEMM_BUCKETS`, `LOUP_DEBUG_SPLINE`, `LOUP_DEBUG_TILE_TIMES` | any value | print diagnostics of CUDA graphs, GEMM plans, bucketed GEMM timings, kernel-variant timings and tiled-call phase times | `src/engine.cu`, `src/generic.cu` |
+| `LOUP_DEBUG_GRAPHS`, `LOUP_DEBUG_GEMM`, `LOUP_DEBUG_GEMM_BUCKETS`, `LOUP_DEBUG_SPLINE` | any value | print diagnostics of CUDA graphs, GEMM plans, bucketed GEMM timings and kernel-variant timings | `src/engine.cu`, `src/generic.cu` |
+| `LOUP_DEBUG_TILE_TIMES` | `1` | prints the tiled call's phase times, the row pool and the kept slots | `src/engine.cu` |
+| `LOUP_TILED_HOST_MD` | `1` | tiled MD: the integrator on the host (NVE and Langevin only, with its own Langevin noise stream) instead of on the device | `loupmd/tiled_engine.py` |
 | `LOUP_NO_NVML` | `1` | the device's free memory from CUDA alone instead of the smaller of CUDA's and NVML's figures | `src/engine.cu` |
 | `LOUP_DEBUG_PLAN` | `1` | prints the free device memory at the steps of a system's set-up and first call, and the memory plan's counters | `src/engine.cu` |
 | `LOUP_DEBUG_PLAN_FREE` | MiB | the capacity plan counts at most this much device memory as free (tests of its thresholds) | `src/engine.cu` |

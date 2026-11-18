@@ -49,7 +49,7 @@ suite that needs no file.
 | `ns/day` | simulated time per day at the protocol's timestep |
 | `spread` | (largest - smallest block) / median |
 | `T / K` | the temperature at the end; it should be near 300 K |
-| `dangerous` | neighbour-list rebuilds after an atom had moved more than half the skin; should be 0 |
+| `dangerous` | always 0: the engine checks the neighbour list at every step and rebuilds it before a force call could use a stale one. The column is kept for the record's format |
 | `status` | `ok`, or `UNSTABLE` when the temperature is not finite |
 
 An `UNSTABLE` row is not a valid timing, and the command exits with code 1.
@@ -69,10 +69,10 @@ names the entry. The shipped entries are for the NVIDIA GeForce RTX 5060 Ti:
 
 | Model | System | Protocol | ms/step |
 |---|---|---|---|
-| `omat0-medium` | NbCl5 3x3x3 | standard | 1.881 |
-| `omat0-medium` | SrTiO3 10x10x10 | standard | 8.243 |
-| `omat0-medium` | SrTiO3 6x6x6 | quick | 1.833 |
-| `omat0-small` | SrTiO3 10x10x10 | standard | 4.54 |
+| `omat0-medium` | NbCl5 3x3x3 | standard | 1.720 |
+| `omat0-medium` | SrTiO3 10x10x10 | standard | 7.725 |
+| `omat0-medium` | SrTiO3 6x6x6 | quick | 1.704 |
+| `omat0-small` | SrTiO3 10x10x10 | standard | 4.276 |
 
 A reference is a figure to compare with, not a promise. Another GPU model has no reference.
 

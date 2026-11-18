@@ -118,6 +118,13 @@ def test_missing_cubin_and_unknown_architecture_only_warn(healthy, monkeypatch):
     monkeypatch.setattr(doctor, "probe_gpus", lambda: [("Future GPU", "700.0", 130)])
     cubin = _status(doctor.run_checks(), "tensor-core")[0]
     assert cubin.status == doctor.WARN and "none is shipped for compute capability 13.0" in cubin.detail
+    # Compute capability 8.0 loads LoupMD's own build, the other 8.x GPUs FastMACE's (src/engine.cu).
+    for name in doctor.CUBIN_OF_CAPABILITY.values():
+        (healthy / "pkg" / "cubins" / name).write_bytes(b"")
+    monkeypatch.setattr(doctor, "probe_gpus", lambda: [("NVIDIA A100", "580.0", 80), ("RTX 4000 Ada", "580.0", 89)])
+    a100, ada = _status(doctor.run_checks(), "tensor-core")
+    assert a100.status == doctor.OK and a100.detail.endswith("gemm_tc_hyb_sm80.cubin")
+    assert ada.status == doctor.OK and ada.detail.endswith("tf32x3_hyb_sm80.cubin")
 
 
 def test_cache_root_inside_the_python_installation_or_read_only(healthy, monkeypatch):

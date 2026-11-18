@@ -1,8 +1,9 @@
 # Errors
 
-Every exception LoupMD raises derives from `LoupError` (`loupmd/errors.py`). All classes are importable from the
-top-level package: `lm.InputError`, `lm.PlanRefused`, and so on. A refused setting is never replaced by another
-silently; the error says what was refused and why.
+Every refusal LoupMD makes itself is a `LoupError` (`loupmd/errors.py`). Errors from underneath pass through
+unchanged: a failed download raises `OSError`, and an unknown keyword to an ASE drop-in class raises `TypeError`.
+All classes are importable from the top-level package: `lm.InputError`, `lm.PlanRefused`, and so on. A refused
+setting is never replaced by another silently; the error says what was refused and why.
 
 ## Message shape
 
@@ -30,7 +31,7 @@ Next: Download the release again (download=True), or pass trusted=True to load t
 
 | Class | Also derives from | Extra attributes | Raised when |
 | --- | --- | --- | --- |
-| `LoupError` | `Exception` | `what`, `why`, `next_step` | base class; not raised by itself in normal use |
+| `LoupError` | `Exception` | `what`, `why`, `next_step` | base class; also raised itself where no subclass fits: a bundle that is not in the cache in an environment without the export extra (the message names the missing modules and `pip install 'loupmd[export]'`), a failed export, `loupmd build-kernels` without `nvcc` or the kernel sources, `loupmd bench` on a GPU that is in use |
 | `InputError` | `ValueError` | | an argument is refused before the library reads it: a wrong type, shape or value, an unknown label, a missing checkpoint file, an unknown key in a run file, a directory that already holds a run |
 | `CheckpointTrustError` | | | a checkpoint would be unpickled without a matching SHA-256 or `trusted=True`; a download whose hash differs (the file is deleted); a URL without a hash |
 | `CacheLocationError` | | | the cache root lies inside the Python installation (`sys.prefix`) |

@@ -90,8 +90,8 @@ A profile file has `name`, `[[segments]]` tables (`kind = "ramp"` with `start_K`
 `rate_K_per_ps`; `kind = "hold"` with `temperature_K` and `ps`) and optionally `sample_interval`,
 `trajectory_interval`, `relax_fmax`, `quench`, `ensemble` and `pressure_GPa`. A profile with `ensemble = "NPT"` runs
 at its constant pressure ([constant pressure](npt.md)); pressure schedules are refused. A profile's `relax_fmax` is
-recorded only: `loupmd md` does not relax first. Its `quench` settings are used by
-[`loupmd quench`](relax.md#quenching-a-finished-run). From Python, `lm.md(structure, model=...,
+recorded only: `loupmd md` does not relax first. Its `quench` settings are not read by
+[`loupmd quench`](relax.md#quenching-a-finished-run) in this version: pass them as flags. From Python, `lm.md(structure, model=...,
 **lm.protocols.PROFILES["fast"].md_options())` runs a profile's schedule and ensemble, without its cadences.
 
 ## Neighbour skin

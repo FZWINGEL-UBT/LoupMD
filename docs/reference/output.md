@@ -145,11 +145,11 @@ What the run was, enough to repeat it. `loupmd run metadata.json` repeats a run 
 | `schedule` | the resolved schedule (segments with `kind`, `phase`, `start_K`, `end_K`, `ps`, `steps`), or `null` |
 | `output` | the `lm.Output` fields |
 | `seed`, `skin_A`, `skin` | noise seed; skin in A; the skin record (`mode` `auto` or `fixed`, with the estimate and the measured largest step for `auto`) |
-| `plan` | `execution` (`whole` or `tiled`), `precision`, `kernels` (`generic` or `specialised`), `kernel_signature`, `interaction_layers`, `r_max_A`, `memory`, `library`; tiled runs add `receivers`, `tiles`, `integrator_on`, `wavefront` |
+| `plan` | `execution` (`whole` or `tiled`), `precision`, `kernels` (`generic` or `specialised`), `kernel_signature`, `interaction_layers`, `r_max_A`, `memory`, `library`; tiled runs add `receivers`, `tiles`, `integrator_on` (`device` or `host`), `wavefront`, `requested` (the `capacity` mode asked for) and `tiled_because` (`asked` or `memory`). `memory` is the capacity plan's record in bytes: `whole_bytes`, `free_bytes`, `tiled_global_bytes`, `tile_workspace_bytes`, `host_bytes` (pinned host memory) with `host_lists` and `host_state` (whether the tile lists and the layer state are there) |
 | `dispersion` | the dispersion entry (below), or `null` |
 | `gate` | `status` (`skipped`, `passed`, `failed`, `unavailable`) and the gate's record |
 | `step` | the last step |
-| `counters` | `steps`, `rebuilds`, `pipelined_steps`, `dangerous_builds` |
+| `counters` | `steps`, `rebuilds`, `pipelined_steps`, `dangerous_builds` (always 0: the engine checks the neighbour list at every step) |
 | `mc` | Monte Carlo `moves` and `counters`, or `null` |
 | `timing` | `setup_s`, `wall_s`, `ms_per_step`, `engine_ms_per_step`, `ns_per_day`, `atom_steps_per_s` |
 | `arguments` | the arguments of `lm.md` (the run file's table) |

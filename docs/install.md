@@ -15,8 +15,8 @@ WSL2 on Windows. It needs Python 3.10 or newer. The runtime needs no PyTorch and
 The tensor-core GEMM kernels ship for compute capability 8.x, 9.x and 12.x. On a 10.x GPU the engine runs on its
 other GEMMs, somewhat slower, and `loupmd doctor` prints a warning.
 
-The 0.1.0a1 wheel has been run on one GPU only, an RTX 5060 Ti (compute capability 12.0):
-[the release verification](validation/release-0.1.0.md) has the results. Its code for compute capability 8.0, 8.6,
+The 0.1.0a1 wheel has been run on one GPU only, an RTX 5060 Ti (compute capability 12.0);
+`docs/validation/release-0.1.0.md` in the repository has the results. Its code for compute capability 8.0, 8.6,
 8.9, 9.0 and 10.0 is compiled from the same sources and has not been run from the wheel. On any GPU,
 `loupmd validate` compares a model with MACE float64 on that machine.
 
@@ -65,7 +65,7 @@ pip install "dist/loupmd-0.1.0a1-py3-none-manylinux_2_28_x86_64.whl[export]"
 |---|---|---|
 | `export` | torch 2.14.1, mace-torch 0.3.16, cuequivariance 0.12.0, cuequivariance-torch 0.12.0 | exporting a checkpoint to a bundle, `loupmd validate`, `loupmd build-kernels` |
 | `dev` | pytest, build | running the tests |
-| `docs` | mkdocs-material | building this site |
+| `docs` | mkdocs-material, mkdocstrings | building this site |
 
 The export runs in a separate process with the same Python interpreter, so install the extra into the environment
 that runs LoupMD. Bundles already in the cache, or exported elsewhere, run without it.
@@ -95,8 +95,8 @@ pickle and runs code when it is loaded, so a file outside the table needs `--sha
 Many models are under the Academic Software License (non-commercial use only). The run report and `loupmd models`
 name the licence of each.
 
-The cache root is `$LOUPMD_CACHE`, else `~/.cache/loupmd`. It holds `models/`, `bundles/`, `plans/`, `gate_refs/` and
-`lib/`, and must lie outside the Python environment. `loupmd cache list`, `size` and `prune` manage it. See
+The cache root is `$LOUPMD_CACHE`, else `~/.cache/loupmd`. It holds `models/`, `bundles/`, `gate_refs/` and `lib/`
+and the engine's GEMM plan files (`plans_*.bin`) in the root itself, and must lie outside the Python environment. `loupmd cache list`, `size` and `prune` manage it. See
 [environment variables](reference/environment.md).
 
 ## Check the setup

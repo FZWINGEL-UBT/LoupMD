@@ -30,7 +30,8 @@ the full table.
 
 A label fixes its head. A multi-head checkpoint without its own label takes the head by name, either as
 `lm.load("mh1", head="omol")` or as the label `mh-1:omol`. There is no default head: a multi-head model without
-`head=` is refused with its heads listed.
+`head=` is refused with its heads listed, also when its file is given by path. Only `loupmd validate` on a
+multi-head file given by path without `--head` picks one itself (`omat_pbe` where the file has it).
 
 ## Finding the file
 
@@ -83,18 +84,19 @@ bundle for the structure's elements. The export runs in a process of its own and
 (`pip install 'loupmd[export]'`: torch, mace-torch, cuequivariance).
 
 Bundles are kept in `<cache root>/bundles/`. A bundle's file name carries a key over the model file's SHA-256, the
-elements, the head, the kernel path, charge and spin, and the exporter's own sources. A changed exporter never finds
-an old bundle. Two processes that need the same bundle export it once: the export runs under a file lock. A
+elements, the head, the kernel path, charge and spin, and the exporter's own sources with the compiled kernels'
+signature. A changed exporter or regenerated kernels never find an old bundle. Two processes that need the same bundle export it once: the export runs under a file lock. A
 structure with an element the model has no embedding for is refused (`ModelElementError`) before any export.
 
-`loupmd cache list --kind bundles` shows them; `loupmd cache prune` removes old ones, which are exported again when
-needed. The cache root is `LOUPMD_CACHE` (default `~/.cache/loupmd`; see [environment](../reference/environment.md)).
+`loupmd cache list --kind bundles` shows them; `loupmd cache prune --older-than DAYS` (or `--max-size SIZE`) removes
+old ones, which are exported again when needed. The cache root is `LOUPMD_CACHE` (default `~/.cache/loupmd`; see [environment](../reference/environment.md)).
 
 ## Generic and specialised kernels
 
 Every model runs the generic kernels by default. MACE-OMAT-0 medium also has kernels specialised to it. They were
 about 8% faster on an RTX 5060 Ti and not faster on an A100. `LOUP_GENERIC=0` selects them, and
-`loupmd validate --specialised` gates them. Per-atom energies and the tiled execution need the generic kernels.
+`loupmd validate --specialised` gates them. Per-atom energies and the tiled execution need the generic kernels and a
+short-range model: MACE-POLAR-1 has neither.
 
 ## Kernel plugins
 

@@ -32,6 +32,9 @@ Each raises `PlanRefused` or `InputError`, and the message says what to use inst
   execution path.
 - `min_mc_temperature_K=`: run the Monte Carlo moves with `mc=` over the whole run, or split the schedule into runs
   with and without moves ([Monte Carlo](monte-carlo.md)).
+- `Swap(velocities="rescale")` or `"redraw"`, `Transmute(velocities="redraw")` or `"redraw_all"`, and
+  `Displace(adaptive=True)`: LoupMD has `"exchange"` for swaps, `"rescale"` for transmutations and a fixed
+  displacement step only ([Monte Carlo](monte-carlo.md)).
 - A CSVR thermostat on a structure at rest. FastMACE runs it, and the structure stays at rest, because CSVR rescales
   the velocities it finds. LoupMD refuses it: add `initial_velocities = "maxwell_boltzmann"` (or a temperature in K)
   to the run file, or draw velocities first.

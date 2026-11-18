@@ -33,6 +33,7 @@ parameter sets with their sources.
 | `d3zero`, `d3bjm`, `d3zerom` | zero damping and the two modified dampings of Smith et al. 2016, with d3bj's cutoffs |
 | `d3bj-atm` | `d3bj` plus the three-body (Axilrod-Teller-Muto) term over triangles whose sides are within 20 bohr |
 | `d3-reference` | simple-dftd3's Python defaults: pairs to 60 bohr, coordination numbers and the three-body term to 40 bohr |
+| `auto` | `d3bj` when the model's functional has a parameter set and its data has no dispersion; refused otherwise |
 
 The parameters follow the model's training functional: PBE for OMAT-0, MP-0, MPA-0 and MH-1's `omat_pbe` head,
 r2SCAN for MatPES-r2SCAN and MH-1's `matpes_r2scan` head (Becke-Johnson damping only: r2SCAN has no zero-damping
@@ -40,8 +41,9 @@ set). `lm.Dispersion(functional="pbe")` chooses another functional's set and war
 takes raw parameters, and the run's record then names them as given by the user.
 
 LoupMD refuses dispersion for models whose training data contain it already, because D3 on top counts it twice:
-MACE-OFF (wB97M-D3(BJ) data), MACE-OMOL-0 and MH-1's `omol` and `spice_wB97M` heads (wB97M-V, whose VV10
-correlation describes dispersion), and MACE-POLAR-1.
+MACE-OFF and MH-1's `spice_wB97M` head (wB97M-D3(BJ) data), MACE-OMOL-0 and MH-1's `omol` head (wB97M-V, whose
+VV10 correlation describes dispersion). MACE-POLAR-1 is refused as well: it models long-range interactions of its
+own and names no single training functional.
 
 ## Accuracy
 

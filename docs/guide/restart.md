@@ -21,7 +21,7 @@ the last restart point before the stop.
   counters, and where the output chunks end.
 - `simulation.json`: how to make the run again: the model (label or path, head, charge, spin multiplicity,
   SHA-256), the integrator record, the output cadences, the seed, the skin, the elements of the bundle, the
-  execution mode (whole or tiled) and the dispersion record.
+  execution mode (whole, tiled or wavefront) and the dispersion record.
 
 Both are written to a temporary file, fsynced and renamed, so a crash leaves the previous version in place. A
 restart point is also a chunk boundary: the rows and frames up to it are closed and fsynced, and the next
@@ -58,7 +58,9 @@ started with; a run with nothing left is refused and asks for `--steps N`. It th
 - **The state:** positions, velocities, the cell and the integrator's own state (a barostat's momentum, for
   example) come back from the state block bitwise.
 - **The noise:** the seed is the run's, and the thermostat's random stream goes on where it stopped. Monte Carlo
-  attempts draw from a stream fixed by the seed and the step, so a resumed run makes the same attempts.
+  attempts draw from a stream fixed by the seed and the step, so a resumed run that is given the same `mc=` moves
+  again makes the same attempts. The moves themselves are not stored: `loupmd run --resume` continues without them
+  ([Monte Carlo](monte-carlo.md)).
 - **The schedule:** its position and target; the thermostat stays at the last target of a finished schedule.
 - **The output:** rows and frames go on at the same cadences. The chunks after the restart point (written by the
   stopped run after its last restart) are deleted, and the run continues in the next chunk, so the joined thermo
@@ -78,13 +80,15 @@ with `long_range="auto"` repeats its setup check, so it may choose another metho
 
 ## What must match
 
-`RestartMismatch` is raised, and nothing in the directory is changed, when:
+`RestartMismatch` is raised when one of the following holds. In every case but the state block's, nothing in the
+directory has been changed by then:
 
 - `restart.npz` or `simulation.json` is missing, or either has a format this version does not read
   (`loupmd.restart/1`, `loupmd.simulation/1`);
 - the model cannot be loaded again (pass `force_field=`), or its SHA-256 is not the one the restart was written
   with;
-- the state block does not fit the restart's own record (another number of atoms, for example);
+- the state block does not fit the restart's own record (another number of atoms, for example); this one is found
+  last, after the output chunks written after the restart point were removed;
 - an output chunk up to the restart point is missing, or the chunks hold another number of rows or frames than the
   restart recorded (they were changed after it was written);
 - the chunks written after the restart cannot be deleted (a read-only directory or file).

@@ -106,8 +106,8 @@ loupmd md structure.cif --model omat0-medium --profile anneal --timestep 1 --ini
 loupmd quench structure.loupmd
 ```
 
-The settings come from the command line, else from the run's shipped profile (`anneal` has quench settings), else
-the defaults:
+The settings come from the command line, else the defaults (FastMACE's, which are also the `anneal` profile's). A
+profile's own `quench` table is not read in this version:
 
 | flag | default |
 |---|---|

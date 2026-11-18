@@ -248,6 +248,16 @@ def test_a_restart_of_another_model_or_atom_count_is_refused(setup, tmp_path):
     with pytest.raises(RestartMismatch, match="no restart"):
         loupmd.Simulation.resume(tmp_path / "nothing-here", force_field=setup.force_field())
     assert _steps(directory) == [0, 20]                             # a refused resume deletes nothing
+    # A restart.npz of another program is refused as a mismatch too, not with a KeyError or a ValueError.
+    foreign = tmp_path / "foreign"
+    foreign.mkdir()
+    (foreign / "simulation.json").write_text("{}")
+    np.savez(foreign / "restart.npz", positions=np.zeros((2, 3)))
+    with pytest.raises(RestartMismatch, match="has format None"):
+        loupmd.Simulation.resume(foreign, force_field=setup.force_field())
+    np.savez(foreign / "restart.npz", state=np.array([{"a": 1}], dtype=object))
+    with pytest.raises(RestartMismatch, match="is not a restart this version reads"):
+        loupmd.Simulation.resume(foreign, force_field=setup.force_field())
 
 
 def test_save_restart_without_output_needs_a_path(setup, tmp_path):

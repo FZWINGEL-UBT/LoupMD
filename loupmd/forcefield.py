@@ -70,6 +70,15 @@ class ForceField:
         self.elements = known.elements if known is not None else None     # None: not known before a probe
         self.r_max_A = known.r_max_A if known is not None else None
         self.heads = known.heads if known is not None else None
+        if known is not None and len(known.heads) > 1:
+            # A released multi-head file given by path follows its label's rule (no default head), so that the head
+            # that runs, its training functional (the D3 parameters) and the bundle are one head's.
+            if self.head is None:
+                raise InputError(f"{resolved.path.name} has several heads and no default",
+                                 next_step=f"Pass head= one of {', '.join(known.heads)}.")
+            if self.head not in known.heads:
+                raise InputError(f"{resolved.path.name} has no head {self.head!r}",
+                                 next_step=f"Its heads are {', '.join(known.heads)}.")
         self.licence = known.licence if known is not None else None
         # MACE-POLAR-1: k-space electrostatics (no cell relaxation, no tiled execution).
         self.long_range = known is not None and known.model_type == "PolarMACE"

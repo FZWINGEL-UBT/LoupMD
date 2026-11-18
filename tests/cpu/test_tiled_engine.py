@@ -347,3 +347,23 @@ def test_a_state_block_of_the_other_engine_is_refused():
     eng.set_system(np.full(4, 11), np.full(4, 23.0))
     with pytest.raises(BackendError, match="not a tiled-mode state block"):
         eng.import_state(b"x" * 400)
+
+
+def test_the_report_names_what_the_plan_keeps_in_host_memory():
+    """The memory line of a tiled plan: nothing about the host when everything is on the device, the tile lists when
+    only they are in pinned host memory, the lists and the layer state when the plan moved both (PLAN.md O31, O32)."""
+    from loupmd import report
+
+    def line(**host):
+        memory = {"whole_bytes": 32 << 30, "free_bytes": 13 << 30, "tiled_global_bytes": 1 << 30,
+                  "tile_workspace_bytes": 7 << 30, **host}
+        plan = {"execution": "tiled", "receivers": 65536, "tiles": 27, "kernels": None, "memory": memory,
+                "precision": provenance.PRECISION}
+        return next(text for text in report._plan_lines({"plan": plan, "gpu": None}) if text.startswith("memory:"))
+
+    assert line(host_bytes=0).endswith("tiled 8.00 GiB planned, 13.00 GiB free on the card")
+    assert line(host_bytes=2 << 30, host_lists=True).endswith(
+        "; the tile lists' edges in pinned host memory (2.00 GiB)")
+    assert line(host_bytes=6 << 30, host_lists=True, host_state=True).endswith(
+        "; the tile lists' edges and the layer state in pinned host memory (6.00 GiB)")
+    assert line(host_bytes=2 << 30).endswith("the tile lists' edges in pinned host memory (2.00 GiB)")  # older record

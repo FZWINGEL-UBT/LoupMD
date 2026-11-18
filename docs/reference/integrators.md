@@ -8,9 +8,8 @@ How to run MD is in [Molecular dynamics](../guide/md.md); constant pressure is i
 Units: time in fs, temperature in K, friction per fs, pressure in GPa, compressibility per GPa. A thermostat's
 temperature, friction and time constant have no defaults: physics is not chosen silently.
 
-`lm.integrators` exports `NVE`, `Langevin`, `CSVR`, `NoseHooverChain` and `Berendsen` (`__all__`). `LangevinBAOAB`
-and `MTK` are records of the same module (`lm.integrators.LangevinBAOAB`, `lm.integrators.MTK`); both are
-experimental.
+`lm.integrators` exports all seven records (`__all__`): `NVE`, `Langevin`, `CSVR`, `NoseHooverChain`, `Berendsen`,
+`LangevinBAOAB` and `MTK`. `LangevinBAOAB` and `MTK` are experimental.
 
 ## Overview
 
@@ -27,9 +26,10 @@ experimental.
 
 The conserved quantity is listed where the record documents one.
 
-The tiled execution of cells that do not fit the GPU integrates `NVE` and `Langevin` only, on the host; other
-records are refused there ([Large cells](../guide/large-cells.md)). A long-range model (MACE-POLAR-1) with a
-barostat is refused.
+The tiled execution of cells that do not fit the GPU runs the fixed-cell records (`NVE`, `Langevin`, `CSVR`,
+`NoseHooverChain`, and `Berendsen` without barostat fields) on the device; with a dispersion term the integrator runs
+on the host, `NVE` and `Langevin` only. Barostats are refused there with `PlanRefused`
+([Large cells](../guide/large-cells.md)). A long-range model (MACE-POLAR-1) with a barostat is refused.
 
 ## Selecting a record
 
@@ -163,7 +163,7 @@ for the atoms (Leimkuhler and Matthews) and a Langevin-Hoover barostat for the c
 | `max_volume_ratio` | float or None | 20.0 | | only 20.0; the run stops once the volume leaves a twentieth to twenty times its start |
 | `max_cell_length_A` | float or None | 1000.0 | A | only 1000.0 |
 
-The last four fields are FastMACE's; other values are refused by name (`PlanRefused`). In the full-cell mode the
+The last five fields are FastMACE's; other values are refused by name (`PlanRefused`). In the full-cell mode the
 barostat's drag on the velocities is Quigley and Probert's; ASE 3.27 adds its trace term to all nine elements. A
 cell that leaves its limits stops the run with `CellDivergedError` ([Errors](errors.md)).
 

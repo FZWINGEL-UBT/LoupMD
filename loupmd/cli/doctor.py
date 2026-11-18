@@ -20,6 +20,7 @@ OK, WARN, FAIL = "ok", "warn", "FAIL"
 RUNTIME_LIBRARIES = ("libcudart.so.13", "libcublas.so.13", "libcublasLt.so.13")
 MIN_COMPUTE_CAPABILITY = 80           # PLAN.md A5: the own SGEMM needs cp.async, the hybrid GEMMs TF32 tensor cores
 CUBIN_OF_MAJOR = {8: "tf32x3_hyb_sm80.cubin", 9: "tf32x3_hyb_sm90.cubin", 12: "tf32x3_hyb_sm120.cubin"}
+CUBIN_OF_CAPABILITY = {80: "gemm_tc_hyb_sm80.cubin"}      # the file the engine loads on 8.0 (src/engine.cu)
 
 
 @dataclass(frozen=True)
@@ -115,7 +116,7 @@ def check_cubins(library, gpus):
         return []
     out = []
     for index, (name, _, cap) in enumerate(gpus):
-        cubin = CUBIN_OF_MAJOR.get(cap // 10)
+        cubin = CUBIN_OF_CAPABILITY.get(cap, CUBIN_OF_MAJOR.get(cap // 10))
         if cubin is None:
             out.append(Check(WARN, f"tensor-core GEMM kernels for GPU {index}",
                              f"none is shipped for compute capability {cap // 10}.{cap % 10}",

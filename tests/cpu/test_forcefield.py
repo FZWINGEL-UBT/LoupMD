@@ -148,6 +148,28 @@ def test_a_released_file_given_by_path_is_recognised_by_its_hash(load, checkpoin
         ff.evaluate(_nacl())
 
 
+def test_a_released_multi_head_file_given_by_path_needs_its_head(load, checkpoint, monkeypatch):
+    """MACE-MH-1's file given by path follows its label's rule: no default head, and the training functional (the D3
+    parameters) is the chosen head's, not the first stored head's."""
+    digest = models.sha256_of(checkpoint)
+    monkeypatch.setattr(models, "checkpoint_of_digest", lambda d: models.CHECKPOINTS["mh-1"] if d == digest else None)
+    with pytest.raises(InputError) as caught:
+        load()
+    assert "some.model has several heads and no default" in str(caught.value) and "omat_pbe" in str(caught.value)
+    with pytest.raises(InputError, match="some.model has no head 'nonsense'"):
+        load(head="nonsense")
+    ff = load(head="omat_pbe")
+    assert (ff.label, ff.head, ff.functional) == (None, "omat_pbe", "pbe")
+    assert load(head="matpes_r2scan").functional == "r2scan"
+
+
+def test_lm_config_is_reachable_as_the_guides_write_it():
+    import importlib
+
+    assert loupmd.__getattr__("config") is importlib.import_module("loupmd.config")
+    assert loupmd.config.CapacityConfig(mode="tiled", receivers=8192).receivers == 8192
+
+
 # ---------------------------------------------------------------------------------------------- evaluate
 
 def test_evaluate_returns_energy_forces_and_the_stress_when_asked(load):

@@ -72,7 +72,9 @@ def _plan(sim):
         plan["memory"] = {"whole_bytes": int(found.whole_bytes), "free_bytes": int(found.free_bytes),
                           "tiled_global_bytes": int(found.tiled_global_bytes),
                           "tile_workspace_bytes": int(found.tile_workspace_bytes),
-                          "host_bytes": int(getattr(found, "host_bytes", 0) or 0)}
+                          "host_bytes": int(getattr(found, "host_bytes", 0) or 0),
+                          "host_lists": bool(getattr(found, "host_lists", False)),
+                          "host_state": bool(getattr(found, "host_state", False))}
     try:
         from . import _core
 

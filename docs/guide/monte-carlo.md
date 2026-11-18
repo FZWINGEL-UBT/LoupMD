@@ -47,7 +47,9 @@ frame and restart point.
 
 - An NVE run has no temperature, so `mc=` is refused there.
 - The random stream of each block follows from the run's seed, the step and the move's place in the list. A resumed
-  run makes the same attempts as one that was not interrupted.
+  run that is given the same `mc=` again makes the same attempts as one that was not interrupted. The moves are not
+  stored with a restart: `loupmd run --resume` continues without them, so resume a Monte Carlo run from Python
+  (`lm.Simulation.resume(...)`, then `run(steps, mc=moves)`).
 - `lm.md` refuses FastMACE's `min_mc_temperature_K=`. To leave out part of a schedule, split it into
   `Simulation.run` calls with and without `mc=`.
 

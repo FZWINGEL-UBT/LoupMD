@@ -13,6 +13,9 @@ loupmd models --download omat0-medium
 
 ## One run, three ways
 
+Each variant writes to the directory `run`, and a new run refuses a directory that already holds output: delete
+`run` or change the name before trying the next one.
+
 ### Command line
 
 ```bash

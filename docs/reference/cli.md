@@ -220,7 +220,7 @@ loupmd md [-h] [--structure FILE] --model MODEL [--head HEAD] [--checkpoint PATH
 | `--initial-velocities` `HOW` | keep (default), maxwell_boltzmann or a temperature in K: what a structure at rest starts with |
 | `--check` `CHECK` | skip (default), gate or allow_unavailable: the accuracy gate before the first step |
 | `--device` `N` | the GPU index (default 0) |
-| `--capacity` `CAPACITY` | auto (default): the whole cell when it fits the GPU, else tiles (NVE and Langevin); whole, tiled or wavefront (tiles in the wavefront order, two-layer models) force one (one of: auto, whole, tiled, wavefront) |
+| `--capacity` `CAPACITY` | auto (default): the whole cell when it fits the GPU, else tiles (fixed cell: NVE and the thermostats, no barostat); whole, tiled or wavefront (tiles in the wavefront order, two-layer models) force one (one of: auto, whole, tiled, wavefront) |
 | `--skin` `A` | the neighbour-list skin in A, or auto (default): chosen from how far the atoms move per step; it decides speed only |
 | `--output` `DIR` | the output directory (default <structure stem>.loupmd) |
 | `--thermo-every` `N` | thermo rows every N steps (default 20) |
@@ -283,7 +283,7 @@ loupmd init md [-h] [--structure FILE] --model MODEL [--head HEAD] [--checkpoint
 | `--initial-velocities` `HOW` | keep (default), maxwell_boltzmann or a temperature in K: what a structure at rest starts with |
 | `--check` `CHECK` | skip (default), gate or allow_unavailable: the accuracy gate before the first step |
 | `--device` `N` | the GPU index (default 0) |
-| `--capacity` `CAPACITY` | auto (default): the whole cell when it fits the GPU, else tiles (NVE and Langevin); whole, tiled or wavefront (tiles in the wavefront order, two-layer models) force one (one of: auto, whole, tiled, wavefront) |
+| `--capacity` `CAPACITY` | auto (default): the whole cell when it fits the GPU, else tiles (fixed cell: NVE and the thermostats, no barostat); whole, tiled or wavefront (tiles in the wavefront order, two-layer models) force one (one of: auto, whole, tiled, wavefront) |
 | `--skin` `A` | the neighbour-list skin in A, or auto (default): chosen from how far the atoms move per step; it decides speed only |
 | `--output` `DIR` | the output directory (default <structure stem>.loupmd) |
 | `--thermo-every` `N` | thermo rows every N steps (default 20) |

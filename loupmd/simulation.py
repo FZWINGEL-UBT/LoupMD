@@ -1080,10 +1080,15 @@ class Simulation:
                                   next_step="A run writes it every Output.restart_every steps and when "
                                             "save_restart() is called.")
         record = json.loads(record_file.read_text())
-        with np.load(restart, allow_pickle=False) as data:
-            data = {key: data[key] for key in data.files}
-        if str(data["format"]) != RESTART_FORMAT or record.get("format") != SIMULATION_FORMAT:
-            raise RestartMismatch(f"{restart} has format {str(data['format'])!r} and {record_file.name} "
+        try:
+            with np.load(restart, allow_pickle=False) as data:
+                data = {key: data[key] for key in data.files}
+        except (ValueError, OSError, EOFError) as error:        # pickled arrays, or no npz file at all
+            raise RestartMismatch(f"{restart} is not a restart this version reads",
+                                  why=str(error).splitlines()[0]) from None
+        found_format = str(data["format"]) if "format" in data else None
+        if found_format != RESTART_FORMAT or record.get("format") != SIMULATION_FORMAT:
+            raise RestartMismatch(f"{restart} has format {found_format!r} and {record_file.name} "
                                   f"{record.get('format')!r}; this version reads {RESTART_FORMAT!r} and "
                                   f"{SIMULATION_FORMAT!r}")
         saved_sha = str(data["model_sha256"])

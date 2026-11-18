@@ -52,7 +52,8 @@ def _arguments_parser(parser):
                                                         "gate before the first step")
     parser.add_argument("--device", type=int, default=0, metavar="N", help="the GPU index (default 0)")
     parser.add_argument("--capacity", choices=("auto", "whole", "tiled", "wavefront"), default="auto",
-                        help="auto (default): the whole cell when it fits the GPU, else tiles (NVE and Langevin); "
+                        help="auto (default): the whole cell when it fits the GPU, else tiles (fixed cell: NVE and "
+                             "the thermostats, no barostat); "
                              "whole, tiled or wavefront (tiles in the wavefront order, two-layer models) force one")
     parser.add_argument("--skin", default="auto", metavar="A", help="the neighbour-list skin in A, or auto "
                         "(default): chosen from how far the atoms move per step; it decides speed only")

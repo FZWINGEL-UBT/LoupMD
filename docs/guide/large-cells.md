@@ -3,7 +3,8 @@
 LoupMD runs the whole cell in one pass when it fits the GPU. A larger cell is split into tiles. Each tile is a block
 of at most `receivers` atoms plus the atoms within the model's reach around it. The forces are the same as the
 whole-cell call to float32 rounding: the plan's bounds are 1e-7 eV/atom and 1e-5 eV/A with the hybrid GEMMs off
-(PLAN.md D60).
+(PLAN.md D60). A whole-cell run folds the chain of matrix products between two layers into one and a tiled run
+does not, which alone moves forces by about 2e-6 eV/A.
 
 ## Choosing the mode
 
@@ -11,13 +12,21 @@ whole-cell call to float32 rounding: the plan's bounds are 1e-7 eV/atom and 1e-5
 plans the run:
 
 1. It sets up one probe tile of at most 4,096 atoms and measures the memory per atom and per neighbour edge.
-2. It uses the whole-cell call when that fits in 90% of the free GPU memory and the neighbour list stays under
-   536,870,911 edges.
-3. Otherwise it uses the largest tile size from 65,536 down to 4,096 atoms that fits.
-4. When no tile size fits, it keeps the tiles' neighbour lists in the computer's memory (pinned, at most half of
-   what is free) and the GPU reads them over the bus. The run is then 15-20% slower, and larger cells fit: the
-   lists are about a third of what the tiles keep on the GPU (an estimate; most of it with the wavefront). The
-   report says so on its memory line.
+2. It uses the whole-cell call when that fits in 90% of the free GPU memory, with room for the scratch buffers of a
+   first call, and the neighbour list stays under 536,870,911 edges.
+3. Otherwise it uses the largest tile size of 65,536, 49,152, 32,768, 24,576, 16,384, 12,288, 8,192, 6,144 and
+   4,096 atoms whose state and workspace fit.
+4. When the tiles' state does not fit the GPU, or fits only with small tiles, parts of it move to the computer's
+   memory, pinned so that the GPU reads and writes them directly: first the tiles' neighbour lists (at most half of
+   the available host memory), then also the layers' outputs and their gradients for the whole cell (with the lists
+   at most two thirds of it). The report names what was moved on its memory line.
+5. From 2^20 atoms, when the layers' state fits neither the GPU nor that share of the host, two-layer models run the
+   tiles in [the wavefront order](#the-wavefront), which holds the state of a moving band of tiles only.
+6. A cell that fits in none of these ways at 4,096-atom tiles is refused before anything runs, with the memory it
+   would need.
+
+The free GPU memory is what other programs leave at that moment. Under WSL 2 CUDA's own figure leaves out most of
+what Windows programs hold, so the engine also asks NVML and takes the smaller of the two.
 
 ```python
 import loupmd as lm
@@ -30,39 +39,64 @@ print(result.plan["execution"], result.plan.get("receivers"))      # "tiled", 65
 loupmd md big.cif --model omat0-medium --temperature 300 --steps 10000 --capacity auto
 ```
 
-The report says which mode the run took (here 320,000 atoms on a 16 GB card):
+The report says which mode the run took. 320,000 atoms on a 16 GB card:
 
 ```
 Plan
   8 tiles of at most 65,536 atoms on GPU 0 (NVIDIA GeForce RTX 5060 Ti, ...) (the cell does not fit the card
   whole); the integrator runs on the device
-  memory: the whole system would need 32.12 GiB; tiled 10.45 GiB planned, 14.00 GiB free on the card
+  memory: the whole system would need 29.27 GiB; tiled 9.10 GiB planned, 11.80 GiB free on the card
 ```
 
-`capacity="whole"` forces the whole-cell call; a cell that does not fit then fails with an out-of-memory message.
-`capacity="tiled"` forces tiles, and `lm.config.CapacityConfig(mode="tiled", receivers=8192)` also fixes their
-size. `memory_fraction` (default 0.9) is the share of the free memory the plan may use.
+and 1,080,000 atoms on the same card:
+
+```
+Plan
+  27 tiles of at most 65,536 atoms on GPU 0 (NVIDIA GeForce RTX 5060 Ti, ...) (the cell does not fit the card
+  whole); the integrator runs on the device
+  memory: the whole system would need 98.63 GiB; tiled 8.43 GiB planned, 11.73 GiB free on the card; the tile
+  lists' edges and the layer state in pinned host memory (5.70 GiB)
+```
+
+`capacity="whole"` forces the whole-cell call; a cell that does not fit then fails with the engine's out-of-memory
+error. `capacity="tiled"` forces tiles, and `lm.config.CapacityConfig(mode="tiled", receivers=8192)` also fixes
+their size. `memory_fraction` (default 0.9) is the share of the free GPU memory the plan may use. The planned figure
+is what the call will hold, within a few percent (`docs/validation/capacity.md` in the repository).
 
 ## The wavefront
 
-The plain tiled call keeps every layer's output for the whole cell on the GPU. At a million atoms that alone needs
-about 30 GB for OMAT-0 medium. For two-layer models the tiles can run in the wavefront order instead. The tiles lie
-in layers along the first cell axis, and each tile's first pass runs just before the first tile that needs its
-output. Its last pass runs just after the last tile that adds to it. Only a moving band of tiles is held, in a pool
-of rows.
+The plain tiled call needs every layer's output and its gradient for the whole cell: on the GPU while they fit,
+else in pinned host memory. With OMAT-0 medium the host then holds 5.6 GiB at 1,080,000 atoms and 22 GiB at
+5,000,000, lists included. When the host's share does not hold them either, two-layer models run the tiles in the
+wavefront order instead. The tiles lie in layers along the first cell axis, and each tile's first pass runs just
+before the first tile that needs its output. Its last pass runs just after the last tile that adds to it. Only a
+moving band of tiles is held, in a pool of rows on the GPU.
 
 `capacity="auto"` uses the wavefront from 2^20 atoms when the plan has 12 or more layers of tiles along the first
-axis. `capacity="wavefront"` forces it. A model with three layers (OMOL-0) is refused in that mode and uses the
-plain tiled call. The forces are those of the plain tiled call to float32 rounding. The report then adds "the tiles
-run in the wavefront order".
+axis and the layers' state is not kept in host memory. `capacity="wavefront"` forces it. A model with three layers
+(OMOL-0) is refused in that mode and uses the plain tiled call. The forces are those of the plain tiled call to
+float32 rounding. The report then adds "the tiles run in the wavefront order".
 
-Measured on an RTX 5060 Ti with OMAT-0 medium (STATUS_AND_PROFILE.md §6.22):
+## What fits a 16 GB card
 
-| Atoms | Mode | Tiles | GPU peak | Seconds per force call |
-|---|---|---|---|---|
-| 368,640 | tiled | 32 | 4.91 GiB | 0.80 |
-| 368,640 | wavefront | 40 | 4.05 GiB | 0.80 |
-| 1,081,600 | wavefront (`auto`; 11% of the atoms' rows held) | 34 | 10.84 GiB | 2.35 |
+Measured on an RTX 5060 Ti (16 GB, about 13 GiB free) in a machine with 39 GiB of host memory, with OMAT-0 medium
+on cubic `SrTiO3` cells and `capacity="auto"` at the default memory fraction (`docs/validation/capacity.md` in the
+repository has the full record):
+
+| Atoms | What `auto` chose | Tiles (largest tile) | GPU peak | Pinned host memory | Seconds per force call |
+|---|---|---|---|---|---|
+| 121,945 | whole cell | 1 | 11.2 GiB (planned) | none | 0.197 |
+| 135,000 | tiles | 8 (65,536) | 4.05 GiB | none | 0.246 |
+| 320,000 | tiles | 8 (65,536) | 9.03 GiB | none | 0.580 |
+| 1,080,000 | tiles, lists and layer state in host memory | 27 (65,536) | 8.34 GiB | 5.58 GiB | 2.164 |
+| 2,560,000 | tiles, lists and layer state in host memory | 64 (49,152) | 11.65 GiB | 12.33 GiB | 5.142 |
+| 5,000,000 | tiles, lists and layer state in host memory | 216 (32,768) | 11.33 GiB | 22.07 GiB | 10.105 |
+| 8,008,065 | wavefront, lists in host memory | 2,016 (6,144) | 11.62 GiB | 5.94 GiB | 16.906 |
+| 10,985,000 | wavefront, lists in host memory | 3,825 (4,096) | 11.58 GiB | 8.15 GiB | 24.206 |
+
+121,945 atoms is the largest cube that runs whole there, and 10,985,000 the largest the plan accepts; 12,301,875
+atoms are refused. With OMAT-0 small, 20,480,000 atoms ran (24.5 s per force call). Other models, cards and host
+memory give other limits: the plan decides from what it measures on the machine.
 
 ## What the tiled mode runs
 
@@ -84,14 +118,10 @@ Measured on an RTX 5060 Ti with OMAT-0 medium (STATUS_AND_PROFILE.md §6.22):
 
 ## Speed
 
-Measured on an RTX 5060 Ti (16 GB) with OMAT-0 medium; µs per atom per force call:
+From the table above, per atom and force call (RTX 5060 Ti, OMAT-0 medium): 1.6 us for the whole cell, 1.8 us in
+tiles on the GPU, 2.0 us with the lists and the layer state in host memory, and 2.1 to 2.2 us in the wavefront
+order. A tiled step therefore costs 1.1 to 1.4 times the whole-cell call per atom. An MD step is the force call plus
+the integrator on the GPU: a short Langevin run took 585 ms per step at 320,000 atoms and 2.16 s at 1,080,000.
 
-| Atoms | Whole cell | 2 tiles | 8 tiles |
-|---|---|---|---|
-| 40,000 | 1.65 | 2.97 | 4.33 |
-| 320,000 (`SrTiO3`, MD step, NVE / Langevin) | does not fit | | 1.95 / 1.97 (8 tiles of 65,536; 624 / 630 ms per step) |
-| 1,081,600 (`SrTiO3`, MD step, Langevin, wavefront) | does not fit | | 2.11 (32 tiles of 49,152; 2.28 s per step) |
-
-The 40,000-atom row is older (before the November 2026 tiled-call work); at 320,000 atoms and more the tiled MD
-step costs about 1.2 to 1.3 times the whole-cell call per atom (1.65 us). The first step of a tiled run tunes the
-GEMMs for the tile shapes, which takes 1.5 to 5 s. STATUS_AND_PROFILE.md §6.16 to §6.18 has the measurements.
+The first call of a run builds the tiles' neighbour lists and tunes the GEMMs for the tile shapes: 1.8 s at 135,000
+atoms, 7.9 s at 1,080,000 and 79 s at 10,985,000. At 10,985,000 atoms the plan itself took 21 s.

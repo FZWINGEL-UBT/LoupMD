@@ -101,10 +101,13 @@ def _plan_lines(metadata) -> list:
         lines.append(f"{plan['kernels']} kernels{layers}{cutoff}; library {plan['library'] or 'unknown'}")
     memory = plan["memory"]
     if memory and plan.get("execution") == "tiled" and memory.get("tiled_global_bytes") is not None:
+        # What the plan keeps in pinned host memory: the tile lists' edges, and with host_state the layers' outputs
+        # and gradients as well (records written before the flag existed name the lists).
+        held = "the tile lists' edges and the layer state" if memory.get("host_state") else "the tile lists' edges"
         lines.append(f"memory: the whole system would need {_bytes(memory['whole_bytes'])}; tiled "
                      f"{_bytes(memory['tiled_global_bytes'] + memory['tile_workspace_bytes'])} planned, "
                      f"{_bytes(memory['free_bytes'])} free on the card"
-                     + (f"; the tile lists' edges in host memory ({_bytes(memory['host_bytes'])})"
+                     + (f"; {held} in pinned host memory ({_bytes(memory['host_bytes'])})"
                         if memory.get("host_bytes") else ""))
     elif memory:
         lines.append(f"memory: {_bytes(memory['whole_bytes'])} planned, {_bytes(memory['free_bytes'])} "

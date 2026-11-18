@@ -30,15 +30,16 @@ Several things happen once and are then cached or reused:
 - **GEMM plans.** The engine times its matrix products for each new shape on your GPU and stores the winners in
   `plans_*.bin` files, keyed by GPU, cuBLASLt version and library build.
 - **Per-system tuning.** Some kernel variants are timed at the first neighbour-list build of a system. The first
-  step of a tiled run tunes the GEMMs for the tile shapes, 1.5 to 5 s ([large cells](guide/large-cells.md)).
+  call of a tiled run builds the tiles' lists and tunes the GEMMs for the tile shapes: about 2 s at 135,000 atoms
+  and more than a minute at ten million ([large cells](guide/large-cells.md)).
 - **Setup checks.** `capacity="auto"` probes one tile to plan the memory, and `dispersion="d3bj"` times its candidate
   methods on the starting structure ([dispersion](guide/dispersion.md)).
 
 ## Where is the cache, and how do I clean it?
 
 The cache root is `LOUPMD_CACHE`, default `~/.cache/loupmd` (`LOUP_CACHE_DIR` is accepted as an older name). It
-holds `models/`, `bundles/`, `plans/`, `gate_refs/` and `lib/`, and must lie outside the Python installation. The
-engine writes its GEMM plan files into the root.
+holds `models/`, `bundles/`, `gate_refs/` and `lib/`, and must lie outside the Python installation. The engine
+writes its GEMM plan files (`plans_*.bin`) into the root itself.
 
 ```bash
 loupmd cache size
@@ -54,8 +55,10 @@ models and built kernel plugins are removed only when named with `--kind models`
 ## The cell does not fit the GPU. What now?
 
 With `capacity="auto"` (the default) a cell that does not fit in 90% of the free GPU memory runs in tiles of up to
-65,536 atoms. The tiled mode runs NVE and Langevin; other thermostats and the barostats are refused there.
-`capacity="whole"` forces the whole cell and fails with a `CapacityError` when it does not fit. See
+65,536 atoms; still larger cells keep parts of their state in host memory. The tiled mode keeps the cell fixed: it
+runs NVE and the NVT thermostats (with a dispersion term NVE and Langevin only) and refuses the barostats.
+`capacity="whole"` forces the whole cell and fails with the engine's out-of-memory error when it does not fit. On a
+16 GB card with 39 GiB of host memory, OMAT-0 medium ran 121,945 atoms whole and 10,985,000 in tiles. See
 [large cells](guide/large-cells.md).
 
 ## The run stopped with a non-finite energy. What happened?
@@ -105,5 +108,6 @@ which keep ASE's arguments and let the engine run the loop. See [ASE](guide/ase.
 LoupMD keeps FastMACE's names and arguments wherever a feature exists in both. It refuses float64 forces, the
 fallback to the MACE calculator, bitwise-reproducible runs and FastMACE's execution switches (`mode=`, `runner=`,
 `engine=`, `neighbours=`, `calibrate=`), each with a message naming what to use instead. In Monte Carlo it refuses
-`min_mc_temperature_K=`, the swap velocity treatments other than `"exchange"` and the adaptive displacement step.
+`min_mc_temperature_K=`, the swap velocity treatments other than `"exchange"`, the transmutation ones other than
+`"rescale"` and the adaptive displacement step.
 See [what LoupMD leaves out](guide/not-in-loupmd.md).
