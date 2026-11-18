@@ -67,7 +67,8 @@ class EngineNoise:
         self.normal, self.chi2, self.step = normal, chi2, 0
 
     def standard_normal(self, size=None):
-        return np.full(size, self.normal[self.step])
+        # numpy 2.5 refuses None as a shape (numpy 2.2 took it for a scalar)
+        return np.full(() if size is None else size, self.normal[self.step])
 
     def standard_gamma(self, shape):
         value = 0.5 * self.chi2[self.step]                 # ASE doubles it: 2 standard_gamma(n / 2) is chi2(n)

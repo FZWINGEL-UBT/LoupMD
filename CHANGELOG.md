@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+- The export extra installs torch 2.15.0 and mace-torch 0.3.17 on Python 3.11 and newer. Python 3.10 keeps torch
+  2.14.1 and mace-torch 0.3.16, the last versions that support it. With torch 2.15 the CUDA libraries are those of
+  cuda-toolkit 13.2.2 (13.0.3 on Python 3.10).
+- mace-torch 0.3.17 is the first whose stress for the MACE-POLAR-1 models has the cell dependence of the
+  long-range term. LoupMD's stress has always had it: against mace-torch 0.3.16 the two differed by about 0.02 GPa
+  on a water box, against 0.3.17 they agree.
+- The export extra installs `graph_longrange`, which MACE's POLAR-1 models are built on. With 0.0.1 a `polar1-*`
+  model could not be exported after a plain `pip install "loupmd[export]"`. An environment without the package is
+  now told what to install.
+
 ## 0.0.1 (18 November 2026)
 
 The first public release of LoupMD (`PLAN.md` Stages 0 to 7).

@@ -32,16 +32,24 @@ def test_the_runtime_needs_neither_torch_nor_a_compiler(project):
     base = project["project"]["dependencies"]
     names = {d.split(";")[0].split("[")[0].split("=")[0].split(">")[0].split("<")[0].strip().lower() for d in base}
     assert names == {"numpy", "ase", "tomli", "cuda-toolkit"}      # tomli: run files on Python 3.10 only
-    # The CUDA 13 runtime, cuBLAS and cuFFT (D79) exactly as torch 2.14.1+cu130 pins them: the same wheels for both.
-    assert "cuda-toolkit[cublas,cudart,cufft]==13.0.3; platform_system == 'Linux'" in base
+    # The CUDA 13 runtime, cuBLAS and cuFFT (D79) exactly as the export extra's torch pins them, the same wheels for
+    # both: cuda-toolkit 13.2.2 with torch 2.15.0, and 13.0.3 with torch 2.14.1 on Python 3.10.
+    assert ("cuda-toolkit[cublas,cudart,cufft]==13.2.2; platform_system == 'Linux' and python_version >= '3.11'"
+            in base)
+    assert ("cuda-toolkit[cublas,cudart,cufft]==13.0.3; platform_system == 'Linux' and python_version < '3.11'"
+            in base)
 
 
 def test_the_extras(project):
     extras = project["project"]["optional-dependencies"]
     assert set(extras) == {"export", "dev", "docs"}
     export = {d.split("=")[0].strip() for d in extras["export"]}
-    assert {"torch", "mace-torch"} <= export
+    assert {"torch", "mace-torch", "graph_longrange"} <= export      # graph_longrange: the MACE-POLAR-1 models
     assert all("==" in d for d in extras["export"]), "the export extra pins the versions it was tested with"
+    # torch 2.15 and mace-torch 0.3.17 (O36) need Python 3.11; Python 3.10 keeps the last versions that support it.
+    for new, old in (("torch==2.15.0", "torch==2.14.1"), ("mace-torch==0.3.17", "mace-torch==0.3.16")):
+        assert f"{new}; python_version >= '3.11'" in extras["export"]
+        assert f"{old}; python_version < '3.11'" in extras["export"]
     assert any(d.startswith("pytest") for d in extras["dev"])
 
 

@@ -3,8 +3,8 @@
 # CUDA 13.3 on Rocky Linux 8: the compiler the engine was developed and measured with, on the glibc (2.28) that
 # makes the library a manylinux_2_28 one. gcc-toolset-13 is the host compiler, as on the development machine; its
 # additions to libstdc++ are linked statically, so the library asks for no more than Rocky 8's own libstdc++.
-# The library runs on the CUDA runtime the package pins (cuda-toolkit 13.0.3, as torch's): every CUDA symbol it
-# imports is in those libraries (PLAN.md D58).
+# The library runs on the CUDA runtimes the package pins (cuda-toolkit 13.2.2, and 13.0.3 on Python 3.10, as
+# torch's): every CUDA symbol it imports is in those libraries (PLAN.md D58).
 FROM nvidia/cuda:13.3.1-devel-rockylinux8
 
 RUN dnf install -y gcc-toolset-13-gcc-c++ make binutils python3.11 python3.11-pip \

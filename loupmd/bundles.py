@@ -164,6 +164,14 @@ def ensure_bundle(model_path, atomic_numbers, *, head=None, generic=None, charge
                 if done.returncode == kernels.UNSUPPORTED_STATUS and marked:
                     raise kernels.unsupported(model_path.name,
                                               marked[-1][len(kernels.UNSUPPORTED_MARKER):].split())
+                if done.returncode != 0 and "No module named 'graph_longrange'" in (done.stderr or ""):
+                    # A MACE-POLAR-1 checkpoint cannot even be loaded without it; the export extra has it since
+                    # 0.0.2, an environment made for 0.0.1 does not.
+                    raise LoupError(
+                        f"the export of {model_path.name} needs the graph_longrange package",
+                        why="MACE's POLAR-1 models are built on it, and this environment does not have it",
+                        next_step="Install it into this environment: pip install 'loupmd[export]', or "
+                                  "pip install graph_longrange==0.4.4.")
                 if done.returncode != 0 or not part.is_file():
                     tail = (done.stderr or done.stdout or "").strip().splitlines()[-6:]
                     raise LoupError(f"the export of {model_path.name} for elements {z_sorted} failed",

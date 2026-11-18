@@ -139,6 +139,12 @@ loupmd validate --model omat0-medium --structure structure.cif --json gate.json
 - `--capacity tiled` or `wavefront` gates the tiled execution.
 - The references are cached in `<cache root>/gate_refs/`; `--no-ref-cache` computes them again.
 
+For the MACE-POLAR-1 models the stress reference is the strain derivative of MACE's float64 energy, taken by
+central differences, and LoupMD's stress agrees with it. mace-torch up to 0.3.16 returns a stress for these models
+that lacks the cell dependence of the long-range term: on a 648-atom water box with `polar1-s` its diagonal
+components were 0.02 GPa (about 1%) off. mace-torch 0.3.17 has the term, and its stress agreed with LoupMD's on
+that box. To compare LoupMD's stress of a POLAR-1 model with MACE's own, use mace-torch 0.3.17 or newer.
+
 The gate needs the export extra. It exits with code 1 when a quantity fails. Before an MD run, `check="gate"`
 (`--check gate`) runs the same rule on rattled copies of the run's structure and stops with `GateFailed` if it
 fails. With `"allow_unavailable"` a gate whose references cannot be computed is recorded as unavailable and the run

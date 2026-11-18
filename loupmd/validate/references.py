@@ -145,7 +145,8 @@ def _evaluate(model_path, dtype, configs, head, device, charge, spin):
 
 def _fd_stress(model_path, configs, device, h=FD_STRESS_H):
     """Stress as the float64 MACE energy's central difference under symmetric strain. For PolarMACE this is the
-    corrected stress: the installed PolarMACE's autograd stress leaves out the k-space terms' cell dependence."""
+    reference whatever mace-torch is installed: up to 0.3.16 its autograd stress leaves out the k-space terms' cell
+    dependence (about 0.02 GPa on a water box with POLAR-1-S); 0.3.17 has it."""
     import numpy as np
     from mace.calculators import MACECalculator
 

@@ -25,21 +25,29 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Physics",
 ]
 # The runtime needs no torch and no compiler. The CUDA 13 runtime, cuBLAS and cuFFT (the split dispersion sum, opened
-# only when used; PLAN.md D79) come from the NVIDIA wheels, pinned
-# exactly as torch 2.14.1+cu130 pins them (cuda-toolkit 13.0.3: nvidia-cuda-runtime 13.0.96, nvidia-cublas
-# 13.1.1.3), so that the export extra's torch and the engine load the same libraries.
+# only when used; PLAN.md D79) come from the NVIDIA wheels, pinned exactly as the export extra's torch pins them, so
+# that torch and the engine load the same libraries: cuda-toolkit 13.2.2 with torch 2.15.0+cu132
+# (nvidia-cuda-runtime 13.2.86, nvidia-cublas 13.4.1.3), and on Python 3.10 cuda-toolkit 13.0.3 with torch
+# 2.14.1+cu130 (nvidia-cuda-runtime 13.0.96, nvidia-cublas 13.1.1.3).
 dependencies = [
     "numpy>=1.26",
     "ase>=3.23",
     "tomli>=2; python_version < '3.11'",
-    "cuda-toolkit[cublas,cudart,cufft]==13.0.3; platform_system == 'Linux'",
+    "cuda-toolkit[cublas,cudart,cufft]==13.2.2; platform_system == 'Linux' and python_version >= '3.11'",
+    "cuda-toolkit[cublas,cudart,cufft]==13.0.3; platform_system == 'Linux' and python_version < '3.11'",
 ]
 
 [project.optional-dependencies]
-# Exporting a model to a bundle and computing gate references: the versions the exporters were tested with.
+# Exporting a model to a bundle and computing gate references: the versions the exporters were tested with (the
+# owner's decision O36). torch 2.15 and mace-torch 0.3.17 need Python 3.11; Python 3.10 keeps the last versions
+# that support it. mace-torch 0.3.17 is the first whose MACE-POLAR-1 stress has the long-range term's cell
+# dependence. graph_longrange is what MACE's POLAR-1 models are made of (mace-torch's own "polar" extra).
 export = [
-    "torch==2.14.1",
-    "mace-torch==0.3.16",
+    "torch==2.15.0; python_version >= '3.11'",
+    "torch==2.14.1; python_version < '3.11'",
+    "mace-torch==0.3.17; python_version >= '3.11'",
+    "mace-torch==0.3.16; python_version < '3.11'",
+    "graph_longrange==0.4.4",
     "cuequivariance==0.12.0",
     "cuequivariance-torch==0.12.0",
 ]

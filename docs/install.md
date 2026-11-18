@@ -65,12 +65,13 @@ The engine loads the CUDA 13 runtime, cuBLAS and cuBLASLt. They come from NVIDIA
 dependency:
 
 ```text
-cuda-toolkit[cublas,cudart,cufft]==13.0.3
+cuda-toolkit[cublas,cudart,cufft]==13.2.2
 ```
 
-The version is the one torch 2.14.1+cu130 pins, so torch (in the `export` extra, below) and the engine load the
-same libraries. You do not need a CUDA toolkit on the system. If the libraries are not on the loader path, LoupMD
-loads them from the NVIDIA wheels in the same Python environment.
+The version is the one torch 2.15.0 pins, so torch (in the `export` extra, below) and the engine load the same
+libraries. On Python 3.10 it is 13.0.3, the version of torch 2.14.1. You do not need a CUDA toolkit on the system.
+If the libraries are not on the loader path, LoupMD loads them from the NVIDIA wheels in the same Python
+environment.
 
 cuFFT is used only by the split sum of the D3 dispersion term (`long_range="split"`, and the split candidates of
 `long_range="auto"`). It is opened the first time a mesh is made. Without it the split sum is refused with the line
@@ -87,7 +88,11 @@ pip install "loupmd[export]"
 
 | Extra | Installs | Needed for |
 |---|---|---|
-| `export` | torch 2.14.1, mace-torch 0.3.16, cuequivariance 0.12.0, cuequivariance-torch 0.12.0 | exporting a checkpoint to a bundle, the accuracy gate (`check="gate"`, `loupmd validate`), `loupmd build-kernels` |
+| `export` | torch 2.15.0, mace-torch 0.3.17, graph_longrange 0.4.4, cuequivariance 0.12.0, cuequivariance-torch 0.12.0 | exporting a checkpoint to a bundle, the accuracy gate (`check="gate"`, `loupmd validate`), `loupmd build-kernels` |
+
+torch 2.15 and mace-torch 0.3.17 need Python 3.11 or newer. On Python 3.10 the extra installs torch 2.14.1 and
+mace-torch 0.3.16, the last versions that support it. `graph_longrange` is the package MACE's POLAR-1 models are
+built on; the `polar1-*` labels cannot be exported without it.
 
 The export runs in a separate process with the same Python interpreter, so install the extra into the environment
 that runs LoupMD. Bundles already in the cache, or exported elsewhere, run without it. The extras `dev` and `docs`

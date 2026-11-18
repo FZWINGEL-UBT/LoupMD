@@ -24,7 +24,7 @@ with open(os.environ["COUNT_FILE"], "a") as f:
     f.write(" ".join(args) + "\n")
 time.sleep(float(os.environ.get("EXPORT_SECONDS", "0")))
 if os.environ.get("EXPORT_FAILS"):
-    sys.exit("the model has an unsupported layer")
+    sys.exit(os.environ.get("EXPORT_MESSAGE", "the model has an unsupported layer"))
 with open(out, "wb") as f:
     f.write(b"bundle for " + " ".join(args).encode())
 """
@@ -98,6 +98,17 @@ def test_a_failed_export_leaves_nothing_behind_and_says_why(stage, monkeypatch):
     assert not [p for p in (tmp_path / "cache" / "bundles").iterdir() if not p.name.endswith(".lock")]
     monkeypatch.delenv("EXPORT_FAILS")
     assert bundles.ensure_bundle(model, [8], exporter=exporter).is_file()   # the next try is not blocked
+
+
+def test_a_polar_export_without_graph_longrange_says_what_to_install(stage, monkeypatch):
+    """An environment made for 0.0.1's export extra has no graph_longrange: MACE cannot load a POLAR-1 checkpoint."""
+    tmp_path, model, exporter = stage
+    monkeypatch.setenv("EXPORT_FAILS", "1")
+    monkeypatch.setenv("EXPORT_MESSAGE", "ModuleNotFoundError: No module named 'graph_longrange'")
+    with pytest.raises(LoupError, match="the export of tiny.model needs the graph_longrange package") as info:
+        bundles.ensure_bundle(model, [8], exporter=exporter)
+    assert "pip install 'loupmd[export]'" in str(info.value) and "POLAR-1" in str(info.value)
+    assert not [p for p in (tmp_path / "cache" / "bundles").iterdir() if not p.name.endswith(".lock")]
 
 
 def test_a_miss_without_the_export_extra_names_the_extra(stage, monkeypatch):
