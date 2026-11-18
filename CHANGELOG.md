@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.0a1 (not yet released)
+## 0.0.1 (18 November 2026)
 
 The first public release of LoupMD (`PLAN.md` Stages 0 to 7).
 

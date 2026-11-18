@@ -114,7 +114,7 @@ def test_one_call_runs_writes_and_reports(ff, atoms, tmp_path):
                                     "(initial_velocities='maxwell_boltzmann'; the structure was at rest)"]
     text = result.summary
     assert str(result) == text == report.text(metadata)
-    for line in ("LoupMD 0.1.0a1: MD run, status idle", "Model and structure", "some.model, SHA-256",
+    for line in (f"LoupMD {loupmd.__version__}: MD run, status idle", "Model and structure", "some.model, SHA-256",
                  "Atoms x (2, 1, 1): 16 atoms (Cl 8, Na 8), cell 11.28 x 5.64 x 5.64 A",
                  "Physics", "NVT, Langevin, timestep 1 fs, friction 0.001965/fs, 300 K",
                  "40 steps (0.04 ps) to step 40, seed 3", "Plan", "the whole system on", "Gate",

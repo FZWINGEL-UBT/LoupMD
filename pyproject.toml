@@ -52,6 +52,11 @@ docs = [
     "mkdocstrings[python]>=0.29",
 ]
 
+[project.urls]
+Documentation = "https://fzwingel-ubt.github.io/LoupMD/"
+Repository = "https://github.com/FZWINGEL-UBT/LoupMD"
+Changelog = "https://github.com/FZWINGEL-UBT/LoupMD/blob/release/v1/CHANGELOG.md"
+
 [project.scripts]
 loupmd = "loupmd.cli:main"
 

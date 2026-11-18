@@ -2259,7 +2259,7 @@ the free memory the plan counts (`LOUP_DEBUG_PLAN_FREE`), since the true figure 
 All tiers on the library with these changes (sha256 `e021051e`): `tests/cpu` 490 passed, 5 skipped; `tests/gpu -m
 fast` 359 passed, 7 skipped; `-m full` 48 passed; `-m acceptance` 15 passed, 1 skipped (422 passed, 8 skipped: the
 NbCl5 structure). With the long-range models' buffers counted (library `8c82bc7e`, the release verification of
-`docs/validation/release-0.1.0.md`): fast 360, full 48, acceptance 15 passed; the gate per label 37 passed (20
+`docs/validation/release-0.0.1.md`): fast 360, full 48, acceptance 15 passed; the gate per label 37 passed (20
 whole, 17 tiled); `loupmd bench` standard, the library of 97e365d against this one, a b b a twice: `NbCl5` 3x3x3
 1.863 / 1.857 / 1.866 / 1.864 -> 1.724 / 1.726 / 1.728 / 1.729 ms/step (0.927), `SrTiO3` 10x10x10 8.069 / 8.096 /
 8.118 / 8.128 -> 7.780 / 7.778 / 7.789 / 7.810 (0.961): what the merged kernels give the whole-system MD step.

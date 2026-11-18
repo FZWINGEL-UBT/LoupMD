@@ -6,7 +6,7 @@ from .errors import (BackendError, CacheLocationError, CapacityError, CellDiverg
                      GateFailed, GateUnavailable, InputError, LoupError, ModelElementError, NonFiniteError,
                      PlanRefused, RestartMismatch, UnsupportedModel)
 
-__version__ = "0.1.0a1"  # LOUP_VERSION of include/loupmd.h (tests/test_abi.py keeps the two equal)
+__version__ = "0.0.1"  # LOUP_VERSION of include/loupmd.h (tests/test_abi.py keeps the two equal)
 
 from .runtime import GpuInfo, RuntimeInfo, runtime_info  # noqa: E402  (reads __version__ when called)
 

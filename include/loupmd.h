@@ -12,7 +12,7 @@ typedef struct LoupHandle LoupHandle;
 // caller built against another value must not use the library (loupmd/_core.py refuses it).
 #define LOUP_ABI_VERSION 1
 // The release this source belongs to (the same string as loupmd.__version__).
-#define LOUP_VERSION "0.1.0a1"
+#define LOUP_VERSION "0.0.1"
 
 int loup_abi_version(void);     // LOUP_ABI_VERSION of the loaded library
 const char* loup_version(void); // LOUP_VERSION "+" 16 hex digits: a hash of the library file (the one in the

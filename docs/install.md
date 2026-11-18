@@ -15,22 +15,26 @@ WSL2 on Windows. It needs Python 3.10 or newer. The runtime needs no PyTorch and
 The tensor-core GEMM kernels ship for compute capability 8.x, 9.x and 12.x. On a 10.x GPU the engine runs on its
 other GEMMs, somewhat slower, and `loupmd doctor` prints a warning.
 
-The 0.1.0a1 wheel has been run on one GPU only, an RTX 5060 Ti (compute capability 12.0);
-`docs/validation/release-0.1.0.md` in the repository has the results. Its code for compute capability 8.0, 8.6,
+The 0.0.1 wheel has been run on one GPU only, an RTX 5060 Ti (compute capability 12.0);
+`docs/validation/release-0.0.1.md` in the repository has the results. Its code for compute capability 8.0, 8.6,
 8.9, 9.0 and 10.0 is compiled from the same sources and has not been run from the wheel. On any GPU,
 `loupmd validate` compares a model with MACE float64 on that machine.
 
 ## Install the wheel
 
-The release wheel is built from a commit of this repository with `tools/release/build_wheel.sh` (it needs docker
-and git, no GPU). The wheel lands in `dist/`:
+The release wheel is on PyPI. The package name is `loupmd` and the command it installs is `loupmd`:
 
 ```bash
-tools/release/build_wheel.sh            # dist/loupmd-0.1.0a1-py3-none-manylinux_2_28_x86_64.whl
-pip install dist/loupmd-0.1.0a1-py3-none-manylinux_2_28_x86_64.whl
+pip install loupmd
 ```
 
-A PyPI release is not published yet. The package name is `loupmd` and the command it installs is `loupmd`.
+The same wheel can be built from a commit of the repository with `tools/release/build_wheel.sh` (it needs docker
+and git, no GPU). It lands in `dist/`:
+
+```bash
+tools/release/build_wheel.sh            # dist/loupmd-0.0.1-py3-none-manylinux_2_28_x86_64.whl
+pip install dist/loupmd-0.0.1-py3-none-manylinux_2_28_x86_64.whl
+```
 
 The install pulls in numpy (1.26 or newer), ASE (3.23 or newer), `tomli` on Python 3.10, and on Linux the NVIDIA
 CUDA libraries.
@@ -58,7 +62,7 @@ A model runs on the engine as a bundle (a `.loup` file), exported once from the 
 your structure and kept in the cache. The export needs PyTorch and MACE:
 
 ```bash
-pip install "dist/loupmd-0.1.0a1-py3-none-manylinux_2_28_x86_64.whl[export]"
+pip install "loupmd[export]"
 ```
 
 | Extra | Installs | Needed for |

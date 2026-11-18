@@ -31,21 +31,29 @@ Every model runs in float32 on the engine. Before a run LoupMD can compare energ
 MACE in float64 on rattled copies of your structure (`check="gate"`, `loupmd validate`): the gate allows three
 times the error of float32 MACE.
 
-## Requirements
+## Install
 
-Linux x86_64 (glibc 2.28 or newer) or WSL2, an NVIDIA GPU of compute capability 8.0 or newer with a driver for
-CUDA 13, and Python 3.10 or newer. Exporting a model the first time needs the `export` extra (PyTorch and MACE);
-see `docs/install.md`.
+```bash
+pip install "loupmd[export]"    # the engine, and PyTorch and MACE to export a model the first time it runs
+loupmd doctor                   # checks the GPU, the driver, the libraries and the model files
+```
 
-This pre-release (0.1.0a1) has been verified on an RTX 5060 Ti (compute capability 12.0) only. The wheel also
+`pip install loupmd` alone installs the engine without PyTorch; it runs models that are already exported.
+
+It needs Linux x86_64 (glibc 2.28 or newer) or WSL2, an NVIDIA GPU of compute capability 8.0 or newer with a
+driver for CUDA 13, and Python 3.10 or newer. The
+[install guide](https://fzwingel-ubt.github.io/LoupMD/install/) has the details.
+
+This first release (0.0.1) has been verified on an RTX 5060 Ti (compute capability 12.0) only. The wheel also
 holds code for compute capability 8.0, 8.6, 8.9, 9.0 and 10.0, which is untested in this release
-(`docs/validation/release-0.1.0.md`).
+(`docs/validation/release-0.0.1.md` in the repository).
 
 ## Documentation
 
-The documentation is in `docs/` and builds with `mkdocs build --strict` (`pip install -e ".[docs]"`): install,
-quickstart, guides, the command-line and Python reference, and "Coming from FastMACE". The runnable examples are in
-`examples/`.
+The documentation is at <https://fzwingel-ubt.github.io/LoupMD/>: install, quickstart, guides, the command-line
+and Python reference, and "Coming from FastMACE". Its sources are in `docs/` of the
+[repository](https://github.com/FZWINGEL-UBT/LoupMD) and build with `mkdocs build --strict`
+(`pip install -e ".[docs]"`). The runnable examples are in `examples/`.
 
 ## Licence
 
