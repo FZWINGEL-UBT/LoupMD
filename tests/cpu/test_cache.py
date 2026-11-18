@@ -100,6 +100,35 @@ def test_a_failed_export_leaves_nothing_behind_and_says_why(stage, monkeypatch):
     assert bundles.ensure_bundle(model, [8], exporter=exporter).is_file()   # the next try is not blocked
 
 
+def test_a_miss_without_the_export_extra_names_the_extra(stage, monkeypatch):
+    """A wheel installed without the export extra: a miss says what to install, not the exporter's traceback."""
+    tmp_path, model, exporter = stage
+    monkeypatch.setattr(bundles, "missing_export_modules", lambda: ["torch", "mace"])
+    with pytest.raises(LoupError, match="cannot export one") as info:
+        bundles.ensure_bundle(model, [8])
+    text = str(info.value)
+    assert "missing: torch, mace" in text and "pip install 'loupmd[export]'" in text
+    assert bundles.bundle_name(model, [8]) in text                          # where a bundle from elsewhere goes
+    assert not _runs(tmp_path)                                              # no export process was started
+    assert not [p for p in (tmp_path / "cache" / "bundles").iterdir() if not p.name.endswith(".lock")]
+    assert bundles.ensure_bundle(model, [8], exporter=exporter).is_file()   # a given exporter is not second-guessed
+    assert bundles.ensure_bundle(model, [8]).is_file()                      # and a cached bundle needs no extra
+
+
+def test_the_kernel_signature_is_found_in_a_checkout_and_in_a_wheel(tmp_path):
+    """The signature header is part of the bundle key. A wheel has no ``src`` beside the package and ships the header
+    in ``_lib``: the key of a checkout and of a wheel of one commit must be the same."""
+    header = bundles._signature_header()
+    assert header == ROOT / "src" / bundles.SIGNATURE_HEADER and header.is_file()
+    assert bundles.EXPORTER_SOURCES[-1] == header
+    package = tmp_path / "site-packages" / "loupmd"
+    (package / "_lib").mkdir(parents=True)
+    shipped = package / "_lib" / bundles.SIGNATURE_HEADER
+    shipped.write_bytes(header.read_bytes())
+    assert bundles._signature_header(package) == shipped
+    assert bundles.exporter_fingerprint([*bundles.EXPORTER_SOURCES[:-1], shipped]) == bundles.exporter_fingerprint()
+
+
 def test_bundles_of_the_old_layout_are_found(stage):
     tmp_path, model, exporter = stage
     old = tmp_path / "cache" / bundles.bundle_name(model, [8, 22, 38])

@@ -12,6 +12,7 @@ engine tests and the developer scripts use; ``ensure_bundle`` finds its bundles 
 from __future__ import annotations
 
 import hashlib
+import importlib.util
 import os
 import subprocess
 import sys
@@ -25,9 +26,21 @@ _PACKAGE = Path(__file__).resolve().parent
 # kernels' signature. Their hash is part of the cache key, so a changed exporter or regenerated kernels never find
 # an old bundle, with no version number to remember. (A FastMACE change to the product basis is caught separately:
 # the loader compares the product signatures a bundle carries with the compiled kernels'.)
+SIGNATURE_HEADER = "generated_kernels_signature.h"
+
+
+def _signature_header(package=None) -> Path:
+    """The compiled kernels' signature header: in a checkout's ``src``, else the copy the wheel ships in ``_lib``
+    (the same file under the same name, so a checkout and a wheel of one commit share their bundles)."""
+    package = _PACKAGE if package is None else Path(package)
+    checkout = package.parent / "src" / SIGNATURE_HEADER
+    return checkout if checkout.is_file() else package / "_lib" / SIGNATURE_HEADER
+
+
 EXPORTER_SOURCES = [_PACKAGE / "export" / name for name in ("__init__.py", "omat0.py", "generic.py", "polar.py",
-                                                            "bundle.py")] + [
-    _PACKAGE.parent / "src" / "generated_kernels_signature.h"]
+                                                            "bundle.py")] + [_signature_header()]
+# What `python -m loupmd.export` imports and the runtime does not: the export extra of pyproject.toml.
+EXPORT_MODULES = ("torch", "mace", "e3nn")
 _DIGESTS: dict = {}
 
 
@@ -51,6 +64,11 @@ def exporter_fingerprint(paths=None) -> str:
         p = Path(p)
         h.update(p.name.encode() + b"\0" + (p.read_bytes() if p.is_file() else b"") + b"\0")
     return h.hexdigest()[:16]
+
+
+def missing_export_modules() -> list:
+    """The modules of the export extra that this environment lacks (nothing is imported)."""
+    return [name for name in EXPORT_MODULES if importlib.util.find_spec(name) is None]
 
 
 def exporter_environment(environ=None) -> dict:
@@ -129,6 +147,14 @@ def ensure_bundle(model_path, atomic_numbers, *, head=None, generic=None, charge
             return existing
     with cache.locked(out):
         if not out.is_file():                           # another process may have exported it while we waited
+            missing = missing_export_modules() if exporter is None else []
+            if missing:
+                raise LoupError(
+                    f"no bundle of {model_path.name} for elements {z_sorted} is in the cache, and this environment "
+                    "cannot export one",
+                    why=f"the export extra is not installed (missing: {', '.join(missing)})",
+                    next_step="Install it into this environment: pip install 'loupmd[export]'. Or copy a bundle "
+                              f"that the same LoupMD version exported elsewhere to {out}.")
             part = out.with_name(out.name + f".part.{os.getpid()}")
             cmd = _export_command(model_path, z_sorted, part, head, generic, charge, spin_multiplicity, exporter)
             try:

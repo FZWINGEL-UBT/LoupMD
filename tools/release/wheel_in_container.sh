@@ -22,6 +22,7 @@ mkdir -p $lib/cubins $lib/kernel-src
 cp build/wheel/libloupmd.so $lib/
 cp cubins/*.cubin $lib/cubins/
 cp src/generated_generic_manifest.json $lib/
+cp src/generated_kernels_signature.h $lib/              # part of the bundle cache's key (loupmd/bundles.py)
 cp src/kernel_plugin.h src/generated_generic.cuh src/kernels_common.cuh codegen/gen_generic.py $lib/kernel-src/
 
 python3.11 -m build --wheel --no-isolation --outdir dist . > build-wheel.log 2>&1 || { tail -30 build-wheel.log; exit 1; }
@@ -59,6 +60,7 @@ print("needs:", " ".join(needed))
 
 names = zipfile.ZipFile(wheel).namelist()
 must = ["loupmd/_lib/libloupmd.so", "loupmd/_lib/generated_generic_manifest.json",
+        "loupmd/_lib/generated_kernels_signature.h",
         "loupmd/_lib/kernel-src/gen_generic.py", "loupmd/_lib/kernel-src/kernel_plugin.h",
         "loupmd/_lib/kernel-src/generated_generic.cuh", "loupmd/_lib/kernel-src/kernels_common.cuh",
         "loupmd/_lib/cubins/tf32x3_hyb_sm120.cubin", "loupmd/bench/reference.json",

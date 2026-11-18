@@ -13,13 +13,13 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .. import _gpu, cache, models
+from ..bundles import EXPORT_MODULES
 from ..errors import LoupError
 
 OK, WARN, FAIL = "ok", "warn", "FAIL"
 RUNTIME_LIBRARIES = ("libcudart.so.13", "libcublas.so.13", "libcublasLt.so.13")
 MIN_COMPUTE_CAPABILITY = 80           # PLAN.md A5: the own SGEMM needs cp.async, the hybrid GEMMs TF32 tensor cores
 CUBIN_OF_MAJOR = {8: "tf32x3_hyb_sm80.cubin", 9: "tf32x3_hyb_sm90.cubin", 12: "tf32x3_hyb_sm120.cubin"}
-EXPORT_MODULES = ("torch", "mace", "e3nn")
 
 
 @dataclass(frozen=True)
