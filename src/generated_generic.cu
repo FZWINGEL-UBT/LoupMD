@@ -2409,6 +2409,126 @@ __global__ void __launch_bounds__(MAX_T) gconv_fwd_L2b(
         const int sndB = s_snd[k + 1];
         const float4 pwB = s_pw[k + 1];
         const float* sheB = she + ED;
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ == 1200
+      { // paths 2 (2,2,0), 6 (2,1,1), 7 (2,3,1), 12 (2,2,2), 11 (2,0,2) pair as Cartesian forms (S119, S121):
+        // Q = sum_m x2_m B'_m, v = Q Y1, h = Y1 . v, t = Y1 h - 6/5 v, u_m = v . B'_m Y1 - 2 x_m; the paths'
+        // constants are in the stores
+        float w2, w2B, w6, w6B, w7, w7B, w12, w12B, w11, w11B;
+        {
+          const uint2 c = __ldg(tq + 2 * C + ch);
+          const unsigned eb0 = (c.y & 0x0F800000u) + bias_shift;
+          const float eb_f = __uint_as_float(eb0);
+          const float r0 = __uint_as_float((c.x & 0x7FFFF8u) | eb0);
+          const float r1 = __uint_as_float((c.y & 0x7FFFF0u) | eb0);
+          const float r2 = __uint_as_float((__funnelshift_l(c.x, c.x, 20) & 0x7FF800u) | eb0);
+          const float r3 = __uint_as_float((__funnelshift_l(c.y, c.y, 19) & 0x7F8000u) | eb0);
+          w2 = fmaf(pw.z, r3, fmaf(pw.y, r2, fmaf(pw.x, r1, fmaf(pw.w, eb_f, r0))));
+          w2B = fmaf(pwB.z, r3, fmaf(pwB.y, r2, fmaf(pwB.x, r1, fmaf(pwB.w, eb_f, r0))));
+        }
+        {
+          const uint2 c = __ldg(tq + 6 * C + ch);
+          const unsigned eb0 = (c.y & 0x0F800000u) + bias_shift;
+          const float eb_f = __uint_as_float(eb0);
+          const float r0 = __uint_as_float((c.x & 0x7FFFF8u) | eb0);
+          const float r1 = __uint_as_float((c.y & 0x7FFFF0u) | eb0);
+          const float r2 = __uint_as_float((__funnelshift_l(c.x, c.x, 20) & 0x7FF800u) | eb0);
+          const float r3 = __uint_as_float((__funnelshift_l(c.y, c.y, 19) & 0x7F8000u) | eb0);
+          w6 = fmaf(pw.z, r3, fmaf(pw.y, r2, fmaf(pw.x, r1, fmaf(pw.w, eb_f, r0))));
+          w6B = fmaf(pwB.z, r3, fmaf(pwB.y, r2, fmaf(pwB.x, r1, fmaf(pwB.w, eb_f, r0))));
+        }
+        {
+          const uint2 c = __ldg(tq + 7 * C + ch);
+          const unsigned eb0 = (c.y & 0x0F800000u) + bias_shift;
+          const float eb_f = __uint_as_float(eb0);
+          const float r0 = __uint_as_float((c.x & 0x7FFFF8u) | eb0);
+          const float r1 = __uint_as_float((c.y & 0x7FFFF0u) | eb0);
+          const float r2 = __uint_as_float((__funnelshift_l(c.x, c.x, 20) & 0x7FF800u) | eb0);
+          const float r3 = __uint_as_float((__funnelshift_l(c.y, c.y, 19) & 0x7F8000u) | eb0);
+          w7 = fmaf(pw.z, r3, fmaf(pw.y, r2, fmaf(pw.x, r1, fmaf(pw.w, eb_f, r0))));
+          w7B = fmaf(pwB.z, r3, fmaf(pwB.y, r2, fmaf(pwB.x, r1, fmaf(pwB.w, eb_f, r0))));
+        }
+        {
+          const uint2 c = __ldg(tq + 12 * C + ch);
+          const unsigned eb0 = (c.y & 0x0F800000u) + bias_shift;
+          const float eb_f = __uint_as_float(eb0);
+          const float r0 = __uint_as_float((c.x & 0x7FFFF8u) | eb0);
+          const float r1 = __uint_as_float((c.y & 0x7FFFF0u) | eb0);
+          const float r2 = __uint_as_float((__funnelshift_l(c.x, c.x, 20) & 0x7FF800u) | eb0);
+          const float r3 = __uint_as_float((__funnelshift_l(c.y, c.y, 19) & 0x7F8000u) | eb0);
+          w12 = fmaf(pw.z, r3, fmaf(pw.y, r2, fmaf(pw.x, r1, fmaf(pw.w, eb_f, r0))));
+          w12B = fmaf(pwB.z, r3, fmaf(pwB.y, r2, fmaf(pwB.x, r1, fmaf(pwB.w, eb_f, r0))));
+        }
+        {
+          const uint2 c = __ldg(tq + 11 * C + ch);
+          const unsigned eb0 = (c.y & 0x0F800000u) + bias_shift;
+          const float eb_f = __uint_as_float(eb0);
+          const float r0 = __uint_as_float((c.x & 0x7FFFF8u) | eb0);
+          const float r1 = __uint_as_float((c.y & 0x7FFFF0u) | eb0);
+          const float r2 = __uint_as_float((__funnelshift_l(c.x, c.x, 20) & 0x7FF800u) | eb0);
+          const float r3 = __uint_as_float((__funnelshift_l(c.y, c.y, 19) & 0x7F8000u) | eb0);
+          w11 = fmaf(pw.z, r3, fmaf(pw.y, r2, fmaf(pw.x, r1, fmaf(pw.w, eb_f, r0))));
+          w11B = fmaf(pwB.z, r3, fmaf(pwB.y, r2, fmaf(pwB.x, r1, fmaf(pwB.w, eb_f, r0))));
+        }
+        const float xc0 = __ldg(x2 + ((int64_t)snd * 5 + 0) * C + ch);
+        const float xc1 = __ldg(x2 + ((int64_t)snd * 5 + 1) * C + ch);
+        const float xc2 = __ldg(x2 + ((int64_t)snd * 5 + 2) * C + ch);
+        const float xc3 = __ldg(x2 + ((int64_t)snd * 5 + 3) * C + ch);
+        const float xc4 = __ldg(x2 + ((int64_t)snd * 5 + 4) * C + ch);
+        const float y1 = she[1], y2 = she[2], y3 = she[3];
+        const float qa = xc2 * 0x1.279a740000000p-1f, qxx = -qa - xc4, qzz = xc4 - qa, qyy = qa + qa;
+        const float vx = fmaf(qxx, y1, fmaf(xc1, y2, xc0 * y3));
+        const float vy = fmaf(xc1, y1, fmaf(qyy, y2, xc3 * y3));
+        const float vz = fmaf(xc0, y1, fmaf(xc3, y2, qzz * y3));
+        const float h = fmaf(y1, vx, fmaf(y2, vy, y3 * vz));
+        acc[0] = fmaf(w2, h, acc[0]);
+        acc[1] = fmaf(w6, vx, acc[1]);
+        acc[2] = fmaf(w6, vy, acc[2]);
+        acc[3] = fmaf(w6, vz, acc[3]);
+        const float p = w7 * h, q = -0x1.3333340000000p+0f * w7;
+        acc[4] = fmaf(p, y1, fmaf(q, vx, acc[4]));
+        acc[5] = fmaf(p, y2, fmaf(q, vy, acc[5]));
+        acc[6] = fmaf(p, y3, fmaf(q, vz, acc[6]));
+        acc[12] = fmaf(w12, fmaf(-2.0f, xc0, fmaf(vx, y3, vz * y1)), acc[12]);
+        acc[13] = fmaf(w12, fmaf(-2.0f, xc1, fmaf(vx, y2, vy * y1)), acc[13]);
+        acc[14] = fmaf(w12, fmaf(-2.0f, xc2, 0x1.279a740000000p-1f * fmaf(vy, y2 + y2, -fmaf(vx, y1, vz * y3))), acc[14]);
+        acc[15] = fmaf(w12, fmaf(-2.0f, xc3, fmaf(vy, y3, vz * y2)), acc[15]);
+        acc[16] = fmaf(w12, fmaf(-2.0f, xc4, fmaf(vz, y3, -vx * y1)), acc[16]);
+        acc[7] = fmaf(w11, xc0, acc[7]);
+        acc[8] = fmaf(w11, xc1, acc[8]);
+        acc[9] = fmaf(w11, xc2, acc[9]);
+        acc[10] = fmaf(w11, xc3, acc[10]);
+        acc[11] = fmaf(w11, xc4, acc[11]);
+        const float xc0B = __ldg(x2 + ((int64_t)sndB * 5 + 0) * C + ch);
+        const float xc1B = __ldg(x2 + ((int64_t)sndB * 5 + 1) * C + ch);
+        const float xc2B = __ldg(x2 + ((int64_t)sndB * 5 + 2) * C + ch);
+        const float xc3B = __ldg(x2 + ((int64_t)sndB * 5 + 3) * C + ch);
+        const float xc4B = __ldg(x2 + ((int64_t)sndB * 5 + 4) * C + ch);
+        const float y1B = sheB[1], y2B = sheB[2], y3B = sheB[3];
+        const float qaB = xc2B * 0x1.279a740000000p-1f, qxxB = -qaB - xc4B, qzzB = xc4B - qaB, qyyB = qaB + qaB;
+        const float vxB = fmaf(qxxB, y1B, fmaf(xc1B, y2B, xc0B * y3B));
+        const float vyB = fmaf(xc1B, y1B, fmaf(qyyB, y2B, xc3B * y3B));
+        const float vzB = fmaf(xc0B, y1B, fmaf(xc3B, y2B, qzzB * y3B));
+        const float hB = fmaf(y1B, vxB, fmaf(y2B, vyB, y3B * vzB));
+        acc[0] = fmaf(w2B, hB, acc[0]);
+        acc[1] = fmaf(w6B, vxB, acc[1]);
+        acc[2] = fmaf(w6B, vyB, acc[2]);
+        acc[3] = fmaf(w6B, vzB, acc[3]);
+        const float pB = w7B * hB, qB = -0x1.3333340000000p+0f * w7B;
+        acc[4] = fmaf(pB, y1B, fmaf(qB, vxB, acc[4]));
+        acc[5] = fmaf(pB, y2B, fmaf(qB, vyB, acc[5]));
+        acc[6] = fmaf(pB, y3B, fmaf(qB, vzB, acc[6]));
+        acc[12] = fmaf(w12B, fmaf(-2.0f, xc0B, fmaf(vxB, y3B, vzB * y1B)), acc[12]);
+        acc[13] = fmaf(w12B, fmaf(-2.0f, xc1B, fmaf(vxB, y2B, vyB * y1B)), acc[13]);
+        acc[14] = fmaf(w12B, fmaf(-2.0f, xc2B, 0x1.279a740000000p-1f * fmaf(vyB, y2B + y2B, -fmaf(vxB, y1B, vzB * y3B))), acc[14]);
+        acc[15] = fmaf(w12B, fmaf(-2.0f, xc3B, fmaf(vyB, y3B, vzB * y2B)), acc[15]);
+        acc[16] = fmaf(w12B, fmaf(-2.0f, xc4B, fmaf(vzB, y3B, -vxB * y1B)), acc[16]);
+        acc[7] = fmaf(w11B, xc0B, acc[7]);
+        acc[8] = fmaf(w11B, xc1B, acc[8]);
+        acc[9] = fmaf(w11B, xc2B, acc[9]);
+        acc[10] = fmaf(w11B, xc3B, acc[10]);
+        acc[11] = fmaf(w11B, xc4B, acc[11]);
+      }
+#else
       { // path 2 (2,2,0) pair
         const uint2 c = __ldg(tq + 2 * C + ch);
         const unsigned eb0 = (c.y & 0x0F800000u) + bias_shift;
@@ -2632,6 +2752,7 @@ __global__ void __launch_bounds__(MAX_T) gconv_fwd_L2b(
         acc[16] = fmaf(w * xi_4, -she[39], acc[16]);
         acc[16] = fmaf(wB * xiB_4, -sheB[39], acc[16]);
       }
+#endif
       { // path 15 (2,1,3) pair
         const uint2 c = __ldg(tq + 15 * C + ch);
         const unsigned eb0 = (c.y & 0x0F800000u) + bias_shift;
@@ -2780,6 +2901,92 @@ __global__ void __launch_bounds__(MAX_T) gconv_fwd_L2b(
       }
         k += 2;
       } else {
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ == 1200
+      { // paths 2 (2,2,0), 6 (2,1,1), 7 (2,3,1), 12 (2,2,2), 11 (2,0,2) as Cartesian forms (S119, S121):
+        // Q = sum_m x2_m B'_m, v = Q Y1, h = Y1 . v, t = Y1 h - 6/5 v, u_m = v . B'_m Y1 - 2 x_m; the paths'
+        // constants are in the stores
+        float w2, w6, w7, w12, w11;
+        {
+          const uint2 c = __ldg(tq + 2 * C + ch);
+          const unsigned eb0 = (c.y & 0x0F800000u) + bias_shift;
+          const float eb_f = __uint_as_float(eb0);
+          const float r0 = __uint_as_float((c.x & 0x7FFFF8u) | eb0);
+          const float r1 = __uint_as_float((c.y & 0x7FFFF0u) | eb0);
+          const float r2 = __uint_as_float((__funnelshift_l(c.x, c.x, 20) & 0x7FF800u) | eb0);
+          const float r3 = __uint_as_float((__funnelshift_l(c.y, c.y, 19) & 0x7F8000u) | eb0);
+          w2 = fmaf(pw.z, r3, fmaf(pw.y, r2, fmaf(pw.x, r1, fmaf(pw.w, eb_f, r0))));
+        }
+        {
+          const uint2 c = __ldg(tq + 6 * C + ch);
+          const unsigned eb0 = (c.y & 0x0F800000u) + bias_shift;
+          const float eb_f = __uint_as_float(eb0);
+          const float r0 = __uint_as_float((c.x & 0x7FFFF8u) | eb0);
+          const float r1 = __uint_as_float((c.y & 0x7FFFF0u) | eb0);
+          const float r2 = __uint_as_float((__funnelshift_l(c.x, c.x, 20) & 0x7FF800u) | eb0);
+          const float r3 = __uint_as_float((__funnelshift_l(c.y, c.y, 19) & 0x7F8000u) | eb0);
+          w6 = fmaf(pw.z, r3, fmaf(pw.y, r2, fmaf(pw.x, r1, fmaf(pw.w, eb_f, r0))));
+        }
+        {
+          const uint2 c = __ldg(tq + 7 * C + ch);
+          const unsigned eb0 = (c.y & 0x0F800000u) + bias_shift;
+          const float eb_f = __uint_as_float(eb0);
+          const float r0 = __uint_as_float((c.x & 0x7FFFF8u) | eb0);
+          const float r1 = __uint_as_float((c.y & 0x7FFFF0u) | eb0);
+          const float r2 = __uint_as_float((__funnelshift_l(c.x, c.x, 20) & 0x7FF800u) | eb0);
+          const float r3 = __uint_as_float((__funnelshift_l(c.y, c.y, 19) & 0x7F8000u) | eb0);
+          w7 = fmaf(pw.z, r3, fmaf(pw.y, r2, fmaf(pw.x, r1, fmaf(pw.w, eb_f, r0))));
+        }
+        {
+          const uint2 c = __ldg(tq + 12 * C + ch);
+          const unsigned eb0 = (c.y & 0x0F800000u) + bias_shift;
+          const float eb_f = __uint_as_float(eb0);
+          const float r0 = __uint_as_float((c.x & 0x7FFFF8u) | eb0);
+          const float r1 = __uint_as_float((c.y & 0x7FFFF0u) | eb0);
+          const float r2 = __uint_as_float((__funnelshift_l(c.x, c.x, 20) & 0x7FF800u) | eb0);
+          const float r3 = __uint_as_float((__funnelshift_l(c.y, c.y, 19) & 0x7F8000u) | eb0);
+          w12 = fmaf(pw.z, r3, fmaf(pw.y, r2, fmaf(pw.x, r1, fmaf(pw.w, eb_f, r0))));
+        }
+        {
+          const uint2 c = __ldg(tq + 11 * C + ch);
+          const unsigned eb0 = (c.y & 0x0F800000u) + bias_shift;
+          const float eb_f = __uint_as_float(eb0);
+          const float r0 = __uint_as_float((c.x & 0x7FFFF8u) | eb0);
+          const float r1 = __uint_as_float((c.y & 0x7FFFF0u) | eb0);
+          const float r2 = __uint_as_float((__funnelshift_l(c.x, c.x, 20) & 0x7FF800u) | eb0);
+          const float r3 = __uint_as_float((__funnelshift_l(c.y, c.y, 19) & 0x7F8000u) | eb0);
+          w11 = fmaf(pw.z, r3, fmaf(pw.y, r2, fmaf(pw.x, r1, fmaf(pw.w, eb_f, r0))));
+        }
+        const float xc0 = __ldg(x2 + ((int64_t)snd * 5 + 0) * C + ch);
+        const float xc1 = __ldg(x2 + ((int64_t)snd * 5 + 1) * C + ch);
+        const float xc2 = __ldg(x2 + ((int64_t)snd * 5 + 2) * C + ch);
+        const float xc3 = __ldg(x2 + ((int64_t)snd * 5 + 3) * C + ch);
+        const float xc4 = __ldg(x2 + ((int64_t)snd * 5 + 4) * C + ch);
+        const float y1 = she[1], y2 = she[2], y3 = she[3];
+        const float qa = xc2 * 0x1.279a740000000p-1f, qxx = -qa - xc4, qzz = xc4 - qa, qyy = qa + qa;
+        const float vx = fmaf(qxx, y1, fmaf(xc1, y2, xc0 * y3));
+        const float vy = fmaf(xc1, y1, fmaf(qyy, y2, xc3 * y3));
+        const float vz = fmaf(xc0, y1, fmaf(xc3, y2, qzz * y3));
+        const float h = fmaf(y1, vx, fmaf(y2, vy, y3 * vz));
+        acc[0] = fmaf(w2, h, acc[0]);
+        acc[1] = fmaf(w6, vx, acc[1]);
+        acc[2] = fmaf(w6, vy, acc[2]);
+        acc[3] = fmaf(w6, vz, acc[3]);
+        const float p = w7 * h, q = -0x1.3333340000000p+0f * w7;
+        acc[4] = fmaf(p, y1, fmaf(q, vx, acc[4]));
+        acc[5] = fmaf(p, y2, fmaf(q, vy, acc[5]));
+        acc[6] = fmaf(p, y3, fmaf(q, vz, acc[6]));
+        acc[12] = fmaf(w12, fmaf(-2.0f, xc0, fmaf(vx, y3, vz * y1)), acc[12]);
+        acc[13] = fmaf(w12, fmaf(-2.0f, xc1, fmaf(vx, y2, vy * y1)), acc[13]);
+        acc[14] = fmaf(w12, fmaf(-2.0f, xc2, 0x1.279a740000000p-1f * fmaf(vy, y2 + y2, -fmaf(vx, y1, vz * y3))), acc[14]);
+        acc[15] = fmaf(w12, fmaf(-2.0f, xc3, fmaf(vy, y3, vz * y2)), acc[15]);
+        acc[16] = fmaf(w12, fmaf(-2.0f, xc4, fmaf(vz, y3, -vx * y1)), acc[16]);
+        acc[7] = fmaf(w11, xc0, acc[7]);
+        acc[8] = fmaf(w11, xc1, acc[8]);
+        acc[9] = fmaf(w11, xc2, acc[9]);
+        acc[10] = fmaf(w11, xc3, acc[10]);
+        acc[11] = fmaf(w11, xc4, acc[11]);
+      }
+#else
       { // path 2 (2,2,0)
         const uint2 c = __ldg(tq + 2 * C + ch);
         const unsigned eb0 = (c.y & 0x0F800000u) + bias_shift;
@@ -2914,6 +3121,7 @@ __global__ void __launch_bounds__(MAX_T) gconv_fwd_L2b(
         acc[16] = fmaf(w * xi_3, she[7], acc[16]);
         acc[16] = fmaf(w * xi_4, -she[39], acc[16]);
       }
+#endif
       { // path 15 (2,1,3)
         const uint2 c = __ldg(tq + 15 * C + ch);
         const unsigned eb0 = (c.y & 0x0F800000u) + bias_shift;
@@ -3002,23 +3210,91 @@ __global__ void __launch_bounds__(MAX_T) gconv_fwd_L2b(
     sync_grp();
   }
   if (density_table && ch == 0) D[rcv] = dsum;
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ == 1200
+  mid0[((int64_t)rcv * 1 + 0) * 3 * C + 2 * C + ch] = acc[0] * 0x1.279a740000000p-2f;
+#else
   mid0[((int64_t)rcv * 1 + 0) * 3 * C + 2 * C + ch] = acc[0] * 0x1.c9f25c0000000p-2f;
+#endif
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ == 1200
   mid1[((int64_t)rcv * 3 + 0) * 5 * C + 3 * C + ch] = acc[1] * 0x1.43d1360000000p-2f;
+#else
+  mid1[((int64_t)rcv * 3 + 0) * 5 * C + 3 * C + ch] = acc[1] * 0x1.43d1360000000p-2f;
+#endif
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ == 1200
   mid1[((int64_t)rcv * 3 + 1) * 5 * C + 3 * C + ch] = acc[2] * 0x1.43d1360000000p-2f;
+#else
+  mid1[((int64_t)rcv * 3 + 1) * 5 * C + 3 * C + ch] = acc[2] * 0x1.43d1360000000p-2f;
+#endif
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ == 1200
   mid1[((int64_t)rcv * 3 + 2) * 5 * C + 3 * C + ch] = acc[3] * 0x1.43d1360000000p-2f;
+#else
+  mid1[((int64_t)rcv * 3 + 2) * 5 * C + 3 * C + ch] = acc[3] * 0x1.43d1360000000p-2f;
+#endif
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ == 1200
+  mid1[((int64_t)rcv * 3 + 0) * 5 * C + 4 * C + ch] = acc[4] * 0x1.b8a8d00000000p-3f;
+#else
   mid1[((int64_t)rcv * 3 + 0) * 5 * C + 4 * C + ch] = acc[4] * 0x1.e990ce0000000p-3f;
+#endif
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ == 1200
+  mid1[((int64_t)rcv * 3 + 1) * 5 * C + 4 * C + ch] = acc[5] * 0x1.b8a8d00000000p-3f;
+#else
   mid1[((int64_t)rcv * 3 + 1) * 5 * C + 4 * C + ch] = acc[5] * 0x1.bee9060000000p-3f;
+#endif
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ == 1200
+  mid1[((int64_t)rcv * 3 + 2) * 5 * C + 4 * C + ch] = acc[6] * 0x1.b8a8d00000000p-3f;
+#else
   mid1[((int64_t)rcv * 3 + 2) * 5 * C + 4 * C + ch] = acc[6] * 0x1.bee9060000000p-3f;
+#endif
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ == 1200
   mid2[((int64_t)rcv * 5 + 0) * 5 * C + 3 * C + ch] = acc[7] * 0x1.c9f25c0000000p-2f;
+#else
+  mid2[((int64_t)rcv * 5 + 0) * 5 * C + 3 * C + ch] = acc[7] * 0x1.c9f25c0000000p-2f;
+#endif
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ == 1200
   mid2[((int64_t)rcv * 5 + 1) * 5 * C + 3 * C + ch] = acc[8] * 0x1.c9f25c0000000p-2f;
+#else
+  mid2[((int64_t)rcv * 5 + 1) * 5 * C + 3 * C + ch] = acc[8] * 0x1.c9f25c0000000p-2f;
+#endif
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ == 1200
   mid2[((int64_t)rcv * 5 + 2) * 5 * C + 3 * C + ch] = acc[9] * 0x1.c9f25c0000000p-2f;
+#else
+  mid2[((int64_t)rcv * 5 + 2) * 5 * C + 3 * C + ch] = acc[9] * 0x1.c9f25c0000000p-2f;
+#endif
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ == 1200
   mid2[((int64_t)rcv * 5 + 3) * 5 * C + 3 * C + ch] = acc[10] * 0x1.c9f25c0000000p-2f;
+#else
+  mid2[((int64_t)rcv * 5 + 3) * 5 * C + 3 * C + ch] = acc[10] * 0x1.c9f25c0000000p-2f;
+#endif
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ == 1200
   mid2[((int64_t)rcv * 5 + 4) * 5 * C + 3 * C + ch] = acc[11] * 0x1.c9f25c0000000p-2f;
+#else
+  mid2[((int64_t)rcv * 5 + 4) * 5 * C + 3 * C + ch] = acc[11] * 0x1.c9f25c0000000p-2f;
+#endif
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ == 1200
+  mid2[((int64_t)rcv * 5 + 0) * 5 * C + 4 * C + ch] = acc[12] * 0x1.11acee0000000p-2f;
+#else
   mid2[((int64_t)rcv * 5 + 0) * 5 * C + 4 * C + ch] = acc[12] * 0x1.e990ce0000000p-3f;
+#endif
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ == 1200
+  mid2[((int64_t)rcv * 5 + 1) * 5 * C + 4 * C + ch] = acc[13] * 0x1.11acee0000000p-2f;
+#else
   mid2[((int64_t)rcv * 5 + 1) * 5 * C + 4 * C + ch] = acc[13] * 0x1.a7f9ee0000000p-3f;
+#endif
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ == 1200
+  mid2[((int64_t)rcv * 5 + 2) * 5 * C + 4 * C + ch] = acc[14] * 0x1.11acee0000000p-2f;
+#else
   mid2[((int64_t)rcv * 5 + 2) * 5 * C + 4 * C + ch] = acc[14] * 0x1.e990ce0000000p-3f;
+#endif
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ == 1200
+  mid2[((int64_t)rcv * 5 + 3) * 5 * C + 4 * C + ch] = acc[15] * 0x1.11acee0000000p-2f;
+#else
   mid2[((int64_t)rcv * 5 + 3) * 5 * C + 4 * C + ch] = acc[15] * 0x1.a7f9ee0000000p-3f;
+#endif
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ == 1200
+  mid2[((int64_t)rcv * 5 + 4) * 5 * C + 4 * C + ch] = acc[16] * 0x1.11acee0000000p-2f;
+#else
   mid2[((int64_t)rcv * 5 + 4) * 5 * C + 4 * C + ch] = acc[16] * 0x1.a7f9ee0000000p-3f;
+#endif
   mid3[((int64_t)rcv * 7 + 0) * 4 * C + 2 * C + ch] = acc[17] * 0x1.11acee0000000p-2f;
   mid3[((int64_t)rcv * 7 + 1) * 4 * C + 2 * C + ch] = acc[18] * 0x1.bee9060000000p-3f;
   mid3[((int64_t)rcv * 7 + 2) * 4 * C + 2 * C + ch] = acc[19] * 0x1.1aa69e0000000p-4f;
@@ -3514,6 +3790,111 @@ __global__ void __launch_bounds__(128) gconv_bwd_L2(
         float gx2_3 = 0.0f;
         const float x2_4 = __ldg(x2_p + ((int64_t)snd * 5 + 4) * C + ch);
         float gx2_4 = 0.0f;
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ == 1200
+        { // paths 2 (2,2,0), 6 (2,1,1), 7 (2,3,1), 12 (2,2,2), 11 (2,0,2) as Cartesian forms (S119, S121): with Q = sum_m x2_m B'_m,
+          // v = Q n, h = n . v, G = sum_m gd_m B'_m and w = G n, F = al h + b . v + C22 R22 (v . w - 2/3 gd . x)
+          // + C02 R02 ge . x (al = C0 R0 g0 + C3 R3 g3 . n, b = C1 R1 g1 - 2/5 C3 R3 g3). dF/dx_m = c . B'_m n
+          // - 2/3 C22 R22 gd_m + C02 R02 ge_m with c = al n + b + C22 R22 w; the radial pull is F with dw for R;
+          // dF/dn = Q c + al v + C3 R3 h g3 + C22 R22 G v up to radial parts (the edge end projects them out),
+          // added to dY[1..3] / sqrt 3 (Y1 = sqrt 3 n)
+          float R2, dw2, R6, dw6, R7, dw7, R12, dw12, R11, dw11;
+          {
+            const uint2 c = __ldg(tq + 2 * C + ch);
+            const unsigned eb0 = (c.y & 0x0F800000u) + bias_shift;
+            const float eb_f = __uint_as_float(eb0);
+            const float r0 = __uint_as_float((c.x & 0x7FFFF8u) | eb0);
+            const float r1 = __uint_as_float((c.y & 0x7FFFF0u) | eb0);
+            const float r2 = __uint_as_float((__funnelshift_l(c.x, c.x, 20) & 0x7FF800u) | eb0);
+            const float r3 = __uint_as_float((__funnelshift_l(c.y, c.y, 19) & 0x7F8000u) | eb0);
+            R2 = fmaf(s3, r3, fmaf(s2, r2, fmaf(s1, r1, fmaf(nw_hb, eb_f, r0))));
+            dw2 = fmaf(ds3, r3, fmaf(ds2, r2, fmaf(ndt_hb, eb_f, r1)));
+          }
+          {
+            const uint2 c = __ldg(tq + 6 * C + ch);
+            const unsigned eb0 = (c.y & 0x0F800000u) + bias_shift;
+            const float eb_f = __uint_as_float(eb0);
+            const float r0 = __uint_as_float((c.x & 0x7FFFF8u) | eb0);
+            const float r1 = __uint_as_float((c.y & 0x7FFFF0u) | eb0);
+            const float r2 = __uint_as_float((__funnelshift_l(c.x, c.x, 20) & 0x7FF800u) | eb0);
+            const float r3 = __uint_as_float((__funnelshift_l(c.y, c.y, 19) & 0x7F8000u) | eb0);
+            R6 = fmaf(s3, r3, fmaf(s2, r2, fmaf(s1, r1, fmaf(nw_hb, eb_f, r0))));
+            dw6 = fmaf(ds3, r3, fmaf(ds2, r2, fmaf(ndt_hb, eb_f, r1)));
+          }
+          {
+            const uint2 c = __ldg(tq + 7 * C + ch);
+            const unsigned eb0 = (c.y & 0x0F800000u) + bias_shift;
+            const float eb_f = __uint_as_float(eb0);
+            const float r0 = __uint_as_float((c.x & 0x7FFFF8u) | eb0);
+            const float r1 = __uint_as_float((c.y & 0x7FFFF0u) | eb0);
+            const float r2 = __uint_as_float((__funnelshift_l(c.x, c.x, 20) & 0x7FF800u) | eb0);
+            const float r3 = __uint_as_float((__funnelshift_l(c.y, c.y, 19) & 0x7F8000u) | eb0);
+            R7 = fmaf(s3, r3, fmaf(s2, r2, fmaf(s1, r1, fmaf(nw_hb, eb_f, r0))));
+            dw7 = fmaf(ds3, r3, fmaf(ds2, r2, fmaf(ndt_hb, eb_f, r1)));
+          }
+          {
+            const uint2 c = __ldg(tq + 12 * C + ch);
+            const unsigned eb0 = (c.y & 0x0F800000u) + bias_shift;
+            const float eb_f = __uint_as_float(eb0);
+            const float r0 = __uint_as_float((c.x & 0x7FFFF8u) | eb0);
+            const float r1 = __uint_as_float((c.y & 0x7FFFF0u) | eb0);
+            const float r2 = __uint_as_float((__funnelshift_l(c.x, c.x, 20) & 0x7FF800u) | eb0);
+            const float r3 = __uint_as_float((__funnelshift_l(c.y, c.y, 19) & 0x7F8000u) | eb0);
+            R12 = fmaf(s3, r3, fmaf(s2, r2, fmaf(s1, r1, fmaf(nw_hb, eb_f, r0))));
+            dw12 = fmaf(ds3, r3, fmaf(ds2, r2, fmaf(ndt_hb, eb_f, r1)));
+          }
+          {
+            const uint2 c = __ldg(tq + 11 * C + ch);
+            const unsigned eb0 = (c.y & 0x0F800000u) + bias_shift;
+            const float eb_f = __uint_as_float(eb0);
+            const float r0 = __uint_as_float((c.x & 0x7FFFF8u) | eb0);
+            const float r1 = __uint_as_float((c.y & 0x7FFFF0u) | eb0);
+            const float r2 = __uint_as_float((__funnelshift_l(c.x, c.x, 20) & 0x7FF800u) | eb0);
+            const float r3 = __uint_as_float((__funnelshift_l(c.y, c.y, 19) & 0x7F8000u) | eb0);
+            R11 = fmaf(s3, r3, fmaf(s2, r2, fmaf(s1, r1, fmaf(nw_hb, eb_f, r0))));
+            dw11 = fmaf(ds3, r3, fmaf(ds2, r2, fmaf(ndt_hb, eb_f, r1)));
+          }
+          const float ga = s_g[ch * 31 + 0];
+          const float gb0 = s_g[ch * 31 + 1], gb1 = s_g[ch * 31 + 2], gb2 = s_g[ch * 31 + 3];
+          const float gc0 = s_g[ch * 31 + 4], gc1 = s_g[ch * 31 + 5], gc2 = s_g[ch * 31 + 6];
+          const float gd0 = s_g[ch * 31 + 12], gd1 = s_g[ch * 31 + 13], gd2 = s_g[ch * 31 + 14], gd3 = s_g[ch * 31 + 15], gd4 = s_g[ch * 31 + 16];
+          const float ge0 = s_g[ch * 31 + 7], ge1 = s_g[ch * 31 + 8], ge2 = s_g[ch * 31 + 9], ge3 = s_g[ch * 31 + 10], ge4 = s_g[ch * 31 + 11];
+          const float qa = x2_2 * 0x1.279a740000000p-1f, qxx = -qa - x2_4, qzz = x2_4 - qa, qyy = qa + qa;
+          const float vx = fmaf(qxx, nx, fmaf(x2_1, ny, x2_0 * nz));
+          const float vy = fmaf(x2_1, nx, fmaf(qyy, ny, x2_3 * nz));
+          const float vz = fmaf(x2_0, nx, fmaf(x2_3, ny, qzz * nz));
+          const float h = fmaf(nx, vx, fmaf(ny, vy, nz * vz));
+          const float gn = fmaf(gc0, nx, fmaf(gc1, ny, gc2 * nz));
+          const float gq = gd2 * 0x1.279a740000000p-1f, gxx = -gq - gd4, gzz = gd4 - gq, gyy = gq + gq;
+          const float wx = fmaf(gxx, nx, fmaf(gd1, ny, gd0 * nz));
+          const float wy = fmaf(gd1, nx, fmaf(gyy, ny, gd3 * nz));
+          const float wz = fmaf(gd0, nx, fmaf(gd3, ny, gzz * nz));
+          const float k3r = 0x1.1e377a0000000p+0f * R7, k3b = -0x1.c9f25c0000000p-2f * R7, k1r = 0x1.186f180000000p-1f * R6;
+          const float k22r = 0x1.9a83660000000p-1f * R12, k22b = -0x1.11acee0000000p-1f * R12, k02r = 0x1.c9f25c0000000p-2f * R11;
+          const float al = fmaf(k3r, gn, 0x1.bb67ae0000000p-1f * R2 * ga);
+          const float cx = fmaf(al, nx, fmaf(k1r, gb0, fmaf(k22r, wx, k3b * gc0)));
+          const float cy = fmaf(al, ny, fmaf(k1r, gb1, fmaf(k22r, wy, k3b * gc1)));
+          const float cz = fmaf(al, nz, fmaf(k1r, gb2, fmaf(k22r, wz, k3b * gc2)));
+          gx2_0 = fmaf(cx, nz, fmaf(cz, nx, fmaf(k22b, gd0, fmaf(k02r, ge0, gx2_0))));
+          gx2_1 = fmaf(cx, ny, fmaf(cy, nx, fmaf(k22b, gd1, fmaf(k02r, ge1, gx2_1))));
+          gx2_2 = fmaf(0x1.279a740000000p-1f, fmaf(cy, ny + ny, -fmaf(cx, nx, cz * nz)), fmaf(k22b, gd2, fmaf(k02r, ge2, gx2_2)));
+          gx2_3 = fmaf(cy, nz, fmaf(cz, ny, fmaf(k22b, gd3, fmaf(k02r, ge3, gx2_3))));
+          gx2_4 = fmaf(cz, nz, fmaf(-cx, nx, fmaf(k22b, gd4, fmaf(k02r, ge4, gx2_4))));
+          const float d3 = 0x1.1e377a0000000p+0f * dw7, d3b = -0x1.c9f25c0000000p-2f * dw7, d1 = 0x1.186f180000000p-1f * dw6;
+          const float d22 = 0x1.9a83660000000p-1f * dw12, d22b = -0x1.11acee0000000p-1f * dw12, d02 = 0x1.c9f25c0000000p-2f * dw11;
+          const float gdx = fmaf(gd0, x2_0, fmaf(gd1, x2_1, fmaf(gd2, x2_2, fmaf(gd3, x2_3, gd4 * x2_4))));
+          const float gex = fmaf(ge0, x2_0, fmaf(ge1, x2_1, fmaf(ge2, x2_2, fmaf(ge3, x2_3, ge4 * x2_4))));
+          pull_R = fmaf(fmaf(d3, gn, 0x1.bb67ae0000000p-1f * dw2 * ga), h,
+                        fmaf(fmaf(d1, gb0, fmaf(d22, wx, d3b * gc0)), vx, fmaf(fmaf(d1, gb1, fmaf(d22, wy, d3b * gc1)), vy,
+                        fmaf(fmaf(d1, gb2, fmaf(d22, wz, d3b * gc2)), vz, fmaf(d22b, gdx, fmaf(d02, gex, pull_R))))));
+          const float hk = k3r * h;
+          const float gvx = fmaf(gxx, vx, fmaf(gd1, vy, gd0 * vz));
+          const float gvy = fmaf(gd1, vx, fmaf(gyy, vy, gd3 * vz));
+          const float gvz = fmaf(gd0, vx, fmaf(gd3, vy, gzz * vz));
+          dY[1] = fmaf(0x1.279a740000000p-1f, fmaf(qxx, cx, fmaf(x2_1, cy, fmaf(x2_0, cz, fmaf(al, vx, fmaf(hk, gc0, k22r * gvx))))), dY[1]);
+          dY[2] = fmaf(0x1.279a740000000p-1f, fmaf(x2_1, cx, fmaf(qyy, cy, fmaf(x2_3, cz, fmaf(al, vy, fmaf(hk, gc1, k22r * gvy))))), dY[2]);
+          dY[3] = fmaf(0x1.279a740000000p-1f, fmaf(x2_0, cx, fmaf(x2_3, cy, fmaf(qzz, cz, fmaf(al, vz, fmaf(hk, gc2, k22r * gvz))))), dY[3]);
+        }
+#else
         { // path 2 (2,2,0)
           const uint2 c = __ldg(tq + 2 * C + ch);
           const unsigned eb0 = (c.y & 0x0F800000u) + bias_shift;
@@ -3793,6 +4174,7 @@ __global__ void __launch_bounds__(128) gconv_bwd_L2(
           gx2_4 = fmaf(R, A4_1 * Y5 + A4_2 * Y6 + A4_3 * Y7 + A4_4 * Y8, gx2_4);
 #endif
         }
+#endif
         { // path 15 (2,1,3)
           const uint2 c = __ldg(tq + 15 * C + ch);
           const unsigned eb0 = (c.y & 0x0F800000u) + bias_shift;

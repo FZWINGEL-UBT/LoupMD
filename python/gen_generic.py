@@ -157,6 +157,129 @@ def fit_conversion(l1, l2, l3):
     assert res < 1e-12, (l1, l2, l3, res)
     return M.numpy()
 
+# S119 / S121: five of the seven x-degree-2 paths as Cartesian forms. With the scaled l = 2 basis
+# B'_0 = E_xz + E_zx, B'_1 = E_xy + E_yx, B'_2 = diag(-1, 2, -1) / sqrt 3, B'_3 = E_yz + E_zy, B'_4 = diag(-1, 0, 1)
+# (n B'_m n = 2 Y2_m(n) / sqrt 15, tr(B'_m B'_k) = 2 delta_mk), Q = sum_m x_m B'_m, v = Q n and h = n . v for the unit
+# edge direction n, the outputs are C h (2, 2, 0), C v (2, 1, 1), C (n h - 2/5 v) (2, 3, 1), C (v . B'_m n - 2/3 x_m)
+# (2, 2, 2) and C x (2, 0, 2), each with its own radial weight and constant (identity component order in the frame of
+# the spherical harmonics). One Q, v and h serve them all. deg2_cart fits the constants to the Wigner-3j contractions
+# (exact to 1e-12).
+DEG2_CART = ((2, 2, 0), (2, 1, 1), (2, 3, 1), (2, 2, 2), (2, 0, 2))
+INV_SQRT3 = 1.0 / math.sqrt(3.0)
+
+
+def _deg2_q(x):
+    x0, x1, x2, x3, x4 = x.unbind(-1)
+    a = x2 * INV_SQRT3
+    return torch.stack([torch.stack([-a - x4, x1, x0], -1), torch.stack([x1, 2 * a, x3], -1),
+                        torch.stack([x0, x3, x4 - a], -1)], -2)
+
+
+def deg2_cart():
+    gen = torch.Generator().manual_seed(20261118)
+    x = torch.randn(96, 5, generator=gen, dtype=torch.float64)
+    n = torch.randn(96, 3, generator=gen, dtype=torch.float64)
+    n = n / n.norm(dim=-1, keepdim=True)
+    v = torch.einsum("sij,sj->si", _deg2_q(x), n)
+    h = (n * v).sum(-1, keepdim=True)
+    basis = torch.stack([_deg2_q(torch.eye(5, dtype=torch.float64)[m][None])[0] for m in range(5)])
+    f22 = torch.einsum("si,mij,sj->sm", v, basis, n) - 2.0 / 3.0 * x
+    out = {}
+    for p, form in zip(DEG2_CART, (h, v, n * h - 0.4 * v, f22, x)):
+        W3 = o3.wigner_3j(*p, dtype=torch.float64)
+        y = o3.spherical_harmonics(p[1], n, normalize=False, normalization="component")
+        target = torch.einsum("ijo,si,sj->so", W3, x, y)
+        c = float((form * target).sum() / (form * form).sum())
+        res = float((c * form - target).abs().max() / target.abs().max())
+        assert res < 1e-12, (p, res)
+        out[p] = c
+    return out
+
+
+def _decode_into(k, outs, pad):
+    """The packed-table decode of path k's coefficients, then ``name = expr`` for each (name, expr) of ``outs``."""
+    ls = [f"{pad}const uint2 c = __ldg(tq + {k} * C + ch);",
+          f"{pad}const unsigned eb0 = (c.y & 0x0F800000u) + bias_shift;",
+          f"{pad}const float eb_f = __uint_as_float(eb0);",
+          f"{pad}const float r0 = __uint_as_float((c.x & 0x7FFFF8u) | eb0);",
+          f"{pad}const float r1 = __uint_as_float((c.y & 0x7FFFF0u) | eb0);",
+          f"{pad}const float r2 = __uint_as_float((__funnelshift_l(c.x, c.x, 20) & 0x7FF800u) | eb0);",
+          f"{pad}const float r3 = __uint_as_float((__funnelshift_l(c.y, c.y, 19) & 0x7F8000u) | eb0);"]
+    return ls + [f"{pad}{name} = {expr};" for name, expr in outs]
+
+
+def _w_fwd(pw):
+    return f"fmaf({pw}.z, r3, fmaf({pw}.y, r2, fmaf({pw}.x, r1, fmaf({pw}.w, eb_f, r0))))"
+
+
+W_BWD = "fmaf(s3, r3, fmaf(s2, r2, fmaf(s1, r1, fmaf(nw_hb, eb_f, r0))))"
+DW_BWD = "fmaf(ds3, r3, fmaf(ds2, r2, fmaf(ndt_hb, eb_f, r1)))"
+
+
+def _cart_bwd(cart, GS, gofs):
+    """gconv_bwd_L2's block for the Cartesian paths (S119, S121): x gradient, radial pull and direction gradient of
+    F = sum_p C_p R_p g_p . form_p from one Q, v and h per edge and channel."""
+    cc = deg2_cart()
+    k0, k1, k3, k22, k02 = (cart[p] for p in DEG2_CART)
+    C0, C1, C3, C22, C02 = (cc[p] for p in DEG2_CART)
+    i3 = lit(INV_SQRT3)
+    g = lambda k, m: f"s_g[ch * {GS} + {gofs[k] + m}]"  # noqa: E731
+    ls = [f"        {{ // paths {k0} (2,2,0), {k1} (2,1,1), {k3} (2,3,1), {k22} (2,2,2), {k02} (2,0,2) as Cartesian forms "
+          "(S119, S121): with Q = sum_m x2_m B'_m,",
+          "          // v = Q n, h = n . v, G = sum_m gd_m B'_m and w = G n, F = al h + b . v + C22 R22 (v . w - 2/3 gd . x)",
+          "          // + C02 R02 ge . x (al = C0 R0 g0 + C3 R3 g3 . n, b = C1 R1 g1 - 2/5 C3 R3 g3). dF/dx_m = c . B'_m n",
+          "          // - 2/3 C22 R22 gd_m + C02 R02 ge_m with c = al n + b + C22 R22 w; the radial pull is F with dw for R;",
+          "          // dF/dn = Q c + al v + C3 R3 h g3 + C22 R22 G v up to radial parts (the edge end projects them out),",
+          "          // added to dY[1..3] / sqrt 3 (Y1 = sqrt 3 n)",
+          "          float " + ", ".join(f"R{k}, dw{k}" for k in (k0, k1, k3, k22, k02)) + ";"]
+    for k in (k0, k1, k3, k22, k02):
+        ls += ["          {"] + _decode_into(k, [(f"R{k}", W_BWD), (f"dw{k}", DW_BWD)], "            ") + ["          }"]
+    ls += [f"          const float ga = {g(k0, 0)};",
+           f"          const float gb0 = {g(k1, 0)}, gb1 = {g(k1, 1)}, gb2 = {g(k1, 2)};",
+           f"          const float gc0 = {g(k3, 0)}, gc1 = {g(k3, 1)}, gc2 = {g(k3, 2)};",
+           "          const float " + ", ".join(f"gd{m} = {g(k22, m)}" for m in range(5)) + ";",
+           "          const float " + ", ".join(f"ge{m} = {g(k02, m)}" for m in range(5)) + ";",
+           f"          const float qa = x2_2 * {i3}, qxx = -qa - x2_4, qzz = x2_4 - qa, qyy = qa + qa;",
+           "          const float vx = fmaf(qxx, nx, fmaf(x2_1, ny, x2_0 * nz));",
+           "          const float vy = fmaf(x2_1, nx, fmaf(qyy, ny, x2_3 * nz));",
+           "          const float vz = fmaf(x2_0, nx, fmaf(x2_3, ny, qzz * nz));",
+           "          const float h = fmaf(nx, vx, fmaf(ny, vy, nz * vz));",
+           "          const float gn = fmaf(gc0, nx, fmaf(gc1, ny, gc2 * nz));",
+           f"          const float gq = gd2 * {i3}, gxx = -gq - gd4, gzz = gd4 - gq, gyy = gq + gq;",
+           "          const float wx = fmaf(gxx, nx, fmaf(gd1, ny, gd0 * nz));",
+           "          const float wy = fmaf(gd1, nx, fmaf(gyy, ny, gd3 * nz));",
+           "          const float wz = fmaf(gd0, nx, fmaf(gd3, ny, gzz * nz));",
+           f"          const float k3r = {lit(C3)} * R{k3}, k3b = {lit(-0.4 * C3)} * R{k3}, k1r = {lit(C1)} * R{k1};",
+           f"          const float k22r = {lit(C22)} * R{k22}, k22b = {lit(-2.0 / 3.0 * C22)} * R{k22}, "
+           f"k02r = {lit(C02)} * R{k02};",
+           f"          const float al = fmaf(k3r, gn, {lit(C0)} * R{k0} * ga);",
+           "          const float cx = fmaf(al, nx, fmaf(k1r, gb0, fmaf(k22r, wx, k3b * gc0)));",
+           "          const float cy = fmaf(al, ny, fmaf(k1r, gb1, fmaf(k22r, wy, k3b * gc1)));",
+           "          const float cz = fmaf(al, nz, fmaf(k1r, gb2, fmaf(k22r, wz, k3b * gc2)));",
+           "          gx2_0 = fmaf(cx, nz, fmaf(cz, nx, fmaf(k22b, gd0, fmaf(k02r, ge0, gx2_0))));",
+           "          gx2_1 = fmaf(cx, ny, fmaf(cy, nx, fmaf(k22b, gd1, fmaf(k02r, ge1, gx2_1))));",
+           f"          gx2_2 = fmaf({i3}, fmaf(cy, ny + ny, -fmaf(cx, nx, cz * nz)), fmaf(k22b, gd2, fmaf(k02r, ge2, gx2_2)));",
+           "          gx2_3 = fmaf(cy, nz, fmaf(cz, ny, fmaf(k22b, gd3, fmaf(k02r, ge3, gx2_3))));",
+           "          gx2_4 = fmaf(cz, nz, fmaf(-cx, nx, fmaf(k22b, gd4, fmaf(k02r, ge4, gx2_4))));",
+           f"          const float d3 = {lit(C3)} * dw{k3}, d3b = {lit(-0.4 * C3)} * dw{k3}, d1 = {lit(C1)} * dw{k1};",
+           f"          const float d22 = {lit(C22)} * dw{k22}, d22b = {lit(-2.0 / 3.0 * C22)} * dw{k22}, "
+           f"d02 = {lit(C02)} * dw{k02};",
+           "          const float gdx = fmaf(gd0, x2_0, fmaf(gd1, x2_1, fmaf(gd2, x2_2, fmaf(gd3, x2_3, gd4 * x2_4))));",
+           "          const float gex = fmaf(ge0, x2_0, fmaf(ge1, x2_1, fmaf(ge2, x2_2, fmaf(ge3, x2_3, ge4 * x2_4))));",
+           f"          pull_R = fmaf(fmaf(d3, gn, {lit(C0)} * dw{k0} * ga), h,",
+           "                        fmaf(fmaf(d1, gb0, fmaf(d22, wx, d3b * gc0)), vx, fmaf(fmaf(d1, gb1, fmaf(d22, wy, d3b * gc1)), vy,",
+           "                        fmaf(fmaf(d1, gb2, fmaf(d22, wz, d3b * gc2)), vz, fmaf(d22b, gdx, fmaf(d02, gex, pull_R))))));",
+           "          const float hk = k3r * h;",
+           "          const float gvx = fmaf(gxx, vx, fmaf(gd1, vy, gd0 * vz));",
+           "          const float gvy = fmaf(gd1, vx, fmaf(gyy, vy, gd3 * vz));",
+           "          const float gvz = fmaf(gd0, vx, fmaf(gd3, vy, gzz * vz));",
+           f"          dY[1] = fmaf({i3}, fmaf(qxx, cx, fmaf(x2_1, cy, fmaf(x2_0, cz, fmaf(al, vx, fmaf(hk, gc0, k22r * gvx))))), dY[1]);",
+           f"          dY[2] = fmaf({i3}, fmaf(x2_1, cx, fmaf(qyy, cy, fmaf(x2_3, cz, fmaf(al, vy, fmaf(hk, gc1, k22r * gvy))))), dY[2]);",
+           f"          dY[3] = fmaf({i3}, fmaf(x2_0, cx, fmaf(x2_3, cy, fmaf(qzz, cz, fmaf(al, vz, fmaf(hk, gc2, k22r * gvz))))), dY[3]);",
+           "        }"]
+    return ls
+
+
 def emit_conv_fwd(lx, groups=(0, 1, 2), name=None):
     """Forward conv over layout(lx)'s paths whose x degree is in ``groups`` (table stride: all paths). A kernel
     launched with density_table = nullptr leaves D alone, so a split launch computes the density once."""
@@ -222,24 +345,15 @@ def emit_conv_fwd(lx, groups=(0, 1, 2), name=None):
     extra_hi = _extra_code("      ", "ch - 32")
     extra_lo = _extra_code("          ", "ch")
 
-    body, body_pair = [], []
+    blk, blk_pair, acc_of = {}, {}, {}
+    acc_off = 0
     for k, (l1, l2, l3) in sel:
-        decode = [
-            f"        const uint2 c = __ldg(tq + {k} * C + ch);",
-            "        const unsigned eb0 = (c.y & 0x0F800000u) + bias_shift;",
-            "        const float eb_f = __uint_as_float(eb0);",
-            "        const float r0 = __uint_as_float((c.x & 0x7FFFF8u) | eb0);",
-            "        const float r1 = __uint_as_float((c.y & 0x7FFFF0u) | eb0);",
-            "        const float r2 = __uint_as_float((__funnelshift_l(c.x, c.x, 20) & 0x7FF800u) | eb0);",
-            "        const float r3 = __uint_as_float((__funnelshift_l(c.y, c.y, 19) & 0x7F8000u) | eb0);",
-            "        const float w = fmaf(pw.z, r3, fmaf(pw.y, r2, fmaf(pw.x, r1, fmaf(pw.w, eb_f, r0))));",
-        ]
+        acc_of[k] = acc_off
+        acc_off += 2 * l3 + 1
         m1_used = sorted({m1 for _, m1 in path_pairs[k]})
-        body.append(f"      {{ // path {k} ({l1},{l2},{l3})")
-        body += decode
-        body_pair.append(f"      {{ // path {k} ({l1},{l2},{l3}) pair")
-        body_pair += decode
-        body_pair.append("        const float wB = fmaf(pwB.z, r3, fmaf(pwB.y, r2, fmaf(pwB.x, r1, fmaf(pwB.w, eb_f, r0))));")
+        body = [f"      {{ // path {k} ({l1},{l2},{l3})"] + _decode_into(k, [("const float w", _w_fwd("pw"))], "        ")
+        body_pair = [f"      {{ // path {k} ({l1},{l2},{l3}) pair"] + _decode_into(
+            k, [("const float w", _w_fwd("pw")), ("const float wB", _w_fwd("pwB"))], "        ")
         for m1 in m1_used:
             body.append(f"        const float xi_{m1} = __ldg(x{l1} + ((int64_t)snd * {2 * l1 + 1} + {m1}) * C + ch);")
             body_pair.append(f"        const float xi_{m1} = __ldg(x{l1} + ((int64_t)snd * {2 * l1 + 1} + {m1}) * C + ch);")
@@ -249,20 +363,86 @@ def emit_conv_fwd(lx, groups=(0, 1, 2), name=None):
             body.append(f"        acc[{I}] = fmaf(w * xi_{m1}, {sg}she[{eslot}], acc[{I}]);")
             body_pair.append(f"        acc[{I}] = fmaf(w * xi_{m1}, {sg}she[{eslot}], acc[{I}]);")
             body_pair.append(f"        acc[{I}] = fmaf(wB * xiB_{m1}, {sg}sheB[{eslot}], acc[{I}]);")
-        body.append("      }")
-        body_pair.append("      }")
+        blk[k] = body + ["      }"]
+        blk_pair[k] = body_pair + ["      }"]
+
+    # S119 / S121 (sm_120): with all the Cartesian paths in this kernel, one Q, v = Q Y1 and h = Y1 . v per edge and
+    # channel serve them (Y1 = sqrt 3 n, |Y1|^2 = 3, so n h - 2/5 v = (Y1 h - 6/5 v) / (3 sqrt 3) and
+    # v . B'_m n - 2/3 x_m = (v' . B'_m Y1 - 2 x_m) / 3 with v' = Q Y1); their constants and these factors go into the
+    # stores. Other GPUs keep the per-path forms.
+    cart = {p: k for k, p in sel if p in DEG2_CART}
+    if len(cart) < len(DEG2_CART):
+        cart = {}
+    cart_scale = {}
+    if cart:
+        cc = deg2_cart()
+        k0, k1, k3, k22, k02 = (cart[p] for p in DEG2_CART)
+        cart_scale = {k0: cc[DEG2_CART[0]] / 3.0, k1: cc[DEG2_CART[1]] / math.sqrt(3.0),
+                      k3: cc[DEG2_CART[2]] / (3.0 * math.sqrt(3.0)), k22: cc[DEG2_CART[3]] / 3.0,
+                      k02: cc[DEG2_CART[4]]}
+
+    def _cart_fwd(pair):
+        sfx = ("", "B") if pair else ("",)
+        I0, I1, I3, I22, I02 = (acc_of[k] for k in (k0, k1, k3, k22, k02))
+        i3 = lit(INV_SQRT3)
+        ls = [f"      {{ // paths {k0} (2,2,0), {k1} (2,1,1), {k3} (2,3,1), {k22} (2,2,2), {k02} (2,0,2){' pair' if pair else ''} "
+              "as Cartesian forms (S119, S121):",
+              "        // Q = sum_m x2_m B'_m, v = Q Y1, h = Y1 . v, t = Y1 h - 6/5 v, u_m = v . B'_m Y1 - 2 x_m; the paths'",
+              "        // constants are in the stores",
+              "        float " + ", ".join(f"w{k}{s}" for k in (k0, k1, k3, k22, k02) for s in sfx) + ";"]
+        for k in (k0, k1, k3, k22, k02):
+            ls += ["        {"] + _decode_into(k, [(f"w{k}{s}", _w_fwd("pw" + s)) for s in sfx], "          ") + ["        }"]
+        for s in sfx:
+            ls += [f"        const float xc{m}{s} = __ldg(x2 + ((int64_t)snd{s} * 5 + {m}) * C + ch);" for m in range(5)]
+            ls += [f"        const float y1{s} = she{s}[1], y2{s} = she{s}[2], y3{s} = she{s}[3];",
+                   f"        const float qa{s} = xc2{s} * {i3}, qxx{s} = -qa{s} - xc4{s}, "
+                   f"qzz{s} = xc4{s} - qa{s}, qyy{s} = qa{s} + qa{s};",
+                   f"        const float vx{s} = fmaf(qxx{s}, y1{s}, fmaf(xc1{s}, y2{s}, xc0{s} * y3{s}));",
+                   f"        const float vy{s} = fmaf(xc1{s}, y1{s}, fmaf(qyy{s}, y2{s}, xc3{s} * y3{s}));",
+                   f"        const float vz{s} = fmaf(xc0{s}, y1{s}, fmaf(xc3{s}, y2{s}, qzz{s} * y3{s}));",
+                   f"        const float h{s} = fmaf(y1{s}, vx{s}, fmaf(y2{s}, vy{s}, y3{s} * vz{s}));",
+                   f"        acc[{I0}] = fmaf(w{k0}{s}, h{s}, acc[{I0}]);"]
+            ls += [f"        acc[{I1 + m}] = fmaf(w{k1}{s}, v{c}{s}, acc[{I1 + m}]);" for m, c in enumerate("xyz")]
+            ls.append(f"        const float p{s} = w{k3}{s} * h{s}, q{s} = {lit(-1.2)} * w{k3}{s};")
+            ls += [f"        acc[{I3 + m}] = fmaf(p{s}, y{m + 1}{s}, fmaf(q{s}, v{c}{s}, acc[{I3 + m}]));"
+                   for m, c in enumerate("xyz")]
+            u = [f"fmaf(vx{s}, y3{s}, vz{s} * y1{s})", f"fmaf(vx{s}, y2{s}, vy{s} * y1{s})",
+                 f"{i3} * fmaf(vy{s}, y2{s} + y2{s}, -fmaf(vx{s}, y1{s}, vz{s} * y3{s}))",
+                 f"fmaf(vy{s}, y3{s}, vz{s} * y2{s})", f"fmaf(vz{s}, y3{s}, -vx{s} * y1{s})"]
+            ls += [f"        acc[{I22 + m}] = fmaf(w{k22}{s}, fmaf(-2.0f, xc{m}{s}, {u[m]}), acc[{I22 + m}]);"
+                   for m in range(5)]
+            ls += [f"        acc[{I02 + m}] = fmaf(w{k02}{s}, xc{m}{s}, acc[{I02 + m}]);" for m in range(5)]
+        return ls + ["      }"]
+
+    body, body_pair = [], []
+    for k, _ in sel:
+        if k in cart_scale:
+            if k == min(cart_scale):
+                for dst, pair in ((body, False), (body_pair, True)):
+                    dst.append("#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ == 1200")
+                    dst += _cart_fwd(pair)
+                    dst.append("#else")
+                    for c in sorted(cart_scale):
+                        dst += (blk_pair if pair else blk)[c]
+                    dst.append("#endif")
+            continue
+        body += blk[k]
+        body_pair += blk_pair[k]
 
     stores = []
-    acc_off = 0
     for k, (l1, l2, l3) in sel:
         _, j = slot[k]
         n = count[l3]
         for m3 in range(2 * l3 + 1):
-            I = acc_off + m3
+            I = acc_of[k] + m3
+            dst = f"  mid{l3}[((int64_t)rcv * {2 * l3 + 1} + {m3}) * {n} * C + {j} * C + ch] = acc[{I}]"
             sc = acc_scale[I]
             mult = "" if abs(sc - 1.0) < 1e-7 else f" * {lit(sc)}"
-            stores.append(f"  mid{l3}[((int64_t)rcv * {2 * l3 + 1} + {m3}) * {n} * C + {j} * C + ch] = acc[{I}]{mult};")
-        acc_off += 2 * l3 + 1
+            if k in cart_scale:
+                stores += ["#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ == 1200", f"{dst} * {lit(cart_scale[k])};",
+                           "#else", f"{dst}{mult};", "#endif"]
+            else:
+                stores.append(f"{dst}{mult};")
 
     x_args = ", ".join(f"const float* __restrict__ x{l}" for l in range(lx + 1))
     m_args = ", ".join(f"float* __restrict__ mid{l}" for l in range(4))
@@ -657,7 +837,9 @@ def emit_conv_bwd_L2(groups=(0, 1, 2)):
         for m in range(2 * l1 + 1):
             ch_body.append(f"        const float x{l1}_{m} = __ldg(x{l1}_p + ((int64_t)snd * {2 * l1 + 1} + {m}) * C + ch);")
             ch_body.append(f"        float gx{l1}_{m} = 0.0f;")
+        pb = {}
         for k, _, l2, l3 in by_l1[l1]:
+            start = len(ch_body)
             W = o3.wigner_3j(l1, l2, l3, dtype=torch.float64).numpy()
             _, j = slot[k]
             n = count[l3]
@@ -714,6 +896,23 @@ def emit_conv_bwd_L2(groups=(0, 1, 2)):
             ch_body += old
             ch_body.append("#endif")
             ch_body.append("        }")
+            pb[k] = ch_body[start:]
+            del ch_body[start:]
+        # S119 / S121 (sm_120): the Cartesian paths as one block (_cart_bwd); other GPUs keep the per-path blocks
+        cart = {(a, b, c): k for k, a, b, c in by_l1[l1] if (a, b, c) in DEG2_CART}
+        if len(cart) < len(DEG2_CART):
+            cart = {}
+        for k, _, _, _ in by_l1[l1]:
+            if k in cart.values():
+                if k == min(cart.values()):
+                    ch_body.append("#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ == 1200")
+                    ch_body += _cart_bwd(cart, GS, gofs)
+                    ch_body.append("#else")
+                    for c in sorted(cart.values()):
+                        ch_body += pb[c]
+                    ch_body.append("#endif")
+                continue
+            ch_body += pb[k]
         ch_body.append("        if (WANT_DX) {")
         for m in range(2 * l1 + 1):
             ch_body.append(f"          atomicAdd(dx{l1}_p + ((int64_t)snd * {2 * l1 + 1} + {m}) * C + ch, gx{l1}_{m});")
