@@ -703,23 +703,26 @@ __global__ void inv_kernel(int N, int C, int lmax, const float* __restrict__ f0,
     if (emb) x0[(int64_t)a * 2 * C + C + u] = emb[(int64_t)sp[a] * C + u];
 }
 
-// out_l[a][m][u] = x_l[a][m][u] * P[a][u]  (mode "l x 0 -> l")
+// out_l[a][m][u] = x_l[a][m][u] * (P[a][u] + pb[u])  (mode "l x 0 -> l"; pb: the folded update's bias, or nullptr)
 __global__ void bcast_mul_kernel(int64_t n, int C, int d, const float* __restrict__ x, const float* __restrict__ P,
-                                 float* __restrict__ out) {
+                                 const float* __restrict__ pb, float* __restrict__ out) {
     const int64_t i = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= n) return;
     const int64_t a = i / ((int64_t)d * C);
-    out[i] = x[i] * P[a * C + i % C];
+    const int u = (int)(i % C);
+    const float p = pb ? P[a * C + u] + pb[u] : P[a * C + u];
+    out[i] = x[i] * p;
 }
 
-// reverse of bcast_mul and of the inv contraction for one degree: dx += dout * P (bcast), dP[a][u] += sum_m dout x
+// reverse of bcast_mul and of the inv contraction for one degree: dx += dout * (P + pb) (bcast),
+// dP[a][u] += sum_m dout x
 __global__ void bcast_mul_bwd_kernel(int N, int C, int d, const float* __restrict__ x, const float* __restrict__ P,
-                                     const float* __restrict__ dout, float* __restrict__ dx, float* __restrict__ dP,
-                                     int dP_ld) {
+                                     const float* __restrict__ pb, const float* __restrict__ dout,
+                                     float* __restrict__ dx, float* __restrict__ dP, int dP_ld) {
     const int64_t i = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= (int64_t)N * C) return;
     const int a = (int)(i / C), u = (int)(i % C);
-    const float p = P[(int64_t)a * dP_ld + u];
+    const float p = pb ? P[(int64_t)a * dP_ld + u] + pb[u] : P[(int64_t)a * dP_ld + u];
     float acc = 0.0f;
     for (int m = 0; m < d; ++m) {
         const int64_t idx = ((int64_t)a * d + m) * C + u;
@@ -1058,12 +1061,17 @@ struct PolarLR::Impl {
     // linear in their inputs. With `fold` (sm_120 and compute capability 8.0, the GPUs it was measured on;
     // LOUP_POLAR_FOLD=0 disables it, =1 forces it elsewhere) the weights are stored composed with dot^T (`_dot`,
     // fold_dotT_kernel): one C x C product per SCF step and l in each direction instead of two, and none for the
-    // electron energy. Otherwise the unfolded weights and products.
+    // electron energy. Likewise the update MLP's last layer (affine, no activation) feeds only P_l = nl tpo_l^T: with
+    // `fold` it is composed with tpo_l (`tpo_W`, `tpo_b`, S115), so P_l comes from the last hidden layer (H columns)
+    // and nl is never formed. Otherwise the unfolded weights and products.
     bool fold = false;
     struct Update {
         float *Wpot = nullptr, *Wq = nullptr, *Wnf[3] = {}, *dot[3] = {};              // unfolded
         float *Wpot_dot = nullptr, *Wq_dot = nullptr, *Wnf_dot[3] = {};                // folded
-        float *tpo[3] = {}, *emb = nullptr;
+        // P_l for l <= 1 (the readout reads nw_0 and nw_1 only): tpo_l unfolded; folded, tpo_W_l = W tpo_l^T [H, C]
+        // and tpo_b_l = b tpo_l^T [C] from the MLP's last layer (W, b)
+        bool tpo_fold = false;
+        float *tpo[2] = {}, *tpo_W[2] = {}, *tpo_b[2] = {}, *emb = nullptr;
         Mlp mlp;
         float *ro_W1[2] = {}, *ro_Wm0 = nullptr, *ro_bm = nullptr, *ro_Wm1 = nullptr, *ro_W2 = nullptr,
               *ro_b2 = nullptr;
@@ -1071,8 +1079,8 @@ struct PolarLR::Impl {
     };
     struct Step {  // saved forward state of one SCF step
         double* SFq = nullptr;  // the step's charge structure factors (cos [K_cap][8], sin [K_cap][8])
-        float *qin = nullptr, *pot = nullptr, *AB = nullptr, *mixed[3] = {}, *Z[3] = {}, *x0 = nullptr, *P[3] = {},
-              *nw[3] = {}, *s0 = nullptr, *v1 = nullptr, *smid = nullptr, *vmid = nullptr, *out = nullptr,
+        float *qin = nullptr, *pot = nullptr, *AB = nullptr, *mixed[3] = {}, *Z[3] = {}, *x0 = nullptr, *P[2] = {},
+              *nw[2] = {}, *s0 = nullptr, *v1 = nullptr, *smid = nullptr, *vmid = nullptr, *out = nullptr,
               *qnew = nullptr, *gmixed_stat = nullptr;
         std::vector<float*> z, act;  // MLP pre-activations and activations
         float* stat = nullptr;
@@ -1293,11 +1301,21 @@ void PolarLR::load(const Bundle& b, int S, int n_layers) {
                 U.Wnf[l] = P.up(b.f32(p + "Wnf_" + std::to_string(l), {C, C}));
                 U.dot[l] = P.up(dot[l]);
             }
-            U.tpo[l] = P.up(b.f32(p + "tpo_" + std::to_string(l), {C, C}));
         }
         U.emb = P.up(b.f32(p + "src_emb", {S, C}));
         P.load_mlp(b, p + "mlp_", b.meta_int(p + "mlp_n"), U.mlp);
         if (U.mlp.in[0] != 2 * C || U.mlp.out.back() != C) throw std::runtime_error("polar bundle: update MLP shape");
+        U.tpo_fold = P.fold && U.mlp.n >= 2;
+        for (int l = 0; l <= std::min(P.lmax, 1); ++l) {
+            const std::vector<float> tpo = b.f32(p + "tpo_" + std::to_string(l), {C, C});
+            if (U.tpo_fold) {
+                const int k = U.mlp.n - 1, H = U.mlp.in[k];
+                U.tpo_W[l] = P.up_fold(b.f32(p + "mlp_W" + std::to_string(k), {H, C}), H, C, {{0, C, &tpo}});
+                U.tpo_b[l] = P.up_fold(b.f32(p + "mlp_b" + std::to_string(k), {C}), 1, C, {{0, C, &tpo}});
+            } else {
+                U.tpo[l] = P.up(tpo);
+            }
+        }
         if (b.meta_int(p + "ro_H") != 32) throw std::runtime_error("polar bundle: readout width must be 32");
         U.ro_W1[0] = P.up(b.f32(p + "ro_W1_0", {C, 64}));
         if (P.lmax >= 1) U.ro_W1[1] = P.up(b.f32(p + "ro_W1_1", {C, 32}));
@@ -1517,7 +1535,9 @@ void PolarLR::alloc_system(int N) {
         }
     }
     P.dP = P.sys(n * C);
-    P.dnl = P.sys(n * C);
+    P.dnl = std::any_of(P.upd.begin(), P.upd.end(), [](const Impl::Update& U) { return !U.tpo_fold; })
+                ? P.sys(n * C)
+                : nullptr;
     P.dx0 = P.sys(n * 2 * C);
     P.ds0 = P.sys(n * 64);
     P.dv1 = P.sys(n * 96);
@@ -1554,14 +1574,17 @@ void PolarLR::alloc_system(int N) {
         for (int l = 0; l <= P.lmax; ++l) {
             s.Z[l] = P.sys(n * (2 * l + 1) * C);
             if (!P.fold) s.mixed[l] = P.sys(n * (2 * l + 1) * C);
-            s.P[l] = P.sys(n * C);
-            s.nw[l] = P.sys(n * (2 * l + 1) * C);
+            if (l <= 1) {  // the readout reads nw_0 and nw_1 only
+                s.P[l] = P.sys(n * C);
+                s.nw[l] = P.sys(n * (2 * l + 1) * C);
+            }
         }
         s.x0 = P.sys(n * 2 * C);
         s.z.clear();
         s.act.clear();
         for (int k = 0; k < U.mlp.n; ++k) {
-            s.z.push_back(P.sys(n * U.mlp.out[k]));
+            // folded (tpo_fold): the last layer's output nl is never formed
+            s.z.push_back(k < U.mlp.n - 1 || !U.tpo_fold ? P.sys(n * U.mlp.out[k]) : nullptr);
             s.act.push_back(k < U.mlp.n - 1 ? P.sys(n * U.mlp.out[k]) : nullptr);
         }
         s.stat = P.sys(n * 2 * U.mlp.n);
@@ -1625,10 +1648,11 @@ void PolarLR::record(cudaStream_t st, int N, const GemmFn& gemm,
                                                                           nullptr);
         pot_fwd_kernel<<<blocks_for((int64_t)N * 16), 256, 0, st>>>(N, P.fc, P.f16, q, pot);
     };
-    auto mlp_fwd = [&](const Impl::Mlp& m, const float* x, std::vector<float*>& z, std::vector<float*>& act,
+    // the first n_run layers (n_run = m.n - 1: the hidden layers only, the last one folded into the next product)
+    auto mlp_fwd = [&](const Impl::Mlp& m, int n_run, const float* x, std::vector<float*>& z, std::vector<float*>& act,
                        float* stat) {
         const float* in = x;
-        for (int k = 0; k < m.n; ++k) {
+        for (int k = 0; k < n_run; ++k) {
             gemm(false, N, m.out[k], m.in[k], 1.0f, in, m.in[k], m.W[k], m.out[k], 0.0f, z[k], m.out[k]);
             if (k < m.n - 1) {
                 bias_ln_silu_fwd_kernel<<<blocks_for(N, 4), 128, 0, st>>>(N, m.out[k], m.b[k], z[k], m.g[k], m.be[k],
@@ -1640,15 +1664,14 @@ void PolarLR::record(cudaStream_t st, int N, const GemmFn& gemm,
             }
         }
     };
-    // dy: gradient of the last layer's output z[n-1]; returns the gradient of the MLP input in dxout [N, in0]
-    auto mlp_bwd = [&](const Impl::Mlp& m, const float* x, const std::vector<float*>& z, const std::vector<float*>& act,
-                       const float* stat, const float* dy, float* dxout) {
-        (void)x;
-        (void)act;
+    // dz_top: gradient of z[k_top] (the last layer's output for k_top = m.n - 1; the last hidden layer's
+    // pre-activation for k_top = m.n - 2, the last layer folded away); returns the gradient of the MLP input in dxout
+    auto mlp_bwd = [&](const Impl::Mlp& m, int k_top, const std::vector<float*>& z, const float* stat,
+                       const float* dz_top, float* dxout) {
         // dz: gradient of layer k's output (pre-activation for k < n - 1). Each GEMM writes the scratch buffer that
         // does not hold its input; the LayerNorm-SiLU reverse then runs in place on it.
-        const float* dz = dy;
-        for (int k = m.n - 1; k >= 0; --k) {
+        const float* dz = dz_top;
+        for (int k = k_top; k >= 0; --k) {
             float* dst = k > 0 ? (dz == P.mlp_d1 ? P.mlp_d2 : P.mlp_d1) : dxout;
             gemm(true, N, m.in[k], m.out[k], 1.0f, dz, m.out[k], m.W[k], m.out[k], 0.0f, dst, m.in[k]);
             if (k > 0) {
@@ -1687,17 +1710,30 @@ void PolarLR::record(cudaStream_t st, int N, const GemmFn& gemm,
         if (lm > 0) join();
         inv_kernel<<<blocks_for((int64_t)N * C), 256, 0, st>>>(N, C, lm, P.fm[0], P.fm[1], P.fm[2], s.Z[0], s.Z[1],
                                                                 s.Z[2], U.emb, species, s.x0);
-        mlp_fwd(U.mlp, s.x0, s.z, s.act, s.stat);
-        const float* nl = s.z.back();
-        if (lm > 0) fork();
-        for (int l = 0; l <= lm; ++l) {
-            if (lm > 0) lane(l);
-            gemm(true, N, C, C, 1.0f, nl, C, U.tpo[l], C, 0.0f, s.P[l], C);
+        // P_l = nl tpo_l^T for l <= 1 (the readout reads nw_0 and nw_1 only), nl the MLP's output
+        const int lp = std::min(lm, 1);
+        if (U.tpo_fold) {  // P_l = h tpo_W_l (+ tpo_b_l, in bcast_mul), h the last hidden layer's activation
+            mlp_fwd(U.mlp, U.mlp.n - 1, s.x0, s.z, s.act, s.stat);
+            const int k = U.mlp.n - 2, H = U.mlp.out[k];
+            if (lp > 0) fork();
+            for (int l = 0; l <= lp; ++l) {
+                if (lp > 0) lane(l);
+                gemm(false, N, C, H, 1.0f, s.act[k], H, U.tpo_W[l], C, 0.0f, s.P[l], C);
+            }
+            if (lp > 0) join();
+        } else {
+            mlp_fwd(U.mlp, U.mlp.n, s.x0, s.z, s.act, s.stat);
+            const float* nl = s.z.back();
+            if (lp > 0) fork();
+            for (int l = 0; l <= lp; ++l) {
+                if (lp > 0) lane(l);
+                gemm(true, N, C, C, 1.0f, nl, C, U.tpo[l], C, 0.0f, s.P[l], C);
+            }
+            if (lp > 0) join();
         }
-        if (lm > 0) join();
-        for (int l = 0; l <= lm; ++l)
-            bcast_mul_kernel<<<blocks_for((int64_t)N * dimL(l) * C), 256, 0, st>>>((int64_t)N * dimL(l) * C, C,
-                                                                                  dimL(l), P.fm[l], s.P[l], s.nw[l]);
+        for (int l = 0; l <= lp; ++l)
+            bcast_mul_kernel<<<blocks_for((int64_t)N * dimL(l) * C), 256, 0, st>>>(
+                (int64_t)N * dimL(l) * C, C, dimL(l), P.fm[l], s.P[l], U.tpo_fold ? U.tpo_b[l] : nullptr, s.nw[l]);
         if (lm >= 1) fork();
         if (lm >= 1) lane(0);
         gemm(false, N, 64, C, 1.0f, s.nw[0], C, U.ro_W1[0], 64, 0.0f, s.s0, 64);
@@ -1759,7 +1795,7 @@ void PolarLR::record(cudaStream_t st, int N, const GemmFn& gemm,
         inv_kernel<<<blocks_for((int64_t)N * C), 256, 0, st>>>(N, C, lm, hL[0], lm >= 1 ? hL[1] : nullptr,
                                                                 lm >= 2 ? hL[2] : nullptr, P.Zv[0], P.Zv[1], P.Zv[2],
                                                                 nullptr, species, P.lex0 + C);
-        mlp_fwd(P.le_mlp, P.lex0, P.le_z, P.le_act, P.le_stat);
+        mlp_fwd(P.le_mlp, P.le_mlp.n, P.lex0, P.le_z, P.le_act, P.le_stat);
         sum_rows_kernel<<<blocks_for(N), 256, 0, st>>>(N, P.le_z.back(), energy);
     }
     // ---------------- Coulomb energy
@@ -1784,7 +1820,7 @@ void PolarLR::record(cudaStream_t st, int N, const GemmFn& gemm,
     // local electron energy backward
     if (P.add_le) {
         fill_kernel<<<blocks_for(N), 256, 0, st>>>(N, 1.0f, P.dout);  // dE/de per atom (the MLP's single output)
-        mlp_bwd(P.le_mlp, P.lex0, P.le_z, P.le_act, P.le_stat, P.dout, P.dx0);
+        mlp_bwd(P.le_mlp, P.le_mlp.n - 1, P.le_z, P.le_stat, P.dout, P.dx0);
         for (int l = 0; l <= lm; ++l) {
             // lex0 = [sum_m hL . Zq, sum_m hL . Zv]: dhL += dZ-weighted, dZq = dlex . hL
             inv_bwd_kernel<<<blocks_for((int64_t)N * dimL(l) * C), 256, 0, st>>>(
@@ -1829,13 +1865,25 @@ void PolarLR::record(cudaStream_t st, int N, const GemmFn& gemm,
             gemm(true, N * 3, C, 32, 1.0f, P.dv1, 32, U.ro_W1[1], 32, 0.0f, P.dnw[1], C);
             join();
         }
-        // nw_l = fm_l * P_l (ro_W1 only feeds l = 0, 1, so dnw[2] is zero and contributes nothing)
+        // nw_l = fm_l * P_l (ro_W1 only feeds l = 0, 1). Folded, dP_l tpo_W_l^T is the gradient of the last hidden
+        // layer's activation (accumulated over l in mlp_d1), whose LayerNorm-SiLU reverse starts the MLP reverse.
+        float* dhid = P.mlp_d1;
+        const int kh = U.mlp.n - 2, Hh = U.tpo_fold ? U.mlp.out[kh] : 0;
         for (int l = 0; l <= std::min(lm, 1); ++l) {
-            bcast_mul_bwd_kernel<<<blocks_for((int64_t)N * C), 256, 0, st>>>(N, C, dimL(l), P.fm[l], s.P[l],
-                                                                             P.dnw[l], P.dfm[l], P.dP, C);
-            gemm(false, N, C, C, 1.0f, P.dP, C, U.tpo[l], C, l == 0 ? 0.0f : 1.0f, P.dnl, C);
+            bcast_mul_bwd_kernel<<<blocks_for((int64_t)N * C), 256, 0, st>>>(
+                N, C, dimL(l), P.fm[l], s.P[l], U.tpo_fold ? U.tpo_b[l] : nullptr, P.dnw[l], P.dfm[l], P.dP, C);
+            if (U.tpo_fold)
+                gemm(true, N, Hh, C, 1.0f, P.dP, C, U.tpo_W[l], C, l == 0 ? 0.0f : 1.0f, dhid, Hh);
+            else
+                gemm(false, N, C, C, 1.0f, P.dP, C, U.tpo[l], C, l == 0 ? 0.0f : 1.0f, P.dnl, C);
         }
-        mlp_bwd(U.mlp, s.x0, s.z, s.act, s.stat, P.dnl, P.dx0);
+        if (U.tpo_fold) {
+            ln_silu_bwd_kernel<<<blocks_for(N, 4), 128, 0, st>>>(N, Hh, s.z[kh], U.mlp.g[kh], U.mlp.be[kh],
+                                                                 s.stat + (size_t)2 * N * kh, dhid, dhid);
+            mlp_bwd(U.mlp, kh, s.z, s.stat, dhid, P.dx0);
+        } else {
+            mlp_bwd(U.mlp, U.mlp.n - 1, s.z, s.stat, P.dnl, P.dx0);
+        }
         // inv = sum fm . Z
         for (int l = 0; l <= lm; ++l)
             inv_bwd_kernel<<<blocks_for((int64_t)N * dimL(l) * C), 256, 0, st>>>(
