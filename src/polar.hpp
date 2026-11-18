@@ -28,6 +28,7 @@ public:
     bool set_cell(const double* cell);
     void alloc_system(int N);
     void free_system();
+    size_t system_bytes() const;  // device bytes of the system's buffers
     // h[t][l] / dh[t][l]: layer t's node features [N, 2l+1, C] and their gradient accumulators
     void record(cudaStream_t st, int N, const GemmFn& gemm,
                 const std::function<void()>& fork, const std::function<void(int)>& lane,

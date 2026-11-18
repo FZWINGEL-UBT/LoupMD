@@ -1533,6 +1533,7 @@ void GenericModel::setup_chain_fold(const Bundle& b) {
         for (int l = 0; l < 3; ++l) layers_[t]->fold[l] = std::move(out[t][l]);
     chain_fold_ = chain_fold_built_ = true;
 }
+size_t GenericModel::system_bytes() const { return sys_bytes_ + (lr_ ? lr_->system_bytes() : 0); }
 float* GenericModel::layer_out(int t, int l) const { return layers_[t]->hout[l]; }
 float* GenericModel::layer_out_grad(int t, int l) const { return layers_[t]->dhout[l]; }
 int GenericModel::out_width(int t) const { return layers_[t]->C_out; }

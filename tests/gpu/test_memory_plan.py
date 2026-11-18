@@ -135,3 +135,31 @@ def test_the_tiled_plan_is_the_calls_device_peak(fraction):
           f"{ex.peak_bytes / 1e6:.0f} MB of {ex.budget_bytes / 1e6:.0f} MB")
     assert abs(predicted - ex.peak_bytes) < 0.06 * ex.peak_bytes, (predicted, ex.peak_bytes)
     assert ex.peak_bytes <= (fraction + 0.02) * ex.budget_bytes
+
+
+def test_prediction_for_a_long_range_model():
+    """The long-range part's buffers count too (per-atom charges, potentials and features per SCF step, and the
+    k-space arrays, which grow with the cell): MACE-POLAR-1-S, NaCl 8,000 atoms from a 216-atom cell, within 5% of
+    the measured memory (18 November 2026: 1.1% above; 23% below before they were counted)."""
+    from ase.build import bulk
+
+    def cell_of(rep):
+        at = bulk("NaCl", "rocksalt", a=5.64, cubic=True).repeat((rep, rep, rep))
+        at.positions += np.random.default_rng(1).normal(scale=0.04, size=at.positions.shape)
+        return at
+
+    bundle = ensure_loup_bundle(find_model("MACE-POLAR-1-S.model"), [11, 17])
+    small, large = cell_of(3), cell_of(10)
+    probe = LoupEngine(bundle)
+    probe.set_system(small.numbers, small.get_masses(), skin=0.5)
+    probe.evaluate(small.positions, small.cell.array)
+    predicted = probe.plan_memory(len(large))
+    eng = LoupEngine(bundle)
+    before = probe.plan_memory(1).free_bytes
+    eng.set_system(large.numbers, large.get_masses(), skin=0.5)
+    eng.evaluate(large.positions, large.cell.array)
+    measured = before - probe.plan_memory(1).free_bytes
+    del eng
+    print(f"memory plan POLAR-1-S 8,000 atoms: predicted {predicted.whole_bytes / 1e6:.1f} MB, measured "
+          f"{measured / 1e6:.1f} MB")
+    assert abs(predicted.whole_bytes - measured) < 0.05 * measured, (predicted.whole_bytes, measured)

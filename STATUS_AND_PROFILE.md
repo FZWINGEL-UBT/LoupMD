@@ -2209,11 +2209,14 @@ scaled plan):
 | MH-1 | 5,000 / 20,480 | 2.525 / 9.975 | 0.987 / 1.004 | 0.994 / 1.005 |
 | OMOL-0 extra large (water) | 648 / 5,184 | 1.250 / 8.619 | 0.891 / 0.981 | 0.961 / 0.991 |
 | OFF23 medium (water) | 5,184 / 41,472 | 0.480 / 3.531 | 1.040 / 1.003 | 1.043 / 1.003 |
-| POLAR-1-S (NaCl) | 1,728 / 21,952 | 0.583 / 6.577 | none | 0.763 / 0.773 |
+| POLAR-1-S (NaCl) | 1,728 / 8,000 / 21,952 | 0.578 / 2.441 / 6.582 | none | 1.029 / 1.011 / 1.008 |
+| POLAR-1-M (NaCl) | 1,728 / 8,000 | 1.281 / 5.383 | none | 0.965 / 0.996 |
+| POLAR-1-L (NaCl) | 1,728 | 2.348 | none | 0.949 |
 
 Before: the capacity plan 1.03-1.06 at the larger sizes, the scaled plan 0.988-1.003 there and 0.94-0.98 at the
-small ones. Open: the long-range models. Their k-space and charge buffers (`src/polar.cu`) are not counted, so the
-scaled plan is 23% low, and `loup_plan_execution` gives them no whole-system count at all. A first call takes more
+small ones. The long-range models' k-space and charge buffers (`src/polar.cu`) were not counted at all: the scaled
+plan was 23% low (0.763 / 0.773 for POLAR-1-S) and counts them now (`PolarLR::system_bytes`). Open: for these
+models `loup_plan_execution` gives no whole-system count (they have no probe tile). A first call takes more
 for a moment than the system keeps: the GEMM timing writes into a scratch copy of each output (121,945 atoms of
 OMAT-0 medium: 0.9 GiB above the 11.2 GiB kept). The plan's "fits whole" check now leaves room for the model's
 largest buffer and the cache-flush buffer.
@@ -2255,4 +2258,8 @@ the free memory the plan counts (`LOUP_DEBUG_PLAN_FREE`), since the true figure 
 
 All tiers on the library with these changes (sha256 `e021051e`): `tests/cpu` 490 passed, 5 skipped; `tests/gpu -m
 fast` 359 passed, 7 skipped; `-m full` 48 passed; `-m acceptance` 15 passed, 1 skipped (422 passed, 8 skipped: the
-NbCl5 structure).
+NbCl5 structure). With the long-range models' buffers counted (library `8c82bc7e`, the release verification of
+`docs/validation/release-0.1.0.md`): fast 360, full 48, acceptance 15 passed; the gate per label 37 passed (20
+whole, 17 tiled); `loupmd bench` standard, the library of 97e365d against this one, a b b a twice: `NbCl5` 3x3x3
+1.863 / 1.857 / 1.866 / 1.864 -> 1.724 / 1.726 / 1.728 / 1.729 ms/step (0.927), `SrTiO3` 10x10x10 8.069 / 8.096 /
+8.118 / 8.128 -> 7.780 / 7.778 / 7.789 / 7.810 (0.961): what the merged kernels give the whole-system MD step.

@@ -1128,9 +1128,11 @@ struct PolarLR::Impl {
         w_.push_back(d);
         return d;
     }
+    size_t sys_bytes = 0;  // the per-system buffers of sys() (PolarLR::system_bytes)
     float* sys(size_t n) {
         float* d = nullptr;
         CUDA_CHECK_THROW(cudaMalloc(&d, std::max<size_t>(n, 1) * sizeof(float)));
+        sys_bytes += std::max<size_t>(n, 1) * sizeof(float);
         s_.push_back(d);
         return d;
     }
@@ -1455,10 +1457,21 @@ bool PolarLR::set_cell(const double* c) {
     return true;
 }
 
+// Device bytes of the system's long-range buffers, for the memory plans: the per-atom ones (charges, potentials,
+// features and their gradients, one set per SCF step), the zero slab, and the k-space ones, whose length follows the
+// cell (a larger cell of the same density has as many k-vectors more as atoms).
+size_t PolarLR::system_bytes() const {
+    const Impl& P = *p_;
+    const size_t per_k = (size_t)KI * sizeof(float) + 2 * 16 * sizeof(double) + 16 * sizeof(float) +
+                         P.steps.size() * (32 * sizeof(float) + 16 * sizeof(double));
+    return P.sys_bytes + P.bwd_zero_bytes + (size_t)P.K_cap * per_k;
+}
+
 void PolarLR::free_system() {
     Impl& P = *p_;
     for (void* q : P.s_) cudaFree(q);
     P.s_.clear();
+    P.sys_bytes = 0;
     if (P.bwd_zero_slab) cudaFree(P.bwd_zero_slab);
     P.bwd_zero_slab = nullptr;
     P.bwd_zero_bytes = 0;

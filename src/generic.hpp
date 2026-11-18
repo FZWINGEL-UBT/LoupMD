@@ -91,9 +91,9 @@ public:
     const std::vector<int>& atomic_numbers() const { return Z_; }
     const std::vector<double>& e0() const { return e0_; }
     int n_layers() const { return n_layers_; }
-    // Bytes of the per-system buffers (alloc_system) and of the edge buffers (ensure_edges), for loup_plan_memory.
-    // The long-range part's buffers (polar.cu) are not counted.
-    size_t system_bytes() const { return sys_bytes_; }
+    // Bytes of the per-system buffers (alloc_system) and of the edge buffers (ensure_edges), for loup_plan_memory,
+    // the long-range part's (polar.cu) included.
+    size_t system_bytes() const;
     // The same with every layer's buffers its own: what a whole system of as many rows allocates where this one
     // shares them (share_layer_buffers); equal to system_bytes() otherwise.
     size_t system_bytes_unshared() const { return sys_bytes_unshared_; }
