@@ -57,7 +57,9 @@ and Python reference, and "Coming from FastMACE". Its sources are in `docs/` of 
 
 ## Licence
 
-LoupMD is MIT-licensed (`LICENSE`). The tensor-core GEMM kernels compiled from CUTLASS headers are BSD-3-Clause,
-and the modules ported from ASE are LGPL-2.1-or-later; `NOTICE.md` lists every file of each, the origins of the
-data, and the licences of the run-time dependencies. Each MACE model keeps its own licence, which `loupmd models`
-prints.
+LoupMD's own code is MIT-licensed (`LICENSE`). The code that follows ASE is LGPL-2.1-or-later, as ASE is: the
+optimisers, and in the engine the thermostats, the barostats and the minimiser. The compiled engine library
+(`libloupmd.so`) contains them and is distributed under LGPL-2.1-or-later as a whole; its source is the repository
+at the release's tag. The tensor-core GEMM kernels compiled from CUTLASS headers are BSD-3-Clause. `NOTICE.md`
+lists every file of each, the origins of the data, and the licences of the run-time dependencies. Each MACE model
+keeps its own licence, which `loupmd models` prints.

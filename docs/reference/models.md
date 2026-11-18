@@ -43,7 +43,8 @@ Licences (`LICENCE_TEXT`):
 | ASL | Academic Software License (non-commercial use only), https://github.com/gabor1/ASL |
 | MIT | MIT License |
 
-LoupMD itself is MIT-licensed. The run report names the model's licence.
+LoupMD's own code is MIT-licensed. Its engine library holds the integrators that follow ASE and is
+LGPL-2.1-or-later, as ASE is (`NOTICE.md` in the repository). The run report names the model's licence.
 
 ### Elements
 

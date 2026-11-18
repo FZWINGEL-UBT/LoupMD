@@ -214,6 +214,11 @@ class TiledEngine:
         v, x = self._vel, self._pos
         if fix_com and it.kind == _core.LOUP_NVE:
             v -= (self._masses[:, None] * v).sum(axis=0) / total_mass
+        # SPDX-SnippetBegin
+        # SPDX-License-Identifier: LGPL-2.1-or-later
+        # Provenance: the Langevin and velocity-Verlet steps, up to the end marker, follow ASE 3.27's
+        # ase/md/langevin.py and ase/md/verlet.py (LGPL-2.1-or-later, (c) the ASE developers,
+        # https://gitlab.com/ase/ase); see NOTICE.md.
         langevin = it.kind == _core.LOUP_LANGEVIN
         if langevin:
             fr = it.friction_per_fs / units.fs
@@ -256,6 +261,7 @@ class TiledEngine:
                 x += step
                 e, f, _ = self._force_call(stress=False)
                 v += 0.5 * dt * f * inv_m
+            # SPDX-SnippetEnd
             largest = max(largest, float(np.sqrt((step * step).sum(axis=1).max())))
             self._md_steps += 1
             if it.thermo_every and self._md_steps % it.thermo_every == 0:

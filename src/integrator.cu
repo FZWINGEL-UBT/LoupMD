@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: LGPL-2.1-or-later
+// Provenance: the integrators of this file follow the molecular-dynamics classes of ASE 3.27 (ase/md/verlet.py,
+// langevin.py, bussi.py, nose_hoover_chain.py, nvtberendsen.py, langevinbaoab.py; LGPL-2.1-or-later, (c) the ASE
+// developers, https://gitlab.com/ase/ase) in their coefficients and their order of operations; see NOTICE.md.
 #include <cuda_runtime.h>
 #include <curand_kernel.h>
 #include <cmath>

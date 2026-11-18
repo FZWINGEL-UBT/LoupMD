@@ -186,7 +186,8 @@ def _speed_line(metadata) -> str:
 
 def _licence_line(model) -> str:
     text = models.LICENCE_TEXT.get(model["licence"])
-    return (f"model: {text}" if text else "model: not in the label table, see its publisher") + "; LoupMD: MIT"
+    return ((f"model: {text}" if text else "model: not in the label table, see its publisher")
+            + "; LoupMD: MIT, its engine library LGPL-2.1-or-later")
 
 
 def _block(title, lines) -> list:

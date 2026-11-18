@@ -55,12 +55,35 @@ def test_licence_and_the_files_that_ship(project):
     # Every file that says it is LGPL is listed in NOTICE.md, and NOTICE.md lists no other.
     import re
 
-    lgpl = sorted(str(p.relative_to(ROOT)).replace("\\", "/") for p in (ROOT / "loupmd").rglob("*.py")
-                  if p.read_text().startswith("# SPDX-License-Identifier: LGPL-2.1-or-later"))
-    notice = (ROOT / "NOTICE.md").read_text()
-    section = notice[notice.index("## Modules ported from ASE"):]
-    section = section[:section.index("\n## ", 5)] if "\n## " in section[5:] else section
-    assert lgpl == sorted(re.findall(r"^\| `(loupmd/[^`]+)` \|", section, flags=re.M)) and lgpl
+    def tracked_sources():
+        yield from (ROOT / "loupmd").rglob("*.py")
+        for pattern in ("*.cu", "*.cuh", "*.hpp", "*.h"):
+            yield from (ROOT / "src").rglob(pattern)
+
+    def relative(path):
+        return str(path.relative_to(ROOT)).replace("\\", "/")
+
+    def rows(heading):
+        section = notice[notice.index(heading):]
+        section = section[:section.index("\n## ", 5)] if "\n## " in section[5:] else section
+        return sorted(re.findall(r"^\| `((?:loupmd|src)/[^`]+)` \|", section, flags=re.M))
+
+    notice = (ROOT / "NOTICE.md").read_text(encoding="utf-8")
+    texts = {relative(p): p.read_text(encoding="utf-8") for p in tracked_sources()}
+    lgpl = sorted(name for name, text in texts.items()
+                  if text.startswith(("# SPDX-License-Identifier: LGPL-2.1-or-later",
+                                      "// SPDX-License-Identifier: LGPL-2.1-or-later")))
+    assert lgpl == rows("## Modules ported from ASE") and lgpl
+    # The engine's integrators and its minimiser follow ASE and carry its licence (owner decision O35).
+    assert {"src/integrator.cu", "src/cell.cu", "src/minimize.cu"} <= set(lgpl)
+    # A block under LGPL inside an MIT file is marked at both ends, and NOTICE.md names the file.
+    blocks = sorted(name for name, text in texts.items() if "SPDX-SnippetBegin" in text)
+    assert blocks == rows("## Blocks that follow ASE inside MIT files") and blocks
+    for name in blocks:
+        text = texts[name]
+        assert text.count("SPDX-SnippetBegin") == text.count("SPDX-SnippetEnd") == 1
+        block = text[text.index("SPDX-SnippetBegin"):text.index("SPDX-SnippetEnd")]
+        assert "SPDX-License-Identifier: LGPL-2.1-or-later" in block
     data = project["tool"]["setuptools"]["package-data"]["loupmd"]
     assert {"_lib/*.so", "_lib/cubins/*", "bench/reference.json", "bench/structures/*"} <= set(data)
     assert (ROOT / "loupmd" / "bench" / "reference.json").is_file()

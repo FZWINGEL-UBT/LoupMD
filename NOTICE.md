@@ -1,7 +1,9 @@
 # Third-party notices
 
-LoupMD is distributed under the MIT licence (`LICENSE`); files ported from ASE will carry LGPL-2.1-or-later
-(owner decision O6 of 15 November 2026, `PLAN.md` §1.1). The files below are binaries or generated sources; each
+LoupMD is distributed under the MIT licence (`LICENSE`), with two exceptions this file lists. The code that
+follows ASE is under LGPL-2.1-or-later (owner decisions O6 of 15 November 2026 and O35 of 18 November 2026,
+`PLAN.md` §1.1), and because the engine's integrators are part of it, the compiled library `libloupmd.so` is
+distributed under LGPL-2.1-or-later as a whole. The compiled GEMM kernels are BSD-3-Clause. The files below are binaries or generated sources; each
 is listed with what it was made from. `tests/test_notice.py` checks that every tracked binary and generated file
 appears here.
 
@@ -80,21 +82,39 @@ in the table and is shown by `loupmd models`.
 
 ## Modules ported from ASE (LGPL-2.1-or-later)
 
-By owner decision O6 (15 November 2026) the modules below, which port classes of ASE 3.27 (LGPL-2.1-or-later,
-© the ASE developers, <https://gitlab.com/ase/ase>) so that they agree with ASE to rounding, are distributed
-under **LGPL-2.1-or-later**, not MIT. Each starts with `# SPDX-License-Identifier: LGPL-2.1-or-later` and a
-provenance line. The licence text is `LICENSES/LGPL-2.1-or-later.txt`. They are plain Python source.
+By owner decisions O6 (15 November 2026) and O35 (18 November 2026) the files below, which port or follow classes
+of ASE 3.27 (LGPL-2.1-or-later, © the ASE developers, <https://gitlab.com/ase/ase>) so that they agree with ASE to
+rounding, are distributed under **LGPL-2.1-or-later**, not MIT. Each starts with an
+`SPDX-License-Identifier: LGPL-2.1-or-later` line and a provenance line. The licence text is
+`LICENSES/LGPL-2.1-or-later.txt`.
 
 | LGPL file | Ported from (ASE 3.27) |
 | --- | --- |
 | `loupmd/optimize/lbfgs.py` | `ase/optimize/lbfgs.py` (`LBFGS` without line search) |
 | `loupmd/optimize/fire.py` | `ase/optimize/fire.py` (`FIRE` without the downhill check) |
 | `loupmd/optimize/cell.py` | `ase/filters.py` (`UnitCellFilter`'s cell mapping and `FrechetCellFilter`) |
+| `src/integrator.cu` | the thermostats and barostats of `ase/md`, as CUDA kernels; the section "Integrators that follow ASE's conventions" lists each |
+| `src/cell.cu` | `ase/md/nptberendsen.py` (the Berendsen barostat; the file's other kernels are the engine's variable cell) |
+| `src/minimize.cu` | `ase/optimize/lbfgs.py`: the device part of `loupmd/optimize/lbfgs.py` |
 
-The records of `loupmd/optimize/__init__.py` and `loupmd/integrators.py` take ASE's argument names and defaults
-(an interface, not ported code) and are MIT. The Langevin and velocity-Verlet steps of `src/integrator.cu`
-implement the published algorithms with ASE's coefficient conventions; they were written for the engine and are
-MIT.
+The records of `loupmd/optimize/__init__.py` and `loupmd/integrators.py` and the classes of `loupmd/ase/` take
+ASE's argument names and defaults (an interface, not ported code) and are MIT.
+
+**The compiled library.** `libloupmd.so` (in the wheel: `loupmd/_lib/libloupmd.so`) is linked from these kernels
+and the rest of the engine, and is distributed under LGPL-2.1-or-later as a whole; the other source files it is
+built from stay MIT. The complete source of a release's library is this repository at the tag of that version
+(`v<version>`, <https://github.com/FZWINGEL-UBT/LoupMD>), and `tools/release/` holds the build. The package loads
+the library at run time; `LOUP_LIB` names another build to load in its place.
+
+## Blocks that follow ASE inside MIT files (LGPL-2.1-or-later)
+
+Two blocks follow the same ASE classes inside files that are otherwise MIT. Each lies between an
+`SPDX-SnippetBegin` and an `SPDX-SnippetEnd` comment and is under LGPL-2.1-or-later (O35).
+
+| File | Block | Follows (ASE 3.27) |
+| --- | --- | --- |
+| `src/engine.cu` | the integrators' coefficients and masses in the set-up of an MD call | the classes of `ase/md` named in "Integrators that follow ASE's conventions" |
+| `loupmd/tiled_engine.py` | the Langevin and velocity-Verlet steps of the tiled mode's host loop | `ase/md/langevin.py`, `ase/md/verlet.py` |
 
 ## Structure files
 
@@ -120,9 +140,9 @@ bake-off, never copied or linked.
 The thermostats and barostats below are CUDA kernels written for the engine. Each implements a published algorithm
 and follows ASE 3.27's class of the same name in its argument meanings, its coefficients and its order of
 operations, so that a LoupMD run agrees with ASE's to rounding (the tests compare them). No ASE source file was
-copied; the comments name the ASE class each one follows. They are distributed under MIT with the rest of the
-engine. Whether following ASE's order of operations makes them derived works of ASE (as decision O6 found for
-the optimisers, which port ASE's Python classes) is open for the owner (PLAN.md D81).
+copied; the comments name the ASE class each one follows. Because they were written from ASE's implementation,
+the owner decided on 18 November 2026 (O35, `PLAN.md` D81) to distribute them under ASE's licence,
+LGPL-2.1-or-later, as decision O6 did for the optimisers. The commits before that decision marked them MIT.
 
 | Kernel section | Algorithm | Follows (ASE 3.27) |
 | --- | --- | --- |

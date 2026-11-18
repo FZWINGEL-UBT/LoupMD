@@ -9,7 +9,8 @@ description = "Molecular dynamics with MACE potentials on a C++/CUDA engine"
 readme = "README.md"
 requires-python = ">=3.10"
 # MIT for LoupMD; BSD-3-Clause for the tensor-core GEMM kernels compiled from CUTLASS headers; LGPL-2.1-or-later
-# for the modules ported from ASE (PLAN.md decision O6). NOTICE.md lists the files of each.
+# for the code that follows ASE: the optimiser modules (PLAN.md decision O6) and the engine's integrator and
+# minimiser kernels, and with them the compiled library as a whole (O35). NOTICE.md lists the files of each.
 license = "MIT AND BSD-3-Clause AND LGPL-2.1-or-later"
 license-files = ["LICENSE", "NOTICE.md", "cubins/LICENSE.cutlass", "LICENSES/LGPL-2.1-or-later.txt"]
 authors = [{ name = "Fabian Zwingel" }]

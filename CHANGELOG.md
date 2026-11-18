@@ -20,3 +20,6 @@ The first public release of LoupMD (`PLAN.md` Stages 0 to 7).
 - The accuracy gate against PyTorch MACE in float64, and `loupmd validate`.
 - An ASE calculator and drop-in ASE MD and optimiser classes.
 - Documentation site, examples, and "Coming from FastMACE".
+- Licences: MIT for LoupMD's own code; LGPL-2.1-or-later, as ASE, for the code that follows ASE (the optimisers,
+  and the engine's thermostats, barostats and minimiser), so the compiled engine library is LGPL-2.1-or-later as a
+  whole; BSD-3-Clause for the tensor-core GEMM kernels (`NOTICE.md`).

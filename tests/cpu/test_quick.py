@@ -119,7 +119,8 @@ def test_one_call_runs_writes_and_reports(ff, atoms, tmp_path):
                  "Physics", "NVT, Langevin, timestep 1 fs, friction 0.001965/fs, 300 K",
                  "40 steps (0.04 ps) to step 40, seed 3", "Plan", "the whole system on", "Gate",
                  'skipped (check="skip")', "Setup", "Speed", "ms/step with output", "ns/day", "million atom-steps/s",
-                 "Licence", "model: not in the label table", "LoupMD: MIT", "Warnings", "Output",
+                 "Licence", "model: not in the label table",
+                 "LoupMD: MIT, its engine library LGPL-2.1-or-later", "Warnings", "Output",
                  "thermo.*.csv every 20 steps, trajectory.*.traj every 20"):
         assert line in text, line
     assert len(text.splitlines()) <= 30                               # one screen

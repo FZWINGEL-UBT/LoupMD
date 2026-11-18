@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: LGPL-2.1-or-later
+// Provenance: LBFGS as ASE 3.27's ase/optimize/lbfgs.py does it (LGPL-2.1-or-later, (c) the ASE developers,
+// https://gitlab.com/ase/ase), through loupmd/optimize/lbfgs.py; see NOTICE.md.
 // Structure relaxation on the device (loup_minimize): the kernels of LBFGS as ASE 3.27 does it, in the matrix form
 // of loupmd/optimize/lbfgs.py. The optimiser's vectors live on the device in the engine's atom order; the host
 // solves the two small triangular systems of the history (at most `memory` unknowns) and decides convergence.

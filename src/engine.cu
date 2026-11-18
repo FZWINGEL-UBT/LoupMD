@@ -3427,6 +3427,10 @@ static int run_md_loop(
     h->forces_current = false;  // until this call completes: a failure below leaves positions ahead of the forces
     ++h->pos_epoch;
 
+    // SPDX-SnippetBegin
+    // SPDX-License-Identifier: LGPL-2.1-or-later
+    // Provenance: the integrators' coefficients and masses, up to the end marker, follow ASE 3.27's ase/md classes
+    // (LGPL-2.1-or-later, (c) the ASE developers, https://gitlab.com/ase/ase); see NOTICE.md.
     // ASE's Langevin coefficients. c3, c4, c5 carry sigma = sqrt(2 gamma kB T), which the first half-kick forms from
     // the target on the device; here are their factors of sigma.
     double c1 = 0, c2 = 0, a3 = 0, a4 = 0, a5 = 0, two_fr_kb = 0;
@@ -3527,6 +3531,7 @@ static int run_md_loop(
         }
         CUDA_CHECK(cudaMemsetAsync(h->d_int_work, 0, kIntWorkSlots * sizeof(double), h->stream));
     }
+    // SPDX-SnippetEnd
 
     // fix_com: the buffers of the two-pass noise, and for NVE the total momentum removed once (the forces of a
     // periodic system sum to zero to rounding, so it stays removed).

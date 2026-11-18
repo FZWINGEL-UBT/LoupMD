@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: LGPL-2.1-or-later
+// Provenance: the Berendsen barostat of this file follows ASE 3.27's ase/md/nptberendsen.py (NPTBerendsen and
+// Inhomogeneous_NPTBerendsen; LGPL-2.1-or-later, (c) the ASE developers, https://gitlab.com/ase/ase); see NOTICE.md.
 // The variable cell's kernels (cell.hpp).
 #include "cell.hpp"
 
