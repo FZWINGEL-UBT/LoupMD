@@ -1,0 +1,39 @@
+Time (%),Total Time (ns),Instances,Avg (ns),Med (ns),Min (ns),Max (ns),StdDev (ns),Name
+26.8,68879889,65,1059690.6,1045154.0,1034788,1333257,55336.0,"void gconv_bwd_L1s<(bool)1, (int)128, (bool)1>(int, int, int, int, SplineGrid, int, int, const int *, const int *, const float4 *, const int *, const float2 *, const int *, const uint2 *, const float4 *, unsigned int, const float *, const float *, const float *, const float *, const float *, const float *, const float *, float *, float *, float *, int)"
+16.4,42260922,65,650168.0,638791.0,622761,1038435,68293.5,"void gconv_fwd_L1s<(int)5, (bool)0, (int)640, (bool)1, (int)128>(int, int, int, int, SplineGrid, int, int, const int *, const int *, const float4 *, const int *, const float2 *, const int *, const uint2 *, const float4 *, unsigned int, const float *, const float *, float *, float *, float *, float *, float *, float *, float *)"
+11.3,28983140,390,74315.7,61275.0,11806,546031,55433.5,"void loup::<unnamed>::sgemm128_kernel<(int)8, (bool)1, (bool)1>(int, int, int, const float *, const float *, float *, float)"
+11.0,28401298,65,436943.0,427482.0,422970,723168,48822.0,"void loup::<unnamed>::first_bwd_edge_kernel<(int)2, (bool)0, (bool)0>(const int *, int, int, int, int, int, SplineGrid, int, int, const int *, const int *, const float4 *, const int *, const float4 *, const float *, const float *, const float *, const float *, const float *, const float *, loup::<unnamed>::ZblParams, double *, double *, double *)"
+8.4,21611346,260,83120.6,83400.5,22782,385437,47578.4,"void loup::<unnamed>::sgemm128_kernel<(int)4, (bool)1, (bool)1>(int, int, int, const float *, const float *, float *, float)"
+5.9,15311303,65,235558.5,225036.0,211725,491764,43985.5,gprod_bwd_dd662f9d3a2b5b2b
+5.8,14917993,65,229507.6,217900.0,199918,677539,60320.3,"loup::<unnamed>::first_fwd_kernel(int, int, int, int, int, int, SplineGrid, int, int, const int *, const int *, const float4 *, const int *, const float4 *, float *, float *, float *, float *, float *)"
+2.9,7379911,65,113537.1,108886.0,98679,147282,12750.5,gprod_fwd_dd662f9d3a2b5b2b
+2.4,6074491,195,31151.2,31901.0,19646,42429,8891.9,void cutlass::Kernel2<cutlass_80_simt_sgemm_128x64_8x5_nn_align1>(T1::Params)
+1.8,4755385,65,73159.8,70041.0,69498,271528,24990.6,"void gprod_ro1s_fused_ae0a447b65f4fcd4<(int)128, (int)4>(int, int, const float *, const float *, const float *, const float *, const float *, const float *, long, const int *, const float *, const float *, const float *, const float *, float, float *, double *, float *, float *, float *, float *, float *)"
+1.7,4331675,130,33320.6,31341.0,16670,60603,16168.9,fm_tf32x3_rr_64x64
+1.0,2623897,65,40367.6,39900.0,36733,53435,2370.1,"loup::compute_and_count_active_kernel(int, float, const double *, const int *, const int *, const double *, float4 *, int *)"
+0.9,2353996,325,7243.1,5920.0,3423,14751,3184.7,"void loup::<unnamed>::sgemm32_kernel<(bool)0>(int, int, int, const float *, const float *, float *, float *, float, int)"
+0.8,2130464,65,32776.4,31006.0,27550,62522,6296.6,"loup::scatter_active_edges_kernel(int, float, SplineGrid, int, int, const int *, const int *, const int *, const int *, const float4 *, int *, int *, int *, float4 *, int *, float2 *)"
+0.6,1575124,65,24232.7,24254.0,21598,25086,493.9,fm_tf32x3_rc_64x64
+0.4,1120314,130,8617.8,8512.0,6527,12255,1363.7,void cutlass::Kernel2<cutlass_80_simt_sgemm_128x32_8x5_nn_align1>(T1::Params)
+0.4,966702,65,14872.3,14847.0,14494,15423,181.4,fm_tf32x3_rr_64x32
+0.3,849428,4,212357.0,211789.0,210382,215468,2239.3,"loup::fill_neighbors_kernel(int, int, loup::CellMat64, int, int, int, int, int, int, double, float, float, const double *, const int *, const int *, const int *, const int *, const int *, const double *, const float4 *, const int *, const int *, const int *, int *, int *, unsigned int *, const int *)"
+0.2,640103,64,10001.6,9983.0,9887,10623,108.4,"loup::langevin_first_half_kernel(int, double, double, double, double, double, double, unsigned long long, const unsigned long long *, const double *, const double *, const double *, double *, double *, double *)"
+0.2,465298,130,3579.2,3919.5,2624,4927,744.1,void cutlass::Kernel2<cutlass_80_simt_sgemm_128x32_8x5_tn_align1>(T1::Params)
+0.2,460761,65,7088.6,7135.0,6400,7711,216.9,"loup::<unnamed>::gather_rows_kernel(int, int, const int *, const float *, float *)"
+0.1,310436,4,77609.0,77353.0,77113,78617,702.3,"loup::count_neighbors_kernel(int, loup::CellMat64, int, int, int, int, int, int, double, float, float, const double *, const int *, const int *, const int *, const double *, const float4 *, int *)"
+0.1,240074,4,60018.5,60090.5,59642,60251,262.2,"loup::sort_gather_rows_kernel(loup::CellMat64, const int *, const unsigned int *, const int *, const int *, const int *, int *, double *, int *, const int *)"
+0.1,165365,64,2583.8,2592.0,2432,2912,84.3,"loup::langevin_second_half_kernel(int, double, double, const double *, const double *, const double *, double *, unsigned long long *)"
+0.1,143254,73,1962.4,1952.0,1856,2176,55.7,"void cub::_V_300303_SM_1200::detail::scan::DeviceScanKernel<cub::_V_300303_SM_1200::detail::scan::policy_hub<int, int, int, unsigned int, cuda::std::__4::plus<void>>::Policy1000, int *, int *, cub::_V_300303_SM_1200::ScanTileState<int, (bool)1>, cuda::std::__4::plus<void>, cub::_V_300303_SM_1200::detail::InputValue<int, int *>, unsigned int, int, (bool)0, int>(T2, T3, T4, int, T5, T6, T7)"
+0.0,124887,65,1921.3,1920.0,1536,2528,203.0,"loup::<unnamed>::species_energy_kernel(int, const int *, const float *, double *)"
+0.0,116859,64,1825.9,1824.0,1696,2464,100.7,"loup::guard_step_kernel(unsigned long long, int, const int *, const int *, unsigned int *, int *)"
+0.0,90615,64,1415.9,1407.0,1343,1728,73.0,"loup::check_skin_kernel(int, double, const double *, const double *, int *)"
+0.0,40283,73,551.8,544.0,479,1024,84.5,"void cub::_V_300303_SM_1200::detail::scan::DeviceScanInitKernel<cub::_V_300303_SM_1200::ScanTileState<int, (bool)1>>(T1, int)"
+0.0,13982,4,3495.5,3488.0,3487,3519,15.7,"loup::wrap_and_bin_kernel(int, loup::CellMat64, int, int, int, const double *, double *, int *, int *, int *)"
+0.0,8224,4,2056.0,2048.0,2048,2080,16.0,"loup::scatter_bins_kernel(int, const double *, const int *, const int *, const int *, int *, int *, double *, float4 *, int *, int *)"
+0.0,5343,4,1335.8,1343.5,1312,1344,15.8,"loup::rebuild_gate_kernel(const int *, const int *, int, int, int *, unsigned int *, int *)"
+0.0,4064,4,1016.0,1008.0,960,1088,54.7,"loup::rest_guard_kernel(unsigned long long, const int *, const int *)"
+0.0,3360,4,840.0,832.0,832,864,16.0,"loup::nl_commit_kernel(int, const double *, double *, int *, const int *)"
+0.0,3328,4,832.0,816.0,768,928,69.1,"loup::max_degree_kernel(int, const int *, int *)"
+0.0,2528,4,632.0,608.0,608,704,48.0,"loup::copy_ints_kernel(int, const int *, int *)"
+0.0,2208,4,552.0,544.0,544,576,16.0,"loup::nl_reset_kernel(int, int *, int *, int *, int *)"
+0.0,1824,1,1824.0,1824.0,1824,1824,0.0,"loup::kinetic_energy_kernel(int, const double *, const double *, double *)"

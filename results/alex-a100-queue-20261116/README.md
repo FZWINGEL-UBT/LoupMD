@@ -110,6 +110,39 @@ In the A/B rows, the two values in brackets are the two run orders.
 Still pending at 08:18 CET (reason `Priority`): `s100c` and the twelve `s106*` jobs. Slurm's estimated starts were
 18 November 04:55 (`s100c`) to 08:02 CET; `s106g8`-`s106g10` had no estimate yet.
 
+## Round of 18 November (S115-S128)
+
+### The S106 sweep's two failing stress rows
+
+All nineteen jobs above finished (log: the owner's `alex-a100-jobs-20261118.txt`). Every gate passed except two OMAT-0 medium
+stress rows on `SrTiO3_3x3x3_c1` (limit 3.00): the specialised path with `wprime_rcv=1, wprime_threads=512` (3.07)
+and the generic path with `LOUP_CHAIN_FOLD=0` (3.38 / 3.14 / 3.01 across the three conv choices). The folded generic
+sweep passed (worst stress 2.92). The absolute stress error there is about 3.4e-7 eV/A^3, and the ratio divides by
+MACE float32's own error (`max(dS32, 1e-7 / 3)`), so a row near the floor moves with the atomic accumulation order.
+Since S114, `wprime_rcv=1` is the cc 8.0 default, so the first row is a default configuration. `q121r_s106` and
+`q121r_s121` repeat both gates three times per library to measure that spread before any change is considered.
+
+### Libraries (built on the Alex login node, CUDA 13.2, `sm_80`, `alex_build.sh` in `scripts/`)
+
+| Tag | sha256 (first 16) | Sources | Python |
+| --- | --- | --- | --- |
+| `s121` | `41795c411f9b159d` | `round6-hardening` `990b261` (S115-S121; S119 / S121 compile their per-path forms on `sm_80`) | `$W/py121` |
+| `s123` | `c72262b5bc907931` | `990b261` + S122-S124 (the sources of `5fb1099` and the S122 part of `f799b54`) | `$W/pys123` |
+| `s123x80` | `0f55589e94b60333` | `s123` with the Cartesian forms of S119 / S121 / S122 also compiled for `sm_80` (test build) | `$W/pys123x80` |
+
+S125, S127 and S128 (`f799b54`) are not in these libraries; a later round builds them.
+
+### Jobs (submitted 18 November about 20:55 CET; held by a maintenance reservation, `ReqNodeNotAvail`)
+
+| Job IDs | Names | Libraries | What it measures | Decision it informs |
+| --- | --- | --- | --- | --- |
+| 5030343-44 | `q121c1`, `q121c2` | `s106` -> `s121` | Library ABBA on shared plans, 2 rounds: POLAR-1-S / M / L NaCl216, POLAR-1-S NbCl5 (S115, S118); OFF23-S / M / L water216, MP-0 and MPtrj SrTiO3 (S116), OMAT-0 generic SrTiO3 (control) | S115-S121 not slower on cc 8.0 |
+| 5030345-55 | `q121g1`-`q121g11` | `s121` | 3x gates of every family at the cc 8.0 defaults; `g10`: `LOUP_CHAIN_FOLD=0`; `g11`: `LOUP_POLAR_FOLD=0` (POLAR-1-S / M / L) | Every row passes: S115-S121 validated on cc 8.0 |
+| 5030356-57 | `q121r_s106`, `q121r_s121` | `s106`, `s121` | OMAT-0 medium specialised oxide gate and generic oxide gate with `LOUP_CHAIN_FOLD=0`, three times each | The spread of the two failing rows above |
+| 5030381 | `q123c1` | `s121` -> `s123` | Library ABBA: POLAR-1-S / L NaCl216, POLAR-1-S NbCl5 (S123 / S124), POLAR-1-M NaCl216 (control) | S123 / S124 not slower on cc 8.0 |
+| 5030382 | `q123c2` | `s123` -> `s123x80` | Library ABBA: OFF23-L / OFF23-M water216, OFF24-M water, MP-0 and OMAT-0 generic SrTiO3, POLAR-1-L NaCl216, OMOL-0 XL water216 | The Cartesian forms faster on cc 8.0 (sm_86: OFF23-L `0.938`, POLAR-1-L `0.985`, OMAT-0 generic `0.991`): extend their `__CUDA_ARCH__` condition, then gate |
+| 5030383-85 | `q123g1`-`q123g3` | `s123x80`, `s123` | 3x gates: the x-degree-1 and x-degree-2 Cartesian families on `s123x80`; POLAR-1-S / L on `s123` on both fold paths | Accuracy of the above on cc 8.0 |
+
 ## Local gate reference (5060 Ti)
 
 Worst force / stress ratio of the S100 library's full sweep (ledger `gen-pass-glue`):
