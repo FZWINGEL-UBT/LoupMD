@@ -94,3 +94,4 @@ nav:
       - Environment and caches: reference/environment.md
       - Errors: reference/errors.md
       - Python API: reference/api.md
+  - Development: development.md

@@ -4,12 +4,19 @@ This page runs one simulation three ways: from the command line, from Python, an
 steps of NVT molecular dynamics at 300 K with a Langevin thermostat and a 0.5 fs timestep (5 ps), with the
 `omat0-medium` model. Then it shows what the run wrote, and a short relaxation.
 
-You need LoupMD installed ([install](install.md)), the export extra for the first run of a model on a new set of
-elements, and a structure file that ASE reads, here `structure.cif`. Fetch the model once:
+## Install
 
 ```bash
+pip install "loupmd[export]"
+loupmd doctor
 loupmd models --download omat0-medium
 ```
+
+The first line installs LoupMD from PyPI with the export extra (PyTorch and MACE), which a model needs the first
+time it runs on a new set of elements. `loupmd doctor` checks the GPU, the driver and the libraries, and the last
+line fetches the model file once (79 MB) into the cache. [Install](install.md) says what the machine needs.
+
+You also need a structure file that ASE reads, here `structure.cif`.
 
 ## One run, three ways
 

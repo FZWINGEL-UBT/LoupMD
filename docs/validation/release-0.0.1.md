@@ -1,4 +1,8 @@
-# Release verification: 0.1.0
+# Release verification: 0.0.1
+
+The release is version 0.0.1 (the owner's decision of 18 November 2026, `PLAN.md` O34). Until that afternoon the
+tree carried the version 0.1.0a1, and the checks below ran on builds that report it; the wheel of 0.0.1 and what
+was run on it are in [the 0.0.1 wheel](#the-001-wheel).
 
 The final checks of `PLAN.md` S7-T06 on the release branch, run again on the code after the merge of
 `round6-hardening` (`PLAN.md` O30). Everything here was measured on one machine: an NVIDIA GeForce RTX 5060 Ti
@@ -14,6 +18,10 @@ wait for the owner.
   (`6b3313f`, `aa44e42`: the release scripts, the bundle cache's key, one error message; no C++/CUDA source
   changed). Its library, for six compute capabilities, has SHA-256 `dd9fdc04f4d0ee59...` and reports
   `0.1.0a1+488eb2ee43695540`.
+- Release wheel: built from `b920ecb`, the commit tagged `v0.0.1`. It differs from `aa44e42` by the Python fixes of
+  the documentation audit (`5b4e690`), the version string and the package metadata; of the C++/CUDA sources only
+  the version in `include/loupmd.h` changed. Its library has SHA-256 `4e369761e26af194...` and reports
+  `0.0.1+8dbdbf4b6e095e04`.
 
 The results of 16 November, on the branch before the merge, are in this file's history (`6d06428`).
 
@@ -31,6 +39,7 @@ The results of 16 November, on the branch before the merge, are in this file's h
 | Release build | `tools/release/make_release.sh` | wheel and source tarball of `aa44e42` built in the container; six compute capabilities; `twine check --strict` passed; nothing uploaded |
 | Clean install of the built wheel | `pip install` of the wheel in a fresh environment without torch, then `loupmd doctor`, `loupmd bench --quick`, the quickstart's steps | passed (after two fixes); `loupmd validate` from the wheel's package: 12 of 12 passed |
 | The wheel's library against the `sm_120` build | `loupmd bench --model omat0-medium --suite standard --ab`, a b b a twice | a tie: 1.002 (`NbCl5` 3x3x3), 1.000 (`SrTiO3` 10x10x10) |
+| The 0.0.1 wheel with its export extra in a fresh environment | `pip install "<wheel>[export]"` from PyPI, then `loupmd doctor`, `loupmd bench --quick` from an empty cache, `loupmd md --check gate`, `loupmd validate` | passed: doctor 9 of 9, 1.693 ms/step (reference 1.704), the gate on five runs; the quickstart's five steps; the fast GPU tier on its library 360 passed, 7 skipped |
 
 ## Gate per label
 
@@ -188,10 +197,82 @@ Both sides read about 2% above the reference numbers measured in the morning (1.
 benchmark above did. The machine was not quiet (another session compiled and ran its own GPU jobs between these
 runs); the cause was not looked for, and `loupmd/bench/reference.json` keeps the morning's numbers.
 
-**Not checked.** `pip install "loupmd[export]"` into a fresh environment (the gate above used the development
-environment's torch and mace); `loupmd build-kernels` from the wheel; the wheel's code for compute capability 8.0,
-8.6, 8.9, 9.0 and 10.0, which has not run on any GPU (the workstations with other GPUs need the university
-network, which the build machine was not on).
+**Not checked on this wheel.** `pip install "loupmd[export]"` into a fresh environment (the gate above used the
+development environment's torch and mace; done on the 0.0.1 wheel, below); `loupmd build-kernels` from the wheel;
+the wheel's code for compute capability 8.0, 8.6, 8.9, 9.0 and 10.0, which has not run on any GPU (the
+workstations with other GPUs need the university network, which the build machine was not on).
+
+## The 0.0.1 wheel
+
+`b920ecb` sets the version 0.0.1, adds the project links to `pyproject.toml` (it had none) and writes `README.md`
+for the PyPI page. The wheel was built again from that commit with `tools/release/make_release.sh` and is the file
+for the upload. Before the build, `loupmd` was free on PyPI and on TestPyPI (both answered 404 for the project on
+18 November 2026). Nothing was uploaded.
+
+In `dist/release-0.0.1-b920ecbf3a91/` on the build machine:
+
+| File | Bytes | SHA-256 |
+| --- | --- | --- |
+| `loupmd-0.0.1-py3-none-manylinux_2_28_x86_64.whl` | 11,305,683 | `cf8d31c7a5a51b48ae987c2dff378f0f78b81dd626da8e40748b2e3906857954` |
+| `loupmd-0.0.1-src.tar.gz` (`git archive` of the commit) | 2,294,098 | `0c6c89b932755075724e3f40a783bba56927489ac3e49ddddee4543c3f00931e` |
+
+The image and the checks are those of the build above: the library for six compute capabilities built in 73 s, 15
+ELF images per target, symbol versions up to `GLIBC_2.14`, `GLIBCXX_3.4.22` and `CXXABI_1.3.11`, 112 files,
+`twine check --strict` passed. The metadata (version 2.4) names the licence expression, the four licence files and
+the three project links.
+
+### A fresh environment with the export extra
+
+This is what `pip install "loupmd[export]"` gives a new user, and the check the section above left open. A new
+`python3 -m venv` in WSL 2 (Python 3.12.3) and `pip install --no-cache-dir "<the wheel file>[export]"`, every
+dependency from PyPI: 281 s, 67 distributions, 5.9 GB, `pip check` finds no broken requirement. It installed torch
+2.14.1 (which reports `2.14.1+cu130`), mace-torch 0.3.16, e3nn 0.4.4, cuequivariance 0.12.0, numpy 2.5.5, ASE
+3.29.0 and `cuda-toolkit` 13.0.3: torch pins the same `cuda-toolkit` version as the package, so one set of CUDA
+libraries serves both.
+
+Every command ran the installed package from a folder outside the checkout, with an empty cache (`LOUPMD_CACHE`),
+the model files from `LOUPMD_MODELS` and none of the development set-up's variables:
+
+| Step | Result |
+| --- | --- |
+| `loupmd doctor` | 9 checks, 0 failed, 0 warnings |
+| `loupmd bench --quick --model omat0-medium`, empty cache | the environment's own exporter wrote the bundle; `SrTiO3` 6x6x6: 1.693 ms/step (reference 1.704, ratio 0.993); 44 s with the export |
+| the same again | 1.690 ms/step (ratio 0.992); 3 s |
+| `loupmd md nacl.cif --model omat0-medium --temperature 300 --steps 2000 --repeat 3 3 3 --check gate` | the gate passed (energy 0.41, force 1.57, stress 1.21 of the 3 allowed, two rattled copies); 2,000 steps at 0.294 ms/step in the engine; report and output files written; 47 s |
+| `loupmd validate --model omat0-medium --set oxide --capacity whole` | passed: 0.57 / 1.89 / 1.61 |
+| the same, `--capacity tiled` | passed: 0.58 / 1.97 / 1.81 |
+| `loupmd validate --model off23-small --set organic --capacity whole` | passed: 0.00 / 0.64 / 1.88 |
+| `loupmd validate --model mh1-omat --set crystals --capacity whole` | passed: 0.09 / 0.85 / 0.32 |
+| `loupmd models --download omat0-medium`, a second empty cache, `LOUPMD_MODELS` unset | 79,463,999 bytes in 7 s; the SHA-256 matches the label table |
+| the quickstart's `loupmd md structure.cif --model omat0-medium --temperature 300 --steps 10000 --initial-velocities maxwell_boltzmann --seed 1 --output run`, with the downloaded model (rattled rock salt 3x3x3, 216 atoms) | ran: the export and 10,000 steps in 40 s, 0.303 ms/step in the engine |
+| the quickstart's Python script (`lm.md`) | ran in 5 s: 0.304 ms/step in the engine |
+| its ASE script (`lm.calc`, then `loupmd.ase.md.Langevin` for 10,000 steps) | ran in 6 s: -728.720213 eV, 0.300 ms/step in the engine; ASE 3.29 prints a deprecation notice for its own `MaxwellBoltzmannDistribution` |
+| `loupmd relax structure.cif --model omat0-medium --fmax 0.01` | converged after 23 steps, largest force 0.0082 eV/A; `structure.relaxed.extxyz` written |
+| the quickstart's Python relaxation, positions and then the cell (`FrechetCell`) | converged after 23 and after 30 steps |
+
+The float64 references of these gates were computed in this environment, by its torch and mace, into its own empty
+reference cache; the table of the 0.1.0a1 wheel above read the development cache's references. The stress ratios
+of `omat0-medium` are larger here (1.61 and 1.81 against 1.24 and 1.32); both are within the limit of 3, and the
+cause of the difference was not looked for.
+
+Seen and left: a run with `--check gate` prints torch's and mace's own warnings before the report (about 25 lines:
+`torch.jit` deprecation notices and the `weights_only` notice for the checkpoint the package has just verified by
+its SHA-256).
+
+**The floor of the tag.** In a plain `rockylinux:8` container (Rocky Linux 8.10, glibc 2.28, Python 3.11.13, no
+CUDA toolkit, no GPU) `pip install` of the 0.0.1 wheel worked (numpy 2.4.6, scipy 1.17.1 there), and `loupmd
+doctor` found the three CUDA libraries in the NVIDIA wheels and loaded `libloupmd` (`0.0.1+8dbdbf4b6e095e04`); its
+only failure was the GPU check.
+
+**The tree's tests on the 0.0.1 wheel's library.** `pytest -q tests/gpu -m fast` with `LOUP_LIB` on the installed 0.0.1
+wheel's library: 360 passed, 7 skipped (439 s), as on the 0.1.0a1 builds.
+
+**Not repeated on the 0.0.1 builds.** The full and acceptance tiers, the gate for every label and the A/B of the
+wheel's library against the `sm_120` build: they ran on the 0.1.0a1 builds above, from the same C++/CUDA sources.
+`tests/cpu` at `b920ecb`: 495 passed, 5 skipped.
+
+**Not checked.** `loupmd build-kernels` from the wheel; the wheel's code for compute capability 8.0, 8.6, 8.9, 9.0
+and 10.0, which has not run on any GPU; an upload to TestPyPI as a rehearsal.
 
 ## Tests whose premise the merge changed
 

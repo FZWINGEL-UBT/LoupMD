@@ -3,6 +3,14 @@
 LoupMD is a Python package with a compiled C++/CUDA library. It runs on Linux x86_64 with an NVIDIA GPU, and in
 WSL2 on Windows. It needs Python 3.10 or newer. The runtime needs no PyTorch and no CUDA compiler.
 
+```bash
+pip install "loupmd[export]"
+loupmd doctor
+```
+
+The first line installs the engine together with PyTorch and MACE, which export a model the first time it runs.
+The second checks the GPU, the driver and the libraries. The rest of this page explains each part.
+
 ## What you need
 
 - **Linux x86_64** with glibc 2.28 or newer: the wheel is tagged `manylinux_2_28_x86_64`. On Windows, use WSL2 with
@@ -20,24 +28,26 @@ The 0.0.1 wheel has been run on one GPU only, an RTX 5060 Ti (compute capability
 8.9, 9.0 and 10.0 is compiled from the same sources and has not been run from the wheel. On any GPU,
 `loupmd validate` compares a model with MACE float64 on that machine.
 
-## Install the wheel
+## Install with pip
 
-The release wheel is on PyPI. The package name is `loupmd` and the command it installs is `loupmd`:
-
-```bash
-pip install loupmd
-```
-
-The same wheel can be built from a commit of the repository with `tools/release/build_wheel.sh` (it needs docker
-and git, no GPU). It lands in `dist/`:
+The package is on PyPI under the name `loupmd`, and the command it installs is `loupmd`. Install it into a virtual
+environment:
 
 ```bash
-tools/release/build_wheel.sh            # dist/loupmd-0.0.1-py3-none-manylinux_2_28_x86_64.whl
-pip install dist/loupmd-0.0.1-py3-none-manylinux_2_28_x86_64.whl
+python3 -m venv ~/loupmd-env
+source ~/loupmd-env/bin/activate
+pip install "loupmd[export]"
 ```
+
+`pip install loupmd` without the extra installs the engine alone. That is enough for a machine that only runs
+models whose bundles are already in the cache ([the export extra](#the-export-extra) below).
 
 The install pulls in numpy (1.26 or newer), ASE (3.23 or newer), `tomli` on Python 3.10, and on Linux the NVIDIA
-CUDA libraries.
+CUDA libraries. An environment with the export extra takes about 6 GB, most of it PyTorch and its CUDA libraries;
+the engine alone takes about 1.6 GB.
+
+pip installs a wheel only: there is no source distribution, since the library is compiled with the CUDA compiler.
+On a platform the wheel does not cover, pip answers that it finds no matching distribution.
 
 ### CUDA run-time libraries
 
@@ -67,12 +77,11 @@ pip install "loupmd[export]"
 
 | Extra | Installs | Needed for |
 |---|---|---|
-| `export` | torch 2.14.1, mace-torch 0.3.16, cuequivariance 0.12.0, cuequivariance-torch 0.12.0 | exporting a checkpoint to a bundle, `loupmd validate`, `loupmd build-kernels` |
-| `dev` | pytest, build | running the tests |
-| `docs` | mkdocs-material, mkdocstrings | building this site |
+| `export` | torch 2.14.1, mace-torch 0.3.16, cuequivariance 0.12.0, cuequivariance-torch 0.12.0 | exporting a checkpoint to a bundle, the accuracy gate (`check="gate"`, `loupmd validate`), `loupmd build-kernels` |
 
 The export runs in a separate process with the same Python interpreter, so install the extra into the environment
-that runs LoupMD. Bundles already in the cache, or exported elsewhere, run without it.
+that runs LoupMD. Bundles already in the cache, or exported elsewhere, run without it. The extras `dev` and `docs`
+are for work on LoupMD itself ([development](development.md)).
 
 ## Models
 
@@ -124,37 +133,14 @@ It prints one line per check, `[ ok ]`, `[warn]` or `[FAIL]`, with a fix for any
 The exit status is 1 if a check failed. In Python, `print(lm.runtime_info())` shows the package and library
 versions, the CUDA runtime that was loaded and the GPUs.
 
-## Build from source
+## Building it yourself
 
-The library builds with `make` in Linux or WSL2. It needs `nvcc` and cuBLAS from a CUDA toolkit; the Makefile
-looks for `nvcc` at `/usr/local/cuda/bin/nvcc` (set `NVCC=` otherwise). Build for your GPU's architecture:
+The wheel from PyPI is all a run needs. [Development](development.md) describes how to build the library from
+source for one GPU, run the tests, and build the wheel and the release files.
 
-```bash
-make -j4 CUDA_ARCH=sm_120         # RTX 50 series (the default)
-make -j4 CUDA_ARCH=sm_89          # RTX 40 series
-make -j4 CUDA_ARCH=sm_80          # A100
-```
-
-This writes `build/<arch>/libloupmd.so` and copies it to `./libloupmd.so` at the root of the checkout. Then install
-the package from the checkout:
-
-```bash
-pip install -e ".[export]"
-```
-
-The package uses, in this order: the library named by `LOUP_LIB`, the one inside the installed package
-(`loupmd/_lib/`, filled only by the wheel build), and `libloupmd.so` at the root of the checkout. The tensor-core
-kernels are read from `cubins/` beside the library.
-
-Objects of different architectures are kept apart in `build/<arch>/`: objects of another architecture link without
-complaint and then fail at every kernel launch. `make clean` removes `build/` and `./libloupmd.so`.
-
-`make wheel-lib` builds the library of the wheel, with code for all six architectures, into
-`build/wheel/libloupmd.so`. `WHEEL_ARCHS="89 120"` narrows it for a quick build. `tools/release/build_wheel.sh` runs
-this inside a CUDA 13.3 image on Rocky Linux 8 and packs the wheel.
-
-A model whose symmetric contraction the library was not built with needs its own kernels. `loupmd build-kernels
-MODEL` compiles them with `nvcc` into a plugin in the cache, which the engine then finds by itself. It needs a CUDA
-toolkit and the export extra.
+One case needs a compiler on a user's machine: a model whose symmetric contraction the wheel's library was not
+built with needs its own kernels. `loupmd build-kernels MODEL` compiles them with `nvcc` into a plugin in the
+cache, which the engine then finds by itself. It needs a CUDA toolkit and the export extra; see
+[kernel plugins](guide/models.md#kernel-plugins).
 
 Next: [the quickstart](quickstart.md).
