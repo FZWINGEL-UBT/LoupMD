@@ -441,6 +441,8 @@ def test_the_plan_puts_the_wavefronts_row_pool_in_host_memory_below_the_device_p
             except BackendError:
                 return None
 
+        # a fixed free memory for the plan: the true figure moves by MB between two plans (other programs)
+        monkeypatch.setenv("LOUP_DEBUG_PLAN_FREE", "8000")
         lo, hi = 1e-4, 0.9                             # the smallest fraction with the pool on the device
         while hi - lo > 1e-3 * hi:
             mid = 0.5 * (lo + hi)
@@ -526,12 +528,15 @@ def test_the_plan_moves_the_tile_lists_to_host_memory_only_when_they_do_not_fit(
         dev, forced = plan(0.9, "0"), plan(0.9, "1")
         assert dev is not None and not dev.host_lists and dev.host_bytes == 0
         assert forced.host_lists and forced.host_bytes > 0
-        # the edges leave the device estimate (the same cap on both sides): 8 B each in the compact form on either side
-        # (O32; the plan counts them 10% over)
+        # the same cap on both sides. The edges leave the device and two staging buffers of the largest tile's edges
+        # come (tile-plan-exact: the plan counts what the call holds), so with one or two tiles the device figure
+        # stays about where it was.
         assert forced.receivers == dev.receivers
-        moved = dev.tiled_global_bytes - forced.tiled_global_bytes
-        assert abs(moved - forced.host_bytes) <= 0.01 * forced.host_bytes
+        device = lambda p: p.tiled_global_bytes + p.tile_workspace_bytes
+        assert device(forced) <= 1.05 * device(dev)
         # the smallest fraction that fits with the lists on the device, to 0.1%
+        # a fixed free memory for the plan: the true figure moves by MB between two plans (other programs)
+        monkeypatch.setenv("LOUP_DEBUG_PLAN_FREE", "8000")
         lo, hi = 1e-4, 0.9
         while hi - lo > 1e-3 * hi:
             mid = 0.5 * (lo + hi)
@@ -567,6 +572,8 @@ def test_the_plan_moves_the_layer_state_to_host_memory_only_when_the_lists_there
             except BackendError:
                 return None
 
+        # a fixed free memory for the plan: the true figure moves by MB between two plans (other programs)
+        monkeypatch.setenv("LOUP_DEBUG_PLAN_FREE", "8000")
         lo, hi = 1e-4, 0.9                             # the smallest fraction with the state on the device
         while hi - lo > 1e-3 * hi:
             mid = 0.5 * (lo + hi)
@@ -681,9 +688,10 @@ def test_a_tiles_layers_share_one_arena_and_give_the_same_result(model, structur
     """tile-shared-layers: a sweep runs one layer, so a tiled system keeps its layers' own buffers in one arena as
     large as the largest layer; LOUP_TILE_SHARE_LAYERS=0 gives every buffer its own memory. Same kernels and
     operations: the numbers agree up to the order of the float32 atomic sums, in the building call and a kept one.
-    The plan is the same (it counts every layer's buffers, as a whole system has them) and the call's device peak
-    is lower: by 38 KiB per receiver of the cap for OMAT-0 small, about 190 MiB at 5,000. (The peak is read from the
-    device's free memory, which other programs move by tens of MiB: asked only where the saving is far above that.)"""
+    The plan's cap and whole-system count are the same, its tile workspace is at least a fifth smaller, and the
+    call's device peak is lower: by 38 KiB per receiver for OMAT-0 small, about 190 MiB at 5,000. (The peak is read
+    from the device's free memory, which other programs move by tens of MiB: asked only where the saving is far above
+    that.)"""
     at = structure()
     moved = at.positions + np.random.default_rng(23).normal(scale=0.01, size=at.positions.shape)
     bundle = ensure_loup_bundle(find_model(model), sorted(set(at.get_atomic_numbers().tolist())))
@@ -703,7 +711,8 @@ def test_a_tiles_layers_share_one_arena_and_give_the_same_result(model, structur
             gc.collect()
 
     (plan_own, own, peak_own), (plan_shared, shared, peak_shared) = run("0"), run("1")
-    assert abs(plan_shared.tile_workspace_bytes - plan_own.tile_workspace_bytes) <= 0.01 * plan_own.tile_workspace_bytes
+    assert plan_shared.receivers == plan_own.receivers
+    assert plan_shared.tile_workspace_bytes < 0.8 * plan_own.tile_workspace_bytes
     assert abs(plan_shared.whole_bytes - plan_own.whole_bytes) <= 0.01 * plan_own.whole_bytes
     if saved_mib:
         assert peak_own - peak_shared > saved_mib * 2**20, (peak_shared, peak_own)

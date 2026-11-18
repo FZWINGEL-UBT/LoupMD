@@ -117,5 +117,8 @@ gates in that form. Most are read when an engine is made; the MD-loop switches a
 | `LOUP_DEBUG_PACK` | any value | prints the packed tables' relative error per layer | `src/generic.cu`, `src/model_loader.cu` |
 | `LOUP_DEBUG_ERRORS` | any value | prints every library error to standard error | `src/engine.cu` |
 | `LOUP_DEBUG_GRAPHS`, `LOUP_DEBUG_GEMM`, `LOUP_DEBUG_GEMM_BUCKETS`, `LOUP_DEBUG_SPLINE`, `LOUP_DEBUG_TILE_TIMES` | any value | print diagnostics of CUDA graphs, GEMM plans, bucketed GEMM timings, kernel-variant timings and tiled-call phase times | `src/engine.cu`, `src/generic.cu` |
+| `LOUP_NO_NVML` | `1` | the device's free memory from CUDA alone instead of the smaller of CUDA's and NVML's figures | `src/engine.cu` |
+| `LOUP_DEBUG_PLAN` | `1` | prints the free device memory at the steps of a system's set-up and first call, and the memory plan's counters | `src/engine.cu` |
+| `LOUP_DEBUG_PLAN_FREE` | MiB | the capacity plan counts at most this much device memory as free (tests of its thresholds) | `src/engine.cu` |
 | `LOUP_DEBUG_EDGE_LIMIT` | integer | lowers the largest neighbour-edge count of a whole-system list, for the test of its refusal | `src/engine.cu` |
 | `LOUPMD_EXPORT_FASTMACE` | path to a FastMACE checkout | the exporter takes its names from that checkout instead of the vendored copy | `loupmd/export/_fastmace.py` |

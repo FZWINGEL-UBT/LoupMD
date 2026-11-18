@@ -2007,6 +2007,10 @@ All tiers again on d0d149f (the merge 09d6daa and the gate's follow-up; the same
 engines: OMAT-0 small oxide worst force / stress ratio 1.29 / 1.47, OMAT-0 medium oxide 1.84 / 1.24 (wavefront
 1.84 / 1.35, whole 1.92 / 1.38), OMOL-0 extra large organic 0.85 / 0.81.
 
+(Peaks and budgets in this entry and the next were read from CUDA's free memory, which §6.35 shows to be wrong under
+WSL 2: the budgets are 1.5 to 2 GiB too large and peaks above about 10.4 GiB are 1.2 GiB too high. The times and
+plans stand for the fractions of that larger budget.)
+
 The tiled mode after the merge (17 November 2026, 5060 Ti only): the merged library (sha256 `74612462`, commit
 09d6daa) against the library of 97e365d, SrTiO3 cubes with 0.04 A of noise, skin 0.5 A, no stress. Plans
 (`plan_execution` only): OMAT-0 medium and small, 135,000 / 320,000 / 1,080,000 / 2,560,000 / 3,524,845 / 5,000,000 /
@@ -2052,9 +2056,9 @@ OMAT-0 small:
 | 2,560,000 | 0.9 | 65,536, 96 | 2.968 / 2.965 | 2.900 / 2.897 | 0.977 | 12.70 -> 12.74 |
 
 Every plan is 1.1-2.3% faster with the merged library at an equal or slightly lower peak, in both orders. The one
-larger step, 320,000 atoms of OMAT-0 medium at fraction 0.5 (-8.6%), is the lists: with 28 B per edge every tile's
-full slot of kept active edges fits the budget (the peak rises to the fraction's 7.17 GiB), where 36 B left the tiles
-compacting in every sweep. Energies agree to 1e-7 eV/atom between the libraries up to 5,000,000 atoms and to
+larger step, 320,000 atoms of OMAT-0 medium at fraction 0.5 (-8.6%), is memory the smaller lists free within the
+budget (the peak rises to the fraction's 7.17 GiB): for the kept slots of active edges or for the kept layer-0
+results, which of the two was not told apart. Energies agree to 1e-7 eV/atom between the libraries up to 5,000,000 atoms and to
 3e-7 at 8,008,065 (where two runs of one library differ by 2e-7).
 
 The host-state rules of this section against the merged plans: `tile-host-state-larger-cap` and
@@ -2176,3 +2180,79 @@ unchanged (5.23-5.25 s); 8M atoms first / second rebuild 23.06 / 22.79 s. Pinned
 host estimate. Tiled, memory-plan and tiled-MD tests 71 passed; on the installed library at f0406bf with the
 kernel-plugin test's bounds at the gate's floors (b5a0b62) all of `tests/gpu` (fast, full and acceptance) 412 passed,
 8 skipped (the NbCl5 structure).
+
+### 6.35 The memory plan against what the calls take, and the capacity of the RTX 5060 Ti (18 November 2026, PLAN.md O33)
+
+Everything in this section is measured on the RTX 5060 Ti in WSL 2 only.
+
+**The free memory the plans start from.** Under WSL 2 `cudaMemGetInfo` does not give the card's free memory. With
+Windows programs holding 2.9 GiB it reported 15.16 GiB free of 15.90 (NVML: 13.1 GiB free). It then fell by exactly
+what the process allocated up to 10.2 GiB held, and by 1.2 GiB more at once at the next step (allocations of 512 MiB
+and 1 GiB in a row, `torch.empty`; NVML's use rose by each allocation and nothing else). A single allocation of
+64 MiB to 4 GiB takes its size, to 2 MiB. So every budget the plans made was 1.5 to 2 GiB too large, and every
+device peak read above about 10.4 GiB held was 1.2 GiB too high: the peaks of §6.34 above that level (11.07, 12.74,
+13.06 GiB ...) and the "1.1 GiB the counters miss" that MH-1 seemed to take at 20,480 atoms (11.6 GiB read, 9.97 by
+NVML, 10.00 counted). The engine now takes the smaller of CUDA's and NVML's free memory wherever it plans or reads a
+peak (`device_memory`, `libnvidia-ml.so.1` loaded at run time; 0.35 ms a query; `LOUP_NO_NVML=1` keeps CUDA's figure).
+A memory fraction is now a fraction of the memory that is free in fact: at 0.9 the plans may use 11.8 GiB here, not
+13.1 to 13.6, and today's plans at a fraction f have the memory §6.34's had at about 0.88 f.
+
+**Whole systems.** `loup_plan_memory` scales the current system's buffers; `loup_plan_execution` counts a whole system
+from a probe tile. The second ignored the skip-chain fold (a whole system never forms the non-last layers' outputs
+and their gradients: 4% of OMAT-0 medium's rows) and both left 30 to 100 MB out that do not scale (now 64 MB instead
+of 32). Plan / measured (NVML, from before `set_system` to after the first evaluation; the capacity plan, then the
+scaled plan):
+
+| model | atoms | measured (GiB) | capacity plan | scaled plan |
+| --- | --- | --- | --- | --- |
+| OMAT-0 medium | 5,000 / 40,000 / 98,415 | 0.521 / 3.701 / 9.092 | 1.001 / 1.004 / 0.995 | 1.004 / 1.005 / 0.996 |
+| MH-1 | 5,000 / 20,480 | 2.525 / 9.975 | 0.987 / 1.004 | 0.994 / 1.005 |
+| OMOL-0 extra large (water) | 648 / 5,184 | 1.250 / 8.619 | 0.891 / 0.981 | 0.961 / 0.991 |
+| OFF23 medium (water) | 5,184 / 41,472 | 0.480 / 3.531 | 1.040 / 1.003 | 1.043 / 1.003 |
+| POLAR-1-S (NaCl) | 1,728 / 21,952 | 0.583 / 6.577 | none | 0.763 / 0.773 |
+
+Before: the capacity plan 1.03-1.06 at the larger sizes, the scaled plan 0.988-1.003 there and 0.94-0.98 at the
+small ones. Open: the long-range models. Their k-space and charge buffers (`src/polar.cu`) are not counted, so the
+scaled plan is 23% low, and `loup_plan_execution` gives them no whole-system count at all. A first call takes more
+for a moment than the system keeps: the GEMM timing writes into a scratch copy of each output (121,945 atoms of
+OMAT-0 medium: 0.9 GiB above the 11.2 GiB kept). The plan's "fits whole" check now leaves room for the model's
+largest buffer and the cache-flush buffer.
+
+**Tiled systems.** The plan reported the estimate its cap search uses: every layer's own buffers (§6.34: the layers
+now share an arena), a tile of `cap` receivers whatever the grid makes, 32 B a kept row, and none of the kept slots,
+staging buffers and layer-0 results that the call adds within the fraction. Plan / peak was 0.55 to 2.07 on 13
+plans (135,000 atoms at fraction 0.9: 8.40 GiB planned, 4.05 held; 1,080,000 at 0.25: 1.64 planned, 2.97 held).
+`tile-plan-exact`: the cap search is unchanged (its rules were measured with those estimates), and what the plan
+reports is computed for the chosen cap from the plan's own tiles (`tile_shape`: the widest domain, every tile's
+rows, the tiles in flight, the wavefront's pool) and the call's own rules for slots, staging and layer 0. If what
+the call must hold does not fit by these figures the cap steps down, or the plan refuses (13,720,000 atoms of
+OMAT-0 medium were planned at 12.4 GiB of 11.8 allowed before). The slots' reserve also leaves room for the GEMM
+timing's scratch, so a building call stays within the fraction. Plan / peak now, fractions 0.9 / 0.5 / 0.25:
+OMAT-0 medium 135,000 atoms 1.017 / 1.017 / 1.024, 320,000 atoms 1.008 / 1.021 / 1.041, 1,080,000 atoms 1.011 /
+1.015 / 1.049, 2,560,000 atoms 1.009 / 1.022 (0.9 / 0.5); OMAT-0 small 320,000 atoms 1.010 / 1.015, 1,080,000 atoms
+1.011 / 1.012, 2,560,000 atoms 1.007 (0.9). The three plans of 64 to 216 tiles are the 4-5% ones: the plan counts every
+ghost candidate as a kept row.
+
+**Pinned host memory.** The host state's alias (the gradients of the layer outputs added into the outputs' rows) was
+planned as four windows of a tile's rows. The call opens a window per block that another tile still reads, and in a
+grid of tiles that is most of them: 27 of 27 at 1,080,000 atoms, 64 of 64 and 186 of 216 at 2,560,000. Planned
+against pinned before: 4.52 against 5.58 GiB (1,080,000 atoms), 8.18 against 12.33 GiB (2,560,000). At 8,008,065
+atoms the host-state plan of §6.34 (`tile-host-state-window`, "23.9 GB") comes to about 37 GiB of this machine's 39
+by the corrected count (not measured), which may be why WSL became unstable in those runs. The plan now follows the call's window schedule
+(`tile_shape`), and its cap search counts both arrays in full: planned / pinned 1.03 (1,080,000), 1.02 (2,560,000),
+0.99 (5,000,000: 21.87 against 22.07 GiB). The host state may take two thirds of the available host memory by that
+count (it was 60% of the low count, up to 96% in fact); a plan above that keeps the layer state on the device (the
+wavefront), as 8,008,065 atoms of OMAT-0 medium now do.
+
+**Capacity.** `docs/validation/capacity.md`: OMAT-0 medium runs 121,945 atoms whole (0.197 s a call, 1.61 us per
+atom) and up to 10,985,000 atoms in tiles at fraction 0.9 (24.2 s, 2.20 us per atom, device peak 11.58 GiB, 8.2 GiB
+pinned); 12,301,875 are refused. OMAT-0 small ran 20,480,000 atoms (24.5 s, 1.19 us per atom, 11.57 GiB, 15.2 GiB
+pinned). From 1,080,000 to 10,985,000 atoms the kept call costs 2.00 to 2.20 us per atom (OMAT-0 medium).
+
+Tests: `tests/gpu/test_memory_plan.py` asks the capacity plan's whole count within 4% of the measured system and
+the tiled plan within 6% of the call's peak; the tests that find a plan's threshold by bisecting the fraction fix
+the free memory the plan counts (`LOUP_DEBUG_PLAN_FREE`), since the true figure moves by MB with other programs.
+
+All tiers on the library with these changes (sha256 `e021051e`): `tests/cpu` 490 passed, 5 skipped; `tests/gpu -m
+fast` 359 passed, 7 skipped; `-m full` 48 passed; `-m acceptance` 15 passed, 1 skipped (422 passed, 8 skipped: the
+NbCl5 structure).

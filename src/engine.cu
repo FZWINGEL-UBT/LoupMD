@@ -23,6 +23,7 @@
 #include <type_traits>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <chrono>
 #include <functional>
 #include <tuple>
@@ -547,6 +548,72 @@ struct HybCubin {
         loaded = false;
     }
 };
+
+// The device's free and total memory, for every memory plan, budget and peak. CUDA's own figure is not enough under
+// WSL2 (WDDM): it leaves out most of what other programs hold on the card. Measured on the RTX 5060 Ti (18 November
+// 2026): cudaMemGetInfo gave 15.16 GiB free of 15.90 while Windows programs held 2.9 GiB (NVML: 13.1 GiB free), fell
+// by what the process allocated up to 10.2 GiB held, and then by 1.2 GiB more at once. A plan made from it
+// overcommits the card, and a peak read from it is 1.2 GiB too high above that step. NVML counts every program's
+// memory and followed each allocation exactly: where libnvidia-ml.so.1 is there, the smaller of the two figures is
+// the free memory. LOUP_NO_NVML=1 keeps CUDA's figure alone (tests).
+struct NvmlMemory {
+    unsigned long long total, free, used;
+};
+struct NvmlLib {
+    void* lib = nullptr;
+    int (*init)() = nullptr;
+    int (*by_pci)(const char*, void**) = nullptr;
+    int (*memory)(void*, NvmlMemory*) = nullptr;
+    std::map<int, void*> devices;  // CUDA device index -> NVML handle (nullptr: not found)
+    std::mutex lock;
+    bool tried = false, ok = false;
+
+    // Free bytes of CUDA device `dev` as NVML counts them; false where NVML is not available.
+    bool free_bytes(int dev, size_t* out) {
+        std::lock_guard<std::mutex> guard(lock);
+        if (!tried) {
+            tried = true;
+            const char* off = std::getenv("LOUP_NO_NVML");
+            if (!(off && off[0] == '1')) {
+                lib = dlopen("libnvidia-ml.so.1", RTLD_LAZY | RTLD_LOCAL);
+                if (lib) {
+                    init = reinterpret_cast<int (*)()>(dlsym(lib, "nvmlInit_v2"));
+                    by_pci = reinterpret_cast<int (*)(const char*, void**)>(dlsym(lib, "nvmlDeviceGetHandleByPciBusId_v2"));
+                    memory = reinterpret_cast<int (*)(void*, NvmlMemory*)>(dlsym(lib, "nvmlDeviceGetMemoryInfo"));
+                    ok = init && by_pci && memory && init() == 0;
+                }
+            }
+        }
+        if (!ok) return false;
+        auto it = devices.find(dev);
+        if (it == devices.end()) {
+            int domain = 0, bus = 0, device = 0;
+            void* handle = nullptr;
+            char id[32];
+            if (cudaDeviceGetAttribute(&domain, cudaDevAttrPciDomainId, dev) == cudaSuccess &&
+                cudaDeviceGetAttribute(&bus, cudaDevAttrPciBusId, dev) == cudaSuccess &&
+                cudaDeviceGetAttribute(&device, cudaDevAttrPciDeviceId, dev) == cudaSuccess) {
+                std::snprintf(id, sizeof(id), "%08x:%02x:%02x.0", domain, bus, device);
+                if (by_pci(id, &handle) != 0) handle = nullptr;
+            }
+            it = devices.emplace(dev, handle).first;
+        }
+        NvmlMemory m{};
+        if (!it->second || memory(it->second, &m) != 0) return false;
+        *out = (size_t)m.free;
+        return true;
+    }
+};
+static NvmlLib g_nvml;
+
+static cudaError_t device_memory(size_t* free_b, size_t* total_b) {
+    const cudaError_t e = cudaMemGetInfo(free_b, total_b);
+    if (e != cudaSuccess) return e;
+    int dev = 0;
+    size_t nvml_free = 0;
+    if (cudaGetDevice(&dev) == cudaSuccess && g_nvml.free_bytes(dev, &nvml_free)) *free_b = std::min(*free_b, nvml_free);
+    return cudaSuccess;
+}
 
 // FNV-1a over this library's own file: GEMM plans are keyed by it, so a rebuilt library (new kernels, other tile
 // code) never reuses plans timed against an older build.
@@ -1739,6 +1806,16 @@ static int nl_commit(LoupHandle* h, const int* go = nullptr) {
     return 0;
 }
 
+// LOUP_DEBUG_PLAN=1: the device's free memory at a named point of a whole system's set-up and first call (where its
+// memory goes), and loup_plan_memory's counters.
+static void plan_dbg(const char* what) {
+    static const bool on = std::getenv("LOUP_DEBUG_PLAN") != nullptr;
+    if (!on) return;
+    size_t f = 0, t = 0;
+    device_memory(&f, &t);
+    std::fprintf(stderr, "plan debug: %-28s %8.1f MB free\n", what, f / 1048576.0);
+}
+
 // Host decisions after nl_count (edge capacity, the graphs' edge bucket), then fill, sort and commit.
 static int nl_finish(LoupHandle* h, const NlGeom& g, int E_new, int max_deg, bool check_order) {
     h->E_skin = E_new;
@@ -2392,16 +2469,20 @@ static int ensure_force_graph(LoupHandle* h, int compute_stress) {
             explicit NoFork(LoupHandle* h_) : h(h_), saved(h_->fork_ok) { h->fork_ok = false; }
             ~NoFork() { h->fork_ok = saved; }
         } no_fork(h);
+        plan_dbg("before the uncaptured pass");
         record_force_pass(h, compute_stress);
         CUDA_CHECK(cudaGetLastError());  // launch errors (e.g. no kernel image for this GPU) surface here, named
         CUDA_CHECK(cudaStreamSynchronize(h->stream));
         h->save_disk_plans();
+        plan_dbg("after the uncaptured pass");
     }
 
     CUDA_CHECK(cudaStreamBeginCapture(h->stream, cudaStreamCaptureModeGlobal));
     record_force_pass(h, compute_stress);
     CUDA_CHECK(cudaStreamEndCapture(h->stream, &h->force_graph));
+    plan_dbg("after the capture");
     CUDA_CHECK(cudaGraphInstantiate(&h->force_graph_exec, h->force_graph, nullptr, nullptr, 0));
+    plan_dbg("after the instantiation");
     h->force_graph_stress = compute_stress;
     return 0;
 }
@@ -2806,7 +2887,9 @@ static int set_system_impl(LoupHandle* h, int n_atoms, const int* atomic_numbers
         h->d_energy_f64 = reinterpret_cast<double*>(base);
         h->d_forces_f64 = reinterpret_cast<double*>(base + off_f64);
         h->d_virial_grad_f64 = reinterpret_cast<double*>(base + off_v64);
+        plan_dbg("before the model's rows");
         h->gen->alloc_system(n_atoms);
+        plan_dbg("after the model's rows");
         if (h->E_cap > 0) h->gen->ensure_edges(h->E_cap);
         h->N = n_local;
         h->n_ghost = n_ghost;
@@ -3065,8 +3148,10 @@ static int prepare_evaluate(LoupHandle* h, const double* positions, const double
     CUDA_CHECK(cudaSetDevice(h->device_id));
     // Positions only: MD velocities are kept. The neighbour list is rebuilt only when the cell changed or an atom
     // moved more than skin/2 since the last build; the force graph is reused unless the rebuild outgrew it.
+    plan_dbg("before the upload");
     const int cell_changed = upload_positions(h, positions, cell);
     if (cell_changed < 0) return -1;
+    plan_dbg("after the upload");
     bool rebuild = cell_changed != 0 || !h->nl_valid || h->cell_ref_stale;
     if (!rebuild) {
         const double half_skin = 0.5 * h->skin;
@@ -3078,6 +3163,7 @@ static int prepare_evaluate(LoupHandle* h, const double* positions, const double
         rebuild = v[0] != 0;
     }
     if (rebuild && rebuild_neighbors(h) != 0) return -1;
+    plan_dbg("after the rebuild");
     return 0;
 }
 
@@ -5782,6 +5868,99 @@ static int64_t wave_pool_rows(const double* positions, int n_atoms, const double
     return peak;
 }
 
+// tile-plan-exact: the tiles a call at `receivers` will make, as far as its memory goes: how many, the widest
+// domain (locals and ghost candidates: the workspace's rows), the most locals in one, every tile's rows together,
+// and with the wavefront the row pool and the most tiles in flight at once (those hold slots of kept active edges).
+struct TileShape {
+    int64_t tiles = 0, widest_rows = 0, max_local = 0, rows_total = 0, in_flight = 0, pool_rows = -1;
+    int64_t windows = 0;  // the host state's gradient windows (alias), each of max_local rows: the call's schedule
+    bool wave = false;
+};
+static int tile_shape(const double* positions, int n_atoms, const double* cell, int receivers, double reach,
+                      bool wave_on, bool wave_forced, bool count_windows, TileShape* out) {
+    loup::TilePlan plan;
+    try {
+        plan = loup::plan_tiles(positions, n_atoms, cell, receivers, 0, nullptr, reach, nullptr, wave_on ? reach : 0.0);
+    } catch (const std::exception& e) {
+        loup::set_error("tile plan: %s", e.what());
+        return -1;
+    }
+    TileShape s;
+    s.tiles = plan.tiles();
+    std::vector<int64_t> counts((size_t)s.tiles);
+    for (int64_t k = 0; k < s.tiles; ++k) {
+        const int64_t nl = plan.local_ptr[(size_t)k + 1] - plan.local_ptr[(size_t)k];
+        const int64_t ng = plan.ghost_ptr[(size_t)k + 1] - plan.ghost_ptr[(size_t)k];
+        counts[(size_t)k] = nl;
+        s.widest_rows = std::max(s.widest_rows, nl + ng);
+        s.max_local = std::max(s.max_local, nl);
+        s.rows_total += nl + ng;
+    }
+    s.in_flight = s.tiles;
+    s.wave = wave_on && (wave_forced || plan.grid[0] >= 12) && s.tiles >= 2;  // the tiled call's rule
+    if (s.wave) {
+        std::vector<int64_t> needs_ptr, needs, ready;
+        loup::tile_dependencies(plan, needs_ptr, needs, ready);
+        int64_t peak = 0, open = 0, most = 0;
+        const std::vector<loup::SweepStep> steps =
+            loup::wavefront_schedule(s.tiles, needs_ptr.data(), needs.data(), ready.data(), counts.data(), 1, &peak);
+        for (const loup::SweepStep& st : steps) {
+            open += st.sweep == 1 ? 1 : st.sweep == 3 ? -1 : 0;
+            most = std::max(most, open);
+        }
+        s.pool_rows = peak;
+        s.in_flight = most;
+    }
+    if (count_windows && !s.wave && s.tiles >= 1) {
+        // The tiled call's order of the last sweeps and its windows (the host state's alias): block j's gradients
+        // sit in a window from the first to the last of {j} and the tiles that hold ghosts of j; a window is taken
+        // again once its block has folded. From the plan's candidates, a superset of the kept ghosts.
+        const int64_t T = s.tiles;
+        std::vector<int64_t> needs_ptr, needs, ready;
+        loup::tile_dependencies(plan, needs_ptr, needs, ready);
+        std::vector<std::vector<int>> dep((size_t)T);
+        std::vector<int64_t> rdy((size_t)T), pos((size_t)T);
+        std::vector<int> ord((size_t)T);
+        for (int64_t k = 0; k < T; ++k) {
+            ord[(size_t)k] = (int)k;
+            rdy[(size_t)k] = k;
+            for (int64_t i = needs_ptr[(size_t)k]; i < needs_ptr[(size_t)k + 1]; ++i) {
+                const int64_t j = needs[(size_t)i];
+                if (j == k) continue;
+                dep[(size_t)j].push_back((int)k);
+                rdy[(size_t)k] = std::max(rdy[(size_t)k], j);
+            }
+        }
+        std::stable_sort(ord.begin(), ord.end(), [&](int x, int y) { return rdy[(size_t)x] < rdy[(size_t)y]; });
+        for (int64_t q = 0; q < T; ++q) pos[(size_t)ord[(size_t)q]] = q;
+        std::vector<std::vector<int>> folds((size_t)T), opens((size_t)T);
+        std::vector<int> win_of((size_t)T, -1), free_w;
+        for (int64_t j = 0; j < T; ++j) {
+            int64_t first = pos[(size_t)j], last = pos[(size_t)j];
+            for (int k : dep[(size_t)j]) {
+                first = std::min(first, pos[(size_t)k]);
+                last = std::max(last, pos[(size_t)k]);
+            }
+            if (counts[(size_t)j] == 0) continue;
+            folds[(size_t)last].push_back((int)j);
+            if (first < last) opens[(size_t)first].push_back((int)j);
+        }
+        int n_win = 0;
+        for (int64_t q = 0; q < T; ++q) {
+            for (int j : folds[(size_t)q])
+                if (win_of[(size_t)j] >= 0) free_w.push_back(win_of[(size_t)j]);
+            for (int j : opens[(size_t)q]) {
+                if (free_w.empty()) free_w.push_back(n_win++);
+                win_of[(size_t)j] = free_w.back();
+                free_w.pop_back();
+            }
+        }
+        s.windows = n_win;
+    }
+    *out = s;
+    return 0;
+}
+
 static int plan_execution_impl(LoupHandle* h, int n_atoms, const int* atomic_numbers, const double* positions,
                                const double* cell, double skin, LoupMemoryPlan* out) {
     if (!h) return -1;
@@ -5805,7 +5984,7 @@ static int plan_execution_impl(LoupHandle* h, int n_atoms, const int* atomic_num
     LoupMemoryPlan plan{};
     size_t free_b = 0, total_b = 0;
     if (h->exec_mode == LOUP_EXEC_WHOLE || !can_tile(h)) {  // the whole-system call: asked, or all the bundle has
-        CUDA_CHECK(cudaMemGetInfo(&free_b, &total_b));
+        CUDA_CHECK(device_memory(&free_b, &total_b));
         plan.free_bytes = free_b;
         plan.mode = LOUP_EXEC_WHOLE;
         *out = plan;
@@ -5835,7 +6014,7 @@ static int plan_execution_impl(LoupHandle* h, int n_atoms, const int* atomic_num
     if (rebuild_neighbors(h) != 0) return -1;
     // Bytes per row (locals and ghosts alike), per edge of capacity, and those that do not scale; kPlanAllowance as
     // in loup_plan_memory.
-    constexpr double kPlanAllowance = 32.0 * 1024.0 * 1024.0;
+    constexpr double kPlanAllowance = 64.0 * 1024.0 * 1024.0;
     // tile-shared-layers: a row is counted with every layer's buffers its own, as a whole system has them and as
     // the tile workspace had them when the caps below were measured; the workspace's layers share one arena, so
     // it takes less than the plan counts (OMAT-0 medium a third less). What that leaves goes to the kept slots and
@@ -5845,13 +6024,21 @@ static int plan_execution_impl(LoupHandle* h, int n_atoms, const int* atomic_num
                           (double)h->cub_tmp_bytes) / h->atom_cap;
     const double edge_b = ((double)h->sys_edge_bytes + (double)h->gen->edge_bytes()) / h->E_cap;
     const double fixed_b = (double)h->sys_fixed_bytes + (double)h->weight_copy_bytes + kPlanAllowance;
+    // What a first call needs beyond what it keeps: the GEMM timing's scratch output, as large as the model's
+    // largest buffer, and its cache-flush buffer (sgemm_rm's autotune). 121,945 atoms whole: 0.9 GiB above the
+    // system's 11.2 GiB in the first call (NVML, 18 November 2026).
+    const double scratch_row_b = (double)h->gen->largest_buffer_bytes() / h->atom_cap;
+    const double scratch_fixed_b = 2.0 * (double)std::max(h->l2_bytes, 1 << 20);
     const double epl = (double)h->E_skin / d.n_local;  // edges per receiver
     auto edge_cap = [](double e) { return std::max(e + std::floor(e / 4.0) + 1024.0, 4096.0); };
-    CUDA_CHECK(cudaMemGetInfo(&free_b, &total_b));
+    CUDA_CHECK(device_memory(&free_b, &total_b));
+    // LOUP_DEBUG_PLAN_FREE=<MiB> (tests of the plan's thresholds): at most that much counts as free here. The true
+    // figure moves by MB with what other programs hold, and a threshold is a fraction of it found to 0.1%.
+    if (const char* e = std::getenv("LOUP_DEBUG_PLAN_FREE"))
+        free_b = std::min(free_b, (size_t)std::max(0LL, std::atoll(e)) << 20);
     const double budget = (double)free_b + handle_system_bytes(h);  // the probe's buffers go when the call sets up
     const double allowed = h->exec_fraction * budget;
     const double n = n_atoms;
-    const double whole = row_b * n + edge_b * edge_cap(n * epl) + fixed_b;
     // The tiled call: the whole system's layer outputs, their gradients and the forces; each tile's kept list
     // (rows: species, positions, row map; edges: senders, receivers, pairs, shifts); the workspace for the widest
     // domain, whose ghost rows grow with a tile's surface; the adjoint buffers.
@@ -5872,6 +6059,11 @@ static int plan_execution_impl(LoupHandle* h, int n_atoms, const int* atomic_num
             }
         adj_per_row += widest_l * sizeof(float);
     }
+    // The whole system: every layer's own buffers, less the non-last layers' outputs and their gradients where the
+    // skip-chain fold is built (a whole system folds and never forms them: 4% of OMAT-0 medium's rows, 7% of
+    // OMOL-0's). Measured against the system itself: within 1% from 20,000 atoms (status §6.35).
+    const double whole = (row_b - (h->gen->chain_fold_built() ? layer_per_atom : 0.0)) * n +
+                         edge_b * edge_cap(n * epl) + fixed_b;
     // O32: with the layer state in host memory the device holds four ring slots of a layer's rows instead
     double ring_per_row = 0.0;
     for (int t = 0; t + 1 < L; ++t) {
@@ -5909,8 +6101,10 @@ static int plan_execution_impl(LoupHandle* h, int n_atoms, const int* atomic_num
         }
         if (hstate) {  // O32: the layer state in host memory, four ring slots on the device (HostPipe)
             ws += 4.0 * ring_per_row * rows;
-            hstate_host = (alias_plan ? 0.5 * n * layer_per_atom + std::min(T, 4.0) * c * ring_per_row
-                                      : n * layer_per_atom) + 6.0 * ring_per_row * rows;
+            // (the alias: its windows hold up to every block's gradients at once in a grid of tiles, 1,080,000 atoms
+            // in 27 tiles 71%, 2,560,000 in 64 nearly all of them, so the search counts both arrays; the plan's own
+            // figure follows the call's window schedule: tile_shape)
+            hstate_host = n * layer_per_atom + 6.0 * ring_per_row * rows;
             global = n * 3.0 * sizeof(double) + 32.0 * (n + T * (rows - c)) + 4.0 * (n + T) +
                      (host ? 0.0 : dev_edge_b * n * epl);
             return 0;
@@ -5938,6 +6132,7 @@ static int plan_execution_impl(LoupHandle* h, int n_atoms, const int* atomic_num
     // O31 (S5-T07): the lists' edge arrays go to pinned host memory only when no cap fits with them on the device,
     // and only within half of the host memory available now (MemAvailable); LOUP_TILE_HOST_LISTS=1|0 forces it.
     const double host_need = (host_compact() ? 8.0 : (double)kTileFullEdgeB) * n * epl * 1.1;  // O32: compact unless turned off
+    double host_lists_b = host_need;  // the plan's figure of the lists' edges in host memory (exact below)
     double host_avail = 0.0;
     {
         FILE* f = std::fopen("/proc/meminfo", "r");
@@ -5957,7 +6152,9 @@ static int plan_execution_impl(LoupHandle* h, int n_atoms, const int* atomic_num
     if (const char* e = std::getenv("LOUP_TILE_HOST_LISTS")) host_force = std::atoi(e) != 0 ? 1 : 0;
     const bool host_ok = host_force == 1 || (host_force < 0 && host_need <= 0.5 * host_avail);
     // O32: the layer state in host memory too (plain order), only when no cap fits with the lists there alone, and
-    // the lists, the state and its staging within 60% of the available host memory; LOUP_TILE_HOST_STATE=1|0 forces
+    // the lists, the state and its staging within two thirds of the available host memory (kHostStateShare; 60% of a
+    // count that left the alias windows out until tile-plan-exact: up to 96% in fact); LOUP_TILE_HOST_STATE=1|0 forces
+    constexpr double kHostStateShare = 2.0 / 3.0;
     int hs_force = -1;
     if (const char* e = std::getenv("LOUP_TILE_HOST_STATE")) hs_force = std::atoi(e) != 0 ? 1 : 0;
     // The host state's form (O32): 1 the plain order's (whole system, pipelined), 2 the wavefront's row pool as blocks
@@ -5980,7 +6177,7 @@ static int plan_execution_impl(LoupHandle* h, int n_atoms, const int* atomic_num
     auto hs_room = [&](double c, int form) {  // the host side of the host state's step at cap c
         double g = 0.0, w = 0.0;
         tiled_at(c, true, g, w, form);
-        const bool ok = host_need + hstate_host <= 0.6 * host_avail;
+        const bool ok = host_need + hstate_host <= kHostStateShare * host_avail;
         host_short |= !ok;
         return ok;
     };
@@ -6099,13 +6296,102 @@ static int plan_execution_impl(LoupHandle* h, int n_atoms, const int* atomic_num
         tiled_at(cap, host, g, w, h->tile_host_state);
     }
     if (!std::isfinite(global)) global = 0.0;  // the last cap tried had no wavefront (a refusal follows)
-    plan.host_bytes = (size_t)((h->tile_host_lists ? host_need : 0.0) + (h->tile_host_state ? hstate_host : 0.0));
+    // tile-plan-exact: the cap above comes from estimates with every layer's buffers its own and n / cap tiles, the
+    // quantities its rules were measured with. What the plan reports is what the call will hold at that cap: the
+    // workspace of the plan's widest tile (its layers share one arena), every tile's kept rows and edges, the
+    // whole-system arrays, and the kept slots, staging buffers and layer-0 results by the call's own rules for the
+    // memory the rest leaves. Before, plan and peak differed by -45% to +107% (status §6.35).
+    bool exact_fits = true;
+    for (int cap_i = 0; cap > 0;) {
+        TileShape shape;
+        const bool wave_on = wave && (hstate == 0 || wave_forced || hstate == 2);
+        if (tile_shape(positions, n_atoms, cell, cap, r_list + 1e-3, wave_on, wave_forced, hstate == 1 && alias_plan,
+                       &shape) != 0)
+            return -1;
+        const double row_ws_b = ((double)h->sys_atom_bytes + (double)h->gen->system_bytes() +
+                                 (double)h->cub_tmp_bytes) / h->atom_cap;
+        const double rows_max = (double)shape.widest_rows, e_max = (double)shape.max_local * epl;
+        const bool compact = host ? host_compact() : device_compact();
+        const double exact_ws = row_ws_b * rows_max + edge_b * edge_cap(e_max) + fixed_b;
+        // kept lists (rows; edges unless they are in host memory), positions, reference positions and forces, the
+        // adjoint rows, the layer state (whole system, the wavefront's pool, or the host state's four ring slots)
+        double kept = (double)shape.rows_total * (4 + 24 + 4 + 24) + 4.0 * (n + (double)shape.tiles) +
+                      3.0 * n * 3.0 * sizeof(double) + adj_per_row * rows_max;
+        if (!host) kept += n * epl * (compact ? 8.0 : (double)kTileFullEdgeB);
+        if (shape.wave) kept += 4.0 * (double)shape.rows_total;
+        if (hstate == 0) kept += (shape.wave ? (double)shape.pool_rows : n) * layer_per_atom;
+        else if (hstate == 1) kept += 4.0 * ring_per_row * rows_max;
+        // what the call adds within the fraction's reserve (its rules: the slots' set-up in the tiled call)
+        // What the call must hold has to fit as well: the search above counts 32 B a kept row and n / cap tiles, and
+        // a plan of thousands of tiles holds more (13,720,000 atoms at cap 4,096: 12.4 GiB against 11.8 allowed).
+        // Then the next smaller cap, or the refusal below. A cap the caller set is taken as it is.
+        exact_fits = exact_ws + kept <= allowed;
+        if (!exact_fits && h->exec_receivers <= 0) {
+            while (cap_i < (int)(sizeof(kCaps) / sizeof(kCaps[0])) && kCaps[cap_i] >= cap) ++cap_i;
+            if (cap_i < (int)(sizeof(kCaps) / sizeof(kCaps[0]))) {
+                cap = kCaps[cap_i];
+                continue;
+            }
+            shown_g = kept;
+            shown_w = exact_ws;
+            cap = 0;
+            break;
+        }
+        const double reserve =
+            std::max({256.0 * 1048576.0, 0.02 * (double)total_b, (1.0 - h->exec_fraction) * budget}) +
+            scratch_row_b * rows_max + scratch_fixed_b;  // as the call: its first sweeps time GEMMs
+        double avail = budget - exact_ws - kept - reserve;
+        if (host) {
+            const double stage_b = std::max(e_max, 1.0) * (compact ? 8.0 : (double)kTileFullEdgeB);
+            bool on = 2.0 * stage_b <= avail;
+            if (const char* e = std::getenv("LOUP_TILE_HOST_STAGE")) on = std::atoi(e) != 0;
+            if (on) { kept += 2.0 * stage_b; avail -= 2.0 * stage_b; }
+        }
+        const double slot_b = std::max(e_max, 1.0) * (16 + 3 * 4 + 8) + (rows_max + 1.0) * 4.0;
+        const double cslot_b = std::max(e_max, 1.0) * 8.0 + (rows_max + 1.0) * 4.0;
+        const double in_flight = (double)shape.in_flight, room = std::max(0.0, avail);
+        double want = std::min(in_flight, std::floor(room / slot_b));
+        if (compact && want < in_flight)
+            want = in_flight * cslot_b <= room
+                       ? std::min(in_flight, std::floor((room - in_flight * cslot_b) / (slot_b - cslot_b)))
+                       : 0.0;
+        const char* keep_env = std::getenv("LOUP_TILE_KEEP_ACTIVE");
+        if (keep_env) want = std::min(in_flight, std::max(0.0, (double)std::atoll(keep_env)));
+        double want_c = compact ? std::min(in_flight - want, std::floor(std::max(0.0, avail - want * slot_b) / cslot_b))
+                                : 0.0;
+        if (keep_env) want_c = 0.0;
+        if (const char* e = std::getenv("LOUP_TILE_KEEP_COMPACT"))
+            want_c = compact ? std::min(in_flight - want, std::max(0.0, (double)std::atoll(e))) : 0.0;
+        kept += want * slot_b + want_c * cslot_b;
+        if (!shape.wave && h->gen->sweep_keep_layer0()) {
+            const double l0_b = (double)h->gen->sweep_keep_floats(n_atoms) * sizeof(float);
+            bool on = l0_b <= budget - exact_ws - kept - reserve;
+            if (const char* e = std::getenv("LOUP_TILE_KEEP_L0")) on = std::atoi(e) != 0;
+            if (on) kept += l0_b;
+        }
+        ws = exact_ws;
+        global = kept;
+        // the pinned host memory: the lists' edges; the layer outputs of every atom, their gradients (with the alias:
+        // the windows the call's schedule opens), the two staging rows and the pipeline's four
+        // (the lists: every edge once, in pinned buffers that get 1/32 of room to grow: tile-pinned-headroom)
+        host_lists_b = n * epl * (compact ? 8.0 : (double)kTileFullEdgeB) * (33.0 / 32.0);
+        if (hstate == 1)
+            hstate_host = 0.5 * n * layer_per_atom +
+                          (alias_plan ? (double)shape.windows * (double)shape.max_local * ring_per_row
+                                      : 0.5 * n * layer_per_atom) + 6.0 * ring_per_row * rows_max;
+        break;
+    }
+    if (cap == 0) {  // nothing fits by the exact figures: no tiled plan (the refusal below, or the whole system)
+        h->tile_host_lists = h->tile_host_state = 0;
+        plan.host_lists = plan.host_state = 0;
+    }
+    plan.host_bytes = (size_t)((h->tile_host_lists ? host_lists_b : 0.0) + (h->tile_host_state ? hstate_host : 0.0));
     plan.whole_bytes = (size_t)whole;
     plan.tiled_global_bytes = (size_t)global;
     plan.tile_workspace_bytes = (size_t)ws;
     plan.free_bytes = free_b;
     plan.receivers = cap;
-    const bool whole_fits = whole <= allowed && n * epl <= (double)h->edge_limit;
+    const bool whole_fits = whole + scratch_row_b * n + scratch_fixed_b <= allowed && n * epl <= (double)h->edge_limit;
     plan.mode = (h->exec_mode == LOUP_EXEC_AUTO && whole_fits) ? LOUP_EXEC_WHOLE : LOUP_EXEC_TILED;
     if (plan.mode == LOUP_EXEC_TILED && cap == 0) {
         loup::set_error("%d atoms do not fit the device even in tiles of %d receivers: %.2f GiB of state and "
@@ -6115,11 +6401,11 @@ static int plan_execution_impl(LoupHandle* h, int n_atoms, const int* atomic_num
                         host ? ", with the tile lists' edges in host memory"
                              : (host_force == 0 ? "; host lists are off (LOUP_TILE_HOST_LISTS=0)"
                                                 : "; the tile lists' edges would not fit in half of the free host memory"),
-                        host_short ? "; the layer state in host memory would exceed 60% of the available host memory"
+                        host_short ? "; the layer state in host memory would exceed two thirds of the available host memory"
                                    : "");
         return -1;
     }
-    // A forced host state skips the 60% check (hs_room), but no plan may pin more than 90% of the available host
+    // A forced host state skips the share check (hs_room), but no plan may pin more than 90% of the available host
     // memory: 8,008,065 atoms with the wavefront's host pool forced planned 42.1 GB against 40.1 GB available, and
     // pinning it took the WSL distro down (status §6.34)
     if (plan.mode == LOUP_EXEC_TILED && (double)plan.host_bytes > 0.9 * host_avail) {
@@ -6209,12 +6495,12 @@ static int evaluate_tiled_impl(LoupHandle* h, int n_atoms, const int* atomic_num
         receivers = mp.receivers;
     }
     size_t free_b = 0, total_b = 0, least_free = 0;
-    CUDA_CHECK(cudaMemGetInfo(&free_b, &total_b));
+    CUDA_CHECK(device_memory(&free_b, &total_b));
     const double budget = (double)free_b + handle_system_bytes(h) + (st ? st->bytes : 0.0);
     least_free = free_b;
     auto note_free = [&]() -> int {
         size_t f = 0, t = 0;
-        CUDA_CHECK(cudaMemGetInfo(&f, &t));
+        CUDA_CHECK(device_memory(&f, &t));
         least_free = std::min(least_free, f);
         return 0;
     };
@@ -6226,7 +6512,7 @@ static int evaluate_tiled_impl(LoupHandle* h, int n_atoms, const int* atomic_num
         cudaStreamSynchronize(h->stream);
         const auto now = std::chrono::steady_clock::now();
         size_t f = 0, t = 0;
-        cudaMemGetInfo(&f, &t);
+        device_memory(&f, &t);
         std::fprintf(stderr, "tile times: %-28s %9.2f ms (%.0f MB free)\n", what,
                      std::chrono::duration<double, std::milli>(now - tick_last).count(), (double)f / 1e6);
         tick_last = now;
@@ -6556,13 +6842,16 @@ static int evaluate_tiled_impl(LoupHandle* h, int n_atoms, const int* atomic_num
         const double slot_bytes =
             (double)std::max(st->max_edges, 1) * (16 + 3 * 4 + 8) + (double)(st->max_rows + 1) * 4;
         size_t free_b = 0, total_b = 0;
-        CUDA_CHECK(cudaMemGetInfo(&free_b, &total_b));
+        CUDA_CHECK(device_memory(&free_b, &total_b));
         // within the free memory less a reserve of max(256 MB, 2% of the card): the wavefront at 1,081,600 atoms
         // gains 2.3% from 5 slots (980 of 1,312 MB free) and nothing from 1 (status §6.34). O32: and within the
         // memory fraction (the part of the budget it leaves out stays free): 3,524,845 atoms at fraction 0.75 took 24
         // slots of 221 MB in 5.8 GB free and ran out of memory in the sweeps; with 8 they ran (peak 13.3 of 16 GB).
+        // tile-plan-exact: and less the scratch of the GEMM timing in a building call's first sweeps (the model's
+        // largest buffer and the cache-flush buffer), so that call stays within the fraction as well
         const double reserve =
-            std::max({256.0 * 1048576.0, 0.02 * (double)total_b, (1.0 - h->exec_fraction) * budget});
+            std::max({256.0 * 1048576.0, 0.02 * (double)total_b, (1.0 - h->exec_fraction) * budget}) +
+            (double)h->gen->largest_buffer_bytes() + 2.0 * (double)std::max(h->l2_bytes, 1 << 20);
         // Host lists: two staging buffers first (LOUP_TILE_HOST_STAGE=0|1), then the slots in what is left
         st->stage = 0;
         for (DeviceBufferGuard& g : st->ring.buf)
@@ -6685,7 +6974,7 @@ static int evaluate_tiled_impl(LoupHandle* h, int n_atoms, const int* atomic_num
             double l0_bytes = 0.0;
             for (const TileList& t : lists) l0_bytes += (double)h->gen->sweep_keep_floats(t.n_local) * sizeof(float);
             size_t f2 = 0, t2 = 0;
-            CUDA_CHECK(cudaMemGetInfo(&f2, &t2));
+            CUDA_CHECK(device_memory(&f2, &t2));
             bool on = l0_bytes <= (double)f2 - reserve;
             if (const char* e = std::getenv("LOUP_TILE_KEEP_L0")) on = std::atoi(e) != 0;
             bool ok = on;
@@ -6919,6 +7208,9 @@ static int evaluate_tiled_impl(LoupHandle* h, int n_atoms, const int* atomic_num
         tick("host windows");
     }
     h->pinned_spare.clear();  // O32: the spares this state's set-up did not take
+    if (tile_times)
+        std::fprintf(stderr, "tile host memory: %.1f MB pinned (%d windows), %.1f MB of device state\n",
+                     st->host_bytes / 1048576.0, (int)st->win.size(), st->bytes / 1048576.0);
     auto win_p = [&](int j) { return static_cast<float*>(st->win[(size_t)win_of[(size_t)j]]->p); };
     if (st->pipe && st->hp.tile_events((size_t)T) != 0) {
         loup::set_error("tile host state: cannot create the copy events");
@@ -7879,11 +8171,19 @@ static int plan_memory_impl(LoupHandle* h, int n_atoms, double edges_per_atom, L
     // kPlanAllowance stands for what is not counted (captured graphs, the allocator's rounding of sixty buffers):
     // on SrTiO3 with OMAT-0 medium the counted bytes were 58, -1 and 25 MB below the measured memory at 5,000, 20,480
     // and 40,000 atoms (RTX 5060 Ti, 15 November 2026).
-    constexpr double kPlanAllowance = 32.0 * 1024.0 * 1024.0;
+    constexpr double kPlanAllowance = 64.0 * 1024.0 * 1024.0;
     const double whole = atom_now * scale + (double)h->sys_fixed_bytes + edge_now / h->E_cap * cap +
                          (double)h->cub_tmp_bytes * scale + (double)h->weight_copy_bytes + kPlanAllowance;
     size_t free_b = 0, total_b = 0;
-    CUDA_CHECK(cudaMemGetInfo(&free_b, &total_b));
+    CUDA_CHECK(device_memory(&free_b, &total_b));
+    if (const char* e = std::getenv("LOUP_DEBUG_PLAN"); e && e[0] == '1')
+        std::fprintf(stderr, "plan memory: N %d (rows %d), edges %d (capacity %d); engine rows %.1f MB, model rows "
+                     "%.1f MB, engine edges %.1f MB, model edges %.1f MB, fixed %.1f MB, scan %.1f MB, weight copies "
+                     "%.1f MB; device free %.1f of %.1f MB\n", h->N, h->atom_cap, h->E_skin, h->E_cap,
+                     h->sys_atom_bytes / 1048576.0, (h->gen ? h->gen->system_bytes() : 0) / 1048576.0,
+                     h->sys_edge_bytes / 1048576.0, (h->gen ? h->gen->edge_bytes() : 0) / 1048576.0,
+                     h->sys_fixed_bytes / 1048576.0, h->cub_tmp_bytes / 1048576.0, h->weight_copy_bytes / 1048576.0,
+                     free_b / 1048576.0, total_b / 1048576.0);
     LoupMemoryPlan plan{};
     plan.whole_bytes = (size_t)whole;
     plan.free_bytes = free_b;

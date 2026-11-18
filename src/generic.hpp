@@ -97,6 +97,9 @@ public:
     // The same with every layer's buffers its own: what a whole system of as many rows allocates where this one
     // shares them (share_layer_buffers); equal to system_bytes() otherwise.
     size_t system_bytes_unshared() const { return sys_bytes_unshared_; }
+    // The largest single buffer of the system: the first pass times every GEMM shape into a scratch copy of its
+    // output, so a system's first call needs that much more for a moment (the engine's memory plans).
+    size_t largest_buffer_bytes() const { return sys_max_alloc_; }
     size_t edge_bytes() const { return edge_bytes_; }
     // For a sweep driver: layer t's output rows of degree l ([rows, 2l + 1, out_width(t)]; nullptr when the model
     // does not form them) and the buffer the next layer's sweep leaves their gradient in.
@@ -168,6 +171,7 @@ private:
     bool share_layers_env_ = true;   // LOUP_TILE_SHARE_LAYERS != 0, read at load
     bool layers_shared_ = false;     // the allocated system's layers share their arena
     size_t sys_bytes_unshared_ = 0;  // sys_bytes_ with every layer's buffers its own
+    size_t sys_max_alloc_ = 0;       // the largest single buffer of alloc_system
     void update_h0_read();           // h0_read_ for the current chain_fold_ (S97)
     // S59 layer-0 species tables (sm_120, cc 8.0; LOUP_SPECIES_TABLES=0 disables): see setup_species_tables.
     void setup_species_tables(const Bundle& b);

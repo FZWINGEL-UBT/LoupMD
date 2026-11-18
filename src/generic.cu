@@ -1635,6 +1635,7 @@ void GenericModel::free_system() {
     sys_alloc_bytes_.clear();
     layers_shared_ = false;
     sys_bytes_unshared_ = 0;
+    sys_max_alloc_ = 0;
     if (d_zero_slab_) cudaFree(d_zero_slab_);
     d_zero_slab_ = nullptr;
     zero_slab_bytes_ = 0;
@@ -1655,8 +1656,10 @@ void GenericModel::free_system() {
 void GenericModel::alloc_system(int N) {
     free_system();
     sys_bytes_ = 0;
+    sys_max_alloc_ = 0;
     auto alloc = [&](size_t floats) -> float* {
         float* p = nullptr;
+        sys_max_alloc_ = std::max(sys_max_alloc_, floats * sizeof(float));
         CUDA_CHECK_THROW(cudaMalloc(&p, std::max<size_t>(floats, 1) * sizeof(float)));
         sys_bytes_ += std::max<size_t>(floats, 1) * sizeof(float);
         sys_allocs_.push_back(p);
@@ -1698,6 +1701,7 @@ void GenericModel::alloc_system(int N) {
     bool sizing = false;
     auto own = [&](size_t floats) -> float* {
         if (!layers_shared_) return alloc(floats);
+        if (sizing) sys_max_alloc_ = std::max(sys_max_alloc_, floats * sizeof(float));
         float* p = sizing ? nullptr : reinterpret_cast<float*>(arena + arena_off);
         arena_off += align256(std::max<size_t>(floats, 1) * sizeof(float));
         return p;
@@ -1752,7 +1756,9 @@ void GenericModel::alloc_system(int N) {
             layers_sum += arena_off;
         }
         sizing = false;
+        const size_t largest = sys_max_alloc_;  // the arena is no buffer of a GEMM
         arena = reinterpret_cast<char*>(alloc((arena_bytes + sizeof(float) - 1) / sizeof(float)));
+        sys_max_alloc_ = largest;
     }
     for (int t = 0; t < n_layers_; ++t) {
         GenericLayer* L = layers_[t];
