@@ -16,6 +16,8 @@
 set -euo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
 root=$(cd "$here/../.." && pwd)
+# Git Bash: with the path conversion off (below) git.exe does not take /d/...; D:/... serves bash, git and docker.
+if command -v cygpath > /dev/null 2>&1; then root=$(cygpath -m "$root"); fi
 ref=${1:-HEAD}
 image=${LOUPMD_WHEEL_IMAGE:-loupmd-wheel-build:cuda13.3-rocky8}
 docker=${DOCKER:-docker}

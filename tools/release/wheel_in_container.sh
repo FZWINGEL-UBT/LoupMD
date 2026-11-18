@@ -5,10 +5,12 @@
 set -euo pipefail
 set +u; source /opt/rh/gcc-toolset-13/enable; set -u       # its script reads unset variables
 export PATH=/usr/local/cuda/bin:$PATH
-echo "nvcc $(nvcc --version | grep -o 'V[0-9.]*'), g++ $(g++ -dumpfullversion), glibc $(ldd --version | head -1 | grep -o '[0-9.]*$'), $(python3.11 --version)"
+echo "nvcc $(nvcc --version | grep -o 'V[0-9][0-9.]*'), g++ $(g++ -dumpfullversion), glibc $(ldd --version | head -1 | grep -o '[0-9.]*$'), $(python3.11 --version)"
 
+# build_wheel.sh always passes WHEEL_ARCHS, empty for the default: an empty value in the environment would replace
+# the Makefile's list and nvcc would compile for its own default architecture.
 archs=()
-[ -n "${WHEEL_ARCHS:-}" ] && archs=("WHEEL_ARCHS=$WHEEL_ARCHS")
+if [ -n "${WHEEL_ARCHS:-}" ]; then archs=("WHEEL_ARCHS=$WHEEL_ARCHS"); else unset WHEEL_ARCHS; fi
 start=$(date +%s)
 make -j"${LOUPMD_WHEEL_JOBS:-4}" wheel-lib "${archs[@]}" > build-lib.log 2>&1 || { tail -30 build-lib.log; exit 1; }
 echo "library built in $(( $(date +%s) - start )) s"

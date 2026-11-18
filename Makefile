@@ -33,6 +33,10 @@ $(OBJDIR)/libloupmd.so: $(OBJS)
 # file; a GPU loads the code of its own architecture. `make wheel-lib` writes build/wheel/libloupmd.so and leaves
 # ./libloupmd.so alone. WHEEL_ARCHS narrows the list (for example WHEEL_ARCHS="89 120" for a quick build).
 WHEEL_ARCHS ?= 80 86 89 90 100 120
+ifeq ($(strip $(WHEEL_ARCHS)),)
+# An empty WHEEL_ARCHS (from the environment, say) is the default list, not a build without -gencode.
+override WHEEL_ARCHS = 80 86 89 90 100 120
+endif
 WHEEL_GENCODE = $(foreach a,$(WHEEL_ARCHS),-gencode arch=compute_$(a),code=sm_$(a))
 WHEELDIR = build/wheel
 WHEEL_OBJS = $(patsubst src/%.cu,$(WHEELDIR)/%.o,$(SRCS))
