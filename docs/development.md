@@ -108,6 +108,23 @@ Two builds of one commit give libraries of different bytes; the build is not rep
 wheel you upload: install it into a new environment and run `loupmd doctor`, `loupmd bench --quick` and
 `loupmd validate`.
 
+Publishing a version takes four steps, in this order. PyPI never accepts a second file with the name of one it
+has had, so a mistake found after the upload needs a new version number.
+
+1. Tag the commit the wheel was built from: `git tag -a v0.0.1 -m "LoupMD 0.0.1"`.
+2. Upload the wheel to PyPI with an API token of the project:
+   `python -m twine upload dist/release-<version>-<commit>/loupmd-<version>-*.whl`.
+3. Push the branch and the tag. The push rebuilds this site, and the tag is where the source of the LGPL library
+   is offered (`NOTICE.md`).
+4. Make the GitHub release from the same folder, so that it holds the file that is on PyPI:
+
+    ```bash
+    gh release create v0.0.1 --verify-tag --title "LoupMD 0.0.1" --notes-file notes.md \
+        dist/release-<version>-<commit>/*
+    ```
+
+Then install by name into a new environment (`pip install "loupmd[export]"`) and run the checks above once more.
+
 ## Build this site
 
 ```bash

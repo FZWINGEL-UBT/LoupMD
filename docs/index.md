@@ -15,6 +15,19 @@ print(result.summary)
 The same run from the command line is `loupmd md structure.cif --model omat0-medium --temperature 300 --steps 10000`;
 the [quickstart](quickstart.md) shows it with the CLI, Python and ASE side by side.
 
+## Install
+
+```bash
+pip install "loupmd[export]"
+loupmd doctor
+```
+
+LoupMD is on [PyPI](https://pypi.org/project/loupmd/). It needs Linux x86_64 or WSL2, an NVIDIA GPU of compute
+capability 8.0 or newer and Python 3.10 or newer; [install](install.md) has the details. The
+[releases](https://github.com/FZWINGEL-UBT/LoupMD/releases) on GitHub hold each version's files with their
+checksums, and the [changelog](https://github.com/FZWINGEL-UBT/LoupMD/blob/release/v1/CHANGELOG.md) lists what each
+version brought.
+
 ## What it does
 
 - NVT, NVE and NPT molecular dynamics with the thermostats and barostats of ASE, on the GPU

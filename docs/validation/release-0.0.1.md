@@ -295,6 +295,10 @@ the tag `v0.0.1` (on `f3e5d8d`) were pushed to the repository right after, and t
 from that push, so its install page and its quickstart name `pip install "loupmd[export]"` from the minute the
 file was there. The tag is where the source of the LGPL library is offered.
 
+The GitHub release `v0.0.1` ("LoupMD 0.0.1", published at 16:29 UTC) holds the three files of
+`dist/release-0.0.1-f3e5d8d834af/`: the wheel, `loupmd-0.0.1-src.tar.gz` and `SHA256SUMS`. An anonymous download
+of all three passed `sha256sum -c SHA256SUMS`, and GitHub's digest of the wheel is the SHA-256 PyPI lists.
+
 Then the install by name: a new `python3 -m venv` in WSL 2 (Python 3.12.3, pip 26.3, no pip configuration) and
 `pip install --no-cache-dir "loupmd[export]"`: 217 s, 67 distributions, 5.9 GB, `pip check` finds no broken
 requirement, the same versions as in the environment above. pip took `loupmd` from the index (the installed

@@ -23,8 +23,9 @@ The second checks the GPU, the driver and the libraries. The rest of this page e
 The tensor-core GEMM kernels ship for compute capability 8.x, 9.x and 12.x. On a 10.x GPU the engine runs on its
 other GEMMs, somewhat slower, and `loupmd doctor` prints a warning.
 
-The 0.0.1 wheel has been run on one GPU only, an RTX 5060 Ti (compute capability 12.0);
-`docs/validation/release-0.0.1.md` in the repository has the results. Its code for compute capability 8.0, 8.6,
+The 0.0.1 wheel has been run on one GPU only, an RTX 5060 Ti (compute capability 12.0); the
+[release record](https://github.com/FZWINGEL-UBT/LoupMD/blob/release/v1/docs/validation/release-0.0.1.md) in the
+repository has the results. Its code for compute capability 8.0, 8.6,
 8.9, 9.0 and 10.0 is compiled from the same sources and has not been run from the wheel. On any GPU,
 `loupmd validate` compares a model with MACE float64 on that machine.
 
@@ -48,6 +49,15 @@ the engine alone takes about 1.6 GB.
 
 pip installs a wheel only: there is no source distribution, since the library is compiled with the CUDA compiler.
 On a platform the wheel does not cover, pip answers that it finds no matching distribution.
+
+Each version is also a [release on GitHub](https://github.com/FZWINGEL-UBT/LoupMD/releases) with the same wheel,
+an archive of the sources and a `SHA256SUMS` file. To install from a downloaded file, check it and name it to pip;
+the dependencies still come from a package index:
+
+```bash
+sha256sum -c --ignore-missing SHA256SUMS
+pip install "./loupmd-0.0.1-py3-none-manylinux_2_28_x86_64.whl[export]"
+```
 
 ### CUDA run-time libraries
 
@@ -109,8 +119,8 @@ Many models are under the Academic Software License (non-commercial use only). T
 name the licence of each.
 
 The cache root is `$LOUPMD_CACHE`, else `~/.cache/loupmd`. It holds `models/`, `bundles/`, `gate_refs/` and `lib/`
-and the engine's GEMM plan files (`plans_*.bin`) in the root itself, and must lie outside the Python environment. `loupmd cache list`, `size` and `prune` manage it. See
-[environment variables](reference/environment.md).
+and the engine's GEMM plan files (`plans_*.bin`) in the root itself, and must lie outside the Python environment.
+`loupmd cache list`, `size` and `prune` manage it. See [environment variables](reference/environment.md).
 
 ## Check the setup
 
