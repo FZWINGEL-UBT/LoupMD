@@ -24,12 +24,16 @@ struct GenericLayer {
     // bundle's per-pair tables are byte-identical, as in the MACE-OFF bundles; loup::table_pair)
     int intervals = 0, Q1 = 0, pair_sym = 0;
     int first_hidden = 0, J = 0, K0 = 0;  // layer 0 outer sum over J columns; K0 = S * (J - 1) padded to 16
+    int Jt = 0;  // S128: layer 0's table row stride (float4): J, or J - 1 without the density column (kinds 0 / 1)
     float* C0[4] = {};                    // [K0, lin_cols] (per species when skip_folded)
     float* S0[4] = {};                    // [N, 2l+1, K0] (the backward reuses it for dS0)
     int has_sc = 0, sc_species = 0, readout = -1, ro_H = 0, prod_species = 0, prod_segw = 0;
     int skip_folded = 0, ro_folded = 0;
     int fwd_var = 0;           // S64: conv forward variant (launch_conv_fwd; tune_conv_variants picks it per system)
     bool last_preloc = false;  // S64: the preloc flag of the last recorded conv forward (for the re-launch)
+    // S125: W_lin_1..3 exactly zero (certified at load), so lin_1..3 are exactly zero: the pruned lx 1 conv kernels
+    // (gconv_*_L1s, the output-degree-0 paths only) run, and the l >= 1 projections are skipped in both directions
+    bool conv_prune = false;
     int lin_cols[4] = {0, 0, 0, 0};
     int sc_has[3] = {0, 0, 0};
     SplineGrid grid{};
@@ -346,8 +350,10 @@ __global__ void assemble_forces_kernel(const int* __restrict__ E_dev, int S, con
 // density, summed into D. One block per receiver, one thread per column j < J - 1 (S105: the density column is summed
 // by warp 0, one lane per staged edge, instead of by a warp of its own); a receiver's edges are grouped by ascending
 // sender species (the neighbour list's contract), so each species slot is written once (zeros if it has no edge).
+// S128: Jt = the table's row stride in float4: J, or J - 1 when the layer reads no density (agnostic kinds: the
+// column is dropped at load, rows of 1,024 B at 64 columns), and then neither D nor the density sum is formed.
 __global__ void __launch_bounds__(256) first_fwd_kernel(
-    int N, int S, int I, int J, int K0, SplineGrid grid, int sh_perm, int pair_sym,
+    int N, int S, int I, int J, int Jt, int K0, SplineGrid grid, int sh_perm, int pair_sym,
     const int* __restrict__ row_ptr, const int* __restrict__ senders, const float4* __restrict__ vec_len,
     const int* __restrict__ species, const float4* __restrict__ table,
     float* __restrict__ s0, float* __restrict__ s1, float* __restrict__ s2, float* __restrict__ s3, float* __restrict__ D) {
@@ -397,14 +403,14 @@ __global__ void __launch_bounds__(256) first_fwd_kernel(
             }
             __syncthreads();
             float dv = 0.0f;
-            if (tid < cnt) {
-                const float4 dc = __ldg(table + ((int64_t)pr * I + s_iv[tid]) * J + Jp);
+            if (Jt > Jp && tid < cnt) {
+                const float4 dc = __ldg(table + ((int64_t)pr * I + s_iv[tid]) * Jt + Jp);
                 const float t = s_t[tid];
                 dv = fmaf(t, fmaf(t, fmaf(t, dc.w, dc.z), dc.y), dc.x);
             }
             if (tid < Jp) {
                 for (int k = 0; k < cnt; ++k) {
-                    const float4 cf = __ldg(table + ((int64_t)pr * I + s_iv[k]) * J + tid);
+                    const float4 cf = __ldg(table + ((int64_t)pr * I + s_iv[k]) * Jt + tid);
                     const float t = s_t[k];
                     const float v = fmaf(t, fmaf(t, fmaf(t, cf.w, cf.z), cf.y), cf.x);
                     const float* sh = s_sh + k * 16;
@@ -412,7 +418,7 @@ __global__ void __launch_bounds__(256) first_fwd_kernel(
                     for (int m = 0; m < 16; ++m) acc[m] = fmaf(v, sh[m], acc[m]);
                 }
             }
-            if (tid < 32)
+            if (Jt > Jp && tid < 32)
                 for (int k = 0; k < cnt; ++k) dsum += __shfl_sync(0xffffffffu, dv, k);
             __syncthreads();
         }
@@ -436,7 +442,7 @@ __global__ void __launch_bounds__(256) first_fwd_kernel(
         #pragma unroll
         for (int m = 0; m < 7; ++m) s3[((int64_t)a * 7 + m) * K0 + K + tid] = 0.0f;
     }
-    if (tid == 0) D[a] = dsum;
+    if (tid == 0 && Jt > Jp) D[a] = dsum;
 }
 
 // STAGE_G: the receiver's gradient rows G[m][s Jp + j] (16 x K floats, the same for all its edges) are staged once in
@@ -445,7 +451,7 @@ __global__ void __launch_bounds__(256) first_fwd_kernel(
 // memory) the rows are read from global memory per edge.
 template <bool STAGE_G>
 __global__ void __launch_bounds__(256) first_bwd_kernel(
-    int N, int S, int I, int J, int K0, SplineGrid grid, int sh_perm, int pair_sym,
+    int N, int S, int I, int J, int Jt, int K0, SplineGrid grid, int sh_perm, int pair_sym,
     const int* __restrict__ row_ptr, const int* __restrict__ senders, const float4* __restrict__ vec_len,
     const int* __restrict__ species, const float4* __restrict__ table,
     const float* __restrict__ g0, const float* __restrict__ g1, const float* __restrict__ g2, const float* __restrict__ g3,
@@ -490,8 +496,8 @@ __global__ void __launch_bounds__(256) first_bwd_kernel(
         #pragma unroll
         for (int m = 0; m < 16; ++m) dY[m] = 0.0f;
         float er = 0.0f;
-        for (int j = hl; j < J; j += 16) {
-            const float4 cf = __ldg(table + ((int64_t)pr * I + iv) * J + j);
+        for (int j = hl; j < Jt; j += 16) {  // S128: j == Jp (the density) only when the table keeps it
+            const float4 cf = __ldg(table + ((int64_t)pr * I + iv) * Jt + j);
             const float v = fmaf(t, fmaf(t, fmaf(t, cf.w, cf.z), cf.y), cf.x);
             const float dv = fmaf(t, fmaf(t, 3.0f * cf.w, 2.0f * cf.z), cf.y) * sxi;
             if (j == Jp) {
@@ -575,7 +581,7 @@ __global__ void __launch_bounds__(256) first_bwd_kernel(
 #endif
 template <int COLS, bool HAS_ZBL, bool STRESS>
 __global__ void __launch_bounds__(128, COLS == 2 ? LOUP_FIRST_BWD_EDGE_MINB2 : 0) first_bwd_edge_kernel(
-    const int* __restrict__ E_dev, int S, int I, int J, int K0, SplineGrid grid, int sh_perm, int pair_sym,
+    const int* __restrict__ E_dev, int S, int I, int J, int Jt, int K0, SplineGrid grid, int sh_perm, int pair_sym,
     const int* __restrict__ senders, const int* __restrict__ receivers, const float4* __restrict__ vec_len,
     const int* __restrict__ species, const float4* __restrict__ table,
     const float* __restrict__ g0, const float* __restrict__ g1, const float* __restrict__ g2, const float* __restrict__ g3,
@@ -667,7 +673,7 @@ __global__ void __launch_bounds__(128, COLS == 2 ? LOUP_FIRST_BWD_EDGE_MINB2 : 0
             const int pr = __shfl_sync(0xffffffffu, m_pr, k);
             const float t = __shfl_sync(0xffffffffu, m_t, k);
             const float sxi = __shfl_sync(0xffffffffu, m_sxi, k);
-            const float4* tb = table + ((int64_t)pr * I + iv) * J;
+            const float4* tb = table + ((int64_t)pr * I + iv) * Jt;
             float pa[COLS], pd[COLS];
             #pragma unroll
             for (int c = 0; c < COLS; ++c) {
@@ -1053,6 +1059,17 @@ void GenericModel::load(const Bundle& b) {
             if (L->first_hidden)
                 for (int l = 0; l < 4; ++l) L->C0[l] = upload(W, c0_pad[l]);
         }
+        // S125: MP-0 medium's second interaction has W_lin_1..3 exactly zero (about 5.5e-94 in the float64 checkpoint,
+        // 0 after its float32 conversion), so only 2 of its 10 conv paths reach the answer. Certified here from the
+        // loaded weights, so other checkpoints keep every path. LOUP_CONV_PRUNE=0 disables it (tests, A/B).
+        if (!L->first_hidden && L->lmax_x == 1) {
+            const char* pe = std::getenv("LOUP_CONV_PRUNE");
+            bool dead = !(pe && pe[0] == '0');
+            for (int l = 1; l < 4 && dead; ++l)
+                for (float v : b.f32(p + "W_lin_" + std::to_string(l), {L->n_l3[l] * L->C_x, L->lin_cols[l]}))
+                    if (v != 0.0f) { dead = false; break; }
+            L->conv_prune = dead;
+        }
         if (nl) {
             const std::vector<double> ab = b.f64(p + "alpha_beta", {2});
             L->alpha = (float)ab[0];
@@ -1120,16 +1137,15 @@ void GenericModel::load(const Bundle& b) {
             if (one_table) L->pair_sym = 2;
             const int Pt = one_table ? 1 : Ptab;
             if (L->first_hidden) {
+                // S128: the density column (the last) only where the layer reads the density (kinds 2-4); the
+                // agnostic kinds never form D, so their rows hold the J - 1 hidden columns alone
+                L->Jt = L->kind >= 2 ? L->J : L->J - 1;
                 const size_t PI = (size_t)Pt * L->intervals;
                 const float4* src = reinterpret_cast<const float4*>(tab.data());
-                std::vector<float4> host(PI * L->J);
-                if (L->J == L->Q1) {
-                    memcpy(host.data(), src, PI * L->J * sizeof(float4));
-                } else {
-                    for (size_t pi = 0; pi < PI; ++pi) {
-                        memcpy(&host[pi * L->J], &src[pi * L->Q1], (size_t)(L->J - 1) * sizeof(float4));
-                        host[pi * L->J + L->J - 1] = src[pi * L->Q1 + L->Q1 - 1];
-                    }
+                std::vector<float4> host(PI * L->Jt);
+                for (size_t pi = 0; pi < PI; ++pi) {
+                    memcpy(&host[pi * L->Jt], &src[pi * L->Q1], (size_t)(L->J - 1) * sizeof(float4));
+                    if (L->Jt == L->J) host[pi * L->Jt + L->J - 1] = src[pi * L->Q1 + L->Q1 - 1];
                 }
                 L->table = upload(W, host);
             } else {
@@ -1472,7 +1488,7 @@ int GenericModel::tune_conv_variants(cudaStream_t st) {
                 CUDA_CHECK_THROW(cudaEventRecord(e0, st));
                 launch_conv_fwd(L->lmax_x, st, a.N, L->C_x, S_, L->intervals, L->grid, sh_perm_, L->pair_sym, a.row_ptr,
                                 a.senders, a.vec_len, a.slab, a.t_sx, L->last_preloc, a.species, L->packed_table,
-                                L->density_table, L->cubic_bias_shift, L->x, L->mid, L->D, v);
+                                L->density_table, L->cubic_bias_shift, L->x, L->mid, L->D, v, nullptr, L->conv_prune);
                 CUDA_CHECK_THROW(cudaEventRecord(e1, st));
                 CUDA_CHECK_THROW(cudaEventSynchronize(e1));
                 float ms = 0.0f;
@@ -1579,6 +1595,11 @@ void GenericModel::alloc_system(int N) {
                 L->dpre[l] = (t > 0 && l <= L->lmax_x) ? alloc(n * dimL(l) * L->lin_cols[l]) : nullptr;
             }
         }
+        if (L->conv_prune)  // S125: the skipped projections' outputs, read by the product (or the gate), stay zero
+            for (int l = 1; l < 4; ++l) {
+                float* z = L->skip_folded ? L->msgf[l] : L->lin[l];
+                CUDA_CHECK_THROW(cudaMemset(z, 0, n * dimL(l) * (L->skip_folded ? L->C_msg : L->lin_cols[l]) * sizeof(float)));
+            }
         if (L->kind == 4)  // with the S59 table the gates read res[0] from it
             for (int l = 0; l <= L->lmax_x; ++l)
                 L->res[l] = (l == 0 && L->res0_table) ? nullptr : alloc(n * dimL(l) * L->lin_cols[l]);
@@ -1719,7 +1740,7 @@ void GenericModel::record(const GenericPassInputs& in) {
         if (L->first_hidden) {
             const int Kh = L->K0;
             first_fwd_kernel<<<N, ((std::max(L->J - 1, 64) + 31) / 32) * 32, 0, st>>>(
-                N, S, L->intervals, L->J, L->K0, L->grid, sh_perm_, L->pair_sym, in.act_row_ptr, in.act_senders,
+                N, S, L->intervals, L->J, L->Jt, L->K0, L->grid, sh_perm_, L->pair_sym, in.act_row_ptr, in.act_senders,
                 in.act_vec_len, in.species, L->table, L->S0[0], L->S0[1], L->S0[2], L->S0[3], L->D);
             if (L->skip_folded) {
                 fork();
@@ -1748,16 +1769,18 @@ void GenericModel::record(const GenericPassInputs& in) {
                                 ? conv_var_override_ : L->fwd_var;
             launch_conv_fwd(L->lmax_x, st, N, Cx, S, L->intervals, L->grid, sh_perm_, L->pair_sym, in.act_row_ptr,
                             in.act_senders, in.act_vec_len, in.act_slab, in.act_t_sx, L->last_preloc, in.species,
-                            L->packed_table, L->density_table, L->cubic_bias_shift, L->x, L->mid, L->D, var, L->dx);
+                            L->packed_table, L->density_table, L->cubic_bias_shift, L->x, L->mid, L->D, var, L->dx,
+                            L->conv_prune);
+            const int n_proj = L->conv_prune ? 1 : 4;  // S125: lin_1..3 stay zero (W_lin_1..3 = 0)
             if (L->skip_folded) {
                 fork();
-                for (int l = 0; l < 4; ++l)
+                for (int l = 0; l < n_proj; ++l)
                     species_gemm(false, l, L->n_l3[l] * Cx, Cm, L->mid[l], L->W_lin[l],
                                  (int64_t)L->n_l3[l] * Cx * Cm, 0.0f, L->msgf[l], 4 * l);
                 join();
             } else {
                 fork();
-                for (int l = 0; l < 4; ++l) {
+                for (int l = 0; l < n_proj; ++l) {
                     lane(l);
                     in.gemm(false, N * dimL(l), L->lin_cols[l], L->n_l3[l] * Cx, 1.0f, L->mid[l], L->n_l3[l] * Cx,
                             L->W_lin[l], L->lin_cols[l], 0.0f, L->lin[l], L->lin_cols[l]);
@@ -1807,7 +1830,8 @@ void GenericModel::record(const GenericPassInputs& in) {
             launch_prod_ro1_fused(L->prod, st, N, Cm, L->msgf, Dp, L->prod_w,
                                   L->prod_species ? (int64_t)L->prod_segw * Cm : 0, in.species,
                                   L->sc_has[0] ? L->hid : nullptr, L->ro_W1, L->ro_b1, L->ro_W2, L->ro_act_c,
-                                  L->dhid, in.energy, dm, dDp);
+                                  L->dhid, in.energy, dm, dDp,
+                                  L->conv_prune && L->kind != 4);  // S127: m_1..3 = lin_1..3 = 0 (not for kind 4)
             continue;
         }
         const float* ro_fw = fused_readout(t);
@@ -2064,7 +2088,7 @@ void GenericModel::record(const GenericPassInputs& in) {
             }
             if (L->J - 1 <= 96) {
                 if (has_edges) {
-                    using EdgeBwd = void (*)(const int*, int, int, int, int, SplineGrid, int, int, const int*, const int*,
+                    using EdgeBwd = void (*)(const int*, int, int, int, int, int, SplineGrid, int, int, const int*, const int*,
                                              const float4*, const int*, const float4*, const float*, const float*, const float*,
                                              const float*, const float*, const float*, ZblParams, double*, double*, double*);
                     const EdgeBwd tbl[2][2][2] = {
@@ -2073,7 +2097,7 @@ void GenericModel::record(const GenericPassInputs& in) {
                         {{first_bwd_edge_kernel<3, false, false>, first_bwd_edge_kernel<3, false, true>},
                          {first_bwd_edge_kernel<3, true, false>, first_bwd_edge_kernel<3, true, true>}}};
                     tbl[L->J - 1 > 64 ? 1 : 0][has_zbl_ ? 1 : 0][in.compute_stress ? 1 : 0]<<<(in.E_cap + 127) / 128, 128, 0, st>>>(
-                        in.E_dev, S, L->intervals, L->J, L->K0, L->grid, sh_perm_, L->pair_sym, in.act_senders,
+                        in.E_dev, S, L->intervals, L->J, L->Jt, L->K0, L->grid, sh_perm_, L->pair_sym, in.act_senders,
                         in.act_receivers, in.act_vec_len, in.species, L->table, L->S0[0], L->S0[1], L->S0[2], L->S0[3],
                         density ? L->dD : nullptr, d_edge_dvec_, zbl_p, in.energy, in.forces, in.virial);
                 }
@@ -2081,27 +2105,29 @@ void GenericModel::record(const GenericPassInputs& in) {
                 const size_t g_smem = (size_t)16 * S * (L->J - 1) * sizeof(float);
                 if (g_smem <= 46 * 1024)  // + 2 KB static shared memory within the 48 KB default
                     first_bwd_kernel<true><<<N, 256, g_smem, st>>>(
-                        N, S, L->intervals, L->J, L->K0, L->grid, sh_perm_, L->pair_sym, in.act_row_ptr, in.act_senders,
+                        N, S, L->intervals, L->J, L->Jt, L->K0, L->grid, sh_perm_, L->pair_sym, in.act_row_ptr, in.act_senders,
                         in.act_vec_len, in.species, L->table, L->S0[0], L->S0[1], L->S0[2], L->S0[3],
                         density ? L->dD : nullptr, d_edge_dvec_);
                 else
                     first_bwd_kernel<false><<<N, 256, 0, st>>>(
-                        N, S, L->intervals, L->J, L->K0, L->grid, sh_perm_, L->pair_sym, in.act_row_ptr, in.act_senders,
+                        N, S, L->intervals, L->J, L->Jt, L->K0, L->grid, sh_perm_, L->pair_sym, in.act_row_ptr, in.act_senders,
                         in.act_vec_len, in.species, L->table, L->S0[0], L->S0[1], L->S0[2], L->S0[3],
                         density ? L->dD : nullptr, d_edge_dvec_);
             }
             continue;
         }
-        // dmid (aliases mid: the forward values are dead) = dlin @ W_lin^T (or dmsgf @ W_lin_folded^T)
+        // dmid (aliases mid: the forward values are dead) = dlin @ W_lin^T (or dmsgf @ W_lin_folded^T); S125: dmid_0
+        // only (the pruned conv backward reads no other)
+        const int n_proj = L->conv_prune ? 1 : 4;
         if (L->skip_folded) {
             fork();
-            for (int l = 0; l < 4; ++l)
+            for (int l = 0; l < n_proj; ++l)
                 species_gemm(true, l, Cm, L->n_l3[l] * Cx, L->dmsgf[l], L->W_lin[l],
                              (int64_t)L->n_l3[l] * Cx * Cm, 0.0f, L->mid[l], 4 * l);
             join();
         } else {
             fork();
-            for (int l = 0; l < 4; ++l) {
+            for (int l = 0; l < n_proj; ++l) {
                 lane(l);
                 in.gemm(true, N * dimL(l), L->n_l3[l] * Cx, L->lin_cols[l], 1.0f, L->dlin[l], L->lin_cols[l],
                         L->W_lin[l], L->lin_cols[l], 0.0f, L->mid[l], L->n_l3[l] * Cx);
@@ -2118,7 +2144,7 @@ void GenericModel::record(const GenericPassInputs& in) {
         launch_conv_bwd(L->lmax_x, st, N, Cx, S, L->intervals, L->grid, sh_perm_, L->pair_sym, in.act_row_ptr,
                         in.act_senders, in.act_vec_len, in.act_slab, in.act_t_sx, can_preloc(L), in.species,
                         L->packed_table, L->density_table, L->cubic_bias_shift, L->x, L->mid,
-                        density ? L->dD : nullptr, L->dx, t > 0, d_edge_dvec_, t == n_layers_ - 1);
+                        density ? L->dD : nullptr, L->dx, t > 0, d_edge_dvec_, t == n_layers_ - 1, L->conv_prune);
         if (t > 0 && !chain_fold_) {  // S57: the earlier layers' fold reads dx directly
             if (L->lmax_x > 0) fork();
             for (int l = 0; l <= L->lmax_x; ++l) {

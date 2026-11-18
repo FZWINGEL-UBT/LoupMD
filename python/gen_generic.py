@@ -196,6 +196,34 @@ def deg2_cart():
     return out
 
 
+# S122: four of the six x-degree-1 paths as Cartesian forms of the sender vector p and the unit direction n: with
+# d = p . n, q_m = p . B'_m n and u_m = n . B'_m n (= 2 Y2_m(n) / sqrt 15), the outputs are C d (1, 1, 0),
+# C (n d - p / 3) (1, 2, 1), C q (1, 1, 2) and C (d u - 2/5 q) (1, 3, 2). One d and one q serve the four paths, and
+# the forward conv stages none of their linear forms. cart1_consts fits the constants (exact to 1e-12).
+CART1 = ((1, 1, 0), (1, 2, 1), (1, 1, 2), (1, 3, 2))
+
+
+def cart1_consts():
+    gen = torch.Generator().manual_seed(20261119)
+    p = torch.randn(96, 3, generator=gen, dtype=torch.float64)
+    n = torch.randn(96, 3, generator=gen, dtype=torch.float64)
+    n = n / n.norm(dim=-1, keepdim=True)
+    basis = torch.stack([_deg2_q(torch.eye(5, dtype=torch.float64)[m][None])[0] for m in range(5)])
+    d = (p * n).sum(-1, keepdim=True)
+    q = torch.einsum("si,mij,sj->sm", p, basis, n)
+    u = torch.einsum("si,mij,sj->sm", n, basis, n)
+    out = {}
+    for path, form in zip(CART1, (d, n * d - p / 3.0, q, d * u - 0.4 * q)):
+        W3 = o3.wigner_3j(*path, dtype=torch.float64)
+        y = o3.spherical_harmonics(path[1], n, normalize=False, normalization="component")
+        target = torch.einsum("ijo,si,sj->so", W3, p, y)
+        c = float((form * target).sum() / (form * form).sum())
+        res = float((c * form - target).abs().max() / target.abs().max())
+        assert res < 1e-12, (path, res)
+        out[path] = c
+    return out
+
+
 def _decode_into(k, outs, pad):
     """The packed-table decode of path k's coefficients, then ``name = expr`` for each (name, expr) of ``outs``."""
     ls = [f"{pad}const uint2 c = __ldg(tq + {k} * C + ch);",
@@ -280,13 +308,14 @@ def _cart_bwd(cart, GS, gofs):
     return ls
 
 
-def emit_conv_fwd(lx, groups=(0, 1, 2), name=None):
-    """Forward conv over layout(lx)'s paths whose x degree is in ``groups`` (table stride: all paths). A kernel
-    launched with density_table = nullptr leaves D alone, so a split launch computes the density once."""
+def emit_conv_fwd(lx, groups=(0, 1, 2), name=None, l3s=(0, 1, 2, 3)):
+    """Forward conv over layout(lx)'s paths whose x degree is in ``groups`` and output degree in ``l3s`` (table stride:
+    all paths). A kernel launched with density_table = nullptr leaves D alone, so a split launch computes the density
+    once. S125: l3s = (0,) is the pruned kernel of a layer whose projections W_lin_1..3 are exactly zero."""
     paths, slot, count = layout(lx)
     n_paths = len(paths)
     name = name or f"gconv_fwd_L{lx}"
-    sel = [(k, p) for k, p in enumerate(paths) if p[0] in groups]
+    sel = [(k, p) for k, p in enumerate(paths) if p[0] in groups and p[2] in l3s]
     nacc = sum(2 * l3 + 1 for _, (_, _, l3) in sel)
     def _f32(x):
         return struct.unpack("f", struct.pack("f", x))[0]
@@ -308,7 +337,22 @@ def emit_conv_fwd(lx, groups=(0, 1, 2), name=None):
         path_pairs[k] = p_keys
         acc_off += 2 * l3 + 1
 
+    # Cartesian path sets of this kernel (S119 / S121: DEG2_CART; S122: CART1), each used on sm_120 when complete
+    acc_of = {}
+    acc_off = 0
+    for k, (_, _, l3) in sel:
+        acc_of[k] = acc_off
+        acc_off += 2 * l3 + 1
+    path_of = {acc_of[k] + m: k for k, (_, _, l3) in sel for m in range(2 * l3 + 1)}
+    carts = {}
+    for name_, set_ in (("deg2", DEG2_CART), ("x1", CART1)):
+        found = {p: k for k, p in sel if p in set_}
+        if len(found) == len(set_):
+            carts[name_] = found
+    cart_ks = {k for found in carts.values() for k in found.values()}
+
     acc_scale, cg_use, extras = {}, {}, collections.OrderedDict()
+    forms = []  # (I, m1, sign, key or None, slot) in accumulator order
     for I in range(nacc):
         singles = [abs(t[0][0]) for (i, _), t in cg_terms.items() if i == I and len(t) == 1]
         if singles:
@@ -326,30 +370,43 @@ def emit_conv_fwd(lx, groups=(0, 1, 2), name=None):
                 cg_use[(I, m1)] = ("-" if norm[0][0] < 0 else "", norm[0][1])
                 continue
             sign = -1.0 if norm[0][0] < 0 else 1.0
-            key = tuple(sorted((ec, lit(sign * c)) for c, ec in norm))
+            forms.append((I, m1, sign, tuple(sorted((ec, lit(sign * c)) for c, ec in norm))))
+    # S122: the linear forms only the Cartesian paths read get the last slots, so sm_120 stages (and holds) only the
+    # first n_keep of them; the other GPUs stage all
+    for cart_pass in (False, True):
+        for I, m1, sign, key in forms:
+            if (path_of[I] in cart_ks) != cart_pass:
+                continue
             if key not in extras:
                 extras[key] = 16 + len(extras)
             cg_use[(I, m1)] = ("-" if sign < 0 else "", extras[key])
+        if not cart_pass:
+            n_keep = len(extras)
 
     ED = 4 * math.ceil((16 + len(extras)) / 4)
+    ED_keep = 4 * math.ceil((16 + n_keep) / 4)
+    SM120 = "#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ == 1200"
     def _extra_code(pad, idx_expr):
         if not extras:
             return ""
         ls = [f"{pad}{{ float* p = s_sh + ({idx_expr}) * ED;"]
         for key, eslot in extras.items():
+            if cart_ks and eslot == 16 + n_keep:
+                ls.append("#if !(defined(__CUDA_ARCH__) && __CUDA_ARCH__ == 1200)")
             expr = " + ".join(f"{c_lit} * p[{ec}]" for ec, c_lit in key)
             ls.append(f"{pad}  p[{eslot}] = {expr};")
+        if cart_ks and n_keep < len(extras):
+            ls.append("#endif")
         ls.append(f"{pad}}}")
         return "\n" + "\n".join(ls)
 
     extra_hi = _extra_code("      ", "ch - 32")
     extra_lo = _extra_code("          ", "ch")
+    ed_decl = (f"  constexpr int TILE = 32;\n{SM120}\n  constexpr int ED = {ED_keep};\n#else\n  constexpr int ED = {ED};\n"
+               "#endif" if cart_ks and ED_keep < ED else f"  constexpr int TILE = 32, ED = {ED};")
 
-    blk, blk_pair, acc_of = {}, {}, {}
-    acc_off = 0
+    blk, blk_pair = {}, {}
     for k, (l1, l2, l3) in sel:
-        acc_of[k] = acc_off
-        acc_off += 2 * l3 + 1
         m1_used = sorted({m1 for _, m1 in path_pairs[k]})
         body = [f"      {{ // path {k} ({l1},{l2},{l3})"] + _decode_into(k, [("const float w", _w_fwd("pw"))], "        ")
         body_pair = [f"      {{ // path {k} ({l1},{l2},{l3}) pair"] + _decode_into(
@@ -366,20 +423,24 @@ def emit_conv_fwd(lx, groups=(0, 1, 2), name=None):
         blk[k] = body + ["      }"]
         blk_pair[k] = body_pair + ["      }"]
 
-    # S119 / S121 (sm_120): with all the Cartesian paths in this kernel, one Q, v = Q Y1 and h = Y1 . v per edge and
-    # channel serve them (Y1 = sqrt 3 n, |Y1|^2 = 3, so n h - 2/5 v = (Y1 h - 6/5 v) / (3 sqrt 3) and
-    # v . B'_m n - 2/3 x_m = (v' . B'_m Y1 - 2 x_m) / 3 with v' = Q Y1); their constants and these factors go into the
-    # stores. Other GPUs keep the per-path forms.
-    cart = {p: k for k, p in sel if p in DEG2_CART}
-    if len(cart) < len(DEG2_CART):
-        cart = {}
+    # S119 / S121 (sm_120): with all the degree-two Cartesian paths in this kernel, one Q, v = Q Y1 and h = Y1 . v per
+    # edge and channel serve them (Y1 = sqrt 3 n, |Y1|^2 = 3, so n h - 2/5 v = (Y1 h - 6/5 v) / (3 sqrt 3) and
+    # v . B'_m n - 2/3 x_m = (v' . B'_m Y1 - 2 x_m) / 3 with v' = Q Y1). S122: likewise d' = p . Y1 and
+    # q'_m = p . B'_m Y1 for the x-degree-1 paths (n d - p / 3 = (Y1 d' - p) / 3, and with Y2_m = sqrt 15 / 2 u_m,
+    # d u - 2/5 q = (d' Y2 - sqrt 15 / 5 q') 2 / (3 sqrt 5)). The constants and these factors go into the stores.
+    # Other GPUs keep the per-path forms.
     cart_scale = {}
-    if cart:
+    if "deg2" in carts:
         cc = deg2_cart()
-        k0, k1, k3, k22, k02 = (cart[p] for p in DEG2_CART)
-        cart_scale = {k0: cc[DEG2_CART[0]] / 3.0, k1: cc[DEG2_CART[1]] / math.sqrt(3.0),
-                      k3: cc[DEG2_CART[2]] / (3.0 * math.sqrt(3.0)), k22: cc[DEG2_CART[3]] / 3.0,
-                      k02: cc[DEG2_CART[4]]}
+        k0, k1, k3, k22, k02 = (carts["deg2"][p] for p in DEG2_CART)
+        cart_scale.update({k0: cc[DEG2_CART[0]] / 3.0, k1: cc[DEG2_CART[1]] / math.sqrt(3.0),
+                           k3: cc[DEG2_CART[2]] / (3.0 * math.sqrt(3.0)), k22: cc[DEG2_CART[3]] / 3.0,
+                           k02: cc[DEG2_CART[4]]})
+    if "x1" in carts:
+        c1 = cart1_consts()
+        j110, j121, j112, j132 = (carts["x1"][p] for p in CART1)
+        cart_scale.update({j110: c1[CART1[0]] / math.sqrt(3.0), j121: c1[CART1[1]] / 3.0,
+                           j112: c1[CART1[2]] / math.sqrt(3.0), j132: c1[CART1[3]] * 2.0 / (3.0 * math.sqrt(5.0))})
 
     def _cart_fwd(pair):
         sfx = ("", "B") if pair else ("",)
@@ -414,15 +475,44 @@ def emit_conv_fwd(lx, groups=(0, 1, 2), name=None):
             ls += [f"        acc[{I02 + m}] = fmaf(w{k02}{s}, xc{m}{s}, acc[{I02 + m}]);" for m in range(5)]
         return ls + ["      }"]
 
+    def _cart1_fwd(pair):
+        sfx = ("", "B") if pair else ("",)
+        A0, A1, A2, A3 = (acc_of[k] for k in (j110, j121, j112, j132))
+        i3 = lit(INV_SQRT3)
+        ls = [f"      {{ // paths {j110} (1,1,0), {j121} (1,2,1), {j112} (1,1,2), {j132} (1,3,2){' pair' if pair else ''} "
+              "as Cartesian forms (S122): d = p . Y1,",
+              "        // q_m = p . B'_m Y1; the paths' constants are in the stores",
+              "        float " + ", ".join(f"w{k}{s}" for k in (j110, j121, j112, j132) for s in sfx) + ";"]
+        for k in (j110, j121, j112, j132):
+            ls += ["        {"] + _decode_into(k, [(f"w{k}{s}", _w_fwd("pw" + s)) for s in sfx], "          ") + ["        }"]
+        for s in sfx:
+            ls += [f"        const float pc{m}{s} = __ldg(x1 + ((int64_t)snd{s} * 3 + {m}) * C + ch);" for m in range(3)]
+            ls += [f"        const float u1{s} = she{s}[1], u2{s} = she{s}[2], u3{s} = she{s}[3];",
+                   f"        const float dd{s} = fmaf(pc0{s}, u1{s}, fmaf(pc1{s}, u2{s}, pc2{s} * u3{s}));",
+                   f"        acc[{A0}] = fmaf(w{j110}{s}, dd{s}, acc[{A0}]);"]
+            ls += [f"        acc[{A1 + m}] = fmaf(w{j121}{s}, fmaf(u{m + 1}{s}, dd{s}, -pc{m}{s}), acc[{A1 + m}]);"
+                   for m in range(3)]
+            qq = [f"fmaf(pc0{s}, u3{s}, pc2{s} * u1{s})", f"fmaf(pc0{s}, u2{s}, pc1{s} * u1{s})",
+                  f"{i3} * fmaf(pc1{s}, u2{s} + u2{s}, -fmaf(pc0{s}, u1{s}, pc2{s} * u3{s}))",
+                  f"fmaf(pc1{s}, u3{s}, pc2{s} * u2{s})", f"fmaf(pc2{s}, u3{s}, -pc0{s} * u1{s})"]
+            ls.append("        const float " + ", ".join(f"qq{m}{s} = {qq[m]}" for m in range(5)) + ";")
+            ls += [f"        acc[{A2 + m}] = fmaf(w{j112}{s}, qq{m}{s}, acc[{A2 + m}]);" for m in range(5)]
+            ls += [f"        acc[{A3 + m}] = fmaf(w{j132}{s}, fmaf(dd{s}, she{s}[{4 + m}], "
+                   f"{lit(-math.sqrt(15.0) / 5.0)} * qq{m}{s}), acc[{A3 + m}]);" for m in range(5)]
+        return ls + ["      }"]
+
+    emit_cart = {"deg2": _cart_fwd, "x1": _cart1_fwd}
     body, body_pair = [], []
     for k, _ in sel:
-        if k in cart_scale:
-            if k == min(cart_scale):
+        set_name = next((nm for nm, found in carts.items() if k in found.values()), None)
+        if set_name:
+            ks = sorted(carts[set_name].values())
+            if k == ks[0]:
                 for dst, pair in ((body, False), (body_pair, True)):
-                    dst.append("#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ == 1200")
-                    dst += _cart_fwd(pair)
+                    dst.append(SM120)
+                    dst += emit_cart[set_name](pair)
                     dst.append("#else")
-                    for c in sorted(cart_scale):
+                    for c in ks:
                         dst += (blk_pair if pair else blk)[c]
                     dst.append("#endif")
             continue
@@ -439,8 +529,7 @@ def emit_conv_fwd(lx, groups=(0, 1, 2), name=None):
             sc = acc_scale[I]
             mult = "" if abs(sc - 1.0) < 1e-7 else f" * {lit(sc)}"
             if k in cart_scale:
-                stores += ["#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ == 1200", f"{dst} * {lit(cart_scale[k])};",
-                           "#else", f"{dst}{mult};", "#endif"]
+                stores += [SM120, f"{dst} * {lit(cart_scale[k])};", "#else", f"{dst}{mult};", "#endif"]
             else:
                 stores.append(f"{dst}{mult};")
 
@@ -460,7 +549,7 @@ __global__ void __launch_bounds__(MAX_T) {name}(
     const int* __restrict__ species, const uint2* __restrict__ packed_table, const float4* __restrict__ density_table,
     unsigned bias_shift, {x_args}, {m_args}, float* __restrict__ D, {z_args}) {{
   const int C = C_FIX ? C_FIX : C_arg;
-  constexpr int TILE = 32, ED = {ED};
+{ed_decl}
   static_assert(R >= 1 && R <= 15, "bar.sync id limit");
   __shared__ int s_snd_all[R][TILE];
   __shared__ __align__(16) float4 s_pw_all[R][TILE];
@@ -580,18 +669,19 @@ EDGE_DVEC_SET = """\
       edge_dvec[(int64_t)e * 3 + 1] = fy;
       edge_dvec[(int64_t)e * 3 + 2] = fz;"""
 
-def emit_conv_bwd_lp(lx):
-    """Late pull-back backward over layout(lx)'s paths with x degree <= 1: every path for lx 0 / 1; for lx 2 the ten
-    paths of lx 1 indexed into the 17-path table (gconv_bwd_L2lp, which also owns the density term); the x degree 2
-    paths then run in gconv_bwd_L2."""
+def emit_conv_bwd_lp(lx, l3s=(0, 1, 2, 3), name=None, qs_name=None):
+    """Late pull-back backward over layout(lx)'s paths with x degree <= 1 and output degree in ``l3s``: every path for
+    lx 0 / 1; for lx 2 the ten paths of lx 1 indexed into the 17-path table (gconv_bwd_L2lp, which also owns the
+    density term); the x degree 2 paths then run in gconv_bwd_L2. S125: l3s = (0,) is the pruned kernel (name, with
+    its staged floats per channel as constexpr qs_name for the launcher's dynamic shared memory)."""
     paths, slot, count = layout(lx)
     n_paths = len(paths)
     xl = min(lx, 1)
-    name = f"gconv_bwd_L{lx}" if lx <= 1 else "gconv_bwd_L2lp"
+    name = name or (f"gconv_bwd_L{lx}" if lx <= 1 else "gconv_bwd_L2lp")
     slots = []
     n_slots = 0
     for k, (l1, l2, l3) in enumerate(paths):
-        if l1 > 1:
+        if l1 > 1 or l3 not in l3s:
             continue
         form = _lp_form(l1, l2, l3)
         sz = 2 * l3 + 1
@@ -732,7 +822,8 @@ def emit_conv_bwd_lp(lx):
     x_args = ", ".join(f"const float* __restrict__ x{l}_p" for l in range(xl + 1))
     dm_args = ", ".join(f"const float* __restrict__ dmid{l}" for l in range(4))
     dx_args = ", ".join(f"float* __restrict__ dx{l}_p" for l in range(xl + 1))
-    return f"""template <bool WANT_DX, int C_FIX = 0, bool PRELOC = false>
+    qs_line = f"constexpr int {qs_name} = {QS};  // staged dmid floats per channel (dynamic smem C * QS)\n" if qs_name else ""
+    return qs_line + f"""template <bool WANT_DX, int C_FIX = 0, bool PRELOC = false>
 __global__ void __launch_bounds__(512) {name}(
     int N, int C_arg, int S, int I, SplineGrid grid, int sh_perm, int pair_sym,
     const int* __restrict__ row_ptr, const int* __restrict__ senders, const float4* __restrict__ vec_len,
@@ -1163,7 +1254,7 @@ def emit_product(sig, prog, feats, sh):
                 for cc, u in items:
                     assert cc == 0
                     RF.append(f"  y0 = fmaf(w{b}, {_expr(u)}, y0);")
-        RF += [
+        ro_block = [
             "  __shared__ float s_y[512];",
             "  __shared__ float s_part[32][16];",
             "  __shared__ float s_dh[16];",
@@ -1196,6 +1287,7 @@ def emit_product(sig, prog, feats, sh):
             "  #pragma unroll",
             "  for (int k = 0; k < 16; ++k) g0 = fmaf(s_dh[k], __ldg(ro_W1 + c * 16 + k), g0);",
         ]
+        RF += ro_block
         # Backward SSA reusing x0..x15, v_i, and w{b} already in registers
         adj_rf = {}
         def add_rf(u, ab):
@@ -1247,8 +1339,119 @@ def emit_product(sig, prog, feats, sh):
             "  }",
             "}",
         ]
-        return "\n".join(F) + "\n\n" + "\n".join(B) + "\n\n" + "\n".join(RF) + "\n", lo
+        # S127: the same fused kernel for a layer whose message has only its scalar part (S125's pruned layers:
+        # lin_1..3 exactly zero): the program with x1..x15 = 0 propagated (dead mul / lin / dot terms and feature
+        # terms dropped; the kept sums keep their order, so y0 and dm0 are the full kernel's values up to the sign of
+        # zero), m0 the only input and dm0 the only gradient written (the pruned layer reads no other).
+        ops_s, used_s, feats_s = _scalar_prune(prog, feats)
+        RS = [
+            "template <int MAX_B, int MIN_BLK>",
+            f"__global__ void __launch_bounds__(MAX_B, MIN_BLK) gprod_ro1s_fused_{sig}(",
+            f"    {args_in}, const float* __restrict__ sc_skip16, const float* __restrict__ ro_W1,",
+            "    const float* __restrict__ ro_b1, const float* __restrict__ ro_W2, float ro_act_c,",
+            "    float* __restrict__ d_hidden16, double* __restrict__ out_energy,",
+            f"    {_ptr_args('dm', range(4), const=False)}, float* __restrict__ dD) {{",
+            "  const int a = blockIdx.x, c = threadIdx.x;",
+            "  if (a >= N) return;",
+            "  const float s = D ? 1.0f / (D[a] + 1.0f) : 1.0f;",
+            "  const float* wr = w + (int64_t)sp[a] * w_stride + c;",
+            "  const float x0 = __ldg(m0 + (int64_t)a * C + c) * s;",
+        ]
+        for i in used_s:
+            _ssa(RS, i, ops_s[i])
+        RS.append("  float y0 = 0.0f;")
+        for b, f in enumerate(feats_s):
+            if f:
+                RS.append(f"  const float w{b} = __ldg(wr + {b} * C);")
+                RS += [f"  y0 = fmaf(w{b}, {_expr(u)}, y0);" for _, u in sorted(f.items())]
+        RS += ro_block
+        adj_s = {}
+        def add_s(u, ab):
+            name = f"d{_expr(u)}"
+            if u in adj_s:
+                RS.append(f"  {name} = fmaf({ab[0]}, {ab[1]}, {name});")
+            else:
+                RS.append(f"  float {name} = {ab[0]} * {ab[1]};")
+            adj_s[u] = name
+        for b, f in enumerate(feats_s):
+            for cc, u in sorted(f.items()):
+                add_s(u, (f"w{b}", f"g{cc}"))
+        for i in reversed(used_s):
+            if i not in adj_s:
+                continue
+            op, da = ops_s[i], adj_s[i]
+            if op[0] == "mul":
+                add_s(op[1], (da, _expr(op[2])))
+                add_s(op[2], (da, _expr(op[1])))
+            elif op[0] == "lin":
+                for cc, u in op[1]:
+                    add_s(u, (_literal(cc), da))
+            else:
+                for a_, b_ in op[1]:
+                    add_s(a_, (da, _expr(b_)))
+                    add_s(b_, (da, _expr(a_)))
+        dx0 = adj_s.get(-1, "0.0f")
+        RS += [
+            f"  dm0[(int64_t)a * C + c] = {dx0} * s;",
+            "  if (dD) {",
+            f"    float dot = {dx0} * x0;",
+            "    #pragma unroll",
+            "    for (int off = 16; off > 0; off >>= 1) dot += __shfl_xor_sync(0xffffffffu, dot, off);",
+            "    __shared__ float red[16];",
+            "    if ((c & 31) == 0) red[c >> 5] = dot;",
+            "    __syncthreads();",
+            "    if (c == 0) {",
+            "      float total = 0.0f;",
+            "      const int nw = C >> 5;",
+            "      for (int w_i = 0; w_i < nw; ++w_i) total += red[w_i];",
+            "      atomicAdd(dD + a, -s * total);",
+            "    }",
+            "  }",
+            "}",
+        ]
+        return "\n".join(F) + "\n\n" + "\n".join(B) + "\n\n" + "\n".join(RF) + "\n\n" + "\n".join(RS) + "\n", lo
     return "\n".join(F) + "\n\n" + "\n".join(B) + "\n", lo
+
+
+def _scalar_prune(prog, feats):
+    """S127: prog's nodes with the inputs x1..x15 exactly zero: ops (node -> op without its zero terms) for the nodes
+    that stay nonzero, the nodes the remaining feature terms need (ascending, SSA order) and the feature terms."""
+    zero = set()
+    ops = {}
+
+    def z(u):
+        return u in zero if u >= 0 else -1 - u >= 1
+
+    for i, op in enumerate(prog.nodes):
+        if op[0] == "mul":
+            if z(op[1]) or z(op[2]):
+                zero.add(i)
+            else:
+                ops[i] = op
+        elif op[0] == "lin":
+            t = tuple((c, u) for c, u in op[1] if not z(u))
+            if t:
+                ops[i] = ("lin", t)
+            else:
+                zero.add(i)
+        else:
+            t = tuple((a_, b_) for a_, b_ in op[1] if not (z(a_) or z(b_)))
+            if t:
+                ops[i] = ("dot", t)
+            else:
+                zero.add(i)
+    feats_s = [{cc: u for cc, u in (f or {}).items() if u is not None and not z(u)} for f in feats]
+    need, stack = set(), [u for f in feats_s for u in f.values() if u >= 0]
+    while stack:
+        i = stack.pop()
+        if i in need:
+            continue
+        need.add(i)
+        op = ops[i]
+        refs = [op[1], op[2]] if op[0] == "mul" else [u for _, u in op[1]] if op[0] == "lin" else \
+            [x for ab in op[1] for x in ab]
+        stack += [u for u in refs if u >= 0]
+    return ops, sorted(need), feats_s
 
 
 _LAUNCHERS_CPP = """
@@ -1268,10 +1471,55 @@ const GProdKernels* find_gprod(const char* sig) {
 // receiver per block with the paired-edge decode (the default), 1 without, 2 five receivers per 640-thread block.
 int conv_fwd_variants(int lx, int C) { return (lx == 1 && C == 128) ? 3 : 1; }
 
+// S125: the full and the pruned (output degree 0 only, gconv_*_L1s) lx 1 kernels share one launch body.
+#define LOUP_LAUNCH_FWD_L1(K)                                                                                          \\
+    if (C == 128) {                                                                                                     \\
+        if (var == 2) {                                                                                                 \\
+            auto fn = preloc ? K<5, false, 640, true, 128> : K<5, false, 640, false, 128>;                              \\
+            fn<<<(N + 4) / 5, 640, 0, st>>>(N, C, S, I, sg, perm, psym, rp, snd, vl, act_slab, act_t_sx, sp, packed,  \\
+                                            dens, bias_shift, x[0], x[1], mid[0], mid[1], mid[2], mid[3], D, z0, z1);   \\
+        } else {                                                                                                        \\
+            auto fn = var == 1 ? (preloc ? K<1, false, 256, true, 128> : K<1, false, 256, false, 128>)                  \\
+                               : (preloc ? K<1, true, 256, true, 128> : K<1, true, 256, false, 128>);                   \\
+            fn<<<N, 128, 0, st>>>(N, C, S, I, sg, perm, psym, rp, snd, vl, act_slab, act_t_sx, sp, packed, dens,        \\
+                                  bias_shift, x[0], x[1], mid[0], mid[1], mid[2], mid[3], D, z0, z1);                   \\
+        }                                                                                                               \\
+    } else if (C == 256) {                                                                                              \\
+        auto fn = preloc ? K<1, false, 256, true, 256> : K<1, false, 256, false, 256>;                                  \\
+        fn<<<N, 256, 0, st>>>(N, C, S, I, sg, perm, psym, rp, snd, vl, act_slab, act_t_sx, sp, packed, dens,            \\
+                              bias_shift, x[0], x[1], mid[0], mid[1], mid[2], mid[3], D, z0, z1);                       \\
+    } else if (C <= 256) {                                                                                              \\
+        auto fn = preloc ? K<1, false, 256, true> : K<1, false, 256, false>;                                            \\
+        fn<<<N, C, 0, st>>>(N, C, S, I, sg, perm, psym, rp, snd, vl, act_slab, act_t_sx, sp, packed, dens,              \\
+                            bias_shift, x[0], x[1], mid[0], mid[1], mid[2], mid[3], D, z0, z1);                         \\
+    } else {                                                                                                            \\
+        auto fn = preloc ? K<1, false, 512, true> : K<1, false, 512, false>;                                            \\
+        fn<<<N, C, 0, st>>>(N, C, S, I, sg, perm, psym, rp, snd, vl, act_slab, act_t_sx, sp, packed, dens,              \\
+                            bias_shift, x[0], x[1], mid[0], mid[1], mid[2], mid[3], D, z0, z1);                         \\
+    }
+#define LOUP_LAUNCH_BWD_L1(K, QS)                                                                                      \\
+    {                                                                                                                   \\
+        const size_t smem = (size_t)C * (QS) * sizeof(float);                                                           \\
+        auto pick = [&](auto f_p, auto f_n) { return preloc ? f_p : f_n; };                                            \\
+        auto fn = (C == 128) ? (want_dx ? pick(K<true, 128, true>, K<true, 128, false>)                                 \\
+                                        : pick(K<false, 128, true>, K<false, 128, false>))                              \\
+                : (C == 224) ? (want_dx ? pick(K<true, 224, true>, K<true, 224, false>)                                 \\
+                                        : pick(K<false, 224, true>, K<false, 224, false>))                              \\
+                : (C == 256) ? (want_dx ? pick(K<true, 256, true>, K<true, 256, false>)                                 \\
+                                        : pick(K<false, 256, true>, K<false, 256, false>))                              \\
+                             : (want_dx ? pick(K<true, 0, true>, K<true, 0, false>)                                     \\
+                                        : pick(K<false, 0, true>, K<false, 0, false>));                                 \\
+        if (smem > 48000)                                                                                               \\
+            check_cuda(cudaFuncSetAttribute((const void*)fn, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)smem));  \\
+        fn<<<N, C == 256 ? 512 : 256, smem, st>>>(N, C, S, I, sg, perm, psym, rp, snd, vl, act_slab, act_t_sx, sp,     \\
+                                                  packed, dens, bias_shift, x[0], x[1], dmid[0], dmid[1], dmid[2],     \\
+                                                  dmid[3], dD, dx[0], dx[1], edge_dvec, (int)dvec_assign);              \\
+    }
+
 void launch_conv_fwd(int lx, cudaStream_t st, int N, int C, int S, int I, const SplineGrid& sg, int perm, int psym,
                      const int* rp, const int* snd, const float4* vl, const int* act_slab, const float2* act_t_sx,
                      bool preloc, const int* sp, const uint2* packed, const float4* dens, unsigned bias_shift,
-                     float* const* x, float* const* mid, float* D, int var, float* const* zx) {
+                     float* const* x, float* const* mid, float* D, int var, float* const* zx, bool prune) {
     // S99: zx (nullable) = the layer's x gradient rows, zeroed by the (first) forward kernel of each receiver
     float* z0 = zx ? zx[0] : nullptr;
     float* z1 = (zx && lx >= 1) ? zx[1] : nullptr;
@@ -1291,29 +1539,10 @@ void launch_conv_fwd(int lx, cudaStream_t st, int N, int C, int S, int I, const 
                                 bias_shift, x[0], mid[0], mid[1], mid[2], mid[3], D, z0);
         }
     } else if (lx == 1) {
-        if (C == 128) {
-            if (var == 2) {
-                auto fn = preloc ? gconv_fwd_L1<5, false, 640, true, 128> : gconv_fwd_L1<5, false, 640, false, 128>;
-                fn<<<(N + 4) / 5, 640, 0, st>>>(N, C, S, I, sg, perm, psym, rp, snd, vl, act_slab, act_t_sx, sp, packed,
-                                                dens, bias_shift, x[0], x[1], mid[0], mid[1], mid[2], mid[3], D, z0, z1);
-            } else {
-                auto fn = var == 1 ? (preloc ? gconv_fwd_L1<1, false, 256, true, 128> : gconv_fwd_L1<1, false, 256, false, 128>)
-                                   : (preloc ? gconv_fwd_L1<1, true, 256, true, 128> : gconv_fwd_L1<1, true, 256, false, 128>);
-                fn<<<N, 128, 0, st>>>(N, C, S, I, sg, perm, psym, rp, snd, vl, act_slab, act_t_sx, sp, packed, dens,
-                                      bias_shift, x[0], x[1], mid[0], mid[1], mid[2], mid[3], D, z0, z1);
-            }
-        } else if (C == 256) {
-            auto fn = preloc ? gconv_fwd_L1<1, false, 256, true, 256> : gconv_fwd_L1<1, false, 256, false, 256>;
-            fn<<<N, 256, 0, st>>>(N, C, S, I, sg, perm, psym, rp, snd, vl, act_slab, act_t_sx, sp, packed, dens,
-                                  bias_shift, x[0], x[1], mid[0], mid[1], mid[2], mid[3], D, z0, z1);
-        } else if (C <= 256) {
-            auto fn = preloc ? gconv_fwd_L1<1, false, 256, true> : gconv_fwd_L1<1, false, 256, false>;
-            fn<<<N, C, 0, st>>>(N, C, S, I, sg, perm, psym, rp, snd, vl, act_slab, act_t_sx, sp, packed, dens,
-                                bias_shift, x[0], x[1], mid[0], mid[1], mid[2], mid[3], D, z0, z1);
+        if (prune) {
+            LOUP_LAUNCH_FWD_L1(gconv_fwd_L1s)
         } else {
-            auto fn = preloc ? gconv_fwd_L1<1, false, 512, true> : gconv_fwd_L1<1, false, 512, false>;
-            fn<<<N, C, 0, st>>>(N, C, S, I, sg, perm, psym, rp, snd, vl, act_slab, act_t_sx, sp, packed, dens,
-                                bias_shift, x[0], x[1], mid[0], mid[1], mid[2], mid[3], D, z0, z1);
+            LOUP_LAUNCH_FWD_L1(gconv_fwd_L1)
         }
     } else {
         if (C == 128) {
@@ -1356,7 +1585,7 @@ void launch_conv_bwd(int lx, cudaStream_t st, int N, int C, int S, int I, const 
                      const int* rp, const int* snd, const float4* vl, const int* act_slab, const float2* act_t_sx,
                      bool preloc, const int* sp, const uint2* packed, const float4* dens, unsigned bias_shift,
                      float* const* x, float* const* dmid, const float* dD, float* const* dx, bool want_dx,
-                     float* edge_dvec, bool dvec_assign) {
+                     float* edge_dvec, bool dvec_assign, bool prune) {
     if (lx == 0) {
         const size_t smem = (size_t)C * 20 * sizeof(float);
         auto pick = [&](auto f_p, auto f_n) { return preloc ? f_p : f_n; };
@@ -1371,20 +1600,11 @@ void launch_conv_bwd(int lx, cudaStream_t st, int N, int C, int S, int I, const 
                                  bias_shift, x[0], dmid[0], dmid[1], dmid[2], dmid[3], dD, dx[0], edge_dvec,
                                  (int)dvec_assign);
     } else if (lx == 1) {
-        const size_t smem = (size_t)C * 44 * sizeof(float);
-        auto pick = [&](auto f_p, auto f_n) { return preloc ? f_p : f_n; };
-        auto fn = (C == 128) ? (want_dx ? pick(gconv_bwd_L1<true, 128, true>, gconv_bwd_L1<true, 128, false>)
-                                        : pick(gconv_bwd_L1<false, 128, true>, gconv_bwd_L1<false, 128, false>))
-                : (C == 224) ? (want_dx ? pick(gconv_bwd_L1<true, 224, true>, gconv_bwd_L1<true, 224, false>)
-                                        : pick(gconv_bwd_L1<false, 224, true>, gconv_bwd_L1<false, 224, false>))
-                : (C == 256) ? (want_dx ? pick(gconv_bwd_L1<true, 256, true>, gconv_bwd_L1<true, 256, false>)
-                                        : pick(gconv_bwd_L1<false, 256, true>, gconv_bwd_L1<false, 256, false>))
-                             : (want_dx ? pick(gconv_bwd_L1<true, 0, true>, gconv_bwd_L1<true, 0, false>)
-                                        : pick(gconv_bwd_L1<false, 0, true>, gconv_bwd_L1<false, 0, false>));
-        if (smem > 48000) check_cuda(cudaFuncSetAttribute((const void*)fn, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)smem));
-        fn<<<N, C == 256 ? 512 : 256, smem, st>>>(N, C, S, I, sg, perm, psym, rp, snd, vl, act_slab, act_t_sx, sp, packed, dens,
-                                 bias_shift, x[0], x[1], dmid[0], dmid[1], dmid[2], dmid[3], dD, dx[0], dx[1],
-                                 edge_dvec, (int)dvec_assign);
+        if (prune) {
+            LOUP_LAUNCH_BWD_L1(gconv_bwd_L1s, kGconvBwdL1sQS)
+        } else {
+            LOUP_LAUNCH_BWD_L1(gconv_bwd_L1, 44)
+        }
     } else {
         const size_t smem = (size_t)C * 44 * sizeof(float), smem_g = (size_t)C * kGconvBwdL2GS * sizeof(float);
         auto pick_lp = [&](auto f_p, auto f_n) { return preloc ? f_p : f_n; };
@@ -1439,12 +1659,14 @@ void launch_prod(const GProdKernels* k, bool backward, cudaStream_t st, int N, i
 void launch_prod_ro1_fused(const GProdKernels* k, cudaStream_t st, int N, int C, float* const* m, const float* D,
                            const float* w, int64_t w_stride, const int* sp, const float* sc_skip16,
                            const float* ro_W1, const float* ro_b1, const float* ro_W2, float ro_act_c,
-                           float* d_hidden16, double* out_energy, float* const* dm, float* dD) {
+                           float* d_hidden16, double* out_energy, float* const* dm, float* dD, bool scalar_only) {
     void* args[] = {&N,          &C,           (void*)&m[0], (void*)&m[1],  (void*)&m[2], (void*)&m[3], &D,
                     &w,          &w_stride,    &sp,          &sc_skip16,    &ro_W1,       &ro_b1,       &ro_W2,
                     &ro_act_c,   &d_hidden16,  &out_energy,  (void*)&dm[0], (void*)&dm[1], (void*)&dm[2],
                     (void*)&dm[3], &dD};
-    const void* fn = (C <= 128) ? k->ro1_128 : (C <= 256) ? k->ro1_256 : k->ro1_512;
+    // S127: scalar_only = the layer's message has only its scalar part (S125), the zero-propagated kernel
+    const void* fn = scalar_only ? ((C <= 128) ? k->ro1s_128 : (C <= 256) ? k->ro1s_256 : k->ro1s_512)
+                                 : ((C <= 128) ? k->ro1_128 : (C <= 256) ? k->ro1_256 : k->ro1_512);
     check_cuda(cudaLaunchKernel(fn, dim3(N), dim3(C), args, 0, st));
 }
 
@@ -1554,6 +1776,9 @@ def main():
             else:
                 conv_parts.append(emit_conv_fwd(lx))
             conv_parts.append(emit_conv_bwd(lx))
+            if lx == 1:  # S125: output degree 0 only (W_lin_1..3 exactly zero, GenericLayer::conv_prune)
+                conv_parts.append(emit_conv_fwd(1, l3s=(0,), name="gconv_fwd_L1s"))
+                conv_parts.append(emit_conv_bwd_lp(1, l3s=(0,), name="gconv_bwd_L1s", qs_name="kGconvBwdL1sQS"))
         cache["sh16"] = sh16_src
         cache["conv"] = conv_parts
         dirty_emit = True
@@ -1643,27 +1868,30 @@ def main():
         "",
         sh16_src,
         "struct GProdKernels { const char* sig; int lmax_out; int segments_w; const void* fwd; const void* bwd; "
-        "const void* ro1_128; const void* ro1_256; const void* ro1_512; };",
+        "const void* ro1_128; const void* ro1_256; const void* ro1_512; const void* ro1s_128; const void* ro1s_256; "
+        "const void* ro1s_512; };",
         "",
         "namespace loup {",
         "const GProdKernels* find_gprod(const char* sig);",
         "void launch_conv_fwd(int lx, cudaStream_t st, int N, int C, int S, int I, const SplineGrid& sg, int perm, int psym,",
         "                     const int* rp, const int* snd, const float4* vl, const int* act_slab, const float2* act_t_sx,",
         "                     bool preloc, const int* sp, const uint2* packed, const float4* dens, unsigned bias_shift,",
-        "                     float* const* x, float* const* mid, float* D, int var = 0, float* const* zx = nullptr);",
+        "                     float* const* x, float* const* mid, float* D, int var = 0, float* const* zx = nullptr,",
+        "                     bool prune = false);",
         "int conv_fwd_variants(int lx, int C);",
         "void launch_conv_bwd(int lx, cudaStream_t st, int N, int C, int S, int I, const SplineGrid& sg, int perm, int psym,",
         "                     const int* rp, const int* snd, const float4* vl, const int* act_slab, const float2* act_t_sx,",
         "                     bool preloc, const int* sp, const uint2* packed, const float4* dens, unsigned bias_shift,",
         "                     float* const* x, float* const* dmid, const float* dD, float* const* dx, bool want_dx,",
-        "                     float* edge_dvec, bool dvec_assign);",
+        "                     float* edge_dvec, bool dvec_assign, bool prune = false);",
         "void launch_prod(const GProdKernels* k, bool backward, cudaStream_t st, int N, int C, float* const* m, const float* D,",
         "                 const float* w, int64_t w_stride, const int* sp, float* const* y_or_g, float* const* dm, float* dD,",
         "                 const float* ro_w = nullptr, double* energy = nullptr);",
         "void launch_prod_ro1_fused(const GProdKernels* k, cudaStream_t st, int N, int C, float* const* m, const float* D,",
         "                           const float* w, int64_t w_stride, const int* sp, const float* sc_skip16,",
         "                           const float* ro_W1, const float* ro_b1, const float* ro_W2, float ro_act_c,",
-        "                           float* d_hidden16, double* out_energy, float* const* dm, float* dD);",
+        "                           float* d_hidden16, double* out_energy, float* const* dm, float* dD,",
+        "                           bool scalar_only = false);",
         "}  // namespace loup",
     ]) + "\n"
 
@@ -1679,11 +1907,10 @@ def main():
     ]
     for sig, lo, segw in table:
         if lo == 0:
-            ro = (f"(const void*)gprod_ro1_fused_{sig}<128, 4>, "
-                  f"(const void*)gprod_ro1_fused_{sig}<256, 2>, "
-                  f"(const void*)gprod_ro1_fused_{sig}<512, 1>")
+            ro = ", ".join(f"(const void*)gprod_{v}_fused_{sig}<{c}, {b}>" for v in ("ro1", "ro1s")
+                           for c, b in ((128, 4), (256, 2), (512, 1)))
         else:
-            ro = "nullptr, nullptr, nullptr"
+            ro = ", ".join(["nullptr"] * 6)
         cu_parts.append(f'    {{"{sig}", {lo}, {segw}, (const void*)gprod_fwd_{sig}, (const void*)gprod_bwd_{sig}, {ro}}},')
     cu_parts.append("};")
     cu_parts.append(_LAUNCHERS_CPP)

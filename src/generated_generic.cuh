@@ -56,25 +56,27 @@ __device__ __forceinline__ void sh16_grad(float x, float y, float z, const float
   gz = d10*t6 + d13*t20*t7 + d14*t5*z + d3*t0 + d4*t2 + d7*t1*y + d8*t23 - t10*t19 - t13*z - t15*t18 + t15*t27 + t16*t22 - 0x1.0000000000000p-2f*t17*t8 - t27*t8 - t3*z;
 }
 
-struct GProdKernels { const char* sig; int lmax_out; int segments_w; const void* fwd; const void* bwd; const void* ro1_128; const void* ro1_256; const void* ro1_512; };
+struct GProdKernels { const char* sig; int lmax_out; int segments_w; const void* fwd; const void* bwd; const void* ro1_128; const void* ro1_256; const void* ro1_512; const void* ro1s_128; const void* ro1s_256; const void* ro1s_512; };
 
 namespace loup {
 const GProdKernels* find_gprod(const char* sig);
 void launch_conv_fwd(int lx, cudaStream_t st, int N, int C, int S, int I, const SplineGrid& sg, int perm, int psym,
                      const int* rp, const int* snd, const float4* vl, const int* act_slab, const float2* act_t_sx,
                      bool preloc, const int* sp, const uint2* packed, const float4* dens, unsigned bias_shift,
-                     float* const* x, float* const* mid, float* D, int var = 0, float* const* zx = nullptr);
+                     float* const* x, float* const* mid, float* D, int var = 0, float* const* zx = nullptr,
+                     bool prune = false);
 int conv_fwd_variants(int lx, int C);
 void launch_conv_bwd(int lx, cudaStream_t st, int N, int C, int S, int I, const SplineGrid& sg, int perm, int psym,
                      const int* rp, const int* snd, const float4* vl, const int* act_slab, const float2* act_t_sx,
                      bool preloc, const int* sp, const uint2* packed, const float4* dens, unsigned bias_shift,
                      float* const* x, float* const* dmid, const float* dD, float* const* dx, bool want_dx,
-                     float* edge_dvec, bool dvec_assign);
+                     float* edge_dvec, bool dvec_assign, bool prune = false);
 void launch_prod(const GProdKernels* k, bool backward, cudaStream_t st, int N, int C, float* const* m, const float* D,
                  const float* w, int64_t w_stride, const int* sp, float* const* y_or_g, float* const* dm, float* dD,
                  const float* ro_w = nullptr, double* energy = nullptr);
 void launch_prod_ro1_fused(const GProdKernels* k, cudaStream_t st, int N, int C, float* const* m, const float* D,
                            const float* w, int64_t w_stride, const int* sp, const float* sc_skip16,
                            const float* ro_W1, const float* ro_b1, const float* ro_W2, float ro_act_c,
-                           float* d_hidden16, double* out_energy, float* const* dm, float* dD);
+                           float* d_hidden16, double* out_energy, float* const* dm, float* dD,
+                           bool scalar_only = false);
 }  // namespace loup
