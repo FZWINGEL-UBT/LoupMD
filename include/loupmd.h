@@ -92,6 +92,8 @@ int loup_profile_force(LoupHandle* h, int warmup, int n_calls, double* out_total
 //                   host, instead of inside the step graph (testing).
 //   LOUP_POLAR_FOLD=0|1  POLAR long range without (0) the load-time dot^T weight fold, testing the path other GPUs take,
 //                   or with it (1) on any GPU (sm_120 and cc 8.0 fold by default).
+//   LOUP_POLAR_ZBLK=0  POLAR long range: run the GEMMs of weight blocks certified exactly zero at load (POLAR-1-L's
+//                   l = 2 SCF and electron-energy blocks), which are skipped by default (testing).
 //   LOUP_CHAIN_FOLD=0|1  generic models (OMOL-0, MH-1, the OMAT-0 / MP-0 / MPtrj / OFF families on the generic path):
 //                   0 skips the load-time skip-chain fold (the path other GPUs take), 1 folds on any GPU (testing;
 //                   sm_120 and cc 8.0 fold by default).
@@ -100,6 +102,9 @@ int loup_profile_force(LoupHandle* h, int warmup, int n_calls, double* out_total
 //   LOUP_CONV_TUNE=0|1  generic models: 0 keeps the default conv forward variant (no per-system timing at the first
 //                   rebuild); 1 times the variants on any GPU (testing; sm_120 times them by default).
 //   LOUP_CONV_FWD_VARIANT=0|1|2  force a generic conv forward variant (testing; see python/test_gate.py).
+//   LOUP_CONV_PRUNE=0  generic models: keep every conv path of a layer whose l >= 1 projections are exactly zero
+//                   (MP-0 medium's second interaction), which by default runs only its output-degree-0 paths and a
+//                   scalar-only product (testing).
 //   LOUP_NO_HYBRID=1  no tensor-core GEMM cubin (float32 SIMT GEMMs only).
 //   LOUP_HYBRID_CUBIN=path  load this GEMM cubin instead of the default (cubins/gemm_tc_hyb_sm80.cubin, LoupMD's own
 //                   cubins/src/gemm_tc.cu build with more tiles and beta support, on cc 8.0; FastMACE's
