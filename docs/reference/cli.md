@@ -126,8 +126,9 @@ loupmd validate [-h] [--model MODEL] [--dispersion PRESET] [--functional NAME]
                        [--head HEAD] [--checkpoint PATH] [--sha256 HEX] [--trusted] [--download]
                        [--set {oxide,organic,crystals}] [--structure FILE] [--copies N]
                        [--rattle A] [--ref-device {auto,cuda,cpu}] [--no-ref-cache]
-                       [--include-unstable] [--capacity {whole,tiled,wavefront}] [--charge CHARGE]
-                       [--spin-multiplicity SPIN_MULTIPLICITY] [--device N] [--json FILE]
+                       [--include-unstable] [--specialised] [--capacity {whole,tiled,wavefront}]
+                       [--charge CHARGE] [--spin-multiplicity SPIN_MULTIPLICITY] [--device N]
+                       [--json FILE]
 ```
 
 | Argument | Meaning |
@@ -147,7 +148,7 @@ loupmd validate [-h] [--model MODEL] [--dispersion PRESET] [--functional NAME]
 | `--ref-device` `REF_DEVICE` | where MACE computes the references; cpu for models whose float64 pass does not fit the GPU (default: the GPU if there is one) (one of: auto, cuda, cpu) |
 | `--no-ref-cache` | compute the references again and overwrite the cached ones |
 | `--include-unstable` | also gate configurations on which the model itself is not float32-reproducible |
-| `--specialised` | ==SUPPRESS== |
+| `--specialised` | refused: the kernels specialised to MACE-OMAT-0 medium (an option of 0.0.1) were retired, and every model runs the generic kernels |
 | `--capacity` `CAPACITY` | whole: one call per structure (default); tiled: tile by tile, about four tiles per structure, as large cells run; wavefront: tiled in the wavefront order with the row pool (two-layer models) (one of: whole, tiled, wavefront) |
 | `--charge` `CHARGE` | total charge (models with a charge embedding) |
 | `--spin-multiplicity` `SPIN_MULTIPLICITY` | 2S + 1 (models with a spin embedding) |

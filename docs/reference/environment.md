@@ -75,19 +75,25 @@ gates in that form. Most are read when an engine is made; the MD-loop switches a
 
 | Variable | Values | Effect | Read in |
 | --- | --- | --- | --- |
-| `LOUP_GENERIC` | `0`, `1` | `0`: MACE-OMAT-0 medium runs its specialised kernels instead of the generic ones | `loupmd/bundles.py` |
-| `LOUP_SPLINE_VARIANT` | `R1`, `R1p`, `R4`, `R4p`, `R5` | forces the specialised path's spline kernel variant | `src/engine.cu` |
-| `LOUP_WPRIME_THREADS` | `256`, `512` | forces the w' backward kernel's block size | `src/engine.cu` |
-| `LOUP_WPRIME_RCV` | `0`, `1` | forces the receiver-owned w' kernel off or on (default: on at every size on `sm_120` and compute capability 8.0, on other GPUs from 512 atoms) | `src/engine.cu` |
+| `LOUP_GENERIC` | any | ignored (0.0.1: `0` selected the kernels specialised to MACE-OMAT-0 medium, which were retired with their switches `LOUP_SPLINE_VARIANT`, `LOUP_WPRIME_THREADS`, `LOUP_WPRIME_RCV` and `LOUP_M1_CHUNK`) | `loupmd/bundles.py` |
 | `LOUP_REORDER` | `0`, `1` | atom reordering off or on | `src/engine.cu` |
 | `LOUP_ROW_SORT` | `global` | every neighbour row sorted in global scratch, the path of rows over 4,096 edges | `src/engine.cu` |
 | `LOUP_NB_GROUPS` | `0`, `1` | the lane-group neighbour-list kernels off, or on any GPU (default: on for `sm_120` and compute capability 8.0) | `src/engine.cu` |
-| `LOUP_M1_CHUNK` | atoms, `0` | specialised kernels: the receiver chunk of the second layer's messages (`0`: one chunk) | `src/engine.cu` |
 | `LOUP_POLAR_FOLD` | `0`, `1` | MACE-POLAR-1: `0`: the unfolded SCF and electron-energy GEMMs; `1`: the fold on GPUs other than `sm_120` and compute capability 8.0 | `src/polar.cu` |
 | `LOUP_CHAIN_FOLD` | `0`, `1` | `0`: whole systems of multi-layer models on the generic kernels without the skip-chain fold (tiled systems never fold); `1`: the fold on GPUs other than `sm_120` and compute capability 8.0 | `src/generic.cu` |
 | `LOUP_SPECIES_TABLES` | `0`, `1` | `0`: layer 0's species-only GEMMs instead of the per-species tables (OMOL-0, MH-1); `1`: the tables on GPUs other than `sm_120` and compute capability 8.0 | `src/generic.cu` |
 | `LOUP_CONV_FWD_VARIANT` | `0`, `1`, `2` | forces the generic conv forward variant | `src/generic.cu` |
 | `LOUP_CONV_TUNE` | `0`, `1` | per-system timing of the conv forward variants off, or on for any GPU | `src/generic.cu` |
+| `LOUP_CONV_PRUNE` | `0` | keeps every conv path of a layer whose higher-degree projections are exactly zero (MACE-MP-0 medium's second layer), instead of the pruned paths and the scalar-only product | `src/generic.cu` |
+| `LOUP_LIN_COMPACT` | `0` | the dense projections and product kernels instead of a layer's live channels (MACE-MPtrj-2022.9, MACE-MP-0 medium's first layer) | `src/generic.cu` |
+| `LOUP_SENDER_BWD` | `0` | the receiver-owned backward of a pruned conv layer on whole systems too (tiles and open domains always run it) | `src/generated_generic.cu` |
+| `LOUP_GATE_FUSE`, `LOUP_GATE_FUSE_FWD` | `0` | the gate kernels of gated layers (MH-1, OMOL-0, POLAR-1) instead of the gate in the neighbouring GEMM's epilogue, backward / forward | `src/engine.cu` |
+| `LOUP_POLAR_HFOLD` | `0` to `3` | MACE-POLAR-1: the long-range hidden fold per degree (bit l - 1: degree l); `0`: every layer's output formed | `src/generic.cu` |
+| `LOUP_POLAR_ZBLK` | `0` | MACE-POLAR-1: runs the GEMMs of exactly-zero weight blocks, which are skipped by default | `src/polar.cu` |
+| `LOUP_JIT` | `0`, `1` | the run-time compiler: `0` off; unset: conv layers whose width the library has no instance for, and products it was not built with, are compiled when a bundle is loaded, where NVRTC (`libnvrtc.so`) is found (else the built-in kernels run); `1` also the first layer's kernels | `src/jit.cu` |
+| `LOUP_NVRTC` | path | the NVRTC library the run-time compiler loads | `src/jit.cu` |
+| `LOUP_JIT_PRODUCTS`, `LOUP_CONV_GENERIC` | `1` | every product compiled from the bundle's source; every conv layer on the run-time-width kernels (tests of the run-time compiler) | `src/generic.cu`, `src/generated_generic.cu` |
+| `LOUP_EVAL_ARM` | `0`, `1` | `loup_set_evaluate_ahead` for every handle: `0` keeps it off, `1` switches it on. With it on, other GPU work of the process between two `loup_evaluate` calls can wait forever (`include/loupmd.h`) | `src/engine.cu` |
 | `LOUP_NO_HYBRID` | `1` | no tensor-core hybrid GEMM cubin | `src/engine.cu` |
 | `LOUP_HYBRID_CUBIN` | path | loads this GEMM cubin instead of the shipped one | `src/engine.cu` |
 | `LOUP_LR_HYBRID` | `1` | the hybrid cubin for long-range models too | `src/engine.cu` |
@@ -115,8 +121,10 @@ gates in that form. Most are read when an engine is made; the MD-loop switches a
 | `LOUP_D3_PME_ORDER` | `4`, `5`, `6`, `8` | D3 mesh: the B-spline order | `src/dispersion/d3_pair.cu` |
 | `LOUP_D3_ATM_PROJ` | `0` | D3 three-body term: the per-triangle C6 table walk | `src/dispersion/d3_pair.cu` |
 | `LOUP_SWEEP_REPLAY` | any value | generic path: a whole system runs the sweep schedule of a tiled one, without the skip-chain fold (not for long-range models) | `src/generic.cu` |
-| `LOUP_DEBUG_PACK` | any value | prints the packed tables' relative error per layer | `src/generic.cu`, `src/model_loader.cu` |
+| `LOUP_DEBUG_PACK` | any value | prints the packed tables' relative error per layer | `src/generic.cu` |
 | `LOUP_DEBUG_ERRORS` | any value | prints every library error to standard error | `src/engine.cu` |
+| `LOUP_DEBUG_JIT`, `LOUP_DEBUG_COMPACT`, `LOUP_DEBUG_ARM` | `1` | print what the run-time compiler builds or reads from its cache, the compacted layers, and why nothing is queued ahead | `src/generic.cu`, `src/jit.cu`, `src/engine.cu` |
+| `LOUP_DEBUG_EVAL_TIMES` | `1` | when a handle is destroyed, prints where its `loup_evaluate` calls spent their time | `src/engine.cu` |
 | `LOUP_DEBUG_GRAPHS`, `LOUP_DEBUG_GEMM`, `LOUP_DEBUG_GEMM_BUCKETS`, `LOUP_DEBUG_SPLINE` | any value | print diagnostics of CUDA graphs, GEMM plans, bucketed GEMM timings and kernel-variant timings | `src/engine.cu`, `src/generic.cu` |
 | `LOUP_DEBUG_TILE_TIMES` | `1` | prints the tiled call's phase times, the row pool and the kept slots | `src/engine.cu` |
 | `LOUP_TILED_HOST_MD` | `1` | tiled MD: the integrator on the host (NVE and Langevin only, with its own Langevin noise stream) instead of on the device | `loupmd/tiled_engine.py` |

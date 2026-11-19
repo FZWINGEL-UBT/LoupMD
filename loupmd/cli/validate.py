@@ -2,7 +2,6 @@
 ``--dispersion``, the D3 term against simple-dftd3 at the same settings (PLAN.md S6-D10)."""
 from __future__ import annotations
 
-import argparse
 import sys
 from pathlib import Path
 
@@ -46,7 +45,9 @@ def add_parser(sub):
                                                                     "cached ones")
     parser.add_argument("--include-unstable", action="store_true",
                         help="also gate configurations on which the model itself is not float32-reproducible")
-    parser.add_argument("--specialised", action="store_true", help=argparse.SUPPRESS)  # retired: refused
+    parser.add_argument("--specialised", action="store_true",
+                        help="refused: the kernels specialised to MACE-OMAT-0 medium (an option of 0.0.1) were "
+                             "retired, and every model runs the generic kernels")
     parser.add_argument("--capacity", choices=("whole", "tiled", "wavefront"), default="whole",
                         help="whole: one call per structure (default); tiled: tile by tile, about four tiles per "
                              "structure, as large cells run; wavefront: tiled in the wavefront order with the row "

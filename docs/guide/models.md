@@ -91,12 +91,14 @@ structure with an element the model has no embedding for is refused (`ModelEleme
 `loupmd cache list --kind bundles` shows them; `loupmd cache prune --older-than DAYS` (or `--max-size SIZE`) removes
 old ones, which are exported again when needed. The cache root is `LOUPMD_CACHE` (default `~/.cache/loupmd`; see [environment](../reference/environment.md)).
 
-## Generic and specialised kernels
+## One set of kernels
 
-Every model runs the generic kernels by default. MACE-OMAT-0 medium also has kernels specialised to it. They were
-about 8% faster on an RTX 5060 Ti and not faster on an A100. `LOUP_GENERIC=0` selects them, and
-`loupmd validate --specialised` gates them. Per-atom energies and the tiled execution need the generic kernels and a
-short-range model: MACE-POLAR-1 has neither.
+Every model runs the same kernels (the "generic" kernels of 0.0.1). Version 0.0.1 also had kernels specialised to
+MACE-OMAT-0 medium, selected with `LOUP_GENERIC=0` and gated with `loupmd validate --specialised`. They are gone:
+the generic kernels have since overtaken them. `LOUP_GENERIC` is now ignored, `loupmd validate --specialised` is
+refused, and a bundle that was exported for the specialised kernels is refused with a message to export it again
+(the bundle cache does that by itself). Per-atom energies and the tiled execution need a short-range model:
+MACE-POLAR-1 has neither.
 
 ## Kernel plugins
 
@@ -113,7 +115,8 @@ loupmd build-kernels my_model.model
 any other. It needs the CUDA toolkit (13.x), the export extra and the kernel sources (a source checkout, or a wheel
 that ships them). `--arch sm_XY` compiles for another GPU than GPU 0; `--force` compiles again. The generator loads the
 checkpoint, so the trust rule of every other command applies: a file outside the label table needs `--sha256 HEX`
-or `--trusted`. `LOUP_KERNEL_PATH` adds folders the engine searches for plugins.
+or `--trusted`. `LOUP_KERNEL_PATH` adds folders the engine searches for plugins. A plugin built for 0.0.1 is not
+loaded by a later library (the kernel interface changed): build it again.
 
 ## The accuracy gate
 
