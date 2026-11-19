@@ -21,8 +21,12 @@ KK = ["-k", "on", "g", "1", "-sf", "kk"]
 
 
 @functools.lru_cache(maxsize=None)
+def _packages() -> str:
+    return subprocess.run([LMP, "-h"], capture_output=True, text=True).stdout.split("Installed packages")[-1][:400]
+
+
 def _has_kokkos() -> bool:
-    return "KOKKOS" in subprocess.run([LMP, "-h"], capture_output=True, text=True).stdout.split("Installed packages")[-1][:400]
+    return "KOKKOS" in _packages()
 
 
 def _style_args(style):
@@ -157,3 +161,36 @@ def test_refusals_say_why(case):
     assert "is not in" in out and "which holds" in out
     out = _lmp(d, "bad_fix", _head(bundle) + "fix 1 all nve\nrun_style loupmd nve\nrun 1\n", ok=False)
     assert "fixes that act during the steps cannot be used" in out
+
+
+@pytest.mark.parametrize("style", ["plain", "kk"])
+def test_rigid_bodies_of_a_bonded_system_run(case, style):
+    """A system with bonds and a host fix (rigid/small): LAMMPS-Kokkos aborted on its bond list while loupmd/kk
+    requested no neighbour list (it now requests an occasional one, which is never built)."""
+    if "RIGID" not in _packages() or "MOLECULE" not in _packages():
+        pytest.skip("this lmp has no RIGID / MOLECULE packages")
+    d, at, bundle = case
+    n = len(at)
+    # the same atoms as bodies of five (one formula unit each), with one bond per body
+    order = {"O": 1, "Ti": 2, "Sr": 3}
+    lines = (d / "sys.data").read_text().splitlines()
+    k = next(i for i, ln in enumerate(lines) if ln.startswith("Atoms"))
+    head = [ln for ln in lines[:k] if "atoms" not in ln and "atom types" not in ln]
+    atoms = [ln.split() for ln in lines[k + 2:k + 2 + n]]
+    assert len(atoms) == n and all(int(a[1]) in order.values() for a in atoms)
+    out = [head[0], "", f"{n} atoms", f"{n // 5} bonds", "3 atom types", "1 bond types"] + head[1:]
+    # Coordinates from the Atoms object, not wrapped (read_data wraps them and sets the image flags), so that each
+    # body is compact; the sheared cell is lower triangular, which is LAMMPS's frame already.
+    x = at.positions
+    out += ["Atoms # molecular", ""] + [f"{a[0]} {i // 5 + 1} {a[1]} {x[i, 0]:.10f} {x[i, 1]:.10f} {x[i, 2]:.10f}"
+                                        for i, a in enumerate(atoms)]
+    out += ["", "Bonds", ""] + [f"{m + 1} 1 {5 * m + 1} {5 * m + 2}" for m in range(n // 5)]
+    (d / "bonded.data").write_text("\n".join(out) + "\n")
+    deck = (f"units metal\natom_style molecular\natom_modify map yes\nboundary p p p\nread_data bonded.data\n"
+            f"bond_style zero\nbond_coeff 1 3.4\npair_style loupmd\npair_coeff * * {bundle} O Ti Sr\nneighbor 0.5 bin\n"
+            "timestep 0.0005\nvelocity all create 300.0 4928459 mom yes rot no dist gaussian\n"
+            "fix 1 all rigid/nve/small molecule\nthermo 20\nthermo_style custom step temp pe ke etotal\nrun 40\n")
+    _lmp(d, f"rigid_{style}", deck, _style_args(style))
+    rows = _thermo(d, f"rigid_{style}")
+    assert len(rows) == 3 and all(np.isfinite(x) for r in rows for x in r)
+    assert abs(rows[-1][4] - rows[0][4]) < 5e-3 * n  # total energy, eV: a rigid-body run conserves it

@@ -17,6 +17,7 @@
 #include "domain.h"
 #include "error.h"
 #include "kokkos.h"
+#include "neigh_request.h"
 #include "neighbor.h"
 #include "update.h"
 
@@ -53,6 +54,23 @@ int PairLoupMDKokkos<DeviceType>::default_device()
 #else
   return 0;
 #endif
+}
+
+/* ----------------------------------------------------------------------
+   The engine needs no neighbour list. LAMMPS-Kokkos, though, keeps its own per-step work on the device (the
+   displacement check that triggers reneighbouring, the bond topology) only when a list is requested there; without
+   one it falls back to the host and, with bonds and a host fix such as rigid/small, aborts on its bond list. An
+   occasional list is requested and never built.
+------------------------------------------------------------------------- */
+
+template<class DeviceType>
+void PairLoupMDKokkos<DeviceType>::init_style()
+{
+  PairLoupMD::init_style();
+
+  auto request = neighbor->add_request(this, NeighConst::REQ_OCCASIONAL);
+  request->set_kokkos_host(std::is_same_v<DeviceType,LMPHostType> && !std::is_same_v<DeviceType,LMPDeviceType>);
+  request->set_kokkos_device(std::is_same_v<DeviceType,LMPDeviceType>);
 }
 
 /* ---------------------------------------------------------------------- */

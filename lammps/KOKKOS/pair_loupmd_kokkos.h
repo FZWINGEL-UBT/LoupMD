@@ -38,6 +38,7 @@ class PairLoupMDKokkos : public PairLoupMD {
 
   PairLoupMDKokkos(class LAMMPS *);
   void compute(int, int) override;
+  void init_style() override;
 
  protected:
   int default_device() override;

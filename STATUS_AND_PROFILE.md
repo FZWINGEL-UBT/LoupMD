@@ -534,9 +534,14 @@ S145 (`lmp-styles`, `eng-evaluate-one-graph`, `eng-device-io`, `eng-run-graph-re
   OFF23-S water216.
 - LAMMPS-Kokkos's own step on this machine is 2.43 ms (zero-strength LJ, 648 atoms), which bounds `loupmd/kk` on
   small systems under WSL 2.
+- LAMMPS's own features with the pair styles: 26 of 28 setups run (integrators, thermostats, barostats, SHAKE,
+  RATTLE, rigid bodies, minimisers, `hybrid/overlay`); table in `LAMMPS_SYMMETRIX_PARITY_PLAN.md`. `loupmd/kk` now
+  requests an occasional neighbour list: SrTiO3 320 atoms 1.29-1.38 → 0.97-1.03 ms/step, 5,000 atoms 8.38-8.45 →
+  8.14-8.19, and rigid bodies in bonded systems no longer abort under Kokkos.
 - Tests on the final library: 47 + 35 of the existing suite (the families' gates among them), 12 in the new
   `tests/test_device_io.py` (the device call and `loup_evaluate` on every rebuild path of the step graph, run calls in
-  blocks) and 7 in the new `tests/test_lammps.py` (both pair styles and the run style): 101 pass.
+  blocks) and 7 in the new `tests/test_lammps.py` (both pair styles and the run style): 101 pass. `tests/test_lammps.py` has nine
+  since the rigid-body test (both modes); those and the 12 device tests pass on the build with the list request.
 
 ### 5.4 Fixes Found by the Family Work
 - **POLAR LayerNorm-MLP reverse wrote its GEMM output over its own input** (`mlp_bwd`: after the first hidden layer

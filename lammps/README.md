@@ -85,6 +85,11 @@ run_style loupmd langevin T damp seed
   Use `reset_atoms id` after deleting atoms.
 - Energy, forces and the global virial (pressure, `fix npt`, `fix box/relax`). No per-atom energies or virials
   (`compute pe/atom`, `compute stress/atom`).
+- LAMMPS's fixes work with the pair styles as with any pair style. Run on 19 November 2026: `nve`, `nvt`, `npt`,
+  `nph`, `langevin`, `temp/csvr`, `temp/berendsen`, `press/berendsen`, `setforce`, `spring/self`, `momentum`,
+  `recenter`, `addforce`, `deform`, `nve/limit`, `viscous`, `shake`, `rattle`, `rigid/nve/small`,
+  `rigid/nvt/small`, `box/relax` with `minimize`, `hybrid/overlay`. `fix press/berendsen` needs the material's
+  `modulus`: LAMMPS's default of 10 bar makes a solid's box explode.
 - A changing box (`fix npt`) rebuilds the engine's neighbour list in every step: 1.7 to 1.9× the step time on a
   648-atom cell.
 - An isolated molecule needs a periodic box with more than 2 (cutoff + skin) of vacuum.
@@ -99,7 +104,7 @@ SrTiO3 from the benchmark inputs, 100 warm-up and 256 measured steps, two runs e
 |---|---|---|
 | `run_style loupmd` | 7.84 - 7.86 | 0.61 - 0.63 |
 | `pair_style loupmd` | 8.20 | 0.86 - 0.90 |
-| `pair_style loupmd/kk` | 8.38 - 8.45 | 1.29 - 1.38 |
+| `pair_style loupmd/kk` | 8.14 - 8.19 | 0.97 - 1.03 |
 | Symmetrix `symmetrix/mace/foundation/float32/kk` (same LAMMPS version, same job) | 13.47 - 13.54 | 1.55 - 1.59 |
 
 Under WSL 2 every blocking exchange between host and GPU costs 0.1 - 0.2 ms, and LAMMPS-Kokkos makes several per step:

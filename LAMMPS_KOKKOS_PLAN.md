@@ -63,6 +63,11 @@ differs from the plan that follows it. Figures marked *estimate* are not measure
   at 320 (single runs 3% apart), the cost of handing the state back and evaluating energy and pressure at each
   output step. It is the same loop, so it cannot be faster; both end at the same temperature (158 K, 149 - 150 K).
   The 16 November five-engine run had the engine at 8.45 ms/step on the 5,000-atom case, with that day's library.
+- After S145, `loupmd/kk` requests an occasional neighbour list, so that LAMMPS-Kokkos keeps its own per-step work
+  on the GPU: the `loupmd/kk` column's SrTiO3 rows became 8.14 - 8.19 and 0.97 - 1.03 ms/step (a later job, same
+  protocol). It also fixes an abort of rigid bodies in bonded systems under Kokkos.
+- With `pair_style loupmd`, 26 LAMMPS setups (integrators, thermostats, barostats, constraints, minimisers) were
+  run: table in `LAMMPS_SYMMETRIX_PARITY_PLAN.md`, Part 1.
 - Symmetrix-XL on the NaCl case was 3.55 - 3.61 ms/step on 5 November (not rerun).
 
 **What the measurements changed:**
