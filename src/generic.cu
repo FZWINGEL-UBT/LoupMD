@@ -623,19 +623,24 @@ __global__ void __launch_bounds__(256) first_bwd_kernel(
 // thirds of it shuffles; FMA pipe 30%), hence S140's broadcast reads from shared memory and the radial pull riding in
 // the fold. On sm_120, COLS = 2 is capped at 80 registers (6 blocks / SM, no spills; 92-96 registers uncapped).
 // COLS = 3 would spill under the cap, and other architectures (not measured) keep the uncapped kernel.
+// S142: J_FIX = 65 (64 radial columns, two per lane: OMAT-0 medium / small, ...) compiles the table width in, so the
+// column predicates, the even-width test and first_col_pos fold away (1,984 -> 1,568 static instructions, same 80
+// registers; OMAT-0 generic SrTiO3 424 -> 375 us per force call, 5060 Ti). J_FIX = 0 reads J at run time.
 #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ == 1200
 #define LOUP_FIRST_BWD_EDGE_MINB2 6
 #else
 #define LOUP_FIRST_BWD_EDGE_MINB2 0
 #endif
-template <int COLS, bool HAS_ZBL, bool STRESS>
+template <int COLS, bool HAS_ZBL, bool STRESS, int J_FIX = 0>
 __global__ void __launch_bounds__(128, COLS == 2 ? LOUP_FIRST_BWD_EDGE_MINB2 : 0) first_bwd_edge_kernel(
-    const int* __restrict__ E_dev, int S, int I, int J, int Jt, int K0, SplineGrid grid, int sh_perm, int pair_sym,
+    const int* __restrict__ E_dev, int S, int I, int J_arg, int Jt, int K0, SplineGrid grid, int sh_perm, int pair_sym,
     const int* __restrict__ senders, const int* __restrict__ receivers, const float4* __restrict__ vec_len,
     const int* __restrict__ species, const float4* __restrict__ table,
     const float* __restrict__ g0, const float* __restrict__ g1, const float* __restrict__ g2, const float* __restrict__ g3,
     const float* __restrict__ dD, const float* __restrict__ edge_dvec, ZblParams zbl,
     double* __restrict__ energy, double* __restrict__ forces, double* __restrict__ virial) {
+    static_assert(J_FIX == 0 || (COLS == 2 && J_FIX == 65), "fixed width: 64 columns, two per lane");
+    const int J = J_FIX ? J_FIX : J_arg;
     constexpr int CHUNK = 32;
     const int E = *E_dev;
     const int tid = threadIdx.x, warp = tid >> 5, warp_id = blockIdx.x * 4 + warp, lane = tid & 31;
@@ -2468,12 +2473,15 @@ void GenericModel::record(const GenericPassInputs& in) {
                     using EdgeBwd = void (*)(const int*, int, int, int, int, int, SplineGrid, int, int, const int*, const int*,
                                              const float4*, const int*, const float4*, const float*, const float*, const float*,
                                              const float*, const float*, const float*, ZblParams, double*, double*, double*);
-                    const EdgeBwd tbl[2][2][2] = {
+                    const EdgeBwd tbl[3][2][2] = {
                         {{first_bwd_edge_kernel<2, false, false>, first_bwd_edge_kernel<2, false, true>},
                          {first_bwd_edge_kernel<2, true, false>, first_bwd_edge_kernel<2, true, true>}},
                         {{first_bwd_edge_kernel<3, false, false>, first_bwd_edge_kernel<3, false, true>},
-                         {first_bwd_edge_kernel<3, true, false>, first_bwd_edge_kernel<3, true, true>}}};
-                    tbl[L->J - 1 > 64 ? 1 : 0][has_zbl_ ? 1 : 0][in.compute_stress ? 1 : 0]<<<(in.E_cap + 127) / 128, 128, 0, st>>>(
+                         {first_bwd_edge_kernel<3, true, false>, first_bwd_edge_kernel<3, true, true>}},
+                        {{first_bwd_edge_kernel<2, false, false, 65>, first_bwd_edge_kernel<2, false, true, 65>},
+                         {first_bwd_edge_kernel<2, true, false, 65>, first_bwd_edge_kernel<2, true, true, 65>}}};
+                    const int cols = L->J - 1 > 64 ? 1 : (L->J == 65 ? 2 : 0);  // 2: S142's fixed 64-column kernel
+                    tbl[cols][has_zbl_ ? 1 : 0][in.compute_stress ? 1 : 0]<<<(in.E_cap + 127) / 128, 128, 0, st>>>(
                         in.E_dev, S, L->intervals, L->J, L->Jt, L->K0, L->grid, sh_perm_, L->pair_sym, in.act_senders,
                         in.act_receivers, in.act_vec_len, in.species, L->table, L->S0[0], L->S0[1], L->S0[2], L->S0[3],
                         density ? L->dD : nullptr, d_edge_dvec_, zbl_p, in.energy, in.forces, in.virial);

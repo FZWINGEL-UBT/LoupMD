@@ -429,12 +429,18 @@ __global__ void __launch_bounds__(512) gconv_bwd_L0(
         atomicAdd(dx0_p + (int64_t)snd * C + ch, dx0_acc);
       }
     }
-    #pragma unroll
-    for (int off = 16; off > 0; off >>= 1) {
-      pull_Gx += __shfl_xor_sync(0xffffffffu, pull_Gx, off);
-      pull_Gy += __shfl_xor_sync(0xffffffffu, pull_Gy, off);
-      pull_Gz += __shfl_xor_sync(0xffffffffu, pull_Gz, off);
-      pull_R  += __shfl_xor_sync(0xffffffffu, pull_R,  off);
+    {  // S142: split fold of the four partials (gen_generic.py FOLD4)
+      const bool up16 = (lane & 16) != 0, up8 = (lane & 8) != 0;
+      const float f0 = (up16 ? pull_Gz : pull_Gx) + __shfl_xor_sync(0xffffffffu, up16 ? pull_Gx : pull_Gz, 16);
+      const float f1 = (up16 ? pull_R : pull_Gy) + __shfl_xor_sync(0xffffffffu, up16 ? pull_Gy : pull_R, 16);
+      float f = (up8 ? f1 : f0) + __shfl_xor_sync(0xffffffffu, up8 ? f0 : f1, 8);
+      f += __shfl_xor_sync(0xffffffffu, f, 4);
+      f += __shfl_xor_sync(0xffffffffu, f, 2);
+      f += __shfl_xor_sync(0xffffffffu, f, 1);
+      pull_Gx = f;
+      pull_Gy = __shfl_sync(0xffffffffu, f, 8);
+      pull_Gz = __shfl_sync(0xffffffffu, f, 16);
+      pull_R = __shfl_sync(0xffffffffu, f, 24);
     }
     if (lane == 0) {
       float ddens = 0.0f;
@@ -1384,12 +1390,18 @@ __global__ void __launch_bounds__(512) gconv_bwd_L1(
         atomicAdd(dx1_p + ((int64_t)snd * 3 + 2) * C + ch, dx1_2);
       }
     }
-    #pragma unroll
-    for (int off = 16; off > 0; off >>= 1) {
-      pull_Gx += __shfl_xor_sync(0xffffffffu, pull_Gx, off);
-      pull_Gy += __shfl_xor_sync(0xffffffffu, pull_Gy, off);
-      pull_Gz += __shfl_xor_sync(0xffffffffu, pull_Gz, off);
-      pull_R  += __shfl_xor_sync(0xffffffffu, pull_R,  off);
+    {  // S142: split fold of the four partials (gen_generic.py FOLD4)
+      const bool up16 = (lane & 16) != 0, up8 = (lane & 8) != 0;
+      const float f0 = (up16 ? pull_Gz : pull_Gx) + __shfl_xor_sync(0xffffffffu, up16 ? pull_Gx : pull_Gz, 16);
+      const float f1 = (up16 ? pull_R : pull_Gy) + __shfl_xor_sync(0xffffffffu, up16 ? pull_Gy : pull_R, 16);
+      float f = (up8 ? f1 : f0) + __shfl_xor_sync(0xffffffffu, up8 ? f0 : f1, 8);
+      f += __shfl_xor_sync(0xffffffffu, f, 4);
+      f += __shfl_xor_sync(0xffffffffu, f, 2);
+      f += __shfl_xor_sync(0xffffffffu, f, 1);
+      pull_Gx = f;
+      pull_Gy = __shfl_sync(0xffffffffu, f, 8);
+      pull_Gz = __shfl_sync(0xffffffffu, f, 16);
+      pull_R = __shfl_sync(0xffffffffu, f, 24);
     }
     if (lane == 0) {
       float ddens = 0.0f;
@@ -1697,12 +1709,18 @@ __global__ void __launch_bounds__(512) gconv_bwd_L1s(
         atomicAdd(dx1_p + ((int64_t)snd * 3 + 2) * C + ch, dx1_2);
       }
     }
-    #pragma unroll
-    for (int off = 16; off > 0; off >>= 1) {
-      pull_Gx += __shfl_xor_sync(0xffffffffu, pull_Gx, off);
-      pull_Gy += __shfl_xor_sync(0xffffffffu, pull_Gy, off);
-      pull_Gz += __shfl_xor_sync(0xffffffffu, pull_Gz, off);
-      pull_R  += __shfl_xor_sync(0xffffffffu, pull_R,  off);
+    {  // S142: split fold of the four partials (gen_generic.py FOLD4)
+      const bool up16 = (lane & 16) != 0, up8 = (lane & 8) != 0;
+      const float f0 = (up16 ? pull_Gz : pull_Gx) + __shfl_xor_sync(0xffffffffu, up16 ? pull_Gx : pull_Gz, 16);
+      const float f1 = (up16 ? pull_R : pull_Gy) + __shfl_xor_sync(0xffffffffu, up16 ? pull_Gy : pull_R, 16);
+      float f = (up8 ? f1 : f0) + __shfl_xor_sync(0xffffffffu, up8 ? f0 : f1, 8);
+      f += __shfl_xor_sync(0xffffffffu, f, 4);
+      f += __shfl_xor_sync(0xffffffffu, f, 2);
+      f += __shfl_xor_sync(0xffffffffu, f, 1);
+      pull_Gx = f;
+      pull_Gy = __shfl_sync(0xffffffffu, f, 8);
+      pull_Gz = __shfl_sync(0xffffffffu, f, 16);
+      pull_R = __shfl_sync(0xffffffffu, f, 24);
     }
     if (lane == 0) {
       float ddens = 0.0f;
@@ -1816,12 +1834,18 @@ __global__ void __launch_bounds__(128) gconv_bwd_L1sr(
         pull_R = fmaf(dw, A * q1, pull_R);
       }
     }
-    #pragma unroll
-    for (int off = 16; off > 0; off >>= 1) {
-      pull_Gx += __shfl_xor_sync(0xffffffffu, pull_Gx, off);
-      pull_Gy += __shfl_xor_sync(0xffffffffu, pull_Gy, off);
-      pull_Gz += __shfl_xor_sync(0xffffffffu, pull_Gz, off);
-      pull_R  += __shfl_xor_sync(0xffffffffu, pull_R,  off);
+    {  // S142: split fold of the four partials (gen_generic.py FOLD4)
+      const bool up16 = (lane & 16) != 0, up8 = (lane & 8) != 0;
+      const float f0 = (up16 ? pull_Gz : pull_Gx) + __shfl_xor_sync(0xffffffffu, up16 ? pull_Gx : pull_Gz, 16);
+      const float f1 = (up16 ? pull_R : pull_Gy) + __shfl_xor_sync(0xffffffffu, up16 ? pull_Gy : pull_R, 16);
+      float f = (up8 ? f1 : f0) + __shfl_xor_sync(0xffffffffu, up8 ? f0 : f1, 8);
+      f += __shfl_xor_sync(0xffffffffu, f, 4);
+      f += __shfl_xor_sync(0xffffffffu, f, 2);
+      f += __shfl_xor_sync(0xffffffffu, f, 1);
+      pull_Gx = f;
+      pull_Gy = __shfl_sync(0xffffffffu, f, 8);
+      pull_Gz = __shfl_sync(0xffffffffu, f, 16);
+      pull_R = __shfl_sync(0xffffffffu, f, 24);
     }
     if (lane == 0) {
       float ddens = 0.0f, dDi = 0.0f;
@@ -3408,12 +3432,18 @@ __global__ void __launch_bounds__(512) gconv_bwd_L2lp(
         atomicAdd(dx1_p + ((int64_t)snd * 3 + 2) * C + ch, dx1_2);
       }
     }
-    #pragma unroll
-    for (int off = 16; off > 0; off >>= 1) {
-      pull_Gx += __shfl_xor_sync(0xffffffffu, pull_Gx, off);
-      pull_Gy += __shfl_xor_sync(0xffffffffu, pull_Gy, off);
-      pull_Gz += __shfl_xor_sync(0xffffffffu, pull_Gz, off);
-      pull_R  += __shfl_xor_sync(0xffffffffu, pull_R,  off);
+    {  // S142: split fold of the four partials (gen_generic.py FOLD4)
+      const bool up16 = (lane & 16) != 0, up8 = (lane & 8) != 0;
+      const float f0 = (up16 ? pull_Gz : pull_Gx) + __shfl_xor_sync(0xffffffffu, up16 ? pull_Gx : pull_Gz, 16);
+      const float f1 = (up16 ? pull_R : pull_Gy) + __shfl_xor_sync(0xffffffffu, up16 ? pull_Gy : pull_R, 16);
+      float f = (up8 ? f1 : f0) + __shfl_xor_sync(0xffffffffu, up8 ? f0 : f1, 8);
+      f += __shfl_xor_sync(0xffffffffu, f, 4);
+      f += __shfl_xor_sync(0xffffffffu, f, 2);
+      f += __shfl_xor_sync(0xffffffffu, f, 1);
+      pull_Gx = f;
+      pull_Gy = __shfl_sync(0xffffffffu, f, 8);
+      pull_Gz = __shfl_sync(0xffffffffu, f, 16);
+      pull_R = __shfl_sync(0xffffffffu, f, 24);
     }
     if (lane == 0) {
       float ddens = 0.0f;

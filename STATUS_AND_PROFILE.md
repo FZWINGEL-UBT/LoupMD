@@ -488,6 +488,10 @@ S141 (`pol-sf-split-fold`, `gen-conv-fwd-pruned-r5`, 19 November, branch `develo
 - The structure factor's FP64 warp fold split so each lane folds one value (bitwise the old sums): POLAR-1-M NbCl5 `0.979` (19.66 -> 19.26 ms, the develop library against `d6e97b7` on shared plans), NaCl216 `0.989`, POLAR-1-L NaCl216 `0.994`.
 - MP-0 medium's pruned forward (`gconv_fwd_L1s`) stages four harmonics instead of sixteen, uses literal barrier ids (16 -> 6 reserved barriers) and, on `sm_120`, the 16 KB shared-memory configuration: 648 -> 576 us per force call; MP-0 SrTiO3 `0.984`, NbCl5 `0.974` (lab) / `0.995` (develop, noisy).
 - Gates: POLAR-1-S / -M / -L crystals, MP-0 medium oxide (default and with prune / sender backward / compaction / chain fold off) and OMAT-0 generic oxide pass; 77 tests pass on the develop library. Rejected or not built in the same round, with their numbers: the ledger's S141 rows (dual-pipe GEMM lanes, R6, literal barriers in the full forward, the bond-frame backward bound and the precision screens).
+S142 (`gen-conv-bwd-fold4`, `gen-first-bwd-edge-j64`, 19 November, branch `develop`, 5060 Ti only):
+- The lx <= 1 conv backwards fold their four pull partials together (9 shuffles instead of 20, lane 0's sums bitwise the old ones): `gconv_bwd_L1` 2,773 -> 2,741 us per force call on OMAT-0 generic SrTiO3.
+- The layer-0 edge backward is compiled for 64 radial columns when the model has them: 424 -> 375 us per force call (OMAT-0 generic SrTiO3), MP-0 NbCl5 62.4 -> 59.0 us.
+- Together, against the develop library `595ee89` on shared plans: OMAT-0 medium generic SrTiO3 `0.991` (7.742 -> 7.672 ms), OMAT-0 small SrTiO3 `0.988`, MP-0 medium SrTiO3 `0.988`, MP-0 NbCl5 `0.984` (a first run read `1.020`; that cell scatters by 2%). 13 gate cases (213 rows) and 77 tests pass. The other items of the owner's eighth list: the ledger's S142 rows (six lab variants rejected, four bounds, eight paper verdicts).
 
 ### 5.4 Fixes Found by the Family Work
 - **POLAR LayerNorm-MLP reverse wrote its GEMM output over its own input** (`mlp_bwd`: after the first hidden layer

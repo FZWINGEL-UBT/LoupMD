@@ -674,6 +674,26 @@ EDGE_DVEC_SET = """\
       edge_dvec[(int64_t)e * 3 + 1] = fy;
       edge_dvec[(int64_t)e * 3 + 2] = fz;"""
 
+# S142: the four pull partials of an L1 conv backward folded together: the two first xor stages split the values
+# between the lanes (selects), the last three are plain, then lane 0 gathers the other three sums (value c ends in
+# lanes 8c .. 8c + 7): 9 shuffles and 6 adds instead of 4 x 5 of each. Lane 0's four sums are bit for bit the plain
+# xor fold's (same pairs, same tree, commuting adds; the split of src/warp_fold.cuh), which is all the tail reads.
+# OMAT-0 generic SrTiO3: gconv_bwd_L1 2,773 -> 2,741 us per force call (5060 Ti).
+FOLD4 = """    {  // S142: split fold of the four partials (gen_generic.py FOLD4)
+      const bool up16 = (lane & 16) != 0, up8 = (lane & 8) != 0;
+      const float f0 = (up16 ? pull_Gz : pull_Gx) + __shfl_xor_sync(0xffffffffu, up16 ? pull_Gx : pull_Gz, 16);
+      const float f1 = (up16 ? pull_R : pull_Gy) + __shfl_xor_sync(0xffffffffu, up16 ? pull_Gy : pull_R, 16);
+      float f = (up8 ? f1 : f0) + __shfl_xor_sync(0xffffffffu, up8 ? f0 : f1, 8);
+      f += __shfl_xor_sync(0xffffffffu, f, 4);
+      f += __shfl_xor_sync(0xffffffffu, f, 2);
+      f += __shfl_xor_sync(0xffffffffu, f, 1);
+      pull_Gx = f;
+      pull_Gy = __shfl_sync(0xffffffffu, f, 8);
+      pull_Gz = __shfl_sync(0xffffffffu, f, 16);
+      pull_R = __shfl_sync(0xffffffffu, f, 24);
+    }"""
+
+
 def emit_conv_bwd_lp(lx, l3s=(0, 1, 2, 3), name=None, qs_name=None):
     """Late pull-back backward over layout(lx)'s paths with x degree <= 1 and output degree in ``l3s``: every path for
     lx 0 / 1; for lx 2 the ten paths of lx 1 indexed into the 17-path table (gconv_bwd_L2lp, which also owns the
@@ -873,13 +893,7 @@ __global__ void __launch_bounds__(512) {name}(
     for (int ch = lane; ch < C; ch += 32) {{
 {chr(10).join(ch_body)}
     }}
-    #pragma unroll
-    for (int off = 16; off > 0; off >>= 1) {{
-      pull_Gx += __shfl_xor_sync(0xffffffffu, pull_Gx, off);
-      pull_Gy += __shfl_xor_sync(0xffffffffu, pull_Gy, off);
-      pull_Gz += __shfl_xor_sync(0xffffffffu, pull_Gz, off);
-      pull_R  += __shfl_xor_sync(0xffffffffu, pull_R,  off);
-    }}
+{FOLD4}
     if (lane == 0) {{
       float ddens = 0.0f;
       if (dD && dD1_r != 0.0f) {{
@@ -1001,13 +1015,7 @@ __global__ void __launch_bounds__(128) gconv_bwd_L1sr(
         pull_R = fmaf(dw, A * q1, pull_R);
       }}
     }}
-    #pragma unroll
-    for (int off = 16; off > 0; off >>= 1) {{
-      pull_Gx += __shfl_xor_sync(0xffffffffu, pull_Gx, off);
-      pull_Gy += __shfl_xor_sync(0xffffffffu, pull_Gy, off);
-      pull_Gz += __shfl_xor_sync(0xffffffffu, pull_Gz, off);
-      pull_R  += __shfl_xor_sync(0xffffffffu, pull_R,  off);
-    }}
+{FOLD4}
     if (lane == 0) {{
       float ddens = 0.0f, dDi = 0.0f;
       if (dD) {{  // the density belongs to the reversed edge's receiver i
