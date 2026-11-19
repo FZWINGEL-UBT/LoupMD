@@ -163,7 +163,7 @@ __global__ void __launch_bounds__(256) first_fwd_kernel(
     if (tid == 0 && Jt > Jp) D[a] = dsum;
 }
 
-// Edge-parallel layer-0 backward + ZBL + force/virial assembly (tabled_outer_sum0_backward_kernel design):
+// Edge-parallel layer-0 backward + ZBL + force/virial assembly (as the retired OMAT-0 path's):
 // 4 warps x 32 edges/warp, COLS columns/lane (2 for Jp <= 64, 3 for Jp <= 96); caches dS0 across consecutive
 // active edges with the same (rcv, snd_sp), folds SH gradients in s_edge[4][32][20], then all 32 lanes assemble
 // forces, ZBL and virial in parallel. Bound by its load/store pipe (ncu, OMAT-0 generic SrTiO3: LSU 71% of peak, two

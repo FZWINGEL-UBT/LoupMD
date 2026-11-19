@@ -19,8 +19,9 @@ typedef struct {
 // After a failure caused by a CUDA error the device context may be unusable: destroy the handle.
 
 // Create engine from a .loup bundle (python/export.py; python/loupmd.py's ensure_loup_bundle caches them) on CUDA
-// device `device_id`. Two architectures: MACE-OMAT-0 medium on its specialised kernels, and the generic path for
-// MACE-OMAT-0 small, MACE-OFF23/23b/24, MACE-MH-1 (one head per bundle) and MACE-POLAR-1 S/M/L. MACE-POLAR-1 is
+// device `device_id`. One path for every family (MACE-OMAT-0 / MP-0 / MPA-0 / MatPES, MACE-OMOL-0, MACE-OFF23/23b/24,
+// MACE-MH-1 with one head per bundle, MACE-POLAR-1 S/M/L); bundles of the retired specialised OMAT-0-medium path
+// (arch omat0_medium_spec, before JIT_DESIGN.md stage 5) are refused: re-export them. MACE-POLAR-1 is
 // evaluated for neutral singlet systems in zero external field; its stress includes the k-space terms' cell
 // dependence (MACE PR 1718), which the PolarMACE releases up to 0.3.16 leave out.
 LoupHandle* loup_create(const char* loup_path, int device_id);
@@ -80,13 +81,13 @@ int loup_profile_force(LoupHandle* h, int warmup, int n_calls, double* out_total
 //                   name, compute capability, cuBLASLt version and a hash of this library; plans whose winner leads
 //                   the runner-up by less than 3% are not persisted.
 //   LOUP_RETUNE     if set, ignore the plan cache and re-time every GEMM shape (results are still saved).
-//   LOUP_SPLINE_VARIANT, LOUP_WPRIME_THREADS, LOUP_REORDER  force kernel variants (testing; see python/test_gate.py).
-//   LOUP_WPRIME_RCV=0|1  specialised OMAT-0 path: the edge-tiled (0) or receiver-owned (1) w' backward (testing; the
-//                   receiver-owned kernel is the default on sm_120 and compute capability 8.0, and on other GPUs from
-//                   512 atoms).
-//   LOUP_M1_CHUNK=<atoms>|0  specialised OMAT-0 path: chunks of at most this many receivers for the interaction-1
-//                   message buffers whenever the system is larger (default: chunks of at most 8,192 above 16,384
-//                   atoms, in two alternating buffers; 0 = always one chunk) (testing).
+//   LOUP_REORDER=0|1  the spatial atom reorder off or on (testing).
+//   LOUP_CONV_FWD_VARIANT, LOUP_CONV_TUNE  force or untune the conv forward variants (testing; python/test_gate.py).
+//   LOUP_JIT=0|1    the run-time compiler (JIT_DESIGN.md): 0 off (built-in kernels only; a bundle whose product the
+//                   library lacks is then refused), unset the kernels the library has no instance for (conv widths,
+//                   products), 1 also layer 0's kernels. LOUP_NVRTC names the NVRTC library, LOUP_DEBUG_JIT=1 prints
+//                   what is compiled or read from <LOUP_CACHE_DIR>/jit/, LOUP_JIT_PRODUCTS=1 compiles every product
+//                   from the bundle (testing).
 //   LOUP_ROW_SORT=global  sort every neighbour row in global scratch, the path of rows over 4,096 edges (testing).
 //   LOUP_MD_REBUILD=host|fallback  MD neighbour rebuilds host-driven, or counted on the GPU and always finished on the
 //                   host, instead of inside the step graph (testing).

@@ -1,7 +1,6 @@
 #include "loupmd.h"
 #include "model.hpp"
 #include "kernels_common.cuh"
-#include "generated_kernels.cuh"
 #include "generic.hpp"
 #include "bundle.hpp"
 
@@ -98,7 +97,7 @@ __global__ void scatter_active_edges_kernel(
     int N, float r_max, SplineGrid grid, int S, int pair_sym, const int* __restrict__ species,
     const int* __restrict__ row_ptr, const int* __restrict__ act_row_ptr,
     const int* __restrict__ senders, const float4* __restrict__ tmp_vec_len,
-    int* __restrict__ act_senders, int* __restrict__ act_receivers, int* __restrict__ act_pairs,
+    int* __restrict__ act_senders, int* __restrict__ act_receivers,
     float4* __restrict__ act_vec_len,
     int* __restrict__ act_slab, float2* __restrict__ act_t_sx);
 __global__ void check_skin_kernel(int N, double half_skin, const double* __restrict__ pos64,
@@ -184,29 +183,6 @@ __global__ void nl_commit_kernel(int n, const double* __restrict__ pos, double* 
     if (i == 0) *need_rebuild = 0;
 }
 
-__global__ void tabled_outer_sum0_forward_kernel(
-    int N, int S, int pieces0, int n_bins0, float r_lo0, float bin_scale0,
-    const int* __restrict__ act_row_ptr, const float4* __restrict__ vec_len,
-    const int* __restrict__ senders, const int* __restrict__ species,
-    const float* __restrict__ coef0, const float* __restrict__ starts0,
-    const float* __restrict__ scales0, const int32_t* __restrict__ bins0,
-    float* __restrict__ S0_0, float* __restrict__ S0_1, float* __restrict__ S0_2, float* __restrict__ S0_3,
-    float* __restrict__ D0);
-
-__global__ void tabled_outer_sum0_backward_kernel(
-    const int* __restrict__ E_ptr, int S, int pieces0, int n_bins0, float r_lo0, float bin_scale0, float r_max,
-    int compute_stress, float zbl_r_max_max, float zbl_p,
-    float zbl_c0, float zbl_c1, float zbl_c2, float zbl_c3,
-    const float4* __restrict__ vec_len,
-    const int* __restrict__ senders, const int* __restrict__ receivers, const int* __restrict__ pairs,
-    const int* __restrict__ species, const float* __restrict__ pcoef0, const float* __restrict__ starts0,
-    const float* __restrict__ scales0, const int32_t* __restrict__ bins0,
-    const float* __restrict__ dS0_0, const float* __restrict__ dS0_1,
-    const float* __restrict__ dS0_2, const float* __restrict__ dS0_3,
-    const float* __restrict__ dD0,
-    const float* __restrict__ zbl_r_cut, const float* __restrict__ zbl_inv_a, const float* __restrict__ zbl_pref,
-    const float* __restrict__ edge_force_1,
-    double* __restrict__ energy_f64, double* __restrict__ forces_f64, double* __restrict__ virial_grad_f64);
 constexpr double ASE_FS = 0.09822694788464063;
 constexpr double ASE_KB = 8.617330337217213e-5;
 
@@ -403,43 +379,18 @@ struct HybCubin {
 
 // FNV-1a over this library's own file: GEMM plans are keyed by it, so a rebuilt library (new kernels, other tile
 // code) never reuses plans timed against an older build.
-// Test overrides (LOUP_SPLINE_VARIANT=R1|R1p|R4|R4p|R5, LOUP_WPRIME_THREADS=256|512, LOUP_WPRIME_RCV=0|1,
-// LOUP_REORDER=0|1, LOUP_ROW_SORT=global, LOUP_MD_REBUILD=host|fallback, LOUP_M1_CHUNK=<atoms>|0): pin a kernel
-// variant or path that tuning or a size threshold would otherwise pick, so the gate and the tests can cover every one.
-// Parsed by hand (no strtol: the library must link against older glibc).
+// Test overrides (LOUP_REORDER=0|1, LOUP_ROW_SORT=global, LOUP_MD_REBUILD=host|fallback): pin a path that a size
+// threshold or the cadence would otherwise pick, so the tests can cover every one.
 struct VariantOverrides {
-    int spline_var = -1;  // index into tune_rebuild_variants' table
-    int wp_threads = 0;
-    int wprime_rcv = -1;
     int reorder = -1;
     bool row_sort_global = false;  // neighbour rows sorted in global scratch (else only rows over 4096 edges)
     int md_rebuild = 0;  // MD rebuilds: 0 on the GPU in the step graph, 1 host-driven, 2 counted on the GPU, finished on the host
-    int m1_chunk = -1;   // receivers per m1 chunk (0: one chunk; -1: kM1ChunkAtoms)
     VariantOverrides() {
-        static const char* const names[5] = {"R1", "R1p", "R4", "R4p", "R5"};
-        if (const char* s = std::getenv("LOUP_SPLINE_VARIANT"))
-            for (int v = 0; v < 5; ++v)
-                if (strcmp(s, names[v]) == 0) spline_var = v;
-        if (const char* s = std::getenv("LOUP_WPRIME_THREADS")) {
-            if (strcmp(s, "256") == 0) wp_threads = 256;
-            if (strcmp(s, "512") == 0) wp_threads = 512;
-        }
-        if (const char* s = std::getenv("LOUP_WPRIME_RCV")) wprime_rcv = (s[0] == '1') ? 1 : (s[0] == '0') ? 0 : -1;
         if (const char* s = std::getenv("LOUP_REORDER")) reorder = (s[0] == '1') ? 1 : (s[0] == '0') ? 0 : -1;
         if (const char* s = std::getenv("LOUP_ROW_SORT")) row_sort_global = strcmp(s, "global") == 0;
         if (const char* s = std::getenv("LOUP_MD_REBUILD")) md_rebuild = strcmp(s, "host") == 0 ? 1 : strcmp(s, "fallback") == 0 ? 2 : 0;
-        if (const char* s = std::getenv("LOUP_M1_CHUNK")) {
-            int v = 0;
-            for (; *s >= '0' && *s <= '9' && v < 100000000; ++s) v = v * 10 + (*s - '0');
-            m1_chunk = v;
-        }
     }
 };
-static constexpr int kSplineVar = 5;
-static constexpr int kSplineVarR[kSplineVar] = {1, 1, 4, 4, 5};
-static constexpr bool kSplineVarPair[kSplineVar] = {false, true, false, true, false};
-// Above twice this many atoms m1 / dm1 (20 KB per atom) run in receiver chunks of at most this many (S112).
-static constexpr int kM1ChunkAtoms = 8192;
 
 static uint64_t library_build_hash() {
     static uint64_t cached = 0;
@@ -490,7 +441,6 @@ struct LoupHandle {
     void* side_ws[kSide] = {};
     cudaEvent_t ev_fork = nullptr;
     cudaEvent_t ev_join[kSide] = {};
-    cudaEvent_t ev_m1[2][4] = {};  // per m1 buffer: its lin1 GEMMs on lanes 0-3 are done (S112 chunk pipeline)
     cudaStream_t gemm_stream = nullptr;  // stream sgemm_rm launches on (main stream outside fork groups)
     void* gemm_ws = nullptr;
     bool fork_ok = true;
@@ -504,26 +454,7 @@ struct LoupHandle {
     };
     std::map<std::tuple<int, int, int, bool, bool>, LtPlan> lt_cache;
     std::map<std::tuple<const float*, int, int>, float*> bt_cache;  // [K, N] copies of transposed weights (weight_kn)
-    int spline_rpb_occ = 1;      // receivers per spline_forward_inter1 block by occupancy (choose_spline_rpb)
-    int spline_rpb = 1;          // in use: spline_rpb_occ until tune_rebuild_variants has timed the variants
-    bool spline_pair = true;     // paired-edge decode in use
-    int wp_threads = 256;        // wprime_backward_inter1_rcv block size (256 or 512; tune_rebuild_variants)
-    VariantOverrides ovr;        // test overrides from the environment, read at loup_create
-    void apply_overrides() {
-        if (ovr.spline_var >= 0) {
-            spline_rpb = kSplineVarR[ovr.spline_var];
-            spline_pair = kSplineVarPair[ovr.spline_var];
-        }
-        if (ovr.wp_threads) wp_threads = ovr.wp_threads;
-    }
-    // Receiver-owned w' below 512 atoms too (`wprime_rcv_small`): it wins there on cc 12.0 (S96: SrTiO3 40 / 135 / 320
-    // atoms 0.984 / 0.953 / 0.967 of the step) and cc 8.0 (S114, A100: 0.994 / 0.989 / 0.968); other GPUs keep the S3
-    // threshold (the edge-tiled kernel there is unmeasured against it).
-    bool wprime_rcv_small = false;
-    bool use_wprime_rcv_at(int n) const {
-        return ovr.wprime_rcv >= 0 ? ovr.wprime_rcv == 1 : (wprime_rcv_small || n >= 512);
-    }
-    bool use_wprime_rcv() const { return use_wprime_rcv_at(N); }
+    VariantOverrides ovr;         // test overrides from the environment, read at loup_create
     bool variants_tuned = false;  // tune_rebuild_variants ran for this system
     struct DiskPlan {
         int M, N, K;
@@ -597,13 +528,11 @@ struct LoupHandle {
         }
         lt_cache.clear();
     }
-    LoupModelGPU model;                       // the specialised OMAT-0-medium path
-    std::unique_ptr<loup::GenericModel> gen;  // the generic path (arch=generic bundles)
-    bool generic() const { return gen != nullptr; }
-    int n_species() const { return gen ? gen->S() : model.S; }
-    float cutoff() const { return gen ? gen->r_max() : model.r_max; }
-    int species_z(int s) const { return gen ? gen->atomic_numbers()[s] : model.atomic_numbers[s]; }
-    double species_e0(int s) const { return gen ? gen->e0()[s] : model.atomic_energies[s]; }
+    std::unique_ptr<loup::GenericModel> gen;  // the model (every bundle is arch=generic since JIT_DESIGN.md stage 5)
+    int n_species() const { return gen->S(); }
+    float cutoff() const { return gen->r_max(); }
+    int species_z(int s) const { return gen->atomic_numbers()[s]; }
+    double species_e0(int s) const { return gen->e0()[s]; }
 
     // System topology (atoms grouped by species 0..S-1)
     int N = 0;
@@ -667,44 +596,17 @@ struct LoupHandle {
     float4* d_act_vec_len = nullptr;
     int* d_act_senders = nullptr;
     int* d_act_receivers = nullptr;
-    int* d_act_pairs = nullptr;
     int* d_act_slab = nullptr;
     float2* d_act_t_sx = nullptr;
     float4* d_tmp_vec_len = nullptr;
     float* d_edge_force_1 = nullptr;
 
-    // Zero-initialized per-step slab + non-zero activation slab
+    // Zero-initialized per-step slab
     void* d_zero_slab = nullptr;
     size_t zero_slab_bytes = 0;
-    size_t zero_tail_off = 0;  // S0/D0 are fully written by the forward; only [zero_tail_off, end) is zero-filled
-    float* d_S0_0 = nullptr;
-    float* d_S0_1 = nullptr;
-    float* d_S0_2 = nullptr;
-    float* d_S0_3 = nullptr;
-    float* d_D0 = nullptr;
-    float* d_dx0 = nullptr;
-    float* d_dx1 = nullptr;
     double* d_energy_f64 = nullptr;
     double* d_forces_f64 = nullptr;
     double* d_virial_grad_f64 = nullptr;
-
-    // Non-zero activation buffers
-    float* d_m0_0 = nullptr; float* d_m0_1 = nullptr; float* d_m0_2 = nullptr; float* d_m0_3 = nullptr;
-    float* d_h0_0 = nullptr; float* d_h0_1 = nullptr;
-    float* d_sc_skip16 = nullptr;
-    float* d_x0 = nullptr;   float* d_x1 = nullptr;
-    // m1 / dm1 (aliased) per receiver chunk. With chunks the two buffers alternate (S112); else only [0] exists.
-    float* d_m1[2][4] = {};
-    float* d_D1 = nullptr;
-    int m1_rows = 0;  // receivers per m1 buffer: N, or the chunk size
-    float* d_b0 = nullptr;   float* d_b1 = nullptr;   float* d_b2 = nullptr;   float* d_b3 = nullptr;
-    float* d_hidden16 = nullptr;  // d(energy)/d(hidden16) [N, 16], written by sc1_fused for the skip backward
-    float* d_db0 = nullptr;  float* d_db1 = nullptr;  float* d_db2 = nullptr;  float* d_db3 = nullptr;
-    float* d_dD1 = nullptr;
-    float* d_dh0_0 = nullptr; float* d_dh0_1 = nullptr;
-    float* d_dm0_0 = nullptr; float* d_dm0_1 = nullptr; float* d_dm0_2 = nullptr; float* d_dm0_3 = nullptr;
-    float* d_dD0 = nullptr;
-    float* d_dS0_0 = nullptr; float* d_dS0_1 = nullptr; float* d_dS0_2 = nullptr; float* d_dS0_3 = nullptr;
 
     // Graph caches
     cudaGraph_t force_graph = nullptr;
@@ -745,10 +647,6 @@ struct LoupHandle {
         if (gen) gen->free_system();
         invalidate_graphs();
         clear_lt_cache();
-        spline_rpb = spline_rpb_occ;
-        spline_pair = true;
-        wp_threads = 256;
-        apply_overrides();
         variants_tuned = false;
         nl_valid = false;
         n_rebuilds = 0;
@@ -771,27 +669,13 @@ struct LoupHandle {
         d_tmp_snd = d_tmp_shifts = nullptr;
         d_sort_keys = nullptr;
         freep(d_act_vec_len);
-        freep(d_act_senders); freep(d_act_receivers); freep(d_act_pairs);
+        freep(d_act_senders); freep(d_act_receivers);
         freep(d_act_slab); freep(d_act_t_sx);
         freep(d_tmp_vec_len);
         freep(d_edge_force_1);
         E_cap = 0; E_skin = 0;
 
         freep(d_zero_slab); zero_slab_bytes = 0;
-        freep(d_m0_0); freep(d_m0_1); freep(d_m0_2); freep(d_m0_3);
-        freep(d_h0_0); freep(d_h0_1); freep(d_sc_skip16);
-        freep(d_x0); freep(d_x1);
-        for (auto& buf : d_m1)
-            for (float*& p : buf) freep(p);
-        freep(d_D1);
-        d_b0 = d_b1 = d_b2 = d_b3 = nullptr;              // views into d_zero_slab (the S0 regions)
-        freep(d_hidden16);
-        d_db0 = d_db1 = d_db2 = d_db3 = nullptr;          // aliased onto d_b_*
-        freep(d_dD1);
-        d_dh0_0 = d_dh0_1 = nullptr;                      // aliased onto d_h0_*
-        d_dm0_0 = d_dm0_1 = d_dm0_2 = d_dm0_3 = nullptr;  // aliased onto d_m0_*
-        freep(d_dD0);
-        d_dS0_0 = d_dS0_1 = d_dS0_2 = d_dS0_3 = nullptr;  // aliased onto d_S0_*
     }
 };
 
@@ -1115,7 +999,6 @@ static int ensure_edge_capacity(LoupHandle* h, int needed) {
     CUDA_CHECK(reallocp(h->d_act_vec_len, sizeof(float4)));
     CUDA_CHECK(reallocp(h->d_act_senders, sizeof(int)));
     CUDA_CHECK(reallocp(h->d_act_receivers, sizeof(int)));
-    CUDA_CHECK(reallocp(h->d_act_pairs, sizeof(int)));
     CUDA_CHECK(reallocp(h->d_act_slab, sizeof(int)));
     CUDA_CHECK(reallocp(h->d_act_t_sx, sizeof(float2)));
     CUDA_CHECK(reallocp(h->d_tmp_vec_len, sizeof(float4)));
@@ -1124,7 +1007,7 @@ static int ensure_edge_capacity(LoupHandle* h, int needed) {
     h->d_tmp_snd = tmp4;
     h->d_sort_keys = reinterpret_cast<uint32_t*>(tmp4 + (size_t)cap);
     h->d_tmp_shifts = reinterpret_cast<int*>(h->d_edge_force_1);
-    if (h->gen) h->gen->ensure_edges(cap);
+    h->gen->ensure_edges(cap);
     h->E_cap = cap;
     return 0;
 }
@@ -1281,7 +1164,7 @@ static int pow2_at_least(int n) {
 // Fills the rows into the edge arrays (capacity >= the edge count), then sorts each receiver's row by key
 // (sym_pair << 19 | length bits), ties in fill order, and gathers it. Contract: for a fixed receiver sym_pair grows
 // with the sender species, so every row ends up grouped by ascending sender species, which the receiver-owned
-// tabled_outer_sum0_forward_kernel relies on (it stores one slot per species run); the sort kernel flags a row that
+// first_fwd_kernel (layer0_kernels.cuh) relies on (it writes each species slot once); the sort kernel flags a row that
 // breaks it (a changed key or sym_pair would otherwise corrupt S0 silently). P: the sort width, a power of two >= the
 // longest row; rows of P <= 4096 sort in shared memory. go: the MD step graph's rebuild verdict (nullptr: always).
 static int nl_fill(LoupHandle* h, const NlGeom& g, int P, const int* go = nullptr) {
@@ -1436,184 +1319,40 @@ static void gemm_join(LoupHandle* h) {
     h->gemm_ws = nullptr;
 }
 
-// Receiver chunks of the m1 / dm1 buffers in order: fn(c, a0, n) for chunk c = [a0, a0 + n), whose buffer is c & 1
-// (one chunk, the whole system, unless set_system_impl chose chunks).
-template <class F>
-static void for_each_m1_chunk(const LoupHandle* h, F&& fn) {
-    for (int c = 0, a0 = 0; a0 < h->N; ++c, a0 += h->m1_rows) fn(c, a0, std::min(h->m1_rows, h->N - a0));
-}
-
-// m1 chunk pipeline (S112). Odd chunks' spline and w' run on side stream kM1OddStream, even ones on the main stream,
-// so each chunk's kernel fills the tail of the previous one; lanes 0-3 run the lin1 GEMMs. m1_fork_lanes: lanes 0-3
-// wait for everything queued on `st`; m1_lanes_done: they record that the GEMMs into buffer `buf` are done;
-// m1_wait_lanes: `st` waits for that. Without forked GEMMs (autotune pass) everything runs in order on the main stream.
-static constexpr int kM1OddStream = 4;
-
-static void m1_fork_lanes(LoupHandle* h, cudaStream_t st) {
-    if (!h->fork_ok) return;
-    CUDA_CHECK_THROW(cudaEventRecord(h->ev_fork, st));
-    for (int l = 0; l < 4; ++l) CUDA_CHECK_THROW(cudaStreamWaitEvent(h->side[l], h->ev_fork, 0));
-}
-
-static void m1_lanes_done(LoupHandle* h, int buf) {
-    if (!h->fork_ok) return;
-    for (int l = 0; l < 4; ++l) CUDA_CHECK_THROW(cudaEventRecord(h->ev_m1[buf][l], h->side[l]));
-}
-
-static void m1_wait_lanes(LoupHandle* h, int buf, cudaStream_t st) {
-    if (!h->fork_ok) return;
-    for (int l = 0; l < 4; ++l) CUDA_CHECK_THROW(cudaStreamWaitEvent(st, h->ev_m1[buf][l], 0));
-}
-
-// The receiver-owned kernels index receivers through row_ptr and their per-receiver rows only, so a chunk is the
-// shifted row_ptr / D1 / dD1 with chunk-local m1 / dm1 rows; senders, edges and dx0 / dx1 stay global.
-static void launch_wprime_rcv(LoupHandle* h, int threads, int a0, int n, int buf, cudaStream_t st) {
-    float* const* dm1 = h->d_m1[buf];
-    wprime_backward_inter1_rcv<<<n, threads, 0, st>>>(
-        n, h->d_act_row_ptr + h->N, h->d_x0, h->d_x1, h->d_act_vec_len,
-        h->d_act_senders, h->d_act_row_ptr + a0,
-        h->d_act_slab, h->d_act_t_sx,
-        dm1[0], dm1[1], dm1[2], dm1[3], h->d_dD1 + a0,
-        h->model.d_cubic_packed8_1, h->model.d_density_table_1, h->model.cubic_bias_shift,
-        h->d_dx0, h->d_dx1, h->d_edge_force_1);
-}
-
-static void launch_spline(LoupHandle* h, int rpb, bool pair, int a0, int n, int buf, cudaStream_t st) {
-    float* const* m1 = h->d_m1[buf];
-    auto* kernel = rpb == 5 ? spline_forward_inter1<5, false>
-                 : rpb == 4 ? (pair ? spline_forward_inter1<4, true> : spline_forward_inter1<4, false>)
-                            : (pair ? spline_forward_inter1<1, true> : spline_forward_inter1<1, false>);
-    kernel<<<(n + rpb - 1) / rpb, 128 * rpb, 0, st>>>(
-        n, h->d_act_row_ptr + h->N, h->d_x0, h->d_x1, h->d_act_vec_len, h->d_act_senders, h->d_act_row_ptr + a0,
-        h->d_act_slab, h->d_act_t_sx, h->model.d_cubic_packed8_1, h->model.d_density_table_1,
-        h->model.cubic_bias_shift,
-        m1[0], m1[1], m1[2], m1[3], h->d_D1 + a0);
-}
-
 // Kernel variants whose ranking depends on the system, timed once per system at the first MD rebuild (thermalised
-// positions, before the rebuild touches the edge arrays) on the last force pass's inputs; the fastest is adopted if it
-// beats the current one by >= 2% (LOUP_DEBUG_SPLINE=1 prints the timings). Outputs of the extra launches are
-// rewritten (m1, D1, edge forces) or re-zeroed (dx0, dx1) by every force pass before use. The w' launches read
-// dm1/dD1, which alias m1/D1 and so hold the spline timings' forward values by then: harmless for timing (same
-// shapes, same access pattern), and nothing reads w' outputs from these launches. The time spent here is reported as
-// LoupMDStats::tune_ms and excluded from step_ms. Both kernels are timed over every m1 chunk, as the force pass runs
-// them.
-//   spline: the 4- and 5-receiver blocks win where consecutive receivers share table slabs and lose where they rarely
-//   do (5060 Ti: SrTiO3 -8%, NbCl5 +6.8%); the paired-edge decode depends on how many consecutive edges share a slab.
-//   The ideal starting lattice of a run shows neither.
-//   w': 512-thread blocks halve the shared q staging per SM (more L1): Ada -3%, 5060 Ti +0.8% (SrTiO3).
-static float time_best_of_3(LoupHandle* h, cudaEvent_t e0, cudaEvent_t e1, const std::function<void()>& launch) {
-    float best = 1e30f;
-    for (int round = 0; round < 4; ++round) {
-        CUDA_CHECK_THROW(cudaEventRecord(e0, h->stream));
-        launch();
-        CUDA_CHECK_THROW(cudaEventRecord(e1, h->stream));
-        CUDA_CHECK_THROW(cudaEventSynchronize(e1));
-        float ms = 0.0f;
-        CUDA_CHECK_THROW(cudaEventElapsedTime(&ms, e0, e1));
-        if (round > 0) best = std::min(best, ms);  // round 0 warms up
-    }
-    return best;
-}
-
+// positions) on the last force pass's inputs: the generic layers' conv forward variants
+// (GenericModel::tune_conv_variants). The time spent is reported as LoupMDStats::tune_ms and excluded from step_ms.
 static void tune_rebuild_variants(LoupHandle* h) {
     if (h->variants_tuned) return;
     // No pair inside r_max + skin: the active-edge arrays were never written. Time later, on a list with edges.
     if (h->E_graph == 0) return;
-    if (h->generic()) {  // S64: the generic layers' conv forward variants (GenericModel::tune_conv_variants)
-        const int r = h->gen->tune_conv_variants(h->stream);
-        if (r < 0) return;  // no force pass recorded for this system yet: time at a later rebuild
-        h->variants_tuned = true;
-        if (r > 0) h->invalidate_graphs();
-        return;
-    }
+    const int r = h->gen->tune_conv_variants(h->stream);
+    if (r < 0) return;  // no force pass recorded for this system yet: time at a later rebuild
     h->variants_tuned = true;
-    EventPairGuard ev;
-    cudaEvent_t e0 = ev.e0, e1 = ev.e1;
-    bool changed = false;
-
-    float best[kSplineVar] = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
-    if (h->ovr.spline_var < 0) {
-        for (int v = 0; v < kSplineVar; ++v)
-            best[v] = time_best_of_3(h, e0, e1, [&] {
-                for_each_m1_chunk(h, [&](int c, int a0, int n) {
-                    launch_spline(h, kSplineVarR[v], kSplineVarPair[v], a0, n, c & 1, h->stream);
-                });
-            });
-        int cur = 0;
-        for (int v = 0; v < kSplineVar; ++v)
-            if (kSplineVarR[v] == h->spline_rpb && kSplineVarPair[v] == h->spline_pair) cur = v;
-        int fast = cur;
-        for (int v = 0; v < kSplineVar; ++v)
-            if (best[v] < best[fast]) fast = v;
-        if (best[fast] < 0.98f * best[cur]) {
-            h->spline_rpb = kSplineVarR[fast];
-            h->spline_pair = kSplineVarPair[fast];
-            changed = true;
-        }
-    }
-
-    float wp[2] = {0.0f, 0.0f};
-    if (h->use_wprime_rcv() && !h->ovr.wp_threads) {  // the receiver-owned w' (else the edge-tiled kernel)
-        for (int t = 0; t < 2; ++t)
-            wp[t] = time_best_of_3(h, e0, e1, [&] {
-                for_each_m1_chunk(h, [&](int c, int a0, int n) {
-                    launch_wprime_rcv(h, t ? 512 : 256, a0, n, c & 1, h->stream);
-                });
-            });
-        const int cur_t = h->wp_threads == 512 ? 1 : 0;
-        if (wp[1 - cur_t] < 0.98f * wp[cur_t]) {
-            h->wp_threads = cur_t == 1 ? 256 : 512;
-            changed = true;
-        }
-    }
-    if (changed) h->invalidate_graphs();
-    if (getenv("LOUP_DEBUG_SPLINE"))
-        fprintf(stderr, "spline us: R1 %.1f, R1p %.1f, R4 %.1f, R4p %.1f, R5 %.1f -> R=%d paired=%d; w' us: 256 %.1f, 512 %.1f -> %d\n",
-                best[0] * 1e3, best[1] * 1e3, best[2] * 1e3, best[3] * 1e3, best[4] * 1e3, h->spline_rpb,
-                (int)h->spline_pair, wp[0] * 1e3, wp[1] * 1e3, h->wp_threads);
+    if (r > 0) h->invalidate_graphs();
 }
 
 static void record_force_pass(LoupHandle* h, int compute_stress) {
     const int N = h->N;
-    const int E = h->E_graph;
     const int S = h->n_species();
     const float r_max = h->cutoff();
 
-    // S0 and D0 are fully written by the interaction-0 forward; only the accumulators after them need zeroing.
-    CUDA_CHECK_THROW(cudaMemsetAsync(static_cast<char*>(h->d_zero_slab) + h->zero_tail_off, 0,
-                                     h->zero_slab_bytes - h->zero_tail_off, h->stream));
-    // No pair within r_max + skin. The specialised model then has no interaction energy at all. A generic model can
-    // still have one per atom (residual first block, readout biases, the long-range term: MACE-MH-1 0.56 eV and
-    // MACE-POLAR-1-S 0.64 eV per isolated atom), so its pass runs on the empty edge list.
-    if (E == 0 && !h->generic()) return;
-
-    const int gridE64 = (E + 63) / 64;
-    const int gridE128 = (E + 127) / 128;
+    CUDA_CHECK_THROW(cudaMemsetAsync(h->d_zero_slab, 0, h->zero_slab_bytes, h->stream));
+    // With no pair within r_max + skin the pass still runs, on the empty edge list: a model can have an energy per
+    // isolated atom (residual first block, readout biases, the long-range term: MACE-MH-1 0.56 eV and MACE-POLAR-1-S
+    // 0.64 eV).
 
     SplineGrid sg{};
     int sg_psym = 1;
-    if (h->generic()) {
-        if (const SplineGrid* pg = h->gen->preloc_grid()) {
-            sg = *pg;
-            sg_psym = h->gen->preloc_pair_sym();
-        } else {
-            sg.n_bands = 1;
-            sg.total_intervals = 1;
-            sg.counts[0] = 1;
-            sg.ends[0] = r_max;
-            sg.inv_h[0] = 1.0f / r_max;
-        }
+    if (const SplineGrid* pg = h->gen->preloc_grid()) {
+        sg = *pg;
+        sg_psym = h->gen->preloc_pair_sym();
     } else {
-        for (int i = 0; i < 8; ++i) {
-            sg.starts[i] = h->model.grid1.starts[i];
-            sg.ends[i] = h->model.grid1.ends[i];
-            sg.inv_h[i] = h->model.grid1.inv_h[i];
-            sg.offsets[i] = h->model.grid1.offsets[i];
-            sg.counts[i] = h->model.grid1.counts[i];
-        }
-        sg.n_bands = h->model.grid1.n_bands;
-        sg.total_intervals = h->model.grid1.total_intervals;
+        sg.n_bands = 1;
+        sg.total_intervals = 1;
+        sg.counts[0] = 1;
+        sg.ends[0] = r_max;
+        sg.inv_h[0] = 1.0f / r_max;
     }
 
     // 1. Compute edge vectors, compact active edges (r < r_max) with their spline locator
@@ -1626,230 +1365,43 @@ static void record_force_pass(LoupHandle* h, int compute_stress) {
         h->d_cub_tmp, act_scan_bytes, h->d_act_deg, h->d_act_row_ptr, N + 1, h->stream);
     loup::scatter_active_edges_kernel<<<warpGridN, 128, 0, h->stream>>>(
         N, r_max, sg, S, sg_psym, h->d_species, h->d_row_ptr, h->d_act_row_ptr, h->d_senders,
-        h->d_tmp_vec_len, h->d_act_senders, h->d_act_receivers, h->d_act_pairs, h->d_act_vec_len,
+        h->d_tmp_vec_len, h->d_act_senders, h->d_act_receivers, h->d_act_vec_len,
         h->d_act_slab, h->d_act_t_sx);
 
     const int* d_E_act = h->d_act_row_ptr + N;
-    if (h->generic()) {
-        loup::GenericPassInputs in{};
-        in.stream = h->stream;
-        in.N = N;
-        in.E_dev = d_E_act;
-        in.E_cap = h->E_cap;
-        in.act_row_ptr = h->d_act_row_ptr;
-        in.act_senders = h->d_act_senders;
-        in.act_receivers = h->d_act_receivers;
-        in.act_vec_len = h->d_act_vec_len;
-        in.act_slab = h->d_act_slab;
-        in.act_t_sx = h->d_act_t_sx;
-        in.species = h->d_species;
-        in.species_start = &h->species_start;
-        in.species_count = &h->species_count;
-        in.energy = h->d_energy_f64;
-        in.forces = h->d_forces_f64;
-        in.virial = h->d_virial_grad_f64;
-        in.compute_stress = compute_stress;
-        in.pos64 = h->d_pos64;
-        in.gemm = [h](bool transB, int M, int Nc, int K, float alpha, const float* A, int lda, const float* B, int ldb,
-                      float beta, float* C, int ldc) {
-            sgemm_rm(h, false, transB, M, Nc, K, alpha, A, lda, B, ldb, beta, C, ldc);
-        };
-        in.gemm_fork = [h] { gemm_fork(h); };
-        in.gemm_lane = [h](int lane) { gemm_lane(h, lane); };
-        in.gemm_join = [h] { gemm_join(h); };
-        if (h->gate_fuse)
-            in.gemm_gate_bwd = [h](int l, int M, int Nc, int K, const float* A, const float* B,
-                                   const loup::GateArgs& g) { return gemm_gate(h, false, l, M, Nc, K, A, B, g); };
-        if (h->gate_fuse_fwd)
-            in.gemm_gate_fwd = [h](int l, int M, int Nc, int K, const float* A, const float* B,
-                                   const loup::GateArgs& g) { return gemm_gate(h, true, l, M, Nc, K, A, B, g); };
-        h->gen->record(in);
-        return;
-    }
-
-    // 2. Interaction 0: tabled outer sum forward + COMPOSE_SKIP species GEMMs
-    loup::tabled_outer_sum0_forward_kernel<<<(N + 3) / 4, 128, 0, h->stream>>>(
-        N, S, h->model.pieces0, h->model.n_bins0, h->model.r_lo0, h->model.bin_scale0,
-        h->d_act_row_ptr, h->d_act_vec_len, h->d_act_senders, h->d_species,
-        h->model.d_coef0, h->model.d_starts0, h->model.d_scales0, h->model.d_bins0,
-        h->d_S0_0, h->d_S0_1, h->d_S0_2, h->d_S0_3, h->d_D0);
-    const int K0 = S * 64;
-    float* S0_ptrs[4] = {h->d_S0_0, h->d_S0_1, h->d_S0_2, h->d_S0_3};
-    float* m0_ptrs[4] = {h->d_m0_0, h->d_m0_1, h->d_m0_2, h->d_m0_3};
-    const int dims[4] = {1, 3, 5, 7};
-    gemm_fork(h);
-    for (int s = 0; s < S; ++s) {
-        int ns = h->species_count[s];
-        if (ns == 0) continue;
-        int st = h->species_start[s];
-        for (int l = 0; l < 4; ++l) {
-            int d = dims[l];
-            gemm_lane(h, 4 * s + l);
-            sgemm_rm(h, false, false, ns * d, 128, K0,
-                     1.0f, S0_ptrs[l] + (size_t)st * d * K0, K0,
-                     h->model.d_C0[l] + (size_t)s * K0 * 128, 128,
-                     0.0f, m0_ptrs[l] + (size_t)st * d * 128, 128);
-        }
-    }
-    gemm_join(h);
-    // 3. Product 0 + Readout 0
-    sc0_forward<<<N, 128, 0, h->stream>>>(
-        N, h->d_m0_0, h->d_m0_1, h->d_m0_2, h->d_m0_3,
-        h->d_D0, h->model.d_w0_factored, h->d_species, h->model.d_w_ro0,
-        h->d_h0_0, h->d_h0_1, h->d_energy_f64);
-
-    // 4. Interaction 1: skip_tp + linear_up + spline_forward1 + linear1
-    gemm_fork(h);
-    for (int s = 0; s < S; ++s) {
-        int ns = h->species_count[s];
-        if (ns == 0) continue;
-        int st = h->species_start[s];
-        gemm_lane(h, 2 + (s & 1));
-        sgemm_rm(h, false, false, ns, 16, 128,
-                 1.0f, h->d_h0_0 + (size_t)st * 128, 128,
-                 h->model.d_W_skip1_16 + (size_t)s * 128 * 16, 16,
-                 0.0f, h->d_sc_skip16 + (size_t)st * 16, 16);
-    }
-    gemm_lane(h, 0);
-    sgemm_rm(h, false, false, N, 128, 128, 1.0f, h->d_h0_0, 128, h->model.d_W_up_0, 128, 0.0f, h->d_x0, 128);
-    gemm_lane(h, 1);
-    sgemm_rm(h, false, false, N * 3, 128, 128, 1.0f, h->d_h0_1, 128, h->model.d_W_up_1, 128, 0.0f, h->d_x1, 128);
-    gemm_join(h);
-
-    // 4b. Spline forward + linear1 per m1 chunk (S112). With chunks the two m1 buffers alternate and so do the
-    // spline streams (m1_fork_lanes); chunk c's lin1 GEMMs (lanes 0-3) follow its spline, and chunk c + 2's spline
-    // waits for them.
-    const int n_chunks = (N + h->m1_rows - 1) / h->m1_rows;
-    const bool alternate = n_chunks > 1 && h->fork_ok;
-    auto chunk_stream = [&](int c) { return alternate && (c & 1) ? h->side[kM1OddStream] : h->stream; };
-    if (alternate) gemm_fork(h);  // the odd chunks' stream after x0 / x1
-    for_each_m1_chunk(h, [&](int c, int a0, int n) {
-        float* const* m1 = h->d_m1[c & 1];
-        const cudaStream_t st = chunk_stream(c);
-        if (c >= 2) m1_wait_lanes(h, c & 1, st);
-        launch_spline(h, h->spline_rpb, h->spline_pair, a0, n, c & 1, st);
-        m1_fork_lanes(h, st);
-        gemm_lane(h, 0);
-        sgemm_rm(h, false, false, n, 128, 256, 1.0f, m1[0], 256, h->model.d_W_lin1[0], 128, 0.0f,
-                 h->d_b0 + (size_t)a0 * 128, 128);
-        gemm_lane(h, 1);
-        sgemm_rm(h, false, false, n * 3, 128, 384, 1.0f, m1[1], 384, h->model.d_W_lin1[1], 128, 0.0f,
-                 h->d_b1 + (size_t)a0 * 3 * 128, 128);
-        gemm_lane(h, 2);
-        sgemm_rm(h, false, false, n * 5, 128, 384, 1.0f, m1[2], 384, h->model.d_W_lin1[2], 128, 0.0f,
-                 h->d_b2 + (size_t)a0 * 5 * 128, 128);
-        gemm_lane(h, 3);
-        sgemm_rm(h, false, false, n * 7, 128, 256, 1.0f, m1[3], 256, h->model.d_W_lin1[3], 128, 0.0f,
-                 h->d_b3 + (size_t)a0 * 7 * 128, 128);
-        m1_lanes_done(h, c & 1);
-    });
-    gemm_join(h);
-
-    // 5-6. Product 1 + Readout 1 forward and backward (one block per atom)
-    sc1_fused<<<N, 128, 0, h->stream>>>(
-        N, h->d_b0, h->d_b1, h->d_b2, h->d_b3, h->d_D1,
-        h->model.d_w1_factored, h->d_species,
-        h->d_sc_skip16, h->model.d_W_p1_ro1, h->model.d_W_ro1_2,
-        h->d_hidden16, h->d_energy_f64,
-        h->d_db0, h->d_db1, h->d_db2, h->d_db3, h->d_dD1);
-
-    // 7. Backward: linear1 + w' per m1 chunk. Chunk c + 1's lin1 GEMMs (lanes 0-3) overlap chunk c's w', which runs
-    // on the chunk's stream; chunk c + 2's GEMMs, into the same buffer as chunk c's, are forked after that w'. Chunks
-    // exist only with the receiver-owned w' (set_system_impl): the edge-tiled kernel indexes dm1 by global receiver.
-    auto lin1_backward = [&](int c) {
-        const int a0 = c * h->m1_rows, n = std::min(h->m1_rows, N - a0);
-        float* const* dm1 = h->d_m1[c & 1];
-        gemm_lane(h, 0);
-        sgemm_rm(h, false, true, n, 256, 128, 1.0f, h->d_db0 + (size_t)a0 * 128, 128, h->model.d_W_lin1[0], 128, 0.0f,
-                 dm1[0], 256);
-        gemm_lane(h, 1);
-        sgemm_rm(h, false, true, n * 3, 384, 128, 1.0f, h->d_db1 + (size_t)a0 * 3 * 128, 128, h->model.d_W_lin1[1], 128,
-                 0.0f, dm1[1], 384);
-        gemm_lane(h, 2);
-        sgemm_rm(h, false, true, n * 5, 384, 128, 1.0f, h->d_db2 + (size_t)a0 * 5 * 128, 128, h->model.d_W_lin1[2], 128,
-                 0.0f, dm1[2], 384);
-        gemm_lane(h, 3);
-        sgemm_rm(h, false, true, n * 7, 256, 128, 1.0f, h->d_db3 + (size_t)a0 * 7 * 128, 128, h->model.d_W_lin1[3], 128,
-                 0.0f, dm1[3], 256);
-        m1_lanes_done(h, c & 1);
+    loup::GenericPassInputs in{};
+    in.stream = h->stream;
+    in.N = N;
+    in.E_dev = d_E_act;
+    in.E_cap = h->E_cap;
+    in.act_row_ptr = h->d_act_row_ptr;
+    in.act_senders = h->d_act_senders;
+    in.act_receivers = h->d_act_receivers;
+    in.act_vec_len = h->d_act_vec_len;
+    in.act_slab = h->d_act_slab;
+    in.act_t_sx = h->d_act_t_sx;
+    in.species = h->d_species;
+    in.species_start = &h->species_start;
+    in.species_count = &h->species_count;
+    in.energy = h->d_energy_f64;
+    in.forces = h->d_forces_f64;
+    in.virial = h->d_virial_grad_f64;
+    in.compute_stress = compute_stress;
+    in.pos64 = h->d_pos64;
+    in.gemm = [h](bool transB, int M, int Nc, int K, float alpha, const float* A, int lda, const float* B, int ldb,
+                  float beta, float* C, int ldc) {
+        sgemm_rm(h, false, transB, M, Nc, K, alpha, A, lda, B, ldb, beta, C, ldc);
     };
-    gemm_fork(h);  // lanes and the odd chunks' stream after sc1_fused
-    lin1_backward(0);
-    if (n_chunks > 1) lin1_backward(1);
-    for_each_m1_chunk(h, [&](int c, int a0, int n) {
-        const cudaStream_t st = chunk_stream(c);
-        m1_wait_lanes(h, c & 1, st);
-        if (!h->use_wprime_rcv()) {
-            float* const* dm1 = h->d_m1[0];
-            wprime_backward_inter1<<<gridE64, 256, 0, h->stream>>>(
-                N, d_E_act, h->d_x0, h->d_x1, h->d_act_vec_len,
-                h->d_act_senders, h->d_act_receivers,
-                h->d_act_slab, h->d_act_t_sx,
-                dm1[0], dm1[1], dm1[2], dm1[3], h->d_dD1,
-                h->model.d_cubic_packed8_1, h->model.d_density_table_1, h->model.cubic_bias_shift,
-                h->d_dx0, h->d_dx1, h->d_edge_force_1);
-        } else {
-            launch_wprime_rcv(h, h->wp_threads, a0, n, c & 1, st);
-        }
-        if (c + 2 < n_chunks) {
-            m1_fork_lanes(h, st);
-            lin1_backward(c + 2);
-        }
-    });
-    gemm_join(h);
-
-    // dh0_0 = dx0 @ W_up_0^T, then the skip backward accumulates into it (same lane keeps that order)
-    gemm_fork(h);
-    gemm_lane(h, 0);
-    sgemm_rm(h, false, true, N, 128, 128, 1.0f, h->d_dx0, 128, h->model.d_W_up_0, 128, 0.0f, h->d_dh0_0, 128);
-    for (int s = 0; s < S; ++s) {
-        int ns = h->species_count[s];
-        if (ns == 0) continue;
-        int st = h->species_start[s];
-        sgemm_rm(h, false, true, ns, 128, 16,
-                 1.0f, h->d_hidden16 + (size_t)st * 16, 16,
-                 h->model.d_W_skip1_16 + (size_t)s * 128 * 16, 16,
-                 1.0f, h->d_dh0_0 + (size_t)st * 128, 128);
-    }
-    gemm_lane(h, 1);
-    sgemm_rm(h, false, true, N * 3, 128, 128, 1.0f, h->d_dx1, 128, h->model.d_W_up_1, 128, 0.0f, h->d_dh0_1, 128);
-    gemm_join(h);
-
-    // 8. Backward: Product 0 + Readout 0 + Interaction 0
-    sc0_backward<<<N, 128, 0, h->stream>>>(
-        N, h->d_m0_0, h->d_m0_1, h->d_m0_2, h->d_m0_3,
-        h->d_D0, h->model.d_w0_factored, h->d_species, h->model.d_w_ro0,
-        h->d_dh0_0, h->d_dh0_1,
-        h->d_dm0_0, h->d_dm0_1, h->d_dm0_2, h->d_dm0_3, h->d_dD0);
-
-    float* dm0_ptrs[4] = {h->d_dm0_0, h->d_dm0_1, h->d_dm0_2, h->d_dm0_3};
-    float* dS0_ptrs[4] = {h->d_dS0_0, h->d_dS0_1, h->d_dS0_2, h->d_dS0_3};
-    gemm_fork(h);
-    for (int s = 0; s < S; ++s) {
-        int ns = h->species_count[s];
-        if (ns == 0) continue;
-        int st = h->species_start[s];
-        for (int l = 0; l < 4; ++l) {
-            int d = dims[l];
-            gemm_lane(h, 4 * s + l);
-            sgemm_rm(h, false, true, ns * d, K0, 128,
-                     1.0f, dm0_ptrs[l] + (size_t)st * d * 128, 128,
-                     h->model.d_C0[l] + (size_t)s * K0 * 128, 128,
-                     0.0f, dS0_ptrs[l] + (size_t)st * d * K0, K0);
-        }
-    }
-    gemm_join(h);
-
-    // 8b-9. Interaction 0 tabled backward + fused SH pullback, ZBL, and force/virial assembly
-    loup::tabled_outer_sum0_backward_kernel<<<gridE128, 128, 0, h->stream>>>(
-        d_E_act, S, h->model.pieces0, h->model.n_bins0, h->model.r_lo0, h->model.bin_scale0, r_max,
-        compute_stress, h->model.has_zbl ? h->model.zbl_r_max_max : 0.0f, h->model.zbl_p,
-        h->model.zbl_c[0], h->model.zbl_c[1], h->model.zbl_c[2], h->model.zbl_c[3],
-        h->d_act_vec_len, h->d_act_senders, h->d_act_receivers, h->d_act_pairs, h->d_species,
-        h->model.d_pcoef0, h->model.d_starts0, h->model.d_scales0, h->model.d_bins0,
-        h->d_dS0_0, h->d_dS0_1, h->d_dS0_2, h->d_dS0_3, h->d_dD0,
-        h->model.d_zbl_r_cut, h->model.d_zbl_inv_a, h->model.d_zbl_pref,
-        h->d_edge_force_1, h->d_energy_f64, h->d_forces_f64, h->d_virial_grad_f64);
+    in.gemm_fork = [h] { gemm_fork(h); };
+    in.gemm_lane = [h](int lane) { gemm_lane(h, lane); };
+    in.gemm_join = [h] { gemm_join(h); };
+    if (h->gate_fuse)
+        in.gemm_gate_bwd = [h](int l, int M, int Nc, int K, const float* A, const float* B,
+                               const loup::GateArgs& g) { return gemm_gate(h, false, l, M, Nc, K, A, B, g); };
+    if (h->gate_fuse_fwd)
+        in.gemm_gate_fwd = [h](int l, int M, int Nc, int K, const float* A, const float* B,
+                               const loup::GateArgs& g) { return gemm_gate(h, true, l, M, Nc, K, A, B, g); };
+    h->gen->record(in);
 }
 
 static int ensure_force_graph(LoupHandle* h, int compute_stress) {
@@ -1906,53 +1458,6 @@ static int guarded(LoupHandle* h, const char* name, F&& f) {
     return -1;
 }
 
-// Per-arch L1 tuning of the gather-heavy kernels. Their table slabs and sender rows are reused across resident
-// blocks, so a smaller shared-memory carveout (more L1) cuts L2 traffic; the driver's default configuration leaves
-// most of the unified array as unused shared memory (64 KB for spline_forward_inter1, 100 KB for the i0 kernels).
-// The driver maps the carveout percent to a configuration non-proportionally and per kernel, so the percents are
-// measured per arch (sm_120: ncu launch__shared_mem_config_size + duration; sm_89: nsys durations, SrTiO3 5k):
-//   spline, 1 receiver per block: sm_120 20% (32 KB) 2.28 -> 2.20 ms; sm_89 10% 3.03 -> 2.85 ms.
-//   spline, 4 receivers per block: 0% (smallest configuration, 16 KB) on both; sm_120 1.99 ms vs 2.05-2.08 ms at
-//     64 KB; sm_89 2.47 ms at 0-10%, 2.51 at 25%, 2.60 at 50% (SrTiO3).
-//   sm_120 (RTX 5060 Ti): i0 forward 40% (64 KB) 305 -> 245 us; i0 backward 59% (64 KB) 702 -> 672 us (before its
-//                         SH staging; now equal at 64 and 100 KB).
-//   sm_89 (RTX 4000 Ada): the i0 kernels are fastest at the driver default.
-// Other archs keep the defaults (unmeasured).
-static void tune_l1(int device_id) {
-    int maj = 0, min = 0;
-    CUDA_CHECK_THROW(cudaDeviceGetAttribute(&maj, cudaDevAttrComputeCapabilityMajor, device_id));
-    CUDA_CHECK_THROW(cudaDeviceGetAttribute(&min, cudaDevAttrComputeCapabilityMinor, device_id));
-    auto carve = [](const void* kernel, int pct) {
-        CUDA_CHECK_THROW(cudaFuncSetAttribute(kernel, cudaFuncAttributePreferredSharedMemoryCarveout, pct));
-    };
-    if (maj == 12) {
-        carve((const void*)spline_forward_inter1<1, true>, 20);
-        carve((const void*)spline_forward_inter1<1, false>, 20);
-        carve((const void*)spline_forward_inter1<4, true>, 0);
-        carve((const void*)spline_forward_inter1<4, false>, 0);
-        carve((const void*)spline_forward_inter1<5, false>, 0);
-        carve((const void*)loup::tabled_outer_sum0_forward_kernel, 40);
-        carve((const void*)loup::tabled_outer_sum0_backward_kernel, 59);
-    } else if (maj == 8 && min == 9) {
-        carve((const void*)spline_forward_inter1<1, true>, 10);
-        carve((const void*)spline_forward_inter1<1, false>, 10);
-        carve((const void*)spline_forward_inter1<4, true>, 0);
-        carve((const void*)spline_forward_inter1<4, false>, 0);
-        carve((const void*)spline_forward_inter1<5, false>, 0);
-    }
-}
-
-// Default spline variant until tune_rebuild_variants has measured the system (and for evaluate()-only use): 4 receivers
-// per block share table slabs between the receivers' warps through L1, but the block holds all 16 warps' registers
-// until its slowest receiver finishes, so it is the default only where it keeps the resident warp count of the
-// 1-receiver kernel (sm_89: 16 either way; sm_120: 16 vs 20, where it loses ~7% on NbCl5).
-static int choose_spline_rpb() {
-    int b1 = 0, b4 = 0;
-    CUDA_CHECK_THROW(cudaOccupancyMaxActiveBlocksPerMultiprocessor(&b1, spline_forward_inter1<1, true>, 128, 0));
-    CUDA_CHECK_THROW(cudaOccupancyMaxActiveBlocksPerMultiprocessor(&b4, spline_forward_inter1<4, true>, 512, 0));
-    return b4 * 4 >= b1 ? 4 : 1;
-}
-
 extern "C" {
 
 LoupHandle* loup_create(const char* loup_path, int device_id) {
@@ -1975,7 +1480,6 @@ LoupHandle* loup_create(const char* loup_path, int device_id) {
                 own_ext_env = true;
             }
             h->nb_groups_ok = h->is_sm120 || cc80;
-            h->wprime_rcv_small = h->is_sm120 || cc80;
             if (const char* e = std::getenv("LOUP_NB_GROUPS"); e && (e[0] == '0' || e[0] == '1')) h->nb_groups_ok = e[0] == '1';
             if (const char* e = std::getenv("LOUP_FORCE_TC"); e && e[0] == '1') h->force_tc = true;
             if (const char* e = std::getenv("LOUP_GATE_FUSE"); e && e[0] == '0') h->gate_fuse = false;
@@ -1996,18 +1500,15 @@ LoupHandle* loup_create(const char* loup_path, int device_id) {
         for (int i = 0; i < LoupHandle::kSide; ++i) {
             CUDA_CHECK_THROW(cudaStreamCreateWithFlags(&h->side[i], cudaStreamNonBlocking));
             CUDA_CHECK_THROW(cudaEventCreateWithFlags(&h->ev_join[i], cudaEventDisableTiming));
-            if (i < 4)
-                for (auto& ev : h->ev_m1) CUDA_CHECK_THROW(cudaEventCreateWithFlags(&ev[i], cudaEventDisableTiming));
             CUDA_CHECK_THROW(cudaMalloc(&h->side_ws[i], h->cublas_ws_bytes));
         }
         {
             const loup::Bundle bundle(loup_path);
-            if (bundle.meta("arch") == "generic") {
-                h->gen = std::make_unique<loup::GenericModel>();
-                h->gen->load(bundle);
-            } else {
-                h->model.load(bundle, loup_path);
-            }
+            if (bundle.meta("arch") != "generic")  // e.g. omat0_medium_spec: the specialised path, retired (stage 5)
+                throw std::runtime_error(std::string(loup_path) + ": bundle arch '" + bundle.meta("arch") +
+                                         "' is no longer supported; re-export it (every model exports as arch=generic)");
+            h->gen = std::make_unique<loup::GenericModel>();
+            h->gen->load(bundle);
         }
         // Tensor-core GEMM implementations have failed full-model POLAR accuracy gates. Their rounding depends on
         // the operands and MMA accumulation, not a fixed multiple of FP32 error. Keep long-range models on FP32
@@ -2015,13 +1516,10 @@ LoupHandle* loup_create(const char* loup_path, int device_id) {
         // LOUP_LR_HYBRID=1 (tests): load the GEMM cubin for long-range models too (e.g. a true 3xTF32 build through
         // LOUP_HYBRID_CUBIN, gated before any adoption).
         const char* lr_hyb = std::getenv("LOUP_LR_HYBRID");
-        if (!(h->gen && h->gen->has_lr()) || (lr_hyb && lr_hyb[0] == '1')) h->hyb.init(device_id);
+        if (!h->gen->has_lr() || (lr_hyb && lr_hyb[0] == '1')) h->hyb.init(device_id);
         if (cc80 && !h->hyb.loaded && !own_ext_env) h->own_ext = true;  // float32 SIMT GEMMs only (see own_ext)
         h->load_disk_plans(device_id);
-        tune_l1(device_id);
         loup::sgemm128_init();
-        h->spline_rpb_occ = h->spline_rpb = choose_spline_rpb();
-        h->apply_overrides();
         return h;
     } catch (const std::exception& e) {
         fprintf(stderr, "loup_create failed: %s\n", e.what());
@@ -2034,13 +1532,9 @@ void loup_destroy(LoupHandle* h) {
     if (!h) return;
     cudaSetDevice(h->device_id);
     h->free_system();
-    h->model.free_gpu();
     if (h->ev_fork) cudaEventDestroy(h->ev_fork);
     for (int i = 0; i < LoupHandle::kSide; ++i) {
         if (h->ev_join[i]) cudaEventDestroy(h->ev_join[i]);
-        if (i < 4)
-            for (auto& ev : h->ev_m1)
-                if (ev[i]) cudaEventDestroy(ev[i]);
         if (h->side_ws[i]) cudaFree(h->side_ws[i]);
         if (h->side[i]) cudaStreamDestroy(h->side[i]);
     }
@@ -2154,108 +1648,19 @@ static int set_system_impl(LoupHandle* h, int n_atoms, const int* atomic_numbers
         if (ensure_cub_tmp(h, scanN_bytes) != 0) return -1;
     }
 
-    if (h->generic()) {
-        // energy, forces and virial only: the generic path keeps its own buffers
-        auto align256 = [](size_t b) { return (b + 255) & ~size_t(255); };
-        const size_t off_f64 = align256(sizeof(double));
-        const size_t off_v64 = off_f64 + align256((size_t)n_atoms * 3 * sizeof(double));
-        h->zero_slab_bytes = off_v64 + align256(6 * sizeof(double));
-        h->zero_tail_off = 0;
-        CUDA_CHECK(cudaMalloc(&h->d_zero_slab, h->zero_slab_bytes));
-        auto* base = static_cast<char*>(h->d_zero_slab);
-        h->d_energy_f64 = reinterpret_cast<double*>(base);
-        h->d_forces_f64 = reinterpret_cast<double*>(base + off_f64);
-        h->d_virial_grad_f64 = reinterpret_cast<double*>(base + off_v64);
-        h->gen->alloc_system(n_atoms);
-        if (h->E_cap > 0) h->gen->ensure_edges(h->E_cap);
-        h->N = n_atoms;
-        return 0;
-    }
-
-    // Zero-initialized per-step slab. b / db (16 x 128 floats per atom) overlay the S0 regions (S111): S0 is dead from
-    // the C0 GEMMs that read it to the dS0 GEMMs that overwrite it, and b / db live only between lin1's forward and
-    // backward GEMMs inside that window. Each S0_l region therefore holds max(K0, 128) floats per row.
-    const size_t K0 = (size_t)S * 64;
-    const size_t K0r = std::max<size_t>(K0, 128);
-    const size_t nN = (size_t)n_atoms;
+    // energy, forces and virial (zeroed per force pass); the model keeps its own buffers
     auto align256 = [](size_t b) { return (b + 255) & ~size_t(255); };
-    size_t off_S0_0 = 0;
-    size_t off_S0_1 = off_S0_0 + align256(nN * 1 * K0r * sizeof(float));
-    size_t off_S0_2 = off_S0_1 + align256(nN * 3 * K0r * sizeof(float));
-    size_t off_S0_3 = off_S0_2 + align256(nN * 5 * K0r * sizeof(float));
-    size_t off_D0   = off_S0_3 + align256(nN * 7 * K0r * sizeof(float));
-    size_t off_dx0  = off_D0   + align256(nN * sizeof(float));
-    size_t off_dx1  = off_dx0  + align256(nN * 128 * sizeof(float));
-    size_t off_en   = off_dx1  + align256(nN * 3 * 128 * sizeof(float));
-    size_t off_f64  = off_en   + align256(sizeof(double));
-    size_t off_v64  = off_f64  + align256(nN * 3 * sizeof(double));
+    const size_t off_f64 = align256(sizeof(double));
+    const size_t off_v64 = off_f64 + align256((size_t)n_atoms * 3 * sizeof(double));
     h->zero_slab_bytes = off_v64 + align256(6 * sizeof(double));
-    h->zero_tail_off = off_dx0;
     CUDA_CHECK(cudaMalloc(&h->d_zero_slab, h->zero_slab_bytes));
     auto* base = static_cast<char*>(h->d_zero_slab);
-    h->d_S0_0 = reinterpret_cast<float*>(base + off_S0_0);
-    h->d_S0_1 = reinterpret_cast<float*>(base + off_S0_1);
-    h->d_S0_2 = reinterpret_cast<float*>(base + off_S0_2);
-    h->d_S0_3 = reinterpret_cast<float*>(base + off_S0_3);
-    h->d_b0 = h->d_S0_0;
-    h->d_b1 = h->d_S0_1;
-    h->d_b2 = h->d_S0_2;
-    h->d_b3 = h->d_S0_3;
-    h->d_D0   = reinterpret_cast<float*>(base + off_D0);
-    h->d_dx0  = reinterpret_cast<float*>(base + off_dx0);
-    h->d_dx1  = reinterpret_cast<float*>(base + off_dx1);
-    h->d_energy_f64 = reinterpret_cast<double*>(base + off_en);
+    h->d_energy_f64 = reinterpret_cast<double*>(base);
     h->d_forces_f64 = reinterpret_cast<double*>(base + off_f64);
     h->d_virial_grad_f64 = reinterpret_cast<double*>(base + off_v64);
-
-    // Non-zero activation buffers
-    auto allocf = [&](float*& p, size_t cnt) { return cudaMalloc(&p, cnt * sizeof(float)); };
-    CUDA_CHECK(allocf(h->d_m0_0, nN * 1 * 128));
-    CUDA_CHECK(allocf(h->d_m0_1, nN * 3 * 128));
-    CUDA_CHECK(allocf(h->d_m0_2, nN * 5 * 128));
-    CUDA_CHECK(allocf(h->d_m0_3, nN * 7 * 128));
-    CUDA_CHECK(allocf(h->d_h0_0, nN * 128));
-    CUDA_CHECK(allocf(h->d_h0_1, nN * 3 * 128));
-    CUDA_CHECK(allocf(h->d_sc_skip16, nN * 16));
-    CUDA_CHECK(allocf(h->d_x0, nN * 128));
-    CUDA_CHECK(allocf(h->d_x1, nN * 3 * 128));
-    // m1 / dm1 run in receiver chunks above 2 x kM1ChunkAtoms atoms (S112; LOUP_M1_CHUNK=<atoms> forces chunks of at
-    // most that size whenever there are more atoms, 0 keeps one chunk): equal chunks rounded up to 20 receivers (whole
-    // blocks of every spline variant) in two alternating buffers. Only with the receiver-owned w': the edge-tiled
-    // kernel indexes dm1 by global receiver.
-    const int chunk_max = h->ovr.m1_chunk >= 0 ? h->ovr.m1_chunk : kM1ChunkAtoms;
-    const int chunk_above = h->ovr.m1_chunk >= 0 ? chunk_max : 2 * chunk_max;
-    h->m1_rows = n_atoms;
-    if (chunk_max > 0 && n_atoms > chunk_above && h->use_wprime_rcv_at(n_atoms)) {
-        const int n_chunks = (n_atoms + chunk_max - 1) / chunk_max;
-        h->m1_rows = std::min(n_atoms, ((n_atoms + n_chunks - 1) / n_chunks + 19) / 20 * 20);
-    }
-    const size_t nM = (size_t)h->m1_rows;
-    const size_t m1_row_floats[4] = {1 * 256, 3 * 384, 5 * 384, 7 * 256};
-    for (int b = 0; b < (h->m1_rows < n_atoms ? 2 : 1); ++b)
-        for (int l = 0; l < 4; ++l) CUDA_CHECK(allocf(h->d_m1[b][l], nM * m1_row_floats[l]));
-    CUDA_CHECK(allocf(h->d_D1, nN));
-    CUDA_CHECK(allocf(h->d_hidden16, nN * 16));
-    CUDA_CHECK(allocf(h->d_dD1, nN));
-    // Alias backward buffers whose forward counterparts are dead before backward writes them (~34 KB/atom saved).
-    h->d_dh0_0 = h->d_h0_0;
-    h->d_dh0_1 = h->d_h0_1;
-    // In place (S110, 16 KB/atom): sc1_fused writes db over its own inputs b and sc0_backward dm0 over m0, each thread
-    // over the 16 values of its channel it has just read; b and m0 are dead after those kernels.
-    h->d_db0 = h->d_b0;
-    h->d_db1 = h->d_b1;
-    h->d_db2 = h->d_b2;
-    h->d_db3 = h->d_b3;
-    h->d_dm0_0 = h->d_m0_0;
-    h->d_dm0_1 = h->d_m0_1;
-    h->d_dm0_2 = h->d_m0_2;
-    h->d_dm0_3 = h->d_m0_3;
-    CUDA_CHECK(allocf(h->d_dD0, nN));
-    h->d_dS0_0 = h->d_S0_0;
-    h->d_dS0_1 = h->d_S0_1;
-    h->d_dS0_2 = h->d_S0_2;
-    h->d_dS0_3 = h->d_S0_3;
-    h->N = n_atoms;  // last: a failure above leaves N = 0
+    h->gen->alloc_system(n_atoms);
+    if (h->E_cap > 0) h->gen->ensure_edges(h->E_cap);
+    h->N = n_atoms;
     return 0;
 }
 
@@ -2289,7 +1694,7 @@ static int upload_positions(LoupHandle* h, const double* positions, const double
     loup::CellMat64 old_cell = h->cell;
     loup::compute_cell_mat(cell, h->cell, h->cell_vol, h->cell_heights);
     const int cell_changed = memcmp(&old_cell, &h->cell, sizeof(old_cell)) != 0 ? 1 : 0;
-    if (h->gen && h->gen->set_cell(cell)) h->invalidate_graphs();
+    if (h->gen->set_cell(cell)) h->invalidate_graphs();
 
     std::vector<double> p_sorted((size_t)h->N * 3);
     for (int dst = 0; dst < h->N; ++dst) {

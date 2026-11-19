@@ -510,7 +510,7 @@ __global__ void max_degree_kernel(int N, const int* __restrict__ deg, int* __res
 // as each edge's index is its fill position -- with a bitonic network over the row padded to a power of two, gathers
 // the sorted edges (each integer image shift turned into its Cartesian offset shift @ cell in float64, so the per-step
 // edge-vector kernel does six float64 additions instead of the full shift-cell product) and flags a row whose sender
-// species decreases (the receiver-owned tabled_outer_sum0_forward_kernel's contract). The network runs in shared
+// species decreases (the contract of layer 0's receiver-owned first_fwd_kernel). The network runs in shared
 // memory sized for the longest row, or (kGlobal, rows too long for it) in `scratch` at 2 x the row start (a row padded
 // to P < 2L entries stays inside its own 2L slots). Unlike cub::DeviceSegmentedSort, which reads its segment partition
 // back to the host, it needs no host round trip.
@@ -629,7 +629,6 @@ __global__ void scatter_active_edges_kernel(
     const float4* __restrict__ tmp_vec_len,
     int* __restrict__ act_senders,
     int* __restrict__ act_receivers,
-    int* __restrict__ act_pairs,
     float4* __restrict__ act_vec_len,
     int* __restrict__ act_slab,
     float2* __restrict__ act_t_sx
@@ -654,13 +653,11 @@ __global__ void scatter_active_edges_kernel(
         if (act) {
             const int dst = out_cursor + __popc(mask & ((1u << lane) - 1u));
             const int snd = senders[e];
-            const int p = sym_pair(species[snd], sp_i, S);
             const int p_slab = table_pair(pair_sym, species[snd], sp_i, S);
             act_senders[dst] = snd;
             act_receivers[dst] = i;
-            act_pairs[dst] = p;
             act_vec_len[dst] = vl;
-            // Fused spline locator (shared by spline_forward_inter1, wprime_backward_inter1, and generic preloc convs)
+            // Fused spline locator (the PRELOC conv kernels' table slab and t)
             int iv;
             float t, sx_inv;
             locate_spline(grid, vl.w, iv, t, sx_inv);

@@ -136,13 +136,12 @@ def _model_digest(model_path: str) -> str:
 
 _DIGESTS: dict = {}
 _PY = Path(__file__).resolve().parent
-# Everything on LoupMD's side that decides a bundle's contents: the exporters, the container writer and the compiled
-# kernels' signature. Their hash is part of the cache key, so a changed exporter or regenerated kernels never find
-# an old bundle, with no version number to remember. (A FastMACE change to the product basis is caught separately:
-# the loader compares the product signatures a bundle carries with the compiled kernels'.)
-EXPORTER_SOURCES = [_PY / name for name in ("export.py", "export_omat0.py", "export_generic.py", "export_polar.py",
-                                            "bundle.py", "gen_product.py")] + [
-    _PY.parent / "src" / "generated_kernels_signature.h"]
+# Everything on LoupMD's side that decides a bundle's contents: the exporters, the product-kernel emitter whose source
+# the bundle carries, and the container writer. Their hash is part of the cache key, so a changed exporter never finds
+# an old bundle, with no version number to remember. (A FastMACE change to the product basis changes the product
+# signatures a bundle carries; the loader then compiles the bundle's product source, JIT_DESIGN.md stage 3.)
+EXPORTER_SOURCES = [_PY / name for name in ("export.py", "export_generic.py", "export_polar.py", "bundle.py",
+                                            "gen_product.py")]
 
 
 def exporter_fingerprint(paths=None) -> str:
@@ -160,8 +159,8 @@ def ensure_loup_bundle(model_path: str, atomic_numbers: list[int], cache_dir: st
     """The cached bundle for (model contents, species, head, path, charge / spin, exporter sources), exporting it on
     a miss.
 
-    The specialised OMAT-0-medium kernels are used when the model has that architecture; ``generic=True`` (or the
-    environment variable LOUP_GENERIC=1) forces the generic path. ``head`` selects a multi-head model's head
+    Every model runs the generic path (the specialised OMAT-0-medium path was retired in JIT_DESIGN.md stage 5);
+    ``generic`` is accepted and ignored. ``head`` selects a multi-head model's head
     (default: omat_pbe if present, else the last head). ``charge`` and ``spin_multiplicity`` (total charge in e and
     2S + 1) apply to models with a total charge / spin embedding (MACE-OMOL-0; default 0 and 1); the export folds
     them into the bundle, so each setting is its own bundle. Other models refuse them."""
@@ -175,11 +174,9 @@ def ensure_loup_bundle(model_path: str, atomic_numbers: list[int], cache_dir: st
     charge = integral("charge", charge)
     spin_multiplicity = integral("spin_multiplicity", spin_multiplicity)
     z_sorted = sorted({int(z) for z in atomic_numbers})
-    if generic is None:
-        generic = os.environ.get("LOUP_GENERIC", "0") == "1"
     cdir = Path(cache_dir or Path.home() / ".cache" / "loupmd")
     cdir.mkdir(parents=True, exist_ok=True)
-    tag = (f"{_model_digest(model_path)}|{z_sorted}|{head}|{int(generic)}|{charge}|{spin_multiplicity}|"
+    tag = (f"{_model_digest(model_path)}|{z_sorted}|{head}|{charge}|{spin_multiplicity}|"
            f"{exporter_fingerprint()}")
     key = hashlib.sha256(tag.encode()).hexdigest()[:16]
     out = cdir / f"{Path(model_path).stem}_{'_'.join(map(str, z_sorted))}_{key}.loup"
@@ -189,8 +186,6 @@ def ensure_loup_bundle(model_path: str, atomic_numbers: list[int], cache_dir: st
                "--elements", ",".join(map(str, z_sorted)), "--output", str(out)]
         if head is not None:
             cmd += ["--head", head]
-        if generic:
-            cmd.append("--generic")
         if charge is not None:
             cmd += ["--charge", str(charge)]
         if spin_multiplicity is not None:

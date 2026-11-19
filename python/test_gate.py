@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Accuracy gate for LoupMD against MACE float64 and float32 references (3x float32 rule).
 
-  python test_gate.py [MODEL] [--head H] [--generic] [--set oxide|organic|crystals] [--ref-device cpu] [--no-ref-cache]
+  python test_gate.py [MODEL] [--head H] [--set oxide|organic|crystals] [--ref-device cpu] [--no-ref-cache]
                       [--include-unstable]
 
 The MACE references are cached (LOUP_GATE_CACHE, default ~/.cache/loupmd/gate_refs; see ref_cache_path for the key);
@@ -9,11 +9,8 @@ The MACE references are cached (LOUP_GATE_CACHE, default ~/.cache/loupmd/gate_re
 
 Structure sets: "oxide" (NaCl, SrTiO3, NbCl5; the default), "organic" (urea, naphthalene, paracetamol, the
 648-atom water box; MACE-OFF's set) and "crystals" (NaCl, NaNbO3, NbCl5 R2SCAN cells; FastMACE's MH-1 / POLAR set).
-For the specialised OMAT-0-medium bundle every structure is evaluated with the default kernel choices; the NbCl5 2x2x2
-cell (576 atoms, above the 512-atom switch to the receiver-owned w' kernel on GPUs other than sm_120) is also evaluated
-with every forced spline variant, both w' block sizes and the Morton atom reorder on and off, and the small cells with
-each w' kernel forced (edge-tiled, receiver-owned at both block sizes), so every kernel path the engine can pick is gated
-(the per-system tuning otherwise only picks one of them per run).
+Models with an lx 1 conv layer at C 128 are also evaluated with each conv forward variant forced
+(GENERIC_VARIANTS), so every variant the per-system tuning can pick is gated.
 """
 from __future__ import annotations
 
@@ -114,20 +111,10 @@ def read_bundle_meta(path):
 DATA_ROOTS = [r for r in (os.environ.get("LOUP_DATA_ROOT"), "/mnt/d/Margraf", "/mnt/homes/zwingel") if r]
 NBCL5_CIFS = [f"{r}/FastMACE/fastmace/protocols/data/NbCl5_R2SCAN.cif" for r in DATA_ROOTS]
 
-# Forced kernel paths (environment read at engine creation, see include/loupmd.h).
-# LOUP_M1_CHUNK forces the S112 receiver chunks of m1 / dm1 (by default above 16,384 atoms) onto these small cells,
-# with a shorter last chunk.
-LARGE_VARIANTS = (
-    [{"LOUP_SPLINE_VARIANT": v} for v in ("R1", "R1p", "R4", "R4p", "R5")]
-    + [{"LOUP_WPRIME_THREADS": "512"}, {"LOUP_REORDER": "1"}, {"LOUP_REORDER": "0"}, {"LOUP_M1_CHUNK": "100"}]
-)
-SMALL_VARIANTS = [{"LOUP_WPRIME_RCV": "0"}, {"LOUP_WPRIME_RCV": "1"}, {"LOUP_WPRIME_RCV": "1", "LOUP_WPRIME_THREADS": "512"},
-                  {"LOUP_WPRIME_RCV": "1", "LOUP_M1_CHUNK": "40"}]
-# Generic models: the conv forward variants of lx 1 layers at C 128 (GenericModel::tune_conv_variants picks one per
+# Forced kernel paths (environment read at engine creation, see include/loupmd.h): the conv forward variants of lx 1 layers at C 128 (GenericModel::tune_conv_variants picks one per
 # system on sm_120; each is gated forced, on every configuration)
 GENERIC_VARIANTS = [{"LOUP_CONV_FWD_VARIANT": v} for v in ("1", "2")]
-VARIANT_KEYS = ("LOUP_SPLINE_VARIANT", "LOUP_WPRIME_THREADS", "LOUP_WPRIME_RCV", "LOUP_REORDER", "LOUP_CONV_FWD_VARIANT",
-                "LOUP_M1_CHUNK")
+VARIANT_KEYS = ("LOUP_CONV_FWD_VARIANT",)
 
 
 def has_conv_variants(meta) -> bool:
@@ -254,7 +241,7 @@ def main():
         if os.path.exists("/home/fzwin/models/mace-omat-0-medium.model")
         else "/mnt/homes/zwingel/ResearchModule/Models/mace-omat-0-medium.model"))
     ap.add_argument("--head", default=None)
-    ap.add_argument("--generic", action="store_true")
+    ap.add_argument("--generic", action="store_true", help=argparse.SUPPRESS)  # accepted; every model is generic
     ap.add_argument("--set", default="oxide", choices=("oxide", "organic", "crystals"))
     ap.add_argument("--ref-device", default="cuda", help="device of the MACE references (cpu for models whose "
                     "float64 reference does not fit the GPU)")
@@ -305,12 +292,10 @@ def main():
         print(f"MACE references saved to {cache}")
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
-    specialised = {}
     conv_variants = {}
 
     engines = {}
     all_pass = True
-    reorder_results = {}
 
     def run(name, at, refs, variant):
         nonlocal all_pass
@@ -321,10 +306,9 @@ def main():
             for k in VARIANT_KEYS:
                 os.environ.pop(k, None)
             os.environ.update(variant)
-            bundle = ensure_loup_bundle(model_path, list(zs), head=head, generic=args.generic or None,
-                                        charge=args.charge, spin_multiplicity=args.spin_multiplicity)
+            bundle = ensure_loup_bundle(model_path, list(zs), head=head, charge=args.charge,
+                                        spin_multiplicity=args.spin_multiplicity)
             meta = read_bundle_meta(bundle)
-            specialised[key] = meta.get("arch") != "generic"
             conv_variants[key] = has_conv_variants(meta)
             engines[key] = LoupEngine(bundle, device_id=0)
             for k in VARIANT_KEYS:
@@ -332,8 +316,6 @@ def main():
         eng = engines[key]
         eng.set_system(at.get_atomic_numbers(), at.get_masses(), skin=0.5)
         e_l, f_l, s_l = eng.evaluate(at.positions, at.cell.array, compute_stress=True)
-        if "LOUP_REORDER" in variant:
-            reorder_results.setdefault(name, []).append((e_l, f_l, s_l))
 
         nat = len(at)
         de_l = abs(e_l - e64) * 1000.0 / nat
@@ -358,23 +340,9 @@ def main():
     for (name, at), r64, r32, sr in zip(configs, ref64, ref32, stress_ref):
         run(name, at, (r64, r32, sr), {})
         zs = tuple(sorted(set(at.get_atomic_numbers().tolist())))
-        if specialised.get((zs, ())):  # the forced-variant matrix exists only for the specialised kernels
-            for variant in (LARGE_VARIANTS if len(at) >= 512 else SMALL_VARIANTS):
-                run(name, at, (r64, r32, sr), variant)
-        elif conv_variants.get((zs, ())):
+        if conv_variants.get((zs, ())):
             for variant in GENERIC_VARIANTS:
                 run(name, at, (r64, r32, sr), variant)
-
-    # The reorder only permutes atoms inside species groups: results must agree to float32 summation-order noise.
-    for name, res in reorder_results.items():
-        (e_on, f_on, s_on), (e_off, f_off, s_off) = res
-        nat = len(f_on)
-        de = abs(e_on - e_off) * 1000.0 / nat
-        df = float(np.abs(f_on - f_off).max())
-        ds = float(np.abs(s_on - s_off).max())
-        ok = de < 1e-3 and df < 1e-4 and ds < 1e-6
-        all_pass = all_pass and ok
-        print(f"{name}: reorder on vs off dE/atom {de:.2e} meV, dF {df:.2e} eV/A, dS {ds:.2e} eV/A3 -> {'PASS' if ok else 'FAIL'}")
     sys.exit(0 if all_pass else 1)
 
 
