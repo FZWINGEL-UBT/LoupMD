@@ -619,9 +619,10 @@ __global__ void __launch_bounds__(256) first_bwd_kernel(
 // Edge-parallel layer-0 backward + ZBL + force/virial assembly (tabled_outer_sum0_backward_kernel design):
 // 4 warps x 32 edges/warp, COLS columns/lane (2 for Jp <= 64, 3 for Jp <= 96); caches dS0 across consecutive
 // active edges with the same (rcv, snd_sp), folds SH gradients in s_edge[4][32][20], then all 32 lanes assemble
-// forces, ZBL and virial in parallel. Latency-bound (serial shuffle folds): on sm_120, COLS = 2 is capped at 80
-// registers (6 blocks / SM, no spills; 92-96 registers uncapped). COLS = 3 would spill under the cap, and other
-// architectures (not measured) keep the uncapped kernel.
+// forces, ZBL and virial in parallel. Bound by its load/store pipe (ncu, OMAT-0 generic SrTiO3: LSU 71% of peak, two
+// thirds of it shuffles; FMA pipe 30%), hence S140's broadcast reads from shared memory and the radial pull riding in
+// the fold. On sm_120, COLS = 2 is capped at 80 registers (6 blocks / SM, no spills; 92-96 registers uncapped).
+// COLS = 3 would spill under the cap, and other architectures (not measured) keep the uncapped kernel.
 #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ == 1200
 #define LOUP_FIRST_BWD_EDGE_MINB2 6
 #else
@@ -642,6 +643,10 @@ __global__ void __launch_bounds__(128, COLS == 2 ? LOUP_FIRST_BWD_EDGE_MINB2 : 0
     const int Jp = J - 1, Jh = (Jp + 1) >> 1;
 
     __shared__ __align__(16) float s_edge[4][CHUNK][20];
+    // S140: each staged edge's receiver, sender species, slab (pr * I + iv) and t, read by the whole warp in the edge
+    // loop as two broadcast shared loads instead of six shuffles
+    __shared__ __align__(16) int4 s_meta[4][CHUNK];
+    __shared__ float s_sxi[4][CHUNK];
     double v00 = 0.0, v01 = 0.0, v02 = 0.0, v11 = 0.0, v12 = 0.0, v22 = 0.0;
     double e_zbl_thread = 0.0;
 
@@ -661,6 +666,8 @@ __global__ void __launch_bounds__(128, COLS == 2 ? LOUP_FIRST_BWD_EDGE_MINB2 : 0
             m_sp = species[m_snd];
             m_rcv_sp = species[m_rcv];
             m_pr = loup::table_pair(pair_sym, m_sp, m_rcv_sp, S);
+            s_meta[warp][lane] = make_int4(m_rcv, m_sp, m_pr * I + m_iv, __float_as_int(m_t));
+            s_sxi[warp][lane] = m_sxi;
         }
         __syncwarp();
 
@@ -673,8 +680,8 @@ __global__ void __launch_bounds__(128, COLS == 2 ? LOUP_FIRST_BWD_EDGE_MINB2 : 0
         int cur_rcv = -1, cur_snd_sp = -1;
 
         for (int k = 0; k < cnt; ++k) {
-            const int rcv = __shfl_sync(0xffffffffu, m_rcv, k);
-            const int snd_sp = __shfl_sync(0xffffffffu, m_sp, k);
+            const int4 mk = s_meta[warp][k];
+            const int rcv = mk.x, snd_sp = mk.y;
             if (rcv != cur_rcv || snd_sp != cur_snd_sp) {
                 cur_rcv = rcv;
                 cur_snd_sp = snd_sp;
@@ -717,11 +724,9 @@ __global__ void __launch_bounds__(128, COLS == 2 ? LOUP_FIRST_BWD_EDGE_MINB2 : 0
                 if (dD) dD_r = __ldg(dD + rcv);
             }
 
-            const int iv = __shfl_sync(0xffffffffu, m_iv, k);
-            const int pr = __shfl_sync(0xffffffffu, m_pr, k);
-            const float t = __shfl_sync(0xffffffffu, m_t, k);
-            const float sxi = __shfl_sync(0xffffffffu, m_sxi, k);
-            const float4* tb = table + ((int64_t)pr * I + iv) * Jt;
+            const float t = __int_as_float(mk.w);
+            const float sxi = s_sxi[warp][k];
+            const float4* tb = table + (int64_t)mk.z * Jt;
             float pa[COLS], pd[COLS];
             #pragma unroll
             for (int c = 0; c < COLS; ++c) {
@@ -755,8 +760,14 @@ __global__ void __launch_bounds__(128, COLS == 2 ? LOUP_FIRST_BWD_EDGE_MINB2 : 0
                 }
                 gy[d] = gsum;
             }
+            // S140: slot 0 of the fold (the gradient of the constant Y0, never read) carries the radial pull, so the fold
+            // also reduces it (lane 0 ends with its sum) and its separate five-shuffle butterfly is gone
+            float dr_p = 0.0f;
+            #pragma unroll
+            for (int c = 0; c < COLS; ++c) dr_p = fmaf(grad_a[c], pd[c], dr_p);
+            gy[0] = dr_p;
 
-            // 16-shuffle fold of gy[0..15] across 32 lanes -> lane 1..15 holds dsh[lane]
+            // 16-shuffle fold of gy[0..15] across 32 lanes -> lane 1..15 holds dsh[lane], lane 0 the radial pull
             float g8[8];
             const bool odd = (lane & 1) != 0;
             #pragma unroll
@@ -776,13 +787,8 @@ __global__ void __launch_bounds__(128, COLS == 2 ? LOUP_FIRST_BWD_EDGE_MINB2 : 0
             float g1 = (h8 ? g2[1] : g2[0]) + __shfl_xor_sync(0xffffffffu, h8 ? g2[0] : g2[1], 8);
             g1 += __shfl_xor_sync(0xffffffffu, g1, 16);
             if (lane >= 1 && lane < 16) s_edge[warp][k][lane] = g1;
-
-            float dr_v = 0.0f;
-            #pragma unroll
-            for (int c = 0; c < COLS; ++c) dr_v = fmaf(grad_a[c], pd[c], dr_v);
-            #pragma unroll
-            for (int off = 16; off > 0; off >>= 1) dr_v += __shfl_xor_sync(0xffffffffu, dr_v, off);
             if (lane == 0) {
+                float dr_v = g1;
                 if (dD && dD_r != 0.0f) {
                     const float4 cd = __ldg(tb + Jp);
                     const float dvd = fmaf(t, fmaf(t, 3.0f * cd.w, 2.0f * cd.z), cd.y) * sxi;
