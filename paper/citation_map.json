@@ -1,0 +1,1810 @@
+{
+  "batatia2022mace": {
+    "title": "MACE: Higher Order Equivariant Message Passing Neural Networks for Fast and Accurate Force Fields",
+    "authors": [
+      "Ilyes Batatia",
+      "Dávid Péter Kovács",
+      "Gregor N. C. Simm",
+      "Christoph Ortner",
+      "Gábor Csányi"
+    ],
+    "year": "2022",
+    "doi": null,
+    "url": "https://arxiv.org/abs/2206.07697",
+    "draft_sections": [
+      "Methods — From a checkpoint to energy, forces and stress",
+      "Related Work — Native MACE inference"
+    ],
+    "draft_occurrences": [
+      {
+        "file": "methods.tex",
+        "line": 5,
+        "section": "Methods — From a checkpoint to energy, forces and stress"
+      },
+      {
+        "file": "related-work.tex",
+        "line": 5,
+        "section": "Related Work — Native MACE inference"
+      }
+    ]
+  },
+  "drautz2019ace": {
+    "title": "Atomic cluster expansion for accurate and transferable interatomic potentials",
+    "authors": [
+      "Ralf Drautz"
+    ],
+    "year": "2019",
+    "doi": "10.1103/PhysRevB.99.014104",
+    "url": null,
+    "draft_sections": [
+      "Methods — From a checkpoint to energy, forces and stress"
+    ],
+    "draft_occurrences": [
+      {
+        "file": "methods.tex",
+        "line": 5,
+        "section": "Methods — From a checkpoint to energy, forces and stress"
+      }
+    ]
+  },
+  "barrosoluque2024omat": {
+    "title": "Open Materials 2024 (OMat24) Inorganic Materials Dataset and Models",
+    "authors": [
+      "Luis Barroso-Luque",
+      "Muhammed Shuaibi",
+      "Xiang Fu",
+      "Brandon M. Wood",
+      "Misko Dzamba",
+      "Meng Gao",
+      "Ammar Rizvi",
+      "C. Lawrence Zitnick",
+      "Zachary W. Ulissi"
+    ],
+    "year": "2024",
+    "doi": null,
+    "url": "https://arxiv.org/abs/2410.12771",
+    "draft_sections": [
+      "Methods — From a checkpoint to energy, forces and stress"
+    ],
+    "draft_occurrences": [
+      {
+        "file": "methods.tex",
+        "line": 9,
+        "section": "Methods — From a checkpoint to energy, forces and stress"
+      }
+    ]
+  },
+  "kaplan2025matpes": {
+    "title": "A Foundational Potential Energy Surface Dataset for Materials",
+    "authors": [
+      "Aaron D. Kaplan",
+      "Runze Liu",
+      "Ji Qi",
+      "Tsz Wai Ko",
+      "Bowen Deng",
+      "Janosh Riebesell",
+      "Gerbrand Ceder",
+      "Kristin A. Persson",
+      "Shyue Ping Ong"
+    ],
+    "year": "2025",
+    "doi": "10.48550/arXiv.2503.04070",
+    "url": "https://arxiv.org/abs/2503.04070",
+    "draft_sections": [
+      "Methods — From a checkpoint to energy, forces and stress"
+    ],
+    "draft_occurrences": [
+      {
+        "file": "methods.tex",
+        "line": 9,
+        "section": "Methods — From a checkpoint to energy, forces and stress"
+      }
+    ]
+  },
+  "levine2025omol": {
+    "title": "The Open Molecules 2025 (OMol25) Dataset, Evaluations, and Models",
+    "authors": [
+      "Daniel S. Levine",
+      "Muhammed Shuaibi",
+      "Evan Walter Clark Spotte-Smith",
+      "Michael G. Taylor",
+      "Muhammad R. Hasyim",
+      "Kyle Michel",
+      "Ilyes Batatia",
+      "Gábor Csányi",
+      "Misko Dzamba",
+      "Peter Eastman",
+      "Nathan C. Frey",
+      "Xiang Fu",
+      "Vahe Gharakhanyan",
+      "Aditi S. Krishnapriyan",
+      "Joshua A. Rackers",
+      "Sanjeev Raja",
+      "Ammar Rizvi",
+      "Andrew S. Rosen",
+      "Zachary Ulissi",
+      "Santiago Vargas",
+      "C. Lawrence Zitnick",
+      "Samuel M. Blau",
+      "Brandon M. Wood"
+    ],
+    "year": "2025",
+    "doi": "10.48550/arXiv.2505.08762",
+    "url": "https://arxiv.org/abs/2505.08762",
+    "draft_sections": [
+      "Methods — From a checkpoint to energy, forces and stress"
+    ],
+    "draft_occurrences": [
+      {
+        "file": "methods.tex",
+        "line": 9,
+        "section": "Methods — From a checkpoint to energy, forces and stress"
+      }
+    ]
+  },
+  "batatia2025mh1": {
+    "title": "Cross Learning between Electronic Structure Theories for Unifying Molecular, Surface, and Inorganic Crystal Foundation Force Fields",
+    "authors": [
+      "Ilyes Batatia",
+      "Chen Lin",
+      "Joseph Hart",
+      "Elliott Kasoar",
+      "Alin M. Elena",
+      "Sam Walton Norwood",
+      "Thomas Wolf",
+      "Gábor Csányi"
+    ],
+    "year": "2025",
+    "doi": null,
+    "url": "https://arxiv.org/abs/2510.25380",
+    "draft_sections": [
+      "Methods — From a checkpoint to energy, forces and stress"
+    ],
+    "draft_occurrences": [
+      {
+        "file": "methods.tex",
+        "line": 9,
+        "section": "Methods — From a checkpoint to energy, forces and stress"
+      }
+    ]
+  },
+  "batatia2026polar": {
+    "title": "MACE-POLAR-1: A Polarisable Electrostatic Foundation Model for Molecular Chemistry",
+    "authors": [
+      "Ilyes Batatia",
+      "William J. Baldwin",
+      "Domantas Kuryla",
+      "Joseph Hart",
+      "Elliott Kasoar",
+      "Alin M. Elena",
+      "Harry Moore",
+      "Mikołaj J. Gawkowski",
+      "Benjamin X. Shi",
+      "Venkat Kapil",
+      "Panagiotis Kourtis",
+      "Ioan-Bogdan Magdău",
+      "Gábor Csányi"
+    ],
+    "year": "2026",
+    "doi": null,
+    "url": "https://arxiv.org/abs/2602.19411",
+    "draft_sections": [
+      "Methods — From a checkpoint to energy, forces and stress",
+      "Methods — Reciprocal-space terms"
+    ],
+    "draft_occurrences": [
+      {
+        "file": "methods.tex",
+        "line": 9,
+        "section": "Methods — From a checkpoint to energy, forces and stress"
+      },
+      {
+        "file": "methods.tex",
+        "line": 40,
+        "section": "Methods — Reciprocal-space terms"
+      }
+    ]
+  },
+  "geiger2022e3nn": {
+    "title": "e3nn: Euclidean Neural Networks",
+    "authors": [
+      "Mario Geiger",
+      "Tess Smidt"
+    ],
+    "year": "2022",
+    "doi": null,
+    "url": "https://arxiv.org/abs/2207.09453",
+    "draft_sections": [
+      "Methods — Neighbour sums and symmetric products"
+    ],
+    "draft_occurrences": [
+      {
+        "file": "methods.tex",
+        "line": 16,
+        "section": "Methods — Neighbour sums and symmetric products"
+      }
+    ]
+  },
+  "bharadwaj2025oeq": {
+    "title": "An Efficient Sparse Kernel Generator for O(3)-Equivariant Deep Networks",
+    "authors": [
+      "Vivek Bharadwaj",
+      "Austin Glover",
+      "Aydin Buluc",
+      "James Demmel"
+    ],
+    "year": "2025",
+    "doi": null,
+    "url": "https://arxiv.org/abs/2501.13986",
+    "draft_sections": [
+      "Methods — Neighbour sums and symmetric products",
+      "Related Work — Operator and model design"
+    ],
+    "draft_occurrences": [
+      {
+        "file": "methods.tex",
+        "line": 16,
+        "section": "Methods — Neighbour sums and symmetric products"
+      },
+      {
+        "file": "related-work.tex",
+        "line": 10,
+        "section": "Related Work — Operator and model design"
+      }
+    ]
+  },
+  "fu2026symmetrixxl": {
+    "title": "Train for Accuracy, Execute at Scale: Architecture-Preserving Inference for Equivariant Atomistic Foundation Models",
+    "authors": [
+      "Lei Fu",
+      "Zihui Feng",
+      "Yongheng Li",
+      "Hongwei Du",
+      "Xin He",
+      "Junyi Wu",
+      "Kejie Bao",
+      "Yueyu Zhang",
+      "Zeyu Deng",
+      "Ziheng Lu",
+      "Bonan Zhu"
+    ],
+    "year": "2026",
+    "doi": null,
+    "url": "https://arxiv.org/abs/2610.01036",
+    "draft_sections": [
+      "Methods — Neighbour sums and symmetric products",
+      "Methods — Tiling the forward and reverse passes",
+      "Related Work — Native MACE inference"
+    ],
+    "draft_occurrences": [
+      {
+        "file": "methods.tex",
+        "line": 14,
+        "section": "Methods — Neighbour sums and symmetric products",
+        "printed_locator": "App. B"
+      },
+      {
+        "file": "methods.tex",
+        "line": 16,
+        "section": "Methods — Neighbour sums and symmetric products",
+        "printed_locator": "§ 4"
+      },
+      {
+        "file": "methods.tex",
+        "line": 18,
+        "section": "Methods — Neighbour sums and symmetric products",
+        "printed_locator": "§ 3"
+      },
+      {
+        "file": "methods.tex",
+        "line": 26,
+        "section": "Methods — Tiling the forward and reverse passes",
+        "printed_locator": "§ 5"
+      },
+      {
+        "file": "related-work.tex",
+        "line": 7,
+        "section": "Related Work — Native MACE inference",
+        "printed_locator": "§§ 3–4"
+      },
+      {
+        "file": "related-work.tex",
+        "line": 7,
+        "section": "Related Work — Native MACE inference"
+      },
+      {
+        "file": "related-work.tex",
+        "line": 7,
+        "section": "Related Work — Native MACE inference",
+        "printed_locator": "§ 6"
+      }
+    ],
+    "primary_source_locators": [
+      {
+        "locator": "§3",
+        "use": "Streamed MACE execution and regeneration of local terms in the reverse pass.",
+        "url": "https://arxiv.org/html/2610.01036v1#S3"
+      },
+      {
+        "locator": "§4",
+        "use": "Architecture-specialised operator generation.",
+        "url": "https://arxiv.org/html/2610.01036v1#S4"
+      },
+      {
+        "locator": "§5",
+        "use": "Tiled forward and reverse MACE sweeps and inter-layer state.",
+        "url": "https://arxiv.org/html/2610.01036v1#S5"
+      },
+      {
+        "locator": "§6",
+        "use": "Fixed-coordinate matched LAMMPS timing and observed zero rebuilds.",
+        "url": "https://arxiv.org/html/2610.01036v1#S6"
+      },
+      {
+        "locator": "Appendix B",
+        "use": "Cubic Hermite radial table and derivative from the same polynomial.",
+        "url": "https://arxiv.org/html/2610.01036v1#A2"
+      }
+    ]
+  },
+  "fuchs2026uvupr": {
+    "title": "Add receiver-streaming UVU convolution kernel",
+    "authors": [
+      "Paul Fuchs"
+    ],
+    "year": "2026",
+    "doi": null,
+    "url": "https://github.com/PASSIONLab/OpenEquivariance/pull/223",
+    "draft_sections": [
+      "Methods — Neighbour sums and symmetric products"
+    ],
+    "draft_occurrences": [
+      {
+        "file": "methods.tex",
+        "line": 18,
+        "section": "Methods — Neighbour sums and symmetric products"
+      }
+    ]
+  },
+  "lu2022dpcompress": {
+    "title": "DP Compress: A Model Compression Scheme for Generating Efficient Deep Potential Models",
+    "authors": [
+      "Denghui Lu",
+      "Wanrun Jiang",
+      "Yixiao Chen",
+      "Linfeng Zhang",
+      "Weile Jia",
+      "Han Wang",
+      "Mohan Chen"
+    ],
+    "year": "2022",
+    "doi": "10.1021/acs.jctc.2c00102",
+    "url": "https://arxiv.org/abs/2107.02103",
+    "draft_sections": [
+      "Methods — Neighbour sums and symmetric products",
+      "Related Work — Operator and model design"
+    ],
+    "draft_occurrences": [
+      {
+        "file": "methods.tex",
+        "line": 14,
+        "section": "Methods — Neighbour sums and symmetric products"
+      },
+      {
+        "file": "related-work.tex",
+        "line": 10,
+        "section": "Related Work — Operator and model design"
+      }
+    ]
+  },
+  "li2026dpa4c": {
+    "title": "Universal Machine-learning Molecular Dynamics at the Speed of Empirical Potentials",
+    "authors": [
+      "Tiancheng Li",
+      "Jianming Xue",
+      "Linfeng Zhang",
+      "Duo Zhang",
+      "Han Wang"
+    ],
+    "year": "2026",
+    "doi": "10.48550/arXiv.2608.19041",
+    "url": "https://arxiv.org/abs/2608.19041",
+    "draft_sections": [
+      "Methods — Neighbour sums and symmetric products",
+      "Related Work — Operator and model design"
+    ],
+    "draft_occurrences": [
+      {
+        "file": "methods.tex",
+        "line": 14,
+        "section": "Methods — Neighbour sums and symmetric products",
+        "printed_locator": "§ 4.4, Supplement S2.2"
+      },
+      {
+        "file": "methods.tex",
+        "line": 18,
+        "section": "Methods — Neighbour sums and symmetric products",
+        "printed_locator": "§ 4.4"
+      },
+      {
+        "file": "related-work.tex",
+        "line": 10,
+        "section": "Related Work — Operator and model design",
+        "printed_locator": "§ 4.4"
+      },
+      {
+        "file": "related-work.tex",
+        "line": 10,
+        "section": "Related Work — Operator and model design",
+        "printed_locator": "Table 1, note b"
+      }
+    ],
+    "primary_source_locators": [
+      {
+        "locator": "§4.4 and Supplement S2.2",
+        "use": "Quintic Hermite radial maps, fused evaluation, reverse recomputation and node tiling in a single message-passing layer.",
+        "url": "https://arxiv.org/html/2608.19041#S4.SS4"
+      },
+      {
+        "locator": "Table 1, footnote b",
+        "use": "H20 timings of complete LAMMPS/Kokkos steps for DPA4C and ASE energy, force and stress evaluations for MACE.",
+        "url": "https://arxiv.org/pdf/2608.19041#page=6"
+      }
+    ]
+  },
+  "liu2026foundation": {
+    "title": "Foundation-Model Supervision of Distilled Potentials for Million-Atom Molecular Dynamics",
+    "authors": [
+      "Xiaoqing Liu",
+      "Yangshuai Wang",
+      "Lei Shen"
+    ],
+    "year": "2026",
+    "doi": "10.48550/arXiv.2610.23371",
+    "url": "https://arxiv.org/abs/2610.23371",
+    "draft_sections": [
+      "Methods — Neighbour sums and symmetric products",
+      "Methods — Linear maps and arithmetic",
+      "Methods — Tiling the forward and reverse passes",
+      "Methods — Neighbour lists and molecular dynamics",
+      "Related Work — Native MACE inference"
+    ],
+    "claims": [
+      {
+        "section": "Methods — tiled execution",
+        "locator": "§2.1, Fig. 1b, Algorithm 1, and §3.6 for the comparison with Symmetrix-XL",
+        "use": "Cite together with Symmetrix-XL §5 at the description of receiver chunks and three sweeps for two-layer MACE: first-layer forward, second-layer forward and backward, then first-layer replay and backward.",
+        "loupmd": [
+          "docs/guide/large-cells.md",
+          "src/tile_plan.cu"
+        ],
+        "scope": "Liu et al. retain first-layer features and their adjoints across the graph and use chunk-local automatic differentiation. Cite LoupMD's own schedule for the moving row pool, which reduces the live range of those arrays. The authors' student supervision workflow and H200 capacity figures apply to their own evaluator and protocol."
+      },
+      {
+        "section": "Methods — radial tables",
+        "locator": "§3.6, four exact optimizations",
+        "use": "Cite for precomputing MACE radial weights on a cubic Hermite grid. Their 512-knot table is evaluated by a Triton kernel.",
+        "loupmd": [
+          "loupmd/export/generic.py"
+        ],
+        "scope": "LoupMD's packed coefficient format, adaptive spacing and radial-slope validation are implementation details to describe explicitly."
+      },
+      {
+        "section": "Methods — species-only terms",
+        "locator": "§3.6, four exact optimizations",
+        "use": "Cite for replacing a dense species one-hot self-connection product with a species-block gather.",
+        "loupmd": [
+          "src/generic.cu"
+        ],
+        "scope": "LoupMD precomputes layer-0 terms that depend only on the species embedding, including residual and skip contributions on eligible paths. Describe the extra compositions separately."
+      },
+      {
+        "section": "Methods — GPU graph execution",
+        "locator": "§2.1 and §3.6",
+        "use": "Cite for capturing fixed-shape, receiver-chunked MACE passes in CUDA Graphs.",
+        "loupmd": [
+          "src/engine.cu"
+        ],
+        "scope": "Their graph capture covers chunk passes. LoupMD's fixed-cell MD graph also controls the neighbour-list rebuild branch."
+      }
+    ],
+    "draft_occurrences": [
+      {
+        "file": "methods.tex",
+        "line": 14,
+        "section": "Methods — Neighbour sums and symmetric products",
+        "printed_locator": "§ 3.6"
+      },
+      {
+        "file": "methods.tex",
+        "line": 21,
+        "section": "Methods — Linear maps and arithmetic",
+        "printed_locator": "§ 3.6"
+      },
+      {
+        "file": "methods.tex",
+        "line": 26,
+        "section": "Methods — Tiling the forward and reverse passes",
+        "printed_locator": "§ 2.1"
+      },
+      {
+        "file": "methods.tex",
+        "line": 33,
+        "section": "Methods — Neighbour lists and molecular dynamics",
+        "printed_locator": "§ 3.6"
+      },
+      {
+        "file": "related-work.tex",
+        "line": 7,
+        "section": "Related Work — Native MACE inference"
+      },
+      {
+        "file": "related-work.tex",
+        "line": 7,
+        "section": "Related Work — Native MACE inference",
+        "printed_locator": "§§ 2.1–2.3 and 3.6"
+      }
+    ],
+    "primary_source_locators": [
+      {
+        "locator": "§2.1, Fig. 1",
+        "use": "Receiver-chunked two-layer MACE and its three dependency-ordered passes.",
+        "url": "https://arxiv.org/html/2610.23371#S2.SS1"
+      },
+      {
+        "locator": "§3.6",
+        "use": "Species-block gather, cubic radial tables and fixed-shape chunk graphs.",
+        "url": "https://arxiv.org/html/2610.23371#S3.SS6"
+      }
+    ]
+  },
+  "trefethen2013approx": {
+    "title": "Approximation Theory and Approximation Practice",
+    "authors": [
+      "Lloyd N. Trefethen"
+    ],
+    "year": "2013",
+    "doi": null,
+    "url": "https://doi.org/10.1137/1.9781611972405",
+    "draft_sections": [
+      "Methods — Neighbour sums and symmetric products"
+    ],
+    "draft_occurrences": [
+      {
+        "file": "methods.tex",
+        "line": 18,
+        "section": "Methods — Neighbour sums and symmetric products"
+      }
+    ]
+  },
+  "lee2025flashtp": {
+    "title": "FlashTP: Fused, Sparsity-Aware Tensor Product for Machine Learning Interatomic Potentials",
+    "authors": [
+      "Seung Yul Lee",
+      "Hojoon Kim",
+      "Yutack Park",
+      "Dawoon Jeong",
+      "Seungwu Han",
+      "Yeonhong Park",
+      "Jae W. Lee"
+    ],
+    "year": "2025",
+    "doi": null,
+    "url": "https://proceedings.mlr.press/v267/lee25l.html",
+    "draft_sections": [
+      "Methods — Neighbour sums and symmetric products",
+      "Related Work — Operator and model design"
+    ],
+    "draft_occurrences": [
+      {
+        "file": "methods.tex",
+        "line": 18,
+        "section": "Methods — Neighbour sums and symmetric products",
+        "printed_locator": "§§ 4.2–4.4"
+      },
+      {
+        "file": "related-work.tex",
+        "line": 10,
+        "section": "Related Work — Operator and model design"
+      }
+    ],
+    "primary_source_locators": [
+      {
+        "locator": "§§4.2–4.4",
+        "use": "Fusion with reductions, sparse tensor products and aggregation of paths sharing an input.",
+        "url": "https://openreview.net/pdf?id=wiQe95BPaB"
+      }
+    ]
+  },
+  "chorosajev2026sobek": {
+    "title": "Sobek: Streaming Equivariant Tensor Product Convolutions",
+    "authors": [
+      "Vladimir Chorošajev",
+      "Cédric Bény"
+    ],
+    "year": "2026",
+    "doi": null,
+    "url": "https://arxiv.org/abs/2607.18074",
+    "draft_sections": [
+      "Methods — Neighbour sums and symmetric products",
+      "Related Work — Operator and model design"
+    ],
+    "draft_occurrences": [
+      {
+        "file": "methods.tex",
+        "line": 18,
+        "section": "Methods — Neighbour sums and symmetric products"
+      },
+      {
+        "file": "related-work.tex",
+        "line": 10,
+        "section": "Related Work — Operator and model design"
+      }
+    ]
+  },
+  "thakkar2023cutlass": {
+    "title": "CUTLASS",
+    "authors": [
+      "Vijay Thakkar",
+      "Pradeep Ramani",
+      "Cris Cecka",
+      "Aniket Shivam",
+      "Honghao Lu",
+      "Ethan Yan",
+      "Jack Kosaian",
+      "Mark Hoemmen",
+      "Haicheng Wu",
+      "Andrew Kerr",
+      "Matt Nicely",
+      "Duane Merrill",
+      "Dustyn Blasig",
+      "Aditya Atluri",
+      "Fengqi Qiao",
+      "Piotr Majcher",
+      "Paul Springer",
+      "Markus Hohnerbach",
+      "Jin Wang",
+      "Manish Gupta"
+    ],
+    "year": "2026",
+    "doi": null,
+    "url": "https://github.com/NVIDIA/cutlass/releases/tag/v4.8.1",
+    "draft_sections": [
+      "Methods — Linear maps and arithmetic"
+    ],
+    "draft_occurrences": [
+      {
+        "file": "methods.tex",
+        "line": 23,
+        "section": "Methods — Linear maps and arithmetic"
+      }
+    ],
+    "primary_source_locators": [
+      {
+        "locator": "Version 4.8.1, 21 October 2026",
+        "use": "Software release used by the tensor-core kernels. Creator names are listed in the project citation file. The general citation metadata dated 2023 describes v3.0.0.",
+        "url": "https://github.com/NVIDIA/cutlass/releases/tag/v4.8.1"
+      }
+    ]
+  },
+  "ootomo2022recovery": {
+    "title": "Recovering single precision accuracy from Tensor Cores while surpassing the FP32 theoretical peak performance",
+    "authors": [
+      "Hiroyuki Ootomo",
+      "Rio Yokota"
+    ],
+    "year": "2022",
+    "doi": "10.1177/10943420221090256",
+    "url": "https://arxiv.org/abs/2203.03341",
+    "draft_sections": [
+      "Methods — Linear maps and arithmetic"
+    ],
+    "draft_occurrences": [
+      {
+        "file": "methods.tex",
+        "line": 23,
+        "section": "Methods — Linear maps and arithmetic"
+      }
+    ]
+  },
+  "fasi2021tensorcores": {
+    "title": "Numerical behavior of NVIDIA tensor cores",
+    "authors": [
+      "Massimiliano Fasi",
+      "Nicholas J. Higham",
+      "Mantas Mikaitis",
+      "Srikara Pranesh"
+    ],
+    "year": "2021",
+    "doi": "10.7717/peerj-cs.330",
+    "url": null,
+    "draft_sections": [
+      "Methods — Linear maps and arithmetic"
+    ],
+    "draft_occurrences": [
+      {
+        "file": "methods.tex",
+        "line": 23,
+        "section": "Methods — Linear maps and arithmetic"
+      }
+    ]
+  },
+  "verlet1967fluids": {
+    "title": "Computer “Experiments” on Classical Fluids. I. Thermodynamical Properties of Lennard-Jones Molecules",
+    "authors": [
+      "Loup Verlet"
+    ],
+    "year": "1967",
+    "doi": "10.1103/PhysRev.159.98",
+    "url": null,
+    "draft_sections": [
+      "Methods — Neighbour lists and molecular dynamics"
+    ],
+    "draft_occurrences": [
+      {
+        "file": "methods.tex",
+        "line": 31,
+        "section": "Methods — Neighbour lists and molecular dynamics"
+      }
+    ]
+  },
+  "anderson2008gpumd": {
+    "title": "General purpose molecular dynamics simulations fully implemented on graphics processing units",
+    "authors": [
+      "Joshua A. Anderson",
+      "Chris D. Lorenz",
+      "Alex Travesset"
+    ],
+    "year": "2008",
+    "doi": "10.1016/j.jcp.2008.01.047",
+    "url": null,
+    "draft_sections": [
+      "Methods — Neighbour lists and molecular dynamics",
+      "Related Work — Simulation engines"
+    ],
+    "claims": [
+      {
+        "section": "Methods or Related Work — GPU neighbour lists",
+        "locator": "Neighbour-list construction, p. 5348",
+        "use": "Cite as classical MD precedent for building cell-based neighbour lists and running MD on one GPU.",
+        "loupmd": [
+          "src/neighbors.cu"
+        ],
+        "scope": "Use the LoupMD source for count/scan/fill into receiver CSR and the lane-group partitioning of cell-bin visits."
+      }
+    ],
+    "draft_occurrences": [
+      {
+        "file": "methods.tex",
+        "line": 31,
+        "section": "Methods — Neighbour lists and molecular dynamics"
+      },
+      {
+        "file": "related-work.tex",
+        "line": 13,
+        "section": "Related Work — Simulation engines"
+      }
+    ]
+  },
+  "pall2020gromacs": {
+    "title": "Heterogeneous parallelization and acceleration of molecular dynamics simulations in GROMACS",
+    "authors": [
+      "Szilárd Páll",
+      "Artem Zhmurov",
+      "Paul Bauer",
+      "Mark Abraham",
+      "Magnus Lundborg",
+      "Alan Gray",
+      "Berk Hess",
+      "Erik Lindahl"
+    ],
+    "year": "2020",
+    "doi": "10.1063/5.0018516",
+    "url": "https://arxiv.org/abs/2006.09167",
+    "draft_sections": [
+      "Methods — Neighbour lists and molecular dynamics",
+      "Related Work — Simulation engines"
+    ],
+    "claims": [
+      {
+        "section": "Related Work — GPU-resident MD",
+        "locator": "Abstract and GPU integration and dual pair-list discussion",
+        "use": "Cite as prior work on GPU-resident integration and managing buffered pair lists on the GPU. The rolling pruning of its dual lists is relevant when explaining why LoupMD separately tracks buffered and active interactions.",
+        "loupmd": [
+          "src/neighbors.cu",
+          "src/engine.cu"
+        ],
+        "scope": "GROMACS uses clustered pair lists and rolling pruning. LoupMD uses receiver CSR and its own compaction. Use Gray and Páll (2023) for the later graph replay feature."
+      }
+    ],
+    "draft_occurrences": [
+      {
+        "file": "methods.tex",
+        "line": 31,
+        "section": "Methods — Neighbour lists and molecular dynamics"
+      },
+      {
+        "file": "related-work.tex",
+        "line": 13,
+        "section": "Related Work — Simulation engines"
+      }
+    ]
+  },
+  "pelaez2024torchmdnet": {
+    "title": "TorchMD-Net 2.0: Fast Neural Network Potentials for Molecular Simulations",
+    "authors": [
+      "Raul P. Pelaez",
+      "Guillem Simeon",
+      "Raimondas Galvelis",
+      "Antonio Mirarchi",
+      "Peter Eastman",
+      "Stefan Doerr",
+      "Philipp Thölke",
+      "Thomas E. Markland",
+      "Gianni De Fabritiis"
+    ],
+    "year": "2024",
+    "doi": "10.1021/acs.jctc.4c00253",
+    "url": "https://arxiv.org/html/2402.17660v3",
+    "draft_sections": [
+      "Methods — Neighbour lists and molecular dynamics",
+      "Related Work — Simulation engines"
+    ],
+    "claims": [
+      {
+        "section": "Methods — neighbour search and launch overhead",
+        "locator": "§2.5 and the neighbour-list subsection (Figs. 2–3)",
+        "use": "Cite as a direct MLIP precedent for CUDA neighbour search with periodic cell lists and for using CUDA Graphs to amortise neural-potential inference launches.",
+        "loupmd": [
+          "src/neighbors.cu",
+          "src/engine.cu"
+        ],
+        "scope": "TorchMD-Net uses its CUDA neighbour-list operator inside a PyTorch-based model pipeline. Cite LoupMD's source and the CUDA programming guide for the conditional MD-step branch which selects the neighbour-list rebuild."
+      }
+    ],
+    "draft_occurrences": [
+      {
+        "file": "methods.tex",
+        "line": 31,
+        "section": "Methods — Neighbour lists and molecular dynamics"
+      },
+      {
+        "file": "methods.tex",
+        "line": 33,
+        "section": "Methods — Neighbour lists and molecular dynamics"
+      },
+      {
+        "file": "related-work.tex",
+        "line": 13,
+        "section": "Related Work — Simulation engines"
+      }
+    ]
+  },
+  "gray2023gromacsgraphs": {
+    "title": "A Guide to CUDA Graphs in GROMACS 2023",
+    "authors": [
+      "Alan Gray",
+      "Szilárd Páll"
+    ],
+    "year": "2023",
+    "doi": null,
+    "url": "https://developer.nvidia.com/blog/a-guide-to-cuda-graphs-in-gromacs-2023/",
+    "draft_sections": [
+      "Methods — Neighbour lists and molecular dynamics",
+      "Related Work — Simulation engines"
+    ],
+    "claims": [
+      {
+        "section": "Methods — GPU-resident MD graph",
+        "locator": "How CUDA Graphs are used in GROMACS",
+        "use": "Cite this implementation report alongside the CUDA API reference when comparing complete step graph replay in MD.",
+        "loupmd": [
+          "src/engine.cu"
+        ],
+        "scope": "The report covers regular GPU-resident steps and treats list updates as irregular steps. Describe LoupMD's device-side switch and checked rebuild branch with its own source."
+      }
+    ],
+    "draft_occurrences": [
+      {
+        "file": "methods.tex",
+        "line": 33,
+        "section": "Methods — Neighbour lists and molecular dynamics"
+      },
+      {
+        "file": "related-work.tex",
+        "line": 13,
+        "section": "Related Work — Simulation engines"
+      }
+    ]
+  },
+  "nvidia2026cudagraphs": {
+    "title": "CUDA C++ Programming Guide: CUDA Graphs",
+    "authors": [
+      "NVIDIA"
+    ],
+    "year": "2026",
+    "doi": null,
+    "url": "https://docs.nvidia.com/cuda/cuda-programming-guide/04-special-topics/cuda-graphs.html",
+    "draft_sections": [
+      "Methods — Neighbour lists and molecular dynamics"
+    ],
+    "draft_occurrences": [
+      {
+        "file": "methods.tex",
+        "line": 33,
+        "section": "Methods — Neighbour lists and molecular dynamics"
+      }
+    ]
+  },
+  "larsen2017ase": {
+    "title": "The atomic simulation environment—a Python library for working with atoms",
+    "authors": [
+      "Ask Hjorth Larsen",
+      "Jens Jørgen Mortensen",
+      "Jakob Blomqvist",
+      "Ivano E. Castelli",
+      "Rune Christensen",
+      "Marcin Dułak",
+      "Jesper Friis",
+      "Michael N. Groves",
+      "Bjørk Hammer",
+      "Cory Hargus",
+      "others"
+    ],
+    "year": "2017",
+    "doi": "10.1088/1361-648X/aa680e",
+    "url": null,
+    "draft_sections": [
+      "Methods — Neighbour lists and molecular dynamics"
+    ],
+    "draft_occurrences": [
+      {
+        "file": "methods.tex",
+        "line": 35,
+        "section": "Methods — Neighbour lists and molecular dynamics"
+      },
+      {
+        "file": "methods.tex",
+        "line": 35,
+        "section": "Methods — Neighbour lists and molecular dynamics"
+      }
+    ]
+  },
+  "vandeneijnden2006langevin": {
+    "title": "Second-order integrators for Langevin equations with holonomic constraints",
+    "authors": [
+      "Eric Vanden-Eijnden",
+      "Giovanni Ciccotti"
+    ],
+    "year": "2006",
+    "doi": "10.1016/j.cplett.2006.07.086",
+    "url": null,
+    "draft_sections": [
+      "Methods — Neighbour lists and molecular dynamics"
+    ],
+    "draft_occurrences": [
+      {
+        "file": "methods.tex",
+        "line": 35,
+        "section": "Methods — Neighbour lists and molecular dynamics"
+      }
+    ]
+  },
+  "bussi2007csvr": {
+    "title": "Canonical sampling through velocity rescaling",
+    "authors": [
+      "Giovanni Bussi",
+      "Davide Donadio",
+      "Michele Parrinello"
+    ],
+    "year": "2007",
+    "doi": "10.1063/1.2408420",
+    "url": null,
+    "draft_sections": [
+      "Methods — Neighbour lists and molecular dynamics"
+    ],
+    "draft_occurrences": [
+      {
+        "file": "methods.tex",
+        "line": 35,
+        "section": "Methods — Neighbour lists and molecular dynamics"
+      }
+    ]
+  },
+  "martyna1992nhc": {
+    "title": "Nosé–Hoover chains: The canonical ensemble via continuous dynamics",
+    "authors": [
+      "Glenn J. Martyna",
+      "Michael L. Klein",
+      "Mark Tuckerman"
+    ],
+    "year": "1992",
+    "doi": "10.1063/1.463940",
+    "url": null,
+    "draft_sections": [
+      "Methods — Neighbour lists and molecular dynamics"
+    ],
+    "draft_occurrences": [
+      {
+        "file": "methods.tex",
+        "line": 35,
+        "section": "Methods — Neighbour lists and molecular dynamics"
+      }
+    ]
+  },
+  "berendsen1984bath": {
+    "title": "Molecular dynamics with coupling to an external bath",
+    "authors": [
+      "H. J. C. Berendsen",
+      "J. P. M. Postma",
+      "W. F. van Gunsteren",
+      "A. DiNola",
+      "J. R. Haak"
+    ],
+    "year": "1984",
+    "doi": "10.1063/1.448118",
+    "url": null,
+    "draft_sections": [
+      "Methods — Neighbour lists and molecular dynamics"
+    ],
+    "draft_occurrences": [
+      {
+        "file": "methods.tex",
+        "line": 35,
+        "section": "Methods — Neighbour lists and molecular dynamics"
+      }
+    ]
+  },
+  "leimkuhler2013baoab": {
+    "title": "Rational Construction of Stochastic Numerical Methods for Molecular Sampling",
+    "authors": [
+      "B. Leimkuhler",
+      "C. Matthews"
+    ],
+    "year": "2013",
+    "doi": "10.1093/amrx/abs010",
+    "url": null,
+    "draft_sections": [
+      "Methods — Neighbour lists and molecular dynamics"
+    ],
+    "draft_occurrences": [
+      {
+        "file": "methods.tex",
+        "line": 35,
+        "section": "Methods — Neighbour lists and molecular dynamics"
+      }
+    ]
+  },
+  "quigley2004langevin": {
+    "title": "Langevin dynamics in constant pressure extended systems",
+    "authors": [
+      "D. Quigley",
+      "M. I. J. Probert"
+    ],
+    "year": "2004",
+    "doi": "10.1063/1.1755657",
+    "url": null,
+    "draft_sections": [
+      "Methods — Neighbour lists and molecular dynamics"
+    ],
+    "draft_occurrences": [
+      {
+        "file": "methods.tex",
+        "line": 35,
+        "section": "Methods — Neighbour lists and molecular dynamics"
+      }
+    ]
+  },
+  "martyna1994mtk": {
+    "title": "Constant pressure molecular dynamics algorithms",
+    "authors": [
+      "Glenn J. Martyna",
+      "Douglas J. Tobias",
+      "Michael L. Klein"
+    ],
+    "year": "1994",
+    "doi": "10.1063/1.467468",
+    "url": null,
+    "draft_sections": [
+      "Methods — Neighbour lists and molecular dynamics"
+    ],
+    "draft_occurrences": [
+      {
+        "file": "methods.tex",
+        "line": 35,
+        "section": "Methods — Neighbour lists and molecular dynamics"
+      }
+    ]
+  },
+  "tuckerman2006liouville": {
+    "title": "A Liouville-operator derived measure-preserving integrator for molecular dynamics simulations in the isothermal–isobaric ensemble",
+    "authors": [
+      "Mark E Tuckerman",
+      "José Alejandre",
+      "Roberto López-Rendón",
+      "Andrea L Jochim",
+      "Glenn J Martyna"
+    ],
+    "year": "2006",
+    "doi": "10.1088/0305-4470/39/19/s18",
+    "url": null,
+    "draft_sections": [
+      "Methods — Neighbour lists and molecular dynamics"
+    ],
+    "draft_occurrences": [
+      {
+        "file": "methods.tex",
+        "line": 35,
+        "section": "Methods — Neighbour lists and molecular dynamics"
+      }
+    ]
+  },
+  "liu1989lbfgs": {
+    "title": "On the limited memory BFGS method for large scale optimization",
+    "authors": [
+      "Dong C. Liu",
+      "Jorge Nocedal"
+    ],
+    "year": "1989",
+    "doi": "10.1007/BF01589116",
+    "url": null,
+    "draft_sections": [
+      "Methods — Neighbour lists and molecular dynamics"
+    ],
+    "claims": [
+      {
+        "section": "Methods — structure relaxation",
+        "locator": "Original L-BFGS method, pp. 503–528",
+        "use": "Cite for the limited-memory quasi-Newton update if fixed-cell relaxation is part of the manuscript.",
+        "loupmd": [
+          "docs/guide/relax.md",
+          "loupmd/optimize/lbfgs.py"
+        ],
+        "scope": "Cite the ASE paper for the trusted reference implementation and describe the device-resident implementation in LoupMD separately."
+      }
+    ],
+    "draft_occurrences": [
+      {
+        "file": "methods.tex",
+        "line": 35,
+        "section": "Methods — Neighbour lists and molecular dynamics"
+      }
+    ]
+  },
+  "bitzek2006fire": {
+    "title": "Structural Relaxation Made Simple",
+    "authors": [
+      "Erik Bitzek",
+      "Pekka Koskinen",
+      "Franz Gähler",
+      "Michael Moseler",
+      "Peter Gumbsch"
+    ],
+    "year": "2006",
+    "doi": "10.1103/PhysRevLett.97.170201",
+    "url": null,
+    "draft_sections": [
+      "Methods — Neighbour lists and molecular dynamics"
+    ],
+    "claims": [
+      {
+        "section": "Methods — structure relaxation",
+        "locator": "Original FIRE update, article 170201",
+        "use": "Cite for the FIRE structure-relaxation algorithm if the optimiser is discussed.",
+        "loupmd": [
+          "docs/guide/relax.md",
+          "loupmd/optimize/fire.py"
+        ],
+        "scope": "LoupMD ports ASE's FIRE behaviour and evaluates forces with its engine. The optimiser loop itself uses host arrays."
+      }
+    ],
+    "draft_occurrences": [
+      {
+        "file": "methods.tex",
+        "line": 35,
+        "section": "Methods — Neighbour lists and molecular dynamics"
+      }
+    ]
+  },
+  "thaler2026compressedneighbors": {
+    "title": "GPU-Native Compressed Neighbor Lists with a Space-Filling-Curve Data Layout",
+    "authors": [
+      "Felix Thaler",
+      "Sebastian Keller"
+    ],
+    "year": "2026",
+    "doi": "10.48550/arXiv.2602.19873",
+    "url": "https://arxiv.org/abs/2602.19873",
+    "draft_sections": [
+      "Methods — Tiling the forward and reverse passes"
+    ],
+    "claims": [
+      {
+        "section": "Methods — compact tiled neighbour state",
+        "locator": "§II and the compression evaluation in §III",
+        "use": "Cite if the paper discusses compact GPU neighbour-list formats. This is close prior art for reducing the memory cost of storing topology.",
+        "loupmd": [
+          "OPTIMISATION_LEDGER.md",
+          "docs/guide/large-cells.md"
+        ],
+        "scope": "Thaler and Keller compress clusters laid out along a Hilbert curve. LoupMD compacts individual edges using sender ranks and integer periodic-image shifts. Name the respective formats explicitly."
+      }
+    ],
+    "draft_occurrences": [
+      {
+        "file": "methods.tex",
+        "line": 28,
+        "section": "Methods — Tiling the forward and reverse passes"
+      }
+    ]
+  },
+  "grimme2010d3": {
+    "title": "A consistent and accurate ab initio parametrization of density functional dispersion correction (DFT-D) for the 94 elements H-Pu",
+    "authors": [
+      "Stefan Grimme",
+      "Jens Antony",
+      "Stephan Ehrlich",
+      "Helge Krieg"
+    ],
+    "year": "2010",
+    "doi": "10.1063/1.3382344",
+    "url": null,
+    "draft_sections": [
+      "Methods — Reciprocal-space terms"
+    ],
+    "draft_occurrences": [
+      {
+        "file": "methods.tex",
+        "line": 40,
+        "section": "Methods — Reciprocal-space terms"
+      }
+    ]
+  },
+  "grimme2011bj": {
+    "title": "Effect of the damping function in dispersion corrected density functional theory",
+    "authors": [
+      "Stefan Grimme",
+      "Stephan Ehrlich",
+      "Lars Goerigk"
+    ],
+    "year": "2011",
+    "doi": "10.1002/jcc.21759",
+    "url": null,
+    "draft_sections": [
+      "Methods — Reciprocal-space terms"
+    ],
+    "draft_occurrences": [
+      {
+        "file": "methods.tex",
+        "line": 40,
+        "section": "Methods — Reciprocal-space terms"
+      }
+    ]
+  },
+  "iseleholder2012dispersion": {
+    "title": "Development and application of a particle-particle particle-mesh Ewald method for dispersion interactions",
+    "authors": [
+      "Rolf E. Isele-Holder",
+      "Wayne Mitchell",
+      "Ahmed E. Ismail"
+    ],
+    "year": "2012",
+    "doi": "10.1063/1.4764089",
+    "url": "https://arxiv.org/abs/1210.7995",
+    "draft_sections": [
+      "Methods — Reciprocal-space terms"
+    ],
+    "claims": [
+      {
+        "section": "Methods — long-range dispersion",
+        "locator": "Abstract and the methods discussion of PPPM for dispersion",
+        "use": "Cite if describing the established real/reciprocal particle-mesh treatment of inverse-sixth-power dispersion and why cutoff sensitivity is a concern.",
+        "loupmd": [
+          "docs/guide/dispersion.md",
+          "src/dispersion/d3_split.cuh"
+        ],
+        "scope": "Cite FourierD3 for coordination-dependent coefficient separation and Essmann et al. for LoupMD's cardinal B-spline mesh."
+      }
+    ],
+    "draft_occurrences": [
+      {
+        "file": "methods.tex",
+        "line": 40,
+        "section": "Methods — Reciprocal-space terms"
+      }
+    ]
+  },
+  "valeeva2026fourierd3": {
+    "title": "A fast summation method for the DFT-D3 dispersion correction",
+    "authors": [
+      "Victoria Valeeva",
+      "Cheuk Hin Ho",
+      "Mario Geiger",
+      "Franco Pellegrini",
+      "Gábor Csányi",
+      "Emine Kucukbenli",
+      "Christoph Ortner"
+    ],
+    "year": "2026",
+    "doi": "10.48550/arXiv.2607.15103",
+    "url": "https://arxiv.org/abs/2607.15103v3",
+    "draft_sections": [
+      "Methods — Reciprocal-space terms"
+    ],
+    "claims": [
+      {
+        "section": "Methods — long-range dispersion",
+        "locator": "v3, §§II.3–II.4, in particular Eqs. 19–22",
+        "use": "Cite FourierD3 for eigendecomposing the species/reference C6 matrix into atom-centred channels to enable particle-mesh evaluation of environment-dependent D3. LoupMD's design document already names this paper.",
+        "loupmd": [
+          "docs/design/dispersion.md",
+          "src/dispersion/d3_split.cuh",
+          "src/dispersion/d3_mesh.cuh"
+        ],
+        "scope": "FourierD3 uses low-rank approximation. LoupMD's split path retains the non-negligible eigenchannels of the reference-slot matrix (relative threshold 1e-12), reuses them for C8 with atom-specific scaling, and applies a real/reciprocal split with a B-spline mesh. Describe the implemented split and cite Essmann et al. for the mesh interpolation itself."
+      }
+    ],
+    "draft_occurrences": [
+      {
+        "file": "methods.tex",
+        "line": 40,
+        "section": "Methods — Reciprocal-space terms",
+        "printed_locator": "§§ II.3–II.4"
+      }
+    ],
+    "primary_source_locators": [
+      {
+        "locator": "§§II.3–II.4, eqs. 19–22",
+        "use": "Factorisation of the environment-dependent reference C6 matrix before fast summation.",
+        "url": "https://arxiv.org/html/2607.15103v3#S2.SS4"
+      }
+    ]
+  },
+  "essmann1995spme": {
+    "title": "A smooth particle mesh Ewald method",
+    "authors": [
+      "Ulrich Essmann",
+      "Lalith Perera",
+      "Max L. Berkowitz",
+      "Tom Darden",
+      "Hsing Lee",
+      "Lee G. Pedersen"
+    ],
+    "year": "1995",
+    "doi": "10.1063/1.470117",
+    "url": null,
+    "draft_sections": [
+      "Methods — Reciprocal-space terms"
+    ],
+    "draft_occurrences": [
+      {
+        "file": "methods.tex",
+        "line": 40,
+        "section": "Methods — Reciprocal-space terms"
+      }
+    ]
+  },
+  "batzner2022nequip": {
+    "title": "E(3)-equivariant graph neural networks for data-efficient and accurate interatomic potentials",
+    "authors": [
+      "Simon Batzner",
+      "Albert Musaelian",
+      "Lixin Sun",
+      "Mario Geiger",
+      "Jonathan P. Mailoa",
+      "Mordechai Kornbluth",
+      "Nicola Molinari",
+      "Tess E. Smidt",
+      "Boris Kozinsky"
+    ],
+    "year": "2022",
+    "doi": "10.1038/s41467-022-29939-5",
+    "url": "https://arxiv.org/abs/2101.03164",
+    "draft_sections": [
+      "Related Work — Operator and model design"
+    ],
+    "draft_occurrences": [
+      {
+        "file": "related-work.tex",
+        "line": 10,
+        "section": "Related Work — Operator and model design"
+      }
+    ]
+  },
+  "nvidia2026cueq": {
+    "title": "cuEquivariance",
+    "authors": [
+      "NVIDIA"
+    ],
+    "year": "2026",
+    "doi": null,
+    "url": "https://github.com/NVIDIA/cuEquivariance",
+    "draft_sections": [
+      "Methods — Neighbour sums and symmetric products",
+      "Related Work — Operator and model design"
+    ],
+    "draft_occurrences": [
+      {
+        "file": "methods.tex",
+        "line": 16,
+        "section": "Methods — Neighbour sums and symmetric products"
+      },
+      {
+        "file": "related-work.tex",
+        "line": 10,
+        "section": "Related Work — Operator and model design"
+      }
+    ]
+  },
+  "witt2026symmetrix": {
+    "title": "Symmetrix",
+    "authors": [
+      "William C. Witt"
+    ],
+    "year": "2026",
+    "doi": null,
+    "url": "https://github.com/wcwitt/symmetrix",
+    "draft_sections": [
+      "Related Work — Native MACE inference"
+    ],
+    "draft_occurrences": [
+      {
+        "file": "related-work.tex",
+        "line": 5,
+        "section": "Related Work — Native MACE inference"
+      }
+    ],
+    "primary_source_locators": [
+      {
+        "locator": "Repository, Citing Symmetrix",
+        "use": "Original native MACE software and its two primary paper citations.",
+        "url": "https://github.com/wcwitt/symmetrix#citing-symmetrix"
+      }
+    ]
+  },
+  "musaelian2023scaling": {
+    "title": "Scaling the Leading Accuracy of Deep Equivariant Models to Biomolecular Simulations of Realistic Size",
+    "authors": [
+      "Albert Musaelian",
+      "Anders Johansson",
+      "Simon Batzner",
+      "Boris Kozinsky"
+    ],
+    "year": "2023",
+    "doi": "10.1145/3581784.3627041",
+    "url": "https://arxiv.org/abs/2304.10061",
+    "draft_sections": [
+      "Related Work — Simulation engines"
+    ],
+    "draft_occurrences": [
+      {
+        "file": "related-work.tex",
+        "line": 13,
+        "section": "Related Work — Simulation engines"
+      }
+    ]
+  },
+  "park2024parallel": {
+    "title": "Scalable Parallel Algorithm for Graph Neural Network Interatomic Potentials in Molecular Dynamics Simulations",
+    "authors": [
+      "Yutack Park",
+      "Jaesun Kim",
+      "Seungwoo Hwang",
+      "Seungwu Han"
+    ],
+    "year": "2024",
+    "doi": "10.1021/acs.jctc.4c00190",
+    "url": "https://arxiv.org/abs/2402.03789",
+    "draft_sections": [
+      "Related Work — Simulation engines"
+    ],
+    "draft_occurrences": [
+      {
+        "file": "related-work.tex",
+        "line": 13,
+        "section": "Related Work — Simulation engines"
+      }
+    ]
+  },
+  "fuchs2025chemtrain": {
+    "title": "chemtrain-deploy: A parallel and scalable framework for machine learning potentials in million-atom MD simulations",
+    "authors": [
+      "Paul Fuchs",
+      "Weilong Chen",
+      "Stephan Thaler",
+      "Julija Zavadlav"
+    ],
+    "year": "2025",
+    "doi": null,
+    "url": "https://arxiv.org/abs/2506.04055",
+    "draft_sections": [
+      "Related Work — Simulation engines"
+    ],
+    "draft_occurrences": [
+      {
+        "file": "related-work.tex",
+        "line": 13,
+        "section": "Related Work — Simulation engines"
+      }
+    ]
+  },
+  "han2026distmlip": {
+    "title": "DistMLIP: A Distributed Inference Platform for Machine Learning Interatomic Potentials",
+    "authors": [
+      "Kevin Han",
+      "Bowen Deng",
+      "Amir Barati Farimani",
+      "Gerbrand Ceder"
+    ],
+    "year": "2026",
+    "doi": null,
+    "url": "https://openreview.net/pdf?id=4tasfBIPxp",
+    "draft_sections": [
+      "Related Work — Simulation engines"
+    ],
+    "claims": [
+      {
+        "section": "Related Work — large-system alternatives",
+        "locator": "§§3.1–3.4 and Table 1",
+        "use": "Cite if discussing alternative ways to run pretrained MLIPs on large cells: multi-GPU graph partitions and exchange of intermediate node features.",
+        "loupmd": [
+          "docs/guide/large-cells.md"
+        ],
+        "scope": "Treat this as a comparison of scaling strategies for pretrained MLIPs. Keep throughput and capacity claims scoped to the model, device count and timing protocol of each work."
+      }
+    ],
+    "draft_occurrences": [
+      {
+        "file": "related-work.tex",
+        "line": 13,
+        "section": "Related Work — Simulation engines"
+      }
+    ]
+  },
+  "thompson2022lammps": {
+    "title": "LAMMPS - a flexible simulation tool for particle-based materials modeling at the atomic, meso, and continuum scales",
+    "authors": [
+      "Aidan P. Thompson",
+      "H. Metin Aktulga",
+      "Richard Berger",
+      "Dan S. Bolintineanu",
+      "W. Michael Brown",
+      "Paul S. Crozier",
+      "Pieter J. in 't Veld",
+      "Axel Kohlmeyer",
+      "Stan G. Moore",
+      "Trung Dac Nguyen",
+      "Ray Shan",
+      "Mark J. Stevens",
+      "Julien Tranchida",
+      "Christian Trott",
+      "Steven J. Plimpton"
+    ],
+    "year": "2022",
+    "doi": "10.1016/j.cpc.2021.108171",
+    "url": null,
+    "draft_sections": [
+      "Related Work — Simulation engines"
+    ],
+    "draft_occurrences": [
+      {
+        "file": "related-work.tex",
+        "line": 13,
+        "section": "Related Work — Simulation engines"
+      }
+    ]
+  },
+  "kovacs2025maceoff": {
+    "title": "MACE-OFF: Short-Range Transferable Machine Learning Force Fields for Organic Molecules",
+    "authors": [
+      "Dávid Péter Kovács",
+      "J. Harry Moore",
+      "Nicholas J. Browning",
+      "Ilyes Batatia",
+      "Joshua T. Horton",
+      "Yixuan Pu",
+      "Venkat Kapil",
+      "William C. Witt",
+      "Ioan-Bogdan Magdău",
+      "Daniel J. Cole",
+      "Gábor Csányi"
+    ],
+    "year": "2025",
+    "doi": "10.1021/jacs.4c07099",
+    "url": "https://arxiv.org/abs/2312.15211v5",
+    "draft_sections": [
+      "Methods — From a checkpoint to energy, forces and stress",
+      "Methods — Neighbour sums and symmetric products",
+      "Methods — Linear maps and arithmetic",
+      "Related Work — Native MACE inference"
+    ],
+    "draft_occurrences": [
+      {
+        "file": "methods.tex",
+        "line": 9,
+        "section": "Methods — From a checkpoint to energy, forces and stress"
+      },
+      {
+        "file": "methods.tex",
+        "line": 14,
+        "section": "Methods — Neighbour sums and symmetric products",
+        "printed_locator": "§ III.5"
+      },
+      {
+        "file": "methods.tex",
+        "line": 16,
+        "section": "Methods — Neighbour sums and symmetric products",
+        "printed_locator": "§ III.5"
+      },
+      {
+        "file": "methods.tex",
+        "line": 18,
+        "section": "Methods — Neighbour sums and symmetric products",
+        "printed_locator": "§ III.5"
+      },
+      {
+        "file": "methods.tex",
+        "line": 23,
+        "section": "Methods — Linear maps and arithmetic",
+        "printed_locator": "§ III.5"
+      },
+      {
+        "file": "related-work.tex",
+        "line": 5,
+        "section": "Related Work — Native MACE inference"
+      },
+      {
+        "file": "related-work.tex",
+        "line": 5,
+        "section": "Related Work — Native MACE inference",
+        "printed_locator": "§ III.5"
+      }
+    ],
+    "primary_source_locators": [
+      {
+        "locator": "§III.5, paragraphs following Fig. 11",
+        "use": "Native MACE cubic radial splines, fused construction and neighbour sum, sparse product basis, and corrected tensor-core arithmetic in cuda_mace.",
+        "url": "https://arxiv.org/html/2312.15211v5#S3.SS5"
+      }
+    ]
+  },
+  "batatia2025materials": {
+    "title": "A foundation model for atomistic materials chemistry",
+    "authors": [
+      "Ilyes Batatia",
+      "Philipp Benner",
+      "Yuan Chiang",
+      "Alin M. Elena",
+      "Dávid P. Kovács",
+      "Janosh Riebesell",
+      "Xavier R. Advincula",
+      "Mark Asta",
+      "Matthew Avaylon",
+      "William J. Baldwin",
+      "others"
+    ],
+    "year": "2025",
+    "doi": "10.1063/5.0297006",
+    "url": "https://arxiv.org/abs/2401.00096v3",
+    "draft_sections": [
+      "Methods — From a checkpoint to energy, forces and stress",
+      "Related Work — Native MACE inference"
+    ],
+    "draft_occurrences": [
+      {
+        "file": "methods.tex",
+        "line": 9,
+        "section": "Methods — From a checkpoint to energy, forces and stress"
+      },
+      {
+        "file": "related-work.tex",
+        "line": 5,
+        "section": "Related Work — Native MACE inference",
+        "printed_locator": "Appendix A.32, Fig. S50"
+      }
+    ],
+    "primary_source_locators": [
+      {
+        "locator": "App. A.32, Fig. S50",
+        "use": "MACE-MP family and the original Symmetrix Kokkos MACE-MP-0b3 benchmark.",
+        "url": "https://arxiv.org/html/2401.00096v3#A1.SS32"
+      }
+    ]
+  },
+  "tan2026inference": {
+    "title": "High-performance training and inference for deep equivariant interatomic potentials",
+    "authors": [
+      "Chuin Wei Tan",
+      "Marc L. Descoteaux",
+      "Mit Kotak",
+      "Gabriel de Miranda Nascimento",
+      "Seán R. Kavanagh",
+      "Laura Zichi",
+      "Menghang Wang",
+      "Aadit Saluja",
+      "Yizhong R. Hu",
+      "Tess Smidt",
+      "Anders Johansson",
+      "William C. Witt",
+      "Boris Kozinsky",
+      "Albert Musaelian"
+    ],
+    "year": "2026",
+    "doi": "10.1039/D5DD00423C",
+    "url": "https://arxiv.org/abs/2504.16068",
+    "draft_sections": [
+      "Related Work — Operator and model design"
+    ],
+    "draft_occurrences": [
+      {
+        "file": "related-work.tex",
+        "line": 10,
+        "section": "Related Work — Operator and model design"
+      }
+    ],
+    "primary_source_locators": [
+      {
+        "locator": "Inference implementation",
+        "use": "Ahead-of-time NequIP compilation and the custom Triton Allegro tensor product.",
+        "url": "https://arxiv.org/abs/2504.16068"
+      }
+    ]
+  },
+  "nigam2020recursive": {
+    "title": "Recursive evaluation and iterative contraction of N-body equivariant features",
+    "authors": [
+      "Jigyasa Nigam",
+      "Sergey Pozdnyakov",
+      "Michele Ceriotti"
+    ],
+    "year": "2020",
+    "doi": "10.1063/5.0021116",
+    "url": "https://arxiv.org/abs/2007.03407",
+    "provenance": "Primary source identified during review",
+    "primary_source_locators": [
+      {
+        "locator": "Eq. 4",
+        "use": "Higher-order equivariants from recursively coupling an existing feature to a density coefficient. The cost-based choice of a basis for a fixed descriptor is LoupMD-specific.",
+        "url": "https://arxiv.org/pdf/2007.03407#page=2"
+      }
+    ],
+    "draft_sections": [
+      "Methods — Neighbour sums and symmetric products"
+    ],
+    "draft_occurrences": [
+      {
+        "file": "methods.tex",
+        "line": 16,
+        "section": "Methods — Neighbour sums and symmetric products",
+        "printed_locator": "Eq. 4"
+      }
+    ]
+  },
+  "baldwin2026polarstress": {
+    "title": "Fix electrostatic stress bug",
+    "authors": [
+      "William Baldwin"
+    ],
+    "year": "2026",
+    "doi": null,
+    "url": "https://github.com/ACEsuit/mace/pull/1718",
+    "provenance": "Upstream implementation identified in LoupMD release source during review",
+    "primary_source_locators": [
+      {
+        "locator": "Merged pull request 1718, commit 26d27bd",
+        "use": "Change of reciprocal geometry in MACE electrostatic stress. The development-gate rule is specified in LoupMD.",
+        "url": "https://github.com/ACEsuit/mace/pull/1718/commits/26d27bd62e9669731a2e743c873a8291669a3bb9"
+      }
+    ],
+    "draft_sections": [
+      "Methods — Reciprocal-space terms"
+    ],
+    "draft_occurrences": [
+      {
+        "file": "methods.tex",
+        "line": 40,
+        "section": "Methods — Reciprocal-space terms"
+      }
+    ]
+  }
+}
