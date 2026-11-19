@@ -187,6 +187,7 @@ Conventions:
 | [md-thermo-buffer](#md-thermo-buffer) | Thermo rows written on the device inside the captured step (release task S1-T05) | `LoupIntegrator.thermo_every` | both | DEFAULT on `release/v1`, off unless asked (5060 Ti only) | release S1-T05 | `thermo_every = 20` against off: `NbCl5` 1.0005 / 1.0041, `SrTiO3` 1.0003 / 1.0007 | [§6][s6] |
 | [rel-stage1-api](#rel-stage1-api) | Release branch, Stage 1 as a whole against its baseline (error channel, `loup_run`, state blob, memory plan, `loup_evaluate2`, per-layer sweeps, open domains) | – | both | DEFAULT on `release/v1` (5060 Ti only) | release Stage 1 | A/B 0.9994 / 1.0006 (baseline first), 0.9986 / 0.9975 (head first): tie | [§6][s6] |
 | [rel-merge-r6tip](#rel-merge-r6tip) | Release branch after merging `round6-hardening` `e21faa2` (S64 to S67), against that tip's own build | – | both | DEFAULT on `release/v1` (5060 Ti only) | release Stage 1 | seven A/B: `NbCl5` 1.0030 (0.9946 to 1.0080), `SrTiO3` 0.9997 (0.9965 to 1.0044): tie; generic families 0.9944 to 1.0066 | [§6.1][s61] |
+| [rel-merge-develop](#rel-merge-develop) | Release branch after merging `develop` `dec2e1f` (S115 to S146: the kernel rounds since `13d6337`, the run-time compiler, one kernel path, the device-resident call, `lammps/`), against `develop`'s own build and against the branch before the merge | – | both | DEFAULT on `merge/develop-s146` (step times 5060 Ti only; tests and gates also on the RTX 4000 Ada) | release, O38 | merged / develop: OMAT-0 medium `SrTiO3` 1.003, 1.001, 1.001, 0.998, OFF23-M water 1.017, 1.003, 0.998, 1.011, five more cases 0.989 to 1.001: ties. Merged / before: 0.980 (OMAT-0 medium), 0.382 (MP-0 medium), 0.859 (POLAR-1-S), 0.976 to 0.986 elsewhere | [§6.36][s636] |
 | [md-langevin-target](#md-langevin-target) | Langevin's target temperature as a device scalar that the step advances (release task S3-T06): ramps move it every step, a changed temperature captures no graph | `LoupIntegrator.temp_rate_k_per_step` | both | DEFAULT on `release/v1` (5060 Ti only) | release Stage 3 | A/B 1.0085 / 0.9989 (old first), 0.9943 / 0.9938 (new first): tie | [§6.2][s62] |
 | [md-fixed-atoms](#md-fixed-atoms) | Fixed atoms as zero inverse masses; the reported temperature counts 3 (N - n_fixed) (release task S4-T02) | `loup_set_fixed_atoms` | both | DEFAULT on `release/v1` (5060 Ti only) | release Stage 4 | A/B mean of four 1.0032 / 0.9995: tie; no step kernel changed | [§6.3][s63] |
 | [md-fix-com](#md-fix-com) | Centre of mass at rest: Langevin's noise in two passes without its mass-weighted mean, NVE's momentum removed at a call's start; noise coefficients formed once per step (release task S4-T01) | `LoupIntegrator.fix_com` | both | DEFAULT on `release/v1` for `lm.md` / `lm.Simulation`; off in `loup_run_langevin` (5060 Ti only) | release Stage 4 | current build against the merge build, four A/B: 0.9999 / 0.9982: tie; `fix_com` on against off 1.0009 at 5,000 atoms | [§6.4][s64] |
@@ -1919,6 +1920,30 @@ Each entry has the same fields. Unless stated, the system is OMAT-0 medium on th
 - Not measured: the tip's own gate and suite; the gates of the generic families at head; anything on the RTX 4000 Ada.
 - Sources: [§6.1][s61].
 
+<a id="rel-merge-develop"></a>
+#### rel-merge-develop: the release branch after merging `develop`
+- Stage: release, O38 (`merge/develop-s146`: `1d15783` the merge, `00f6b75` the two fixes below; library `7f976766de199e71` on `sm_120`) against `develop` `dec2e1f` (library `1b4afd6065012b28`) and against the branch before the merge (`./libloupmd.so` of 18 November, the code of 0.0.1).
+- Status: DEFAULT on `merge/develop-s146`. Step times on the 5060 Ti only; tests and accuracy gates on both GPUs.
+- What: PLAN.md D92 lists what the merge keeps on either side. Two things had to be built for this branch (D93, `00f6b75`): the zeros that S125 / S130 / S132 write once at allocation stay outside the arena the layers of a sweeping system share, and a pass with ghost atoms runs the receiver-owned pruned conv backward instead of S135's sender-owned kernel. Without them MP-0 medium and MPtrj-2022.9 could not be set up as a domain or run tiled. One defect of `develop` is fixed on the way: `loup_evaluate` after `loup_set_state` captured its step graph on untuned GEMM plans (the plans stayed untuned); it now takes the host-driven pass first.
+- Measured (19 November 2026, RTX 5060 Ti, `.tmp_o/mrg_ab.py`: each run a process of its own through the C interface, a fresh `LOUP_CACHE_DIR` per run, Langevin 300 K, 1 fs, friction 0.01 / fs, 100 warm-up steps, median of six 256-step blocks; a b b a, ms/step):
+
+  | Case | develop | merged | merged | develop | merged / develop |
+  | --- | --- | --- | --- | --- | --- |
+  | OMAT-0 medium `SrTiO3` 5,000 | 7.589 | 7.638 | 7.652 | 7.661 | 1.0026 |
+  | the same, three more rounds | 7.647 / 7.653 / 7.667 | 7.660 / 7.662 / 7.662 | 7.665 / 7.670 / 7.649 | 7.661 / 7.663 / 7.671 | 1.0011 / 1.0011 / 0.9982 |
+  | OMAT-0 medium `SrTiO3` 320 | 0.5773 | 0.5788 | 0.5855 | 0.5866 | 1.0004 |
+  | OMAT-0 small `SrTiO3` 5,000 | 4.2105 | 4.2227 | 4.2204 | 4.2236 | 1.0011 |
+  | MP-0 medium `SrTiO3` 1,080 | 0.6686 | 0.6536 | 0.6656 | 0.6655 | 0.9889 |
+  | OFF23-M water 648 | 0.8740 | 0.8856 | 0.8889 | 0.8705 | 1.0172 |
+  | the same, three more rounds | 0.8596 / 0.8675 / 0.8680 | 0.8633 / 0.8670 / 0.8719 | 0.8717 / 0.8708 / 0.8836 | 0.8707 / 0.8731 / 0.8676 | 1.0028 / 0.9984 / 1.0114 |
+  | MH-1 `NaCl` 216 | 1.3443 | 1.3527 | 1.3337 | 1.3384 | 1.0014 |
+  | POLAR-1-S `NaCl` 216 | 1.1281 | 1.1306 | 1.1160 | 1.1202 | 0.9993 |
+
+- Measured, against the branch before the merge (same protocol, one round; before / merged / merged / before, ms/step): OMAT-0 medium 5,000 atoms 7.822 / 7.663 / 7.669 / 7.827 (0.980); 320 atoms 0.5858 / 0.5756 / 0.5749 / 0.5811 (0.986); OMAT-0 small 4.300 / 4.212 / 4.233 / 4.302 (0.982); MP-0 medium 1.760 / 0.674 / 0.672 / 1.763 (0.382); OFF23-M water 0.892 / 0.883 / 0.872 / 0.889 (0.985); MH-1 1.349 / 1.322 / 1.322 / 1.362 (0.976); POLAR-1-S 1.307 / 1.111 / 1.125 / 1.295 (0.859).
+- Gate and tests: PLAN.md's row "O38, the merge of `develop`" has the counts on both GPUs (accuracy gates of ten model cases PASS on `sm_120` and on `sm_89`).
+- Not measured: step times on the RTX 4000 Ada; the tiled call's times and memory after the merge; LAMMPS step times on this library (the tests pass; the times of S145 / S146 are `develop`'s).
+- Sources: [§6.36][s636]; `.tmp_o/mrg/ab_dev1.log`, `ab_dev2.log`, `ab_rel1.log` (not kept in the tree).
+
 <a id="md-langevin-target"></a>
 #### md-langevin-target: the thermostat's target on the device
 - Switch: `LoupIntegrator.temp_rate_k_per_step` (0 = constant temperature). `src/integrator.cu` (`langevin_first_half_kernel`, `langevin_second_half_kernel`), `src/engine.cu` (`run_md_loop`, `d_langevin_target`).
@@ -3492,6 +3517,7 @@ Time against the memory fraction (kept calls, the plans after this change where 
 [s615]: STATUS_AND_PROFILE.md#615-the-tile-workspace-16-november-2026-0015
 [s616]: STATUS_AND_PROFILE.md#616-tile-lists-kept-and-the-workspace-kept-between-calls-16-november-2026-0040
 [s618]: STATUS_AND_PROFILE.md#618-tiled-md-lists-kept-across-steps-16-november-2026-0220
+[s636]: STATUS_AND_PROFILE.md#636-the-merge-of-develop-19-november-2026-planmd-o38
 
 ### Dispersion
 

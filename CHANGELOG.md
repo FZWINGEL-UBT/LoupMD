@@ -11,6 +11,22 @@
 - The export extra installs `graph_longrange`, which MACE's POLAR-1 models are built on. With 0.0.1 a `polar1-*`
   model could not be exported after a plain `pip install "loupmd[export]"`. An environment without the package is
   now told what to install.
+- Faster kernels for every model family. MD step times on an RTX 5060 Ti against 0.0.1's library (one A B B A
+  round each, Langevin at 300 K): MACE-MP-0 medium on 1,080 atoms of SrTiO3 1.76 to 0.67 ms; MACE-POLAR-1-S on
+  216 atoms of NaCl 1.30 to 1.12 ms; MACE-OMAT-0 medium on 5,000 atoms of SrTiO3 7.82 to 7.67 ms; MACE-OMAT-0
+  small, MACE-OFF23 medium (water, 648 atoms) and MACE-MH-1 (NaCl, 216 atoms) 1.5 to 2.4% faster.
+- One set of kernels. The kernels specialised to MACE-OMAT-0 medium are gone, since the generic kernels have
+  overtaken them: `LOUP_GENERIC` and the `generic` argument of `loupmd.bundles` are ignored, and
+  `loupmd validate --specialised` is refused. A bundle exported for the specialised kernels is refused with a
+  message; the bundle cache exports it again by itself.
+- LAMMPS. The folder `lammps/` of the repository holds the LAMMPS package ML-LOUPMD: `pair_style loupmd`,
+  `pair_style loupmd/kk` for the KOKKOS package, and `run_style loupmd`, which lets the engine integrate between
+  LAMMPS's output steps (`lammps/README.md`). It is built into LAMMPS and is GPL-2.0; it is not part of the wheel.
+- The C interface gains `loup_compute_device` (an evaluation on position and force arrays that stay on the GPU),
+  `loup_cutoff`, `loup_species` and `loup_set_evaluate_ahead`; nothing else in it changed (interface version 1).
+  `loup_evaluate` on an unchanged cell is one launch on the GPU, with no blocking transfer.
+- Every bundle is exported again on its first use (the cache key changed, and a bundle now carries the source of
+  its product kernels). A kernel plugin built by 0.0.1's `loupmd build-kernels` is not loaded: build it again.
 
 ## 0.0.1 (18 November 2026)
 

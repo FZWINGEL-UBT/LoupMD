@@ -55,9 +55,15 @@ wheel-lib: $(WHEELDIR)/libloupmd.so
 
 $(WHEELDIR)/%.o: src/%.cu | $(WHEELDIR)
 	@mkdir -p $(dir $@)
-	$(NVCC) -O3 -std=c++17 $(WHEEL_GENCODE) -Iinclude -Isrc -diag-suppress=1046 -Xcompiler -fPIC -MMD -MP -MF $(@:.o=.d) -c $< -o $@
+	$(NVCC) -O3 -std=c++17 $(WHEEL_GENCODE) -Iinclude -Isrc -I$(WHEELDIR) -diag-suppress=1046 -Xcompiler -fPIC -MMD -MP -MF $(@:.o=.d) -c $< -o $@
 $(WHEELDIR):
 	mkdir -p $@
+# src/jit.cu embeds the kernel headers here as above (JIT_HDRS)
+WHEEL_JIT_INCS = $(patsubst src/%,$(WHEELDIR)/jit_src/%.inc,$(JIT_HDRS))
+$(WHEELDIR)/jit_src/%.inc: src/% | $(WHEELDIR)
+	mkdir -p $(dir $@)
+	{ printf 'R"LOUPJIT('; cat $<; printf ')LOUPJIT"\n'; } > $@
+$(WHEELDIR)/jit.o: $(WHEEL_JIT_INCS)
 
 $(WHEELDIR)/libloupmd.so: $(WHEEL_OBJS)
 	$(NVCC) -shared $(WHEEL_OBJS) $(LDFLAGS) -o $@

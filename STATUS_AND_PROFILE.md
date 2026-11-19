@@ -2335,3 +2335,30 @@ NbCl5 structure). With the long-range models' buffers counted (library `8c82bc7e
 whole, 17 tiled); `loupmd bench` standard, the library of 97e365d against this one, a b b a twice: `NbCl5` 3x3x3
 1.863 / 1.857 / 1.866 / 1.864 -> 1.724 / 1.726 / 1.728 / 1.729 ms/step (0.927), `SrTiO3` 10x10x10 8.069 / 8.096 /
 8.118 / 8.128 -> 7.780 / 7.778 / 7.789 / 7.810 (0.961): what the merged kernels give the whole-system MD step.
+
+### 6.36 The merge of develop (19 November 2026, PLAN.md O38)
+
+`develop` `dec2e1f` (S115 to S146) was merged on the branch `merge/develop-s146` (`1d15783`; PLAN.md D92 for what
+each side keeps, D93 and `00f6b75` for the two fixes the merged kernels needed on domains and tiles). Step times are
+from the RTX 5060 Ti in WSL 2 only; the ledger's entry `rel-merge-develop` has every run.
+
+**Tests.** RTX 5060 Ti (`sm_120`, library `7f976766de199e71`): `tests/cpu` 496 passed, 5 skipped (4 of them for
+`LOUPMD_MODELS`, not set in that run); `tests/gpu` fast
+385 passed and 7 skipped without the NbCl5 structure file, those 7 passed with `LOUPMD_BENCH_STRUCTURES` set; full
+53 passed; acceptance 16 passed (the accuracy gates of ten model cases among them); the ten LAMMPS tests
+(`tests/gpu/test_lammps.py`, in the fast tier's count) against an `lmp` rebuilt on this library. RTX 4000 Ada
+(`sm_89`, `leto` and `leeloo`, library built there from `da43be7` with the toolchain on the network home and
+libstdc++ linked in): `tests/cpu` 500 passed, 1 skipped, in 21 s on 24 workers; fast 350 passed, 41 skipped (no
+`lmp`, no `dftd3` module there), 1 failed because the machine's `/usr/bin/nvcc` does not know `sm_89` (the
+kernel-plugin test); full 52 passed, 1 skipped (a test for hosts with little memory); acceptance 14 passed, and the two MACE-OMOL-0 gates passed with the float64 reference on the CPU (`tools/dev/test_gate.py --ref-device cpu`; PyTorch MACE's reference does not fit the 20 GB card, which fails the tier's own two cases before LoupMD runs).
+
+**Step times, RTX 5060 Ti** (a b b a, fresh GEMM plans per run, Langevin 300 K, median of six 256-step blocks):
+merged against `develop`, a tie on all seven cases (0.989 to 1.003 in one round; OMAT-0 medium on 5,000 atoms
+1.003, 1.001, 1.001, 0.998 and OFF23-M water 1.017, 1.003, 0.998, 1.011 over four rounds). Merged against the
+branch before the merge: OMAT-0 medium `SrTiO3` 5,000 atoms 7.82 to 7.67 ms (0.980), MP-0 medium 1,080 atoms 1.76
+to 0.67 ms (0.382), POLAR-1-S `NaCl` 216 atoms 1.30 to 1.12 ms (0.859), OMAT-0 small, OFF23-M water and MH-1
+0.976 to 0.986.
+
+**Not done.** Step times on the RTX 4000 Ada; the wheel with the merged sources (the wheel build's rule for
+`src/jit.cu` is in the Makefile and compiles; the full build was not run); the export-version checks of D91 on the
+merged code; NVRTC as a dependency of the wheel (D94).
