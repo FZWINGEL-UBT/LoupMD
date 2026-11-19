@@ -1952,8 +1952,10 @@ static int evaluate_once(
     const double* f_sorted = h->stage_f();
     h->stage_out()[0] = 0.0;
     for (int i = 0; i < 6; ++i) h->stage_v()[i] = 0.0;
-    if (cell_changed != 0 || !h->nl_valid) {
-        // A new cell (the list's Cartesian shifts depend on it) or no list yet: the host-driven rebuild, then the pass.
+    if (cell_changed != 0 || !h->nl_valid || h->lt_cache.empty()) {
+        // A new cell (the list's Cartesian shifts depend on it), no list yet, or GEMM plans to tune first (no force
+        // pass on this system yet, as after loup_set_state: a step graph cannot be captured on untuned plans, the
+        // capture failed with a cuBLAS error): the host-driven rebuild, then the pass.
         CUDA_CHECK(cudaMemcpyAsync(h->d_pos64, h->stage_pos(), (size_t)h->N * 3 * sizeof(double), cudaMemcpyHostToDevice, h->stream));
         if (rebuild_neighbors(h) != 0) return -1;
         if (ensure_force_graph(h, stress) != 0) return -1;
@@ -2466,8 +2468,9 @@ static int compute_device_impl(LoupHandle* h, const LoupDeviceIO* io, const doub
     const int grid = (N + 255) / 256;
     io_gather_kernel<<<grid, 256, 0, h->stream>>>(N, io->positions, io->pos_row_stride, io->pos_comp_stride, io->ids,
                                                   h->d_inv_perm, h->d_pos64, h->d_io_bad);
-    if (cell_changed || !h->nl_valid) {
-        // A new cell (the list's Cartesian shifts depend on it) or no list yet: the host-driven rebuild.
+    if (cell_changed || !h->nl_valid || h->lt_cache.empty()) {
+        // A new cell (the list's Cartesian shifts depend on it), no list yet, or GEMM plans to tune first (see
+        // evaluate_once): the host-driven rebuild.
         if (rebuild_neighbors(h) != 0) return -1;
         if (ensure_force_graph(h, stress) != 0) return -1;
         CUDA_CHECK(cudaGraphLaunch(h->force_graph_exec, h->stream));
