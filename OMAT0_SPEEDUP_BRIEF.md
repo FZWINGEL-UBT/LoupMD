@@ -1,5 +1,10 @@
 # OMAT-0 Medium Speedup Research Brief
 
+> **Historical.** The specialised path this brief describes was retired in S144 (19 November 2026, `JIT_DESIGN.md`
+> stage 5). OMAT-0 medium now runs the generic path, which was 2.5-3% faster on the 5060 Ti
+> (`OPTIMISATION_LEDGER.md`, `gen-retire-specialised`). Ideas below that name specialised kernels
+> (`spline_forward_inter1`, `wprime_backward_inter1`, `tabled_outer_sum0_*`, `sc0_*`, `sc1_fused`) no longer apply.
+
 Self-contained technical brief for searching for new speedup ideas on LoupMD's specialised **MACE-OMAT-0 medium**
 path (`arch = omat0_medium_spec`). Snapshot: 13 November 2026. Companion files: `STATUS_AND_PROFILE.md` (sixth
 update, 14:15) and `OPTIMISATION_LEDGER.md`.

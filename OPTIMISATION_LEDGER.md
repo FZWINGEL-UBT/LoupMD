@@ -28,7 +28,9 @@ Conventions:
 - **Systems**: `NbCl5` 3x3x3 (1,944 atoms, 2 species), `SrTiO3` 10x10x10 (5,000 atoms, 3 species, ~370k edges).
   Two values "x / y" without other labels are `NbCl5` / `SrTiO3`.
 - **Path**: spec = the specialised MACE-OMAT-0 medium kernels (sections 1-4 of the status file); gen = the generic
-  path for the other families (section 5); POLAR = MACE-POLAR-1's long-range part (`src/polar.cu`).
+  path for the other families (section 5); POLAR = MACE-POLAR-1's long-range part (`src/polar.cu`). S144 retired
+  the spec path ([gen-retire-specialised](#gen-retire-specialised)). Its DEFAULT items left the build with it, and
+  its NOT BUILT ideas are closed; the rows stay as the record.
 - **Status**: DEFAULT (in the build and on); DEFAULT (scoped: ...); REJECTED (built and measured, not adopted);
   SUPERSEDED; NOT BUILT (dropped on paper or deferred); PENDING (owner decision); BLOCKED; MEASUREMENT (profile or
   check, no switch); FIX (a correctness defect found while optimising).
@@ -286,6 +288,10 @@ Conventions:
 | [gen-readout-unit-seed](#gen-s142-lab-screens) | The fused readout's polynomial backward run with unit seed before the readout's barriers, scaled by the gradient after them | lab (reverted) | gen | REJECTED (5060 Ti only) | S142 | `gprod_ro1_fused` x0.989 (noise), registers 110 -> 124 | [gen-s142-lab-screens](#gen-s142-lab-screens) |
 | [gen-jit-layer0](#gen-jit-layer0) | JIT stage 1 (`JIT_DESIGN.md`): layer 0's `first_fwd_kernel` and `first_bwd_edge_kernel` compiled at load by NVRTC with the model's species count, intervals, table width and stride, `K0`, `sh_perm` and pair symmetry as constants (one source, `src/layer0_kernels.cuh`, for both builds; disk cache of the cubins) | `LOUP_JIT=1` (`src/jit.cu`, `src/kernel_ir.cu`, `GenericModel::setup_jit`) | gen (layer 0 with up to 96 radial columns) | OFF (opt-in; a tie, 5060 Ti only) | S143 | `first_bwd_edge` 374.4 -> 375.1 us, `first_fwd` 231.5 -> 230.3 (OMAT-0 generic SrTiO3); OFF23-S 28.2 -> 28.7 / 15.3 -> 15.0; MH-1 21.2 -> 20.7 / 8.3 -> 8.3; static SASS 5-37% smaller, same registers; forces at the cross-process level; 5 gate cases (68 rows) pass | this file |
 | [gen-jit-layer0-grid](#gen-jit-layer0) | The same with the spline grid's numbers compiled in as literals (`LOUP_JIT_BAKE_GRID=1`, lab knob) | `Layer0IR::bake_grid` | gen | REJECTED (5060 Ti only) | S143 | OFF23-S `first_bwd_edge` 28.2 -> 28.9 us, `first_fwd` 15.3 -> 15.4 (and OMAT-0 generic +0.9% / +2.2% in the first job): seven bands become select chains over literals (about 60 instructions more per kernel than the grid argument) where the argument costs one indexed constant load per field | [gen-jit-layer0](#gen-jit-layer0) |
+| [gen-jit-conv](#gen-jit-conv) | JIT stage 2: a conv layer whose width has no built-in instance compiled at load with its width as a constant (`src/generated_conv.cuh`, embedded), instead of the launchers' run-time-width branch | default (`LOUP_JIT=0` off; `LOUP_CONV_GENERIC=1` forces every conv layer there, tests) | gen (conv widths outside 128 / 256 / 224, e.g. OFF23-S's forward at 96) | DEFAULT (5060 Ti only) | S144 | OFF23-S water216 MD `LOUP_JIT=0` vs default b/a 1.014 (orders 1.020 / 1.009), inside the single-run spread; forces at the cross-process level; tests | this file |
+| [gen-jit-products](#gen-jit-products) | JIT stage 3: each bundle carries its products' source (`gen_product.py`, `L<t>.prod_src`); a signature the library was not built with is compiled at load instead of needing `nvcc` | default (`LOUP_JIT_PRODUCTS=1` compiles every product so, gates; `LOUP_JIT=0` refuses such a bundle) | gen (every family) | DEFAULT (coverage; 5060 Ti only) | S144 | with every product compiled from the bundle 92/92 gate rows over seven families (worst force / stress 2.63 / 1.83); a renamed-signature bundle compiles and matches; 1.3 s per product compile, then the disk cache | this file |
+| [gen-retire-specialised](#gen-retire-specialised) | JIT stage 5: the specialised OMAT-0-medium path retired (`interaction0.cu`, `model_loader.cu`, `generated_kernels.cuh`, `gen_kernels.py`, `export_omat0.py`); OMAT-0 medium runs the generic path | always (`arch=omat0_medium_spec` bundles refused) | OMAT-0 medium | DEFAULT (owner's approval; 5060 Ti only) | S144 | MD specialised -> generic: SrTiO3 7.905 -> 7.671 ms/step (b/a 0.970, orders 0.972 / 0.969), NbCl5 1.756 -> 1.713 (0.975, 0.975 / 0.976); library 10.48 -> 9.97 MB | this file |
+| [gen-jit-epilogue-bound](#gen-jit-epilogue-bound) | JIT stage 4 bound: what epilogue fusion chosen from the IR (gate, readout, density into the GEMM epilogues) could still save | – | gen | MEASUREMENT (not built; 5060 Ti only) | S144 | the gate kernels left after S137 are 3.9% / 3.8% of kernel time on MH-1 NaCl216 / SrTiO3, 3.1% on OMOL-0 XL water216, 1.7% on POLAR-1-L NaCl216 and absent elsewhere; readout and density already run inside the product kernels (`gprod_ro1_fused`), so the bound is ~2-3% on those families only | this file |
 
 <a id="gen-jit-layer0"></a>
 #### gen-jit-layer0: layer 0's kernels compiled at load (JIT stage 1)
@@ -319,6 +325,87 @@ Conventions:
 - Cost: the first load of a model compiles three kernels; later loads read the disk cache. The compile was not timed on its own; `tests/test_jit.py`'s first test (a built-in run, a compiling run and a cached run of MH-1 NaCl54, each with its imports and model load) takes 7 s.
 - Tests: 43 + 36 = 79 passed, including the new `tests/test_jit.py`: JIT against built-in, the cache file written and then read, and the fallback with `LOUP_NVRTC` pointing at a missing library.
 - Status: OFF (opt-in; a tie on the 5060 Ti; sm_89 not measured). The infrastructure is what stages 2-3 of `JIT_DESIGN.md` build on: conv kernels for widths without an AOT instance, and products of models outside the build set without `nvcc`. The grid variant is REJECTED.
+- Sources: this file, `JIT_DESIGN.md`.
+
+<a id="gen-jit-conv"></a>
+#### gen-jit-conv: conv layers of any width compiled at load (JIT stage 2)
+- Switch: on by default; `LOUP_JIT=0` turns it off (the run-time-width branch again); `LOUP_CONV_GENERIC=1` sends every conv layer to the run-time-width path, so that with the JIT on every conv layer is compiled (tests).
+- Stage: S144 (19 November 2026), the owner's "do all the stages".
+- Design:
+  - `gen_generic.py` writes the conv kernels to `src/generated_conv.cuh` (moved out of `generated_generic.cu`); the Makefile embeds it with the other JIT headers.
+  - At load `GenericModel::setup_jit` lowers each conv layer to a `ConvIR` (`lx`, `C`, pruning, which of forward / backward lack a built-in instance). `conv_jit_source` compiles the run-time-width templates with `C_FIX` = the layer's width; the launchers (`conv_launch`) start the JIT kernel with the built-in kernel's parameter list.
+  - `S`, `I` and the grid stay arguments: stage 1 measured that baking them buys nothing.
+  - `jit::level()`: unset = stages 2 and 3, `LOUP_JIT=1` adds layer 0, `LOUP_JIT=0` nothing.
+- Measured (5060 Ti): OFF23-S water216 (`lx` 0, `C` 96: its forward has no built-in instance), MD `a b b a`, two rounds, same library and plans: default (the JIT forward) 0.347 ms/step, `LOUP_JIT=0` (the run-time-width forward) 0.352; b/a 1.014, orders 1.020 / 1.009, inside the single runs' 0.342-0.362 spread.
+- Accuracy: `tests/test_jit.py` compares the JIT conv kernels (`LOUP_CONV_GENERIC=1`, every layer compiled) with the run-time-width built-in ones at the cross-process level (conv tuning off).
+- Status: DEFAULT (5060 Ti only). The models of the build set with built-in widths (128 and the other instances) compile nothing.
+- Sources: this file, `JIT_DESIGN.md`.
+
+<a id="gen-jit-products"></a>
+#### gen-jit-products: products from the bundle's source (JIT stage 3)
+- Switch: on by default for signatures the library lacks; `LOUP_JIT_PRODUCTS=1` compiles every product from the bundle (gates); with `LOUP_JIT=0` a bundle whose signature the library lacks is refused ("no compiled product kernel for signature X", with the reason).
+- Stage: S144 (19 November 2026).
+- Design:
+  - The product emitter (`emit_product`, `_scalar_prune` and helpers) moved verbatim from `gen_generic.py` to `python/gen_product.py`; the generated files are byte-identical, and `gen_product.py` joins the generator's cache key and the bundle cache key (`EXPORTER_SOURCES`).
+  - `export_generic.py` stores each layer's emitted source as `L<t>.prod_src` (U8).
+  - The loader (`src/generic.cu`, `jit_product`) prepends the `kernels_common.cuh` / `generated_sh16.cuh` includes (`product_jit_source`) and fetches the kernels in the built-in table's order (`product_jit_names`: forward, backward, the fused readouts for `lmax_out` 0 at three block shapes, then `fwdc` / `bwdc`). One process-wide table per (signature, source) holds them.
+  - On a compile failure the library warns and keeps the built-in kernel if it has one; otherwise the load fails with the reason.
+- Measured (5060 Ti):
+  - Gates with `LOUP_JIT_PRODUCTS=1` (every product compiled from the bundle): OFF23-S 8/8, OMAT-0 small 6/6, MP-0 medium 18/18, MPtrj 6/6, MH-1 18/18, POLAR-1-M 18/18, OMAT-0 medium generic 18/18; 92/92 rows, worst force / stress ratio 2.63 / 1.83.
+  - A bundle whose signatures and sources were renamed (so the library has none of them) loads, compiles and matches the built-in run; with `LOUP_JIT=0` it is refused (`tests/test_jit.py`).
+  - One product compiles in 1.3 s offline (NVRTC 13.0, `sm_120`); later loads read `<cache>/jit/prod_*.bin`.
+- Status: DEFAULT (coverage; 5060 Ti only). A model outside the build set no longer needs `loupmd build-kernels`' `nvcc` step on `develop`; the release branch's plugin path (`release/v1`) is not changed here, and a release built from `develop` has to ship `gen_product.py`.
+- Sources: this file, `JIT_DESIGN.md`.
+
+<a id="gen-jit-epilogue-bound"></a>
+#### gen-jit-epilogue-bound: what stage 4 (epilogue fusion from the IR) could save
+- Stage: S144 (19 November 2026); a bound from the 19 November nsys profiles (`results/profiles-20261119/summary.md`), no code.
+- Basis (share of kernel time per MD step, 5060 Ti):
+
+  | case | gates (kind 4) |
+  | --- | --- |
+  | MH-1 NaCl216 | 3.9% (`gate_bwd` 66 us, `gate_fwd` 25 us of 2,365) |
+  | MH-1 SrTiO3 | 3.8% |
+  | OMOL-0 XL water216 | 3.1% |
+  | POLAR-1-L NaCl216 | 1.7% |
+  | every other family | none (no gate layers) |
+
+  - S137 already moved the gate backward into the `W_2^T` GEMMs' epilogue ([gen-gate-bwd-epilogue](#gen-gate-bwd-epilogue)) and layer 0's gated store into its projections' epilogue ([gen-gate-fwd-store](#gen-gate-fwd-store)), where the plan is the own `sgemm128`. What remains are the gate passes beside GEMMs that run on other plans.
+  - The readout and the density are already fused into the product kernels (`gprod_ro1_fused`, 81-91% of DRAM peak on OMAT-0).
+  - A fusion keeps the gate's arithmetic and saves the pass's memory traffic and launches, so it saves at most the 1.7-3.9% above: about 2-3% of the step on MH-1, OMOL-0 and POLAR, nothing elsewhere.
+- Status: not built. A per-family epilogue choice from the IR costs a GEMM template per (plan, epilogue) pair for a gain at the A/B noise level of those families.
+- Sources: this file, `JIT_DESIGN.md`.
+
+<a id="gen-retire-specialised"></a>
+#### gen-retire-specialised: the specialised OMAT-0-medium path retired (JIT stage 5)
+- Switch: none. Every bundle is `arch=generic`. `arch=omat0_medium_spec` bundles are refused ("... is no longer supported; re-export it"). `generic=` / `--generic` / `LOUP_GENERIC` are accepted and ignored.
+- Stage: S144 (19 November 2026), the owner's "Its fine to retire the seperate kernels".
+- Removed:
+  - `src/interaction0.cu`, `src/model_loader.cu`, `src/generated_kernels.cuh`, `src/generated_kernels_signature.h`, `python/gen_kernels.py`, `python/export_omat0.py`;
+  - ~740 lines of `src/engine.cu`: the spline / `w'` / `m1`-chunk variants and their timing (`tune_l1`, `choose_spline_rpb`), the specialised buffers and force pass;
+  - the specialised overrides (`LOUP_SPLINE_VARIANT`, `LOUP_WPRIME_THREADS`, `LOUP_WPRIME_RCV`, `LOUP_M1_CHUNK`, `LOUP_GENERIC`);
+  - the specialised variant matrix of `test_gate.py`;
+  - the `act_pairs` output of `scatter_active_edges_kernel`.
+- Kept: `src/model.hpp` keeps the error-check macros and `PackErrTracker`, which the generic loader uses. The library shrinks from 10.48 to 9.97 MB.
+- Measured (5060 Ti, MD `a b b a`, two rounds, on the last library with both paths, same plans; specialised = a, generic = b):
+
+  | system | specialised | generic | b/a (orders) |
+  | --- | --- | --- | --- |
+  | SrTiO3 (5,000 atoms) | 7.905 ms/step | 7.671 | 0.970 (0.972 / 0.969) |
+  | NbCl5 (1,944 atoms) | 1.756 | 1.713 | 0.975 (0.975 / 0.976) |
+
+  The 19 November nsys profile agrees in direction: kernel time 8,624 us generic against 8,739 us specialised per SrTiO3 step.
+- Accuracy: the formerly specialised families gated on the generic-only library (`libloupmd_s5`), 90/90 rows. Worst force / stress ratios:
+
+  | family | set | worst force / stress |
+  | --- | --- | --- |
+  | OMAT-0 medium | oxide | 2.03 / 1.75 |
+  | MP-0b3 medium | oxide | 1.14 / 1.30 |
+  | MPA-0 medium | oxide | 2.02 / 1.81 |
+  | MatPES PBE | crystals | 0.98 / 1.00 |
+  | MatPES r2SCAN | crystals | 1.35 / 0.58 |
+- Tests: 47 + 35 = 82 passed on the generic-only library, including the new refused-bundle test (`tests/test_engine_guards.py`) and the rewritten `tests/test_export.py`.
+- Status: DEFAULT (owner's approval; 5060 Ti only; sm_89 and the A100 not measured since S100). The release branch still has both paths.
 - Sources: this file, `JIT_DESIGN.md`.
 
 <a id="gen-conv-bwd-fold4"></a>
@@ -544,8 +631,9 @@ Do not retry these unless the stated condition changes.
 | One 144-column projection for the 128 scalar features and the 16 skip outputs | not built: the skip is per species (16 columns, `ns` rows each) while `linear_up` is one GEMM over all atoms, so the merge turns the 128-column GEMM into per-species GEMMs; it saves one more read of the 2.6 MB scalar block from L2 and a few small launches, under 10 us per step | owner's idea list, 19 Nov |
 | Hybrid GEMM weights pre-split into TF32-high and FP16-residual fragments at load | not built: the hybrid cubin runs 119 us per step on OMAT-0 generic SrTiO3 (2 launches, `fm_tf32x3_rr_64x64`); the B half of its fragment transform is a fraction of that while the weight operand's bytes double, and the cubin is FastMACE's container build | owner's idea list, 19 Nov |
 | One level of Strassen on the 25,000 x 128 x 384 projection | not built: seven products instead of eight save at most 1/8 of its 192.5 us (24 us); five of the seven need a sum of two activation blocks (12,500 x 192, 9.6 MB each), as passes ~145 MB of DRAM traffic (> 300 us) or as fused loads 50% more A reads in a GEMM bound by FP32 issue, plus the recombination of four output blocks from seven | owner's idea list, 19 Nov |
-| JIT stage 2: the conv kernels compiled at load for the layer's width, species and intervals (`JIT_DESIGN.md`) | open: stage 1 ([gen-jit-layer0](#gen-jit-layer0)) showed that constants alone buy nothing in a latency-bound kernel whose main width is already compiled in, so the candidates are the widths without an AOT instance (the `C = 0` templates: OFF23-L, OMOL-0 extra large, ...); measure what the `C = 128` instance gains over the `C = 0` template on one model first | owner's request, 19 Nov |
-| JIT stage 3: products of models outside the build set from the bundle's factored program, compiled by NVRTC instead of `loupmd build-kernels`' `nvcc` | open: a coverage feature, not a speed-up; the release's plugin path (`release/v1`) is what it would replace | owner's request, 19 Nov |
+| JIT stage 2: the conv kernels compiled at load for the layer's width, species and intervals (`JIT_DESIGN.md`) | done for the widths without a built-in instance: [gen-jit-conv](#gen-jit-conv) (S144); species, intervals and grid stay arguments (stage 1: baking them buys nothing) | owner's request, 19 Nov |
+| JIT stage 3: products of models outside the build set from the bundle's factored program, compiled by NVRTC instead of `loupmd build-kernels`' `nvcc` | done on `develop`: [gen-jit-products](#gen-jit-products) (S144); the release's plugin path (`release/v1`) is unchanged | owner's request, 19 Nov |
+| JIT stage 4: epilogue fusion (gate, readout, density) chosen from the IR | not built: bounded at about 2-3% of the step on MH-1, OMOL-0 and POLAR only, see [gen-jit-epilogue-bound](#gen-jit-epilogue-bound) | owner's request, 19 Nov |
 
 ## Appendix: entries
 
