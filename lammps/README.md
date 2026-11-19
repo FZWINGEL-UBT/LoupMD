@@ -8,7 +8,8 @@ MACE models in LAMMPS through the LoupMD engine, on one CUDA GPU. The package `M
 | `pair_style loupmd/kk` | LAMMPS-Kokkos integrates; positions and forces stay on the GPU | Kokkos CUDA builds that also run other Kokkos styles |
 | `run_style loupmd` | the engine integrates (NVE or Langevin) between LAMMPS's output steps | the engine's own step time; no fix may act during the steps |
 
-Design and measurements: `LAMMPS_KOKKOS_PLAN.md` in the repository root.
+Design and measurements: `LAMMPS_KOKKOS_PLAN.md` in the repository root. The plan for the options of Symmetrix's
+pair styles (run modes, several processes, per-atom energies, open boundaries): `LAMMPS_SYMMETRIX_PARITY_PLAN.md`.
 
 ## Quick start
 
@@ -117,6 +118,7 @@ lammps/examples/                           input decks
 ```
 
 The files in `lammps/` are built into LAMMPS and are distributed under the GNU General Public License version 2,
-as LAMMPS is. `libloupmd.so` keeps LoupMD's licence and is linked through its C interface (`include/loupmd.h`).
+as LAMMPS is (`lammps/LICENSE`; the owner's decision of 19 November 2026). `libloupmd.so` keeps LoupMD's licence and
+is linked through its C interface (`include/loupmd.h`).
 
 Written against LAMMPS `stable_30Sep2026_update1` (Kokkos 5.2.1).

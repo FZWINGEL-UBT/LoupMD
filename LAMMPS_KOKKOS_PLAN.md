@@ -388,7 +388,8 @@ Upstreaming into LAMMPS (a `ML-LOUPMD` package with an external library, like `M
 ## Open points for the owner
 
 1. **Scope.** One GPU (stages A-C) now, and D-F later or never?
-2. **Licence of `lammps/`.** GPL-2.0 (needed to build into LAMMPS) next to the MIT library. Confirm.
+2. **Licence of `lammps/`.** GPL-2.0 (needed to build into LAMMPS) next to the MIT library. Confirmed by the owner
+   on 19 November 2026; the text is `lammps/LICENSE`.
 3. **Where it ships.** `develop` first, then the release package (`release/v1`, a new minor version). Upstream to
    LAMMPS later?
 4. **Target LAMMPS version.** Kokkos must know the GPU's architecture (`sm_120`: a Kokkos release with Blackwell
