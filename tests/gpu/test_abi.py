@@ -71,12 +71,13 @@ def _gpu_name():
                           capture_output=True, text=True, check=True).stdout.strip()
 
 
-def test_info_of_a_model_on_the_specialised_kernels(spec_bundle):
-    info = LoupEngine(spec_bundle).info()
+def test_info_of_the_default_model(sto_bundle):
+    info = LoupEngine(sto_bundle).info()
     assert info.abi == 1
-    assert info.specialised and not info.has_long_range
+    assert not info.specialised and not info.has_long_range     # the specialised kernels were retired: always 0
     assert (info.n_layers, info.n_species, info.r_max) == (2, 3, 6.0)
-    assert info.kernel_signature.startswith("omat0m:C128:")
+    signatures = info.kernel_signature.split(";")
+    assert len(signatures) == 2 and all(len(s) == 16 for s in signatures)
     assert info.gpu_name == _gpu_name()
     major, minor = divmod(info.compute_capability, 10)
     assert major >= 8 and 0 <= minor <= 9

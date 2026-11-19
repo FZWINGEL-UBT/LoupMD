@@ -30,15 +30,14 @@ def _nacl(scale=1.0):
     return at
 
 
-# (model, structure builder, generic=True forces the generic path for a model of the specialised architecture)
+# (model, structure builder, generic: ignored since the specialised kernels were retired)
 CASES = [
-    ("mace-omat-0-medium.model", _oxide, False),      # specialised kernels
-    ("mace-omat-0-medium.model", _oxide, True),       # the same model on the generic path
+    ("mace-omat-0-medium.model", _oxide, True),
     ("mace-omat-0-small.model", _oxide, False),
     ("mace-mh-1.model", _oxide, False),
     ("MACE-POLAR-1-S.model", _nacl, False),           # long range
 ]
-IDS = ["omat0-medium", "omat0-medium-generic", "omat0-small", "mh1", "polar1-s"]
+IDS = ["omat0-medium", "omat0-small", "mh1", "polar1-s"]
 
 
 @pytest.mark.parametrize("model,structure,generic", CASES, ids=IDS)
@@ -182,8 +181,7 @@ def test_per_atom_energies_follow_the_atoms_order_and_leave_md_correct(sto_engin
 
 @pytest.mark.parametrize("model,structure,generic,reason", [
     ("MACE-POLAR-1-S.model", _nacl, None, "not built for long-range models"),
-    ("mace-omat-0-medium.model", _oxide, False, "built for the generic kernels only"),
-], ids=["long_range", "specialised"])
+], ids=["long_range"])
 def test_per_atom_energies_are_refused_where_not_built(model, structure, generic, reason):
     at = structure()
     zs = sorted(set(at.get_atomic_numbers().tolist()))

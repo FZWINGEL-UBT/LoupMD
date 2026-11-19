@@ -301,7 +301,17 @@ def product_tensors(mc64, mc32, t, cols):
     raw = raw if agnostic else raw[cols]
     w = fold_weights(raw.reshape(raw.shape[0], -1), K, sh[1], sh[3]).reshape(raw.shape[0], sh[1], sh[3])
     sig = product_signature(prog, feats, sh)
-    return w.to(torch.float32).numpy(), sig, sh, agnostic
+    return w.to(torch.float32).numpy(), sig, sh, agnostic, (prog, feats)
+
+
+def product_source(sig, prog, feats, sh):
+    """JIT_DESIGN.md stage 3: the CUDA source of the product kernels (gen_product.emit_product, the source
+    codegen/gen_generic.py compiles into the library), stored in the bundle for models outside the library's build
+    set."""
+    from .gen_product import emit_product
+
+    src, _ = emit_product(sig, prog, feats, sh)
+    return np.frombuffer(src.encode(), dtype=np.uint8).copy()
 
 
 def product_signature(prog, feats, sh):
@@ -685,9 +695,10 @@ def export_model(model_path, atomic_nums, out_path, head=None, charge=None, spin
         meta[p + "intervals"] = I
         meta[p + "spline_cert_ppm"] = int(cert["worst"] * 1e6)
         # product
-        w, sig, sh, agnostic = product_tensors(mc64, mc32, t, cols)
+        w, sig, sh, agnostic, (prog, feats) = product_tensors(mc64, mc32, t, cols)
         signatures.append(sig)
         T[p + "prod_w"] = w
+        T[p + "prod_src"] = product_source(sig, prog, feats, sh)
         meta[p + "prod_sig"] = sig
         meta[p + "prod_species"] = int(not agnostic)
         meta[p + "prod_segments_w"] = int(sh[1])

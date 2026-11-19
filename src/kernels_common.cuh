@@ -1,6 +1,14 @@
 #pragma once
+// Also compiled at run time by NVRTC (src/jit.cu embeds it), which has neither the runtime header nor <cstdint>.
+#ifdef __CUDACC_RTC__
+typedef long int64_t;
+typedef unsigned long uint64_t;
+typedef int int32_t;
+typedef unsigned int uint32_t;
+#else
 #include <cuda_runtime.h>
 #include <cstdint>
+#endif
 
 struct SplineGrid {
     float starts[8];
@@ -45,6 +53,12 @@ __device__ __forceinline__ int sym_pair(int s, int t, int S) {
     int a = s < t ? s : t;
     int b = s < t ? t : s;
     return a * S - (a * (a - 1)) / 2 + (b - a);
+}
+
+// Radial-table pair of an edge (sender species s, receiver species t): one table per unordered pair (pair_sym 1), per
+// ordered pair (0), or a single table for every pair (2: the bundle's per-pair tables are byte-identical, S116).
+__device__ __forceinline__ int table_pair(int pair_sym, int s, int t, int S) {
+    return pair_sym == 2 ? 0 : pair_sym ? sym_pair(s, t, S) : s * S + t;
 }
 
 // e3nn component-normalized l <= 3 spherical harmonics of the edge vector (vx, vy, vz) of length len (16 values).

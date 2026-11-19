@@ -1,0 +1,20 @@
+# The engine integrates (run_style loupmd): Langevin MD at the engine's own step time, with LAMMPS for input, thermo
+# output and dumps.
+#   lmp -in in.engine_langevin -var data srtio3.data -var bundle omat_O_Ti_Sr.loup
+units           metal
+atom_style      atomic
+atom_modify     map yes
+boundary        p p p
+read_data       ${data}
+
+pair_style      loupmd
+pair_coeff      * * ${bundle} Sr Ti O           # one element per atom type, in type order
+
+timestep        0.001
+velocity        all create 300.0 4928459 mom yes rot no dist gaussian
+run_style       loupmd langevin 300.0 0.1 48279   # T [K], damp [ps], seed
+
+thermo          200
+thermo_style    custom step temp pe ke etotal press
+dump            traj all custom 1000 traj.lammpstrj id type x y z
+run             10000

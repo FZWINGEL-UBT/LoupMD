@@ -1,4 +1,6 @@
 #pragma once
+// Error-check macros and the 8-byte table error guard, shared by the engine, the generic model and POLAR (the
+// specialised OMAT-0 model that gave the file its name was retired in JIT_DESIGN.md stage 5).
 
 #include <algorithm>
 #include <cmath>
@@ -50,7 +52,6 @@
     } while (0)
 
 namespace loup {
-class Bundle;
 // Largest accepted error of the 8-byte cubic tables (CUBIC_PACKED8), per column relative to the column's largest
 // value or slope (d/dr) over all intervals and pairs. The bundles gated so far measure 2.7e-5 (POLAR-1-L) to 1.7e-4
 // (OFF23 medium); OMAT-0 small's 1.0e-4 costs about 1.2 of the gate's 3 units. A guard against tables far outside what
@@ -124,69 +125,3 @@ struct PackErrTracker {
     }
 };
 }  // namespace loup
-
-struct SplineGridHost {
-    float starts[8];
-    float ends[8];
-    float inv_h[8];
-    int offsets[8];
-    int counts[8];
-    int n_bands;
-    int total_intervals;
-};
-
-struct LoupModelGPU {
-    int S = 0;
-    int P_sym = 0;
-    float r_max = 6.0f;
-    float scale = 1.0f;
-    std::vector<int32_t> atomic_numbers;
-    std::vector<double> atomic_energies;
-
-    // Interaction 0 radial table
-    int pieces0 = 0;
-    int n_bins0 = 0;
-    float r_lo0 = 0.0f;
-    float bin_scale0 = 0.0f;
-    float* d_starts0 = nullptr;
-    float* d_scales0 = nullptr;
-    int32_t* d_bins0 = nullptr;
-    float* d_coef0 = nullptr;   // [P_sym, pieces0, 6, 66]
-    float* d_pcoef0 = nullptr;  // [P_sym, pieces0, 6, 66]
-
-    // Interaction 0 COMPOSE_SKIP weights: 4 degrees x [S, S*64, 128]
-    float* d_C0[4] = {nullptr, nullptr, nullptr, nullptr};
-
-    // Prod 0 + folded readout 0 + inter 1 linear_up / skip_tp
-    float* d_w0_factored = nullptr;  // [S, 29, 128]
-    float* d_w_ro0 = nullptr;        // [128]
-    float* d_W_up_0 = nullptr;       // [128, 128]
-    float* d_W_up_1 = nullptr;       // [128, 128]
-    float* d_W_skip1_16 = nullptr;   // [S, 128, 16]
-
-    // Interaction 1 spline tables
-    SplineGridHost grid1{};
-    unsigned cubic_bias_shift = 0;
-    uint2* d_cubic_packed8_1 = nullptr;   // [P_sym * intervals1, 1280] (8-byte cubic packed)
-    float4* d_density_table_1 = nullptr;  // [P_sym * intervals1]
-
-    // Interaction 1 linear block weights
-    float* d_W_lin1[4] = {nullptr, nullptr, nullptr, nullptr};  // [256,128], [384,128], [384,128], [256,128]
-
-    // Prod 1 + folded readout 1
-    float* d_w1_factored = nullptr;  // [S, 13, 128]
-    float* d_W_p1_ro1 = nullptr;     // [128, 16]
-    float* d_W_ro1_2 = nullptr;      // [16]
-
-    // ZBL pair repulsion
-    int has_zbl = 0;
-    float zbl_c[4] = {0.0f, 0.0f, 0.0f, 0.0f};
-    float zbl_p = 5.0f;
-    float zbl_r_max_max = 0.0f;
-    float* d_zbl_r_cut = nullptr;    // [P_sym]
-    float* d_zbl_inv_a = nullptr;    // [P_sym]
-    float* d_zbl_pref = nullptr;     // [P_sym]
-
-    void load(const loup::Bundle& bundle, const char* path);
-    void free_gpu();
-};

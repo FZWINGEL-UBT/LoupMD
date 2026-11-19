@@ -2,8 +2,8 @@
 
 A quantity passes when LoupMD's deviation from MACE float64 is at most three times MACE float32's deviation from
 MACE float64 on the same structure, or below the floor (0.01 meV/atom, 1e-5 eV/A, 1e-7 eV/A^3). Every kernel path
-the engine can choose is gated: the forced variants of the specialised model, and the conv variants of generic
-models that have them.
+the engine can choose per system is gated: the conv forward variants of the models that have them. (The kernels
+specialised to MACE-OMAT-0 medium and their forced variants were retired with JIT_DESIGN.md stage 5.)
 """
 from __future__ import annotations
 
@@ -18,14 +18,10 @@ from . import references, sets
 
 SCHEMA = "loupmd.gate/1"
 # Forced kernel paths (environment read when an engine is created, see include/loupmd.h).
-LARGE_VARIANTS = ([{"LOUP_SPLINE_VARIANT": v} for v in ("R1", "R1p", "R4", "R4p", "R5")]
-                  + [{"LOUP_WPRIME_THREADS": "512"}, {"LOUP_REORDER": "1"}, {"LOUP_REORDER": "0"}])
-SMALL_VARIANTS = [{"LOUP_WPRIME_RCV": "1"}, {"LOUP_WPRIME_RCV": "1", "LOUP_WPRIME_THREADS": "512"}]
 GENERIC_VARIANTS = [{"LOUP_CONV_FWD_VARIANT": v} for v in ("1", "2")]
-VARIANT_KEYS = ("LOUP_SPLINE_VARIANT", "LOUP_WPRIME_THREADS", "LOUP_WPRIME_RCV", "LOUP_REORDER",
-                "LOUP_CONV_FWD_VARIANT")
+# What a gate engine must not inherit from the caller's environment (a forced variant, the atom reorder)
+VARIANT_KEYS = ("LOUP_REORDER", "LOUP_CONV_FWD_VARIANT")
 TILES_PER_CELL = 4      # --capacity tiled: receivers per tile = atoms / 4, rounded up
-LARGE_ATOMS = 512        # the specialised model's switch to the receiver-owned w' kernel
 # Configurations where the model itself is not float32-reproducible, left out unless asked for: POLAR-1-S on
 # NaNbO3_c0 has forces near 236,000 eV/A and MACE float32 is 27 to 90 eV/A off float64 there. (model stem, config).
 UNSTABLE = {("MACE-POLAR-1-S", "NaNbO3_c0")}
@@ -106,21 +102,19 @@ def run_gate(model, *, head=None, checkpoint=None, sha256=None, trusted=False, d
 
     Refusals come first and in this order: checkpoint trust, the export extra (``GateUnavailable``), the
     structures. ``capacity="tiled"`` evaluates every configuration tile by tile, about four tiles per cell (plan
-    task S5-T04), on the generic kernels; ``capacity="wavefront"`` does so in the wavefront order with the row pool
-    (S5-T08; two-layer models). ``reference(model_path, configs, head, device, charge, spin)``,
+    task S5-T04); ``capacity="wavefront"`` does so in the wavefront order with the row pool (S5-T08; two-layer
+    models). ``generic=False`` asked for the kernels specialised to MACE-OMAT-0 medium, which were retired: refused. ``reference(model_path, configs, head, device, charge, spin)``,
     ``engine_factory``,
     ``ensure_bundle`` and ``bundle_meta`` replace MACE, the engine, the exporter and the bundle reader (tests).
     """
-    import numpy as np
-
     from .. import __version__
 
     if capacity not in ("whole", "tiled", "wavefront"):
         raise PlanRefused(f"capacity must be 'whole', 'tiled' or 'wavefront', got {capacity!r}")
     tiled, wavefront = capacity != "whole", capacity == "wavefront"
-    if tiled and generic is False:
-        raise PlanRefused("the tiled mode runs the generic kernels; the specialised ones have no per-layer sweeps",
-                          next_step="Leave out --specialised, or gate the specialised kernels without --capacity.")
+    if generic is False:
+        raise PlanRefused("the kernels specialised to MACE-OMAT-0 medium were retired: every model runs the generic "
+                          "kernels", next_step="Leave out --specialised (generic=False).")
     gate_config = gate_config or config.GateConfig()
     say = progress or (lambda text: None)
     resolved, digest, _ = models.trusted_checkpoint(model, head, checkpoint=checkpoint, sha256=sha256,
@@ -187,7 +181,7 @@ def run_gate(model, *, head=None, checkpoint=None, sha256=None, trusted=False, d
 
         engine_factory, library = _core.LoupEngine, _core.library_version()
 
-    engines, kinds, rows, reorder_results = {}, {}, [], {}
+    engines, kinds, rows = {}, {}, []
 
     def evaluate(name, at, refs, variant):
         elements = tuple(sorted(set(at.get_atomic_numbers().tolist())))
@@ -198,13 +192,11 @@ def run_gate(model, *, head=None, checkpoint=None, sha256=None, trusted=False, d
             saved = {k: os.environ.pop(k) for k in VARIANT_KEYS + ("LOUP_CHAIN_FOLD",) if k in os.environ}
             os.environ.update(variant)                      # read by the library when the engine is created
             try:
-                bundle = ensure_bundle(resolved.path, list(elements), head=use_head, generic=generic, charge=charge,
+                bundle = ensure_bundle(resolved.path, list(elements), head=use_head, charge=charge,
                                        spin_multiplicity=spin_multiplicity, environ=environ)
                 engines[key] = engine_factory(bundle, device_id=device)
                 if not variant:
-                    specialised = bool(engines[key].info().specialised)
-                    kinds[elements] = ("specialised" if specialised
-                                       else "conv" if has_conv_variants(bundle_meta(bundle)) else "plain")
+                    kinds[elements] = "conv" if has_conv_variants(bundle_meta(bundle)) else "plain"
             finally:
                 for k in VARIANT_KEYS + ("LOUP_CHAIN_FOLD",):
                     os.environ.pop(k, None)
@@ -223,27 +215,19 @@ def run_gate(model, *, head=None, checkpoint=None, sha256=None, trusted=False, d
         else:
             engine.set_system(at.get_atomic_numbers(), at.get_masses(), skin=0.5)
             result = engine.evaluate(at.positions, at.cell.array, compute_stress=True)
-        if "LOUP_REORDER" in variant:
-            reorder_results.setdefault(name, []).append(result)
         rows.append(compare(name, variant, len(at), result, *refs))
         say(format_row(rows[-1]))
 
     for (name, at), r64, r32, sref in zip(configs, ref64, ref32, stress_ref):
         evaluate(name, at, (r64, r32, sref), {})
         kind = kinds[tuple(sorted(set(at.get_atomic_numbers().tolist())))]
-        variants = ((LARGE_VARIANTS if len(at) >= LARGE_ATOMS else SMALL_VARIANTS) if kind == "specialised"
-                    else GENERIC_VARIANTS if kind == "conv" else [])
-        for variant in variants:
+        for variant in (GENERIC_VARIANTS if kind == "conv" else []):
             evaluate(name, at, (r64, r32, sref), variant)
 
-    # The reorder only permutes atoms inside species groups: both orders must agree to summation-order noise.
+    # The record's "reorder" list held the retired specialised kernels' reorder-on / reorder-off comparison; the
+    # field stays in loupmd.gate/1, empty.
     reorder = []
-    for name, ((e_on, f_on, s_on), (e_off, f_off, s_off)) in reorder_results.items():
-        de = abs(e_on - e_off) * 1000.0 / len(f_on)
-        df, ds = float(np.abs(f_on - f_off).max()), float(np.abs(s_on - s_off).max())
-        reorder.append({"config": name, "de_meV_per_atom": de, "df": df, "ds": ds,
-                        "passed": bool(de < 1e-3 and df < 1e-4 and ds < 1e-6)})
-    passed = all(row.passed for row in rows) and all(check["passed"] for check in reorder)
+    passed = all(row.passed for row in rows)
 
     gpu = None
     try:

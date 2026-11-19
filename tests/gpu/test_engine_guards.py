@@ -63,6 +63,16 @@ def test_a_packed_table_far_beyond_the_gated_error_is_refused(tmp_path):
         LoupEngine(bad)
 
 
+def test_a_bundle_of_the_retired_specialised_path_is_refused(tmp_path):
+    """JIT_DESIGN.md stage 5: arch omat0_medium_spec bundles are no longer loaded; the message says to re-export."""
+    good = ensure_loup_bundle(find_model("mace-omat-0-small.model"), [8, 22, 38])
+    meta, T = read_bundle(good)
+    old = tmp_path / "spec.loup"
+    write_bundle(old, dict(meta, arch="omat0_medium_spec"), T)
+    with pytest.raises(RuntimeError, match="'omat0_medium_spec' is no longer supported; re-export it"):
+        LoupEngine(old)
+
+
 def test_charge_and_spin_are_refused_for_a_model_without_their_embedding(tmp_path):
     """Only models with a total-charge / spin embedding (MACE-OMOL-0) take them; any other model must not silently
     ignore a requested charge."""

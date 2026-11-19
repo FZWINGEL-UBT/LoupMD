@@ -5,8 +5,8 @@ the ledger's S7 entries; the workstations were ruled out by the owner. Sections 
 Every optimisation tried so far, adopted or not, is indexed in [OPTIMISATION_LEDGER.md](OPTIMISATION_LEDGER.md);
 a new attempt adds its ledger row and entry together with the numbers recorded here.
 Target model of the specialised kernels (sections 1-4): MACE-OMAT-0 medium (float32, 128 channels, l <= 3,
-correlation 3, cutoff 6.0 A). Every other supported family (MACE-OMAT-0 small, MACE-OFF23/23b/24, MACE-MH-1,
-MACE-POLAR-1 S/M/L) runs on the generic path: section 5.
+correlation 3, cutoff 6.0 A). S144 (19 November 2026, `JIT_DESIGN.md` stage 5) retired that path. Sections 1-4
+record it as it was; every family, OMAT-0 medium included, now runs on the generic path: section 5.
 Verified GPUs:
 - **RTX 5060 Ti** (`sm_120`, Windows/WSL2 WDDM, CUDA 13, 36 SMs, 32 MB L2)
 - **RTX 4000 Ada** (`sm_89`, `leeloo`, Linux, 48 SMs, 48 MB L2; no performance-counter permission, so `ncu` numbers are 5060 Ti only)
@@ -260,15 +260,18 @@ Supported, as in FastMACE (every label of its model table; local files match its
 small and medium, MACE-MatPES PBE and r2SCAN (`MACE-matpes-*-omat-ft`), MACE-OFF23 small / medium / large,
 MACE-OFF23b medium, MACE-OFF24 medium, MACE-MH-1 (any head, one per bundle; default `omat_pbe`), MACE-POLAR-1
 S / M / L and MACE-OMOL-0 extra large (`MACE-omol-0-extra-large-1024`: 1024 hidden channels; total charge and spin
-multiplicity per bundle, `ensure_loup_bundle(..., charge=Q, spin_multiplicity=M)`, default 0 and 1). MACE-OMAT-0
-medium, MP-0b3 medium, MPA-0 medium and both MatPES models (the same density architecture) run the specialised
-kernels of sections 1-4 (`LOUP_GENERIC=1` forces the generic path, used to cross-check it); the rest the generic path.
+multiplicity per bundle, `ensure_loup_bundle(..., charge=Q, spin_multiplicity=M)`, default 0 and 1). All of them run
+the generic path. Until S144, MACE-OMAT-0 medium, MP-0b3 medium, MPA-0 medium and both MatPES models (the same
+density architecture) ran the specialised kernels of sections 1-4. S144 retired those kernels: the generic path was
+2.5-3% faster on OMAT-0 medium (5060 Ti). Bundles of that path (`arch=omat0_medium_spec`) are refused with a
+re-export message.
 
 ### 5.1 Pipeline
-- `python/export.py` picks the exporter: `export_omat0.py` (specialised, `arch=omat0_medium_spec`) when
-  `check_architecture` accepts the model, else `export_generic.py` (`arch=generic`). Both write the `LOUPC001`
-  container (section 3.2, M6); `ensure_loup_bundle(model, Z, head=...)` caches by model content hash, species, head,
-  path and exporter version.
+- `python/export.py` runs `export_generic.py` (`arch=generic`) for every model. Until S144 it ran `export_omat0.py`
+  (specialised, `arch=omat0_medium_spec`) when `check_architecture` accepted the model. The exporter writes the
+  `LOUPC001` container (section 3.2, M6), including each layer's product source (`L<t>.prod_src`, S144). The cache
+  of `ensure_loup_bundle(model, Z, head=...)` is keyed by model content hash, species, head, charge / spin and the
+  exporter sources (`gen_product.py` among them).
 - `export_generic.py` extracts every linear map by probing the float64 e3nn modules with basis inputs (`probe_linear`,
   `probe_species_linear`), so e3nn path weights, `1/avg_num_neighbors`, the normalize2mom constants of SiLU / gates,
   ScaleShift (scale into the readouts and ZBL, shift into E0) and the selected head (E0 row, readout column,
@@ -326,8 +329,8 @@ float64 reference does not fit the GPU (OFF23-L / 23b / 24 on the 16 GB 5060 Ti,
 | MH-1 `omat_pbe`, `matpes_r2scan`, `mp_pbe_refit_add`, `oc20_usemppbe` | crystals | PASS (S59 build: worst force 0.87 / 0.86 / 0.80 / 0.84, stress 0.27 / 0.32 / 0.25 / 0.26) | PASS (first two) |
 | MH-1 `omol`, `spice_wB97M` | organic | PASS (S59 build: worst force 0.32 / 0.28, stress 0.63 / 0.38) | PASS (`omol`) |
 | MP-0 medium, MP-0 large | oxide | PASS (S59 build: worst force 0.72 / 1.31, stress 2.97 / 0.94) | not run |
-| MP-0b3 medium, MPA-0 medium (specialised, every forced variant) | oxide | PASS (S59 build, 30 / 30 rows: worst force 1.06 / 1.68, stress 0.87 / 0.89) | not run |
-| MatPES PBE, r2SCAN (specialised, every forced variant) | crystals | PASS (S59 build, 18 / 18 rows: worst force 0.68 / 1.57, stress 1.10 / 1.04) | not run |
+| MP-0b3 medium, MPA-0 medium (specialised, retired in S144; every forced variant) | oxide | PASS (S59 build, 30 / 30 rows: worst force 1.06 / 1.68, stress 0.87 / 0.89) | not run |
+| MatPES PBE, r2SCAN (specialised, retired in S144; every forced variant) | crystals | PASS (S59 build, 18 / 18 rows: worst force 0.68 / 1.57, stress 1.10 / 1.04) | not run |
 | OMOL-0 extra large | organic: neutral singlet, +1 doublet, -1 doublet, neutral triplet | PASS (S57 path; worst force 0.86 / 0.31 / 0.82 / 0.79, stress 0.79 / 0.19 / 0.63 / 0.47) | not run |
 | POLAR-1-S | crystals | PASS (worst ratio 1.30) | PASS (worst 0.99) |
 | POLAR-1-M | crystals | PASS (worst 0.97) | PASS (worst 1.14) |
@@ -355,7 +358,7 @@ gate is the references), and the float32 bound no longer changes between runs.
 
 | Model | System (atoms) | 5060 Ti ms/step (S7) | 5060 Ti before S7 | Ada (before S7) | FastMACE (documented, 5060 Ti unless noted) |
 |---|---|---|---|---|---|
-| OMAT-0 medium (specialised) | NbCl5 (1,944) / SrTiO3 (5,000) | 1.834 / 8.376 | 1.843 / 8.488 | 2.085 / 9.384 | |
+| OMAT-0 medium (specialised, retired in S144) | NbCl5 (1,944) / SrTiO3 (5,000) | 1.834 / 8.376 | 1.843 / 8.488 | 2.085 / 9.384 | |
 | OMAT-0 small | NbCl5 / SrTiO3 | **1.432 / 6.416** | 2.175 / 10.014 | 2.263 / 10.824 | |
 | OFF23 small / medium / large | water 2x2x2 (5,184) | **3.869 / 9.311 / 33.722** | 5.593 / 13.093 / 47.829 | 5.960 / 14.620 / 59.736 | |
 | OFF23b medium / OFF24 medium | water 2x2x2 | **13.585 / 13.518** | 19.680 / 19.602 | 22.060 / 22.010 | |
@@ -481,9 +484,78 @@ S96-S106 (`wp-receiver-owned`, `gen-pass-glue`, `gen-conv-bwd-l0-red`, `gen-firs
 - S96: the specialised OMAT-0 path's receiver-owned `w'` now runs below 512 atoms too on `sm_120` (SrTiO3 135 / 320 atoms `0.974` / `0.963`); the two OMAT-0 medium paths are now within 2% at every size from 135 to 5,000 atoms.
 - S97-S100 (generic path): no layer-0 embedding gather when every consumer reads a species table, the folded readout's gradient seed assigned (S97) and then its energy and seed folded into the layer's product kernels (S100), the top conv layer's backward assigns the per-edge force vectors (no zero fill, no read-add-store), and each forward conv kernel zeroes its layer's `dx` rows instead of the pass's memset. Library ABBA on shared plans, both orders, S96 -> S100 (product of the steps): OMAT-0 medium generic SrTiO3 `0.989`, MP-0 medium SrTiO3 `0.986`, OFF23-M water216 `0.968`, OFF23-S water216 `0.987`, MH-1 NaCl216 `0.992`; gates pass for every family touched.
 - S101: the remaining accumulating per-edge updates (lower conv layers, `gconv_bwd_L2`) use RED on `sm_120` (OMOL-0 water216 `0.999`, lx 2 models tie).
-- With S97-S101 the generic path leads the specialised one for OMAT-0 medium on this GPU at every size tested (separate processes, generic / specialised: SrTiO3 5,000 atoms `0.989`, NbCl5 `0.984`, 1,080 atoms `0.993`, 320 atoms `0.964`); the default stays specialised pending the A100 comparison (job `s100c`) and the owner's call. Full gate sweep on the S100 library: 20 runs, none failing; S101's families (OFF23-L, OMOL-0, POLAR-1-L) gated again on S101; 77 tests pass on the installed S101 library.
+- With S97-S101 the generic path leads the specialised one for OMAT-0 medium on this GPU at every size tested (separate processes, generic / specialised: SrTiO3 5,000 atoms `0.989`, NbCl5 `0.984`, 1,080 atoms `0.993`, 320 atoms `0.964`); the default stayed specialised pending the A100 comparison (job `s100c`) and the owner's call, until S144 retired the specialised path with the owner's approval. Full gate sweep on the S100 library: 20 runs, none failing; S101's families (OFF23-L, OMOL-0, POLAR-1-L) gated again on S101; 77 tests pass on the installed S101 library.
 - S105 / S106: `first_fwd_kernel` without its density-only warp (warp 0 sums the density in the former order: `S0` and `D` bitwise unchanged; kernel 255-260 -> 240-245 us on OMAT-0 generic SrTiO3) and the Langevin first half with one thread per normal pair (the same Philox words, noise bitwise unchanged; 7.8 -> 3.6 us on water216). Library ABBA S101 -> S106 on shared plans, both orders: OMAT-0 generic SrTiO3 `0.9985`, OFF23-M water216 `0.991`, MH-1 NaCl216 `0.993`; gates pass; 77 tests pass on the installed S106 library.
 - A100 validation of S81-S106 (19 jobs on NHR Alex, queued 16 November, none started at 18:40): job list, libraries, decision rules and the checker in [results/alex-a100-queue-20261116](results/alex-a100-queue-20261116/README.md).
+S141 (`pol-sf-split-fold`, `gen-conv-fwd-pruned-r5`, 19 November, branch `develop`, 5060 Ti only):
+- The structure factor's FP64 warp fold split so each lane folds one value (bitwise the old sums): POLAR-1-M NbCl5 `0.979` (19.66 -> 19.26 ms, the develop library against `d6e97b7` on shared plans), NaCl216 `0.989`, POLAR-1-L NaCl216 `0.994`.
+- MP-0 medium's pruned forward (`gconv_fwd_L1s`) stages four harmonics instead of sixteen, uses literal barrier ids (16 -> 6 reserved barriers) and, on `sm_120`, the 16 KB shared-memory configuration: 648 -> 576 us per force call; MP-0 SrTiO3 `0.984`, NbCl5 `0.974` (lab) / `0.995` (develop, noisy).
+- Gates: POLAR-1-S / -M / -L crystals, MP-0 medium oxide (default and with prune / sender backward / compaction / chain fold off) and OMAT-0 generic oxide pass; 77 tests pass on the develop library. Rejected or not built in the same round, with their numbers: the ledger's S141 rows (dual-pipe GEMM lanes, R6, literal barriers in the full forward, the bond-frame backward bound and the precision screens).
+S142 (`gen-conv-bwd-fold4`, `gen-first-bwd-edge-j64`, 19 November, branch `develop`, 5060 Ti only):
+- The lx <= 1 conv backwards fold their four pull partials together (9 shuffles instead of 20, lane 0's sums bitwise the old ones): `gconv_bwd_L1` 2,773 -> 2,741 us per force call on OMAT-0 generic SrTiO3.
+- The layer-0 edge backward is compiled for 64 radial columns when the model has them: 424 -> 375 us per force call (OMAT-0 generic SrTiO3), MP-0 NbCl5 62.4 -> 59.0 us.
+- Together, against the develop library `595ee89` on shared plans: OMAT-0 medium generic SrTiO3 `0.991` (7.742 -> 7.672 ms), OMAT-0 small SrTiO3 `0.988`, MP-0 medium SrTiO3 `0.988`, MP-0 NbCl5 `0.984` (a first run read `1.020`; that cell scatters by 2%). 13 gate cases (213 rows) and 77 tests pass. The other items of the owner's eighth list: the ledger's S142 rows (six lab variants rejected, four bounds, eight paper verdicts).
+S143 (`gen-jit-layer0`, 19 November, branch `develop`, 5060 Ti only): stage 1 of `JIT_DESIGN.md`, the run-time compiler.
+- Pieces:
+  - layer 0's kernels live in one header (`src/layer0_kernels.cuh`) that `nvcc` compiles and the library embeds;
+  - with `LOUP_JIT=1`, NVRTC (loaded with `dlopen`) compiles it at load with the model's layer-0 constants (`src/kernel_ir.hpp`);
+  - the cubins are kept in `<cache>/jit/`, and launches go through `cudaLaunchKernel` inside the captured graphs;
+  - without NVRTC, or on any failure, the built-in kernels run.
+- Result: a tie. `first_bwd_edge` 374.4 → 375.1 µs and `first_fwd` 231.5 → 230.3 µs (OMAT-0 generic SrTiO3); OFF23-S and MH-1 within ±2.4%. Static SASS is 5–37% smaller, but the kernels are latency / load-store bound, and S142 had already compiled in the width that mattered.
+- Compiling the spline grid in as well is slower (+2.5%, rejected).
+- Gates with `LOUP_JIT=1`: five cases, 68 rows, all pass. Tests: 79 pass (new `tests/test_jit.py`). The switch stays off.
+
+S144 (`gen-jit-conv`, `gen-jit-products`, `gen-jit-epilogue-bound`, `gen-retire-specialised`, 19 November, branch
+`develop`, 5060 Ti only): stages 2-5 of `JIT_DESIGN.md`.
+- Stage 2: conv layers whose width has no built-in instance are compiled at load (`src/generated_conv.cuh`, on by
+  default). OFF23-S water216 (forward at `C` 96) is 1.4% faster than the run-time-width forward in both orders,
+  inside the spread.
+- Stage 3: bundles carry their product source (`gen_product.py`, `L<t>.prod_src`). A signature the library lacks is
+  compiled at load, so a model outside the build set needs no `nvcc`. With every product compiled from the bundle,
+  92/92 gate rows pass over seven families.
+- Stage 4: not built. The gate passes left after S137 are 1.7-3.9% of kernel time on MH-1, OMOL-0 and POLAR and absent
+  elsewhere.
+- Stage 5: the specialised OMAT-0-medium path is retired (owner's approval). The generic path is faster: MD SrTiO3
+  7.905 → 7.671 ms/step (b/a 0.970), NbCl5 1.756 → 1.713 (0.975), both orders. Gates on the generic-only library: the
+  five formerly specialised families pass 90/90 rows. `LOUP_JIT` is unset by default (stages 2 and 3); `1` adds
+  layer 0, and `0` compiles nothing.
+- Tests on the generic-only library: 47 + 35 = 82 pass (`tests/test_jit.py` with five tests, the refused-bundle test in
+  `tests/test_engine_guards.py`, `tests/test_export.py` rewritten for the one exporter).
+
+S145 (`lmp-styles`, `eng-evaluate-one-graph`, `eng-device-io`, `eng-run-graph-reuse`, 19 November, branch `develop`,
+5060 Ti under WSL 2 only): LoupMD in LAMMPS (`lammps/`, `LAMMPS_KOKKOS_PLAN.md`).
+- Styles: `pair_style loupmd` (host arrays), `pair_style loupmd/kk` (Kokkos device views through the new
+  `loup_compute_device`), `run_style loupmd` (the engine integrates between LAMMPS's output steps).
+- Accuracy: `run 0` equals the Python engine within two engine runs' spread on five cases (two sheared cells, POLAR-1-M
+  among them), forces and all six pressure components.
+- Speed, OMAT-0 medium SrTiO3 5,000 / 320 atoms, ms/step: run style 7.84-7.86 / 0.61-0.63, `loupmd` 8.20 / 0.86-0.90,
+  `loupmd/kk` 8.38-8.45 / 1.29-1.38; Symmetrix foundation float32/kk in the same job 13.47-13.54 / 1.55-1.59.
+- `loup_evaluate` is now one graph launch per call with page-locked staging: 0.95-1.14 → 0.41-0.51 ms per call on
+  OFF23-S water216.
+- LAMMPS-Kokkos's own step on this machine is 2.43 ms (zero-strength LJ, 648 atoms), which bounds `loupmd/kk` on
+  small systems under WSL 2.
+- LAMMPS's own features with the pair styles: 26 of 28 setups run (integrators, thermostats, barostats, SHAKE,
+  RATTLE, rigid bodies, minimisers, `hybrid/overlay`); table in `LAMMPS_SYMMETRIX_PARITY_PLAN.md`. `loupmd/kk` now
+  requests an occasional neighbour list: SrTiO3 320 atoms 1.29-1.38 → 0.97-1.03 ms/step, 5,000 atoms 8.38-8.45 →
+  8.14-8.19, and rigid bodies in bonded systems no longer abort under Kokkos.
+- Tests on the final library: 47 + 35 of the existing suite (the families' gates among them), 12 in the new
+  `tests/test_device_io.py` (the device call and `loup_evaluate` on every rebuild path of the step graph, run calls in
+  blocks) and 7 in the new `tests/test_lammps.py` (both pair styles and the run style): 101 pass. `tests/test_lammps.py` has nine
+  since the rigid-body test (both modes); those and the 12 device tests pass on the build with the list request.
+
+S146 (`eng-evaluate-ahead`, `lmp-step-profile`, 19 November, branch `develop`, 5060 Ti under WSL 2 only): stage L1 of
+`LAMMPS_SYMMETRIX_PARITY_PLAN.md`, and a profile of a LAMMPS step.
+- `loup_set_evaluate_ahead` / `pair_style loupmd ahead yes`: the next call's step graph queued ahead behind a stream
+  wait on a host word. LAMMPS `a b b a`: SrTiO3 320 atoms 0.838 / 0.826 → 0.752 / 0.783 ms/step, water216 2 - 5%,
+  5,000 atoms a tie. Off by default: a queued step blocks default-stream work of the whole process (the first build
+  hung in the tests).
+- Where a LAMMPS step with `pair_style loupmd` goes (probes, 320 / 5,000 atoms, µs): launch 20 / 51, launch to the
+  guard 208 / 225, force pass and results 571 / 7,588, LAMMPS's own work 17 / 200. The force pass equals the engine's
+  own step; the fixed 0.2 ms before it is the start of the step graph on an idle GPU (not the host copies: a lab build
+  without them showed 107 - 181 µs).
+- LAMMPS's own features: 26 of 28 setups run with the pair styles (table in the plan).
+- Tests on the final library: 105 pass (47 + 35 of the engine suite, 13 in `tests/test_device_io.py` with the new
+  evaluate-ahead test, 10 in `tests/test_lammps.py`).
 
 ### 5.4 Fixes Found by the Family Work
 - **POLAR LayerNorm-MLP reverse wrote its GEMM output over its own input** (`mlp_bwd`: after the first hidden layer

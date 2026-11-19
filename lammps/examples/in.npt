@@ -1,0 +1,19 @@
+# LAMMPS integrates (the default run_style): any fix works with pair_style loupmd, here a barostat.
+#   lmp -in in.npt -var data srtio3.data -var bundle omat_O_Ti_Sr.loup
+# With a Kokkos CUDA build:  lmp -k on g 1 -sf kk -in in.npt ...   (pair_style loupmd/kk, fix npt/kk)
+units           metal
+atom_style      atomic
+atom_modify     map yes
+boundary        p p p
+read_data       ${data}
+
+pair_style      loupmd
+pair_coeff      * * ${bundle} Sr Ti O           # one element per atom type, in type order
+
+timestep        0.001
+velocity        all create 300.0 4928459 mom yes rot no dist gaussian
+fix             1 all npt temp 300.0 300.0 0.1 iso 1.0 1.0 1.0
+
+thermo          200
+thermo_style    custom step temp pe press vol
+run             5000

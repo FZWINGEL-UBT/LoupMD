@@ -60,13 +60,16 @@ def test_a_bundle_is_exported_once_and_found_again(stage):
     others = {
         bundles.ensure_bundle(model, [8, 22], exporter=exporter),
         bundles.ensure_bundle(model, [8, 22, 38], head="omat_pbe", exporter=exporter),
-        bundles.ensure_bundle(model, [8, 22, 38], generic=False, exporter=exporter),
         bundles.ensure_bundle(model, [8, 22, 38], charge=1, spin_multiplicity=2, exporter=exporter),
     }
-    assert len(others | {first}) == 5 and len(_runs(tmp_path)) == 5
+    assert len(others | {first}) == 4 and len(_runs(tmp_path)) == 4
     assert "--head omat_pbe" in _runs(tmp_path)[2]
-    assert "--generic" in _runs(tmp_path)[0] and "--generic" not in _runs(tmp_path)[3]      # generic by default
-    assert "--charge 1 --spin-multiplicity 2" in _runs(tmp_path)[4]
+    assert "--charge 1 --spin-multiplicity 2" in _runs(tmp_path)[3]
+    # `generic` is accepted and ignored (the kernels specialised to MACE-OMAT-0 medium were retired): the same
+    # bundle, and no export
+    for generic in (True, False):
+        assert bundles.ensure_bundle(model, [8, 22, 38], generic=generic, exporter=exporter) == first
+    assert len(_runs(tmp_path)) == 4 and not any("--generic" in run for run in _runs(tmp_path))
     assert bundles.ensure_bundle(model, [8, 22, 38], charge=1.0, spin_multiplicity=2, exporter=exporter) in others
     with pytest.raises(InputError, match="charge must be an integer, got 0.5"):
         bundles.ensure_bundle(model, [8, 22, 38], charge=0.5, exporter=exporter)
@@ -126,18 +129,13 @@ def test_a_miss_without_the_export_extra_names_the_extra(stage, monkeypatch):
     assert bundles.ensure_bundle(model, [8]).is_file()                      # and a cached bundle needs no extra
 
 
-def test_the_kernel_signature_is_found_in_a_checkout_and_in_a_wheel(tmp_path):
-    """The signature header is part of the bundle key. A wheel has no ``src`` beside the package and ships the header
-    in ``_lib``: the key of a checkout and of a wheel of one commit must be the same."""
-    header = bundles._signature_header()
-    assert header == ROOT / "src" / bundles.SIGNATURE_HEADER and header.is_file()
-    assert bundles.EXPORTER_SOURCES[-1] == header
-    package = tmp_path / "site-packages" / "loupmd"
-    (package / "_lib").mkdir(parents=True)
-    shipped = package / "_lib" / bundles.SIGNATURE_HEADER
-    shipped.write_bytes(header.read_bytes())
-    assert bundles._signature_header(package) == shipped
-    assert bundles.exporter_fingerprint([*bundles.EXPORTER_SOURCES[:-1], shipped]) == bundles.exporter_fingerprint()
+def test_the_bundle_key_is_made_of_files_of_the_package_alone():
+    """A wheel has no ``src`` beside the package: everything in the bundle key lies inside the package, so a
+    checkout and a wheel of one commit share their bundles. The product-kernel emitter is part of the key (a
+    bundle carries its products' source)."""
+    package = ROOT / "loupmd"
+    assert all(source.is_file() and package in source.parents for source in bundles.EXPORTER_SOURCES)
+    assert "gen_product.py" in {source.name for source in bundles.EXPORTER_SOURCES}
 
 
 def test_bundles_of_the_old_layout_are_found(stage):

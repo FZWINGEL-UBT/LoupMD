@@ -25,7 +25,7 @@ MANIFEST_SCHEMA = "loupmd.kernel-manifest/1"
 PLUGIN_PATH_VARIABLE = "LOUP_KERNEL_PATH"
 UNSUPPORTED_MARKER = "loupmd-unsupported-kernel:"      # the exporter's last stderr line before exit status 3
 UNSUPPORTED_STATUS = 3
-_HEADERS = ("generated_generic.cuh", "kernels_common.cuh", "kernel_plugin.h")
+_HEADERS = ("generated_generic.cuh", "generated_sh16.cuh", "kernels_common.cuh", "kernel_plugin.h")
 
 
 def manifest_path() -> Path | None:
@@ -121,7 +121,7 @@ def find_nvcc(environ=None) -> str:
 
 
 def kernel_sources() -> tuple:
-    """``(header folder, generator)``: the three headers a plugin includes and ``gen_generic.py``, from a checkout
+    """``(header folder, generator)``: the headers a plugin includes and ``gen_generic.py``, from a checkout
     (``src/``, ``codegen/``) or from an installed package (``_lib/kernel-src/``)."""
     for headers, generator in ((_PACKAGE.parent / "src", _PACKAGE.parent / "codegen" / "gen_generic.py"),
                                (_PACKAGE / "_lib" / "kernel-src", _PACKAGE / "_lib" / "kernel-src" / "gen_generic.py")):

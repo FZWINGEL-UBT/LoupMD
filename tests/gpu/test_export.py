@@ -4,11 +4,9 @@ The exporters set CUDA_VISIBLE_DEVICES for themselves, so they are driven in a s
 """
 from __future__ import annotations
 
-import re
 import subprocess
 import sys
 
-import pytest
 from gpu_support import ROOT
 
 import loupmd
@@ -16,7 +14,7 @@ import loupmd
 DRIVER = """
 import sys
 sys.path.insert(0, {python_dir!r})
-from loupmd.export import omat0 as ex
+from loupmd.export import generic as ex
 {patch}
 ex.export_model({model!r}, [8, 22, 38], ex.Path({out!r}))
 """
@@ -28,30 +26,32 @@ def _export_with(patch: str, model_path: str, tmp_path):
     return proc, (tmp_path / "x.loup").exists()
 
 
-def test_specialised_export_refuses_an_uncertified_spline(model_path, tmp_path):
-    """The interaction-1 spline must be at least as accurate as the float32 network (certificate <= 1)."""
-    proc, written = _export_with(
-        "ex.rspline.fit = lambda *a, **k: (None, {'worst': 1.5})", model_path, tmp_path)
+def test_export_refuses_an_uncertified_spline(model_path, tmp_path):
+    """Each layer's radial spline must be at least as accurate as the float32 network (certificate <= 1)."""
+    patch = "\n".join([
+        "from loupmd.export import _fastmace as fm",
+        "rs = fm.rspline",
+        "fit = rs.fit",
+        "rs.fit = lambda *a, **k: (fit(*a, **k)[0], {'worst': 1.5})",
+        "ex.refine_for_packing = lambda rspline, rad, ch64, ch32, w, pairs, r_max, spl: (spl, None, [0.0])",
+    ])
+    proc, written = _export_with(patch, model_path, tmp_path)
     assert proc.returncode != 0 and not written
-    assert "interaction 1 radial spline: certificate 1.500" in proc.stderr, proc.stderr[-600:]
+    assert "radial spline certificate 1.500 > 1" in proc.stderr, proc.stderr[-600:]
 
 
-def test_specialised_export_refuses_an_uncertified_first_table(model_path, tmp_path):
-    """The interaction-0 table must be at least as accurate as the float32 network (certificate <= 1)."""
-    proc, written = _export_with(
-        "ex.rad.certify = lambda *a, **k: {'worst': 1.5}", model_path, tmp_path)
-    assert proc.returncode != 0 and not written
-    assert "interaction 0 radial table: certificate 1.500" in proc.stderr, proc.stderr[-600:]
-
-
-def test_specialised_bundle_signature_names_the_product_basis(spec_bundle):
-    """The signature ties a bundle to the compiled kernels' factored product programs, not only to the shapes."""
+def test_bundle_carries_each_products_source(sto_bundle):
+    """JIT_DESIGN.md stage 3: every layer's product kernels travel with the bundle, so a signature the library was not
+    built with is compiled at load."""
     from loupmd.export.bundle import read_bundle
 
-    sig = read_bundle(spec_bundle)[0]["kernel_signature"]
-    assert re.search(r":p0=[0-9a-f]{16}:p1=[0-9a-f]{16}$", sig), sig
-    header = (ROOT / "src" / "generated_kernels_signature.h").read_text()
-    assert f'"{sig}"' in header
+    meta, T = read_bundle(sto_bundle)
+    assert meta["arch"] == "generic"
+    sigs = {k[:-len("prod_sig")]: v for k, v in meta.items() if k.endswith(".prod_sig")}
+    assert sigs
+    for prefix, sig in sigs.items():
+        src = T[prefix + "prod_src"].tobytes().decode()
+        assert f"gprod_fwd_{sig}(" in src and f"gprod_bwd_{sig}(" in src
 
 
 def test_bundle_cache_key_follows_the_exporter_sources(tmp_path):
@@ -63,8 +63,7 @@ def test_bundle_cache_key_follows_the_exporter_sources(tmp_path):
     assert first == loupmd.exporter_fingerprint([a, b])
     b.write_text("y = 3\n")
     assert first != loupmd.exporter_fingerprint([a, b])
-    # the real key covers every exporter, the container writer and the compiled kernels' signature
+    # the real key covers every exporter, the product-kernel emitter and the container writer
     names = {p.name for p in loupmd.EXPORTER_SOURCES}
-    assert {"__init__.py", "omat0.py", "generic.py", "polar.py", "bundle.py",
-            "generated_kernels_signature.h"} <= names
+    assert {"__init__.py", "generic.py", "polar.py", "bundle.py", "gen_product.py"} <= names
     assert all(p.is_file() for p in loupmd.EXPORTER_SOURCES)

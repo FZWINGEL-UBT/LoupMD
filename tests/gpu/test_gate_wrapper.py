@@ -1,8 +1,8 @@
 """Runs tools/dev/test_gate.py (3x float32 rule) per supported model family; slow (exports and float64 references).
 
-The default model (LOUPMD_TEST_MODEL or MACE-OMAT-0 medium) also runs the 576-atom cell and every forced kernel
-variant of the specialised path. The other families run on their FastMACE gate sets when their model file is in
-the folder LOUPMD_MODELS names. The acceptance tier: ``pytest tests/gpu -m acceptance``.
+The default model (LOUPMD_TEST_MODEL or MACE-OMAT-0 medium) runs the oxide set with each forced conv forward
+variant. The other families run on their FastMACE gate sets when their model file is in the folder
+LOUPMD_MODELS names. The acceptance tier: ``pytest tests/gpu -m acceptance``.
 """
 from __future__ import annotations
 

@@ -21,6 +21,25 @@ ABI_VERSION = 1  # LOUP_ABI_VERSION of include/loupmd.h this binding is written 
 TILED_STATE_SLOTS = 64  # the integrator state block of loup_tiled_set_state / loup_tiled_get_state
 
 
+class LoupDeviceIO(ctypes.Structure):
+    """include/loupmd.h's LoupDeviceIO: device pointers and strides of the caller's position and force arrays."""
+    _fields_ = [
+        ("n_rows", ctypes.c_int),
+        ("positions", ctypes.c_void_p),
+        ("pos_row_stride", ctypes.c_longlong),
+        ("pos_comp_stride", ctypes.c_longlong),
+        ("ids", ctypes.c_void_p),
+        ("forces", ctypes.c_void_p),
+        ("f_row_stride", ctypes.c_longlong),
+        ("f_comp_stride", ctypes.c_longlong),
+        ("atom_energy", ctypes.c_void_p),
+        ("flags", ctypes.c_int),
+    ]
+
+
+LOUP_IO_ENERGY, LOUP_IO_VIRIAL = 1, 2
+
+
 class LoupMDStats(ctypes.Structure):
     _fields_ = [
         ("step_ms", ctypes.c_double),
@@ -212,7 +231,7 @@ class EngineInfo:
     compute_capability: int   # of the handle's GPU, major * 10 + minor
     n_layers: int
     has_long_range: bool
-    specialised: bool         # the specialised kernels; False on the generic path
+    specialised: bool         # always False: the kernels specialised to MACE-OMAT-0 medium were retired
     n_species: int
     r_max: float              # A
     gpu_name: str
@@ -359,6 +378,15 @@ def _bind(lib):
     lib.loup_debug_csvr_noise.argtypes = [ctypes.c_void_p, ctypes.c_ulonglong, ctypes.c_ulonglong, ctypes.c_int,
                                           ctypes.c_int, _c_double_p, _c_double_p]
     lib.loup_debug_csvr_noise.restype = ctypes.c_int
+    lib.loup_compute_device.argtypes = [ctypes.c_void_p, ctypes.POINTER(LoupDeviceIO), _c_double_p, ctypes.c_void_p,
+                                        _c_double_p, _c_double_p]
+    lib.loup_compute_device.restype = ctypes.c_int
+    lib.loup_cutoff.argtypes = [ctypes.c_void_p]
+    lib.loup_cutoff.restype = ctypes.c_double
+    lib.loup_species.argtypes = [ctypes.c_void_p, _c_int_p, ctypes.c_int]
+    lib.loup_species.restype = ctypes.c_int
+    lib.loup_set_evaluate_ahead.argtypes = [ctypes.c_void_p, ctypes.c_int]
+    lib.loup_set_evaluate_ahead.restype = ctypes.c_int
     for name in ("loup_set_system", "loup_evaluate", "loup_set_state", "loup_run_nve", "loup_run_langevin",
                  "loup_get_state", "loup_profile_force", "loup_get_info", "loup_run", "loup_export_state",
                  "loup_import_state", "loup_plan_memory", "loup_read_thermo", "loup_evaluate2"):
@@ -449,6 +477,43 @@ class LoupEngine:
         self._check(self._lib.loup_evaluate(self._h, _ptr(pos), _ptr(cel), 1 if compute_stress else 0,
                                             ctypes.byref(energy), _ptr(forces), _ptr(stress)), "loup_evaluate")
         return float(energy.value), forces, stress
+
+    def set_evaluate_ahead(self, on: bool = True) -> None:
+        """Queue each next ``evaluate`` call's force pass ahead of the call (``loup_set_evaluate_ahead``). Only for a
+        process whose sole GPU work between ``evaluate`` calls is this engine's: with it on, other GPU work in
+        between (another engine being set up, PyTorch, a device-wide synchronisation) can wait forever."""
+        self._check(self._lib.loup_set_evaluate_ahead(self._h, 1 if on else 0), "loup_set_evaluate_ahead")
+
+    def cutoff(self) -> float:
+        """The model's cutoff radius in A."""
+        return float(self._lib.loup_cutoff(self._h))
+
+    def species(self) -> list:
+        """The atomic numbers of the bundle's species."""
+        zs = (ctypes.c_int * 128)()
+        n = self._lib.loup_species(self._h, zs, 128)
+        return [int(zs[i]) for i in range(min(n, 128))]
+
+    def compute_device(self, positions_ptr: int, cell, forces_ptr: int = 0, ids_ptr: int = 0, pos_strides=(3, 1),
+                       f_strides=(3, 1), stream: int = 0, energy: bool = True, virial: bool = False):
+        """One force evaluation on arrays that live on the GPU (``loup_compute_device``; the call of the LAMMPS
+        Kokkos pair style).
+
+        ``positions_ptr`` / ``forces_ptr`` / ``ids_ptr`` are device addresses (e.g. ``tensor.data_ptr()`` of CUDA
+        float64 / int32 tensors of this engine's device); the strides are (row, component) in elements. Forces are
+        added to the caller's array. ``stream`` is a ``cudaStream_t`` as an integer (0: the default stream).
+        Returns (energy in eV or None, virial [xx, yy, zz, xy, xz, yz] in eV or None); without ``energy`` and
+        ``virial`` the call returns before the forces are there, and work queued on ``stream`` afterwards waits
+        for them."""
+        cel = _array(cell, (3, 3), "cell")
+        io = LoupDeviceIO(self._n, positions_ptr, pos_strides[0], pos_strides[1], ids_ptr or None,
+                          forces_ptr or None, f_strides[0], f_strides[1], None,
+                          (LOUP_IO_ENERGY if energy else 0) | (LOUP_IO_VIRIAL if virial else 0))
+        e = ctypes.c_double()
+        v = (ctypes.c_double * 6)()
+        self._check(self._lib.loup_compute_device(self._h, ctypes.byref(io), _ptr(cel), stream or None,
+                                                  ctypes.byref(e), v), "loup_compute_device")
+        return (float(e.value) if energy else None), (np.array(v[:]) if virial else None)
 
     def evaluate_tiled(self, atomic_numbers, positions, cell, receivers: int, skin: float = 0.5,
                        compute_stress: bool = True):

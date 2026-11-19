@@ -149,6 +149,11 @@ __device__ __forceinline__ unsigned neighbor_group_mask() {
 // Walks the scan-order bins b = first, first + step, ... of atom i's (2rx+1)(2ry+1)(2rz+1) neighbourhood and calls
 // visit(b, slot, j, r, ix, iy, iz) for every candidate within the list radius (same float pre-test / double band as the
 // one-thread kernels).
+// S120: a bin that cannot hold a candidate is skipped. Along cell axis a the atom sits at u_a (in bin units) inside its
+// own bin, so a bin at offset o lies at least L_a = (o > 0 ? o - u_a : o < 0 ? u_a - o - 1 : 0) bin heights h_a / n_a
+// away (h_a the spacing of the lattice planes): the box is at least max_a L_a away, and sqrt(sum_a L_a^2) in an
+// orthogonal cell. Bins whose bound reaches r_hi (the float pre-test's radius, r_list plus its margin) hold no atom
+// within r_list, so the rows (and their order) are unchanged.
 template <class Visit>
 __device__ __forceinline__ void scan_neighbor_bins(
     int i, int first, int step, const CellMat64& cell, int nx, int ny, int nz, int rx, int ry, int rz, double r_list2,
@@ -160,9 +165,29 @@ __device__ __forceinline__ void scan_neighbor_bins(
     const int rem = bid - bxi * (ny * nz);
     const int byi = rem / nz;
     const int bzi = rem - byi * nz;
+    // All in float (sm_120's FP64 rate is 1/64): the rounding of u_a and of the bound (~1e-5 A at 100 A positions) is
+    // far inside r_hi's margin (>= 0.01 A).
+    const int nb[3] = {nx, ny, nz}, bi[3] = {bxi, byi, bzi};
+    float u[3], bh[3];
+    #pragma unroll
+    for (int a = 0; a < 3; ++a) {
+        // column a of inv: f_a = pos . (inv[a], inv[3 + a], inv[6 + a])
+        const float v0 = (float)cell.inv[a], v1 = (float)cell.inv[3 + a], v2 = (float)cell.inv[6 + a];
+        u[a] = fmaf(fxi, v0, fmaf(fyi, v1, fzi * v2)) * (float)nb[a] - (float)bi[a];
+        bh[a] = 1.0f / ((float)nb[a] * sqrtf(fmaf(v0, v0, fmaf(v1, v1, v2 * v2))));
+    }
+    const bool ortho = cell.c[1] == 0.0 && cell.c[2] == 0.0 && cell.c[3] == 0.0 && cell.c[5] == 0.0 &&
+                       cell.c[6] == 0.0 && cell.c[7] == 0.0;
+    auto gap = [](int o, float ua) { return o > 0 ? (float)o - ua : (o < 0 ? ua - (float)(o + 1) : 0.0f); };
     const int wy = 2 * ry + 1, wz = 2 * rz + 1, nscan = (2 * rx + 1) * wy * wz;
     for (int b = first; b < nscan; b += step) {
         const int qx = b / (wy * wz), qr = b - qx * (wy * wz), qy = qr / wz, qz = qr - qy * wz;
+        {
+            const float lx = gap(qx - rx, u[0]) * bh[0], ly = gap(qy - ry, u[1]) * bh[1],
+                        lz = gap(qz - rz, u[2]) * bh[2];
+            const float lb2 = ortho ? lx * lx + ly * ly + lz * lz : fmaxf(lx * lx, fmaxf(ly * ly, lz * lz));
+            if (lb2 >= r_hi2_f32) continue;
+        }
         const int raw_x = bxi + qx - rx, raw_y = byi + qy - ry, raw_z = bzi + qz - rz;
         const int ix = floor_div(raw_x, nx), iy = floor_div(raw_y, ny), iz = floor_div(raw_z, nz);
         const int bxj = raw_x - ix * nx, byj = raw_y - iy * ny, bzj = raw_z - iz * nz;
@@ -485,7 +510,7 @@ __global__ void max_degree_kernel(int N, const int* __restrict__ deg, int* __res
 // as each edge's index is its fill position -- with a bitonic network over the row padded to a power of two, gathers
 // the sorted edges (each integer image shift turned into its Cartesian offset shift @ cell in float64, so the per-step
 // edge-vector kernel does six float64 additions instead of the full shift-cell product) and flags a row whose sender
-// species decreases (the receiver-owned tabled_outer_sum0_forward_kernel's contract). The network runs in shared
+// species decreases (the contract of layer 0's receiver-owned first_fwd_kernel). The network runs in shared
 // memory sized for the longest row, or (kGlobal, rows too long for it) in `scratch` at 2 x the row start (a row padded
 // to P < 2L entries stays inside its own 2L slots). Unlike cub::DeviceSegmentedSort, which reads its segment partition
 // back to the host, it needs no host round trip.
@@ -604,7 +629,6 @@ __global__ void scatter_active_edges_kernel(
     const float4* __restrict__ tmp_vec_len,
     int* __restrict__ act_senders,
     int* __restrict__ act_receivers,
-    int* __restrict__ act_pairs,
     float4* __restrict__ act_vec_len,
     int* __restrict__ act_slab,
     float2* __restrict__ act_t_sx
@@ -629,13 +653,11 @@ __global__ void scatter_active_edges_kernel(
         if (act) {
             const int dst = out_cursor + __popc(mask & ((1u << lane) - 1u));
             const int snd = senders[e];
-            const int p = sym_pair(species[snd], sp_i, S);
-            const int p_slab = pair_sym ? p : (species[snd] * S + sp_i);
+            const int p_slab = table_pair(pair_sym, species[snd], sp_i, S);
             act_senders[dst] = snd;
             act_receivers[dst] = i;
-            act_pairs[dst] = p;
             act_vec_len[dst] = vl;
-            // Fused spline locator (shared by spline_forward_inter1, wprime_backward_inter1, and generic preloc convs)
+            // Fused spline locator (the PRELOC conv kernels' table slab and t)
             int iv;
             float t, sx_inv;
             locate_spline(grid, vl.w, iv, t, sx_inv);

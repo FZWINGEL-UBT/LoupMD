@@ -43,14 +43,20 @@ The `3x` cubin is CUTLASS's 3xTF32 without the FP16 instruction.
 
 Written by the generators in `codegen/`; not edited by hand. They hold kernel source specialised to model
 architectures (channel counts, irreps, tensor-product paths, coupling coefficients). They hold no model weights:
-those are read from a `.loup` bundle at run time.
+those are read from a `.loup` bundle at run time. A bundle also carries the source text of its model's product
+kernels, as `loupmd/export/gen_product.py` emits it (the text of `src/generated_generic.cu` for that model), which
+the library compiles at load when it was not built with them (JIT_DESIGN.md stage 3).
+
+The kernels specialised to MACE-OMAT-0 medium (`src/generated_kernels.cuh`, `codegen/gen_kernels.py`, with a
+streaming schedule adapted from OpenEquivariance pull request 223) were retired with JIT_DESIGN.md stage 5 and are
+no longer in the tree; version 0.0.1 shipped them.
 
 | File | Generator | Made with |
 | --- | --- | --- |
-| `src/generated_kernels.cuh` | `codegen/gen_kernels.py`, from the architecture of `mace-omat-0-medium.model` | FastMACE's factored symmetric contraction (`fastmace/kernels/cuda/sc_factored.py`, `sc_generated.py`; MIT, © 2026 Fabian Zwingel) and the streaming schedule of FastMACE's `fastmace/kernels/oeq_streaming/` (`schedule.py`, adapted from OpenEquivariance pull request 223 by P. Fuchs, commit `ef051c3f9efa2d1daf74cfbe3beaad152235f47d`; BSD-3-Clause, © 2025 The Regents of the University of California, through Lawrence Berkeley National Laboratory). The generator takes the schedule from that module and emits the kernel text itself; MACE's `convert_e3nn_cueq` (MIT, © 2022 ACEsuit/mace) and e3nn (MIT) supply the coupling coefficients |
-| `src/generated_kernels_signature.h` | `codegen/gen_kernels.py` | the signature string that bundles of the specialised path must carry |
-| `src/generated_generic.cu` | `codegen/gen_generic.py`, from the architectures of the model files found at generation time | FastMACE's factored symmetric contraction (as above); e3nn's Wigner 3j coefficients; sympy for the spherical-harmonic gradient |
-| `src/generated_generic.cuh` | `codegen/gen_generic.py` | as above |
+| `src/generated_generic.cu` | `codegen/gen_generic.py` with `loupmd/export/gen_product.py`, from the architectures of the model files found at generation time | the product kernels: FastMACE's factored symmetric contraction (`fastmace/kernels/cuda/sc_factored.py`, `sc_generated.py`; MIT, © 2026 Fabian Zwingel), with MACE's `convert_e3nn_cueq` (MIT, © 2022 ACEsuit/mace) supplying the contraction's polynomial; the kernels' launchers |
+| `src/generated_generic.cuh` | `codegen/gen_generic.py` | the declarations of the above; no third-party content |
+| `src/generated_conv.cuh` | `codegen/gen_generic.py` | the conv (tensor-product) kernels: e3nn's Wigner 3j coefficients (MIT). Device code only: the library also compiles it at run time (NVRTC, `src/jit.cu`) |
+| `src/generated_sh16.cuh` | `codegen/gen_generic.py` | the spherical harmonics' gradient, derived with sympy (BSD-3-Clause; only its output is here). Device code only, also compiled at run time |
 | `src/generated_generic_manifest.json` | `codegen/gen_generic.py` | the signatures of the product kernels in `src/generated_generic.cu` and the model files each came from; no third-party content |
 
 ## Vendored from FastMACE (`loupmd/export/_vendor/`)

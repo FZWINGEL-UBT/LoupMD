@@ -4,6 +4,9 @@
 #include <cmath>
 #include <cstring>
 #include <cstdlib>
+#include <map>
+#include <memory>
+#include <mutex>
 #include <stdexcept>
 
 #include <dlfcn.h>
@@ -15,6 +18,9 @@
 #include "kernel_plugin.h"
 #include "model.hpp"
 #include "polar.hpp"
+#include "jit.hpp"
+#include "kernel_ir.hpp"
+#include "layer0_kernels.cuh"
 
 namespace loup {
 
@@ -56,16 +62,14 @@ static const GProdKernels* find_plugin_gprod(const std::string& sig, std::string
     return nullptr;
 }
 
-static const GProdKernels* find_product_kernels(const std::string& sig) {
+// The library's own kernels of a signature, else a kernel plugin's; null, with `why` no plugin was found, when
+// neither exists (the caller then turns to the bundle's source, JIT_DESIGN.md stage 3).
+static const GProdKernels* find_product_kernels(const std::string& sig, std::string& why) {
     const char* hidden = std::getenv("LOUP_DEBUG_HIDE_KERNEL");
     if (!(hidden && sig == hidden)) {
         if (const GProdKernels* k = find_gprod(sig.c_str())) return k;
     }
-    std::string why;
-    if (const GProdKernels* k = find_plugin_gprod(sig, why)) return k;
-    throw std::runtime_error("generic bundle: no compiled product kernel for signature " + sig +
-                             ": this library was not built with this model's kernels, and " + why +
-                             ". `loupmd build-kernels MODEL` builds them (needs nvcc)");
+    return find_plugin_gprod(sig, why);
 }
 
 // ------------------------------------------------------------------------------------------------- layer state
@@ -75,17 +79,38 @@ struct GenericLayer {
     int lmax_in = 0, lmax_x = 0, lmax_out = 0;
     int C_in = 0, C_x = 0, C_msg = 0, C_out = 0;
     int n_paths = 0, n_l3[4] = {0, 0, 0, 0};
+    // pair_sym: radial tables per unordered pair (1), per ordered pair (0), or one table for every pair (2, S116: the
+    // bundle's per-pair tables are byte-identical, as in the MACE-OFF bundles; loup::table_pair)
     int intervals = 0, Q1 = 0, pair_sym = 0;
     int first_hidden = 0, J = 0, K0 = 0;  // layer 0 outer sum over J columns; K0 = S * (J - 1) padded to 16
+    int Jt = 0;  // S128: layer 0's table row stride (float4): J, or J - 1 without the density column (kinds 0 / 1)
     float* C0[4] = {};                    // [K0, lin_cols] (per species when skip_folded)
     float* S0[4] = {};                    // [N, 2l+1, K0] (the backward reuses it for dS0)
     int has_sc = 0, sc_species = 0, readout = -1, ro_H = 0, prod_species = 0, prod_segw = 0;
     int skip_folded = 0, ro_folded = 0;
     int fwd_var = 0;           // S64: conv forward variant (launch_conv_fwd; tune_conv_variants picks it per system)
     bool last_preloc = false;  // S64: the preloc flag of the last recorded conv forward (for the re-launch)
+    // S125: W_lin_1..3 exactly zero (certified at load), so lin_1..3 are exactly zero: the pruned lx 1 conv kernels
+    // (gconv_*_L1s, the output-degree-0 paths only) run, and the l >= 1 projections are skipped in both directions
+    bool conv_prune = false;
+    // S130 / S132: compact live channels of a kind-1 layer (compact_layout, certified at load): lin_cols[l] are the
+    // compact projection widths (degree 0: the kept channels, angular first; degree l >= 1: only its live columns, d_pos
+    // mapping each angular position to its column there), n_ang the angular channels, kept the live ones; the terminal
+    // layer's fused product + readout kernel gprod_ro1c and a non-terminal layer's gprod_fwdc / bwdc (through d_order,
+    // compact position -> channel) run on them (LOUP_LIN_COMPACT=0: dense)
+    bool lin_compact = false;
+    int n_ang = 0, kept = 0;
+    int *d_order = nullptr, *d_pos = nullptr;
     int lin_cols[4] = {0, 0, 0, 0};
     int sc_has[3] = {0, 0, 0};
     SplineGrid grid{};
+    // JIT_DESIGN.md stage 1 (LOUP_JIT=1): layer 0's kernels compiled at load with this layer's constants (kernel_ir.hpp);
+    // null: the ahead-of-time kernels
+    const void* jit_fwd = nullptr;
+    const void* jit_bwd_edge[2] = {nullptr, nullptr};  // [stress]
+    // stage 2: the conv kernels of a width without a built-in instance (the launchers' run-time-width branches)
+    ConvJit jit_conv;
+    bool jit_conv_on = false;
     float alpha = 1.0f, beta = 0.0f, gate_cs = 1.0f, gate_cg = 1.0f, ro_act_c = 1.0f;
     const GProdKernels* prod = nullptr;
     // weights (device)
@@ -121,6 +146,17 @@ struct GenericLayer {
     std::vector<FoldTarget> fold[3];
     // S59 (layer 0): [S, lin_cols[0]] species table of the residual (embedding W_up[0] W_res[0]), or nullptr
     float* res0_table = nullptr;
+    // Long-range hidden fold (GenericModel::setup_lr_fold): hfold[l], degree l of hout is never formed: hout[l]
+    // aliases y[l] and dhout[l] aliases dy[l] (in the zero slab), and every consumer's weight (the next layer's W_up /
+    // W_sc, the long-range mixer and source) is composed at load with W_p[l] and the skips in between. x_extra /
+    // sc_extra: further terms of this layer's x[l] / skip sum, y_src[l] W from an earlier folded layer src (backward:
+    // dy_src[l] += dx[l] W^T / dhout[l] W^T).
+    bool hfold[3] = {false, false, false};
+    struct YTerm {
+        int src = 0;
+        float* W = nullptr;
+    };
+    std::vector<YTerm> x_extra[3], sc_extra[3];
 
     ~GenericLayer() {
         for (void* p : weights) cudaFree(p);
@@ -140,6 +176,44 @@ T* upload(std::vector<void*>& owner, const std::vector<T>& host) {
 
 inline int dimL(int l) { return 2 * l + 1; }
 
+// JIT_DESIGN.md stage 3: a product's kernels compiled from the bundle's source, one table per (signature, source) for
+// the process (the modules are never unloaded, jit.hpp). Null on failure, `err` says why.
+const GProdKernels* jit_product(const std::string& sig, int lmax_out, int segw, const std::string& src,
+                                std::string* err) {
+    struct Entry {
+        std::string sig;
+        GProdKernels k;
+    };
+    static std::mutex mu;
+    static std::map<std::string, std::unique_ptr<Entry>> made;
+    const std::string key = sig + ":" + std::to_string(std::hash<std::string>{}(src));
+    std::lock_guard<std::mutex> lk(mu);
+    if (auto it = made.find(key); it != made.end()) return &it->second->k;
+    const std::vector<std::string> names = product_jit_names(sig, lmax_out);
+    const std::vector<const void*> h = jit::build("prod", product_jit_source(src), jit::embedded_headers(), names, err);
+    if (h.size() != names.size()) return nullptr;
+    auto e = std::make_unique<Entry>();
+    e->sig = sig;
+    GProdKernels& k = e->k;
+    k = GProdKernels{};
+    k.sig = e->sig.c_str();
+    k.lmax_out = lmax_out;
+    k.segments_w = segw;
+    size_t i = 0;
+    k.fwd = h[i++];
+    k.bwd = h[i++];
+    if (lmax_out == 0) {
+        for (const void** f : {&k.ro1_128, &k.ro1_256, &k.ro1_512, &k.ro1s_128, &k.ro1s_256, &k.ro1s_512, &k.ro1c_128,
+                               &k.ro1c_256, &k.ro1c_512})
+            *f = h[i++];
+    }
+    k.fwdc = h[i++];
+    k.bwdc = h[i++];
+    const GProdKernels* out = &k;
+    made.emplace(key, std::move(e));
+    return out;
+}
+
 // ------------------------------------------------------------------------------------------------- kernels
 __global__ void gather_rows_kernel(int N, int C, const int* __restrict__ sp, const float* __restrict__ table,
                                    float* __restrict__ out) {
@@ -158,13 +232,14 @@ __device__ __forceinline__ float dsilu_f(float x) {
 
 // Nonlinear block: pre_l = lin_l * s + res_l (s = 1 / (beta D + alpha)), then the gate: out_0 = cs silu(pre_0[:C]),
 // out_l = cs_g sigmoid(pre_0[l C:(l+1) C]) * pre_l (l = 1..3). One block per atom, one thread per channel. With res0_sp,
-// res0 is the S59 [S, 4 C] species table and atom a reads row res0_sp[a] (no per-atom copy).
+// res0 is the S59 [S, 4 C] species table and atom a reads row res0_sp[a] (no per-atom copy). Degrees l with bit l of
+// `fused` set are skipped (their projection's epilogue wrote out_l: sgemm128_gate, forward).
 __global__ void gate_fwd_kernel(int N, int C, int lx, const float* __restrict__ D, float alpha, float beta, float cs,
                                 float cg, const float* __restrict__ lin0, const float* __restrict__ lin1,
                                 const float* __restrict__ lin2, const float* __restrict__ lin3,
                                 const float* __restrict__ res0, const int* __restrict__ res0_sp,
                                 const float* __restrict__ res1, const float* __restrict__ res2, float* __restrict__ o0,
-                                float* __restrict__ o1, float* __restrict__ o2, float* __restrict__ o3) {
+                                float* __restrict__ o1, float* __restrict__ o2, float* __restrict__ o3, unsigned fused) {
     const int a = blockIdx.x, c = threadIdx.x;
     if (a >= N) return;
     const float s = 1.0f / (D[a] * beta + alpha);
@@ -176,6 +251,7 @@ __global__ void gate_fwd_kernel(int N, int C, int lx, const float* __restrict__ 
     float* outs[3] = {o1, o2, o3};
     #pragma unroll
     for (int l = 1; l <= 3; ++l) {
+        if (fused >> l & 1u) continue;
         const float g = cg * sigmoid_f(pre0(l * C + c));
         const float* li = lins[l - 1];
         const float* re = (l <= lx) ? ress[l - 1] : nullptr;
@@ -188,7 +264,10 @@ __global__ void gate_fwd_kernel(int N, int C, int lx, const float* __restrict__ 
 }
 
 // Reverse of gate_fwd: dpre_l (the gradient of pre_l, also the gradient of res_l), dlin_l = dpre_l * s and
-// dD += sum dpre . lin * (-beta s^2) (one atomic per warp). res0 / res0_sp as in gate_fwd.
+// dD += sum dpre . lin * (-beta s^2) (one atomic per warp). res0 / res0_sp as in gate_fwd. Degrees l with bit l of
+// `fused` set are skipped (their W_2^T GEMM ran sgemm128_gate, which did their share). Degrees with bit l of `vform`
+// (residual-free, their forward fused: lin_l is never stored) pass the saved out_l = v as lin_l: with q = sum dgout v,
+// d pre_0[l C + c] = (1 - sigmoid) q and dD += -beta s q (the same terms; v = g (lin s)).
 __global__ void gate_bwd_kernel(int N, int C, int lx, const float* __restrict__ D, float alpha, float beta, float cs,
                                 float cg, const float* __restrict__ lin0, const float* __restrict__ lin1,
                                 const float* __restrict__ lin2, const float* __restrict__ lin3,
@@ -197,14 +276,15 @@ __global__ void gate_bwd_kernel(int N, int C, int lx, const float* __restrict__ 
                                 const float* __restrict__ g0, const float* __restrict__ g1, const float* __restrict__ g2,
                                 const float* __restrict__ g3, float* __restrict__ dp0, float* __restrict__ dp1,
                                 float* __restrict__ dp2, float* __restrict__ dl0, float* __restrict__ dl1,
-                                float* __restrict__ dl2, float* __restrict__ dl3, float* __restrict__ dD) {
+                                float* __restrict__ dl2, float* __restrict__ dl3, float* __restrict__ dD,
+                                unsigned fused, unsigned vform) {
     const int a = blockIdx.x, c = threadIdx.x;
     if (a >= N) return;
     const float s = 1.0f / (D[a] * beta + alpha);
     const int64_t r0 = (int64_t)a * 4 * C, q0 = res0_sp ? (int64_t)res0_sp[a] * 4 * C : r0;
     auto pre0 = [&](int col) { return lin0[r0 + col] * s + (res0 ? res0[q0 + col] : 0.0f); };
-    float acc = 0.0f;  // sum dpre * lin
-    {
+    float acc = 0.0f, accq = 0.0f;  // sum dpre * lin; sum dgout * v (vform degrees)
+    if (!(fused & 1u)) {
         const float p = pre0(c);
         const float d = g0[(int64_t)a * C + c] * cs * dsilu_f(p);
         if (dp0) dp0[r0 + c] = d;
@@ -218,31 +298,48 @@ __global__ void gate_bwd_kernel(int N, int C, int lx, const float* __restrict__ 
     float* dls[3] = {dl1, dl2, dl3};
     #pragma unroll
     for (int l = 1; l <= 3; ++l) {
+        if (fused >> l & 1u) continue;
         const float gp = pre0(l * C + c);
         const float sg = sigmoid_f(gp);
         const float g = cg * sg;
         const float* li = lins[l - 1];
         const float* re = (l <= lx) ? ress[l - 1] : nullptr;
         float* dpl = (l <= lx && l <= 2) ? dps[l - 1] : nullptr;
-        float dg = 0.0f;
-        for (int m = 0; m < 2 * l + 1; ++m) {
-            const int64_t idx = ((int64_t)a * (2 * l + 1) + m) * C + c;
-            const float p = li[idx] * s + (re ? re[idx] : 0.0f);
-            const float go = gs[l - 1][idx];
-            dg = fmaf(go, p, dg);
-            const float d = go * g;
-            if (dpl) dpl[idx] = d;
-            dls[l - 1][idx] = d * s;
-            acc = fmaf(d, li[idx], acc);
+        float dgp;
+        if (vform >> l & 1u) {
+            float q = 0.0f;
+            for (int m = 0; m < 2 * l + 1; ++m) {
+                const int64_t idx = ((int64_t)a * (2 * l + 1) + m) * C + c;
+                const float go = gs[l - 1][idx];
+                q = fmaf(go, li[idx], q);
+                dls[l - 1][idx] = go * g * s;
+            }
+            dgp = (1.0f - sg) * q;
+            accq += q;
+        } else {
+            float dg = 0.0f;
+            for (int m = 0; m < 2 * l + 1; ++m) {
+                const int64_t idx = ((int64_t)a * (2 * l + 1) + m) * C + c;
+                const float p = li[idx] * s + (re ? re[idx] : 0.0f);
+                const float go = gs[l - 1][idx];
+                dg = fmaf(go, p, dg);
+                const float d = go * g;
+                if (dpl) dpl[idx] = d;
+                dls[l - 1][idx] = d * s;
+                acc = fmaf(d, li[idx], acc);
+            }
+            dgp = dg * cg * sg * (1.0f - sg);
         }
-        const float dgp = dg * cg * sg * (1.0f - sg);
         if (dp0) dp0[r0 + l * C + c] = dgp;
         dl0[r0 + l * C + c] = dgp * s;
         acc = fmaf(dgp, lin0[r0 + l * C + c], acc);
     }
     #pragma unroll
-    for (int off = 16; off > 0; off >>= 1) acc += __shfl_xor_sync(0xffffffffu, acc, off);
-    if ((c & 31) == 0) atomicAdd(dD + a, -beta * s * s * acc);
+    for (int off = 16; off > 0; off >>= 1) {
+        acc += __shfl_xor_sync(0xffffffffu, acc, off);
+        accq += __shfl_xor_sync(0xffffffffu, accq, off);
+    }
+    if ((c & 31) == 0) atomicAdd(dD + a, -beta * s * s * acc - beta * s * accq);
 }
 
 // E += sum_a c[species[a]] (S73: a folded linear readout's share of the species-only layer-0 skip).
@@ -315,34 +412,6 @@ __global__ void ro_act_bwd_kernel(int64_t n, float c, const float* __restrict__ 
     if (i < n) d[i] *= c * dsilu_f(pre[i]);
 }
 
-// ZBL per edge (ordered pair tables), float32 as in MACE's float32 model (the gate's yardstick; FP64 runs at 1/64
-// rate on GeForce parts). Callers skip edges beyond the largest ZBL cutoff (ZblParams::r_max, 0 without ZBL)
-// before reading the tables. Returns false outside the pair's cutoff; otherwise en = the pair energy, dE/dvec = g vec.
-struct ZblParams {
-    const float *rc = nullptr, *inv_a = nullptr, *pref = nullptr;
-    float c0 = 0, c1 = 0, c2 = 0, c3 = 0, p = 5.0f, r_max = 0.0f;
-};
-__device__ __forceinline__ bool zbl_pair(const ZblParams& z, int p, float r, float& en, float& g) {
-    const float rc = z.rc[p];
-    if (!(r > 0.0f && r < rc)) return false;
-    const float inv_a = z.inv_a[p], pref = z.pref[p], zp = z.p;
-    const float u = r * inv_a;
-    const float e0 = expf(-3.2f * u), e1 = expf(-0.9423f * u), e2 = expf(-0.4028f * u), e3 = expf(-0.2016f * u);
-    const float phi = z.c0 * e0 + z.c1 * e1 + z.c2 * e2 + z.c3 * e3;
-    const float dphi = -inv_a * (3.2f * z.c0 * e0 + 0.9423f * z.c1 * e1 + 0.4028f * z.c2 * e2 + 0.2016f * z.c3 * e3);
-    const float inv_r = 1.0f / r;
-    const float vz = pref * inv_r * phi;
-    const float dv = pref * inv_r * (dphi - phi * inv_r);
-    const float sr = r / rc;
-    const float s2 = sr * sr;
-    const float sp = zp == 5.0f ? s2 * s2 * sr : powf(sr, zp);
-    const float env = 1.0f - ((zp + 1.0f) * (zp + 2.0f) * 0.5f) * sp + (zp * (zp + 2.0f)) * sp * sr -
-                      (zp * (zp + 1.0f) * 0.5f) * sp * sr * sr;
-    const float denv = -(zp * (zp + 1.0f) * (zp + 2.0f) * 0.5f) * (sp / sr) * (1.0f - sr) * (1.0f - sr) / rc;
-    en = vz * env;
-    g = (dv * env + vz * denv) * inv_r;
-    return true;
-}
 
 // The ZBL pair energy alone, per edge as assemble_forces_kernel and first_bwd_edge_kernel add it in the full pass,
 // for the energy-only pass.
@@ -421,103 +490,6 @@ __global__ void assemble_forces_kernel(const int* __restrict__ E_dev, int S, con
     }
 }
 
-// Layer 0 (input = species embedding): S0_l[a][m][s (J-1) + j] = sum over the active edges of receiver a whose sender
-// has species s of col_j(r) Y_lm, with col the radial chain's columns [h c, c] (j < J - 1); column J - 1 is the edge
-// density, summed into D. One block per receiver, one thread per column j < J - 1 (S105: the density column is summed
-// by warp 0, one lane per staged edge, instead of by a warp of its own); a receiver's edges are grouped by ascending
-// sender species (the neighbour list's contract), so each species slot is written once (zeros if it has no edge).
-__global__ void __launch_bounds__(256) first_fwd_kernel(
-    int N, int S, int I, int J, int K0, SplineGrid grid, int sh_perm, int pair_sym,
-    const int* __restrict__ row_ptr, const int* __restrict__ senders, const float4* __restrict__ vec_len,
-    const int* __restrict__ species, const float4* __restrict__ table,
-    float* __restrict__ s0, float* __restrict__ s1, float* __restrict__ s2, float* __restrict__ s3, float* __restrict__ D) {
-    // s_ee alternates by species parity: with no edge of species s there is no barrier between this iteration's read
-    // and thread 0's write for s + 1, but the next barrier bounds thread 0's lead to one slot.
-    __shared__ int s_iv[32], s_ee[2];
-    __shared__ float s_t[32];
-    __shared__ __align__(16) float s_sh[32 * 16];
-    const int a = blockIdx.x, tid = threadIdx.x;
-    if (a >= N) return;
-    const int Jp = J - 1, K = S * Jp, sa = species[a];
-    const int e_end = row_ptr[a + 1];
-    int e_cur = row_ptr[a];
-    float dsum = 0.0f;  // S105: warp 0 sums the density column in edge order (the order of the former density thread)
-    for (int s = 0; s < S; ++s) {
-        if (tid < 32) {
-            int p = e_cur;
-            while (p < e_end) {
-                const int idx = p + tid;
-                const bool ok = (idx < e_end) && (species[senders[idx]] == s);
-                const unsigned mask = __ballot_sync(0xffffffffu, ok);
-                if (mask != 0xffffffffu) { p += __ffs(~mask) - 1; break; }
-                p += 32;
-            }
-            if (p > e_end) p = e_end;
-            if (tid == 0) s_ee[s & 1] = p;
-        }
-        __syncthreads();
-        const int e_s_end = s_ee[s & 1];
-        float acc[16];
-        #pragma unroll
-        for (int m = 0; m < 16; ++m) acc[m] = 0.0f;
-        const int pr = pair_sym ? loup::sym_pair(s, sa, S) : s * S + sa;
-        for (int base = e_cur; base < e_s_end; base += 32) {
-            const int cnt = (e_s_end - base < 32) ? (e_s_end - base) : 32;
-            if (tid < cnt) {
-                const float4 vl = __ldg(vec_len + base + tid);
-                int iv; float t, sxi;
-                locate_spline(grid, vl.w, iv, t, sxi);
-                s_iv[tid] = iv;
-                s_t[tid] = t;
-            }
-            if (tid >= 32 && tid - 32 < cnt) {
-                const float4 vl = __ldg(vec_len + base + (tid - 32));
-                if (sh_perm) loup::edge_sh16(vl.y, vl.z, vl.x, vl.w, reinterpret_cast<float4*>(s_sh + (tid - 32) * 16));
-                else         loup::edge_sh16(vl.x, vl.y, vl.z, vl.w, reinterpret_cast<float4*>(s_sh + (tid - 32) * 16));
-            }
-            __syncthreads();
-            float dv = 0.0f;
-            if (tid < cnt) {
-                const float4 dc = __ldg(table + ((int64_t)pr * I + s_iv[tid]) * J + Jp);
-                const float t = s_t[tid];
-                dv = fmaf(t, fmaf(t, fmaf(t, dc.w, dc.z), dc.y), dc.x);
-            }
-            if (tid < Jp) {
-                for (int k = 0; k < cnt; ++k) {
-                    const float4 cf = __ldg(table + ((int64_t)pr * I + s_iv[k]) * J + tid);
-                    const float t = s_t[k];
-                    const float v = fmaf(t, fmaf(t, fmaf(t, cf.w, cf.z), cf.y), cf.x);
-                    const float* sh = s_sh + k * 16;
-                    #pragma unroll
-                    for (int m = 0; m < 16; ++m) acc[m] = fmaf(v, sh[m], acc[m]);
-                }
-            }
-            if (tid < 32)
-                for (int k = 0; k < cnt; ++k) dsum += __shfl_sync(0xffffffffu, dv, k);
-            __syncthreads();
-        }
-        if (tid < Jp) {
-            s0[(int64_t)a * K0 + s * Jp + tid] = acc[0];
-            #pragma unroll
-            for (int m = 0; m < 3; ++m) s1[((int64_t)a * 3 + m) * K0 + s * Jp + tid] = acc[1 + m];
-            #pragma unroll
-            for (int m = 0; m < 5; ++m) s2[((int64_t)a * 5 + m) * K0 + s * Jp + tid] = acc[4 + m];
-            #pragma unroll
-            for (int m = 0; m < 7; ++m) s3[((int64_t)a * 7 + m) * K0 + s * Jp + tid] = acc[9 + m];
-        }
-        e_cur = e_s_end;
-    }
-    if (tid < K0 - K) {
-        s0[(int64_t)a * K0 + K + tid] = 0.0f;
-        #pragma unroll
-        for (int m = 0; m < 3; ++m) s1[((int64_t)a * 3 + m) * K0 + K + tid] = 0.0f;
-        #pragma unroll
-        for (int m = 0; m < 5; ++m) s2[((int64_t)a * 5 + m) * K0 + K + tid] = 0.0f;
-        #pragma unroll
-        for (int m = 0; m < 7; ++m) s3[((int64_t)a * 7 + m) * K0 + K + tid] = 0.0f;
-    }
-    if (tid == 0) D[a] = dsum;
-}
 
 // STAGE_G: the receiver's gradient rows G[m][s Jp + j] (16 x K floats, the same for all its edges) are staged once in
 // shared memory, m innermost in float4 chunks swizzled by (k >> 1) & 3 so a warp's column-consecutive float4 reads
@@ -525,7 +497,7 @@ __global__ void __launch_bounds__(256) first_fwd_kernel(
 // memory) the rows are read from global memory per edge.
 template <bool STAGE_G>
 __global__ void __launch_bounds__(256) first_bwd_kernel(
-    int N, int S, int I, int J, int K0, SplineGrid grid, int sh_perm, int pair_sym,
+    int N, int S, int I, int J, int Jt, int K0, SplineGrid grid, int sh_perm, int pair_sym,
     const int* __restrict__ row_ptr, const int* __restrict__ senders, const float4* __restrict__ vec_len,
     const int* __restrict__ species, const float4* __restrict__ table,
     const float* __restrict__ g0, const float* __restrict__ g1, const float* __restrict__ g2, const float* __restrict__ g3,
@@ -534,7 +506,7 @@ __global__ void __launch_bounds__(256) first_bwd_kernel(
     extern __shared__ float4 s_G4[];
     const int a = blockIdx.x, tid = threadIdx.x, wid = tid >> 5, lane = tid & 31, n_warps = blockDim.x >> 5;
     if (a >= N) return;
-    const int Jp = J - 1, K = S * Jp, sa = species[a];
+    const int Jp = J - 1, Jh = (Jp + 1) >> 1, K = S * Jp, sa = species[a];
     const float dDa = dD ? __ldg(dD + a) : 0.0f;
     const int eb = row_ptr[a], ee = row_ptr[a + 1];
     if (STAGE_G) {
@@ -558,7 +530,7 @@ __global__ void __launch_bounds__(256) first_bwd_kernel(
         const int e = valid ? base + half : base;
         const float4 vl = __ldg(vec_len + e);
         const int s = species[senders[e]];
-        const int pr = pair_sym ? loup::sym_pair(s, sa, S) : s * S + sa;
+        const int pr = loup::table_pair(pair_sym, s, sa, S);
         int iv; float t, sxi;
         locate_spline(grid, vl.w, iv, t, sxi);
         const float ux = sh_perm ? vl.y : vl.x, uy = sh_perm ? vl.z : vl.y, uz = sh_perm ? vl.x : vl.z;
@@ -570,8 +542,8 @@ __global__ void __launch_bounds__(256) first_bwd_kernel(
         #pragma unroll
         for (int m = 0; m < 16; ++m) dY[m] = 0.0f;
         float er = 0.0f;
-        for (int j = hl; j < J; j += 16) {
-            const float4 cf = __ldg(table + ((int64_t)pr * I + iv) * J + j);
+        for (int j = hl; j < Jt; j += 16) {  // S128: j == Jp (the density) only when the table keeps it
+            const float4 cf = __ldg(table + ((int64_t)pr * I + iv) * Jt + (j < Jp ? first_col_pos(j, Jh) : j));
             const float v = fmaf(t, fmaf(t, fmaf(t, cf.w, cf.z), cf.y), cf.x);
             const float dv = fmaf(t, fmaf(t, 3.0f * cf.w, 2.0f * cf.z), cf.y) * sxi;
             if (j == Jp) {
@@ -642,266 +614,18 @@ __global__ void __launch_bounds__(256) first_bwd_kernel(
     }
 }
 
-// Edge-parallel layer-0 backward + ZBL + force/virial assembly (tabled_outer_sum0_backward_kernel design):
-// 4 warps x 32 edges/warp, COLS columns/lane (2 for Jp <= 64, 3 for Jp <= 96); caches dS0 across consecutive
-// active edges with the same (rcv, snd_sp), folds SH gradients in s_edge[4][32][20], then all 32 lanes assemble
-// forces, ZBL and virial in parallel. Latency-bound (serial shuffle folds): on sm_120, COLS = 2 is capped at 80
-// registers (6 blocks / SM, no spills; 92-96 registers uncapped). COLS = 3 would spill under the cap, and other
-// architectures (not measured) keep the uncapped kernel.
-#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ == 1200
-#define LOUP_FIRST_BWD_EDGE_MINB2 6
-#else
-#define LOUP_FIRST_BWD_EDGE_MINB2 0
-#endif
-template <int COLS, bool HAS_ZBL, bool STRESS>
-__global__ void __launch_bounds__(128, COLS == 2 ? LOUP_FIRST_BWD_EDGE_MINB2 : 0) first_bwd_edge_kernel(
-    const int* __restrict__ E_dev, int S, int I, int J, int K0, SplineGrid grid, int sh_perm, int pair_sym,
-    const int* __restrict__ senders, const int* __restrict__ receivers, const float4* __restrict__ vec_len,
-    const int* __restrict__ species, const float4* __restrict__ table,
-    const float* __restrict__ g0, const float* __restrict__ g1, const float* __restrict__ g2, const float* __restrict__ g3,
-    const float* __restrict__ dD, const float* __restrict__ edge_dvec, ZblParams zbl,
-    double* __restrict__ energy, double* __restrict__ forces, double* __restrict__ virial) {
-    constexpr int CHUNK = 32;
-    const int E = *E_dev;
-    const int tid = threadIdx.x, warp = tid >> 5, warp_id = blockIdx.x * 4 + warp, lane = tid & 31;
-    const int start = warp_id * CHUNK;
-    const int Jp = J - 1;
-
-    __shared__ __align__(16) float s_edge[4][CHUNK][20];
-    double v00 = 0.0, v01 = 0.0, v02 = 0.0, v11 = 0.0, v12 = 0.0, v22 = 0.0;
-    double e_zbl_thread = 0.0;
-
-    if (start < E) {
-        const int stop = (start + CHUNK < E) ? (start + CHUNK) : E;
-        const int cnt = stop - start;
-        int m_iv = 0, m_pr = 0, m_rcv = -1, m_snd = -1, m_sp = -1, m_rcv_sp = -1;
-        float m_t = 0.0f, m_sxi = 0.0f;
-        if (lane < cnt) {
-            const int e = start + lane;
-            const float4 vl = __ldg(vec_len + e);
-            const float ux = sh_perm ? vl.y : vl.x, uy = sh_perm ? vl.z : vl.y, uz = sh_perm ? vl.x : vl.z;
-            loup::edge_sh16(ux, uy, uz, vl.w, reinterpret_cast<float4*>(s_edge[warp][lane]));
-            locate_spline(grid, vl.w, m_iv, m_t, m_sxi);
-            m_rcv = receivers[e];
-            m_snd = senders[e];
-            m_sp = species[m_snd];
-            m_rcv_sp = species[m_rcv];
-            m_pr = pair_sym ? loup::sym_pair(m_sp, m_rcv_sp, S) : m_sp * S + m_rcv_sp;
-        }
-        __syncwarp();
-
-        float blk[COLS][16];
-        #pragma unroll
-        for (int c = 0; c < COLS; ++c)
-            #pragma unroll
-            for (int d = 0; d < 16; ++d) blk[c][d] = 0.0f;
-        float dD_r = 0.0f;
-        int cur_rcv = -1, cur_snd_sp = -1;
-
-        for (int k = 0; k < cnt; ++k) {
-            const int rcv = __shfl_sync(0xffffffffu, m_rcv, k);
-            const int snd_sp = __shfl_sync(0xffffffffu, m_sp, k);
-            if (rcv != cur_rcv || snd_sp != cur_snd_sp) {
-                cur_rcv = rcv;
-                cur_snd_sp = snd_sp;
-                if (COLS == 2 && (Jp & 1) == 0 && (K0 & 1) == 0) {
-                    const int off = snd_sp * Jp + 2 * lane;
-                    const bool ok = 2 * lane + 1 < Jp;
-                    auto ld2 = [&](const float* base, int64_t row, int d) {
-                        if (ok) {
-                            const float2 v = __ldg(reinterpret_cast<const float2*>(base + row * K0 + off));
-                            blk[0][d] = v.x;
-                            blk[1][d] = v.y;
-                        } else {
-                            blk[0][d] = 2 * lane < Jp ? __ldg(base + row * K0 + off) : 0.0f;
-                            blk[1][d] = 0.0f;
-                        }
-                    };
-                    ld2(g0, rcv, 0);
-                    #pragma unroll
-                    for (int d = 0; d < 3; ++d) ld2(g1, (int64_t)rcv * 3 + d, 1 + d);
-                    #pragma unroll
-                    for (int d = 0; d < 5; ++d) ld2(g2, (int64_t)rcv * 5 + d, 4 + d);
-                    #pragma unroll
-                    for (int d = 0; d < 7; ++d) ld2(g3, (int64_t)rcv * 7 + d, 9 + d);
-                } else {
-                    #pragma unroll
-                    for (int c = 0; c < COLS; ++c) {
-                        const int col = (COLS == 2) ? (2 * lane + c) : (c * 32 + lane);
-                        if (col < Jp) {
-                            const int off = snd_sp * Jp + col;
-                            blk[c][0] = __ldg(g0 + (int64_t)rcv * K0 + off);
-                            #pragma unroll
-                            for (int d = 0; d < 3; ++d) blk[c][1 + d] = __ldg(g1 + ((int64_t)rcv * 3 + d) * K0 + off);
-                            #pragma unroll
-                            for (int d = 0; d < 5; ++d) blk[c][4 + d] = __ldg(g2 + ((int64_t)rcv * 5 + d) * K0 + off);
-                            #pragma unroll
-                            for (int d = 0; d < 7; ++d) blk[c][9 + d] = __ldg(g3 + ((int64_t)rcv * 7 + d) * K0 + off);
-                        }
-                    }
-                }
-                if (dD) dD_r = __ldg(dD + rcv);
-            }
-
-            const int iv = __shfl_sync(0xffffffffu, m_iv, k);
-            const int pr = __shfl_sync(0xffffffffu, m_pr, k);
-            const float t = __shfl_sync(0xffffffffu, m_t, k);
-            const float sxi = __shfl_sync(0xffffffffu, m_sxi, k);
-            const float4* tb = table + ((int64_t)pr * I + iv) * J;
-            float pa[COLS], pd[COLS];
-            #pragma unroll
-            for (int c = 0; c < COLS; ++c) {
-                const int col = (COLS == 2) ? (2 * lane + c) : (c * 32 + lane);
-                if (col < Jp) {
-                    const float4 cf = __ldg(tb + col);
-                    pa[c] = fmaf(t, fmaf(t, fmaf(t, cf.w, cf.z), cf.y), cf.x);
-                    pd[c] = fmaf(t, fmaf(t, 3.0f * cf.w, 2.0f * cf.z), cf.y) * sxi;
-                } else {
-                    pa[c] = 0.0f;
-                    pd[c] = 0.0f;
-                }
-            }
-
-            const float4* shv = reinterpret_cast<const float4*>(s_edge[warp][k]);
-            const float4 Y0 = shv[0], Y1 = shv[1], Y2 = shv[2], Y3 = shv[3];
-            const float shk[16] = {Y0.x, Y0.y, Y0.z, Y0.w, Y1.x, Y1.y, Y1.z, Y1.w,
-                                   Y2.x, Y2.y, Y2.z, Y2.w, Y3.x, Y3.y, Y3.z, Y3.w};
-            float grad_a[COLS];
-            #pragma unroll
-            for (int c = 0; c < COLS; ++c) grad_a[c] = 0.0f;
-            float gy[16];
-            #pragma unroll
-            for (int d = 0; d < 16; ++d) {
-                const float sd = shk[d];
-                float gsum = 0.0f;
-                #pragma unroll
-                for (int c = 0; c < COLS; ++c) {
-                    grad_a[c] = fmaf(blk[c][d], sd, grad_a[c]);
-                    gsum = fmaf(blk[c][d], pa[c], gsum);
-                }
-                gy[d] = gsum;
-            }
-
-            // 16-shuffle fold of gy[0..15] across 32 lanes -> lane 1..15 holds dsh[lane]
-            float g8[8];
-            const bool odd = (lane & 1) != 0;
-            #pragma unroll
-            for (int q = 0; q < 8; ++q)
-                g8[q] = (odd ? gy[2 * q + 1] : gy[2 * q]) + __shfl_xor_sync(0xffffffffu, odd ? gy[2 * q] : gy[2 * q + 1], 1);
-            float g4[4];
-            const bool h2 = (lane & 2) != 0;
-            #pragma unroll
-            for (int q = 0; q < 4; ++q)
-                g4[q] = (h2 ? g8[2 * q + 1] : g8[2 * q]) + __shfl_xor_sync(0xffffffffu, h2 ? g8[2 * q] : g8[2 * q + 1], 2);
-            float g2[2];
-            const bool h4 = (lane & 4) != 0;
-            #pragma unroll
-            for (int q = 0; q < 2; ++q)
-                g2[q] = (h4 ? g4[2 * q + 1] : g4[2 * q]) + __shfl_xor_sync(0xffffffffu, h4 ? g4[2 * q] : g4[2 * q + 1], 4);
-            const bool h8 = (lane & 8) != 0;
-            float g1 = (h8 ? g2[1] : g2[0]) + __shfl_xor_sync(0xffffffffu, h8 ? g2[0] : g2[1], 8);
-            g1 += __shfl_xor_sync(0xffffffffu, g1, 16);
-            if (lane >= 1 && lane < 16) s_edge[warp][k][lane] = g1;
-
-            float dr_v = 0.0f;
-            #pragma unroll
-            for (int c = 0; c < COLS; ++c) dr_v = fmaf(grad_a[c], pd[c], dr_v);
-            #pragma unroll
-            for (int off = 16; off > 0; off >>= 1) dr_v += __shfl_xor_sync(0xffffffffu, dr_v, off);
-            if (lane == 0) {
-                if (dD && dD_r != 0.0f) {
-                    const float4 cd = __ldg(tb + Jp);
-                    const float dvd = fmaf(t, fmaf(t, 3.0f * cd.w, 2.0f * cd.z), cd.y) * sxi;
-                    dr_v = fmaf(dD_r, dvd, dr_v);
-                }
-                s_edge[warp][k][0] = dr_v;
-            }
-        }
-        __syncwarp();
-
-        if (lane < cnt) {
-            const int e = start + lane;
-            const float4 vl = __ldg(vec_len + e);
-            const float dd = vl.w > loup::EPS_SH ? vl.w : loup::EPS_SH;
-            const float inv_d = 1.0f / dd;
-            const float ux = sh_perm ? vl.y : vl.x, uy = sh_perm ? vl.z : vl.y, uz = sh_perm ? vl.x : vl.z;
-            const float x = ux * inv_d, y = uy * inv_d, z = uz * inv_d;
-            float gx, gy, gz;
-            ::sh16_grad(x, y, z, s_edge[warp][lane], gx, gy, gz);
-            const float er = s_edge[warp][lane][0];
-            const float dot = x * gx + y * gy + z * gz;
-            float fx = x * er + (gx - x * dot) * inv_d;
-            float fy = y * er + (gy - y * dot) * inv_d;
-            float fz = z * er + (gz - z * dot) * inv_d;
-            if (sh_perm) { const float tx = fx, ty = fy, tz = fz; fx = tz; fy = tx; fz = ty; }
-            fx += edge_dvec[(int64_t)e * 3 + 0];
-            fy += edge_dvec[(int64_t)e * 3 + 1];
-            fz += edge_dvec[(int64_t)e * 3 + 2];
-            if (HAS_ZBL && vl.w < zbl.r_max) {
-                float zen, zg;
-                if (zbl_pair(zbl, m_sp * S + m_rcv_sp, vl.w, zen, zg)) {
-                    e_zbl_thread += zen;
-                    fx += zg * vl.x;
-                    fy += zg * vl.y;
-                    fz += zg * vl.z;
-                }
-            }
-            atomicAdd(forces + m_rcv * 3 + 0, -(double)fx);
-            atomicAdd(forces + m_rcv * 3 + 1, -(double)fy);
-            atomicAdd(forces + m_rcv * 3 + 2, -(double)fz);
-            atomicAdd(forces + m_snd * 3 + 0, (double)fx);
-            atomicAdd(forces + m_snd * 3 + 1, (double)fy);
-            atomicAdd(forces + m_snd * 3 + 2, (double)fz);
-            if (STRESS) {
-                v00 = (double)vl.x * (double)fx;
-                v01 = 0.5 * ((double)vl.x * (double)fy + (double)vl.y * (double)fx);
-                v02 = 0.5 * ((double)vl.x * (double)fz + (double)vl.z * (double)fx);
-                v11 = (double)vl.y * (double)fy;
-                v12 = 0.5 * ((double)vl.y * (double)fz + (double)vl.z * (double)fy);
-                v22 = (double)vl.z * (double)fz;
-            }
-        }
-    }
-    if (HAS_ZBL && __any_sync(0xffffffffu, e_zbl_thread != 0.0)) {
-        #pragma unroll
-        for (int off = 16; off > 0; off >>= 1) e_zbl_thread += __shfl_xor_sync(0xffffffffu, e_zbl_thread, off);
-        if (lane == 0) atomicAdd(energy, e_zbl_thread);
-    }
-    if (STRESS) {
-        #pragma unroll
-        for (int off = 16; off > 0; off >>= 1) {
-            v00 += __shfl_xor_sync(0xffffffffu, v00, off);
-            v01 += __shfl_xor_sync(0xffffffffu, v01, off);
-            v02 += __shfl_xor_sync(0xffffffffu, v02, off);
-            v11 += __shfl_xor_sync(0xffffffffu, v11, off);
-            v12 += __shfl_xor_sync(0xffffffffu, v12, off);
-            v22 += __shfl_xor_sync(0xffffffffu, v22, off);
-        }
-        __shared__ double s_v[4][6];
-        if (lane == 0) {
-            s_v[warp][0] = v00; s_v[warp][1] = v01; s_v[warp][2] = v02;
-            s_v[warp][3] = v11; s_v[warp][4] = v12; s_v[warp][5] = v22;
-        }
-        __syncthreads();
-        if (tid < 6) {
-            double sum = 0.0;
-            #pragma unroll
-            for (int w = 0; w < 4; ++w) sum += s_v[w][tid];
-            if (sum != 0.0) atomicAdd(virial + tid, sum);
-        }
-    }
-}
 __global__ void zero_edge_kernel(const int* __restrict__ E_dev, float* __restrict__ p) {
     const int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i < 3 * *E_dev) p[i] = 0.0f;
 }
 
-// C[M, N] = A[M, K] B[K, N] in double, one thread per output: load-time weight composition (S57 / S59).
+// C[M, N] = A[M, K] B[K, N] (+ D[M, N]) in double, one thread per output: load-time weight composition (S57 / S59 /
+// the long-range hidden fold).
 __global__ void dmm_kernel(int M, int N, int K, const double* __restrict__ A, const double* __restrict__ B,
-                           double* __restrict__ C) {
+                           const double* __restrict__ D, double* __restrict__ C) {
     const int n = blockIdx.x * blockDim.x + threadIdx.x, m = blockIdx.y;
     if (n >= N || m >= M) return;
-    double s = 0.0;
+    double s = D ? D[(size_t)m * N + n] : 0.0;
     for (int k = 0; k < K; ++k) s = fma(A[(size_t)m * K + k], B[(size_t)k * N + n], s);
     C[(size_t)m * N + n] = s;
 }
@@ -927,13 +651,23 @@ struct DevCompose {
         CUDA_CHECK_THROW(cudaMemcpy(q, d.data(), d.size() * sizeof(double), cudaMemcpyHostToDevice));
         return q;
     }
-    const double* mm(const double* A, int M, int K, const double* B, int N) {
-        double* C = nullptr;
-        CUDA_CHECK_THROW(cudaMalloc(&C, (size_t)M * N * sizeof(double)));
-        tmp.push_back(C);
-        dmm_kernel<<<dim3((unsigned)((N + 127) / 128), (unsigned)M), 128>>>(M, N, K, A, B, C);
+    // C = A[M, K] B[K, N] (+ D[M, N]); into `out` [M, N] if given, else a new temporary
+    const double* mm(const double* A, int M, int K, const double* B, int N, const double* D = nullptr,
+                     double* out = nullptr) {
+        double* C = out;
+        if (!C) {
+            CUDA_CHECK_THROW(cudaMalloc(&C, (size_t)M * N * sizeof(double)));
+            tmp.push_back(C);
+        }
+        dmm_kernel<<<dim3((unsigned)((N + 127) / 128), (unsigned)M), 128>>>(M, N, K, A, B, D, C);
         CUDA_CHECK_THROW(cudaGetLastError());
         return C;
+    }
+    double* alloc(int64_t n) {
+        double* q = nullptr;
+        CUDA_CHECK_THROW(cudaMalloc(&q, std::max<int64_t>(n, 1) * sizeof(double)));
+        tmp.push_back(q);
+        return q;
     }
     // Per species: C[s] = A[s or 0] B[s or 0], s < max(nsA, nsB) (each operand either one block or one per species).
     const double* mm_s(const double* A, int nsA, int M, int K, const double* B, int nsB, int N) {
@@ -943,7 +677,7 @@ struct DevCompose {
         tmp.push_back(C);
         for (int s = 0; s < ns; ++s)
             dmm_kernel<<<dim3((unsigned)((N + 127) / 128), (unsigned)M), 128>>>(
-                M, N, K, A + (nsA > 1 ? (size_t)s * M * K : 0), B + (nsB > 1 ? (size_t)s * K * N : 0),
+                M, N, K, A + (nsA > 1 ? (size_t)s * M * K : 0), B + (nsB > 1 ? (size_t)s * K * N : 0), nullptr,
                 C + (size_t)s * M * N);
         CUDA_CHECK_THROW(cudaGetLastError());
         return C;
@@ -975,6 +709,63 @@ bool device_is_cc120() {
     CUDA_CHECK_THROW(cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor, dev));
     CUDA_CHECK_THROW(cudaDeviceGetAttribute(&minor, cudaDevAttrComputeCapabilityMinor, dev));
     return major == 12 && minor == 0;
+}
+
+// S130 / S132: compact live channels of a kind-1 layer (the projections feed the product directly), certified from exact
+// zeros of the loaded float32 weights. Channel c is dead when its product weights (every species) or every projection
+// column (C0_l or W_lin_l [:, c]) are zero, or, on the fused terminal path, its folded readout row; it is angular when
+// some projection column with l >= 1 is nonzero, else scalar-only (x1..x15 exactly zero: the S127 program). The
+// positions hold the angular channels, then the scalar-only ones, then (all_channels: non-terminal layers, whose dead
+// channels write zero outputs) the dead ones, each group in channel order. Degree 0's compact projection has a column
+// per kept position; degree l >= 1 keeps only its live columns (pos: an angular position's column there, or -1). The
+// bundle holds the system's species only, so the sets depend on them: MPtrj-2022.9 on SrTiO3 keeps 205 / 1 / 2 / 12 of
+// 256 in layer 1 and 251 / 190 / 138 / 123 in layer 0 (NbCl5: 173 and 244 kept). Widths are padded to multiples of 8
+// with zero columns (against 4: MPtrj-2022.9 2.0% / 0.9% faster per step on SrTiO3 / NbCl5, MP-0 medium SrTiO3 0.35%
+// slower). False when the degree-1..3 projection work does not shrink by at least a quarter (the dense kernels stay).
+struct CompactLayout {
+    std::vector<int> order;  // compact position -> channel: the kept channels (then the dead ones with all_channels)
+    std::vector<int> pos;    // [3][n_ang]: angular position i's column in degree l's compact projection, or -1
+    int kept = 0, n_ang = 0;
+    int width[4] = {0, 0, 0, 0};
+};
+bool compact_layout(int C, const std::vector<float>* proj, const int* K, const std::vector<float>& prodw, int Sp,
+                    int segw, const std::vector<float>* roW1, int H, bool all_channels, CompactLayout& out) {
+    std::vector<unsigned char> nz[4];
+    for (int l = 0; l < 4; ++l) {
+        nz[l].assign(C, 0);
+        for (int64_t k = 0; k < K[l]; ++k)
+            for (int c = 0; c < C; ++c)
+                if (proj[l][k * C + c] != 0.0f) nz[l][c] = 1;
+    }
+    std::vector<int> ang, sca, dead;
+    for (int c = 0; c < C; ++c) {
+        bool pw = false, ro = roW1 == nullptr;
+        for (int64_t r = 0; r < (int64_t)Sp * segw && !pw; ++r) pw = prodw[r * C + c] != 0.0f;
+        for (int j = 0; j < H && !ro; ++j) ro = (*roW1)[(int64_t)c * H + j] != 0.0f;
+        const bool angular = nz[1][c] || nz[2][c] || nz[3][c];
+        if (!pw || !ro || !(nz[0][c] || angular)) {  // dead: its product output is zero or never reaches the energy
+            dead.push_back(c);
+            continue;
+        }
+        (angular ? ang : sca).push_back(c);
+    }
+    out.order = ang;
+    out.order.insert(out.order.end(), sca.begin(), sca.end());
+    out.kept = (int)out.order.size();
+    out.n_ang = (int)ang.size();
+    if (all_channels) out.order.insert(out.order.end(), dead.begin(), dead.end());
+    auto pad8 = [](int v) { return std::max(8, (v + 7) / 8 * 8); };
+    out.width[0] = pad8(out.kept);
+    out.pos.assign((size_t)3 * out.n_ang, -1);
+    int work = 0;
+    for (int l = 1; l < 4; ++l) {
+        int w = 0;
+        for (int i = 0; i < out.n_ang; ++i)
+            if (nz[l][out.order[i]]) out.pos[(size_t)(l - 1) * out.n_ang + i] = w++;
+        out.width[l] = pad8(w);
+        work += (2 * l + 1) * out.width[l];
+    }
+    return 4 * work <= 3 * 15 * C;
 }
 
 }  // namespace
@@ -1134,6 +925,17 @@ void GenericModel::load(const Bundle& b) {
             if (L->first_hidden)
                 for (int l = 0; l < 4; ++l) L->C0[l] = upload(W, c0_pad[l]);
         }
+        // S125: MP-0 medium's second interaction has W_lin_1..3 exactly zero (about 5.5e-94 in the float64 checkpoint,
+        // 0 after its float32 conversion), so only 2 of its 10 conv paths reach the answer. Certified here from the
+        // loaded weights, so other checkpoints keep every path. LOUP_CONV_PRUNE=0 disables it (tests, A/B).
+        if (!L->first_hidden && L->lmax_x == 1) {
+            const char* pe = std::getenv("LOUP_CONV_PRUNE");
+            bool dead = !(pe && pe[0] == '0');
+            for (int l = 1; l < 4 && dead; ++l)
+                for (float v : b.f32(p + "W_lin_" + std::to_string(l), {L->n_l3[l] * L->C_x, L->lin_cols[l]}))
+                    if (v != 0.0f) { dead = false; break; }
+            L->conv_prune = dead;
+        }
         if (nl) {
             const std::vector<double> ab = b.f64(p + "alpha_beta", {2});
             L->alpha = (float)ab[0];
@@ -1192,22 +994,31 @@ void GenericModel::load(const Bundle& b) {
             if (off != L->intervals) throw std::runtime_error("generic bundle: spline intervals mismatch");
             const int Ptab = L->pair_sym ? S_ * (S_ + 1) / 2 : P;
             const std::vector<float> tab = b.f32(p + "spline", {Ptab, L->intervals, L->Q1, 4});
+            // One table for every pair when the bundle's per-pair tables are byte-identical (S116): the radial chain
+            // does not read the species (MACE-OFF), so the copies only cost memory and cache footprint.
+            const size_t pair_floats = (size_t)L->intervals * L->Q1 * 4;
+            bool one_table = Ptab > 1;
+            for (int pr = 1; pr < Ptab && one_table; ++pr)
+                one_table = memcmp(tab.data(), tab.data() + pr * pair_floats, pair_floats * sizeof(float)) == 0;
+            if (one_table) L->pair_sym = 2;
+            const int Pt = one_table ? 1 : Ptab;
             if (L->first_hidden) {
-                const size_t PI = (size_t)Ptab * L->intervals;
+                // S128: the density column (the last) only where the layer reads the density (kinds 2-4); the
+                // agnostic kinds never form D, so their rows hold the J - 1 hidden columns alone
+                L->Jt = L->kind >= 2 ? L->J : L->J - 1;
+                const size_t PI = (size_t)Pt * L->intervals;
                 const float4* src = reinterpret_cast<const float4*>(tab.data());
-                std::vector<float4> host(PI * L->J);
-                if (L->J == L->Q1) {
-                    memcpy(host.data(), src, PI * L->J * sizeof(float4));
-                } else {
-                    for (size_t pi = 0; pi < PI; ++pi) {
-                        memcpy(&host[pi * L->J], &src[pi * L->Q1], (size_t)(L->J - 1) * sizeof(float4));
-                        host[pi * L->J + L->J - 1] = src[pi * L->Q1 + L->Q1 - 1];
-                    }
+                std::vector<float4> host(PI * L->Jt);
+                for (size_t pi = 0; pi < PI; ++pi) {
+                    const int Jp = L->J - 1, Jh = (Jp + 1) / 2;  // S131: even columns first, then the odd ones
+                    for (int j = 0; j < Jp; ++j)
+                        host[pi * L->Jt + ((j & 1) ? Jh + (j >> 1) : (j >> 1))] = src[pi * L->Q1 + j];
+                    if (L->Jt == L->J) host[pi * L->Jt + L->J - 1] = src[pi * L->Q1 + L->Q1 - 1];
                 }
                 L->table = upload(W, host);
             } else {
                 const int Q = L->n_paths * L->C_x;
-                const size_t PI = (size_t)Ptab * L->intervals;
+                const size_t PI = (size_t)Pt * L->intervals;
                 const size_t sp_n = PI * Q;
                 const float4* src = reinterpret_cast<const float4*>(tab.data());
                 if (L->kind >= 2) {
@@ -1300,13 +1111,37 @@ void GenericModel::load(const Bundle& b) {
         // product
         {
             const std::string sig = b.meta(p + "prod_sig");
-            L->prod = find_product_kernels(sig);
-            if (L->prod->lmax_out != L->lmax_out) throw std::runtime_error("generic bundle: product degree mismatch");
             L->prod_species = mi("prod_species");
             L->prod_segw = mi("prod_segments_w");
+            // The library's own kernels, else a kernel plugin (loupmd build-kernels), else, JIT_DESIGN.md stage 3,
+            // the bundle's source compiled here (LOUP_JIT_PRODUCTS=1: every product so, for tests and gates).
+            std::string no_plugin;
+            L->prod = find_product_kernels(sig, no_plugin);
+            const char* fp = std::getenv("LOUP_JIT_PRODUCTS");
+            const bool force = fp && fp[0] == '1';
+            std::string why;
+            if ((!L->prod || force) && jit::level() > 0 && b.has(p + "prod_src")) {
+                const auto& raw = b.entry(p + "prod_src").data;
+                const GProdKernels* k =
+                    jit_product(sig, L->lmax_out, L->prod_segw, std::string(raw.begin(), raw.end()), &why);
+                if (k) L->prod = k;
+                else if (L->prod)
+                    fprintf(stderr, "[loupmd] JIT (LOUP_JIT=0 turns it off): %s; using the built-in kernels\n",
+                            why.c_str());
+            } else if (!L->prod) {
+                why = !b.has(p + "prod_src") ? "the bundle has no product source (exported before JIT_DESIGN.md stage 3)"
+                                             : "LOUP_JIT=0";
+            }
+            if (!L->prod)
+                throw std::runtime_error("generic bundle: no compiled product kernel for signature " + sig +
+                                         ": this library was not built with this model's kernels, " + no_plugin +
+                                         ", and the run-time compiler did not build them (" + why +
+                                         "). `loupmd build-kernels MODEL` builds them (needs nvcc)");
+            if (L->prod->lmax_out != L->lmax_out) throw std::runtime_error("generic bundle: product degree mismatch");
             if (L->prod_segw != L->prod->segments_w) throw std::runtime_error("generic bundle: product segments mismatch");
-            L->prod_w = upload(W, b.f32(p + "prod_w", {L->prod_species ? S_ : 1, L->prod_segw, L->C_msg}));
-            std::vector<float> h_wp0;
+            const int Sp = L->prod_species ? S_ : 1;
+            std::vector<float> h_prodw = b.f32(p + "prod_w", {Sp, L->prod_segw, L->C_msg});
+            std::vector<float> h_wp0, h_roW1;
             for (int l = 0; l <= L->lmax_out; ++l) {
                 auto wp = b.f32(p + "W_p_" + std::to_string(l), {L->C_out, L->C_out});
                 if (L->ro_folded && l == 0) h_wp0 = std::move(wp);
@@ -1319,7 +1154,7 @@ void GenericModel::load(const Bundle& b) {
                 L->ro_H = mi("ro_H");
                 const auto row1 = b.f32(p + "ro_W1", {L->C_out, L->ro_H});
                 if (L->ro_folded) {
-                    L->ro_W1 = upload(W, fold_mat(h_wp0.data(), L->C_out, L->C_out, row1.data(), L->ro_H));
+                    h_roW1 = fold_mat(h_wp0.data(), L->C_out, L->C_out, row1.data(), L->ro_H);
                     if (L->sc_has[0]) {
                         const int Ss = L->sc_species ? S_ : 1;
                         std::vector<float> fsc((size_t)Ss * L->C_in * L->ro_H);
@@ -1331,7 +1166,7 @@ void GenericModel::load(const Bundle& b) {
                         L->ro_W1_sc = upload(W, fsc);
                     }
                 } else {
-                    L->ro_W1 = upload(W, row1);
+                    h_roW1 = row1;
                 }
                 L->ro_b1 = upload(W, b.f32(p + "ro_b1", {L->ro_H}));
                 L->ro_W2 = upload(W, b.f32(p + "ro_W2", {L->ro_H}));
@@ -1343,6 +1178,67 @@ void GenericModel::load(const Bundle& b) {
             } else if (L->readout != -1) {
                 throw std::runtime_error("generic bundle: unknown readout kind");
             }
+            // S130 / S132: compact live channels of a kind-1 layer: the terminal one on the fused product + readout path
+            // (gprod_ro1c; the dead channels dropped) or a non-terminal one (gprod_fwdc / bwdc: outputs written in the
+            // dense layout, so the consumers keep their weights). The projection weights (C0 for layer 0, else W_lin)
+            // were uploaded dense above and are replaced by their compact columns.
+            const char* lc = std::getenv("LOUP_LIN_COMPACT");
+            const bool fused = L->ro_folded && L->readout == 1 && L->ro_H == 16 && L->C_out <= 512;
+            const bool have_kernels = fused ? (L->prod->ro1c_128 != nullptr && !L->first_hidden)
+                                            : (!L->ro_folded && L->prod->fwdc != nullptr);
+            CompactLayout cl;
+            if (!(lc && lc[0] == '0') && L->kind == 1 && !L->conv_prune && have_kernels) {
+                const int C = L->C_msg;
+                std::vector<float> proj[4];
+                int K[4];
+                for (int l = 0; l < 4; ++l) {
+                    K[l] = L->first_hidden ? L->K0 : L->n_l3[l] * L->C_x;
+                    proj[l] = L->first_hidden ? c0_pad[l] : b.f32(p + "W_lin_" + std::to_string(l), {K[l], C});
+                }
+                if (compact_layout(C, proj, K, h_prodw, Sp, L->prod_segw, fused ? &h_roW1 : nullptr, L->ro_H, !fused,
+                                   cl)) {
+                    const int kept = cl.kept, W0 = cl.width[0], ncols = fused ? W0 : C, npw = fused ? kept : C;
+                    std::vector<float> pw((size_t)Sp * L->prod_segw * ncols, 0.0f);
+                    for (size_t r = 0; r < (size_t)Sp * L->prod_segw; ++r)
+                        for (int j = 0; j < npw; ++j) pw[r * ncols + j] = h_prodw[r * C + cl.order[j]];
+                    h_prodw.swap(pw);
+                    if (fused) {
+                        // readout rows up to the kernel's blockDim (W0 rounded up to 32), zero beyond the kept channels
+                        std::vector<float> rw((size_t)((W0 + 31) / 32 * 32) * L->ro_H, 0.0f);
+                        for (int j = 0; j < kept; ++j)
+                            memcpy(&rw[(size_t)j * L->ro_H], &h_roW1[(size_t)cl.order[j] * L->ro_H],
+                                   L->ro_H * sizeof(float));
+                        h_roW1.swap(rw);
+                    } else {
+                        L->d_order = upload(W, cl.order);
+                    }
+                    L->d_pos = upload(W, cl.pos);
+                    for (int l = 0; l < 4; ++l) {
+                        const int Wl = cl.width[l];
+                        std::vector<float> wc((size_t)K[l] * Wl, 0.0f);
+                        for (int j = 0; j < (l == 0 ? kept : cl.n_ang); ++j) {
+                            const int col = l == 0 ? j : cl.pos[(size_t)(l - 1) * cl.n_ang + j];
+                            if (col < 0) continue;
+                            for (int64_t k = 0; k < K[l]; ++k) wc[k * Wl + col] = proj[l][k * C + cl.order[j]];
+                        }
+                        float*& dst = L->first_hidden ? L->C0[l] : L->W_lin[l];
+                        auto it = std::find(W.begin(), W.end(), (void*)dst);
+                        if (it != W.end()) W.erase(it);
+                        CUDA_CHECK_THROW(cudaFree(dst));
+                        dst = upload(W, wc);
+                        L->lin_cols[l] = Wl;
+                    }
+                    L->n_ang = cl.n_ang;
+                    L->kept = kept;
+                    L->lin_compact = true;
+                    if (std::getenv("LOUP_DEBUG_COMPACT"))
+                        fprintf(stderr, "compact L%d (%s): kept %d of %d (angular %d), widths %d / %d / %d / %d\n", t,
+                                fused ? "fused readout" : "dense outputs", kept, C, cl.n_ang, cl.width[0], cl.width[1],
+                                cl.width[2], cl.width[3]);
+                }
+            }
+            L->prod_w = upload(W, h_prodw);
+            if (!h_roW1.empty()) L->ro_W1 = upload(W, h_roW1);
         }
     }
     if (layers_.back()->readout < 0) throw std::runtime_error("generic bundle: the last layer has no readout");
@@ -1366,7 +1262,7 @@ void GenericModel::load(const Bundle& b) {
         d_zbl_pref_ = upload(own, b.f32("zbl_pref", {P}));
     }
     setup_species_tables(b);
-    // S64 test override (as LOUP_SPLINE_VARIANT for the specialised path): LOUP_CONV_FWD_VARIANT=v forces conv forward
+    // S64 test override: LOUP_CONV_FWD_VARIANT=v forces conv forward
     // variant v on every layer that has it, without tuning (gates of each variant; see tune_conv_variants)
     conv_var_override_ = -1;
     if (const char* e = std::getenv("LOUP_CONV_FWD_VARIANT"); e && e[0] >= '0' && e[0] <= '9') conv_var_override_ = e[0] - '0';
@@ -1374,6 +1270,8 @@ void GenericModel::load(const Bundle& b) {
     conv_tune_env_ = -1;
     if (const char* e = std::getenv("LOUP_CONV_TUNE"); e && (e[0] == '0' || e[0] == '1')) conv_tune_env_ = e[0] - '0';
     setup_chain_fold(b);
+    setup_lr_fold(b);
+    setup_jit();
     if (std::getenv("LOUP_SWEEP_REPLAY")) {
         if (lr_)
             throw std::runtime_error("LOUP_SWEEP_REPLAY: the sweep schedule is not available for long-range models");
@@ -1410,6 +1308,93 @@ void GenericModel::use_chain_fold(bool on) {
 void GenericModel::share_layer_buffers(bool on) {
     if (N_ > 0) throw std::logic_error("generic: share_layer_buffers with a system allocated");
     share_layers_ = on;
+}
+
+// JIT_DESIGN.md stage 1: with LOUP_JIT=1, layer 0's edge kernels compiled for this model (S, intervals, J, Jt, K0,
+// sh_perm, pair_sym and the spline grid as constants, kernel_ir.cu), launched instead of the ahead-of-time ones with
+// the same arguments. Any failure (no NVRTC, a compile error, a cubin the driver refuses) keeps the ahead-of-time
+// kernels, with one message on stderr.
+void GenericModel::setup_jit() {
+    if (jit::level() == 0) return;
+    const bool dbg = [] {
+        const char* e = std::getenv("LOUP_DEBUG_JIT");
+        return e && e[0] == '1';
+    }();
+    for (GenericLayer* L : layers_) {
+        if (!L->first_hidden) {  // stage 2: conv layers whose width has no built-in instance
+            ConvIR ci;
+            ci.lx = L->lmax_x;
+            ci.C = L->C_x;
+            ci.prune = L->conv_prune;
+            ci.fwd = conv_fwd_generic(ci.lx, ci.C);
+            ci.bwd = conv_bwd_generic(ci.lx, ci.C, ci.prune);
+            if (const char* e = std::getenv("LOUP_JIT_PAIR"); e && e[0] == '0') ci.pair = false;  // lab knob
+            if (dbg)
+                fprintf(stderr, "[loupmd jit] conv IR: lx %d C %d prune %d run-time-width fwd %d bwd %d\n", ci.lx, ci.C,
+                        ci.prune ? 1 : 0, ci.fwd ? 1 : 0, ci.bwd ? 1 : 0);
+            if (!ci.fwd && !ci.bwd) continue;
+            int nf = 0, nb = 0;
+            const std::vector<std::string> names = conv_jit_names(ci, &nf, &nb);
+            std::string err;
+            const std::vector<const void*> k =
+                jit::build("conv", conv_jit_source(), jit::embedded_headers(), names, &err);
+            if (k.size() != names.size()) {
+                static bool told = false;
+                if (!told) fprintf(stderr, "[loupmd] JIT (LOUP_JIT=0 turns it off): %s; using the built-in kernels\n", err.c_str());
+                told = true;
+                continue;
+            }
+            size_t i = 0;
+            for (int f = 0; f < nf; ++f)
+                for (int p = 0; p < 2; ++p) L->jit_conv.fwd[f][p] = k[i++];
+            for (int b = 0; b < nb; ++b)
+                for (int w = 0; w < 2; ++w)
+                    for (int p = 0; p < 2; ++p) L->jit_conv.bwd[b][w][p] = k[i++];
+            L->jit_conv_on = true;
+            continue;
+        }
+        if (!jit::enabled() || L->J - 1 > 96) continue;  // stage 1 (LOUP_JIT=1); above 96 columns: first_bwd_kernel
+        Layer0IR ir;
+        ir.S = S_;
+        ir.I = L->intervals;
+        ir.J = L->J;
+        ir.Jt = L->Jt;
+        ir.K0 = L->K0;
+        ir.sh_perm = sh_perm_;
+        ir.pair_sym = L->pair_sym;
+        ir.zbl = has_zbl_ != 0;
+        ir.grid = L->grid;
+        if (const char* e = std::getenv("LOUP_JIT_BAKE_GRID"); e && e[0] == '1') ir.bake_grid = true;  // lab knob
+        if (const char* e = std::getenv("LOUP_DEBUG_JIT"); e && e[0] == '1')
+            fprintf(stderr, "[loupmd jit] layer0 IR: S %d I %d J %d Jt %d K0 %d sh_perm %d pair_sym %d zbl %d bands %d\n",
+                    ir.S, ir.I, ir.J, ir.Jt, ir.K0, ir.sh_perm, ir.pair_sym, ir.zbl ? 1 : 0, ir.grid.n_bands);
+        std::string err;
+        const std::vector<const void*> k =
+            jit::build("layer0", layer0_jit_source(ir), jit::embedded_headers(), layer0_jit_names(ir), &err);
+        if (k.size() != 3) {
+            static bool told = false;
+            if (!told) fprintf(stderr, "[loupmd] JIT (LOUP_JIT=0 turns it off): %s; using the built-in kernels\n", err.c_str());
+            told = true;
+            continue;
+        }
+        L->jit_fwd = k[0];
+        L->jit_bwd_edge[0] = k[1];
+        L->jit_bwd_edge[1] = k[2];
+    }
+}
+
+// Launches the JIT kernel `k` with the parameter list of the ahead-of-time kernel `aot` (the same source), so the
+// arguments convert exactly as at a <<< >>> launch.
+template <typename T>
+struct jit_arg_ident {
+    using type = T;
+};
+template <typename... P>
+static void launch_jit_as(void (*aot)(P...), const void* k, dim3 grid, dim3 block, size_t smem, cudaStream_t st,
+                          typename jit_arg_ident<P>::type... a) {
+    (void)aot;
+    void* args[] = {(void*)&a...};
+    CUDA_CHECK_THROW(cudaLaunchKernel(k, grid, block, args, smem, st));
 }
 
 // S59 species tables. Layer 0's input h_in[0] is the species embedding row, so every product of it alone is a
@@ -1567,6 +1552,99 @@ std::string GenericModel::kernel_signature() const {
     return out;
 }
 
+
+// Long-range hidden fold. The POLAR models form every layer's hout (S57's chain fold excludes them) because the long-range
+// block reads it: the multipole sources (qsrc += hout_t[l] src_t[l]), the feature mixer (fm[l] += hout_t[l] mix_t[l]),
+// the Fukui MLP (the last layer's l = 0) and the electron energy (the last layer's l <= le_lmax()). The sources and the
+// mixer are linear, as are the next layer's linear_up and skip. For a degree l >= 1, a prefix of k layers whose
+// degree-l hout only those linear maps read (layer 0 has no skip into l; the last layer only if the electron energy
+// does not read l) never forms it: hout_u[l] = sum_{v <= u} y_v[l] G_{v,u} (G_{u,u} = W_p_u, G_{v,u} = G_{v,u-1}
+// W_sc_u), so y_v[l] feeds every consumer through one weight composed in double at load and rounded once: the next
+// layer's x (W_up' = G W_up, earlier layers' terms as x_extra), the first unfolded layer's skip (W_sc' = G W_sc,
+// sc_extra), the mixer W_p_v B_v (B_{k-1} = M_{k-1}, B_u = M_u + W_sc_{u+1} B_{u+1}) and the source (alike, per m
+// block). hout_v[l] / dhout_v[l] alias y_v[l] / dy_v[l]: the long-range block and the next layer read the same
+// pointers with the composed weights, and the backward accumulates every consumer's gradient straight into dy_v[l]
+// (zeroed with the zero slab). Degree 1 folds the first layer (h_0 = y_0 W_p_0; POLAR-1-M / -L: no W_p_0 product in
+// either direction), degree 2 every layer it can (POLAR-1-L: all three, its degree-2 sources and electron-energy
+// blocks being exactly zero; 14 fewer GEMMs per force call). Exact to float32 rounding (reassociation only). sm_120
+// by default; LOUP_POLAR_HFOLD=0 disables it, 1 / 2 / 3 (bit l - 1: degree l) choose the folded degrees on any GPU.
+void GenericModel::setup_lr_fold(const Bundle& b) {
+    if (!lr_) return;
+    int mask = device_is_cc120() ? 3 : 0;
+    if (const char* e = std::getenv("LOUP_POLAR_HFOLD"); e && e[0] >= '0' && e[0] <= '3') mask = e[0] - '0';
+    const int nL = n_layers_, C = layers_[0]->C_out, le_l = lr_->le_lmax();
+    for (int l = 1; l <= std::min(layers_[0]->lmax_out, 2); ++l) {
+        if (!((mask >> (l - 1)) & 1)) continue;
+        int k = l == 1 ? 1 : nL;
+        if (k == nL && le_l >= l) --k;  // the electron energy reads the last layer's hout[l]
+        if (k < 1) continue;
+        // every layer's degree-l output (and later layers' input) C wide, species-independent skips on the way
+        bool ok = !layers_[0]->sc_has[l];
+        for (int u = 0; u < nL; ++u) {
+            const GenericLayer* Lu = layers_[u];
+            if (Lu->lmax_out < l || Lu->C_out != C || Lu->ro_folded) ok = false;
+            if (u > 0 && (Lu->lmax_in < l || Lu->C_in != C || (u <= k && Lu->sc_has[l] && Lu->sc_species))) ok = false;
+        }
+        if (!ok || chain_fold_) continue;
+        DevCompose dc;
+        auto key = [&](int u, const char* w) { return "L" + std::to_string(u) + "." + w + std::to_string(l); };
+        std::vector<const double*> P(k), S(nL, nullptr);
+        for (int u = 0; u < k; ++u) P[u] = dc.dup(b.f32(key(u, "W_p_"), {C, C}));
+        for (int u = 1; u <= std::min(k, nL - 1); ++u)
+            if (layers_[u]->sc_has[l]) S[u] = dc.dup(b.f32(key(u, "W_sc_"), {1, C, C}));
+        // G_{v, s-1} W = W_p_v W_sc_{v+1} ... W_sc_{s-1} W for W [C, cols]; nullptr when a skip on the way is absent
+        auto chain = [&](int v, int s, const double* W, int cols) -> const double* {
+            const double* T = W;
+            for (int u = s - 1; u > v; --u) {
+                if (!S[u]) return nullptr;
+                T = dc.mm(S[u], C, C, T, cols);
+            }
+            return dc.mm(P[v], C, C, T, cols);
+        };
+        // layer s's x (s <= k) and, for the first unfolded layer, its skip: the term of layer s - 1 replaces the
+        // weight (h_in aliases y_{s-1}), the earlier layers' are extra terms
+        for (int s = 1; s <= std::min(k, nL - 1); ++s) {
+            GenericLayer* Ls = layers_[s];
+            auto fold_into = [&](const double* W, int cols, float*& primary, std::vector<GenericLayer::YTerm>& extra) {
+                for (int v = s - 1; v >= 0; --v) {
+                    const double* G = chain(v, s, W, cols);
+                    if (!G) continue;
+                    float* f = dc.to_f32(G, (int64_t)C * cols, Ls->weights);
+                    if (v == s - 1) primary = f;
+                    else extra.push_back({v, f});
+                }
+            };
+            if (Ls->lmax_x >= l)
+                fold_into(dc.dup(b.f32(key(s, "W_up_"), {C, Ls->C_x})), Ls->C_x, Ls->W_up[l], Ls->x_extra[l]);
+            if (s == k && S[s]) fold_into(S[s], C, Ls->W_sc[l], Ls->sc_extra[l]);
+        }
+        // mixer and source of each folded layer v: W_p_v B_v; a source block is m-major, (2l + 1) blocks [C, 8]
+        const int lm = layers_[0]->lmax_out, rows = dimL(l) * C;
+        const double *B = nullptr, *Bs = nullptr;
+        for (int v = k - 1; v >= 0; --v) {
+            const std::string t = std::to_string(v);
+            const double* M = dc.dup(b.f32("LR.mix_" + t + "_" + std::to_string(l), {C, C}));
+            const std::vector<float> src = b.f32("LR.src_" + t, {(lm + 1) * (lm + 1) * C, 8});
+            const double* Rv = dc.dup(std::vector<float>(src.begin() + (size_t)l * l * C * 8,
+                                                         src.begin() + ((size_t)l * l * C + rows) * 8));
+            if (v == k - 1 || !S[v + 1]) {
+                B = M;
+                Bs = Rv;
+            } else {
+                B = dc.mm(S[v + 1], C, C, B, C, M);
+                double* nb = dc.alloc((int64_t)rows * 8);
+                for (int m = 0; m < dimL(l); ++m)
+                    dc.mm(S[v + 1], C, C, Bs + (size_t)m * C * 8, 8, Rv + (size_t)m * C * 8, nb + (size_t)m * C * 8);
+                Bs = nb;
+            }
+            double* sv = dc.alloc((int64_t)rows * 8);
+            for (int m = 0; m < dimL(l); ++m) dc.mm(P[v], C, C, Bs + (size_t)m * C * 8, 8, nullptr, sv + (size_t)m * C * 8);
+            lr_->set_hidden_fold(v, l, dc.to_f32(dc.mm(P[v], C, C, B, C), (int64_t)C * C, layers_[v]->weights),
+                                 dc.to_f32(sv, (int64_t)rows * 8, dc.tmp));
+        }
+        for (int u = 0; u < k; ++u) layers_[u]->hfold[l] = true;
+    }
+}
 // ------------------------------------------------------------------------------------------------- buffers
 bool GenericModel::set_cell(const double* cell) { return lr_ ? lr_->set_cell(cell) : false; }
 
@@ -1574,8 +1652,8 @@ bool GenericModel::set_cell(const double* cell) { return lr_ ? lr_->set_cell(cel
 // unpaired one, and five receivers per 640-thread block) rank differently per system (5060 Ti, gconv_fwd_L1 us per
 // step R1p / R1 / R5: OMAT-0 medium SrTiO3 2,200 / 2,176 / 1,742, NbCl5 346 / 327 / 321; OFF24-M water 2,723 /
 // 2,686 / 2,437; MP-0 medium SrTiO3 2,385 / 2,273 / 2,136, NbCl5 354 / 348 / 357), so each layer's are timed once
-// per system on the last force pass's inputs, as the specialised path times its spline variants
-// (tune_rebuild_variants); a variant replaces the current one only if >= 2% faster. Its outputs (mid, D) are
+// per system on the last force pass's inputs (from
+// tune_rebuild_variants); a variant replaces the current one only if >= 2% faster. Its outputs (mid, D) are
 // rewritten by every force pass. sm_120 by default; LOUP_CONV_TUNE=0 keeps the default variant, LOUP_CONV_TUNE=1
 // times them on any GPU (tests). Returns -1 before a pass has been recorded for this system (call again later), 0 if
 // nothing changed, 1 if a variant changed.
@@ -1601,7 +1679,8 @@ int GenericModel::tune_conv_variants(cudaStream_t st) {
                 CUDA_CHECK_THROW(cudaEventRecord(e0, st));
                 launch_conv_fwd(L->lmax_x, st, a.N, L->C_x, S_, L->intervals, L->grid, sh_perm_, L->pair_sym, a.row_ptr,
                                 a.senders, a.vec_len, a.slab, a.t_sx, L->last_preloc, a.species, L->packed_table,
-                                L->density_table, L->cubic_bias_shift, L->x, L->mid, L->D, v);
+                                L->density_table, L->cubic_bias_shift, L->x, L->mid, L->D, v, nullptr, L->conv_prune,
+                                L->jit_conv_on ? &L->jit_conv : nullptr);
                 CUDA_CHECK_THROW(cudaEventRecord(e1, st));
                 CUDA_CHECK_THROW(cudaEventSynchronize(e1));
                 float ms = 0.0f;
@@ -1733,13 +1812,21 @@ void GenericModel::alloc_system(int N) {
                 L->dpre[l] = (t > 0 && l <= L->lmax_x) ? own(n * dimL(l) * L->lin_cols[l]) : nullptr;
             }
         }
+        if (L->conv_prune)  // S125: the skipped projections' outputs, read by the product (or the gate), stay zero
+            for (int l = 1; l < 4; ++l) {
+                float* z = L->skip_folded ? L->msgf[l] : L->lin[l];
+                CUDA_CHECK_THROW(cudaMemset(z, 0, n * dimL(l) * (L->skip_folded ? L->C_msg : L->lin_cols[l]) * sizeof(float)));
+            }
+        if (L->lin_compact)  // S130 / S132: the pad columns of the compact angular gradients are never written
+            for (int l = 1; l < 4; ++l)
+                CUDA_CHECK_THROW(cudaMemset(L->dlin[l], 0, n * dimL(l) * L->lin_cols[l] * sizeof(float)));
         if (L->kind == 4)  // with the S59 table the gates read res[0] from it
             for (int l = 0; l <= L->lmax_x; ++l)
                 L->res[l] = (l == 0 && L->res0_table) ? nullptr : own(n * dimL(l) * L->lin_cols[l]);
         L->D = own(n);
         for (int l = 0; l <= L->lmax_out; ++l) {
             L->y[l] = own(n * dimL(l) * L->C_out);
-            L->dy[l] = own(n * dimL(l) * L->C_out);
+            L->dy[l] = L->hfold[l] ? nullptr : own(n * dimL(l) * L->C_out);  // folded: in the zero slab (below)
         }
         if (L->ro_H) {
             L->hid = own(n * L->ro_H);
@@ -1768,6 +1855,12 @@ void GenericModel::alloc_system(int N) {
         // What sweeps carry from layer to layer, and the zero slab's accumulators: never in the arena.
         L->dD = (L->kind >= 2) ? zalloc(n) : nullptr;
         for (int l = 0; l <= L->lmax_out; ++l) {
+            if (L->hfold[l]) {  // long-range hidden fold: hout aliases y, dhout dy (in dhout's zero-slab place)
+                L->dy[l] = zalloc(n * dimL(l) * L->C_out);
+                L->hout[l] = L->y[l];
+                L->dhout[l] = L->dy[l];
+                continue;
+            }
             const bool no_hout = L->ro_folded || (chain_fold_ && t < n_layers_ - 1);  // S57: never formed
             L->hout[l] = no_hout ? nullptr : alloc(n * dimL(l) * L->C_out);
             L->dhout[l] = no_hout ? nullptr : zalloc(n * dimL(l) * L->C_out);
@@ -1905,6 +1998,7 @@ void GenericModel::record(const GenericPassInputs& in) {
     // ---------------- forward of layer t: everything from its linear_up to its readout. `energy` takes the
     // readout's energy (a sink when a backward sweep replays the layer).
     std::vector<const float*> written;  // S57 fold destinations already assigned in this pass
+    std::vector<unsigned> gate_vform(n_layers_, 0u);  // per layer: degrees whose forward gate ran in the projection
     auto forward_layer = [&](int t, double* energy) {
         GenericLayer* L = layers_[t];
         const int Cx = L->C_x, Cm = L->C_msg, Co = L->C_out;
@@ -1915,25 +2009,59 @@ void GenericModel::record(const GenericPassInputs& in) {
             for (int l = 0; l <= L->lmax_x; ++l) {
                 if (L->lmax_x > 0) lane(l);
                 in.gemm(false, Nx * dimL(l), Cx, L->C_in, 1.0f, L->h_in[l], L->C_in, L->W_up[l], Cx, 0.0f, L->x[l], Cx);
+                for (const auto& e : L->x_extra[l])  // long-range hidden fold: earlier layers' y terms
+                    in.gemm(false, Nx * dimL(l), Cx, L->C_in, 1.0f, layers_[e.src]->y[l], L->C_in, e.W, Cx, 1.0f,
+                            L->x[l], Cx);
             }
             if (L->lmax_x > 0) join();
         }
         if (L->first_hidden) {
             const int Kh = L->K0;
-            first_fwd_kernel<<<N, ((std::max(L->J - 1, 64) + 31) / 32) * 32, 0, st>>>(
-                N, S, L->intervals, L->J, L->K0, L->grid, sh_perm_, L->pair_sym, in.act_row_ptr, in.act_senders,
-                in.act_vec_len, in.species, L->table, L->S0[0], L->S0[1], L->S0[2], L->S0[3], L->D);
+            const int fwd_blk = ((std::max(L->J - 1, 64) + 31) / 32) * 32;
+            if (L->jit_fwd)
+                launch_jit_as(first_fwd_kernel, L->jit_fwd, N, fwd_blk, 0, st, N, S, L->intervals, L->J, L->Jt, L->K0,
+                              L->grid, sh_perm_, L->pair_sym, in.act_row_ptr, in.act_senders, in.act_vec_len,
+                              in.species, L->table, L->S0[0], L->S0[1], L->S0[2], L->S0[3], L->D);
+            else
+                first_fwd_kernel<<<N, fwd_blk, 0, st>>>(
+                    N, S, L->intervals, L->J, L->Jt, L->K0, L->grid, sh_perm_, L->pair_sym, in.act_row_ptr,
+                    in.act_senders, in.act_vec_len, in.species, L->table, L->S0[0], L->S0[1], L->S0[2], L->S0[3], L->D);
             if (L->skip_folded) {
                 fork();
                 for (int l = 0; l < 4; ++l)
                     species_gemm(false, l, Kh, Cm, L->S0[l], L->C0[l], (int64_t)Kh * Cm, 0.0f, L->msgf[l], 4 * l);
                 join();
             } else {
+                // Residual-free degrees l >= 1 (l > lmax_x; res0 from the S59 table) whose projection can take the gate
+                // into its epilogue store gout_l instead of lin_l (gate_vform): the l = 0 projection, whose gate logits
+                // those epilogues read, runs first.
+                GateArgs gf;
+                gf.natoms = N;
+                gf.C = Cm;
+                gf.D = L->D;
+                gf.alpha = L->alpha;
+                gf.beta = L->beta;
+                gf.cg = L->gate_cg;
+                gf.lin0 = L->lin[0];
+                gf.res0 = L->res0_table;
+                gf.res0_sp = in.species;
+                if (L->kind == 4 && L->res0_table && in.gemm_gate_fwd)
+                    for (int l = L->lmax_x + 1; l < 4; ++l)  // A null: only asks
+                        if (in.gemm_gate_fwd(l, N * dimL(l), L->lin_cols[l], Kh, nullptr, L->C0[l], gf))
+                            gate_vform[t] |= 1u << l;
+                if (gate_vform[t])
+                    in.gemm(false, N, L->lin_cols[0], Kh, 1.0f, L->S0[0], Kh, L->C0[0], L->lin_cols[0], 0.0f, L->lin[0],
+                            L->lin_cols[0]);
                 fork();
-                for (int l = 0; l < 4; ++l) {
+                for (int l = gate_vform[t] ? 1 : 0; l < 4; ++l) {
                     lane(l);
-                    in.gemm(false, N * dimL(l), L->lin_cols[l], Kh, 1.0f, L->S0[l], Kh, L->C0[l], L->lin_cols[l],
-                            0.0f, L->lin[l], L->lin_cols[l]);
+                    gf.out = L->gout[l];
+                    if (!(gate_vform[t] >> l & 1u) ||
+                        !in.gemm_gate_fwd(l, N * dimL(l), L->lin_cols[l], Kh, L->S0[l], L->C0[l], gf)) {
+                        gate_vform[t] &= ~(1u << l);
+                        in.gemm(false, N * dimL(l), L->lin_cols[l], Kh, 1.0f, L->S0[l], Kh, L->C0[l], L->lin_cols[l],
+                                0.0f, L->lin[l], L->lin_cols[l]);
+                    }
                 }
                 if (L->kind == 4 && !L->res0_table) {
                     for (int l = 0; l <= L->lmax_x; ++l) {
@@ -1950,16 +2078,18 @@ void GenericModel::record(const GenericPassInputs& in) {
                                 ? conv_var_override_ : L->fwd_var;
             launch_conv_fwd(L->lmax_x, st, N, Cx, S, L->intervals, L->grid, sh_perm_, L->pair_sym, in.act_row_ptr,
                             in.act_senders, in.act_vec_len, in.act_slab, in.act_t_sx, L->last_preloc, in.species,
-                            L->packed_table, L->density_table, L->cubic_bias_shift, L->x, L->mid, L->D, var, L->dx);
+                            L->packed_table, L->density_table, L->cubic_bias_shift, L->x, L->mid, L->D, var, L->dx,
+                            L->conv_prune, L->jit_conv_on ? &L->jit_conv : nullptr);
+            const int n_proj = L->conv_prune ? 1 : 4;  // S125: lin_1..3 stay zero (W_lin_1..3 = 0)
             if (L->skip_folded) {
                 fork();
-                for (int l = 0; l < 4; ++l)
+                for (int l = 0; l < n_proj; ++l)
                     species_gemm(false, l, L->n_l3[l] * Cx, Cm, L->mid[l], L->W_lin[l],
                                  (int64_t)L->n_l3[l] * Cx * Cm, 0.0f, L->msgf[l], 4 * l);
                 join();
             } else {
                 fork();
-                for (int l = 0; l < 4; ++l) {
+                for (int l = 0; l < n_proj; ++l) {
                     lane(l);
                     in.gemm(false, N * dimL(l), L->lin_cols[l], L->n_l3[l] * Cx, 1.0f, L->mid[l], L->n_l3[l] * Cx,
                             L->W_lin[l], L->lin_cols[l], 0.0f, L->lin[l], L->lin_cols[l]);
@@ -1981,7 +2111,7 @@ void GenericModel::record(const GenericPassInputs& in) {
                                               L->lin[0], L->lin[1], L->lin[2], L->lin[3], res0, res0_sp,
                                               L->lmax_x >= 1 ? L->res[1] : nullptr,
                                               L->lmax_x >= 2 ? L->res[2] : nullptr, L->gout[0], L->gout[1],
-                                              L->gout[2], L->gout[3]);
+                                              L->gout[2], L->gout[3], gate_vform[t]);
             fork();
             for (int l = 0; l < 4; ++l) {
                 lane(l);
@@ -2006,16 +2136,30 @@ void GenericModel::record(const GenericPassInputs& in) {
             float* dm[4];
             for (int l = 0; l < 4; ++l) dm[l] = (L->kind == 1 || L->kind == 3) ? L->dlin[l] : L->dmsgf[l];
             float* dDp = (L->kind == 2 || L->kind == 3) ? L->dD : nullptr;
-            launch_prod_ro1_fused(L->prod, st, N, Cm, L->msgf, Dp, L->prod_w,
-                                  L->prod_species ? (int64_t)L->prod_segw * Cm : 0, in.species,
-                                  L->sc_has[0] ? L->hid : nullptr, L->ro_W1, L->ro_b1, L->ro_W2, L->ro_act_c,
-                                  L->dhid, energy, dm, dDp);
+            if (L->lin_compact)  // S130
+                launch_prod_ro1c_fused(L->prod, st, N, L->lin_cols[0], L->n_ang, L->lin_cols, L->d_pos, L->msgf, Dp,
+                                       L->prod_w,
+                                       L->prod_species ? (int64_t)L->prod_segw * L->lin_cols[0] : 0, in.species,
+                                       L->sc_has[0] ? L->hid : nullptr, L->ro_W1, L->ro_b1, L->ro_W2, L->ro_act_c,
+                                       L->dhid, energy, dm, dDp);
+            else
+                launch_prod_ro1_fused(L->prod, st, N, Cm, L->msgf, Dp, L->prod_w,
+                                      L->prod_species ? (int64_t)L->prod_segw * Cm : 0, in.species,
+                                      L->sc_has[0] ? L->hid : nullptr, L->ro_W1, L->ro_b1, L->ro_W2, L->ro_act_c,
+                                      L->dhid, energy, dm, dDp,
+                                      L->conv_prune && L->kind != 4);  // S127: m_1..3 = lin_1..3 = 0 (not for kind 4)
             return;
         }
         const float* ro_fw = fused_readout(t);
-        launch_prod(L->prod, false, st, N, Cm, L->msgf, Dp, L->prod_w,
-                    L->prod_species ? (int64_t)L->prod_segw * Cm : 0, in.species, L->y, nullptr, nullptr, ro_fw,
-                    ro_fw ? energy : nullptr);
+        if (L->lin_compact)  // S132
+            launch_prod_c(L->prod, false, st, N, Cm, L->kept, L->n_ang, L->lin_cols, L->d_order, L->d_pos, L->msgf, Dp,
+                          L->prod_w,
+                          L->prod_species ? (int64_t)L->prod_segw * Cm : 0, in.species, L->y, nullptr, nullptr, ro_fw,
+                          ro_fw ? energy : nullptr);
+        else
+            launch_prod(L->prod, false, st, N, Cm, L->msgf, Dp, L->prod_w,
+                        L->prod_species ? (int64_t)L->prod_segw * Cm : 0, in.species, L->y, nullptr, nullptr, ro_fw,
+                        ro_fw ? energy : nullptr);
         if (chain_fold_ && t < n_layers_ - 1) {
             // S57: y_t (and layer 0's species-only skip input) into every downstream consumer of hout_t; the first
             // write of a destination in this pass assigns it, later ones accumulate (program order: race-free).
@@ -2068,6 +2212,7 @@ void GenericModel::record(const GenericPassInputs& in) {
         } else if (!L->ro_folded) {
             if (L->lmax_out > 0) fork();
             for (int l = 0; l <= L->lmax_out; ++l) {
+                if (L->hfold[l]) continue;  // long-range hidden fold: hout[l] is y[l], its consumers composed
                 if (L->lmax_out > 0) lane(l);
                 in.gemm(false, N * dimL(l), Co, Co, 1.0f, L->y[l], Co, L->W_p[l], Co, 0.0f, L->hout[l], Co);
                 if (L->sc_has[l]) {
@@ -2076,6 +2221,9 @@ void GenericModel::record(const GenericPassInputs& in) {
                                      L->hout[l]);
                     else
                         in.gemm(false, N * dimL(l), Co, L->C_in, 1.0f, L->h_in[l], L->C_in, L->W_sc[l], Co, 1.0f,
+                                L->hout[l], Co);
+                    for (const auto& e : L->sc_extra[l])
+                        in.gemm(false, N * dimL(l), Co, L->C_in, 1.0f, layers_[e.src]->y[l], L->C_in, e.W, Co, 1.0f,
                                 L->hout[l], Co);
                 }
             }
@@ -2191,6 +2339,7 @@ void GenericModel::record(const GenericPassInputs& in) {
                 const bool fork_p = L->lmax_out > 0 || (L->has_sc && t > 0);
                 if (fork_p) fork();
                 for (int l = 0; l <= L->lmax_out; ++l) {
+                    if (L->hfold[l]) continue;  // long-range hidden fold: dy[l] (= dhout[l]) accumulated in place
                     if (fork_p) lane(l);
                     in.gemm(true, N * dimL(l), Co, Co, 1.0f, L->dhout[l], Co, L->W_p[l], Co, 0.0f, L->dy[l], Co);
                     if (L->sc_has[l] && t > 0) {
@@ -2201,6 +2350,9 @@ void GenericModel::record(const GenericPassInputs& in) {
                             lane(4 + l);
                             in.gemm(true, N * dimL(l), L->C_in, Co, 1.0f, L->dhout[l], Co, L->W_sc[l], Co, 1.0f,
                                     L->dh_in[l], L->C_in);
+                            for (const auto& e : L->sc_extra[l])
+                                in.gemm(true, N * dimL(l), L->C_in, Co, 1.0f, L->dhout[l], Co, e.W, Co, 1.0f,
+                                        layers_[e.src]->dy[l], L->C_in);
                         }
                     }
                 }
@@ -2211,27 +2363,65 @@ void GenericModel::record(const GenericPassInputs& in) {
             // product backward: gradient of the product input
             float* dm[4];
             for (int l = 0; l < 4; ++l) dm[l] = (L->kind == 1 || L->kind == 3) ? L->dlin[l] : L->dmsgf[l];
-            launch_prod(L->prod, true, st, N, Cm, L->msgf, Dp, L->prod_w,
-                        L->prod_species ? (int64_t)L->prod_segw * Cm : 0, in.species, L->dy, dm, dDp,
-                        fused_readout(t));
+            if (L->lin_compact)  // S132
+                launch_prod_c(L->prod, true, st, N, Cm, L->kept, L->n_ang, L->lin_cols, L->d_order, L->d_pos, L->msgf,
+                              Dp,
+                              L->prod_w, L->prod_species ? (int64_t)L->prod_segw * Cm : 0, in.species, L->dy, dm, dDp,
+                              fused_readout(t));
+            else
+                launch_prod(L->prod, true, st, N, Cm, L->msgf, Dp, L->prod_w,
+                            L->prod_species ? (int64_t)L->prod_segw * Cm : 0, in.species, L->dy, dm, dDp,
+                            fused_readout(t));
         }
         if (L->kind == 4) {
+            const float* res0 = L->res0_table ? L->res0_table : L->res[0];
+            const int* res0_sp = L->res0_table ? in.species : nullptr;
+            float* dpre0 = t > 0 ? L->dpre[0] : nullptr;
+            const unsigned vform = gate_vform[t];  // these degrees saved gout_l instead of lin_l
+            const float* lins[4];
+            for (int l = 0; l < 4; ++l) lins[l] = (vform >> l & 1u) ? L->gout[l] : L->lin[l];
+            // dgout_l = dmsgf_l @ W_2[l]^T; degrees whose GEMM takes the gate backward into its epilogue never write
+            // dgout_l, gate_bwd_kernel does the others
+            unsigned fused = 0;
             fork();
             for (int l = 0; l < 4; ++l) {
                 lane(l);
-                in.gemm(true, N * dimL(l), Cm, Cm, 1.0f, L->dmsgf[l], Cm, L->W_2[l], Cm, 0.0f, L->dgout[l], Cm);
+                bool done = false;
+                if (in.gemm_gate_bwd) {
+                    GateArgs g;
+                    g.natoms = N;
+                    g.C = Cm;
+                    g.D = L->D;
+                    g.alpha = L->alpha;
+                    g.beta = L->beta;
+                    g.cs = L->gate_cs;
+                    g.cg = L->gate_cg;
+                    g.lin0 = L->lin[0];
+                    g.lin_l = lins[l];
+                    g.res0 = res0;
+                    g.res0_sp = res0_sp;
+                    g.res_l = (l >= 1 && l <= L->lmax_x && l <= 2) ? L->res[l] : nullptr;
+                    g.dp0 = dpre0;
+                    g.dp_l = (l >= 1 && t > 0 && l <= L->lmax_x && l <= 2) ? L->dpre[l] : nullptr;
+                    g.dl0 = L->dlin[0];
+                    g.dl_l = L->dlin[l];
+                    g.dD = L->dD;
+                    g.vform = vform >> l & 1u;
+                    done = in.gemm_gate_bwd(l, N * dimL(l), Cm, Cm, L->dmsgf[l], L->W_2[l], g);
+                }
+                if (done) fused |= 1u << l;
+                else in.gemm(true, N * dimL(l), Cm, Cm, 1.0f, L->dmsgf[l], Cm, L->W_2[l], Cm, 0.0f, L->dgout[l], Cm);
             }
             join();
-            const float* res0 = L->res0_table ? L->res0_table : L->res[0];
-            const int* res0_sp = L->res0_table ? in.species : nullptr;
-            gate_bwd_kernel<<<N, Cm, 0, st>>>(N, Cm, L->lmax_x, L->D, L->alpha, L->beta, L->gate_cs, L->gate_cg,
-                                              L->lin[0], L->lin[1], L->lin[2], L->lin[3], res0, res0_sp,
-                                              L->lmax_x >= 1 ? L->res[1] : nullptr,
-                                              L->lmax_x >= 2 ? L->res[2] : nullptr, L->dgout[0], L->dgout[1],
-                                              L->dgout[2], L->dgout[3], t > 0 ? L->dpre[0] : nullptr,
-                                              (t > 0 && L->lmax_x >= 1) ? L->dpre[1] : nullptr,
-                                              (t > 0 && L->lmax_x >= 2) ? L->dpre[2] : nullptr, L->dlin[0], L->dlin[1],
-                                              L->dlin[2], L->dlin[3], L->dD);
+            if (fused != 15u)
+                gate_bwd_kernel<<<N, Cm, 0, st>>>(N, Cm, L->lmax_x, L->D, L->alpha, L->beta, L->gate_cs, L->gate_cg,
+                                                  L->lin[0], lins[1], lins[2], lins[3], res0, res0_sp,
+                                                  L->lmax_x >= 1 ? L->res[1] : nullptr,
+                                                  L->lmax_x >= 2 ? L->res[2] : nullptr, L->dgout[0], L->dgout[1],
+                                                  L->dgout[2], L->dgout[3], dpre0,
+                                                  (t > 0 && L->lmax_x >= 1) ? L->dpre[1] : nullptr,
+                                                  (t > 0 && L->lmax_x >= 2) ? L->dpre[2] : nullptr, L->dlin[0],
+                                                  L->dlin[1], L->dlin[2], L->dlin[3], L->dD, fused, vform);
         }
         const bool density = L->kind >= 2;
         if (L->first_hidden) {
@@ -2260,44 +2450,59 @@ void GenericModel::record(const GenericPassInputs& in) {
             }
             if (L->J - 1 <= 96) {
                 if (has_edges) {
-                    using EdgeBwd = void (*)(const int*, int, int, int, int, SplineGrid, int, int, const int*, const int*,
+                    using EdgeBwd = void (*)(const int*, int, int, int, int, int, SplineGrid, int, int, const int*, const int*,
                                              const float4*, const int*, const float4*, const float*, const float*, const float*,
                                              const float*, const float*, const float*, ZblParams, double*, double*, double*);
-                    const EdgeBwd tbl[2][2][2] = {
+                    const EdgeBwd tbl[3][2][2] = {
                         {{first_bwd_edge_kernel<2, false, false>, first_bwd_edge_kernel<2, false, true>},
                          {first_bwd_edge_kernel<2, true, false>, first_bwd_edge_kernel<2, true, true>}},
                         {{first_bwd_edge_kernel<3, false, false>, first_bwd_edge_kernel<3, false, true>},
-                         {first_bwd_edge_kernel<3, true, false>, first_bwd_edge_kernel<3, true, true>}}};
-                    tbl[L->J - 1 > 64 ? 1 : 0][has_zbl_ ? 1 : 0][in.compute_stress ? 1 : 0]<<<(in.E_cap + 127) / 128, 128, 0, st>>>(
-                        in.E_dev, S, L->intervals, L->J, L->K0, L->grid, sh_perm_, L->pair_sym, in.act_senders,
-                        in.act_receivers, in.act_vec_len, in.species, L->table, L->S0[0], L->S0[1], L->S0[2], L->S0[3],
-                        density ? L->dD : nullptr, d_edge_dvec_, zbl_p, in.energy, in.forces, in.virial);
+                         {first_bwd_edge_kernel<3, true, false>, first_bwd_edge_kernel<3, true, true>}},
+                        {{first_bwd_edge_kernel<2, false, false, 65>, first_bwd_edge_kernel<2, false, true, 65>},
+                         {first_bwd_edge_kernel<2, true, false, 65>, first_bwd_edge_kernel<2, true, true, 65>}}};
+                    const int cols = L->J - 1 > 64 ? 1 : (L->J == 65 ? 2 : 0);  // 2: S142's fixed 64-column kernel
+                    const EdgeBwd aot = tbl[cols][has_zbl_ ? 1 : 0][in.compute_stress ? 1 : 0];
+                    const float* dD_arg = density ? L->dD : nullptr;
+                    const unsigned nblk = (unsigned)((in.E_cap + 127) / 128);
+                    if (const void* jk = L->jit_bwd_edge[in.compute_stress ? 1 : 0])
+                        launch_jit_as(aot, jk, nblk, 128, 0, st, in.E_dev, S, L->intervals, L->J, L->Jt, L->K0,
+                                      L->grid, sh_perm_, L->pair_sym, in.act_senders, in.act_receivers,
+                                      in.act_vec_len, in.species, L->table, L->S0[0], L->S0[1], L->S0[2], L->S0[3],
+                                      dD_arg, d_edge_dvec_, zbl_p, in.energy, in.forces, in.virial);
+                    else
+                        aot<<<nblk, 128, 0, st>>>(
+                            in.E_dev, S, L->intervals, L->J, L->Jt, L->K0, L->grid, sh_perm_, L->pair_sym,
+                            in.act_senders, in.act_receivers, in.act_vec_len, in.species, L->table, L->S0[0],
+                            L->S0[1], L->S0[2], L->S0[3], dD_arg, d_edge_dvec_, zbl_p, in.energy, in.forces,
+                            in.virial);
                 }
             } else {
                 const size_t g_smem = (size_t)16 * S * (L->J - 1) * sizeof(float);
                 if (g_smem <= 46 * 1024)  // + 2 KB static shared memory within the 48 KB default
                     first_bwd_kernel<true><<<N, 256, g_smem, st>>>(
-                        N, S, L->intervals, L->J, L->K0, L->grid, sh_perm_, L->pair_sym, in.act_row_ptr, in.act_senders,
+                        N, S, L->intervals, L->J, L->Jt, L->K0, L->grid, sh_perm_, L->pair_sym, in.act_row_ptr, in.act_senders,
                         in.act_vec_len, in.species, L->table, L->S0[0], L->S0[1], L->S0[2], L->S0[3],
                         density ? L->dD : nullptr, d_edge_dvec_);
                 else
                     first_bwd_kernel<false><<<N, 256, 0, st>>>(
-                        N, S, L->intervals, L->J, L->K0, L->grid, sh_perm_, L->pair_sym, in.act_row_ptr, in.act_senders,
+                        N, S, L->intervals, L->J, L->Jt, L->K0, L->grid, sh_perm_, L->pair_sym, in.act_row_ptr, in.act_senders,
                         in.act_vec_len, in.species, L->table, L->S0[0], L->S0[1], L->S0[2], L->S0[3],
                         density ? L->dD : nullptr, d_edge_dvec_);
             }
             return;
         }
-        // dmid (aliases mid: the forward values are dead) = dlin @ W_lin^T (or dmsgf @ W_lin_folded^T)
+        // dmid (aliases mid: the forward values are dead) = dlin @ W_lin^T (or dmsgf @ W_lin_folded^T); S125: dmid_0
+        // only (the pruned conv backward reads no other)
+        const int n_proj = L->conv_prune ? 1 : 4;
         if (L->skip_folded) {
             fork();
-            for (int l = 0; l < 4; ++l)
+            for (int l = 0; l < n_proj; ++l)
                 species_gemm(true, l, Cm, L->n_l3[l] * Cx, L->dmsgf[l], L->W_lin[l],
                              (int64_t)L->n_l3[l] * Cx * Cm, 0.0f, L->mid[l], 4 * l);
             join();
         } else {
             fork();
-            for (int l = 0; l < 4; ++l) {
+            for (int l = 0; l < n_proj; ++l) {
                 lane(l);
                 in.gemm(true, N * dimL(l), L->n_l3[l] * Cx, L->lin_cols[l], 1.0f, L->dlin[l], L->lin_cols[l],
                         L->W_lin[l], L->lin_cols[l], 0.0f, L->mid[l], L->n_l3[l] * Cx);
@@ -2314,12 +2519,16 @@ void GenericModel::record(const GenericPassInputs& in) {
         launch_conv_bwd(L->lmax_x, st, N, Cx, S, L->intervals, L->grid, sh_perm_, L->pair_sym, in.act_row_ptr,
                         in.act_senders, in.act_vec_len, in.act_slab, in.act_t_sx, can_preloc(L), in.species,
                         L->packed_table, L->density_table, L->cubic_bias_shift, L->x, L->mid,
-                        density ? L->dD : nullptr, L->dx, t > 0, d_edge_dvec_, t == n_layers_ - 1);
+                        density ? L->dD : nullptr, L->dx, t > 0, d_edge_dvec_, t == n_layers_ - 1, L->conv_prune,
+                        L->jit_conv_on ? &L->jit_conv : nullptr);
         if (t > 0 && !chain_fold_) {  // S57: the earlier layers' fold reads dx directly
             if (L->lmax_x > 0) fork();
             for (int l = 0; l <= L->lmax_x; ++l) {
                 if (L->lmax_x > 0) lane(l);
                 in.gemm(true, Nx * dimL(l), L->C_in, Cx, 1.0f, L->dx[l], Cx, L->W_up[l], Cx, 1.0f, L->dh_in[l], L->C_in);
+                for (const auto& e : L->x_extra[l])
+                    in.gemm(true, Nx * dimL(l), L->C_in, Cx, 1.0f, L->dx[l], Cx, e.W, Cx, 1.0f, layers_[e.src]->dy[l],
+                            L->C_in);
             }
             if (L->lmax_x > 0) join();
         }

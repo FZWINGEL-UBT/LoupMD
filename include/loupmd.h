@@ -43,8 +43,9 @@ typedef struct {
 const char* loup_last_error(const LoupHandle* h);
 
 // Create engine from a .loup bundle (python -m loupmd.export; loupmd.bundles caches them) on CUDA
-// device `device_id`. Two architectures: MACE-OMAT-0 medium on its specialised kernels, and the generic path for
-// MACE-OMAT-0 small, MACE-OFF23/23b/24, MACE-MH-1 (one head per bundle) and MACE-POLAR-1 S/M/L. MACE-POLAR-1 is
+// device `device_id`. One path for every family (MACE-OMAT-0 / MP-0 / MPA-0 / MatPES, MACE-OMOL-0, MACE-OFF23/23b/24,
+// MACE-MH-1 with one head per bundle, MACE-POLAR-1 S/M/L); bundles of the retired specialised OMAT-0-medium path
+// (arch omat0_medium_spec, before JIT_DESIGN.md stage 5) are refused: re-export them. MACE-POLAR-1 is
 // evaluated for neutral singlet systems in zero external field; its stress includes the k-space terms' cell
 // dependence (MACE PR 1718), which the PolarMACE releases up to 0.3.16 leave out.
 LoupHandle* loup_create(const char* loup_path, int device_id);
@@ -56,13 +57,19 @@ typedef struct {
     int compute_capability;     // of the handle's GPU, major * 10 + minor (120 for sm_120)
     int n_layers;               // interaction layers of the model
     int has_long_range;         // 1 for MACE-POLAR-1 (k-space electrostatics), else 0
-    int specialised;            // 1 on the specialised kernels, 0 on the generic path
+    int specialised;            // always 0: the kernels specialised to MACE-OMAT-0 medium were retired (the field
+                                // keeps the struct's layout)
     int n_species;              // elements the bundle was exported for
     double r_max;               // cutoff in A
     char gpu_name[64];
     char kernel_signature[160]; // the compiled kernels the bundle needs; ends in "..." if it did not fit
 } LoupInfo;
 int loup_get_info(const LoupHandle* h, LoupInfo* out);
+
+// Facts of the loaded model: the cutoff radius in A (0 on a null handle), and the atomic numbers of the bundle's
+// species (returns their count and writes at most `max` of them to out_atomic_numbers, which may be NULL).
+double loup_cutoff(const LoupHandle* h);
+int loup_species(const LoupHandle* h, int* out_atomic_numbers, int max);
 
 // Set system topology (species as atomic numbers Z[0..n_atoms-1], masses in amu).
 // Internally groups atoms by species for contiguous GEMMs; for systems whose per-atom working set exceeds L2, atoms
@@ -96,7 +103,7 @@ int loup_evaluate(
 //                          differs from a plain call's energy in float32 rounding (the per-atom energies come from
 //                          one more energy-only pass; measured up to 6e-7 relative), while forces and stress are
 //                          the plain call's. The device forces are stale afterwards.
-//                          Generic kernels only, and not for long-range models: refused there.
+//                          Not for long-range models: refused there.
 #define LOUP_EVAL_STRESS 1
 #define LOUP_EVAL_ENERGY_ONLY 2
 #define LOUP_EVAL_PER_ATOM 4
@@ -110,6 +117,20 @@ int loup_evaluate2(
     double* out_stress,
     double* out_atom_energies
 );
+
+// Evaluate ahead (0 off, the default; 1 on): after a loup_evaluate call the engine queues the next call's force pass
+// on its GPU stream, held back until that call has written its positions, so the call itself launches nothing. It
+// is for a caller that integrates on the host and calls loup_evaluate every step, such as the LAMMPS pair style:
+// measured on an RTX 5060 Ti under WSL 2, it took 2-7% off a LAMMPS step on cells of a few hundred atoms and nothing
+// measurable off a 5,000-atom step. It starts after two calls in a row with one stress flag and
+// an unchanged cell; a call that does not fit the queued pass, and every other call on the handle, lets the queued
+// pass run first (its result is discarded), so results never depend on the setting.
+// WARNING: between two loup_evaluate calls the handle's stream then holds work that cannot run. Other GPU work of
+// the process in that time may wait for it forever: anything on CUDA's default stream (another handle being set up,
+// another library such as PyTorch) and any device-wide synchronisation. Switch it on only when this handle's
+// loup_evaluate calls are the process's only GPU work between them. Without driver support for a stream wait on host
+// memory the setting has no effect. LOUP_EVAL_ARM=0 keeps it off for every handle; =1 switches it on for every handle.
+int loup_set_evaluate_ahead(LoupHandle* h, int on);
 
 // Initialize MD state (positions [n_atoms, 3] in A, velocities [n_atoms, 3] in ASE units, i.e. A per ASE time unit
 // as returned by ase.Atoms.get_velocities(); cell [3, 3] in A). Velocities are zero after loup_set_system until
@@ -517,23 +538,66 @@ int loup_d3_compute(LoupD3* term, const double* positions, const double* cell, d
 size_t loup_d3_device_bytes(const LoupD3* term);
 void loup_d3_destroy(LoupD3* term);
 
+// Device-resident evaluation, for host codes that keep their atoms on the GPU and integrate themselves (the LAMMPS
+// Kokkos pair style `loupmd/kk`, lammps/ in this repository). All pointers in LoupDeviceIO are device pointers on the
+// engine's CUDA device.
+#define LOUP_IO_ENERGY 1       /* out_energy_ev is filled (the call then waits for the force pass) */
+#define LOUP_IO_VIRIAL 2       /* out_virial is filled (the call then waits for the force pass) */
+#define LOUP_IO_ATOM_ENERGY 4  /* reserved: per-atom energies are not available yet (the call is refused) */
+typedef struct {
+    int n_rows;               // rows of the caller's arrays; must equal n_atoms of loup_set_system
+    // Component c (0 = x, 1 = y, 2 = z) of row r is at base[r * row_stride + c * comp_stride], in doubles: a row-major
+    // [n][3] array has strides (3, 1), a column-major [n_alloc][3] array (Kokkos::LayoutLeft) (1, n_alloc).
+    const double* positions;  // A. Rows may be unwrapped (any periodic image); they must be continuous from call to
+                              // call, since the skin check compares them with the positions of the last list build.
+    long long pos_row_stride, pos_comp_stride;
+    const int* ids;           // [n_rows]: the engine atom (index in loup_set_system's order, 0 .. n_atoms-1) each row
+                              // holds; every atom exactly once. NULL: row r is atom r.
+    double* forces;           // eV/A: the forces are ADDED to the rows (NULL: no forces written)
+    long long f_row_stride, f_comp_stride;
+    double* atom_energy;      // reserved, must be NULL
+    int flags;                // LOUP_IO_* bits
+} LoupDeviceIO;
+
+// Queues one force evaluation behind the work already on `stream` (a cudaStream_t of the same device; NULL is the
+// default stream) and makes `stream` wait for the forces, so work the caller queues on it afterwards sees them. `cell`
+// is a host [3, 3] row-major matrix in A, as for loup_evaluate; a changed cell rebuilds the neighbour list.
+// The call returns as soon as the step is queued and its neighbour-list decision is known; it waits for the result
+// only when energy or virial is asked for. out_energy_ev (with LOUP_IO_ENERGY) is the potential energy in eV.
+// out_virial (with LOUP_IO_VIRIAL) is the virial tensor -dE/d(strain) in eV, as [xx, yy, zz, xy, xz, yz] (the layout
+// and sign of LAMMPS's `virial`; the stress of loup_evaluate is -virial / volume).
+// loup_evaluate, loup_set_state and the run calls may be mixed with it on one handle; MD velocities are untouched.
+// A whole system only (not an open domain, not the tiled call); a dispersion term set on the handle is included.
+// The per-atom energies of loup_evaluate2 are not available here.
+int loup_compute_device(LoupHandle* h, const LoupDeviceIO* io, const double* cell, void* stream,
+                        double* out_energy_ev, double* out_virial);
+
 // Environment:
 //   LOUP_CACHE_DIR  directory for the per-GPU GEMM plan cache (default $HOME/.cache/loupmd). Files are keyed by GPU
 //                   name, compute capability, cuBLASLt version and a hash of this library; plans whose winner leads
 //                   the runner-up by less than 3% are not persisted.
 //   LOUP_RETUNE     if set, ignore the plan cache and re-time every GEMM shape (results are still saved).
-//   LOUP_SPLINE_VARIANT, LOUP_WPRIME_THREADS, LOUP_REORDER  force kernel variants (testing; see tools/dev/test_gate.py).
-//   LOUP_WPRIME_RCV=0|1  specialised OMAT-0 path: the edge-tiled (0) or receiver-owned (1) w' backward (testing; the
-//                   receiver-owned kernel is the default on sm_120 and compute capability 8.0, and on other GPUs from
-//                   512 atoms).
-//   LOUP_M1_CHUNK=<atoms>|0  specialised OMAT-0 path: chunks of at most this many receivers for the interaction-1
-//                   message buffers whenever the system is larger (default: chunks of at most 8,192 above 16,384
-//                   atoms, in two alternating buffers; 0 = always one chunk) (testing).
+//   LOUP_EVAL_ARM=0|1  loup_set_evaluate_ahead for every handle: 0 keeps it off, 1 switches it on (testing; see the
+//                   warning at loup_set_evaluate_ahead).
+//   LOUP_DEBUG_EVAL_TIMES=1  when a handle is destroyed, print where its loup_evaluate calls spent their time: to
+//                   the launch, to the guard's publication, to the results, to the return, and between calls.
+//   LOUP_REORDER=0|1  the spatial atom reorder off or on (testing).
+//   LOUP_CONV_FWD_VARIANT, LOUP_CONV_TUNE  force or untune the conv forward variants (testing; tools/dev/test_gate.py).
+//   LOUP_JIT=0|1    the run-time compiler (JIT_DESIGN.md): 0 off (built-in kernels only; a bundle whose product the
+//                   library lacks is then refused), unset the kernels the library has no instance for (conv widths,
+//                   products), 1 also layer 0's kernels. LOUP_NVRTC names the NVRTC library, LOUP_DEBUG_JIT=1 prints
+//                   what is compiled or read from <LOUP_CACHE_DIR>/jit/, LOUP_JIT_PRODUCTS=1 compiles every product
+//                   from the bundle (testing).
 //   LOUP_ROW_SORT=global  sort every neighbour row in global scratch, the path of rows over 4,096 edges (testing).
 //   LOUP_MD_REBUILD=host|fallback  MD neighbour rebuilds host-driven, or counted on the GPU and always finished on the
 //                   host, instead of inside the step graph (testing).
 //   LOUP_POLAR_FOLD=0|1  POLAR long range without (0) the load-time dot^T weight fold, testing the path other GPUs take,
 //                   or with it (1) on any GPU (sm_120 and cc 8.0 fold by default).
+//   LOUP_POLAR_ZBLK=0  POLAR long range: run the GEMMs of weight blocks certified exactly zero at load (POLAR-1-L's
+//                   l = 2 SCF, electron-energy and source blocks), which are skipped by default (testing).
+//   LOUP_POLAR_HFOLD=0|1|2|3  POLAR models: the degrees (bit l - 1 = degree l) whose hidden chain is folded at load into
+//                   the long-range mixer and source and the next layers' weights; 0 forms every layer's output, the
+//                   path other GPUs take (testing; sm_120 folds degrees 1 and 2 by default).
 //   LOUP_CHAIN_FOLD=0|1  generic models (OMOL-0, MH-1, the OMAT-0 / MP-0 / MPtrj / OFF families on the generic path):
 //                   0 skips the load-time skip-chain fold (the path other GPUs take), 1 folds on any GPU (testing;
 //                   sm_120 and cc 8.0 fold by default).
@@ -542,6 +606,13 @@ void loup_d3_destroy(LoupD3* term);
 //   LOUP_CONV_TUNE=0|1  generic models: 0 keeps the default conv forward variant (no per-system timing at the first
 //                   rebuild); 1 times the variants on any GPU (testing; sm_120 times them by default).
 //   LOUP_CONV_FWD_VARIANT=0|1|2  force a generic conv forward variant (testing; see tools/dev/test_gate.py).
+//   LOUP_CONV_PRUNE=0  generic models: keep every conv path of a layer whose l >= 1 projections are exactly zero
+//                   (MP-0 medium's second interaction), which by default runs only its output-degree-0 paths and a
+//                   scalar-only product (testing).
+//   LOUP_LIN_COMPACT=0  generic models: the dense projections and product kernels of kind-1 layers (MPtrj-2022.9, MP-0
+//                   medium's layer 0) instead of their live channels, certified from exact zeros at load (testing).
+//   LOUP_SENDER_BWD=0  generic models: the receiver-owned backward of a pruned conv layer (MP-0 medium's second
+//                   interaction) instead of the sender-owned one (testing).
 //   LOUP_NO_HYBRID=1  no tensor-core GEMM cubin (float32 SIMT GEMMs only).
 //   LOUP_HYBRID_CUBIN=path  load this GEMM cubin instead of the default (cubins/gemm_tc_hyb_sm80.cubin, LoupMD's own
 //                   cubins/src/gemm_tc.cu build with more tiles and beta support, on cc 8.0; FastMACE's
@@ -553,7 +624,12 @@ void loup_d3_destroy(LoupD3* term);
 //                   by default).
 //   LOUP_FORCE_TC=1  every GEMM the tensor-core cubin can take runs on it (testing the cubin's accuracy on every
 //                   eligible shape; no GEMM plans are loaded or saved).
-//   LOUP_DEBUG_SPLINE, LOUP_DEBUG_GEMM  print the variant / GEMM tuning decisions to stderr.
+//   LOUP_GATE_FUSE=0, LOUP_GATE_FUSE_FWD=0  generic models with gated (kind 4) layers (MH-1, OMOL-0, POLAR-1): keep the
+//                   gate kernels instead of the gate backward in the W_2^T GEMMs' epilogue / layer 0's gated store in
+//                   its projections' epilogue (testing; both run where a GEMM's plan is the own N-fastest sgemm128,
+//                   i.e. on sm_120).
+//   LOUP_DEBUG_SPLINE, LOUP_DEBUG_GEMM, LOUP_DEBUG_COMPACT  print the variant / GEMM tuning decisions and the compacted
+//                   generic layers to stderr.
 //   LOUP_DEBUG_ERRORS  print every failure's message (loup_last_error) to stderr as well.
 //   LOUP_DEBUG_GRAPHS  print a line to stderr for every capture of an MD step graph and for every force pass a run
 //                      call makes before its first step (tests/test_md_graph_reuse.py).

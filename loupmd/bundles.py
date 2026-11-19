@@ -1,8 +1,8 @@
 """The bundle cache: the ``.loup`` file for a model, an element set, a head and a charge / spin setting.
 
 A bundle is exported once and reused. Its file name carries a key over everything that decides its contents (the
-model file's SHA-256, the elements, the head, the path, charge and spin, and the exporter's own sources), so a
-changed exporter never finds an old bundle. Two processes that ask for the same bundle export it once: the export
+model file's SHA-256, the elements, the head, charge and spin, and the exporter's own sources), so a changed
+exporter never finds an old bundle. Two processes that ask for the same bundle export it once: the export
 runs under a file lock and the file appears under its name only when it is complete.
 
 The exporter is ``loupmd.export``, run in a process of its own (it needs torch and sets its own environment).
@@ -22,23 +22,13 @@ from . import cache, kernels
 from .errors import InputError, LoupError
 
 _PACKAGE = Path(__file__).resolve().parent
-# Everything on LoupMD's side that decides a bundle's contents: the exporters, the container writer and the compiled
-# kernels' signature. Their hash is part of the cache key, so a changed exporter or regenerated kernels never find
-# an old bundle, with no version number to remember. (A FastMACE change to the product basis is caught separately:
-# the loader compares the product signatures a bundle carries with the compiled kernels'.)
-SIGNATURE_HEADER = "generated_kernels_signature.h"
-
-
-def _signature_header(package=None) -> Path:
-    """The compiled kernels' signature header: in a checkout's ``src``, else the copy the wheel ships in ``_lib``
-    (the same file under the same name, so a checkout and a wheel of one commit share their bundles)."""
-    package = _PACKAGE if package is None else Path(package)
-    checkout = package.parent / "src" / SIGNATURE_HEADER
-    return checkout if checkout.is_file() else package / "_lib" / SIGNATURE_HEADER
-
-
-EXPORTER_SOURCES = [_PACKAGE / "export" / name for name in ("__init__.py", "omat0.py", "generic.py", "polar.py",
-                                                            "bundle.py")] + [_signature_header()]
+# Everything on LoupMD's side that decides a bundle's contents: the exporters, the product-kernel emitter whose
+# source the bundle carries, and the container writer. Their hash is part of the cache key, so a changed exporter
+# never finds an old bundle, with no version number to remember. (A change to the product basis changes the product
+# signatures a bundle carries; the loader then looks for those kernels: the library's, a plugin's, or the bundle's
+# own source compiled at load, JIT_DESIGN.md stage 3.)
+EXPORTER_SOURCES = [_PACKAGE / "export" / name for name in ("__init__.py", "generic.py", "polar.py", "bundle.py",
+                                                            "gen_product.py")]
 # What `python -m loupmd.export` imports and the runtime does not: the export extra of pyproject.toml.
 EXPORT_MODULES = ("torch", "mace", "e3nn")
 _DIGESTS: dict = {}
@@ -81,11 +71,9 @@ def exporter_environment(environ=None) -> dict:
 
 
 def default_generic() -> bool:
-    """Whether a model takes the generic kernels when the caller does not say: yes, every model (owner's decision
-    O20 of 15 November 2026). MACE-OMAT-0 medium also has kernels specialised to it, about 8% faster on the RTX
-    5060 Ti and not faster on the A100; ``generic=False`` or the environment variable ``LOUP_GENERIC=0`` selects
-    them, for development and comparisons."""
-    return os.environ.get("LOUP_GENERIC", "1") != "0"
+    """Every model takes the generic kernels. The kernels specialised to MACE-OMAT-0 medium (0.0.1: ``generic=False``
+    or ``LOUP_GENERIC=0``) were retired; ``generic`` arguments are accepted and ignored, and so is the variable."""
+    return True
 
 
 def _integral(name, value):
@@ -98,25 +86,21 @@ def _integral(name, value):
 
 
 def bundle_name(model_path, atomic_numbers, head=None, generic=None, charge=None, spin_multiplicity=None) -> str:
-    """The file name of the bundle: model stem, elements and the 16-digit key."""
+    """The file name of the bundle: model stem, elements and the 16-digit key. ``generic`` is ignored."""
     charge = _integral("charge", charge)
     spin_multiplicity = _integral("spin_multiplicity", spin_multiplicity)
     z_sorted = sorted({int(z) for z in atomic_numbers})
-    if generic is None:
-        generic = default_generic()
-    tag = (f"{_model_digest(str(model_path))}|{z_sorted}|{head}|{int(bool(generic))}|{charge}|"
+    tag = (f"{_model_digest(str(model_path))}|{z_sorted}|{head}|{charge}|"
            f"{spin_multiplicity}|{exporter_fingerprint()}")
     key = hashlib.sha256(tag.encode()).hexdigest()[:16]
     return f"{Path(model_path).stem}_{'_'.join(map(str, z_sorted))}_{key}.loup"
 
 
-def _export_command(model_path, z_sorted, output, head, generic, charge, spin_multiplicity, exporter):
+def _export_command(model_path, z_sorted, output, head, charge, spin_multiplicity, exporter):
     exporter = exporter or [sys.executable, "-m", "loupmd.export"]
     cmd = [*exporter, "--model", str(model_path), "--elements", ",".join(map(str, z_sorted)), "--output", str(output)]
     if head is not None:
         cmd += ["--head", head]
-    if generic:
-        cmd.append("--generic")
     if charge is not None:
         cmd += ["--charge", str(charge)]
     if spin_multiplicity is not None:
@@ -129,6 +113,7 @@ def ensure_bundle(model_path, atomic_numbers, *, head=None, generic=None, charge
     """The cached bundle, exporting it on a miss.
 
     ``exporter`` replaces the export command's first words (``[python, -m, loupmd.export]``); the tests use it.
+    ``generic`` is accepted and ignored: every model takes the generic kernels.
     """
     model_path = Path(model_path)
     if not model_path.is_file():
@@ -136,9 +121,7 @@ def ensure_bundle(model_path, atomic_numbers, *, head=None, generic=None, charge
     charge = _integral("charge", charge)
     spin_multiplicity = _integral("spin_multiplicity", spin_multiplicity)
     z_sorted = sorted({int(z) for z in atomic_numbers})
-    if generic is None:
-        generic = default_generic()
-    name = bundle_name(model_path, z_sorted, head, generic, charge, spin_multiplicity)
+    name = bundle_name(model_path, z_sorted, head, None, charge, spin_multiplicity)
     out = cache.cache_dir("bundles", environ=environ) / name
     old_layout = cache.cache_root(environ) / name       # where ensure_loup_bundle keeps its bundles
     for existing in (out, old_layout):
@@ -156,7 +139,7 @@ def ensure_bundle(model_path, atomic_numbers, *, head=None, generic=None, charge
                     next_step="Install it into this environment: pip install 'loupmd[export]'. Or copy a bundle "
                               f"that the same LoupMD version exported elsewhere to {out}.")
             part = out.with_name(out.name + f".part.{os.getpid()}")
-            cmd = _export_command(model_path, z_sorted, part, head, generic, charge, spin_multiplicity, exporter)
+            cmd = _export_command(model_path, z_sorted, part, head, charge, spin_multiplicity, exporter)
             try:
                 done = subprocess.run(cmd, capture_output=True, text=True, env=exporter_environment())
                 marked = [line for line in (done.stderr or "").splitlines()
@@ -187,12 +170,11 @@ def ensure_bundle(model_path, atomic_numbers, *, head=None, generic=None, charge
 def ensure_loup_bundle(model_path: str, atomic_numbers: list[int], cache_dir: str | None = None,
                        head: str | None = None, generic: bool | None = None, charge: int | None = None,
                        spin_multiplicity: int | None = None) -> Path:
-    """The cached bundle for (model contents, species, head, path, charge / spin, exporter sources) in the flat
+    """The cached bundle for (model contents, species, head, charge / spin, exporter sources) in the flat
     cache of the source checkout (``cache_dir``, default ``~/.cache/loupmd``), exporting it on a miss.
 
-    Every model takes the generic kernels unless ``generic=False`` (or the environment variable LOUP_GENERIC=0)
-    asks for the kernels specialised to MACE-OMAT-0 medium (``default_generic``). ``head`` selects a multi-head
-    model's head
+    Every model takes the generic kernels; ``generic`` is accepted and ignored (the kernels specialised to
+    MACE-OMAT-0 medium were retired). ``head`` selects a multi-head model's head
     (default: omat_pbe if present, else the last head). ``charge`` and ``spin_multiplicity`` (total charge in e and
     2S + 1) apply to models with a total charge / spin embedding (MACE-OMOL-0; default 0 and 1); the export folds
     them into the bundle, so each setting is its own bundle. Other models refuse them."""
@@ -206,15 +188,13 @@ def ensure_loup_bundle(model_path: str, atomic_numbers: list[int], cache_dir: st
     charge = integral("charge", charge)
     spin_multiplicity = integral("spin_multiplicity", spin_multiplicity)
     z_sorted = sorted({int(z) for z in atomic_numbers})
-    if generic is None:
-        generic = default_generic()
     cdir = Path(cache_dir or Path.home() / ".cache" / "loupmd")
     cdir.mkdir(parents=True, exist_ok=True)
-    tag = (f"{_model_digest(model_path)}|{z_sorted}|{head}|{int(generic)}|{charge}|{spin_multiplicity}|"
+    tag = (f"{_model_digest(model_path)}|{z_sorted}|{head}|{charge}|{spin_multiplicity}|"
            f"{exporter_fingerprint()}")
     key = hashlib.sha256(tag.encode()).hexdigest()[:16]
     out = cdir / f"{Path(model_path).stem}_{'_'.join(map(str, z_sorted))}_{key}.loup"
     if not out.is_file():
-        cmd = _export_command(model_path, z_sorted, out, head, generic, charge, spin_multiplicity, None)
+        cmd = _export_command(model_path, z_sorted, out, head, charge, spin_multiplicity, None)
         subprocess.run(cmd, check=True, env=exporter_environment())
     return out

@@ -8,4 +8,7 @@
 //   const GProdKernels* loup_plugin_gprod(const char* sig); // its kernels for that signature, or NULL
 // and is loaded when a bundle names a signature the library does not have. Raise LOUP_KERNEL_ABI whenever
 // GProdKernels, a product kernel's argument list or kernels_common.cuh changes in a way a plugin would notice.
-#define LOUP_KERNEL_ABI 1
+// 2: GProdKernels has the scalar-only and compact readouts (ro1s, ro1c) and the compact products (fwdc, bwdc).
+// Since JIT_DESIGN.md stage 3 a bundle also carries its products' source, which the library compiles at load when
+// NVRTC is there: a plugin is then needed only without NVRTC, with LOUP_JIT=0, or for a bundle without the source.
+#define LOUP_KERNEL_ABI 2

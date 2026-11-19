@@ -1,5 +1,6 @@
 """A kernel plugin on the GPU (plan task S2-T06): ``loupmd build-kernels`` compiles a model's product kernels
-with nvcc, and the engine runs them from the plugin when its own are missing. No local model lacks kernels, so
+with nvcc, and the engine runs them from the plugin when its own are missing (before it turns to the source the
+bundle carries). No local model lacks kernels, so
 ``LOUP_DEBUG_HIDE_KERNEL`` hides the library's own for one signature. Needs nvcc and the export extra."""
 from __future__ import annotations
 
@@ -47,11 +48,17 @@ def test_a_plugin_s_kernels_give_the_library_s_results(sto_bundle, tmp_path, mon
     for dE, dF, dS in worst.values():
         assert dE < 3e-6 and dF < 1e-5 and dS < 1e-7
 
-    # Without a plugin a hidden signature is an error that names the command. (A loaded plugin stays loaded, so
-    # the engine is pointed at another, empty folder.)
+    # Without a plugin a hidden signature is compiled from the source the bundle carries (JIT_DESIGN.md stage 3);
+    # where NVRTC is not there it is an error that names the command. (A loaded plugin stays loaded, so the engine
+    # is pointed at another, empty folder. tests/gpu/test_jit.py has the refusal with LOUP_JIT=0.)
     monkeypatch.setenv("LOUPMD_CACHE", str(tmp_path / "empty"))
-    with pytest.raises(BackendError, match="no compiled product kernel for signature " + signatures[-1]) as caught:
-        LoupEngine(sto_bundle)
-    assert "loupmd build-kernels MODEL" in str(caught.value) and "loupmd-kernels-" in str(caught.value)
+    try:
+        compiled = _evaluate(sto_bundle, at)
+    except BackendError as error:
+        assert "no compiled product kernel for signature " + signatures[-1] in str(error)
+        assert "loupmd build-kernels MODEL" in str(error) and "loupmd-kernels-" in str(error)
+    else:
+        assert compiled[0] == pytest.approx(e_ref, abs=3e-6 * len(at))
+        assert np.abs(compiled[1] - f_ref).max() < 1e-5
     monkeypatch.delenv("LOUP_DEBUG_HIDE_KERNEL")
     assert _evaluate(sto_bundle, at)[0] == pytest.approx(e_ref, abs=3e-6 * len(at))

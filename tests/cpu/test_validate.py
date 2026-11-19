@@ -154,7 +154,7 @@ def test_without_the_export_extra_the_gate_is_unavailable(monkeypatch):
 class GateEngine:
     """Returns the float64 reference of the configuration it is asked for, plus ``error`` on the forces."""
 
-    made, error, specialised = [], 1e-5, True
+    made, error = [], 1e-5
 
     def __init__(self, bundle, device_id=0):
         self.bundle, self.device_id = bundle, device_id
@@ -165,7 +165,7 @@ class GateEngine:
         GateEngine.made.append(self)
 
     def info(self):
-        return types.SimpleNamespace(specialised=GateEngine.specialised)
+        return types.SimpleNamespace(specialised=False)
 
     def set_system(self, numbers, masses, skin=0.5):
         self.n = len(numbers)
@@ -193,7 +193,7 @@ class GateEngine:
 def setup(tmp_path, monkeypatch, structures):
     checkpoint = tmp_path / "some.model"
     checkpoint.write_bytes(b"never unpickled here")
-    GateEngine.made, GateEngine.error, GateEngine.specialised = [], 1e-5, True
+    GateEngine.made, GateEngine.error = [], 1e-5
     calls = {"reference": 0, "exported": []}
 
     def reference(model_path, configs, head, ref_device, charge, spin):
@@ -217,7 +217,7 @@ def setup(tmp_path, monkeypatch, structures):
 
     def run(**more):
         options = dict(trusted=True, engine_factory=GateEngine, ensure_bundle=ensure_bundle, reference=reference,
-                       bundle_meta=lambda bundle: {"arch": "omat0"}, environ=environ)
+                       bundle_meta=lambda bundle: {"arch": "generic"}, environ=environ)
         options.update(more)
         return validate.run_gate(str(checkpoint), **options)
 
@@ -225,42 +225,42 @@ def setup(tmp_path, monkeypatch, structures):
     return run
 
 
-def test_the_default_gate_runs_every_kernel_path_of_the_specialised_model(setup):
-    record = setup()
+CONV = {"arch": "generic", "n_layers": 2, "L0.first_hidden": 1, "L0.lmax_x": 0, "L0.C_x": 128,
+        "L1.first_hidden": 0, "L1.lmax_x": 1, "L1.C_x": 128}
+
+
+def test_the_default_gate_runs_every_kernel_path_of_a_model_with_conv_variants(setup, monkeypatch):
+    monkeypatch.setenv("LOUP_REORDER", "1")          # the caller's setting reaches no engine of the gate
+    record = setup(bundle_meta=lambda bundle: CONV)
     assert record["schema"] == "loupmd.gate/1" and record["passed"] is True and record["set"] == "oxide"
     rows = record["rows"]
     by_config = {}
     for row in rows:
         by_config.setdefault(row["config"], []).append(row["variant"])
-    # Small cells: default plus the two receiver-owned w' variants; the 1,728-atom cell: default plus eight.
-    assert by_config["NaCl_2x2x2_c0"] == ["default", "wprime_rcv=1", "wprime_rcv=1,wprime_threads=512"]
-    assert by_config["NbCl5_2x2x2_c1"] == ["default", "spline_variant=R1", "spline_variant=R1p", "spline_variant=R4",
-                                           "spline_variant=R4p", "spline_variant=R5", "wprime_threads=512",
-                                           "reorder=1", "reorder=0"]
-    assert len(rows) == 4 * 3 + 2 * 9 and all(row["passed"] for row in rows)
+    # Every configuration: the default choice, then each conv forward variant forced.
+    assert len(by_config) == 6
+    assert all(variants == ["default", "conv_fwd_variant=1", "conv_fwd_variant=2"] for variants in by_config.values())
+    assert len(rows) == 6 * 3 and all(row["passed"] for row in rows)
     assert rows[0]["force_ratio"] == pytest.approx(1e-5 / F32["df"])
-    assert [check["config"] for check in record["reorder"]] == ["NbCl5_2x2x2_c0", "NbCl5_2x2x2_c1"]
-    assert all(check["passed"] for check in record["reorder"])
+    assert record["reorder"] == []                   # the retired specialised kernels' comparison: the field stays
     # One engine per element set and variant, made with the variant in the environment, which is clean afterwards.
-    assert len(GateEngine.made) == 3 + 3 + 8        # SrTiO3: three; Na and Cl (both cells): three and eight more
-    assert {tuple(sorted(e.variant.items())) for e in GateEngine.made if e.bundle.name == "bundle-11-17.loup"} == {
-        (), (("LOUP_WPRIME_RCV", "1"),), (("LOUP_WPRIME_RCV", "1"), ("LOUP_WPRIME_THREADS", "512")),
-        (("LOUP_SPLINE_VARIANT", "R1"),), (("LOUP_SPLINE_VARIANT", "R1p"),), (("LOUP_SPLINE_VARIANT", "R4"),),
-        (("LOUP_SPLINE_VARIANT", "R4p"),), (("LOUP_SPLINE_VARIANT", "R5"),), (("LOUP_WPRIME_THREADS", "512"),),
-        (("LOUP_REORDER", "1"),), (("LOUP_REORDER", "0"),)}
-    assert not [k for k in gate.VARIANT_KEYS if k in os.environ]
+    by_bundle = {}
+    for engine in GateEngine.made:
+        by_bundle.setdefault(engine.bundle.name, set()).add(tuple(sorted(engine.variant.items())))
+    assert len(GateEngine.made) == 3 * len(by_bundle)
+    assert all(variants == {(), (("LOUP_CONV_FWD_VARIANT", "1"),), (("LOUP_CONV_FWD_VARIANT", "2"),)}
+               for variants in by_bundle.values())
+    assert os.environ["LOUP_REORDER"] == "1" and "LOUP_CONV_FWD_VARIANT" not in os.environ
     assert record["worst"]["force_ratio"] == pytest.approx(1e-5 / F32["df"])
     assert record["model"]["file"] == "some.model" and len(record["model"]["sha256"]) == 64
     text = validate.format_gate(record)
-    assert "PASS" in text and "NbCl5_2x2x2_c1" in text and "spline_variant=R4p" in text and "reorder on vs off" in text
+    assert "PASS" in text and "NbCl5_2x2x2_c1" in text and "conv_fwd_variant=2" in text
 
 
 def test_generic_models_gate_their_conv_variants_or_only_the_default(setup):
-    GateEngine.specialised = False
     plain = setup()
     assert {row["variant"] for row in plain["rows"]} == {"default"} and len(plain["rows"]) == 6
-    conv = {"arch": "generic", "n_layers": 2, "L0.first_hidden": 1, "L0.lmax_x": 0, "L0.C_x": 128,
-            "L1.first_hidden": 0, "L1.lmax_x": 1, "L1.C_x": 128}
+    conv = CONV
     assert gate.has_conv_variants(conv) and not gate.has_conv_variants(dict(conv, **{"L1.C_x": 64}))
     tuned = setup(bundle_meta=lambda bundle: conv)
     assert [row["variant"] for row in tuned["rows"][:3]] == ["default", "conv_fwd_variant=1", "conv_fwd_variant=2"]
@@ -271,7 +271,6 @@ def test_the_tiled_gate_runs_every_configuration_tile_by_tile(setup, monkeypatch
     """S5-T04: --capacity tiled evaluates through the tiled call, about four tiles per cell, on default engines
     (a tiled system leaves the skip-chain fold off itself; the caller's LOUP_CHAIN_FOLD reaches no engine of the
     gate), and records the mode."""
-    GateEngine.specialised = False
     monkeypatch.setenv("LOUP_CHAIN_FOLD", "1")
     record = setup(capacity="tiled")
     assert record["passed"] is True and record["capacity"] == "tiled"
@@ -288,16 +287,16 @@ def test_the_wavefront_gate_asks_the_engine_for_the_wavefront(setup):
     """S5-T08: --capacity wavefront runs the tiled call with LOUP_EXEC_WAVEFRONT set, and records the mode."""
     from loupmd import _core
 
-    GateEngine.specialised = False
     record = setup(capacity="wavefront")
     assert record["passed"] is True and record["capacity"] == "wavefront"
     assert all(engine.execution[0] == _core.LOUP_EXEC_WAVEFRONT for engine in GateEngine.made)
     assert len([call for engine in GateEngine.made for call in engine.tiled]) == 6
 
 
-def test_the_tiled_gate_refuses_the_specialised_kernels(setup):
-    with pytest.raises(PlanRefused, match="the tiled mode runs the generic kernels"):
-        setup(capacity="tiled", generic=False)
+def test_the_gate_refuses_the_retired_specialised_kernels(setup):
+    for capacity in ("whole", "tiled"):
+        with pytest.raises(PlanRefused, match="specialised to MACE-OMAT-0 medium were retired"):
+            setup(capacity=capacity, generic=False)
     with pytest.raises(PlanRefused, match="capacity must be 'whole', 'tiled' or 'wavefront'"):
         setup(capacity="auto")
 

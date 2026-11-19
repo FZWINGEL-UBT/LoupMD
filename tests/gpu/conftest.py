@@ -59,15 +59,8 @@ def model_path() -> str:
 
 @pytest.fixture(scope="session")
 def sto_bundle(model_path):
-    """The test model (MACE-OMAT-0 medium unless LOUPMD_TEST_MODEL names another) on the generic kernels, as every
-    model runs by default."""
+    """The test model (MACE-OMAT-0 medium unless LOUPMD_TEST_MODEL names another)."""
     return ensure_loup_bundle(model_path, [8, 22, 38])
-
-
-@pytest.fixture(scope="session")
-def spec_bundle(model_path):
-    """The same model on the kernels specialised to MACE-OMAT-0 medium."""
-    return ensure_loup_bundle(model_path, [8, 22, 38], generic=False)
 
 
 @pytest.fixture

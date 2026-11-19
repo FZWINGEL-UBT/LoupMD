@@ -163,17 +163,13 @@ def test_sweeps_on_a_periodic_system_without_ghosts():
     assert abs(e - e_ref) / len(at) < 1e-7 and np.abs(f - f_ref).max() < 3e-6 and np.abs(s - s_ref).max() < 3e-8
 
 
-def test_domain_refusals(sto_bundle, spec_bundle):
+def test_domain_refusals():
     at = _oxide()
     n = len(at)
     z2 = np.ascontiguousarray(np.concatenate([at.get_atomic_numbers(), at.get_atomic_numbers()[:5]]), dtype=np.int32)
-    spec = LoupEngine(spec_bundle)                     # the specialised kernels have no sweeps
-    _bind(spec._lib)
-    assert spec._lib.loup_debug_set_domain(spec._h, n, 5, z2.ctypes.data_as(_ip), SKIN) == -1
-    assert spec.last_error().startswith("loup_debug_set_domain: an open domain needs a bundle of the generic path")
-
     bundle = ensure_loup_bundle(find_model("mace-omat-0-small.model"), [8, 22, 38])
     eng = LoupEngine(bundle)
+    _bind(eng._lib)
     assert eng._lib.loup_debug_set_domain(eng._h, n, 5, z2.ctypes.data_as(_ip), SKIN) == 0
     with pytest.raises(BackendError, match="the handle holds an open domain"):
         eng.run_nve(1)                                 # public calls do not run on a domain

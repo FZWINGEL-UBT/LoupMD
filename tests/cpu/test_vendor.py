@@ -49,7 +49,7 @@ def test_the_exporters_import_without_fastmace():
     exporters need torch (the export extra); without it the test skips."""
     pytest.importorskip("torch")
     code = ("import sys\n"
-            "from loupmd.export import _fastmace as fm, generic, omat0\n"
+            "from loupmd.export import _fastmace as fm, gen_product, generic\n"
             "assert fm.SOURCE.startswith('vendored subset'), fm.SOURCE\n"
             "for module, names in ((fm.sc_factored, 'factor fold_weights _emit_node _expr _literal Program'),\n"
             "                      (fm.sc_generated, 'merged_terms shape_of'), (fm.compose_skip, 'composed'),\n"
