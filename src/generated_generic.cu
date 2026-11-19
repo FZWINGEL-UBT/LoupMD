@@ -37,8 +37,8 @@ __global__ void __launch_bounds__(MAX_T) gconv_fwd_L0(
   float dsum = 0.0f;
   const int eb = row_ptr[rcv], ee = row_ptr[rcv + 1];
   auto sync_grp = [&]() {
-    if (R == 1) __syncthreads();
-    else asm volatile("bar.sync %0, 128;" :: "r"(half + 1) : "memory");
+    if (R == 1) { __syncthreads(); return; }
+    asm volatile("bar.sync %0, 128;" :: "r"(half + 1) : "memory");
   };
   for (int base = eb; base < ee; base += TILE) {
     const int cnt = (ee - base < TILE) ? (ee - base) : TILE;
@@ -75,8 +75,8 @@ __global__ void __launch_bounds__(MAX_T) gconv_fwd_L0(
         }
         if (C < 64) {
           const float4 vl = __ldg(vec_len + e);
-          if (sh_perm) loup::edge_sh16(vl.y, vl.z, vl.x, vl.w, reinterpret_cast<float4*>(s_sh + ch * ED));
-          else         loup::edge_sh16(vl.x, vl.y, vl.z, vl.w, reinterpret_cast<float4*>(s_sh + ch * ED));
+          if (sh_perm) loup::edge_sh16(vl.y, vl.z, vl.x, vl.w, reinterpret_cast<float4*>(s_sh + (ch) * ED));
+          else         loup::edge_sh16(vl.x, vl.y, vl.z, vl.w, reinterpret_cast<float4*>(s_sh + (ch) * ED));
         }
       }
       if (density_table) {
@@ -494,8 +494,8 @@ __global__ void __launch_bounds__(MAX_T) gconv_fwd_L1(
   float dsum = 0.0f;
   const int eb = row_ptr[rcv], ee = row_ptr[rcv + 1];
   auto sync_grp = [&]() {
-    if (R == 1) __syncthreads();
-    else asm volatile("bar.sync %0, 128;" :: "r"(half + 1) : "memory");
+    if (R == 1) { __syncthreads(); return; }
+    asm volatile("bar.sync %0, 128;" :: "r"(half + 1) : "memory");
   };
   for (int base = eb; base < ee; base += TILE) {
     const int cnt = (ee - base < TILE) ? (ee - base) : TILE;
@@ -539,8 +539,8 @@ __global__ void __launch_bounds__(MAX_T) gconv_fwd_L1(
         }
         if (C < 64) {
           const float4 vl = __ldg(vec_len + e);
-          if (sh_perm) loup::edge_sh16(vl.y, vl.z, vl.x, vl.w, reinterpret_cast<float4*>(s_sh + ch * ED));
-          else         loup::edge_sh16(vl.x, vl.y, vl.z, vl.w, reinterpret_cast<float4*>(s_sh + ch * ED));
+          if (sh_perm) loup::edge_sh16(vl.y, vl.z, vl.x, vl.w, reinterpret_cast<float4*>(s_sh + (ch) * ED));
+          else         loup::edge_sh16(vl.x, vl.y, vl.z, vl.w, reinterpret_cast<float4*>(s_sh + (ch) * ED));
           { float* p = s_sh + (ch) * ED;
             p[16] = 0x1.bb67b00000000p-1f * p[6] + 0x1.0000000000000p-2f * p[8];
             p[17] = 0x1.0000000000000p-2f * p[4];
@@ -1424,7 +1424,7 @@ __global__ void __launch_bounds__(MAX_T) gconv_fwd_L1s(
     const int* __restrict__ species, const uint2* __restrict__ packed_table, const float4* __restrict__ density_table,
     unsigned bias_shift, const float* __restrict__ x0, const float* __restrict__ x1, float* __restrict__ mid0, float* __restrict__ mid1, float* __restrict__ mid2, float* __restrict__ mid3, float* __restrict__ D, float* __restrict__ zx0, float* __restrict__ zx1) {
   const int C = C_FIX ? C_FIX : C_arg;
-  constexpr int TILE = 32, ED = 16;
+  constexpr int TILE = 32, ED = 4;
   static_assert(R >= 1 && R <= 15, "bar.sync id limit");
   __shared__ int s_snd_all[R][TILE];
   __shared__ __align__(16) float4 s_pw_all[R][TILE];
@@ -1449,15 +1449,31 @@ __global__ void __launch_bounds__(MAX_T) gconv_fwd_L1s(
   float dsum = 0.0f;
   const int eb = row_ptr[rcv], ee = row_ptr[rcv + 1];
   auto sync_grp = [&]() {
-    if (R == 1) __syncthreads();
-    else asm volatile("bar.sync %0, 128;" :: "r"(half + 1) : "memory");
+    if (R == 1) { __syncthreads(); return; }
+    if constexpr (R > 0) { if (half == 0) { asm volatile("bar.sync 1, 128;" : : : "memory"); return; } }
+    if constexpr (R > 1) { if (half == 1) { asm volatile("bar.sync 2, 128;" : : : "memory"); return; } }
+    if constexpr (R > 2) { if (half == 2) { asm volatile("bar.sync 3, 128;" : : : "memory"); return; } }
+    if constexpr (R > 3) { if (half == 3) { asm volatile("bar.sync 4, 128;" : : : "memory"); return; } }
+    if constexpr (R > 4) { if (half == 4) { asm volatile("bar.sync 5, 128;" : : : "memory"); return; } }
+    if constexpr (R > 5) { if (half == 5) { asm volatile("bar.sync 6, 128;" : : : "memory"); return; } }
+    if constexpr (R > 6) { if (half == 6) { asm volatile("bar.sync 7, 128;" : : : "memory"); return; } }
+    if constexpr (R > 7) { if (half == 7) { asm volatile("bar.sync 8, 128;" : : : "memory"); return; } }
+    if constexpr (R > 8) { if (half == 8) { asm volatile("bar.sync 9, 128;" : : : "memory"); return; } }
+    if constexpr (R > 9) { if (half == 9) { asm volatile("bar.sync 10, 128;" : : : "memory"); return; } }
+    if constexpr (R > 10) { if (half == 10) { asm volatile("bar.sync 11, 128;" : : : "memory"); return; } }
+    if constexpr (R > 11) { if (half == 11) { asm volatile("bar.sync 12, 128;" : : : "memory"); return; } }
+    if constexpr (R > 12) { if (half == 12) { asm volatile("bar.sync 13, 128;" : : : "memory"); return; } }
+    if constexpr (R > 13) { if (half == 13) { asm volatile("bar.sync 14, 128;" : : : "memory"); return; } }
+    if constexpr (R > 14) { if (half == 14) { asm volatile("bar.sync 15, 128;" : : : "memory"); return; } }
   };
   for (int base = eb; base < ee; base += TILE) {
     const int cnt = (ee - base < TILE) ? (ee - base) : TILE;
     if (ch >= 32 && ch - 32 < cnt) {
       const float4 vl = __ldg(vec_len + base + (ch - 32));
-      if (sh_perm) loup::edge_sh16(vl.y, vl.z, vl.x, vl.w, reinterpret_cast<float4*>(s_sh + (ch - 32) * ED));
-      else         loup::edge_sh16(vl.x, vl.y, vl.z, vl.w, reinterpret_cast<float4*>(s_sh + (ch - 32) * ED));
+      { float4 sh_t[4];
+        if (sh_perm) loup::edge_sh16(vl.y, vl.z, vl.x, vl.w, sh_t);
+        else         loup::edge_sh16(vl.x, vl.y, vl.z, vl.w, sh_t);
+        *reinterpret_cast<float4*>(s_sh + (ch - 32) * ED) = sh_t[0]; }
     }
     if (ch < 32) {
       float d_edge = 0.0f;
@@ -1487,8 +1503,10 @@ __global__ void __launch_bounds__(MAX_T) gconv_fwd_L1s(
         }
         if (C < 64) {
           const float4 vl = __ldg(vec_len + e);
-          if (sh_perm) loup::edge_sh16(vl.y, vl.z, vl.x, vl.w, reinterpret_cast<float4*>(s_sh + ch * ED));
-          else         loup::edge_sh16(vl.x, vl.y, vl.z, vl.w, reinterpret_cast<float4*>(s_sh + ch * ED));
+          { float4 sh_t[4];
+            if (sh_perm) loup::edge_sh16(vl.y, vl.z, vl.x, vl.w, sh_t);
+            else         loup::edge_sh16(vl.x, vl.y, vl.z, vl.w, sh_t);
+            *reinterpret_cast<float4*>(s_sh + (ch) * ED) = sh_t[0]; }
         }
       }
       if (density_table) {
@@ -1887,8 +1905,8 @@ __global__ void __launch_bounds__(MAX_T) gconv_fwd_L2a(
   float dsum = 0.0f;
   const int eb = row_ptr[rcv], ee = row_ptr[rcv + 1];
   auto sync_grp = [&]() {
-    if (R == 1) __syncthreads();
-    else asm volatile("bar.sync %0, 128;" :: "r"(half + 1) : "memory");
+    if (R == 1) { __syncthreads(); return; }
+    asm volatile("bar.sync %0, 128;" :: "r"(half + 1) : "memory");
   };
   for (int base = eb; base < ee; base += TILE) {
     const int cnt = (ee - base < TILE) ? (ee - base) : TILE;
@@ -1932,8 +1950,8 @@ __global__ void __launch_bounds__(MAX_T) gconv_fwd_L2a(
         }
         if (C < 64) {
           const float4 vl = __ldg(vec_len + e);
-          if (sh_perm) loup::edge_sh16(vl.y, vl.z, vl.x, vl.w, reinterpret_cast<float4*>(s_sh + ch * ED));
-          else         loup::edge_sh16(vl.x, vl.y, vl.z, vl.w, reinterpret_cast<float4*>(s_sh + ch * ED));
+          if (sh_perm) loup::edge_sh16(vl.y, vl.z, vl.x, vl.w, reinterpret_cast<float4*>(s_sh + (ch) * ED));
+          else         loup::edge_sh16(vl.x, vl.y, vl.z, vl.w, reinterpret_cast<float4*>(s_sh + (ch) * ED));
           { float* p = s_sh + (ch) * ED;
             p[16] = 0x1.bb67b00000000p-1f * p[6] + 0x1.0000000000000p-2f * p[8];
             p[17] = 0x1.0000000000000p-2f * p[4];
@@ -2465,8 +2483,8 @@ __global__ void __launch_bounds__(MAX_T) gconv_fwd_L2b(
   float dsum = 0.0f;
   const int eb = row_ptr[rcv], ee = row_ptr[rcv + 1];
   auto sync_grp = [&]() {
-    if (R == 1) __syncthreads();
-    else asm volatile("bar.sync %0, 128;" :: "r"(half + 1) : "memory");
+    if (R == 1) { __syncthreads(); return; }
+    asm volatile("bar.sync %0, 128;" :: "r"(half + 1) : "memory");
   };
   for (int base = eb; base < ee; base += TILE) {
     const int cnt = (ee - base < TILE) ? (ee - base) : TILE;
@@ -2528,8 +2546,8 @@ __global__ void __launch_bounds__(MAX_T) gconv_fwd_L2b(
         }
         if (C < 64) {
           const float4 vl = __ldg(vec_len + e);
-          if (sh_perm) loup::edge_sh16(vl.y, vl.z, vl.x, vl.w, reinterpret_cast<float4*>(s_sh + ch * ED));
-          else         loup::edge_sh16(vl.x, vl.y, vl.z, vl.w, reinterpret_cast<float4*>(s_sh + ch * ED));
+          if (sh_perm) loup::edge_sh16(vl.y, vl.z, vl.x, vl.w, reinterpret_cast<float4*>(s_sh + (ch) * ED));
+          else         loup::edge_sh16(vl.x, vl.y, vl.z, vl.w, reinterpret_cast<float4*>(s_sh + (ch) * ED));
           { float* p = s_sh + (ch) * ED;
             p[16] = 0x1.0000000000000p+2f * p[2];
             p[17] = 0x1.bb67b00000000p+1f * p[1];
@@ -16313,6 +16331,25 @@ const GProdKernels* find_gprod(const char* sig) {
 // receiver per block with the paired-edge decode (the default), 1 without, 2 five receivers per 640-thread block.
 int conv_fwd_variants(int lx, int C) { return (lx == 1 && C == 128) ? 3 : 1; }
 
+// S141: on sm_120 the pruned five-receiver forward runs at the 16 KB shared-memory configuration (carveout 10%): with
+// four staged harmonics and literal barrier ids it needs 7 KB per block, the larger L1 serves its table reads, and
+// MP-0 medium's kernel took 576 instead of 594 us at the driver's 32 KB choice (SrTiO3 5,000 atoms). Set once per
+// process; other GPUs keep the driver's choice.
+static void pruned_r5_carveout() {
+    static const bool done = [] {
+        int dev = 0, major = 0;
+        if (cudaGetDevice(&dev) == cudaSuccess &&
+            cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor, dev) == cudaSuccess && major == 12) {
+            check_cuda(cudaFuncSetAttribute((const void*)gconv_fwd_L1s<5, false, 640, true, 128>,
+                                            cudaFuncAttributePreferredSharedMemoryCarveout, 10));
+            check_cuda(cudaFuncSetAttribute((const void*)gconv_fwd_L1s<5, false, 640, false, 128>,
+                                            cudaFuncAttributePreferredSharedMemoryCarveout, 10));
+        }
+        return true;
+    }();
+    (void)done;
+}
+
 // S125: the full and the pruned (output degree 0 only, gconv_*_L1s) lx 1 kernels share one launch body.
 #define LOUP_LAUNCH_FWD_L1(K)                                                                                          \
     if (C == 128) {                                                                                                     \
@@ -16382,6 +16419,7 @@ void launch_conv_fwd(int lx, cudaStream_t st, int N, int C, int S, int I, const 
         }
     } else if (lx == 1) {
         if (prune) {
+            if (C == 128 && var == 2) pruned_r5_carveout();
             LOUP_LAUNCH_FWD_L1(gconv_fwd_L1s)
         } else {
             LOUP_LAUNCH_FWD_L1(gconv_fwd_L1)

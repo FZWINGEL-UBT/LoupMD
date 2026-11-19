@@ -9,6 +9,7 @@
 
 #include "bundle.hpp"
 #include "model.hpp"
+#include "warp_fold.cuh"
 
 namespace loup {
 
@@ -75,9 +76,11 @@ __global__ void __launch_bounds__(TK * 32) sf_kernel_tiled(
 
     for (int chunk = 0; chunk < N; chunk += 1024) {
         const int chunk_end = min(N, chunk + 1024);
-        float fc[NL], fs[NL];
+        float fcs[2 * NL];  // the cos partials, then the sin partials
+        float* const fc = fcs;
+        float* const fs = fcs + NL;
         #pragma unroll
-        for (int j = 0; j < NL; ++j) fc[j] = fs[j] = 0.0f;
+        for (int j = 0; j < 2 * NL; ++j) fcs[j] = 0.0f;
 
         for (int base = chunk; base < chunk_end; base += TILE) {
             const int cnt = min(TILE, chunk_end - base);
@@ -120,19 +123,11 @@ __global__ void __launch_bounds__(TK * 32) sf_kernel_tiled(
             }
         }
         if (valid_k) {
-            #pragma unroll
-            for (int j = 0; j < NL; ++j) {
-                double dc = (double)fc[j], ds = (double)fs[j];
-                #pragma unroll
-                for (int off = 16; off > 0; off >>= 1) {
-                    dc += __shfl_xor_sync(0xffffffffu, dc, off);
-                    ds += __shfl_xor_sync(0xffffffffu, ds, off);
-                }
-                if (lane == 0) {
-                    s_tot[warp][j] += dc;
-                    s_tot[warp][NL + j] += ds;
-                }
-            }
+            // The split warp fold (src/warp_fold.cuh): the plain xor fold's sums, bit for bit, on far fewer FP64 adds.
+            // Lane L ends with the sum of partial L >> SH; the first lane of each group adds it to the total.
+            constexpr int SH = kWarpFoldShift<2 * NL>;
+            const double tot = warp_fold_split<2 * NL>(fcs, lane);
+            if ((lane & ((1 << SH) - 1)) == 0) s_tot[warp][lane >> SH] += tot;
         }
     }
     __syncwarp();
@@ -163,9 +158,11 @@ __global__ void __launch_bounds__(128) sf_kernel_1(int N, int K, const float* __
     if (tid < 2 * NL) tot[tid] = 0.0;
     for (int chunk = 0; chunk < N; chunk += BLK * 8) {
         const int chunk_end = min(N, chunk + BLK * 8);
-        float fc[NL], fs[NL];
+        float fcs[2 * NL];  // the cos partials, then the sin partials
+        float* const fc = fcs;
+        float* const fs = fcs + NL;
         #pragma unroll
-        for (int j = 0; j < NL; ++j) fc[j] = fs[j] = 0.0f;
+        for (int j = 0; j < 2 * NL; ++j) fcs[j] = 0.0f;
         for (int base = chunk; base < chunk_end; base += BLK) {
             const int cnt = min(BLK, chunk_end - base);
             __syncthreads();
@@ -201,18 +198,10 @@ __global__ void __launch_bounds__(128) sf_kernel_1(int N, int K, const float* __
                 }
             }
         }
-        #pragma unroll
-        for (int j = 0; j < NL; ++j) {
-            double dc = (double)fc[j], ds = (double)fs[j];
-            #pragma unroll
-            for (int off = 16; off > 0; off >>= 1) {
-                dc += __shfl_xor_sync(0xffffffffu, dc, off);
-                ds += __shfl_xor_sync(0xffffffffu, ds, off);
-            }
-            if (lane == 0) {
-                red[warp][j] = dc;
-                red[warp][NL + j] = ds;
-            }
+        {  // the split warp fold, as in sf_kernel_tiled
+            constexpr int SH = kWarpFoldShift<2 * NL>;
+            const double part = warp_fold_split<2 * NL>(fcs, lane);
+            if ((lane & ((1 << SH) - 1)) == 0) red[warp][lane >> SH] = part;
         }
         __syncthreads();
         if (tid < 2 * NL) {

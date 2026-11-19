@@ -390,9 +390,39 @@ def emit_conv_fwd(lx, groups=(0, 1, 2), name=None, l3s=(0, 1, 2, 3)):
         ls.append(f"{pad}}}")
         return "\n" + "\n".join(ls)
 
+    # S141: a kernel whose paths read only the degree 0 and 1 harmonics (the pruned gconv_fwd_L1s: paths (0,0,0) and
+    # (1,1,0)) stages those four per edge instead of sixteen (512 B per receiver instead of 2,048), and its R > 1 group
+    # barriers take literal ids: with the id in a register the compiler reserves all 16 hardware barriers for the
+    # kernel, and one block then fills the SM (ncu: launch__barrier_count 16, occupancy limit 1 block). The full
+    # gconv_fwd_L1 keeps the register id: literal ids made its R5 variant 1% slower (OMAT-0 medium, 5060 Ti).
+    sh4 = (not extras and not cart_ks and all(l2 <= 1 for _, (_, l2, _) in sel)
+           and all(es < 4 for (_, _), (_, es) in cg_use.items()))
+    if sh4:
+        ED = 4
+
+    def _sh_code(pad, idx_expr, extra):
+        if sh4:
+            return "\n".join([
+                f"{pad}{{ float4 sh_t[4];",
+                f"{pad}  if (sh_perm) loup::edge_sh16(vl.y, vl.z, vl.x, vl.w, sh_t);",
+                f"{pad}  else         loup::edge_sh16(vl.x, vl.y, vl.z, vl.w, sh_t);",
+                f"{pad}  *reinterpret_cast<float4*>(s_sh + ({idx_expr}) * ED) = sh_t[0]; }}"])
+        return "\n".join([
+            f"{pad}if (sh_perm) loup::edge_sh16(vl.y, vl.z, vl.x, vl.w, reinterpret_cast<float4*>(s_sh + ({idx_expr}) * ED));",
+            f"{pad}else         loup::edge_sh16(vl.x, vl.y, vl.z, vl.w, reinterpret_cast<float4*>(s_sh + ({idx_expr}) * ED));"
+        ]) + extra
+
     extra_hi = _extra_code("      ", "ch - 32")
     extra_lo = _extra_code("          ", "ch")
     ed_decl = f"  constexpr int TILE = 32, ED = {ED};"
+    sh_hi = _sh_code("      ", "ch - 32", extra_hi)
+    sh_lo = _sh_code("          ", "ch", extra_lo)
+    if sh4:
+        bar_code = "\n".join(
+            f"    if constexpr (R > {n}) {{ if (half == {n}) {{ asm volatile(\"bar.sync {n + 1}, 128;\" : : : \"memory\"); return; }} }}"
+            for n in range(15))
+    else:
+        bar_code = "    asm volatile(\"bar.sync %0, 128;\" :: \"r\"(half + 1) : \"memory\");"
 
     blk, blk_pair = {}, {}
     for k, (l1, l2, l3) in sel:
@@ -558,15 +588,14 @@ __global__ void __launch_bounds__(MAX_T) {name}(
   float dsum = 0.0f;
   const int eb = row_ptr[rcv], ee = row_ptr[rcv + 1];
   auto sync_grp = [&]() {{
-    if (R == 1) __syncthreads();
-    else asm volatile("bar.sync %0, 128;" :: "r"(half + 1) : "memory");
+    if (R == 1) {{ __syncthreads(); return; }}
+{bar_code}
   }};
   for (int base = eb; base < ee; base += TILE) {{
     const int cnt = (ee - base < TILE) ? (ee - base) : TILE;
     if (ch >= 32 && ch - 32 < cnt) {{
       const float4 vl = __ldg(vec_len + base + (ch - 32));
-      if (sh_perm) loup::edge_sh16(vl.y, vl.z, vl.x, vl.w, reinterpret_cast<float4*>(s_sh + (ch - 32) * ED));
-      else         loup::edge_sh16(vl.x, vl.y, vl.z, vl.w, reinterpret_cast<float4*>(s_sh + (ch - 32) * ED));{extra_hi}
+{sh_hi}
     }}
     if (ch < 32) {{
       float d_edge = 0.0f;
@@ -596,8 +625,7 @@ __global__ void __launch_bounds__(MAX_T) {name}(
         }}
         if (C < 64) {{
           const float4 vl = __ldg(vec_len + e);
-          if (sh_perm) loup::edge_sh16(vl.y, vl.z, vl.x, vl.w, reinterpret_cast<float4*>(s_sh + ch * ED));
-          else         loup::edge_sh16(vl.x, vl.y, vl.z, vl.w, reinterpret_cast<float4*>(s_sh + ch * ED));{extra_lo}
+{sh_lo}
         }}
       }}
       if (density_table) {{
@@ -1785,6 +1813,25 @@ const GProdKernels* find_gprod(const char* sig) {
 // receiver per block with the paired-edge decode (the default), 1 without, 2 five receivers per 640-thread block.
 int conv_fwd_variants(int lx, int C) { return (lx == 1 && C == 128) ? 3 : 1; }
 
+// S141: on sm_120 the pruned five-receiver forward runs at the 16 KB shared-memory configuration (carveout 10%): with
+// four staged harmonics and literal barrier ids it needs 7 KB per block, the larger L1 serves its table reads, and
+// MP-0 medium's kernel took 576 instead of 594 us at the driver's 32 KB choice (SrTiO3 5,000 atoms). Set once per
+// process; other GPUs keep the driver's choice.
+static void pruned_r5_carveout() {
+    static const bool done = [] {
+        int dev = 0, major = 0;
+        if (cudaGetDevice(&dev) == cudaSuccess &&
+            cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor, dev) == cudaSuccess && major == 12) {
+            check_cuda(cudaFuncSetAttribute((const void*)gconv_fwd_L1s<5, false, 640, true, 128>,
+                                            cudaFuncAttributePreferredSharedMemoryCarveout, 10));
+            check_cuda(cudaFuncSetAttribute((const void*)gconv_fwd_L1s<5, false, 640, false, 128>,
+                                            cudaFuncAttributePreferredSharedMemoryCarveout, 10));
+        }
+        return true;
+    }();
+    (void)done;
+}
+
 // S125: the full and the pruned (output degree 0 only, gconv_*_L1s) lx 1 kernels share one launch body.
 #define LOUP_LAUNCH_FWD_L1(K)                                                                                          \\
     if (C == 128) {                                                                                                     \\
@@ -1854,6 +1901,7 @@ void launch_conv_fwd(int lx, cudaStream_t st, int N, int C, int S, int I, const 
         }
     } else if (lx == 1) {
         if (prune) {
+            if (C == 128 && var == 2) pruned_r5_carveout();
             LOUP_LAUNCH_FWD_L1(gconv_fwd_L1s)
         } else {
             LOUP_LAUNCH_FWD_L1(gconv_fwd_L1)

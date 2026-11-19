@@ -145,6 +145,7 @@ Conventions:
 | [gen-gate-bwd-epilogue](#gen-gate-bwd-epilogue) | Gate backward in the epilogue of the `W_2^T` GEMMs: own `sgemm128` row tiles of whole atoms (128 / 126 / 125 / 126 rows for l = 0..3), the C tile staged in shared memory, `gate_bwd_kernel`'s per-degree arithmetic in its order, per-block dD partials; `dgout_l` never written | `sgemm128_kernel<8, true, true, 2l + 1>` (`sgemm128_gate`), `gemm_gate` (only where the tuned plan is the own N-fastest `sgemm128`; otherwise the plain GEMM and `gate_bwd_kernel`); `LOUP_GATE_FUSE=0` disables | gen (kind 4: MH-1, OMOL-0, POLAR-1) | DEFAULT (sm_120: the plan condition keeps it there) | S137 | `W_2^T` + gate span 9,457 -> 7,153 us per step (MH-1 SrTiO3; `gate_bwd`'s 3,697 us gone); library ABBA MH-1 SrTiO3 `0.9446`, NaCl216 `0.9869`, POLAR-1-M NbCl5 `0.9647`, POLAR-1-L NaCl216 `0.9955` | this file |
 | [gen-gate-fwd-store](#gen-gate-fwd-store) | Layer 0's residual-free degrees 1-3 stored gated (`gout_l = g (lin_l s)`) by their projection's epilogue, the l = 0 projection first (it holds the gate logits); the reverse through the saved `v` (`d pre0 = (1 - sigmoid) sum dgout v`, `dD += -beta s sum dgout v`) | `sgemm128_kernel<8, true, true, 2l + 1, true>`, the `fused` / `vform` masks of `gate_fwd_kernel` / `gate_bwd_kernel`; `LOUP_GATE_FUSE_FWD=0` disables | gen (layer 0 with the S59 species table: MH-1, OMOL-0) | DEFAULT (sm_120) | S137 | layer-0 forward span 5,064 -> 4,371 us per step, its `gate_fwd` 1,031 -> 85 us; ABBA on top of the backward fusion MH-1 SrTiO3 `0.9911`; both against S129: MH-1 SrTiO3 `0.9342` (32.77 -> 30.62 ms), OMOL-0 XL water216 `0.9633`, MH-1 NaCl216 tie | this file |
 | [gemm-cold-l2-ada-fix](#gemm-cold-l2-ada-fix) | Fix Ada `22 MiB < L2/2` cold-L2 rule for `lin1_fwd l=1` + wider 3xTF32 `mma` tiles | – | both | NOT BUILT | – | untried (`lin1_fwd l=1` timed hot on Ada despite 97 MB `m1`) | `OMAT0_SPEEDUP_BRIEF.md` |
+| [gemm-dual-pipe-lanes](#gemm-dual-pipe-lanes) | Forked GEMM lanes forced onto the tensor-core cubin while the other lanes stay on SIMT, so both pipes work at once | lab `LOUP_LAB_TC_LANES` mask (reverted) | spec, gen (OMAT-0 medium) | REJECTED (5060 Ti only) | S141 | every mask slower: generic path +0.5% (one lane) to +5.8% (all lanes), specialised +1.8% to +5.3% | this file |
 
 ### Scheduling, memory and edge data
 
@@ -272,6 +273,9 @@ Conventions:
 | [gen-conv-fwd-dict](#gen-conv-fwd-dict) | The forward conv's radial rows from a per-group dictionary in shared memory: blocks of 32 consecutive (same-species) receivers x 8 channels, the group's most used slabs (at most KD, each used at least twice, chosen per force call from the precomputed slabs) copied once per block, every other slab read from the table through the same per-edge pointer | `gconv_fwd_L1d / L1sd<KD>`, `conv_dict_build_kernel` (`launch_conv_fwd` variant 3; reverted) | gen (lx 1 forward at C 128) | REJECTED | S138 | `gconv_fwd_L1` 1,693 -> 4,306 us per step at KD 96 (one 8-warp block per SM) and 2,717 at KD 40 (two), MP-0 `L1s` 662 -> 1,278 / 1,168, plus 37-51 us of dictionary builds; MD ABBA OMAT-0 generic SrTiO3 `1.300`, MP-0 `1.189` (both orders) | this file |
 | [gen-conv-fwd-path-teams](#gen-conv-fwd-path-teams) | The generic lx 1 forward conv's ten paths split between warp teams of one receiver block (round-4 research: `f2_0`, two 128-thread teams owning paths {1,3,4,6,7} / {0,2,5,8,9}, 64 registers; `f3_0`, three teams, 56 registers), each output component in one team with its accumulation order | scratch `launch_conv_fwd` variants 3 / 4 (reverted) | gen (lx 1 forward at C 128) | REJECTED | S139 | nsys us per step, OMAT-0 generic: SrTiO3 R5 1,709, `f2_0` 2,291 (+34%), `f3_0` 2,250, the one-receiver R1 2,283; NbCl5 R5 322, `f2_0` 355, `f3_0` 351; step 7.97 -> 8.43 ms | this file |
 | [gen-l0-bwd-lsu](#gen-l0-bwd-lsu) | Layer 0's edge backward on fewer load/store-pipe instructions: each staged edge's metadata (receiver, sender species, slab, t, slope scale) read by the warp as two broadcast shared loads instead of six shuffles, and the radial pull reduced in the unused slot 0 of the 16-value angular fold instead of its own five-shuffle butterfly | `first_bwd_edge_kernel` (`s_meta`, `s_sxi`) | gen (hidden-table layer 0 with <= 96 columns: OMAT-0, MP-0, MPtrj, OFF) | DEFAULT | S140 | `first_bwd_edge` 431 -> 379 us per step (MP-0 SrTiO3), 493 -> 457 (OMAT-0 generic); library ABBA 5060 Ti MP-0 SrTiO3 `0.9846`, OMAT-0 generic `0.9976`, OFF23-M water216 `0.9880`; RTX 4000 Ada MP-0 SrTiO3 `0.9895`, NbCl5 `0.9933`, OMAT-0 generic `0.9978`, OFF23-M tie | this file |
+| [gen-conv-fwd-pruned-r5](#gen-conv-fwd-pruned-r5) | The pruned lx 1 forward (`gconv_fwd_L1s`, [gen-conv-prune](#gen-conv-prune)) stages only the four degree-0 / 1 harmonics per edge (512 B per receiver instead of 2,048), its R > 1 group barriers take literal ids (an id in a register reserves all 16 hardware barriers: one block per SM), and on `sm_120` it runs at the 16 KB shared-memory configuration (carveout 10%) | `emit_conv_fwd` (`sh4`, `bar_code`), `pruned_r5_carveout()` in the generated launcher | gen (MP-0 medium's second interaction) | DEFAULT (5060 Ti only; sm_89 not measured) | S141 | `gconv_fwd_L1s` 648 -> 576 us per force call (`ncu`, MP-0 SrTiO3); MD MP-0 SrTiO3 `0.985`, NbCl5 `0.974` (lab); develop library against `d6e97b7` SrTiO3 `0.984` | this file |
+| [gen-conv-fwd-r6](#gen-conv-fwd-r6) | Six receivers per forward conv block (R6, 768 threads) instead of five | lab `LOUP_LAB_R=6` (reverted) | gen (OMAT-0 generic, MP-0) | REJECTED (5060 Ti only) | S141 | OMAT-0 generic `gconv_fwd_L1` 1,594 -> 1,579 us (`ncu`), MD a tie; MP-0 pruned 598 -> 600 us | this file |
+| [gen-conv-fwd-bar-literal-full](#gen-conv-fwd-bar-literal-full) | Literal barrier ids in the full lx 1 forward (`gconv_fwd_L1` R5) as well | lab (reverted) | gen (OMAT-0 generic) | REJECTED (5060 Ti only) | S141 | MD OMAT-0 generic SrTiO3 +0.7% (7.810 / 7.797 against 7.739 / 7.755 ms with the register id) | this file |
 
 ### MACE-POLAR-1 long range (`src/polar.cu`)
 
@@ -299,6 +303,7 @@ Conventions:
 | [pol-hidden-fold-l2](#pol-hidden-fold-l2) | POLAR-1-L: the degree-2 hidden chain folded into its consumers: no layer forms `hout[2]` (it aliases `y[2]`); the mixers become `W_p_v B_v` (`B_2 = M_2`, `B_1 = M_1 + W_sc_2 B_2`, `B_0 = M_0 + W_sc_1 B_1`), the next layers' `linear_up` take `W_p_0 W_up_1`, `W_p_1 W_up_2`, `W_p_0 W_sc_1 W_up_2`, and the composed sources stay exactly zero (skipped); composed in double at load, rounded once | `GenericModel::setup_lr_fold`, `GenericLayer::hfold / x_extra / sc_extra`, `PolarLR::set_hidden_fold` (`sm_120`; `LOUP_POLAR_HFOLD=0` disables, bit 2 = degree 2) | gen + POLAR (L) | DEFAULT (5060 Ti only) | S136 | GEMM launches 216.3 -> 208.2 per step (against the zero-source skip alone), sgemm128 35.5 -> 25.4; library ABBA POLAR-1-L NaCl216 `0.9234` (`0.9218` / `0.9250`, 3 rounds), with degree 1 `0.9143` (`0.9158` / `0.9129`); -28 MiB; gates L 6 / 6, M 18 / 18, S 5 / 5 on every path | this file |
 | [pol-hidden-fold-l1](#pol-hidden-fold-l1) | POLAR-1-M / -L: the first hidden vector `h_0[1] = y_0[1] W_p_0[1]` never formed: `W_p_0[1]` composed into layer 1's `W_up_1` and `W_sc_1`, `LR.mix_0_1` and the three m blocks of `LR.src_0`'s l = 1 rows; the reverse adds all four consumers' gradients into `dy_0[1]` | as above (bit 1 = degree 1) | gen + POLAR (M, L) | DEFAULT (5060 Ti only) | S136 | 2 GEMM launches fewer per force call (forward and transpose `3N x 512 x 512`); library ABBA POLAR-1-M NbCl5 `0.9807` (`0.9807` / `0.9807`, 2 rounds, 21.05 -> 20.64 ms), NaCl216 `0.9766` (`0.9752` / `0.9779`, 3 rounds), POLAR-1-L NaCl216 `0.9766` (`0.9759` / `0.9774`); NbCl5 -24 MiB | this file |
 | [pol-zero-sources](#pol-zero-sources) | POLAR-1-L: the long-range source blocks certified exactly zero (every layer's l = 2 rows of `LR.src_t`) skip their forward and reverse `qsrc` GEMMs (the first that runs takes beta 0) | `PolarLR::Impl::src_zero`, `src_block_zero` (`LOUP_POLAR_ZBLK=0` disables) | POLAR (L) | DEFAULT | S136 | GEMM launches 222.4 -> 216.3 per step; library ABBA POLAR-1-L NaCl216 `0.9855` (`0.9852` / `0.9858`, 2 rounds, with the hidden fold off) | this file |
+| [pol-sf-split-fold](#pol-sf-split-fold) | The structure factor's FP64 warp fold of its `2 NL` per-lane partials split: each xor step halves the values a lane carries, so lane L ends with partial `L >> SH`'s warp sum, bit for bit the plain xor fold's, with far fewer FP64 adds | `warp_fold_split` (`src/warp_fold.cuh`) in `sf_kernel_tiled` / `sf_kernel_1` | POLAR | DEFAULT (bit-exact; timed on the 5060 Ti only) | S141 | MD POLAR-1-M NbCl5 19.65 -> 19.22 ms (`0.979`), NaCl216 `0.989`, POLAR-1-L NaCl216 `0.994` | this file |
 
 ### Measurements without a switch
 
@@ -313,6 +318,9 @@ Conventions:
 | [meas-plan-variance](#meas-plan-variance) | GEMM plans differ between library builds | MEASUREMENT | POLAR-1-M NaCl 216 S8/S7 b/a 1.013 with each build's cached plans, 0.969 after both retuned | this file |
 | [meas-temperature-cost](#meas-temperature-cost) | Where a thermalised (300 K) `SrTiO3` force pass loses time against one at rest, per kernel, 5060 Ti | MEASUREMENT | the four tabled kernels lose L1 slab reuse (spline 1.58 -> 1.79 ms, i0 backward 497 -> 552 us); the dense contractions are DRAM-bound and do not change | this file |
 | [meas-conv-ablation-bounds](#meas-conv-ablation-bounds) | Upper bounds for table-traffic, atomic and angular-arithmetic ideas: kernel times with one cost removed (timing-only builds, wrong forces), OMAT-0 generic and MP-0 SrTiO3, 5060 Ti | MEASUREMENT | free forward-conv table reads `gconv_fwd_L1` -26% (OMAT-0, 468 us per call) / -40% (MP-0); free backward table reads -5% / -8%; no sender-gradient atomics -5% / -21%; layer 0: free table -6% forward / -9% backward, free angular arithmetic -1-2% forward | this file |
+| [meas-conv-bwd-algebra-bound](#meas-conv-bwd-algebra-bound) | Upper bound for a bond-frame (SO(2)) interaction-1 backward: OMAT-0 generic `gconv_bwd_L1` with its per-path algebra cut to a few FMAs (same loads and table decode; timing only, wrong forces), 5060 Ti | MEASUREMENT | 2,738.5 -> 2,286.7 us per force call (-16.5% of the kernel, 5.8% of 7.80 ms kernel time) | this file |
+| [meas-radial-precision-screens](#meas-radial-precision-screens) | Accuracy screens (float64 MACE, OMAT-0 medium SrTiO3, gate rule) of tensor-core radial synthesis, FP16 outer-shell weights and a Chebyshev outer-shell factorisation; dense matmul rates, 5060 Ti | MEASUREMENT | single-pass FP16 / TF32 synthesis 28-54x the float32 force error, BF16 360-1,130x; FP16 weights pass beyond 5.0 A (0.5-0.9x), fail beyond 4.5 A (3.6x); Chebyshev fails at K 4-24; FP32 17.1, TF32 25.2, FP16 / BF16 ~49-50 TFLOP/s | this file |
+| [meas-sgemm-reuse-pair-cutoff](#meas-sgemm-reuse-pair-cutoff) | Offline censuses: `sgemm128` operand reuse in the `sm_120` SASS; radial weights near the cutoff (per-pair effective cutoff) | MEASUREMENT | 2.33-2.47 register-file reads per FFMA (floor 2.0); OMAT-0 weights fall below 1e-5 of their peak only above ~5.99 A: 0.03-0.13% of edges droppable (MP-0 1.1-2.4%) | this file |
 
 ## Chronology
 
@@ -400,6 +408,13 @@ Do not retry these unless the stated condition changes.
 | Backward projections as two TF32 products (forward energies native; round-4 research) | not built for the terminal GEMMs: on the 5060 Ti (TF32 tensor rate about the FP32 rate) two products of the eight terminal shapes cost at least 1.105 ms at peak against 1.014 ms for the tuned FP32 GEMMs (the research's own floor); splitting rows between FP32 and tensor pipes concurrently is untested. Allowed in principle (AGENTS.md: accuracy decides, 3x gate on every family); the research's CPU screen passed 9 / 9 held-out cases and a 320-step NVE run | `omat0-round4-20261119/two_products` |
 | Backward conv (`gconv_bwd_L1`) split by sender feature type between warp teams (round-4 research) | not built: uncompiled in the research; its forward analogue lost 32-34% ([gen-conv-fwd-path-teams](#gen-conv-fwd-path-teams)), and the backward kernel already runs at 76% of SM and 81% of L2 throughput (ncu, OMAT-0 generic SrTiO3), which a split with an extra per-edge handoff of the four (Gx, Gy, Gz, R) partials cannot relieve | `omat0-round4-20261119/path_codegen` |
 | Layer-0 backward as an MMA product with two TF32 terms (round-4 research, first interaction) | not built: the research expected to halve the 0.472 ms kernel with cheaper matrix arithmetic, but ncu shows it bound by its load/store pipe (71% of peak, two thirds of it shuffles) with the FMA pipe at 30%; S140 removed a quarter of those instructions exactly (-7% / -12% kernel time, [gen-l0-bwd-lsu](#gen-l0-bwd-lsu)). A tensor-core version would also retire the 16-shuffle fold and the per-lane FMAs, but must stage its MMA operands through shared memory, keeps the table reads (free table reads: -9%) and needs the 3x gate on every hidden-table family; the research's target of halving the kernel would now save about 0.23 ms per OMAT-0 generic step (3%), unmeasured | `omat0-round4-20261119/first_center` |
+| Interaction-1 backward in a bond-aligned (SO(2)) frame | not built (19 Nov): its bound is 452 us per force call, 5.8% of OMAT-0 generic SrTiO3's kernel time ([meas-conv-bwd-algebra-bound](#meas-conv-bwd-algebra-bound)). The late pull-back already contracts each receiver adjoint with the bond direction (`h = q . n`, `v = Q n`: the m = 0 and m = +-1 projections), and rotating every path's adjoint into the bond frame costs more FMAs per channel and edge than those contractions; a multi-day generated kernel for less than that bound | owner's idea list, 19 Nov |
+| Both directions of a bond in one pass; cluster-pair undirected convolution | not built: the idea's byte count (6.4 KB more reads against 10.2 KB saved per bond on SrTiO3, about even on NbCl5) is before cache reuse, which already serves most table rows ([spl-receiver-order](#spl-receiver-order)); it adds output reductions for the second endpoint and loses the fixed per-receiver summation order. Layer 0's analogue above was dropped for the same gather | owner's idea list, 19 Nov |
+| Radial weights by texture-unit interpolation (`tex1D`) | not built: ~945 M filtered fetches per forward pass, ~2.6 ms at the 5060 Ti's texture peak (an estimate), against ~1.5 ms for the whole current forward conv | owner's idea list, 19 Nov |
+| Fast multipole expansion of the outer radial shell | not built: at a 6 A cutoff with 1.5 A cells every interaction is near field; there is no far field to expand | owner's idea list, 19 Nov |
+| Persistent multi-stage kernel held in L2; HFMA2 / tensor-core radial weights | not built: see [meas-radial-precision-screens](#meas-radial-precision-screens) for the precision side (single-pass synthesis fails; the three-product split passes but runs no faster than SIMT at the measured rates; FP16 outer-shell weights pass only beyond 5.0 A, where the 4-byte far-edge tables already lost) | owner's idea lists, 19 Nov |
+| Local site-energy updates (Monte Carlo moves, finite-difference phonons) | not built: a feature, not a speed-up of MD; the owner's count is 518 site energies (1.30%) per move on SrTiO3 and 3,839 atoms (9.60%) at 40,000 atoms | owner decision |
+| Cheap bond potential plus multiple time steps (r-RESPA) | not tried (owner: not for now); the owner's screen cuts SrTiO3's fast-force RMS 0.833 -> 0.395 eV/A, NaCl 0.157 -> 0.054 | owner's idea list, 19 Nov |
 | Round-4 research directions closed by their own measurements | whole-graph transforms (no shared accurate basis for the radial adjacency matrices: 7.6-23.0% error lower bounds; a local hierarchy covers 0.57% of edges), sparse tensor-core layouts (>= 63.5-97.8 compensated GFLOP per force call), cheaper quadratic radial decoders (fail the force / stress gate on all four test cells, up to 1.81x / 5.26x), whole spatial slabs (3.59x repeated layer-0 work or 36.3 MiB of frontier state against a 32 MiB L2), speculative batches of future trajectory steps (one certified step per wave) | `omat0-round4-20261119/REPORT.md` |
 
 ## Appendix: entries
@@ -1167,6 +1182,16 @@ Each entry has the same fields. Unless stated, the system is OMAT-0 medium on th
 - Status: NOT BUILT.
 - What: on Ada (`l2_bytes = 48 MiB`), `sgemm_rm`'s `M * K * 4 > l2_bytes / 2` threshold (`24 MiB`) times `lin1_fwd l=1` (`15000 * 384 * 4 = 22.0 MiB`) **hot**, even though `m1_0..3` total 97 MB and stream from DRAM; also check `lin1_bwd` (`db_l` vs `m1_l`) and `LOUP_DEBUG_GEMM=1` picks on both GPUs. Separately, `HybCubin` only provides `64x64`, `32x64`, `64x32` tiles (beaten by `sgemm128` on 5060 Ti `lin1`); test `128x64` / `64x128` 3xTF32 `mma` tiles.
 - Sources: `OMAT0_SPEEDUP_BRIEF.md`.
+
+<a id="gemm-dual-pipe-lanes"></a>
+#### gemm-dual-pipe-lanes: forked GEMM lanes on the tensor-core cubin beside SIMT lanes
+- Switch: none (reverted). A lab build added `LOUP_LAB_TC_LANES` (a lane mask) and `LOUP_LAB_TC_TILE`: GEMMs on the masked fork-group lanes ran on the hybrid cubin's tile 0 whatever the plan said.
+- Stage: S141 (19 November 2026), owner's idea list (dual-pipe GEMM lanes).
+- What: concurrent GEMM groups split between the FP32 pipe (own SIMT kernels) and the tensor pipe (the hybrid cubin), so that both pipes are busy at once.
+- Measured (5060 Ti, OMAT-0 medium SrTiO3, MD 6 x 256 steps, same library and plans on every side): generic path +0.5% (one lane), +2% (two), +4% (four), +5.8% (all lanes); specialised path +1.8% to +5.3%.
+- Reading: the planner had already timed these GEMMs on both kernels and chosen SIMT; forcing tile 0 of the cubin is slower per GEMM, and the overlap does not pay for it.
+- Status: REJECTED (5060 Ti only; code removed).
+- Sources: this file.
 
 ### Scheduling, memory and edge data
 
@@ -2355,6 +2380,34 @@ POLAR-1 NaCl 3x3x3 (216) and POLAR-1-M `NbCl5` 3x3x3 (1,944).
 - Status: DEFAULT (GPU-independent).
 - Sources: this file; `results/profiles-20261118/ncu/omat0m_gen_srtio3_raw.csv.gz`.
 
+<a id="gen-conv-fwd-pruned-r5"></a>
+#### gen-conv-fwd-pruned-r5: four staged harmonics, literal barrier ids and a 16 KB carveout for the pruned forward
+- Switch: `python/gen_generic.py` `emit_conv_fwd` (`sh4`: no extras, no Cartesian forms, every path reads harmonics of degree <= 1; `bar_code`: literal `bar.sync` ids when `sh4`), and `pruned_r5_carveout()` in the generated launcher (cc 12 only; `gconv_fwd_L1s<5, false, 640, *, 128>`). No environment switch; `LOUP_CONV_PRUNE=0` runs the full kernel instead.
+- Stage: S141 (19 November 2026), from the owner's idea lists (occupancy of the pruned layer).
+- What: MP-0 medium's pruned second interaction ([gen-conv-prune](#gen-conv-prune)) keeps paths (0,0,0) and (1,1,0), which read only Y0 and Y1. Its forward staged all sixteen harmonics per edge (2,048 B per 32-edge receiver tile); it now stages four as one `float4` (512 B), so the block needs 7.0 KB of shared memory instead of 14.7 KB. With the group barrier id in a register, the compiler reserved all 16 hardware barriers (`ncu` `launch__barrier_count` 16), so one block filled an SM; literal ids (`bar.sync n+1, 128` under `if constexpr (R > n)`) reserve six. The driver then picked the 32 KB shared-memory configuration; the 16 KB one (carveout 10%) leaves more L1 for the table reads.
+- Measured (5060 Ti, MP-0 medium SrTiO3 5,000 atoms, `ncu`, one force call): `gconv_fwd_L1s` 647.5 us (S135) -> 597.7 us (four harmonics, literal ids, the driver's 32 KB) -> 576.4 us (carveout 10; 15 gives 577.7, 0 gives 8 KB and 635.1). MD (lab, base / switches / carveout, a b c c b a order): SrTiO3 3.092 / 3.067 / 3.043 and 3.095 / 3.068 / 3.050 ms (`0.985` with the carveout); NbCl5 0.672 / 0.662 / 0.651 and 0.668 / 0.658 / 0.653 (`0.974`). Develop library against `d6e97b7` on shared plans (a d d a): SrTiO3 3.098 / 3.043 / 3.046 / 3.092 (`0.984`); NbCl5 0.660 / 0.666 / 0.649 / 0.664 (a noisy first dev run, max 0.690; `0.995` overall). OMAT-0 generic SrTiO3 (kernels unchanged): 7.724 / 7.728 / 7.750 / 7.761, a tie.
+- Results (develop library against `d6e97b7`, same plans, one evaluate): MP-0 SrTiO3 max dF 5.7e-7 eV/A, dE 2.6e-7 meV/atom; OMAT-0 generic SrTiO3 max dF 3.8e-6 (own spread 1.1e-6).
+- Gates (5060 Ti, the develop library, one GEMM plan set per model): POLAR-1-M crystals 18 / 18 (worst force / stress ratio 2.23 / 1.38), POLAR-1-S 5 / 5 (0.62 / 0.63; NaNbO3_c0 skipped as UNSTABLE), POLAR-1-L 6 / 6 (1.66 / 0.75, cached references), MP-0 medium oxide 18 / 18 (0.80 / 0.46) and 18 / 18 with `LOUP_CONV_PRUNE=0 LOUP_SENDER_BWD=0 LOUP_LIN_COMPACT=0 LOUP_CHAIN_FOLD=0` (0.68 / 0.33), OMAT-0 medium generic oxide 18 / 18 (2.03 / 1.81). pytest 77 / 77 (`tests/`, the develop library).
+- Other GPUs: not measured (the owner's workstations were not used); the carveout is set on cc 12 only, the harmonics and barrier changes run everywhere.
+- Status: DEFAULT (5060 Ti only).
+- Sources: this file.
+
+<a id="gen-conv-fwd-r6"></a>
+#### gen-conv-fwd-r6: six receivers per forward conv block
+- Switch: none (reverted). Lab `LOUP_LAB_R=6` launched `gconv_fwd_L1<6, ..., 768>` / `gconv_fwd_L1s<6, ...>`.
+- Stage: S141 (19 November 2026).
+- Measured (5060 Ti, `ncu`, one force call): OMAT-0 generic SrTiO3 `gconv_fwd_L1` R5 1,594.8 us (96 registers) -> R6 1,579.0 us (80 registers); MP-0 pruned R5 597.7 -> R6 600.1 us. MD OMAT-0 generic SrTiO3: base 7.701 / 7.761, R6 (register ids) 7.744 / 7.752, R6 (literal ids) 7.721 / 7.733 ms: a tie.
+- Status: REJECTED (5060 Ti only).
+- Sources: this file.
+
+<a id="gen-conv-fwd-bar-literal-full"></a>
+#### gen-conv-fwd-bar-literal-full: literal barrier ids in the full lx 1 forward
+- Switch: none (S141 keeps the register id for every kernel but the pruned one).
+- Stage: S141 (19 November 2026).
+- Measured (5060 Ti, OMAT-0 generic SrTiO3): `ncu` 1,593.7 -> 1,594.8 us (16 -> 6 barriers, no change in blocks per SM: registers limit it); MD with literal ids 7.810 / 7.797 ms against 7.739 / 7.755 with the register id (+0.7%).
+- Status: REJECTED (5060 Ti only).
+- Sources: this file.
+
 ### MACE-POLAR-1 long range
 
 <a id="pol-double-sf"></a>
@@ -2569,6 +2622,18 @@ POLAR-1 NaCl 3x3x3 (216) and POLAR-1-M `NbCl5` 3x3x3 (1,944).
 - Status: DEFAULT (GPU-independent code).
 - Sources: this file.
 
+<a id="pol-sf-split-fold"></a>
+#### pol-sf-split-fold: the structure factor's warp fold split
+- Switch: `src/warp_fold.cuh` (`warp_fold_split<V>`, `kWarpFoldShift<V>`), used by `sf_kernel_tiled` and `sf_kernel_1` (`src/polar.cu`). No switch: the result is bitwise the old fold's.
+- Stage: S141 (19 November 2026).
+- What: each lane holds `2 NL` FP64 partials (cos and sin per channel) that the plain fold reduced with five xor shuffles and adds per value. The split fold pairs lanes at each xor step so that one lane keeps the lower half of the values and the other the upper half, each adding its partner's copy: after `SH = log2(2 NL)` steps every lane holds one value's partial sum over its lane group, and the remaining steps fold that one value. Each sum is formed in the same tree order as the plain fold, so the bits are the same (`tests/fold_check.cu`: 320,000 sums at V = 16 and 640,000 at V = 32, 0 differing); FP64 adds per warp fall from `5 x 32 x V` to `32 x (V - 1 + 5 - SH)` (and the shuffles likewise).
+- Measured (5060 Ti, MD a b b a on the base library's plans): POLAR-1-M NbCl5 19.626 / 19.215 / 19.232 / 19.665 ms (`0.979`), NaCl216 2.650 / 2.624 / 2.615 / 2.645 (`0.989`); POLAR-1-L NaCl216 4.855 / 4.814 / 4.798 / 4.812 (`0.994`). Develop library against `d6e97b7` on shared plans: POLAR-1-M NbCl5 19.663 / 19.254 / 19.259 / 19.685 (`0.979`); forces max dF 4.1e-5 eV/A of |F|max 14.2 (own spreads 3.6e-6 / 4.2e-6). POLAR-1-S NbCl5 could not be timed: the cell heats to 700-1,000 K with either library and one split-fold run diverged (a bit-exact fold cannot cause it; not rerun).
+- Results: three processes per library on one plan file, POLAR-1-M NbCl5: base against base max dF up to 7.1e-5 eV/A, split against split 5.9e-5, across the libraries 7.8e-5 (the GEMM picks of separate processes).
+- Gates (5060 Ti, the develop library, one GEMM plan set per model): POLAR-1-M crystals 18 / 18 (worst force / stress ratio 2.23 / 1.38), POLAR-1-S 5 / 5 (0.62 / 0.63; NaNbO3_c0 skipped as UNSTABLE), POLAR-1-L 6 / 6 (1.66 / 0.75, cached references), MP-0 medium oxide 18 / 18 (0.80 / 0.46) and 18 / 18 with `LOUP_CONV_PRUNE=0 LOUP_SENDER_BWD=0 LOUP_LIN_COMPACT=0 LOUP_CHAIN_FOLD=0` (0.68 / 0.33), OMAT-0 medium generic oxide 18 / 18 (2.03 / 1.81). pytest 77 / 77 (`tests/`, the develop library).
+- Other GPUs: not measured.
+- Status: DEFAULT (bit-exact; timed on the 5060 Ti only).
+- Sources: this file.
+
 ### Measurements without a switch
 
 <a id="meas-stage-spans"></a>
@@ -2633,6 +2698,31 @@ POLAR-1 NaCl 3x3x3 (216) and POLAR-1-M `NbCl5` 3x3x3 (1,944).
   - The MD runs of the table variants blew up (a rebuild every step, 42-50 ms per step), which is why they were redone on the fixed cell; repeated `evaluate` calls on identical positions are answered from the cache, hence the jitter.
 - Reading: the forward convs are bound by their table traffic (the radial-row cache's lever); the backward convs and layer 0 are not; the layer-0 forward is not bound by its angular arithmetic, so tensor cores cannot speed it up.
 - Sources: this file (`.tmp_o` scripts, not kept).
+
+<a id="meas-conv-bwd-algebra-bound"></a>
+#### meas-conv-bwd-algebra-bound: what a bond-frame interaction-1 backward could save
+- Switch: none. A timing-only lab build (`LOUP_LAB_BWD_STUB=1` in `emit_conv_bwd_lp`) kept every load, the staged adjoint `s_q` and the packed-table decode (w, dw) of `gconv_bwd_L1`, and cut each path's contractions to three or four FMAs (wrong forces).
+- Stage: S141 (19 November 2026), the owner's bond-frame (SO(2)) backward proposal.
+- Measured (5060 Ti, OMAT-0 medium generic SrTiO3 5,000 atoms, `nsys`, 16 force calls on fixed positions after 20 warm-up calls, same plans): `gconv_bwd_L1<1, 128, 1>` 2,738.5 -> 2,286.7 us per call (-451.8 us, -16.5%); all kernels 7,804.8 -> 7,421.2 us. An MD-based first try was discarded: the stub's forces blew the run up (16 rebuilds).
+- Reading: a bond-frame rewrite changes only the per-path algebra, so 452 us (5.8% of the kernel time) bounds it. The late pull-back already evaluates the bond-frame projections it would need: `h = q . n` (m = 0) and `v = Q n` (m = +-1) per path and channel; a rotated form must first rotate each path's receiver adjoint into the edge frame (per edge, since the frame changes per edge), which costs more FMAs than those contractions save. Not built.
+- Status: MEASUREMENT.
+- Sources: this file.
+
+<a id="meas-radial-precision-screens"></a>
+#### meas-radial-precision-screens: lower-precision and factorised radial weights
+- Switch: none. CPU screen: torch MACE OMAT-0 medium in float64 with the radial weights perturbed (straight-through: forward value rounded, gradient of the exact expression, so only the forward error is carried; a necessary condition), against the gate's rule on rattled SrTiO3 cells; tensor-core rates with torch matmul on the 5060 Ti.
+- Stage: S141 (19 November 2026), the owner's idea lists (tensor-core radial synthesis, HFMA2 outer shell, Chebyshev factorisation).
+- Measured: dense matmul (5060 Ti): FP32 17.1, TF32 25.2, FP16 / BF16 49-50 TFLOP/s. Radial MLP's last layer `w = h W` with h and W rounded to 11 bits (FP16 / TF32): force error 28-54x the float32 model's, 8 bits (BF16) 360-1,130x; three products of 11-bit hi / lo parts pass, but cost three products at ~49 TFLOP/s, no faster than the SIMT path that already won this contraction. FP16 weights for edges beyond r_split: 5.0-5.5 A pass (0.5-0.9x), 4.5 A fails (3.6x; 4.7x with each edge's tensor-product output rounded too); the saving would be ~13-16% of the table traffic of edges past 5.5 A, where the 4-byte far-edge tables (T2) already lost 1-3%. Chebyshev outer-shell factorisation: even 24 terms fit each column only to ~1e-3 of its peak (the packed tables' bound is 5e-4); forces 4-14x the float32 error at K = 24, 100-10,000x at K = 4-6.
+- Status: MEASUREMENT (every direction closed or below its expected gain).
+- Sources: this file.
+
+<a id="meas-sgemm-reuse-pair-cutoff"></a>
+#### meas-sgemm-reuse-pair-cutoff: `sgemm128` operand reuse; per-pair effective cutoff
+- Switch: none. Offline: `cuobjdump -sass` of the `sm_120` objects; torch screen of the radial weights near the cutoff.
+- Stage: S141 (19 November 2026), the owner's idea lists (SASS `.reuse` patching, per-pair `r_eff`).
+- Measured: `sgemm128` variants average 2.33-2.47 register-file operand reads per FFMA against a floor of 2.0, so a `.reuse` patcher could save at most ~15% of operand reads, and only where bank conflicts stall. OMAT-0 medium: the radial weights fall below 1e-5 of their peak only above ~5.99 A, so a per-pair effective cutoff drops 0.03-0.13% of the edges; MP-0 1.1-2.4%.
+- Status: MEASUREMENT (neither built).
+- Sources: this file.
 
 [status]: STATUS_AND_PROFILE.md
 [s1]: STATUS_AND_PROFILE.md#1-benchmark--verification-summary
