@@ -72,6 +72,10 @@ CASES = [
     ("mace-mh-1.model", lambda: _oxide(17), 6000, 2),
     ("MACE-OFF23_medium.model", lambda: _water((4, 4, 4)), 10000, 2),
     ("MACE-omol-0-extra-large-1024.model", lambda: _water((2, 1, 1)), 400, 3),
+    # MP-0 medium: a pruned second conv layer (its skipped projections' zeros, the sender-owned backward that an
+    # open domain must not take) and a compact layer 0; MPtrj-2022.9: both layers compact
+    ("2023-12-03-mace-128-L1_epoch-199.model", lambda: _oxide(12), 2200, 2),
+    ("MACE_MPtrj_2022.9.model", lambda: _oxide(12), 2200, 2),
 ]
 IDS = [c[0].split(".model")[0] for c in CASES]
 

@@ -1713,6 +1713,7 @@ void GenericModel::free_system() {
     for (void* p : sys_allocs_) cudaFree(p);
     sys_allocs_.clear();
     sys_alloc_bytes_.clear();
+    sys_zero_once_.clear();
     layers_shared_ = false;
     sys_bytes_unshared_ = 0;
     sys_max_alloc_ = 0;
@@ -1786,6 +1787,15 @@ void GenericModel::alloc_system(int N) {
         arena_off += align256(std::max<size_t>(floats, 1) * sizeof(float));
         return p;
     };
+    // Buffers whose zeros are written once, below, and read in every pass (S125: a pruned conv layer's skipped
+    // projections; S130 / S132: the pad columns of a compact layer's angular gradients) keep memory of their own:
+    // in the arena another layer's sweep would overwrite them.
+    auto own_zero = [&](size_t floats) -> float* {
+        if (sizing) return nullptr;
+        float* p = alloc(floats);
+        sys_zero_once_.push_back(p);
+        return p;
+    };
     auto layout_layer = [&](int t) {
         GenericLayer* L = layers_[t];
         for (int l = 0; l <= L->lmax_x; ++l) {
@@ -1796,13 +1806,14 @@ void GenericModel::alloc_system(int N) {
             for (int l = 0; l < 4; ++l) L->S0[l] = own(n * dimL(l) * (size_t)L->K0);
         for (int l = 0; l < 4; ++l) {
             L->mid[l] = L->first_hidden ? nullptr : own(n * dimL(l) * L->n_l3[l] * L->C_x);
+            const bool zero_fwd = L->conv_prune && l >= 1, zero_bwd = L->lin_compact && l >= 1;
             if (L->skip_folded) {
                 L->lin[l] = nullptr;
                 L->dlin[l] = nullptr;
-                L->msgf[l] = own(n * dimL(l) * L->C_msg);
+                L->msgf[l] = zero_fwd ? own_zero(n * dimL(l) * L->C_msg) : own(n * dimL(l) * L->C_msg);
             } else {
-                L->lin[l] = own(n * dimL(l) * L->lin_cols[l]);
-                L->dlin[l] = own(n * dimL(l) * L->lin_cols[l]);
+                L->lin[l] = zero_fwd ? own_zero(n * dimL(l) * L->lin_cols[l]) : own(n * dimL(l) * L->lin_cols[l]);
+                L->dlin[l] = zero_bwd ? own_zero(n * dimL(l) * L->lin_cols[l]) : own(n * dimL(l) * L->lin_cols[l]);
                 L->msgf[l] = (L->kind == 1 || L->kind == 3) ? L->lin[l] : own(n * dimL(l) * L->C_msg);
             }
             L->dmsgf[l] = own(n * dimL(l) * L->C_msg);
@@ -1812,12 +1823,12 @@ void GenericModel::alloc_system(int N) {
                 L->dpre[l] = (t > 0 && l <= L->lmax_x) ? own(n * dimL(l) * L->lin_cols[l]) : nullptr;
             }
         }
-        if (L->conv_prune)  // S125: the skipped projections' outputs, read by the product (or the gate), stay zero
+        if (L->conv_prune && !sizing)  // S125: the skipped projections' outputs, read by the product (or the gate), stay zero
             for (int l = 1; l < 4; ++l) {
                 float* z = L->skip_folded ? L->msgf[l] : L->lin[l];
                 CUDA_CHECK_THROW(cudaMemset(z, 0, n * dimL(l) * (L->skip_folded ? L->C_msg : L->lin_cols[l]) * sizeof(float)));
             }
-        if (L->lin_compact)  // S130 / S132: the pad columns of the compact angular gradients are never written
+        if (L->lin_compact && !sizing)  // S130 / S132: the pad columns of the compact angular gradients are never written
             for (int l = 1; l < 4; ++l)
                 CUDA_CHECK_THROW(cudaMemset(L->dlin[l], 0, n * dimL(l) * L->lin_cols[l] * sizeof(float)));
         if (L->kind == 4)  // with the S59 table the gates read res[0] from it
@@ -2520,7 +2531,7 @@ void GenericModel::record(const GenericPassInputs& in) {
                         in.act_senders, in.act_vec_len, in.act_slab, in.act_t_sx, can_preloc(L), in.species,
                         L->packed_table, L->density_table, L->cubic_bias_shift, L->x, L->mid,
                         density ? L->dD : nullptr, L->dx, t > 0, d_edge_dvec_, t == n_layers_ - 1, L->conv_prune,
-                        L->jit_conv_on ? &L->jit_conv : nullptr);
+                        L->jit_conv_on ? &L->jit_conv : nullptr, in.n_ghost == 0);
         if (t > 0 && !chain_fold_) {  // S57: the earlier layers' fold reads dx directly
             if (L->lmax_x > 0) fork();
             for (int l = 0; l <= L->lmax_x; ++l) {
@@ -2650,7 +2661,8 @@ void GenericModel::record(const GenericPassInputs& in) {
         // each layer's output (hout) and the gradient of it that later layers added (dhout) survive:
         //   forward sweeps:  layer t forward; its readout's own seed in dhout is dropped again.
         //   last layer:      forward and backward together.
-        //   backward sweeps: everything but the stored outputs is overwritten with NaN, layer t is replayed forward
+        //   backward sweeps: everything but the stored outputs (and the zeros alloc_system wrote once, which no
+        //                    sweep writes) is overwritten with NaN, layer t is replayed forward
         //                    (which adds the readout's seed onto dhout; its energy goes to the sink), then backward.
         for (int t = 0; t < n_layers_; ++t) {
             forward_layer(t, in.energy);
@@ -2666,7 +2678,8 @@ void GenericModel::record(const GenericPassInputs& in) {
             assemble_edges(false);
             if (has_edges) zero_edge_kernel<<<(3 * in.E_cap + 255) / 256, 256, 0, st>>>(in.E_dev, d_edge_dvec_);
             for (size_t i = 0; i < sys_allocs_.size(); ++i) {
-                bool keep = sys_allocs_[i] == d_h0_;
+                bool keep = sys_allocs_[i] == d_h0_ ||
+                            std::find(sys_zero_once_.begin(), sys_zero_once_.end(), sys_allocs_[i]) != sys_zero_once_.end();
                 for (const GenericLayer* K : layers_)
                     for (const float* p : K->hout) keep = keep || (p != nullptr && p == sys_allocs_[i]);
                 if (!keep) CUDA_CHECK_THROW(cudaMemsetAsync(sys_allocs_[i], 0xFF, sys_alloc_bytes_[i], st));

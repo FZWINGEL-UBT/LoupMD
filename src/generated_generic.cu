@@ -12717,7 +12717,7 @@ void launch_conv_bwd(int lx, cudaStream_t st, int N, int C, int S, int I, const 
                      const int* rp, const int* snd, const float4* vl, const int* act_slab, const float2* act_t_sx,
                      bool preloc, const int* sp, const uint2* packed, const float4* dens, unsigned bias_shift,
                      float* const* x, float* const* dmid, const float* dD, float* const* dx, bool want_dx,
-                     float* edge_dvec, bool dvec_assign, bool prune, const ConvJit* jit) {
+                     float* edge_dvec, bool dvec_assign, bool prune, const ConvJit* jit, bool sender_ok) {
     const bool gen = conv_generic_forced();
     const void* jb0 = jit ? jit->bwd[0][want_dx ? 1 : 0][preloc ? 1 : 0] : nullptr;
     const void* jb1 = jit ? jit->bwd[1][want_dx ? 1 : 0][preloc ? 1 : 0] : nullptr;
@@ -12736,7 +12736,9 @@ void launch_conv_bwd(int lx, cudaStream_t st, int N, int C, int S, int I, const 
                     edge_dvec, (int)dvec_assign);
     } else if (lx == 1) {
         if (prune) {
-            if (conv_sender_bwd() && (C == 128 || C == 256)) {
+            // The sender-owned kernel reads every neighbour's receiver gradient through the atom's own row: only on a
+            // list that holds both directions of every pair (sender_ok: not an open domain, whose ghosts have no rows)
+            if (sender_ok && conv_sender_bwd() && (C == 128 || C == 256)) {
                 auto pick = [&](auto f_p, auto f_n) { return preloc ? f_p : f_n; };
                 auto fn = (C == 128) ? (want_dx ? pick(gconv_bwd_L1sr<4, true, true>, gconv_bwd_L1sr<4, true, false>)
                                                 : pick(gconv_bwd_L1sr<4, false, true>, gconv_bwd_L1sr<4, false, false>))

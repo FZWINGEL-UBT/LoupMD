@@ -106,6 +106,9 @@ CASES = [
     ("mace-mh-1.model", _oxide, False, 2),
     ("MACE-OFF23_medium.model", _water, False, 2),
     ("MACE-omol-0-extra-large-1024.model", _water, False, 3),
+    # a pruned conv layer and compact layers (see tests/gpu/test_tiled.py's cases)
+    ("2023-12-03-mace-128-L1_epoch-199.model", _oxide, False, 2),
+    ("MACE_MPtrj_2022.9.model", _oxide, False, 2),
 ]
 IDS = [c[0].split(".model")[0] for c in CASES]
 

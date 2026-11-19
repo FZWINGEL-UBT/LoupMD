@@ -42,6 +42,7 @@ CASES = [
     ("mace-omat-0-small.model", _oxide, False, 2),
     ("mace-omat-0-medium.model", _oxide, True, 2),
     ("2023-12-03-mace-128-L1_epoch-199.model", _oxide, False, 2),
+    ("MACE_MPtrj_2022.9.model", _oxide, False, 2),
     ("mace-mh-1.model", _oxide, False, 2),
     ("MACE-OFF23_medium.model", _water, False, 2),
     ("MACE-omol-0-extra-large-1024.model", _water, False, 3),

@@ -26,7 +26,8 @@ void launch_conv_bwd(int lx, cudaStream_t st, int N, int C, int S, int I, const 
                      const int* rp, const int* snd, const float4* vl, const int* act_slab, const float2* act_t_sx,
                      bool preloc, const int* sp, const uint2* packed, const float4* dens, unsigned bias_shift,
                      float* const* x, float* const* dmid, const float* dD, float* const* dx, bool want_dx,
-                     float* edge_dvec, bool dvec_assign, bool prune = false, const ConvJit* jit = nullptr);
+                     float* edge_dvec, bool dvec_assign, bool prune = false, const ConvJit* jit = nullptr,
+                     bool sender_ok = true);
 void launch_prod(const GProdKernels* k, bool backward, cudaStream_t st, int N, int C, float* const* m, const float* D,
                  const float* w, int64_t w_stride, const int* sp, float* const* y_or_g, float* const* dm, float* dD,
                  const float* ro_w = nullptr, double* energy = nullptr);

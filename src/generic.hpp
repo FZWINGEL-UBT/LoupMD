@@ -232,6 +232,9 @@ private:
     double* d_energy_sink_ = nullptr;  // a replayed forward adds its readout's energy here: it is already counted
     std::vector<size_t> sys_alloc_bytes_;
     std::vector<void*> sys_allocs_;
+    // The buffers whose zeros alloc_system writes once and every pass reads (a pruned conv layer's skipped
+    // projections, a compact layer's pad columns): no sweep writes them, so the sweep schedule's test leaves them.
+    std::vector<const void*> sys_zero_once_;
     float* d_edge_dvec_ = nullptr;  // [E_cap, 3]
     void* d_zero_slab_ = nullptr;
     size_t zero_slab_bytes_ = 0;
