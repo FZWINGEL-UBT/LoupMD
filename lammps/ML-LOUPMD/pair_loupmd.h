@@ -45,6 +45,9 @@ class PairLoupMD : public Pair {
   // for run_style loupmd, where the engine integrates: the engine holding the current system, and the cell
   LoupHandle *engine();
   void cell(double *c) const { box_to_cell(c); }
+  // counts the systems the engine was given (loup_set_system, which also drops the engine's state): unchanged
+  // since a run ended means that the engine still holds that run's state
+  bigint system_serial() const { return serial; }
 
  protected:
   LoupHandle *handle;           // the engine (created in init_style)
@@ -59,7 +62,9 @@ class PairLoupMD : public Pair {
   std::vector<int> type2z;      // [ntypes + 1] atomic number of each atom type
   bool system_dirty;            // the engine has to be given the system again (init_style ran)
   std::vector<int> z_sent;      // atomic number by atom ID - 1 of the system the engine holds
+  std::vector<double> m_sent;   // and its masses
   double skin_sent;
+  bigint serial;                // loup_set_system calls so far
   std::vector<double> xbuf, fbuf;    // host positions / forces by atom ID - 1 (the non-Kokkos compute)
 
   virtual void allocate();

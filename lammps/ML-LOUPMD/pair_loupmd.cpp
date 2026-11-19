@@ -51,7 +51,7 @@ int atomic_number(const char *symbol)
 
 PairLoupMD::PairLoupMD(LAMMPS *lmp) :
     Pair(lmp), handle(nullptr), device(-1), device_loaded(-1), skin_user(-1.0), rmax(0.0), ghost(true), ahead(false), system_dirty(true),
-    skin_sent(-1.0)
+    skin_sent(-1.0), serial(0)
 {
   single_enable = 0;
   restartinfo = 0;
@@ -163,7 +163,8 @@ void PairLoupMD::init_style()
     if (handle) loup_destroy(handle);
     handle = loup_create(bundle.c_str(), dev);
     if (!handle)
-      error->one(FLERR, "Pair style loupmd: could not load {} on CUDA device {} (see the message above)", bundle, dev);
+      error->one(FLERR, "Pair style loupmd: could not load {} on CUDA device {}: {}", bundle, dev,
+                 loup_last_error(nullptr));
     bundle_loaded = bundle;
     device_loaded = dev;
     z_sent.clear();
@@ -235,9 +236,17 @@ void PairLoupMD::ensure_system()
     if (z[i] == 0) error->one(FLERR, "Pair style loupmd requires consecutive atom IDs 1 .. N (use 'reset_atoms id')");
     m[tag[i] - 1] = atom->rmass ? atom->rmass[i] : atom->mass[type[i]];
   }
+  // A run command sets system_dirty (init_style: the masses may be new). The same system again is not sent: the
+  // engine would drop its list, its tuned plans and, under run_style loupmd, the thermostat's state.
+  if (skin == skin_sent && z == z_sent && m == m_sent) {
+    system_dirty = false;
+    return;
+  }
   if (loup_set_system(handle, n, z.data(), m.data(), skin) != 0)
-    error->one(FLERR, "Pair style loupmd: the engine refused the system (see the message above)");
+    error->one(FLERR, "Pair style loupmd: the engine refused the system: {}", loup_last_error(handle));
+  serial++;
   z_sent.swap(z);
+  m_sent.swap(m);
   skin_sent = skin;
   system_dirty = false;
 }
@@ -302,7 +311,7 @@ void PairLoupMD::compute(int eflag, int vflag)
   // The stress is formed in every call: steps that need it then run the engine's captured graph as the others do,
   // instead of re-capturing it.
   if (loup_evaluate(handle, xbuf.data(), cell, 1, &energy, fbuf.data(), stress) != 0)
-    error->one(FLERR, "Pair style loupmd: the force evaluation failed (see the message above)");
+    error->one(FLERR, "Pair style loupmd: the force evaluation failed: {}", loup_last_error(handle));
 
   for (int i = 0; i < n; i++) {
     const size_t k = 3 * (size_t) (tag[i] - 1);

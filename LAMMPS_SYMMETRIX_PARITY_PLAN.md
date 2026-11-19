@@ -167,7 +167,8 @@ Two further costs appear only with certain fixes:
   that serves `fix npt`, `nph`, `deform` and `box/relax` in routes A and B.
 - Target: an NPT step within 10% of the NVT step (now 1.7 - 1.9×).
 
-**L3. LAMMPS's common fixes at the engine's speed** (run style; with P0).
+**L3. LAMMPS's common fixes at the engine's speed** (run style; with P0). **Built on `release/v1`, 19 November
+2026** (local, not pushed); status and measurements after the plan's text.
 - `run_style loupmd` reads the input's fix commands and takes over the ones the engine has an integrator for. The
   user keeps writing LAMMPS syntax:
 
@@ -190,6 +191,51 @@ Two further costs appear only with certain fixes:
   time, `tchain`); options without an engine counterpart (`drag`, `mtk no`, per-direction couplings) send the run to
   route A.
 - Target: the engine's step time for these ensembles, as measured for NVE and Langevin in route C.
+- **Status.** `run_style loupmd` without an ensemble does this (`lammps/ML-LOUPMD/integrate_loupmd.cpp`,
+  `read_fixes`; the user's table is in `lammps/README.md`). Taken over: `fix nve`, `nve` + `langevin`, `nve` +
+  `temp/csvr`, `nve` + `temp/berendsen` (+ `press/berendsen`: `iso`, or per direction in an orthogonal box),
+  `nvt`, `npt iso`, `setforce 0 0 0` and atoms outside the integrating fix's group (held atoms), `momentum linear`.
+  Refused by name, with the reason: every other fix that acts during the steps, and the options without an engine
+  counterpart (`npt aniso` / `tri`, pressure ramps, `drag`, `mtk no`, `dilate`, `fix_modify temp` / `press`,
+  variable temperatures, `nph`).
+- **Measured** (RTX 5060 Ti under WSL 2 only; MACE-OMAT-0 medium, rattled SrTiO3, 300 K, 1 fs, 2,000 steps after
+  200, thermo every 1,000, two runs each with fresh GEMM plans; ms/step):
+
+  | atoms | input | package's own loop | run style | route A (LAMMPS integrates) |
+  |---|---|---|---|---|
+  | 320 | `fix nvt` | 0.647, 0.647 | 0.651, 0.647 | 0.810, 0.837 |
+  | 320 | `fix npt iso` | 0.795, 0.780 | 0.783, 0.792 | 1.309, 1.287 |
+  | 320 | `nve` + `langevin` | 0.580, 0.573 | 0.594, 0.578 | 0.795, 0.801 |
+  | 1,080 | `fix nvt` | 1.748, 1.751 | 1.775, 1.761 | 1.969, 2.007 |
+  | 1,080 | `fix npt iso` | 1.847, 1.863 | 1.844, 1.847 | 2.630, 2.643 |
+  | 1,080 | `nve` + `langevin` | 1.718, 1.711 | 1.718, 1.716 | 1.986, 2.032 |
+  | 5,000 | `fix nvt` | 7.689, 7.678 | 7.743, 7.729 | 8.069, 8.083 |
+  | 5,000 | `fix npt iso` | 7.687, 7.666 | 7.674, 7.663 | 8.891, 8.861 |
+  | 5,000 | `nve` + `langevin` | 7.659, 7.676 | 7.663, 7.677 | 8.192, 8.166 |
+
+  The target is met: the run style is within 1% of the package's own loop in every row. Route A takes 1.04 to
+  1.27 times as long with `fix nvt` and 1.16 to 1.65 times with `fix npt`.
+- **Three things the stage needed besides the mapping.**
+  1. An evaluation between two blocks of a run kept capturing the host step over the integrator's step graphs, and
+     the integrator's again at the next block: four captures per output. `loup_evaluate` now takes the force
+     graph while the MD graphs hold an integrator's step (`evaluate_once`, `keep_md`). Langevin on 320 atoms,
+     before and after: thermo every 1,000 steps 0.600 → 0.580 ms/step, every 100 0.617 → 0.594, every 10
+     0.920 → 0.734; graph captures of the job 20 / 92 / 884 → 6 / 6 / 6.
+  2. The pair style gave the engine the system again at every `run` command (the masses might be new), which
+     dropped the list, the tuned plans and the thermostat's state. It now compares the masses too and sends the
+     system only when it changed. This serves route A as well.
+  3. The fixes the engine stands in for must not run their own `setup()`: `fix langevin`'s adds its forces and
+     assumes `run_style verlet` or `respa` (a crash under any other run style). The run style calls
+     `Modify::setup()`'s parts itself and leaves those fixes out.
+- **Left open.**
+  - `fix npt aniso` and `tri`: the engine's full-cell MTK mode moves all nine components of the box, which is
+    neither. An engine mode with a diagonal or a triangular cell matrix would be needed.
+  - Fixes that only read the state every N steps (`fix ave/time`, `fix print`, `fix ave/atom`) are refused like
+    every fix with an `end_of_step`. They could be served as output is: a block boundary at their steps.
+  - Each output costs about two force evaluations (the output's own, and the first of the next block, which
+    evaluates the same positions again). Reusing the first would halve that: +26 to 34% on the step with output
+    every 10 steps today, +2% with output every 100.
+  - Degrees of freedom with held atoms or a total momentum: the engine counts 3 per moving atom, LAMMPS 3 fewer.
 
 **L4. Constraints.**
 - Through LAMMPS (routes A and B): everything in the table above, including SHAKE, RATTLE and rigid bodies.
@@ -370,7 +416,7 @@ float32-against-float64 error.
 | P5 `float32` / `float32-mixed` names | 2 days | – |
 | P0 one engine | 1 - 2 weeks | the 0.0.2 merge |
 | L2 changing boxes | with P0, plus 2 - 3 days of tests | P0 |
-| L3 LAMMPS's common fixes through the run style | 1 - 2 weeks | P0 |
+| L3 LAMMPS's common fixes through the run style | 1 - 2 weeks (**built, 19 November**) | P0 |
 | P2 per-atom energies | 3 - 4 days | P0 |
 | L6 atom IDs and counts | 2 - 3 days | – |
 | P4a ghost-shell mode | 2 - 3 weeks | P0, P2 |

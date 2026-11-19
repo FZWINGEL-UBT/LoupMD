@@ -1,0 +1,24 @@
+# The engine integrates the ensemble of the input's fixes (run_style loupmd without an ensemble): here fix npt, run
+# by the engine's Martyna-Tobias-Klein integrator at the engine's own step time. LAMMPS reads the input and writes
+# thermo output and dumps. The log names the integrator that runs.
+#   lmp -in in.engine_npt -var data srtio3.data -var bundle omat_O_Ti_Sr.loup
+# Taken over this way: fix nve, nvt, npt ... iso, langevin, temp/csvr, temp/berendsen, press/berendsen,
+# setforce 0 0 0, momentum (lammps/README.md has the table). Remove the run_style line and LAMMPS integrates itself.
+units           metal
+atom_style      atomic
+atom_modify     map yes
+boundary        p p p
+read_data       ${data}
+
+pair_style      loupmd
+pair_coeff      * * ${bundle} Sr Ti O           # one element per atom type, in type order
+
+timestep        0.001
+velocity        all create 300.0 4928459 mom yes rot no dist gaussian
+fix             1 all npt temp 300.0 300.0 0.1 iso 1.0 1.0 1.0
+run_style       loupmd
+
+thermo          200
+thermo_style    custom step temp pe press vol
+dump            traj all custom 1000 traj.lammpstrj id type x y z
+run             10000

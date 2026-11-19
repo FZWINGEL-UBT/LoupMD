@@ -1,4 +1,5 @@
 # LAMMPS integrates (the default run_style): any fix works with pair_style loupmd, here a barostat.
+# (in.engine_npt runs the same ensemble at the engine's step time: the engine integrates in fix npt's place.)
 #   lmp -in in.npt -var data srtio3.data -var bundle omat_O_Ti_Sr.loup
 # With a Kokkos CUDA build:  lmp -k on g 1 -sf kk -in in.npt ...   (pair_style loupmd/kk, fix npt/kk)
 units           metal

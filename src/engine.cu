@@ -1034,6 +1034,7 @@ struct LoupHandle {
     bool probe_ret_set = false;
     int eval_streak = 0;           // loup_evaluate calls in a row that took the step graph with one virial flag
     int eval_streak_stress = -1;
+    int eval_since_run = 0;        // loup_evaluate calls since the last integrator step (evaluate_once: which path)
     // A queued launch whose step can no longer be read in the normal way (an exception, the handle's end): let it
     // run, drain the stream and take the publication counter from the device again.
     void drain_armed() {
@@ -2803,12 +2804,30 @@ static int evaluate_once(
     const double* f_sorted = h->stage_f();
     h->stage_out()[0] = 0.0;
     for (int i = 0; i < 6; ++i) h->stage_v()[i] = 0.0;
-    if (cell_changed != 0 || !h->nl_valid || h->cell_ref_stale || h->lt_cache.empty()) {
+    // The MD graphs hold one kind of step at a time. While they hold an integrator's, as between the blocks of a
+    // run whose driver evaluates at every output (LAMMPS's run style, the package's own run loop), an evaluation
+    // takes the force graph, which stands beside them: capturing the host step over them, and the integrator's
+    // step again at the next block, cost four captures per output (measured through LAMMPS on 320 atoms: 0.92
+    // against 0.60 ms per step with output every 10 steps). From the third evaluation in a row the host step
+    // takes over.
+    const bool keep_md = h->md_step_exec && h->md_graph_kind != kStepHost && h->eval_since_run < 2;
+    ++h->eval_since_run;
+    bool rebuild = cell_changed != 0 || !h->nl_valid || h->cell_ref_stale || h->lt_cache.empty();
+    if (rebuild || keep_md) {
         // A new cell (the list's Cartesian shifts depend on it), no list yet, a list whose reference a
         // variable-cell run left behind, or GEMM plans to tune first (no force pass on this system yet, as after
-        // loup_set_state; a capture would freeze untuned plans): the host-driven rebuild, then the pass.
+        // loup_set_state; a capture would freeze untuned plans): the host-driven rebuild, then the pass. With
+        // keep_md the list is checked first and rebuilt only when an atom has moved more than skin / 2.
         CUDA_CHECK(cudaMemcpyAsync(h->d_pos64, h->stage_pos(), (size_t)h->N * 3 * sizeof(double), cudaMemcpyHostToDevice, h->stream));
-        if (rebuild_neighbors(h) != 0) return -1;
+        if (!rebuild) {
+            CUDA_CHECK(cudaMemsetAsync(h->d_need_rebuild, 0, sizeof(int), h->stream));
+            loup::check_skin_kernel<<<(h->N + 255) / 256, 256, 0, h->stream>>>(h->N, 0.5 * h->skin, h->d_pos64,
+                                                                              h->d_ref_pos64, h->d_need_rebuild);
+            int v[3];
+            if (read_device_ints(h, h->d_need_rebuild, nullptr, nullptr, v) != 0) return -1;
+            rebuild = v[0] != 0;
+        }
+        if (rebuild && rebuild_neighbors(h) != 0) return -1;
         plan_dbg("after the rebuild");
         if (ensure_force_graph(h, stress) != 0) return -1;
         CUDA_CHECK(cudaGraphLaunch(h->force_graph_exec, h->stream));
@@ -3035,6 +3054,7 @@ static int run_md_loop(
     // A step that loup_evaluate queued ahead is this call's step when it is a host step with the same virial flag
     // (released below instead of launched). Before any other step it runs first.
     if (!host_io) h->eval_streak = 0;
+    if (!ext) h->eval_since_run = 0;
     if (h->armed && !(host_io && h->armed_stress == ext_stress) && settle_armed(h) != 0) return -1;
     const int N = h->N;
     const int gridN = (N + 255) / 256;

@@ -3,9 +3,14 @@ Kokkos pair style calls it, and loup_evaluate's one-graph path, on every neighbo
 share with the MD loop. The device arrays here are torch CUDA tensors."""
 from __future__ import annotations
 
+import json
+import os
+import subprocess
+import sys
+
 import numpy as np
 import pytest
-from gpu_support import find_model, srtio3
+from gpu_support import ROOT, find_model, srtio3
 
 from loupmd import LoupEngine, ensure_loup_bundle
 
@@ -121,6 +126,50 @@ def test_device_call_refuses_a_wrong_row_count_and_a_bad_id():
     with pytest.raises(RuntimeError):
         eng.compute_device(x.data_ptr(), cell, f.data_ptr())
     eng._n = n
+
+
+_FIRST_CALL = r"""
+import json, sys
+import numpy as np
+sys.path.insert(0, sys.argv[1])
+from loupmd import LoupEngine
+d = np.load(sys.argv[3])
+eng = LoupEngine(sys.argv[2])
+eng.set_system(d["z"], d["m"], skin=0.5)
+eng.set_state(d["pos"], None, d["cell"])
+if sys.argv[4] == "evaluate":
+    e, f, _ = eng.evaluate(d["pos"], d["cell"])
+else:
+    import torch
+    x = torch.tensor(d["pos"], dtype=torch.float64, device="cuda")
+    ft = torch.zeros(d["pos"].shape, dtype=torch.float64, device="cuda")
+    e, _ = eng.compute_device(x.data_ptr(), d["cell"], ft.data_ptr())
+    torch.cuda.synchronize()
+    f = ft.cpu().numpy()
+print("RESULT " + json.dumps({"e": e, "f": np.asarray(f).tolist()}))
+"""
+
+
+@pytest.mark.parametrize("call", ["evaluate", "device"])
+def test_a_call_right_after_set_state_tunes_before_it_captures(call, tmp_path):
+    """loup_set_state builds the list and runs no force pass, so the GEMM plans are untuned. A step graph must not be
+    captured on them: where the call was the process's first force pass, the capture failed with a cuBLAS error
+    (MACE-OMAT-0 medium, 320 atoms). The call runs in a process of its own with an empty plan folder: an engine that
+    evaluated earlier in the process, or plan files on disk, hide the failure."""
+    at = srtio3(4)
+    at.positions += np.random.default_rng(3).normal(scale=0.05, size=at.positions.shape)
+    bundle = ensure_loup_bundle(find_model("mace-omat-0-medium.model"), [8, 22, 38])
+    np.savez(tmp_path / "s.npz", z=at.get_atomic_numbers(), m=at.get_masses(), pos=at.positions, cell=at.cell.array)
+    env = dict(os.environ, LOUP_CACHE_DIR=str(tmp_path / "plans"))
+    p = subprocess.run([sys.executable, "-c", _FIRST_CALL, str(ROOT), str(bundle), str(tmp_path / "s.npz"), call],
+                       env=env, capture_output=True, text=True, timeout=600)
+    assert p.returncode == 0, (p.stdout + p.stderr)[-2000:]
+    out = json.loads(next(line for line in p.stdout.splitlines() if line.startswith("RESULT "))[7:])
+    ref = LoupEngine(bundle)
+    ref.set_system(at.get_atomic_numbers(), at.get_masses(), skin=0.5)
+    e_ref, f_ref, _ = ref.evaluate(at.positions, at.cell.array)
+    assert abs(out["e"] - e_ref) < 1e-6 * len(at)
+    assert np.abs(np.array(out["f"]) - f_ref).max() < 5e-5
 
 
 def test_run_calls_in_blocks_continue_one_trajectory():

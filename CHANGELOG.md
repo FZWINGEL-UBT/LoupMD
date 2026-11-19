@@ -22,6 +22,15 @@
 - LAMMPS. The folder `lammps/` of the repository holds the LAMMPS package ML-LOUPMD: `pair_style loupmd`,
   `pair_style loupmd/kk` for the KOKKOS package, and `run_style loupmd`, which lets the engine integrate between
   LAMMPS's output steps (`lammps/README.md`). It is built into LAMMPS and is GPL-2.0; it is not part of the wheel.
+- LAMMPS, `run_style loupmd`: the engine runs its own integrator in place of the input's `fix nve`, `fix nvt`,
+  `fix npt ... iso`, `fix langevin`, `fix temp/csvr`, `fix temp/berendsen` and `fix press/berendsen`, with
+  `fix setforce 0 0 0` as held atoms and `fix momentum` as a centre of mass at rest. Such an input runs at the
+  engine's own step time (measured on an RTX 5060 Ti: within 1% of the Python package's loop; LAMMPS integrating
+  itself takes 1.04 to 1.27 times as long with `fix nvt` and 1.16 to 1.65 times with `fix npt`). A fix the engine
+  has no integrator for is refused by name.
+- An evaluation between two blocks of a run (`loup_evaluate` after `loup_run`, as at every output step) no longer
+  makes the engine capture its step graphs again: output every 10 steps cost 0.92 ms per step on a 320-atom cell
+  and costs 0.73 now.
 - The C interface gains `loup_compute_device` (an evaluation on position and force arrays that stay on the GPU),
   `loup_cutoff`, `loup_species` and `loup_set_evaluate_ahead`; nothing else in it changed (interface version 1).
   `loup_evaluate` on an unchanged cell is one launch on the GPU, with no blocking transfer.

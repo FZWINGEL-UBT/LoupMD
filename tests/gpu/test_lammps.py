@@ -160,7 +160,7 @@ def test_refusals_say_why(case):
     out = _lmp(d, "bad_element", _head(bundle, elements="O Ti Na") + "run 0\n", ok=False)
     assert "is not in" in out and "which holds" in out
     out = _lmp(d, "bad_fix", _head(bundle) + "fix 1 all nve\nrun_style loupmd nve\nrun 1\n", ok=False)
-    assert "fixes that act during the steps cannot be used" in out
+    assert "so no fix may act during the steps" in out
 
 
 @pytest.mark.parametrize("style", ["plain", "kk"])

@@ -150,7 +150,7 @@ void PairLoupMDKokkos<DeviceType>::compute(int eflag_in, int vflag_in)
     // The engine queues its work behind what Kokkos has queued, and makes Kokkos's stream wait for the forces.
     const cudaStream_t stream = DeviceType().cuda_stream();
     if (loup_compute_device(handle, &io, cell, (void *) stream, &energy, vir) != 0)
-      error->one(FLERR, "Pair style loupmd/kk: the force evaluation failed (see the message above)");
+      error->one(FLERR, "Pair style loupmd/kk: the force evaluation failed: {}", loup_last_error(handle));
 
     if (!f_direct) {
       auto fs = d_fs;
