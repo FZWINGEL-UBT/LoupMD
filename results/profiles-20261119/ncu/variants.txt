@@ -1,0 +1,7 @@
+mp0m_srtio3: ncu with the MD profile's variant: LOUP_CONV_FWD_VARIANT=2
+omat0m_spec_srtio3: ncu with the MD profile's variant: LOUP_SPLINE_VARIANT=R5
+omat0m_gen_srtio3: ncu with the MD profile's variant: LOUP_CONV_FWD_VARIANT=2
+mptrj_srtio3: ncu with the MD profile's variant: LOUP_CONV_FWD_VARIANT=1
+off23l_water216: ncu with the MD profile's variant: (none)
+mh1_srtio3: ncu with the MD profile's variant: LOUP_CONV_FWD_VARIANT=2
+polar1m_nbcl5: ncu with the MD profile's variant: LOUP_CONV_FWD_VARIANT=2
