@@ -18,6 +18,7 @@
 #include "error.h"
 #include "force.h"
 #include "memory.h"
+#include "modify.h"
 #include "neighbor.h"
 #include "update.h"
 
@@ -49,7 +50,7 @@ int atomic_number(const char *symbol)
 /* ---------------------------------------------------------------------- */
 
 PairLoupMD::PairLoupMD(LAMMPS *lmp) :
-    Pair(lmp), handle(nullptr), device(-1), device_loaded(-1), skin_user(-1.0), rmax(0.0), ghost(true), system_dirty(true),
+    Pair(lmp), handle(nullptr), device(-1), device_loaded(-1), skin_user(-1.0), rmax(0.0), ghost(true), ahead(false), system_dirty(true),
     skin_sent(-1.0)
 {
   single_enable = 0;
@@ -86,7 +87,7 @@ void PairLoupMD::allocate()
 }
 
 /* ----------------------------------------------------------------------
-   pair_style loupmd [device N] [skin S] [ghost yes|no]
+   pair_style loupmd [device N] [skin S] [ghost yes|no] [ahead yes|no]
 ------------------------------------------------------------------------- */
 
 void PairLoupMD::settings(int narg, char **arg)
@@ -106,6 +107,10 @@ void PairLoupMD::settings(int narg, char **arg)
     } else if (strcmp(arg[iarg], "ghost") == 0) {
       if (iarg + 2 > narg) utils::missing_cmd_args(FLERR, "pair_style loupmd ghost", error);
       ghost = utils::logical(FLERR, arg[iarg + 1], false, lmp) != 0;
+      iarg += 2;
+    } else if (strcmp(arg[iarg], "ahead") == 0) {
+      if (iarg + 2 > narg) utils::missing_cmd_args(FLERR, "pair_style loupmd ahead", error);
+      ahead = utils::logical(FLERR, arg[iarg + 1], false, lmp) != 0;
       iarg += 2;
     } else
       error->all(FLERR, "Unknown pair_style loupmd keyword: {}", arg[iarg]);
@@ -164,6 +169,14 @@ void PairLoupMD::init_style()
     z_sent.clear();
   }
   rmax = loup_cutoff(handle);
+
+  // `ahead yes`: the engine queues each next force pass ahead of the call that needs it, which takes the launch off
+  // every step (3-7% of the step on cells of a few hundred atoms under WSL 2). Between two force calls the engine's
+  // GPU stream then holds work that cannot run, and other GPU work of this process could wait for it forever. So it
+  // is off by default, and never on with the KOKKOS or GPU package active: switch it on only when the engine is the
+  // process's one GPU user.
+  const bool other_gpu_user = lmp->kokkos != nullptr || !modify->get_fix_by_style("^GPU").empty();
+  loup_set_evaluate_ahead(handle, ahead && !other_gpu_user ? 1 : 0);
 
   int zs[128];
   const int ns = loup_species(handle, zs, 128);

@@ -30,7 +30,7 @@ namespace LAMMPS_NS {
 // MACE models through the LoupMD engine (libloupmd.so, CUDA). The engine evaluates the whole periodic system on one
 // GPU with its own neighbour list; LAMMPS's neighbour lists and ghost atoms are not used. One MPI process.
 //
-//   pair_style loupmd [device N] [skin S] [ghost yes|no]
+//   pair_style loupmd [device N] [skin S] [ghost yes|no] [ahead yes|no]
 //   pair_coeff * * model.loup El1 El2 ...      (one element per atom type, in type order)
 class PairLoupMD : public Pair {
  public:
@@ -55,6 +55,7 @@ class PairLoupMD : public Pair {
   double skin_user;             // the engine's list skin in A; < 0: LAMMPS's neighbor skin
   double rmax;                  // the model's cutoff, A
   bool ghost;                   // report the model's cutoff to LAMMPS (ghost atoms, forward communication)
+  bool ahead;                   // the engine queues each next force pass ahead (loup_set_evaluate_ahead)
   std::vector<int> type2z;      // [ntypes + 1] atomic number of each atom type
   bool system_dirty;            // the engine has to be given the system again (init_style ran)
   std::vector<int> z_sent;      // atomic number by atom ID - 1 of the system the engine holds

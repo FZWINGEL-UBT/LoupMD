@@ -543,6 +543,20 @@ S145 (`lmp-styles`, `eng-evaluate-one-graph`, `eng-device-io`, `eng-run-graph-re
   blocks) and 7 in the new `tests/test_lammps.py` (both pair styles and the run style): 101 pass. `tests/test_lammps.py` has nine
   since the rigid-body test (both modes); those and the 12 device tests pass on the build with the list request.
 
+S146 (`eng-evaluate-ahead`, `lmp-step-profile`, 19 November, branch `develop`, 5060 Ti under WSL 2 only): stage L1 of
+`LAMMPS_SYMMETRIX_PARITY_PLAN.md`, and a profile of a LAMMPS step.
+- `loup_set_evaluate_ahead` / `pair_style loupmd ahead yes`: the next call's step graph queued ahead behind a stream
+  wait on a host word. LAMMPS `a b b a`: SrTiO3 320 atoms 0.838 / 0.826 → 0.752 / 0.783 ms/step, water216 2 - 5%,
+  5,000 atoms a tie. Off by default: a queued step blocks default-stream work of the whole process (the first build
+  hung in the tests).
+- Where a LAMMPS step with `pair_style loupmd` goes (probes, 320 / 5,000 atoms, µs): launch 20 / 51, launch to the
+  guard 208 / 225, force pass and results 571 / 7,588, LAMMPS's own work 17 / 200. The force pass equals the engine's
+  own step; the fixed 0.2 ms before it is the start of the step graph on an idle GPU (not the host copies: a lab build
+  without them showed 107 - 181 µs).
+- LAMMPS's own features: 26 of 28 setups run with the pair styles (table in the plan).
+- Tests on the final library: 105 pass (47 + 35 of the engine suite, 13 in `tests/test_device_io.py` with the new
+  evaluate-ahead test, 10 in `tests/test_lammps.py`).
+
 ### 5.4 Fixes Found by the Family Work
 - **POLAR LayerNorm-MLP reverse wrote its GEMM output over its own input** (`mlp_bwd`: after the first hidden layer
   the destination buffer was the one holding dz). Harmless while one GEMM tile covered all rows; from ~1,700 atoms

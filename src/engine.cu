@@ -630,6 +630,7 @@ struct LoupHandle {
         invalidate_md_graphs();
     }
     void invalidate_md_graphs() {
+        drain_armed();  // callers settle a queued step first; this is the net under them
         if (md_step_exec) { cudaGraphExecDestroy(md_step_exec); md_step_exec = nullptr; }
         if (md_step_graph) { cudaGraphDestroy(md_step_graph); md_step_graph = nullptr; }
         if (md_checked_exec) { cudaGraphExecDestroy(md_checked_exec); md_checked_exec = nullptr; }
@@ -654,11 +655,49 @@ struct LoupHandle {
     // loup_evaluate's host I/O: page-locked staging [3N positions | 3N forces | energy | 6 virial], so the uploads and
     // downloads are asynchronous copies and the host learns that the results have landed from one publication instead
     // of blocking transfers and a stream synchronisation (a host round trip each, 100-200 us under WSL 2).
-    double* h_stage = nullptr;
+    double* h_stage = nullptr;    // [3N positions | a copy of the zeroed slab: energy, forces, virial]
+    size_t stage_off_f = 0, stage_off_v = 0;  // doubles from the slab copy's start to the forces / the virial
     double* stage_pos() const { return h_stage; }
-    double* stage_f() const { return h_stage + (size_t)3 * N; }
-    double* stage_ev() const { return h_stage + (size_t)6 * N; }
+    double* stage_out() const { return h_stage + (size_t)3 * N; }  // [0] the energy
+    double* stage_f() const { return stage_out() + stage_off_f; }
+    double* stage_v() const { return stage_out() + stage_off_v; }
     cudaEvent_t ev_io_in = nullptr, ev_io_out = nullptr;
+
+    // loup_evaluate, armed (LAMMPS_SYMMETRIX_PARITY_PLAN.md L1): after a call, the next call's step graph is queued
+    // ahead behind a wait on the host-mapped word *h_go (cuStreamWaitValue32). The next call writes its positions into
+    // the staging and stores go_seq there, which lets the graph run with no launch on the call's path (S37: a launch
+    // round trip is 156-174 us under WSL 2). While `armed`, the stream is blocked: nothing else may be queued on it or
+    // wait for it, so every other entry point first lets the queued step run (settle_armed). The stream is a blocking
+    // one, so work on CUDA's default stream anywhere in the process (another handle's set-up, another library) and a
+    // device-wide synchronisation would wait for it too, forever: the caller switches this on
+    // (loup_set_evaluate_ahead) only when its loup_evaluate calls are the process's only GPU work in between.
+    unsigned int* h_go = nullptr;  // mapped page-locked word
+    unsigned int* d_go = nullptr;  // its device address
+    unsigned int go_seq = 0;       // the value that releases the queued graph
+    bool armed = false;
+    bool arm_enabled = false;      // loup_set_evaluate_ahead (LOUP_EVAL_ARM=1: on for every handle, tests)
+    int armed_stress = 0;
+    int arm_state = 0;             // 0 untried, 1 available, -1 not (driver, mapped memory or LOUP_EVAL_ARM=0)
+    // LOUP_DEBUG_EVAL_TIMES=1: where a loup_evaluate call's time goes, as means over the handle's calls that took the
+    // step graph without a rebuild, printed when the handle goes. us: [0] entry to the launch or release, [1] to the
+    // guard's publication, [2] to the results' publication, [3] to the return, [4] return to the next call's entry.
+    bool probe = false;
+    double probe_us[5] = {0, 0, 0, 0, 0};
+    long probe_n = 0, probe_gap_n = 0;
+    std::chrono::steady_clock::time_point probe_t[4], probe_ret;
+    bool probe_ret_set = false;
+    int eval_streak = 0;           // loup_evaluate calls in a row that took the step graph with one virial flag
+    int eval_streak_stress = -1;
+    // A queued launch whose step can no longer be read in the normal way (an exception, the handle's end): let it
+    // run, drain the stream and take the publication counter from the device again.
+    void drain_armed() {
+        if (!armed) return;
+        __atomic_store_n(h_go, go_seq, __ATOMIC_SEQ_CST);
+        armed = false;
+        cudaStreamSynchronize(stream);
+        cudaMemcpy(&pub_count, d_pub_counter, sizeof(unsigned int), cudaMemcpyDeviceToHost);
+        eval_streak = 0;
+    }
 
     int n_rebuilds = 0;     // rebuilds since set_system (atom reorder cadence)
     int* d_order_err = nullptr;  // set by sort_gather_rows_kernel when a row breaks the species-run contract
@@ -1458,6 +1497,76 @@ static int ensure_force_graph(LoupHandle* h, int compute_stress) {
     return 0;
 }
 
+extern "C" {  // as its definition below, inside the entry points' block
+static int run_md_loop(LoupHandle* h, int kind, int n_steps, double dt_fs, double temp_k, double friction_per_fs,
+                       unsigned long long seed, LoupMDStats* out_stats);
+}
+
+// cuStreamWaitValue32 of the driver library (looked up at run time, as the GEMM cubin's calls are): work queued on
+// the stream after it runs once the device reads *addr >= value.
+typedef CUresult (*StreamWaitValue32Fn)(CUstream, CUdeviceptr, cuuint32_t, unsigned int);
+static StreamWaitValue32Fn stream_wait_value32() {
+    static const StreamWaitValue32Fn fn = [] {
+        void* lib = dlopen("libcuda.so.1", RTLD_LAZY);
+        if (!lib) return static_cast<StreamWaitValue32Fn>(nullptr);
+        void* f = dlsym(lib, "cuStreamWaitValue32_v2");  // the name cuda.h maps the call to; the unsuffixed one is v1
+        if (!f) f = dlsym(lib, "cuStreamWaitValue32");
+        return reinterpret_cast<StreamWaitValue32Fn>(f);
+    }();
+    return fn;
+}
+
+// A step that loup_evaluate queued ahead (armed) runs as a step on the positions that are staged, and its
+// publications are read as usual. Every entry point other than a matching loup_evaluate calls this first.
+static int settle_armed(LoupHandle* h) {
+    if (!h) return 0;
+    h->eval_streak = 0;
+    if (!h->armed) return 0;
+    return run_md_loop(h, 3, 1, 1.0, 0.0, 0.0, (unsigned long long)h->armed_stress, nullptr);
+}
+
+// Queues the next loup_evaluate's step graph behind the wait on *h_go. Only with the host step's graphs in place for
+// this virial flag and a standing list. A failure (no driver support, no mapped memory) turns the feature off.
+static void arm_evaluate(LoupHandle* h, int stress) {
+    if (!h->arm_enabled || h->arm_state < 0 || h->armed || !h->nl_valid || !h->md_step_exec ||
+        h->md_graph_key != 2 * 3 + stress)
+        return;
+    if (h->arm_state == 0) {
+        h->arm_state = -1;
+        if (!stream_wait_value32()) return;
+        if (cudaHostAlloc(&h->h_go, 4096, cudaHostAllocMapped) != cudaSuccess) {
+            h->h_go = nullptr;
+            cudaGetLastError();
+            return;
+        }
+        *h->h_go = 0;
+        if (cudaHostGetDevicePointer(reinterpret_cast<void**>(&h->d_go), h->h_go, 0) != cudaSuccess) {
+            cudaGetLastError();
+            return;
+        }
+        h->arm_state = 1;
+    }
+    const unsigned int seq = h->go_seq + 1;
+    if (const CUresult r = stream_wait_value32()(h->stream, reinterpret_cast<CUdeviceptr>(h->d_go), seq,
+                                                 CU_STREAM_WAIT_VALUE_GEQ);
+        r != CUDA_SUCCESS) {
+        h->arm_state = -1;  // nothing was queued
+        if (const char* d = std::getenv("LOUP_DEBUG_ARM"); d && d[0] == '1')
+            fprintf(stderr, "[loupmd] loup_evaluate: no stream wait on a host word here (driver error %d); calls "
+                            "launch their graph\n", (int)r);
+        return;
+    }
+    h->go_seq = seq;
+    if (cudaGraphLaunch(h->md_step_exec, h->stream) != cudaSuccess) {
+        cudaGetLastError();
+        __atomic_store_n(h->h_go, seq, __ATOMIC_SEQ_CST);  // the wait is queued alone: let it pass
+        h->arm_state = -1;
+        return;
+    }
+    h->armed = true;
+    h->armed_stress = stress;
+}
+
 // Every exported entry point runs through this: a C++ exception (CUDA/cuBLAS failure inside record_force_pass,
 // sgemm_rm or HybCubin::launch) must not unwind into the C caller, and a throw during capture must not leave the
 // stream in capture mode.
@@ -1477,6 +1586,7 @@ static int guarded(LoupHandle* h, const char* name, F&& f) {
             cudaStreamEndCapture(h->stream, &g);
             if (g) cudaGraphDestroy(g);
         }
+        h->drain_armed();
         h->invalidate_graphs();
         h->gemm_stream = nullptr;  // a throw between gemm_lane and gemm_join leaves the routing on a side stream
         h->gemm_ws = nullptr;
@@ -1510,6 +1620,9 @@ LoupHandle* loup_create(const char* loup_path, int device_id) {
             if (const char* e = std::getenv("LOUP_FORCE_TC"); e && e[0] == '1') h->force_tc = true;
             if (const char* e = std::getenv("LOUP_GATE_FUSE"); e && e[0] == '0') h->gate_fuse = false;
             if (const char* e = std::getenv("LOUP_GATE_FUSE_FWD"); e && e[0] == '0') h->gate_fuse_fwd = false;
+            if (const char* e = std::getenv("LOUP_DEBUG_EVAL_TIMES"); e && e[0] == '1') h->probe = true;
+            if (const char* e = std::getenv("LOUP_EVAL_ARM"); e && e[0] == '1') h->arm_enabled = true;
+            else if (e && e[0] == '0') h->arm_state = -1;
         }
         CUDA_CHECK_THROW(cudaStreamCreate(&h->stream));
         CUBLAS_CHECK_THROW(cublasCreate(&h->cublas));
@@ -1557,7 +1670,14 @@ LoupHandle* loup_create(const char* loup_path, int device_id) {
 void loup_destroy(LoupHandle* h) {
     if (!h) return;
     cudaSetDevice(h->device_id);
+    if (h->probe && h->probe_n > 0)
+        fprintf(stderr, "[loupmd] loup_evaluate, %ld step-graph calls without a rebuild, mean us: to launch / release %.1f, "
+                        "to the guard %.1f, guard to results %.1f, results to return %.1f; between calls %.1f (%ld)\n",
+                h->probe_n, h->probe_us[0] / h->probe_n, h->probe_us[1] / h->probe_n, h->probe_us[2] / h->probe_n,
+                h->probe_us[3] / h->probe_n, h->probe_gap_n ? h->probe_us[4] / h->probe_gap_n : 0.0, h->probe_gap_n);
+    h->drain_armed();
     h->free_system();
+    if (h->h_go) cudaFreeHost(h->h_go);
     if (h->ev_fork) cudaEventDestroy(h->ev_fork);
     if (h->ev_io_in) cudaEventDestroy(h->ev_io_in);
     if (h->ev_io_out) cudaEventDestroy(h->ev_io_out);
@@ -1580,6 +1700,7 @@ void loup_destroy(LoupHandle* h) {
 static int set_system_impl(LoupHandle* h, int n_atoms, const int* atomic_numbers, const double* masses_amu, double skin) {
     if (!h || n_atoms <= 0 || !atomic_numbers || !(skin >= 0.0) || !std::isfinite(skin)) return -1;
     CUDA_CHECK(cudaSetDevice(h->device_id));
+    if (settle_armed(h) != 0) return -1;
     const int S = h->n_species();
 
     // Validate everything before touching the handle: on any failure the previous system is gone only if the
@@ -1689,7 +1810,9 @@ static int set_system_impl(LoupHandle* h, int n_atoms, const int* atomic_numbers
     h->d_virial_grad_f64 = reinterpret_cast<double*>(base + off_v64);
     h->gen->alloc_system(n_atoms);
     if (h->E_cap > 0) h->gen->ensure_edges(h->E_cap);
-    CUDA_CHECK(cudaHostAlloc(&h->h_stage, ((size_t)6 * n_atoms + 8) * sizeof(double), cudaHostAllocDefault));
+    h->stage_off_f = off_f64 / sizeof(double);
+    h->stage_off_v = off_v64 / sizeof(double);
+    CUDA_CHECK(cudaHostAlloc(&h->h_stage, (size_t)3 * n_atoms * sizeof(double) + h->zero_slab_bytes, cudaHostAllocDefault));
     h->N = n_atoms;
     return 0;
 }
@@ -1751,15 +1874,13 @@ static int upload_positions(LoupHandle* h, const double* positions, const double
     return cell_changed;
 }
 
-// Queues (or, during capture, records) the copies of the energy, the forces and with `stress` the virial into the
-// page-locked staging, and behind them a publication of the neighbour rows' order flag: once the host has read that
-// publication the results have landed, with no blocking transfer and no stream synchronisation.
-static int queue_results(LoupHandle* h, int stress) {
-    double* ev = h->stage_ev();
-    CUDA_CHECK(cudaMemcpyAsync(ev, h->d_energy_f64, sizeof(double), cudaMemcpyDeviceToHost, h->stream));
-    CUDA_CHECK(cudaMemcpyAsync(h->stage_f(), h->d_forces_f64, (size_t)h->N * 3 * sizeof(double), cudaMemcpyDeviceToHost, h->stream));
-    if (stress)
-        CUDA_CHECK(cudaMemcpyAsync(ev + 1, h->d_virial_grad_f64, 6 * sizeof(double), cudaMemcpyDeviceToHost, h->stream));
+// Queues (or, during capture, records) the copy of the energy, the forces and the virial into the page-locked
+// staging, and behind it a publication of the neighbour rows' order flag: once the host has read that publication
+// the results have landed, with no blocking transfer and no stream synchronisation. The three lie in one slab on the
+// device (zeroed by every force pass), so it is one copy: under WSL 2 each host copy in the step costs about 10 us at
+// 648 atoms and 50 us at 5,000 (S145, three copies before).
+static int queue_results(LoupHandle* h, int /*stress*/) {
+    CUDA_CHECK(cudaMemcpyAsync(h->stage_out(), h->d_zero_slab, h->zero_slab_bytes, cudaMemcpyDeviceToHost, h->stream));
     loup::publish_kernel<<<1, 1, 0, h->stream>>>(h->d_order_err, nullptr, nullptr, h->d_pub_counter, h->d_pub);
     return 0;
 }
@@ -1771,6 +1892,7 @@ static int set_state_impl(LoupHandle* h, const double* positions, const double* 
     if (!h || h->N <= 0) return -1;
     CUDA_CHECK(cudaSetDevice(h->device_id));
     if (!valid_input(h->N, positions, cell, velocities)) return -1;
+    if (settle_armed(h) != 0) return -1;
     if (upload_positions(h, positions, cell) < 0) return -1;
     if (velocities) {
         std::vector<double> v_sorted((size_t)h->N * 3);
@@ -1808,18 +1930,28 @@ static bool drop_hybrid(LoupHandle* h) {
 
 static int evaluate_once(
     LoupHandle* h, const double* positions, const double* cell, int compute_stress,
-    double* out_energy_ev, double* out_forces, double* out_stress, bool* finite
+    double* out_energy_ev, double* out_forces, double* out_stress, bool* finite, bool* graph_step
 ) {
     if (!h || h->N <= 0) return -1;
     CUDA_CHECK(cudaSetDevice(h->device_id));
+    const int stress = compute_stress && out_stress ? 1 : 0;
+    *graph_step = false;
+    if (h->armed) {
+        // The step queued by the previous call fits this one only with the same virial flag and cell. Otherwise it
+        // runs first, on the positions that call staged.
+        if (!valid_cell(cell)) return -1;
+        loup::CellMat64 c{};
+        double vol = 0.0, heights[3];
+        loup::compute_cell_mat(cell, c, vol, heights);
+        if ((h->armed_stress != stress || memcmp(&c, &h->cell, sizeof(c)) != 0) && settle_armed(h) != 0) return -1;
+    }
     // Positions only: MD velocities are kept. The neighbour list is rebuilt only when the cell changed or an atom
     // moved more than skin/2 since the last build; the force graph is reused unless the rebuild outgrew it.
     const int cell_changed = stage_positions(h, positions, cell);
     if (cell_changed < 0) return -1;
-    const int stress = compute_stress && out_stress ? 1 : 0;
     const double* f_sorted = h->stage_f();
-    double* ev = h->stage_ev();
-    for (int i = 0; i < 7; ++i) ev[i] = 0.0;
+    h->stage_out()[0] = 0.0;
+    for (int i = 0; i < 6; ++i) h->stage_v()[i] = 0.0;
     if (cell_changed != 0 || !h->nl_valid) {
         // A new cell (the list's Cartesian shifts depend on it) or no list yet: the host-driven rebuild, then the pass.
         CUDA_CHECK(cudaMemcpyAsync(h->d_pos64, h->stage_pos(), (size_t)h->N * 3 * sizeof(double), cudaMemcpyHostToDevice, h->stream));
@@ -1828,12 +1960,14 @@ static int evaluate_once(
         CUDA_CHECK(cudaGraphLaunch(h->force_graph_exec, h->stream));
         int fin[3];
         if (queue_results(h, stress) != 0 || wait_published(h, ++h->pub_count, fin) != 0) return -1;
-    } else if (run_md_loop(h, 3, 1, 1.0, 0.0, 0.0, (unsigned long long)stress, nullptr) != 0) {
-        // One launch of the host step graph: upload, skin check, guard, force pass or on-device rebuild, downloads.
-        return -1;
+    } else {
+        // One launch of the host step graph (or the release of the one queued ahead): upload, skin check, guard,
+        // force pass or on-device rebuild, downloads.
+        if (run_md_loop(h, 3, 1, 1.0, 0.0, 0.0, (unsigned long long)stress, nullptr) != 0) return -1;
+        *graph_step = true;
     }
-    const double inter_e = ev[0];
-    const double* v_grad = ev + 1;
+    const double inter_e = h->stage_out()[0];
+    const double* v_grad = h->stage_v();
 
     *finite = std::isfinite(inter_e);
     for (size_t i = 0; *finite && i < (size_t)h->N * 3; ++i) *finite = std::isfinite(f_sorted[i]);
@@ -1860,14 +1994,48 @@ static int evaluate_impl(
     LoupHandle* h, const double* positions, const double* cell, int compute_stress,
     double* out_energy_ev, double* out_forces, double* out_stress
 ) {
-    bool finite = true;
-    int rc = evaluate_once(h, positions, cell, compute_stress, out_energy_ev, out_forces, out_stress, &finite);
+    bool finite = true, graph_step = false;
+    const auto probe_in = std::chrono::steady_clock::now();
+    if (h && h->probe) h->probe_t[1] = h->probe_t[2] = h->probe_t[3] = probe_in;  // [1] set: a quiet step ran
+    if (h && h->probe) h->probe_t[0] = std::chrono::steady_clock::time_point{};
+    int rc = evaluate_once(h, positions, cell, compute_stress, out_energy_ev, out_forces, out_stress, &finite,
+                           &graph_step);
     if (rc == 0 && !finite && drop_hybrid(h)) {
-        rc = evaluate_once(h, positions, cell, compute_stress, out_energy_ev, out_forces, out_stress, &finite);
+        rc = evaluate_once(h, positions, cell, compute_stress, out_energy_ev, out_forces, out_stress, &finite,
+                           &graph_step);
     }
     if (rc == 0 && !finite) {
         fprintf(stderr, "loupmd: non-finite energy / forces (model output; the configuration may be unphysical)\n");
-        return -1;
+        rc = -1;
+    }
+    // Queue the next call's step ahead once two calls in a row took the step graph with one virial flag. A lone
+    // evaluate between run calls, or calls that alternate the flag, would only pay for a queued pass they discard.
+    const int stress = compute_stress && out_stress ? 1 : 0;
+    if (rc != 0 || !graph_step) {
+        h->eval_streak = 0;
+    } else {
+        h->eval_streak = h->eval_streak_stress == stress ? h->eval_streak + 1 : 1;
+        h->eval_streak_stress = stress;
+        if (h->eval_streak >= 2) arm_evaluate(h, stress);
+    }
+    if (h && h->probe) {
+        const auto now = std::chrono::steady_clock::now();
+        auto us = [](std::chrono::steady_clock::time_point a, std::chrono::steady_clock::time_point b) {
+            return std::chrono::duration<double, std::micro>(b - a).count();
+        };
+        if (rc == 0 && graph_step && h->probe_t[0] != std::chrono::steady_clock::time_point{}) {
+            h->probe_us[0] += us(probe_in, h->probe_t[0]);
+            h->probe_us[1] += us(h->probe_t[0], h->probe_t[1]);
+            h->probe_us[2] += us(h->probe_t[1], h->probe_t[2]);
+            h->probe_us[3] += us(h->probe_t[2], now);
+            ++h->probe_n;
+            if (h->probe_ret_set) {
+                h->probe_us[4] += us(h->probe_ret, probe_in);
+                ++h->probe_gap_n;
+            }
+        }
+        h->probe_ret = now;
+        h->probe_ret_set = rc == 0 && graph_step;
     }
     return rc;
 }
@@ -1887,6 +2055,10 @@ static int run_md_loop(LoupHandle* h, int kind, int n_steps, double dt_fs, doubl
     const bool host_io = kind == 3;
     const int ext_stress = ext && seed ? 1 : 0;
     const int graph_key = ext ? 2 * kind + ext_stress : -1;
+    // A step that loup_evaluate queued ahead is this call's step when it is a host step with the same virial flag
+    // (released below instead of launched). Before any other step it runs first.
+    if (!host_io) h->eval_streak = 0;
+    if (h->armed && !(host_io && h->armed_stress == ext_stress) && settle_armed(h) != 0) return -1;
     const int N = h->N;
     const int gridN = (N + 255) / 256;
     const double dt_ase = dt_fs * loup::ASE_FS;
@@ -2089,16 +2261,30 @@ static int run_md_loop(LoupHandle* h, int kind, int n_steps, double dt_fs, doubl
     // One step: launch the step graph, read the guard's publication, and on a rebuild that the graph could not finish
     // on the GPU, finish it on the host and launch the checked rest.
     auto one_step = [&]() -> int {
-        if (ensure_graphs() != 0) return -1;
-        CUDA_CHECK(cudaGraphLaunch(h->md_step_exec, h->stream));
+        if (h->armed) {
+            // queued ahead by the previous loup_evaluate, behind the wait on *h_go: the store lets it run
+            __atomic_store_n(h->h_go, h->go_seq, __ATOMIC_SEQ_CST);
+            h->armed = false;
+        } else {
+            if (ensure_graphs() != 0) return -1;
+            CUDA_CHECK(cudaGraphLaunch(h->md_step_exec, h->stream));
+        }
+        const bool probing = h->probe && host_io;
+        const auto probe_launched = probing ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
         int v[3];
         if (wait_published(h, ++h->pub_count, v) != 0) return -1;
+        const auto probe_guard = probing ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
         if (v[1]) return order_error();
         // host_io: the step graph ends with the results' copies and their publication `fin` (the rows' order flag),
         // whichever branch ran; the staging holds this step's results once it has landed, if the force pass ran.
         int fin[3] = {0, 0, 0};
         if (!v[0]) {
             if (host_io && wait_published(h, ++h->pub_count, fin) != 0) return -1;
+            if (probing) {
+                h->probe_t[0] = probe_launched;
+                h->probe_t[1] = probe_guard;
+                h->probe_t[2] = std::chrono::steady_clock::now();
+            }
             return fin[0] ? order_error() : 0;
         }
         ++rebuilds;
@@ -2228,6 +2414,7 @@ static int compute_device_impl(LoupHandle* h, const LoupDeviceIO* io, const doub
                                double* out_energy_ev, double* out_virial) {
     if (!h || h->N <= 0 || !io) return -1;
     CUDA_CHECK(cudaSetDevice(h->device_id));
+    if (settle_armed(h) != 0) return -1;
     const int N = h->N;
     if (io->n_rows != N || !io->positions || io->pos_row_stride <= 0 || io->pos_comp_stride <= 0 ||
         (io->forces && (io->f_row_stride <= 0 || io->f_comp_stride <= 0))) {
@@ -2358,6 +2545,7 @@ static int run_langevin_impl(
 static int get_state_impl(LoupHandle* h, double* out_positions, double* out_velocities, double* out_forces, double* out_energy_ev) {
     if (!h || h->N <= 0) return -1;
     CUDA_CHECK(cudaSetDevice(h->device_id));
+    if (settle_armed(h) != 0) return -1;
     std::vector<double> tmp((size_t)h->N * 3);
     if (out_positions) {
         CUDA_CHECK(cudaMemcpyAsync(tmp.data(), h->d_pos64, (size_t)h->N * 3 * sizeof(double), cudaMemcpyDeviceToHost, h->stream));
@@ -2401,6 +2589,7 @@ static int get_state_impl(LoupHandle* h, double* out_positions, double* out_velo
 static int profile_force_impl(LoupHandle* h, int warmup, int n_calls, double* out_total_us) {
     if (!h || h->N <= 0 || !h->nl_valid || warmup < 0 || n_calls <= 0) return -1;
     CUDA_CHECK(cudaSetDevice(h->device_id));
+    if (settle_armed(h) != 0) return -1;
     if (ensure_force_graph(h, 0) != 0) return -1;
     for (int i = 0; i < warmup; ++i) {
         CUDA_CHECK(cudaGraphLaunch(h->force_graph_exec, h->stream));
@@ -2453,6 +2642,16 @@ int loup_run_langevin(
 int loup_get_state(LoupHandle* h, double* out_positions, double* out_velocities, double* out_forces, double* out_energy_ev) {
     return guarded(h, "loup_get_state", [&] {
         return get_state_impl(h, out_positions, out_velocities, out_forces, out_energy_ev);
+    });
+}
+
+int loup_set_evaluate_ahead(LoupHandle* h, int on) {
+    if (!h) return -1;
+    return guarded(h, "loup_set_evaluate_ahead", [&] {
+        CUDA_CHECK(cudaSetDevice(h->device_id));
+        if (!on && settle_armed(h) != 0) return -1;
+        h->arm_enabled = on != 0;
+        return 0;
     });
 }
 

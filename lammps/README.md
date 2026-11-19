@@ -53,7 +53,7 @@ For `loupmd/kk`, build LAMMPS with `-D PKG_KOKKOS=ON -D Kokkos_ENABLE_CUDA=ON -D
 ## Syntax
 
 ```
-pair_style loupmd [device N] [skin S] [ghost yes|no]
+pair_style loupmd [device N] [skin S] [ghost yes|no] [ahead yes|no]
 pair_coeff * * model.loup El1 El2 ...
 ```
 
@@ -61,6 +61,11 @@ pair_coeff * * model.loup El1 El2 ...
 - `skin S`: the skin of the engine's own neighbour list in Å (default: LAMMPS's `neighbor` skin).
 - `ghost no`: tells LAMMPS a pair cutoff of zero, so it creates no ghost atoms. The engine does not need them; LAMMPS
   then warns that the communication cutoff is 0 and switches atom sorting off. Default `yes` (the model's cutoff).
+- `ahead yes`: the engine queues each next force pass ahead of the call that needs it. Measured: 2 - 7% off the step
+  on cells of a few hundred atoms, nothing at 5,000 atoms. Default `no`, because between two steps the engine's GPU
+  stream then holds work that cannot run, and any other GPU library in the same process could wait for it forever.
+  Use it only when LoupMD is the process's one GPU user. It is ignored with the KOKKOS or GPU package active, and
+  has no meaning for `loupmd/kk` and `run_style loupmd`.
 - `pair_coeff`: the bundle and one element symbol per atom type. Every element must be in the bundle. `NULL` is not
   supported, since the engine evaluates every atom.
 
@@ -106,6 +111,10 @@ SrTiO3 from the benchmark inputs, 100 warm-up and 256 measured steps, two runs e
 | `pair_style loupmd` | 8.20 | 0.86 - 0.90 |
 | `pair_style loupmd/kk` | 8.14 - 8.19 | 0.97 - 1.03 |
 | Symmetrix `symmetrix/mace/foundation/float32/kk` (same LAMMPS version, same job) | 13.47 - 13.54 | 1.55 - 1.59 |
+
+With `pair_style loupmd` a step is the engine's force pass plus about 0.2 ms: the start of the engine's step on an
+idle GPU, which the engine's own loop hides by queueing ahead, and LAMMPS's own CPU work (another 0.2 ms at 5,000
+atoms). `run_style loupmd` avoids both.
 
 Under WSL 2 every blocking exchange between host and GPU costs 0.1 - 0.2 ms, and LAMMPS-Kokkos makes several per step:
 with a zero-strength Lennard-Jones potential on 648 atoms it takes 2.4 ms per step by itself. That is why

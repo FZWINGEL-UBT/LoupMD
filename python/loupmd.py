@@ -149,6 +149,9 @@ def _load_lib():
         lib.loup_cutoff.restype = ctypes.c_double
         lib.loup_species.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_int), ctypes.c_int]
         lib.loup_species.restype = ctypes.c_int
+    if hasattr(lib, "loup_set_evaluate_ahead"):
+        lib.loup_set_evaluate_ahead.argtypes = [ctypes.c_void_p, ctypes.c_int]
+        lib.loup_set_evaluate_ahead.restype = ctypes.c_int
     _LIB = lib
     return lib
 
@@ -282,6 +285,13 @@ class LoupEngine:
         if rc != 0:
             raise RuntimeError("loup_evaluate failed")
         return float(energy.value), forces, stress
+
+    def set_evaluate_ahead(self, on: bool = True) -> None:
+        """Queue each next ``evaluate`` call's force pass ahead of the call (loup_set_evaluate_ahead). Only for a
+        process whose sole GPU work between ``evaluate`` calls is this engine's: with it on, other GPU work in between
+        (another engine being set up, PyTorch, a device-wide synchronisation) can wait forever."""
+        if self._lib.loup_set_evaluate_ahead(self._h, 1 if on else 0) != 0:
+            raise RuntimeError("loup_set_evaluate_ahead failed")
 
     def cutoff(self) -> float:
         """The model's cutoff radius in A."""

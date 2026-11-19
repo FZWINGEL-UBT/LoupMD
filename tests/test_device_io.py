@@ -142,3 +142,65 @@ def test_model_facts():
     at, eng = _engine(2)
     assert eng.cutoff() == pytest.approx(6.0)
     assert sorted(eng.species()) == [8, 22, 38]
+
+
+def test_evaluate_ahead_changes_no_result_and_yields_to_every_other_call():
+    """loup_set_evaluate_ahead: the next call's force pass is queued ahead after two calls in a row. Results are those
+    of a freshly built list throughout: through a neighbour rebuild, a call with the other stress flag, a new cell, a
+    run, a state read, a new system, and with a pass still queued when the engine goes.
+
+    While a pass is queued nothing else in the process may use the GPU, so the references are made first and their
+    engine is gone before the setting is switched on."""
+    import gc
+
+    at, eng = _engine()
+    n = len(at)
+    cell = at.cell.array
+    z, m = at.get_atomic_numbers(), at.get_masses()
+    rng = np.random.default_rng(11)
+    seq, pos = [], at.positions.copy()
+    for scale in [0.0, 0.01, 0.01, 0.01, 0.15, 0.01, 0.01, 0.01, 0.15, 0.01, 0.01, 0.01]:
+        pos = pos + rng.normal(scale=scale, size=pos.shape)
+        seq.append(pos.copy())
+    cell2 = cell * 1.002
+    ref = LoupEngine(_bundle())
+    refs = []
+    for k, x in enumerate(seq):
+        ref.set_system(z, m, skin=0.5)
+        refs.append(ref.evaluate(x, cell2 if k == 9 else cell))
+    del ref
+    gc.collect()
+
+    def same(got, k, forces_only=False):
+        e_ref, f_ref, s_ref = refs[k]
+        assert abs(got[0] - e_ref) < 1e-6 * n, k
+        assert np.abs(got[1] - f_ref).max() < 5e-5, k
+        if not forces_only:
+            assert np.abs(got[2] - s_ref).max() < 2e-6, k
+
+    eng.set_evaluate_ahead(True)
+    try:
+        for k, x in enumerate(seq):
+            if k == 9:
+                same(eng.evaluate(x, cell2), k)  # another cell: the queued pass is let run and dropped
+                continue
+            same(eng.evaluate(x, cell), k)
+            if k == 3:
+                same(eng.evaluate(x, cell, compute_stress=False), k, forces_only=True)  # the other stress flag
+            if k == 6:
+                eng.set_state(x, np.zeros_like(x), cell)  # a run and a state read, with a pass queued before them
+                eng.run_nve(3, dt_fs=0.5)
+                assert np.isfinite(eng.get_state()[0]).all()
+        eng.set_system(z, m, skin=0.5)  # a new system with a pass queued
+        same(eng.evaluate(seq[0], cell), 0)
+        same(eng.evaluate(seq[1], cell), 1)
+        same(eng.evaluate(seq[2], cell), 2)  # a pass is queued now
+    finally:
+        eng.set_evaluate_ahead(False)  # lets a queued pass run: later tests use the GPU
+    same(eng.evaluate(seq[3], cell), 3)
+    eng.set_evaluate_ahead(True)
+    eng.evaluate(seq[3], cell)
+    eng.evaluate(seq[3], cell)
+    eng.evaluate(seq[3], cell)
+    del eng  # destroyed with a pass queued
+    gc.collect()

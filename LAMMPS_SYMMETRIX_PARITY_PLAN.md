@@ -1,6 +1,7 @@
 # LoupMD in LAMMPS: LAMMPS's own features, and the options of Symmetrix's pair styles
 
-Status: plan (19 November 2026). Part 1's table of what works today is measured; nothing else in this file is built.
+Status: plan (19 November 2026). Part 1's table of what works today is measured, and stage L1 is built and
+measured (S146); nothing else in this file is built.
 Effort figures and speed targets are *estimates*. Measured figures are from the 5060 Ti under WSL 2.
 
 Goal (owner, 19 November): the LoupMD package for LAMMPS should offer what Symmetrix's does, ideally without losing
@@ -18,6 +19,7 @@ options, with the owner's decisions applied.
 | CPU styles, NequIP styles | out of scope |
 | POLAR `float32-mixed` | offered only where it passes the accuracy gate |
 | licence of `lammps/` | GPL-2.0 (`lammps/LICENSE`) |
+| the engine's own thermostats and barostats (ASE's schemes) for the fast route | acceptable; LAMMPS's exact fixes stay available through the pair styles |
 
 ## Part 1. LAMMPS's integrators, thermostats, barostats and constraints
 
@@ -102,18 +104,28 @@ What the matrix shows:
   - fixes that add or remove atoms (`deposit`, `evaporate`, `gcmc`): their packages are not in the test build;
   - anything that needs several processes (`neb`, replica exchange with more than one process per replica).
 
-### Where route A loses its time
+### Where route A loses its time (measured, S146)
 
-Per step, LAMMPS needs the forces on the CPU before it can move the atoms. Only then can the next force pass start:
+Timing probes inside `loup_evaluate` (`LOUP_DEBUG_EVAL_TIMES=1`), LAMMPS with `pair_style loupmd`, `fix nve` +
+`fix langevin`, means over about 1,080 steps without a neighbour rebuild:
 
-1. The engine's force pass (the engine's step time).
-2. The wait for the results, and LAMMPS's own CPU work (integrator, fixes, ghost atoms): tens of microseconds.
-3. The launch of the next graph. Under WSL 2 a launch round trip measured 156 - 174 µs per step (ledger
-   `md-wait-value`, S37).
+| part of a step, µs | 320 atoms | 5,000 atoms |
+|---|---|---|
+| entry to the launch of the step graph (staging the positions) | 20 | 51 |
+| launch to the guard's publication (upload, skin check, guard) | 208 | 225 |
+| guard to the results having landed (force pass, result copy) | 571 | 7,588 |
+| results to the return | 1 | 29 |
+| between two calls (LAMMPS's own work on the CPU) | 17 | 200 |
+| LAMMPS step | 826 | 8,134 |
+| the engine's own loop, for comparison | 580 - 590 | 7,680 - 7,720 |
 
-The engine's own loop hides item 3 by queueing the next step while the current force pass runs. LAMMPS cannot,
-because the next positions depend on the forces. On water216 the plain style is 0.22 ms above the engine's step
-(0.57 against 0.35).
+- **The force pass itself costs what it costs in the engine's loop.** The gap is everything around it.
+- **A fixed delay of about 0.2 ms sits between a launch and the start of the force pass**, at both sizes. It is not
+  the host copies: a lab build without the upload and the download still showed 107 - 181 µs (water216). It is the
+  start of the engine's large step graph on an idle GPU. The engine's own loop hides it by queueing each step while
+  the previous force pass runs. A caller that integrates on the CPU cannot, because the next positions depend on the
+  forces.
+- **At 5,000 atoms LAMMPS's own CPU work is as large again** (0.2 ms per step for `fix nve` and `fix langevin`).
 
 Two further costs appear only with certain fixes:
 
@@ -124,17 +136,31 @@ Two further costs appear only with certain fixes:
 
 ### Stages
 
-**L1. Pre-armed force pass for route A** (engine).
-- The next call's step graph is queued ahead, behind a wait on a host-mapped word (`cuStreamWaitValue32`). When
-  LAMMPS calls, the engine writes the positions into the page-locked staging and releases the wait. No launch sits on
-  the step's critical path.
-- S37 measured this standalone: it saved 82 - 105 µs of the 156 - 174 µs round trip. It was rejected then because a
-  queued graph could not be cancelled across a neighbour rebuild. The guarded step graph with its SWITCH node (S75)
-  is that missing piece: the queued graph decides on the device whether to run the force pass or the rebuild.
-- A queued graph also has to become harmless when the system, the cell or the virial flag changes before it is
-  released: the guard reads a "skip" word.
-- Target: route A within about 0.1 ms of the engine's step on small systems under WSL 2, and within a few percent at
-  5,000 atoms. Native Linux, where a launch is cheaper, should need it less; to be measured.
+**L1. Pre-armed force pass for route A** (engine). Built in S146 as `loup_set_evaluate_ahead` and
+`pair_style loupmd ahead yes`; off by default.
+- What it does: after a call, the next call's step graph is queued behind a wait on a host-mapped word
+  (`cuStreamWaitValue32`). The next call writes its positions into the staging and stores the word, so no launch sits
+  on its path. The guarded step graph with its SWITCH node (S75) handles a neighbour rebuild inside the queued
+  graph, which is what S37 lacked.
+- Measured (5060 Ti, WSL 2, LAMMPS `a b b a` on one build):
+
+  | system | `ahead no`, ms/step | `ahead yes`, ms/step |
+  |---|---|---|
+  | SrTiO3, 320 atoms | 0.838, 0.826 | 0.752, 0.783 |
+  | OFF23-S water216 | 0.553, 0.567 and 0.581, 0.547 | 0.528, 0.533 and 0.548, 0.561 |
+  | SrTiO3, 5,000 atoms | 8.189, 8.232 | 8.146, 8.269 |
+
+  About 7% at 320 atoms, 2 - 5% on water216, a tie at 5,000 atoms. By the probes it removes the launch call
+  (20 → 3 µs) and about 35 µs of the delay to the guard (208 → 174 µs), and adds 18 µs for queueing the next
+  pass. The delay it was meant to remove is mostly not the launch (see the table above).
+- Why off by default: between two calls the engine's stream holds work that cannot run. The stream is an ordinary
+  (blocking) one, so anything on CUDA's default stream elsewhere in the process, and any device-wide synchronisation,
+  waits for it forever. The first build hung in the tests for this reason (a second engine was being set up). In plain
+  LAMMPS the engine is normally the only GPU user, so `ahead yes` is safe there; it is never switched on with the
+  KOKKOS or GPU package active.
+- Target missed: the plan asked for route A within about 0.1 ms of the engine's step. It is at about 0.2 ms.
+  What is left is the fixed start of the step graph, which only an integrator inside the engine avoids. That makes
+  L3 the stage that matters for speed.
 
 **L2. Changing boxes without a rebuild per step** (engine; with P0).
 - The release engine's variable-cell step forms the Cartesian shifts in every step and keeps the list. Through P0
@@ -187,7 +213,8 @@ Two further costs appear only with certain fixes:
 - A changed atom count re-sends the system (a full `loup_set_system`). For frequent insertion (`fix deposit`,
   `fix gcmc`) the capacity-bucket system of P4 would avoid re-capturing the graphs.
 
-**Order.** L1 and L5's settings can be done on `develop` now. L2 and L3 come with P0. L6 as needed.
+**Order.** L1 is done. L5's settings can be done on `develop` now. L2 and L3 come with P0, and L3 is the one that
+brings LAMMPS's ensembles to the engine's step time. L6 as needed.
 
 ## Part 2. Symmetrix's pair-style options
 
@@ -336,7 +363,7 @@ float32-against-float64 error.
 
 | stage | work | depends on |
 |---|---|---|
-| L1 pre-armed force pass | 1 week | – |
+| L1 pre-armed force pass | done (S146): 2 - 7% on small systems, opt-in | – |
 | L5 Kokkos settings, documented and tested | 2 days (the native-Linux measurement needs a Linux machine) | – |
 | P1 same words | 2 - 3 days | – |
 | P3 any boundary | 3 - 5 days | – |
@@ -352,13 +379,10 @@ float32-against-float64 error.
 | P6b POLAR mesh, one GPU | 2 - 3 weeks | P0 |
 | P6c POLAR distributed grid | 1 - 2 weeks | P4b, P6b |
 
-Suggested order: L1, then P1 / P3 / P5 (all on `develop`, no engine dependency), P0, then L2 and L3 (the two that
-bring LAMMPS's ensembles to the engine's speed), P2, and the several-process and POLAR stages after that.
+Suggested order: P1 / P3 / P5 (all on `develop`, no engine dependency), P0, then L3 and L2 (the two that bring
+LAMMPS's ensembles to the engine's speed), P2, and the several-process and POLAR stages after that.
 
 ## Open points for the owner
 
 1. **Hardware for P4 and L5.** Two GPUs for scaling, and a native-Linux machine for the Kokkos route: the
    workstations or A100 nodes, when available.
-2. **L3's wording.** The engine's thermostats and barostats are ASE's schemes, not LAMMPS's equations. Is "same
-   ensemble, the engine's integrator, said in the log" acceptable for the fast route, with the exact LAMMPS fix
-   available through route A?

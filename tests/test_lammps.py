@@ -194,3 +194,14 @@ def test_rigid_bodies_of_a_bonded_system_run(case, style):
     rows = _thermo(d, f"rigid_{style}")
     assert len(rows) == 3 and all(np.isfinite(x) for r in rows for x in r)
     assert abs(rows[-1][4] - rows[0][4]) < 5e-3 * n  # total energy, eV: a rigid-body run conserves it
+
+
+def test_evaluate_ahead_gives_the_same_run(case):
+    """pair_style loupmd ahead yes (the engine queues each next force pass ahead of its call): the same NVE run."""
+    d, at, bundle = case
+    n = len(at)
+    deck = _md(bundle, "fix 1 all nve")
+    _lmp(d, "ahead_no", deck.replace("pair_style loupmd", "pair_style loupmd ahead no"))
+    _lmp(d, "ahead_yes", deck.replace("pair_style loupmd", "pair_style loupmd ahead yes"))
+    a, b = _thermo(d, "ahead_no"), _thermo(d, "ahead_yes")
+    assert abs(a[-1][2] - b[-1][2]) < 1e-5 * n and abs(a[-1][3] - b[-1][3]) < 1e-5 * n

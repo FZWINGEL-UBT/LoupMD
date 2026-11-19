@@ -52,6 +52,20 @@ int loup_evaluate(
     double* out_stress
 );
 
+// Evaluate ahead (0 off, the default; 1 on): after a loup_evaluate call the engine queues the next call's force pass
+// on its GPU stream, held back until that call has written its positions, so the call itself launches nothing. It
+// is for a caller that integrates on the host and calls loup_evaluate every step, such as the LAMMPS pair style:
+// measured on an RTX 5060 Ti under WSL 2, it took 2-7% off a LAMMPS step on cells of a few hundred atoms and nothing
+// measurable off a 5,000-atom step. It starts after two calls in a row with one stress flag and
+// an unchanged cell; a call that does not fit the queued pass, and every other call on the handle, lets the queued
+// pass run first (its result is discarded), so results never depend on the setting.
+// WARNING: between two loup_evaluate calls the handle's stream then holds work that cannot run. Other GPU work of
+// the process in that time may wait for it forever: anything on CUDA's default stream (another handle being set up,
+// another library such as PyTorch) and any device-wide synchronisation. Switch it on only when this handle's
+// loup_evaluate calls are the process's only GPU work between them. Without driver support for a stream wait on host
+// memory the setting has no effect. LOUP_EVAL_ARM=0 keeps it off for every handle; =1 switches it on for every handle.
+int loup_set_evaluate_ahead(LoupHandle* h, int on);
+
 // Initialize MD state (positions [n_atoms, 3] in A, velocities [n_atoms, 3] in ASE units, i.e. A per ASE time unit
 // as returned by ase.Atoms.get_velocities(); cell [3, 3] in A). Velocities are zero after loup_set_system until
 // this call sets them (a run after only loup_evaluate starts from rest).
@@ -118,6 +132,10 @@ int loup_compute_device(LoupHandle* h, const LoupDeviceIO* io, const double* cel
 //                   name, compute capability, cuBLASLt version and a hash of this library; plans whose winner leads
 //                   the runner-up by less than 3% are not persisted.
 //   LOUP_RETUNE     if set, ignore the plan cache and re-time every GEMM shape (results are still saved).
+//   LOUP_EVAL_ARM=0|1  loup_set_evaluate_ahead for every handle: 0 keeps it off, 1 switches it on (testing; see the
+//                   warning at loup_set_evaluate_ahead).
+//   LOUP_DEBUG_EVAL_TIMES=1  when a handle is destroyed, print where its loup_evaluate calls spent their time: to
+//                   the launch, to the guard's publication, to the results, to the return, and between calls.
 //   LOUP_REORDER=0|1  the spatial atom reorder off or on (testing).
 //   LOUP_CONV_FWD_VARIANT, LOUP_CONV_TUNE  force or untune the conv forward variants (testing; python/test_gate.py).
 //   LOUP_JIT=0|1    the run-time compiler (JIT_DESIGN.md): 0 off (built-in kernels only; a bundle whose product the
