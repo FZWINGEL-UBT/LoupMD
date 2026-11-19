@@ -34,6 +34,12 @@ public:
                 const std::function<void()>& join, const int* species, const double* pos64,
                 const std::vector<std::vector<float*>>& h, const std::vector<std::vector<float*>>& dh, double* energy,
                 double* forces, int compute_stress, double* virial);
+    // Hidden fold (GenericModel::setup_lr_fold): layer t's degree-l mixer weight and source block replaced by weights
+    // the caller composed with the hidden chain (float32 device arrays [C, C] and [(2l + 1) C, 8]; the mixer array
+    // stays the caller's). Source blocks certified exactly zero are skipped (with LOUP_POLAR_ZBLK). Call after load.
+    void set_hidden_fold(int t, int l, const float* mix, const float* src_block);
+    // the highest degree of the last layer's features that the electron energy reads (-1 without it)
+    int le_lmax() const;
 
 private:
     struct Impl;

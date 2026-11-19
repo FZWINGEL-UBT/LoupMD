@@ -93,7 +93,10 @@ int loup_profile_force(LoupHandle* h, int warmup, int n_calls, double* out_total
 //   LOUP_POLAR_FOLD=0|1  POLAR long range without (0) the load-time dot^T weight fold, testing the path other GPUs take,
 //                   or with it (1) on any GPU (sm_120 and cc 8.0 fold by default).
 //   LOUP_POLAR_ZBLK=0  POLAR long range: run the GEMMs of weight blocks certified exactly zero at load (POLAR-1-L's
-//                   l = 2 SCF and electron-energy blocks), which are skipped by default (testing).
+//                   l = 2 SCF, electron-energy and source blocks), which are skipped by default (testing).
+//   LOUP_POLAR_HFOLD=0|1|2|3  POLAR models: the degrees (bit l - 1 = degree l) whose hidden chain is folded at load into
+//                   the long-range mixer and source and the next layers' weights; 0 forms every layer's output, the
+//                   path other GPUs take (testing; sm_120 folds degrees 1 and 2 by default).
 //   LOUP_CHAIN_FOLD=0|1  generic models (OMOL-0, MH-1, the OMAT-0 / MP-0 / MPtrj / OFF families on the generic path):
 //                   0 skips the load-time skip-chain fold (the path other GPUs take), 1 folds on any GPU (testing;
 //                   sm_120 and cc 8.0 fold by default).
@@ -105,6 +108,10 @@ int loup_profile_force(LoupHandle* h, int warmup, int n_calls, double* out_total
 //   LOUP_CONV_PRUNE=0  generic models: keep every conv path of a layer whose l >= 1 projections are exactly zero
 //                   (MP-0 medium's second interaction), which by default runs only its output-degree-0 paths and a
 //                   scalar-only product (testing).
+//   LOUP_LIN_COMPACT=0  generic models: the dense projections and product kernels of kind-1 layers (MPtrj-2022.9, MP-0
+//                   medium's layer 0) instead of their live channels, certified from exact zeros at load (testing).
+//   LOUP_SENDER_BWD=0  generic models: the receiver-owned backward of a pruned conv layer (MP-0 medium's second
+//                   interaction) instead of the sender-owned one (testing).
 //   LOUP_NO_HYBRID=1  no tensor-core GEMM cubin (float32 SIMT GEMMs only).
 //   LOUP_HYBRID_CUBIN=path  load this GEMM cubin instead of the default (cubins/gemm_tc_hyb_sm80.cubin, LoupMD's own
 //                   cubins/src/gemm_tc.cu build with more tiles and beta support, on cc 8.0; FastMACE's
@@ -116,7 +123,12 @@ int loup_profile_force(LoupHandle* h, int warmup, int n_calls, double* out_total
 //                   by default).
 //   LOUP_FORCE_TC=1  every GEMM the tensor-core cubin can take runs on it (testing the cubin's accuracy on every
 //                   eligible shape; no GEMM plans are loaded or saved).
-//   LOUP_DEBUG_SPLINE, LOUP_DEBUG_GEMM  print the variant / GEMM tuning decisions to stderr.
+//   LOUP_GATE_FUSE=0, LOUP_GATE_FUSE_FWD=0  generic models with gated (kind 4) layers (MH-1, OMOL-0, POLAR-1): keep the
+//                   gate kernels instead of the gate backward in the W_2^T GEMMs' epilogue / layer 0's gated store in
+//                   its projections' epilogue (testing; both run where a GEMM's plan is the own N-fastest sgemm128,
+//                   i.e. on sm_120).
+//   LOUP_DEBUG_SPLINE, LOUP_DEBUG_GEMM, LOUP_DEBUG_COMPACT  print the variant / GEMM tuning decisions and the compacted
+//                   generic layers to stderr.
 
 #ifdef __cplusplus
 }

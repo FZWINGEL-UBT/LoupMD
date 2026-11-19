@@ -1170,7 +1170,11 @@ struct PolarLR::Impl {
     int S = 0, L = 0, C = 0, lmax = 0, rows = 0, n_rec = 0, add_le = 0;
     int off[3] = {0, 0, 0};
     std::vector<float*> src;
-    std::vector<std::vector<float*>> mix;
+    // S123 extension: src_zero[t][l], layer t's degree-l source block exactly zero (certified at load and on a hidden
+    // fold; not with LOUP_POLAR_ZBLK=0): its source GEMMs are skipped (POLAR-1-L's l = 2 blocks)
+    std::vector<std::vector<char>> src_zero;
+    bool zblk = true;
+    std::vector<std::vector<const float*>> mix;  // a hidden fold's composed mixer belongs to the generic layer
     float *fk_W1 = nullptr, *fk_Wm = nullptr, *fk_bm = nullptr, *fk_W2 = nullptr, *fk_b2 = nullptr;
     float fk_act = 1.0f;
     std::vector<Update> upd;
@@ -1224,6 +1228,14 @@ struct PolarLR::Impl {
         CUDA_CHECK_THROW(cudaMalloc(&d, std::max<size_t>(n, 1) * sizeof(float)));
         s_.push_back(d);
         return d;
+    }
+    // the degree-l block of a source [R, 8] (blk: its first row, off[l]) exactly zero; never without zblk
+    bool src_block_zero(const float* blk, int l) const {
+        if (!zblk) return false;
+        const size_t n = (size_t)(2 * l + 1) * C * 8;
+        for (size_t i = 0; i < n; ++i)
+            if (blk[i] != 0.0f) return false;
+        return true;
     }
     // W [rows, ld] uploaded with each block's columns [col0, col0 + ncols) composed with its D^T (fold_dotT_kernel).
     struct FoldBlock {
@@ -1305,11 +1317,19 @@ void PolarLR::load(const Bundle& b, int S, int n_layers) {
         if (const char* e = std::getenv("LOUP_POLAR_FOLD"); e && (e[0] == '0' || e[0] == '1'))
             P.fold = e[0] == '1';  // tests: the unfolded path here, the fold elsewhere
     }
+    {
+        const char* zb_env = std::getenv("LOUP_POLAR_ZBLK");
+        P.zblk = !(zb_env && zb_env[0] == '0');
+    }
     for (int t = 0; t < n_layers; ++t) {
-        P.src.push_back(P.up(b.f32("LR.src_" + std::to_string(t), {R, 8})));
+        const std::vector<float> src = b.f32("LR.src_" + std::to_string(t), {R, 8});
+        P.src.push_back(P.up(src));
+        P.src_zero.emplace_back();
         P.mix.emplace_back();
-        for (int l = 0; l <= P.lmax; ++l)
+        for (int l = 0; l <= P.lmax; ++l) {
+            P.src_zero.back().push_back(P.src_block_zero(src.data() + (size_t)P.off[l] * 8, l));
             P.mix.back().push_back(P.up(b.f32("LR.mix_" + std::to_string(t) + "_" + std::to_string(l), {C, C})));
+        }
     }
     P.fk_W1 = P.up(b.f32("LR.fk_W1", {C, 16}));
     P.fk_act = (float)b.f64("LR.fk_act", {1})[0];
@@ -1368,8 +1388,7 @@ void PolarLR::load(const Bundle& b, int S, int n_layers) {
     // S123: block l of a [rows, R] weight exactly zero, so its products are exact zeros and their GEMMs are skipped
     // (POLAR-1-L: the l = 2 blocks of every update's Wpot and Wq and of le_Wq and le_Wv). Folding keeps the zero
     // blocks (W_l dot_l^T = 0). LOUP_POLAR_ZBLK=0 disables the skips (tests, A/B).
-    const char* zb_env = std::getenv("LOUP_POLAR_ZBLK");
-    const bool zblk = !(zb_env && zb_env[0] == '0');
+    const bool zblk = P.zblk;
     auto zero_block = [&](const std::vector<float>& W, int rows, int l) {
         if (!zblk) return false;
         for (int r = 0; r < rows; ++r)
@@ -1494,6 +1513,27 @@ void PolarLR::load(const Bundle& b, int S, int n_layers) {
         if (const char* e = std::getenv("LOUP_POLAR_MONO"); e && e[0] == '0') P.mono = false;
     }
 }
+
+void PolarLR::set_hidden_fold(int t, int l, const float* mix, const float* src_block) {
+    Impl& P = *p_;
+    if (t < 0 || t >= P.L || l < 0 || l > P.lmax) throw std::runtime_error("polar: hidden fold index");
+    const size_t n = (size_t)(2 * l + 1) * P.C * 8;
+    float* dst = P.src[t] + (size_t)P.off[l] * 8;
+    CUDA_CHECK_THROW(cudaMemcpy(dst, src_block, n * sizeof(float), cudaMemcpyDeviceToDevice));
+    std::vector<float> host(n);
+    CUDA_CHECK_THROW(cudaMemcpy(host.data(), dst, n * sizeof(float), cudaMemcpyDeviceToHost));
+    P.src_zero[t][l] = P.src_block_zero(host.data(), l);
+    // the replaced mixer is never read again
+    for (auto it = P.w_.begin(); it != P.w_.end(); ++it)
+        if (*it == P.mix[t][l]) {
+            cudaFree(*it);
+            P.w_.erase(it);
+            break;
+        }
+    P.mix[t][l] = mix;
+}
+
+int PolarLR::le_lmax() const { return p_->add_le ? std::max(p_->le_lq, p_->le_lv) : -1; }
 
 // k-vectors as graph_longrange.compute_k_vectors_flat (rcell = 2 pi inv(cell^T)), with the GTO basis per k
 bool PolarLR::set_cell(const double* c) {
@@ -1761,13 +1801,22 @@ void PolarLR::record(cudaStream_t st, int N, const GemmFn& gemm,
     const dim3 kgrid(blocks_for(N, 128), (unsigned)((K + kc - 1) / kc));
 
     const std::vector<float*>& hL = h[P.L - 1];
-    // ---------------- sources, mixer, and Fukui projection (independent across lanes)
+    // ---------------- sources, mixer, and Fukui projection (independent across lanes); the first source GEMM that
+    // runs initialises qsrc (the zero blocks' are skipped)
+    bool src_none = true;
+    for (int t = 0; t < P.L; ++t)
+        for (int l = 0; l <= lm; ++l) src_none = src_none && P.src_zero[t][l];
+    if (src_none) CUDA_CHECK_THROW(cudaMemsetAsync(P.qsrc, 0, (size_t)N * 8 * sizeof(float), st));
     fork();
+    bool src_first = true;
     for (int t = 0; t < P.L; ++t)
         for (int l = 0; l <= lm; ++l) {
-            lane(0);
-            gemm(false, N, 8, dimL(l) * C, 1.0f, h[t][l], dimL(l) * C, P.src[t] + (size_t)P.off[l] * 8, 8,
-                 t == 0 && l == 0 ? 0.0f : 1.0f, P.qsrc, 8);
+            if (!P.src_zero[t][l]) {
+                lane(0);
+                gemm(false, N, 8, dimL(l) * C, 1.0f, h[t][l], dimL(l) * C, P.src[t] + (size_t)P.off[l] * 8, 8,
+                     src_first ? 0.0f : 1.0f, P.qsrc, 8);
+                src_first = false;
+            }
             lane(1 + l);
             gemm(false, N * dimL(l), C, C, 1.0f, h[t][l], C, P.mix[t][l], C, t == 0 ? 0.0f : 1.0f, P.fm[l], C);
         }
@@ -2119,8 +2168,9 @@ void PolarLR::record(cudaStream_t st, int N, const GemmFn& gemm,
     for (int t = 0; t < P.L; ++t)
         for (int l = 0; l <= lm; ++l) {
             lane(t * (lm + 1) + l);
-            gemm(true, N, dimL(l) * C, 8, 1.0f, P.dq2, 8, P.src[t] + (size_t)P.off[l] * 8, 8, 1.0f, dh[t][l],
-                 dimL(l) * C);
+            if (!P.src_zero[t][l])
+                gemm(true, N, dimL(l) * C, 8, 1.0f, P.dq2, 8, P.src[t] + (size_t)P.off[l] * 8, 8, 1.0f, dh[t][l],
+                     dimL(l) * C);
             gemm(true, N * dimL(l), C, C, 1.0f, P.dfm[l], C, P.mix[t][l], C, 1.0f, dh[t][l], C);
         }
     lane((P.L - 1) * (lm + 1));

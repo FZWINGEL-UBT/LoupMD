@@ -337,7 +337,7 @@ def emit_conv_fwd(lx, groups=(0, 1, 2), name=None, l3s=(0, 1, 2, 3)):
         path_pairs[k] = p_keys
         acc_off += 2 * l3 + 1
 
-    # Cartesian path sets of this kernel (S119 / S121: DEG2_CART; S122: CART1), each used on sm_120 when complete
+    # Cartesian path sets of this kernel (S119 / S121: DEG2_CART; S122: CART1), each used when complete
     acc_of = {}
     acc_off = 0
     for k, (_, _, l3) in sel:
@@ -371,42 +371,33 @@ def emit_conv_fwd(lx, groups=(0, 1, 2), name=None, l3s=(0, 1, 2, 3)):
                 continue
             sign = -1.0 if norm[0][0] < 0 else 1.0
             forms.append((I, m1, sign, tuple(sorted((ec, lit(sign * c)) for c, ec in norm))))
-    # S122: the linear forms only the Cartesian paths read get the last slots, so sm_120 stages (and holds) only the
-    # first n_keep of them; the other GPUs stage all
-    for cart_pass in (False, True):
-        for I, m1, sign, key in forms:
-            if (path_of[I] in cart_ks) != cart_pass:
-                continue
-            if key not in extras:
-                extras[key] = 16 + len(extras)
-            cg_use[(I, m1)] = ("-" if sign < 0 else "", extras[key])
-        if not cart_pass:
-            n_keep = len(extras)
+    # The linear forms the per-path blocks read, one staged slot each (S122: the Cartesian paths read none)
+    for I, m1, sign, key in forms:
+        if path_of[I] in cart_ks:
+            continue
+        if key not in extras:
+            extras[key] = 16 + len(extras)
+        cg_use[(I, m1)] = ("-" if sign < 0 else "", extras[key])
 
     ED = 4 * math.ceil((16 + len(extras)) / 4)
-    ED_keep = 4 * math.ceil((16 + n_keep) / 4)
-    SM120 = "#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ == 1200"
     def _extra_code(pad, idx_expr):
         if not extras:
             return ""
         ls = [f"{pad}{{ float* p = s_sh + ({idx_expr}) * ED;"]
         for key, eslot in extras.items():
-            if cart_ks and eslot == 16 + n_keep:
-                ls.append("#if !(defined(__CUDA_ARCH__) && __CUDA_ARCH__ == 1200)")
             expr = " + ".join(f"{c_lit} * p[{ec}]" for ec, c_lit in key)
             ls.append(f"{pad}  p[{eslot}] = {expr};")
-        if cart_ks and n_keep < len(extras):
-            ls.append("#endif")
         ls.append(f"{pad}}}")
         return "\n" + "\n".join(ls)
 
     extra_hi = _extra_code("      ", "ch - 32")
     extra_lo = _extra_code("          ", "ch")
-    ed_decl = (f"  constexpr int TILE = 32;\n{SM120}\n  constexpr int ED = {ED_keep};\n#else\n  constexpr int ED = {ED};\n"
-               "#endif" if cart_ks and ED_keep < ED else f"  constexpr int TILE = 32, ED = {ED};")
+    ed_decl = f"  constexpr int TILE = 32, ED = {ED};"
 
     blk, blk_pair = {}, {}
     for k, (l1, l2, l3) in sel:
+        if k in cart_ks:
+            continue
         m1_used = sorted({m1 for _, m1 in path_pairs[k]})
         body = [f"      {{ // path {k} ({l1},{l2},{l3})"] + _decode_into(k, [("const float w", _w_fwd("pw"))], "        ")
         body_pair = [f"      {{ // path {k} ({l1},{l2},{l3}) pair"] + _decode_into(
@@ -423,12 +414,12 @@ def emit_conv_fwd(lx, groups=(0, 1, 2), name=None, l3s=(0, 1, 2, 3)):
         blk[k] = body + ["      }"]
         blk_pair[k] = body_pair + ["      }"]
 
-    # S119 / S121 (sm_120): with all the degree-two Cartesian paths in this kernel, one Q, v = Q Y1 and h = Y1 . v per
+    # S119 / S121: with all the degree-two Cartesian paths in this kernel, one Q, v = Q Y1 and h = Y1 . v per
     # edge and channel serve them (Y1 = sqrt 3 n, |Y1|^2 = 3, so n h - 2/5 v = (Y1 h - 6/5 v) / (3 sqrt 3) and
     # v . B'_m n - 2/3 x_m = (v' . B'_m Y1 - 2 x_m) / 3 with v' = Q Y1). S122: likewise d' = p . Y1 and
     # q'_m = p . B'_m Y1 for the x-degree-1 paths (n d - p / 3 = (Y1 d' - p) / 3, and with Y2_m = sqrt 15 / 2 u_m,
     # d u - 2/5 q = (d' Y2 - sqrt 15 / 5 q') 2 / (3 sqrt 5)). The constants and these factors go into the stores.
-    # Other GPUs keep the per-path forms.
+    # S129: on every GPU (S119-S122 had them on sm_120 only).
     cart_scale = {}
     if "deg2" in carts:
         cc = deg2_cart()
@@ -506,15 +497,9 @@ def emit_conv_fwd(lx, groups=(0, 1, 2), name=None, l3s=(0, 1, 2, 3)):
     for k, _ in sel:
         set_name = next((nm for nm, found in carts.items() if k in found.values()), None)
         if set_name:
-            ks = sorted(carts[set_name].values())
-            if k == ks[0]:
-                for dst, pair in ((body, False), (body_pair, True)):
-                    dst.append(SM120)
-                    dst += emit_cart[set_name](pair)
-                    dst.append("#else")
-                    for c in ks:
-                        dst += (blk_pair if pair else blk)[c]
-                    dst.append("#endif")
+            if k == min(carts[set_name].values()):
+                body += emit_cart[set_name](False)
+                body_pair += emit_cart[set_name](True)
             continue
         body += blk[k]
         body_pair += blk_pair[k]
@@ -529,7 +514,7 @@ def emit_conv_fwd(lx, groups=(0, 1, 2), name=None, l3s=(0, 1, 2, 3)):
             sc = acc_scale[I]
             mult = "" if abs(sc - 1.0) < 1e-7 else f" * {lit(sc)}"
             if k in cart_scale:
-                stores += [SM120, f"{dst} * {lit(cart_scale[k])};", "#else", f"{dst}{mult};", "#endif"]
+                stores.append(f"{dst} * {lit(cart_scale[k])};")
             else:
                 stores.append(f"{dst}{mult};")
 
@@ -646,22 +631,14 @@ __global__ void __launch_bounds__(MAX_T) {name}(
 """
 
 # Per-edge force-vector update at the end of the backward convs (one lane per edge, so each element has one writer in
-# the kernel). EDGE_DVEC_RED: on sm_120 a fire-and-forget atomic add, which rounds like the read-add-store (except
-# that it flushes subnormals, ~1e-38, which these per-edge forces never reach) without a load to wait on: the
-# read-modify-write's load was ~4% of gconv_bwd_L0's stall samples and the atomics made it 8-16% faster (S40). S101:
-# every accumulating update on sm_120 (the lower conv layers' and gconv_bwd_L2's); other GPUs keep the read-add-store.
-EDGE_DVEC_RMW = """\
-      edge_dvec[(int64_t)e * 3 + 0] += fx;
-      edge_dvec[(int64_t)e * 3 + 1] += fy;
-      edge_dvec[(int64_t)e * 3 + 2] += fz;"""
+# the kernel): a fire-and-forget atomic add, which rounds like the read-add-store it replaced (except that it flushes
+# subnormals, ~1e-38, which these per-edge forces never reach) without a load to wait on: the read-modify-write's load
+# was ~4% of gconv_bwd_L0's stall samples and the atomics made it 8-16% faster (S40). S101: every accumulating update
+# (the lower conv layers' and gconv_bwd_L2's). S129: on every GPU (sm_120 only before).
 EDGE_DVEC_RED = """\
-#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ == 1200
       atomicAdd(edge_dvec + (int64_t)e * 3 + 0, fx);
       atomicAdd(edge_dvec + (int64_t)e * 3 + 1, fy);
-      atomicAdd(edge_dvec + (int64_t)e * 3 + 2, fz);
-#else
-""" + EDGE_DVEC_RMW + """
-#endif"""
+      atomicAdd(edge_dvec + (int64_t)e * 3 + 2, fz);"""
 # S98: the backward of the top conv layer runs first in the pass and assigns the per-edge vectors instead (no zero
 # fill of the buffer, no load to wait on); dvec_assign is uniform per launch.
 EDGE_DVEC_SET = """\
@@ -897,6 +874,157 @@ __global__ void __launch_bounds__(512) {name}(
 }}
 """
 
+def emit_conv_bwd_l1s_sender():
+    """S135: the pruned (S125) lx 1 backward with the sender as owner. The neighbour list is symmetric (edge (i -> j) in
+    row j has its reverse (j -> i) in row i, same distance, direction -n), so block j walks its own row reversed: for
+    each slot the reversed edge (sender j, receiver i) gathers receiver i's two dmid0 values per channel, j's features
+    stay in registers, and j's x gradient accumulates per warp in registers and is written once (a fixed-order sum over
+    the four warps, no atomics). The reversed edge's force dE/du' goes into the row's own slot as -dE/du' (its vector
+    is u = -u'), which keeps the forces and the virial; every slot is written once. Each warp holds all C = 32 NCH
+    channels of its edge, as in the receiver-owned kernel."""
+    paths, slot, count = layout(1)
+    n_paths = len(paths)
+    sel = [(k, l1, l2) for k, (l1, l2, l3) in enumerate(paths) if l3 == 0]
+    assert [(l1, l2) for _, l1, l2 in sel] == [(0, 0), (1, 1)], sel
+    (k0, _, _), (k1, _, _) = sel
+    m0, m1 = (float(fit_conversion(l1, l2, 0)[0, 0]) for _, l1, l2 in sel)
+    j0, j1 = slot[k0][1], slot[k1][1]
+
+    def decode(k):
+        return "\n".join([
+            f"        const uint2 c = __ldg(tq + {k} * C + ch);",
+            "        const unsigned eb0 = (c.y & 0x0F800000u) + bias_shift;",
+            "        const float eb_f = __uint_as_float(eb0);",
+            "        const float r0 = __uint_as_float((c.x & 0x7FFFF8u) | eb0);",
+            "        const float r1 = __uint_as_float((c.y & 0x7FFFF0u) | eb0);",
+            "        const float r2 = __uint_as_float((__funnelshift_l(c.x, c.x, 20) & 0x7FF800u) | eb0);",
+            "        const float r3 = __uint_as_float((__funnelshift_l(c.y, c.y, 19) & 0x7F8000u) | eb0);",
+            "        const float w = fmaf(s3, r3, fmaf(s2, r2, fmaf(s1, r1, fmaf(nw_hb, eb_f, r0))));",
+            "        const float dw = fmaf(ds3, r3, fmaf(ds2, r2, fmaf(ndt_hb, eb_f, r1)));"])
+
+    return f"""template <int NCH, bool WANT_DX, bool PRELOC>
+__global__ void __launch_bounds__(128) gconv_bwd_L1sr(
+    int N, int S, int I, SplineGrid grid, int sh_perm, int pair_sym,
+    const int* __restrict__ row_ptr, const int* __restrict__ senders, const float4* __restrict__ vec_len,
+    const int* __restrict__ act_slab, const float2* __restrict__ act_t_sx,
+    const int* __restrict__ species, const uint2* __restrict__ packed_table, const float4* __restrict__ density_table,
+    unsigned bias_shift, const float* __restrict__ x0_p, const float* __restrict__ x1_p, const float* __restrict__ dmid0,
+    const float* __restrict__ dD, float* __restrict__ dx0_p, float* __restrict__ dx1_p, float* __restrict__ edge_dvec,
+    int dvec_assign) {{
+  constexpr int C = 32 * NCH;
+  __shared__ float s_red[4][4 * C];  // the four warps' partial x gradients
+  const int j = blockIdx.x, tid = threadIdx.x, wid = tid >> 5, lane = tid & 31;
+  if (j >= N) return;
+  const int sj = species[j];
+  float x0[NCH], xx[NCH], xy[NCH], xz[NCH], d0[NCH], d1x[NCH], d1y[NCH], d1z[NCH];
+  #pragma unroll
+  for (int r = 0; r < NCH; ++r) {{
+    const int ch = lane + 32 * r;
+    x0[r] = __ldg(x0_p + (int64_t)j * C + ch);
+    xx[r] = __ldg(x1_p + ((int64_t)j * 3 + 0) * C + ch);
+    xy[r] = __ldg(x1_p + ((int64_t)j * 3 + 1) * C + ch);
+    xz[r] = __ldg(x1_p + ((int64_t)j * 3 + 2) * C + ch);
+    d0[r] = 0.0f;
+    d1x[r] = 0.0f;
+    d1y[r] = 0.0f;
+    d1z[r] = 0.0f;
+  }}
+  const int eb = row_ptr[j], ee = row_ptr[j + 1];
+  for (int e = eb + wid; e < ee; e += 4) {{
+    const float4 vl = __ldg(vec_len + e);
+    const int i = senders[e];  // the reversed edge's receiver
+    const float ux = sh_perm ? vl.y : vl.x, uy = sh_perm ? vl.z : vl.y, uz = sh_perm ? vl.x : vl.z;
+    const float dd = vl.w > loup::EPS_SH ? vl.w : loup::EPS_SH;
+    const float inv_d = 1.0f / dd;
+    const float nx = -ux * inv_d, ny = -uy * inv_d, nz = -uz * inv_d;
+    float t, sxi;
+    int iv;
+    if (PRELOC) {{
+      const float2 tsx = __ldg(act_t_sx + e);
+      t = tsx.x;
+      sxi = fabsf(tsx.y);
+      iv = __ldg(act_slab + e) % I;
+    }} else {{
+      locate_spline(grid, vl.w, iv, t, sxi);
+    }}
+    const int64_t slab = (int64_t)loup::table_pair(pair_sym, sj, species[i], S) * I + iv;
+    const float s = t - 0.5f, s_sq = s * s;
+    const float s1 = s * 0x1.0p-8f, s2 = s_sq * 0x1.0p-14f, s3 = s * s_sq * 0x1.0p-19f;
+    const float ds2 = (2.0f * s) * 0x1.0p-6f, ds3 = (3.0f * s_sq) * 0x1.0p-11f;
+    const float nw_hb = -1.5f * (1.0f + s1 + s2 + s3), ndt_hb = -1.5f * (1.0f + ds2 + ds3);
+    const uint2* tq = packed_table + slab * ({n_paths} * (int64_t)C);
+    const float* gi = dmid0 + (int64_t)i * {count[0]} * C;
+    float pull_Gx = 0.0f, pull_Gy = 0.0f, pull_Gz = 0.0f, pull_R = 0.0f;
+    #pragma unroll
+    for (int r = 0; r < NCH; ++r) {{
+      const int ch = lane + 32 * r;
+      const float q0 = {lit(m0)} * __ldg(gi + {j0} * C + ch), q1 = {lit(m1)} * __ldg(gi + {j1} * C + ch);
+      {{ // path {k0} (0,0,0) scalar
+{decode(k0)}
+        if (WANT_DX) d0[r] = fmaf(w, q0, d0[r]);
+        pull_R = fmaf(dw, x0[r] * q0, pull_R);
+      }}
+      {{ // path {k1} (1,1,0) lower
+{decode(k1)}
+        const float A = xx[r] * nx + xy[r] * ny + xz[r] * nz;
+        const float wq = w * q1;
+        pull_Gx = fmaf(wq, xx[r], pull_Gx); pull_Gy = fmaf(wq, xy[r], pull_Gy); pull_Gz = fmaf(wq, xz[r], pull_Gz);
+        if (WANT_DX) {{ d1x[r] = fmaf(wq, nx, d1x[r]); d1y[r] = fmaf(wq, ny, d1y[r]); d1z[r] = fmaf(wq, nz, d1z[r]); }}
+        pull_R = fmaf(dw, A * q1, pull_R);
+      }}
+    }}
+    #pragma unroll
+    for (int off = 16; off > 0; off >>= 1) {{
+      pull_Gx += __shfl_xor_sync(0xffffffffu, pull_Gx, off);
+      pull_Gy += __shfl_xor_sync(0xffffffffu, pull_Gy, off);
+      pull_Gz += __shfl_xor_sync(0xffffffffu, pull_Gz, off);
+      pull_R  += __shfl_xor_sync(0xffffffffu, pull_R,  off);
+    }}
+    if (lane == 0) {{
+      float ddens = 0.0f, dDi = 0.0f;
+      if (dD) {{  // the density belongs to the reversed edge's receiver i
+        dDi = __ldg(dD + i);
+        if (dDi != 0.0f) {{
+          const float4 dc = __ldg(density_table + slab);
+          ddens = fmaf(t, fmaf(3.0f * dc.w, t, 2.0f * dc.z), dc.y) * sxi;
+        }}
+      }}
+      const float fn = pull_Gx * nx + pull_Gy * ny + pull_Gz * nz;
+      const float rad = fmaf(pull_R, sxi * 0x1.0p-8f, dDi * ddens);
+      float fx = fmaf(nx, rad - fn * inv_d, pull_Gx * inv_d);
+      float fy = fmaf(ny, rad - fn * inv_d, pull_Gy * inv_d);
+      float fz = fmaf(nz, rad - fn * inv_d, pull_Gz * inv_d);
+      if (sh_perm) {{ const float tx = fx, ty = fy, tz = fz; fx = tz; fy = tx; fz = ty; }}
+      fx = -fx;  // slot e holds the forward edge (i -> j), whose vector is -u'
+      fy = -fy;
+      fz = -fz;
+      if (dvec_assign) {{
+{EDGE_DVEC_SET}
+      }} else {{
+{EDGE_DVEC_RED}
+      }}
+    }}
+  }}
+  if (WANT_DX) {{
+    #pragma unroll
+    for (int r = 0; r < NCH; ++r) {{
+      const int ch = lane + 32 * r;
+      s_red[wid][ch] = d0[r];
+      s_red[wid][C + ch] = d1x[r];
+      s_red[wid][2 * C + ch] = d1y[r];
+      s_red[wid][3 * C + ch] = d1z[r];
+    }}
+    __syncthreads();
+    for (int q = tid; q < 4 * C; q += 128) {{
+      const float v = ((s_red[0][q] + s_red[1][q]) + s_red[2][q]) + s_red[3][q];
+      const int part = q / C, ch = q - part * C;
+      if (part == 0) dx0_p[(int64_t)j * C + ch] = v;
+      else dx1_p[((int64_t)j * 3 + part - 1) * C + ch] = v;
+    }}
+  }}
+}}
+"""
+
 def emit_conv_bwd_L2(groups=(0, 1, 2)):
     lx = 2
     paths, slot, count = layout(lx)
@@ -929,7 +1057,13 @@ def emit_conv_bwd_L2(groups=(0, 1, 2)):
             ch_body.append(f"        const float x{l1}_{m} = __ldg(x{l1}_p + ((int64_t)snd * {2 * l1 + 1} + {m}) * C + ch);")
             ch_body.append(f"        float gx{l1}_{m} = 0.0f;")
         pb = {}
+        # S119 / S121: the Cartesian paths as one block (_cart_bwd, emitted below)
+        cart = {(a, b, c): k for k, a, b, c in by_l1[l1] if (a, b, c) in DEG2_CART}
+        if len(cart) < len(DEG2_CART):
+            cart = {}
         for k, _, l2, l3 in by_l1[l1]:
+            if k in cart.values():
+                continue
             start = len(ch_body)
             W = o3.wigner_3j(l1, l2, l3, dtype=torch.float64).numpy()
             _, j = slot[k]
@@ -953,55 +1087,29 @@ def emit_conv_bwd_L2(groups=(0, 1, 2)):
                     if terms:
                         ch_body.append(f"          const float A{m1}_{m2} = {' + '.join(terms)};")
                         A[m1, m2] = f"A{m1}_{m2}"
-            # Old form (other GPUs): pull_R from the full sum over A x Y, then the dY and x-gradient contractions.
-            old = []
-            tr = [f"{A[m1, m2]} * x{l1}_{m1} * Y{l2 * l2 + m2}" for (m1, m2) in A]
-            old.append(f"          pull_R = fmaf({' + '.join(tr) if tr else '0.0f'}, dw, pull_R);")
-            for m2 in range(2 * l2 + 1):
-                terms = [f"{A[m1, m2]} * x{l1}_{m1}" for m1 in range(2 * l1 + 1) if (m1, m2) in A]
-                if terms:
-                    old.append(f"          dY[{l2 * l2 + m2}] = fmaf(R, {' + '.join(terms)}, dY[{l2 * l2 + m2}]);")
-            for m1 in range(2 * l1 + 1):
-                terms = [f"{A[m1, m2]} * Y{l2 * l2 + m2}" for m2 in range(2 * l2 + 1) if (m1, m2) in A]
-                if terms:
-                    old.append(f"          gx{l1}_{m1} = fmaf(R, {' + '.join(terms)}, gx{l1}_{m1});")
-            # sm_120 (S48): the x gradient's Cg[m1] = sum_m2 A[m1, m2] Y[m2] also gives the radial pull,
+            # S48: the x gradient's Cg[m1] = sum_m2 A[m1, m2] Y[m2] also gives the radial pull,
             # sum_m1 x[m1] Cg[m1] = sum_{m1, m2} A x Y: one term per m1 instead of one per A entry (-10% SASS).
-            new, cg_names = [], []
+            cg_names = []
             for m1 in range(2 * l1 + 1):
                 terms = [f"{A[m1, m2]} * Y{l2 * l2 + m2}" for m2 in range(2 * l2 + 1) if (m1, m2) in A]
                 if terms:
-                    new.append(f"          const float Cg{m1} = {' + '.join(terms)};")
+                    ch_body.append(f"          const float Cg{m1} = {' + '.join(terms)};")
                     cg_names.append((m1, f"Cg{m1}"))
             tr = [f"x{l1}_{m1} * {cgn}" for m1, cgn in cg_names]
-            new.append(f"          pull_R = fmaf({' + '.join(tr) if tr else '0.0f'}, dw, pull_R);")
+            ch_body.append(f"          pull_R = fmaf({' + '.join(tr) if tr else '0.0f'}, dw, pull_R);")
             for m2 in range(2 * l2 + 1):
                 terms = [f"{A[m1, m2]} * x{l1}_{m1}" for m1 in range(2 * l1 + 1) if (m1, m2) in A]
                 if terms:
-                    new.append(f"          dY[{l2 * l2 + m2}] = fmaf(R, {' + '.join(terms)}, dY[{l2 * l2 + m2}]);")
+                    ch_body.append(f"          dY[{l2 * l2 + m2}] = fmaf(R, {' + '.join(terms)}, dY[{l2 * l2 + m2}]);")
             for m1, cgn in cg_names:
-                new.append(f"          gx{l1}_{m1} = fmaf(R, {cgn}, gx{l1}_{m1});")
-            ch_body.append("#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ == 1200")
-            ch_body += new
-            ch_body.append("#else")
-            ch_body += old
-            ch_body.append("#endif")
+                ch_body.append(f"          gx{l1}_{m1} = fmaf(R, {cgn}, gx{l1}_{m1});")
             ch_body.append("        }")
             pb[k] = ch_body[start:]
             del ch_body[start:]
-        # S119 / S121 (sm_120): the Cartesian paths as one block (_cart_bwd); other GPUs keep the per-path blocks
-        cart = {(a, b, c): k for k, a, b, c in by_l1[l1] if (a, b, c) in DEG2_CART}
-        if len(cart) < len(DEG2_CART):
-            cart = {}
         for k, _, _, _ in by_l1[l1]:
             if k in cart.values():
                 if k == min(cart.values()):
-                    ch_body.append("#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ == 1200")
                     ch_body += _cart_bwd(cart, GS, gofs)
-                    ch_body.append("#else")
-                    for c in sorted(cart.values()):
-                        ch_body += pb[c]
-                    ch_body.append("#endif")
                 continue
             ch_body += pb[k]
         ch_body.append("        if (WANT_DX) {")
@@ -1228,6 +1336,140 @@ def emit_product(sig, prog, feats, sh):
           "    if ((threadIdx.x & 31) == 0) atomicAdd(dD + a, -s * dot);",
           "  }",
           "}"]
+    # S130 / S132: compact channels (GenericLayer::lin_compact): the angular thread at compact position c reads degree
+    # l >= 1 at its column pos[(l - 1) n_ang + c] of that degree's compact projection (-1: the channel's projection
+    # column is exactly zero there, so is the input), degree 0 at position c; the feature weights w{b} at position c;
+    # the adjoint seeded with g{cc}. Scalar-only positions run the S127 program (x1..x15 = 0 propagated).
+    ops_s, used_s, feats_s = _scalar_prune(prog, feats)
+    full_ops = dict(enumerate(prog.nodes))
+
+    def cload_lines(w0):  # the widths are wl1..wl3, not w1..w3: the program's feature weights are w{b}
+        out = ["    const int p1 = pos[c], p2 = pos[n_ang + c], p3 = pos[2 * n_ang + c];",
+               f"    const float x0 = __ldg(m0 + (int64_t)a * {w0} + c) * s;"]
+        for l in range(1, 4):
+            for m in range(2 * l + 1):
+                out.append(f"    const float x{l * l + m} = p{l} >= 0 ? "
+                           f"__ldg(m{l} + ((int64_t)a * {2 * l + 1} + {m}) * wl{l} + p{l}) * s : 0.0f;")
+        return out
+
+    def wloads(dst, fs):
+        for b, f in enumerate(fs):
+            if any(u is not None for u in (f or {}).values()):
+                dst.append(f"    const float w{b} = __ldg(wr + {b} * C);")
+
+    def adjoint(dst, ops, ids, fs):
+        adj = {}
+
+        def add(u, ab):
+            name = f"d{_expr(u)}"
+            if u in adj:
+                dst.append(f"    {name} = fmaf({ab[0]}, {ab[1]}, {name});")
+            else:
+                dst.append(f"    float {name} = {ab[0]} * {ab[1]};")
+            adj[u] = name
+
+        for b, f in enumerate(fs):
+            for cc, u in sorted((f or {}).items()):
+                if u is not None:
+                    add(u, (f"w{b}", f"g{cc}"))
+        for i in reversed(ids):
+            if i not in adj:
+                continue
+            op, da = ops[i], adj[i]
+            if op[0] == "mul":
+                add(op[1], (da, _expr(op[2])))
+                add(op[2], (da, _expr(op[1])))
+            elif op[0] == "lin":
+                for cc, u in op[1]:
+                    add(u, (_literal(cc), da))
+            else:
+                for a_, b_ in op[1]:
+                    add(a_, (da, _expr(b_)))
+                    add(b_, (da, _expr(a_)))
+        return adj
+
+    # S132: the forward / backward products on compact channels of a non-terminal layer. The thread at compact position
+    # c (angular first, then scalar-only, then the dead channels: no live input or no product weight) runs the full
+    # program, the S127 program or nothing, and writes the outputs of channel oc = order[c] (zero for a dead one) in
+    # the dense layout, so every consumer keeps its weights; the feature weights come permuted (position c's row). The
+    # backward reads the dense output gradient of oc and writes the compact input gradient at the angular thread's
+    # columns (degree l >= 1) and position c (degree 0); the pad columns stay zero from allocation.
+    args_c = ("int N, int C, int kept, int n_ang, int wl0, int wl1, int wl2, int wl3, const int* __restrict__ order, "
+              "const int* __restrict__ pos, " + _ptr_args("m", range(4)) +
+              ", const float* __restrict__ D, const float* __restrict__ w, int64_t w_stride, const int* __restrict__ sp")
+    head_c = [
+        "  const int a = blockIdx.x, c = blockIdx.y * blockDim.x + threadIdx.x, oc = order[c];",
+        "  const float s = D ? 1.0f / (D[a] + 1.0f) : 1.0f;",
+        "  const float* wr = w + (int64_t)sp[a] * w_stride + c;",
+    ]
+    FC = [f'extern "C" __global__ void __launch_bounds__(128) gprod_fwdc_{sig}(',
+          f"    {args_c}, {_ptr_args('y', range(lo + 1), const=False)},",
+          "    const float* __restrict__ ro_w, double* __restrict__ energy) {"] + head_c
+    FC.append("  float " + ", ".join(f"o{cc} = 0.0f" for cc in range(seg_out)) + ";")
+    FC += ["  if (c < n_ang) {"] + cload_lines("wl0")
+    for i in used:
+        _ssa(FC, i, prog.nodes[i])
+    wloads(FC, feats)
+    for b, f in enumerate(feats):
+        FC += [f"    o{cc} = fmaf(w{b}, {_expr(u)}, o{cc});" for cc, u in sorted((f or {}).items()) if u is not None]
+    FC += ["  } else if (c < kept) {", "    const float x0 = __ldg(m0 + (int64_t)a * wl0 + c) * s;"]
+    for i in used_s:
+        _ssa(FC, i, ops_s[i])
+    wloads(FC, feats_s)
+    for b, f in enumerate(feats_s):
+        FC += [f"    o{cc} = fmaf(w{b}, {_expr(u)}, o{cc});" for cc, u in sorted(f.items())]
+    FC.append("  }")
+    for l in range(lo + 1):
+        for m in range(2 * l + 1):
+            FC.append(f"  y{l}[((int64_t)a * {2 * l + 1} + {m}) * C + oc] = o{l * l + m};")
+    FC += ["  if (ro_w) {",
+           "    double e = (double)o0 * (double)__ldg(ro_w + oc);",
+           "    #pragma unroll",
+           "    for (int off = 16; off > 0; off >>= 1) e += __shfl_xor_sync(0xffffffffu, e, off);",
+           "    __shared__ double s_e[4];",
+           "    if ((threadIdx.x & 31) == 0) s_e[threadIdx.x >> 5] = e;",
+           "    __syncthreads();",
+           "    if (threadIdx.x == 0) {",
+           "      double t = 0.0;",
+           "      for (int i = 0; i < (int)(blockDim.x >> 5); ++i) t += s_e[i];",
+           "      atomicAdd(energy, t);",
+           "    }",
+           "  }",
+           "}"]
+    BC = [f'extern "C" __global__ void __launch_bounds__(128) gprod_bwdc_{sig}(',
+          f"    {args_c}, {_ptr_args('gin', range(lo + 1))},",
+          f"    {_ptr_args('dm', range(4), const=False)}, float* __restrict__ dD, const float* __restrict__ gseed) {{"] + \
+        head_c
+    for l in range(lo + 1):
+        for m in range(2 * l + 1):
+            seed = " + (gseed ? __ldg(gseed + oc) : 0.0f)" if l == 0 else ""
+            BC.append(f"  const float g{l * l + m} = __ldg(gin{l} + ((int64_t)a * {2 * l + 1} + {m}) * C + oc){seed};")
+    BC += ["  float dot = 0.0f;", "  if (c < n_ang) {"] + cload_lines("wl0")
+    for i in used:
+        _ssa(BC, i, prog.nodes[i])
+    wloads(BC, feats)
+    adj_b = adjoint(BC, full_ops, used, feats)
+    for l in range(4):
+        for m in range(2 * l + 1):
+            i = l * l + m
+            dx = adj_b.get(-1 - i, "0.0f")
+            BC.append(f"    dot = fmaf({dx}, x{i}, dot);")
+            BC.append(f"    dm0[(int64_t)a * wl0 + c] = {dx} * s;" if l == 0 else
+                      f"    if (p{l} >= 0) dm{l}[((int64_t)a * {2 * l + 1} + {m}) * wl{l} + p{l}] = {dx} * s;")
+    BC += ["  } else if (c < kept) {", "    const float x0 = __ldg(m0 + (int64_t)a * wl0 + c) * s;"]
+    for i in used_s:
+        _ssa(BC, i, ops_s[i])
+    wloads(BC, feats_s)
+    dx0_b = adjoint(BC, ops_s, used_s, feats_s).get(-1, "0.0f")
+    BC += [f"    dm0[(int64_t)a * wl0 + c] = {dx0_b} * s;", f"    dot = {dx0_b} * x0;",
+           "  } else if (c < wl0) {", "    dm0[(int64_t)a * wl0 + c] = 0.0f;", "  }"]
+    BC += ["  if (dD) {",
+           "    #pragma unroll",
+           "    for (int off = 16; off > 0; off >>= 1) dot += __shfl_xor_sync(0xffffffffu, dot, off);",
+           "    if ((threadIdx.x & 31) == 0) atomicAdd(dD + a, -s * dot);",
+           "  }",
+           "}"]
+    compact_src = "\n".join(FC) + "\n\n" + "\n".join(BC) + "\n"
     if lo == 0:
         # Fused product fwd + linear/bias/silu/linear readout fwd&bwd (ro_H = 16) + product bwd, one block per atom
         # (blockDim = C, 32..512, multiple of 32; generic.cu uses it only for C <= 512): generalises sc1_fused across
@@ -1343,7 +1585,6 @@ def emit_product(sig, prog, feats, sh):
         # lin_1..3 exactly zero): the program with x1..x15 = 0 propagated (dead mul / lin / dot terms and feature
         # terms dropped; the kept sums keep their order, so y0 and dm0 are the full kernel's values up to the sign of
         # zero), m0 the only input and dm0 the only gradient written (the pruned layer reads no other).
-        ops_s, used_s, feats_s = _scalar_prune(prog, feats)
         RS = [
             "template <int MAX_B, int MIN_BLK>",
             f"__global__ void __launch_bounds__(MAX_B, MIN_BLK) gprod_ro1s_fused_{sig}(",
@@ -1409,8 +1650,81 @@ def emit_product(sig, prog, feats, sh):
             "  }",
             "}",
         ]
-        return "\n".join(F) + "\n\n" + "\n".join(B) + "\n\n" + "\n".join(RF) + "\n\n" + "\n".join(RS) + "\n", lo
-    return "\n".join(F) + "\n\n" + "\n".join(B) + "\n", lo
+        # S130: the same fused kernel on compact channels (GenericLayer::lin_compact, certified at load from exact
+        # zeros): C = the kept channels (angular first, a multiple of 4 with zero-weight padding), blockDim = C rounded
+        # up to 32. Threads c < n_ang run the full program with x_lm read at c < w_l of degree l's compact buffer (zero
+        # beyond: an exactly zero projection column), the others the S127 scalar program (their x1..x15 are exactly
+        # zero). Each branch recomputes its forward values after the readout barrier; dm_l is written at the angular
+        # thread's columns (the pad columns stay zero from allocation).
+        cloads = cload_lines("C")
+        RC = [
+            "template <int MAX_B, int MIN_BLK>",
+            f"__global__ void __launch_bounds__(MAX_B, MIN_BLK) gprod_ro1c_fused_{sig}(",
+            "    int N, int C, int n_ang, int wl1, int wl2, int wl3, const int* __restrict__ pos, " +
+            _ptr_args("m", range(4)) + ",",
+            "    const float* __restrict__ D, const float* __restrict__ w, int64_t w_stride, const int* __restrict__ sp,",
+            "    const float* __restrict__ sc_skip16, const float* __restrict__ ro_W1, const float* __restrict__ ro_b1,",
+            "    const float* __restrict__ ro_W2, float ro_act_c, float* __restrict__ d_hidden16,",
+            f"    double* __restrict__ out_energy, {_ptr_args('dm', range(4), const=False)}, float* __restrict__ dD) {{",
+            "  const int a = blockIdx.x, c = threadIdx.x;",
+            "  if (a >= N) return;",
+            "  const float s = D ? 1.0f / (D[a] + 1.0f) : 1.0f;",
+            "  const float* wr = w + (int64_t)sp[a] * w_stride + c;",
+            "  float y0 = 0.0f;",
+            "  if (c < n_ang) {",
+        ] + cloads
+        for i in used:
+            _ssa(RC, i, prog.nodes[i])
+        wloads(RC, feats)
+        for b, f in enumerate(feats):
+            RC += [f"    y0 = fmaf(w{b}, {_expr(u)}, y0);" for _, u in sorted((f or {}).items()) if u is not None]
+        RC += ["  } else if (c < C) {", "    const float x0 = __ldg(m0 + (int64_t)a * C + c) * s;"]
+        for i in used_s:
+            _ssa(RC, i, ops_s[i])
+        wloads(RC, feats_s)
+        for b, f in enumerate(feats_s):
+            RC += [f"    y0 = fmaf(w{b}, {_expr(u)}, y0);" for _, u in sorted(f.items())]
+        RC.append("  }")
+        RC += [ln.replace("const int n_chunks = C >> 4;", "const int n_chunks = (int)(blockDim.x >> 4);")
+               for ln in ro_block]
+        RC += ["  float dot = 0.0f;", "  if (c < n_ang) {"] + cloads
+        for i in used:
+            _ssa(RC, i, prog.nodes[i])
+        wloads(RC, feats)
+        adj_c = adjoint(RC, full_ops, used, feats)
+        for l in range(4):
+            for m in range(2 * l + 1):
+                i = l * l + m
+                dx = adj_c.get(-1 - i, "0.0f")
+                RC.append(f"    dot = fmaf({dx}, x{i}, dot);")
+                RC.append(f"    dm0[(int64_t)a * C + c] = {dx} * s;" if l == 0 else
+                          f"    if (p{l} >= 0) dm{l}[((int64_t)a * {2 * l + 1} + {m}) * wl{l} + p{l}] = {dx} * s;")
+        RC += ["  } else if (c < C) {", "    const float x0 = __ldg(m0 + (int64_t)a * C + c) * s;"]
+        for i in used_s:
+            _ssa(RC, i, ops_s[i])
+        wloads(RC, feats_s)
+        dx0_c = adjoint(RC, ops_s, used_s, feats_s).get(-1, "0.0f")
+        RC += [f"    dm0[(int64_t)a * C + c] = {dx0_c} * s;", f"    dot = {dx0_c} * x0;"]
+        RC += [
+            "  }",
+            "  if (dD) {",
+            "    #pragma unroll",
+            "    for (int off = 16; off > 0; off >>= 1) dot += __shfl_xor_sync(0xffffffffu, dot, off);",
+            "    __shared__ float red[16];",
+            "    if ((c & 31) == 0) red[c >> 5] = dot;",
+            "    __syncthreads();",
+            "    if (c == 0) {",
+            "      float total = 0.0f;",
+            "      const int nw = (int)(blockDim.x >> 5);",
+            "      for (int w_i = 0; w_i < nw; ++w_i) total += red[w_i];",
+            "      atomicAdd(dD + a, -s * total);",
+            "    }",
+            "  }",
+            "}",
+        ]
+        return ("\n".join(F) + "\n\n" + "\n".join(B) + "\n\n" + "\n".join(RF) + "\n\n" + "\n".join(RS) + "\n\n" +
+                "\n".join(RC) + "\n\n" + compact_src, lo)
+    return "\n".join(F) + "\n\n" + "\n".join(B) + "\n\n" + compact_src, lo
 
 
 def _scalar_prune(prog, feats):
@@ -1601,7 +1915,22 @@ void launch_conv_bwd(int lx, cudaStream_t st, int N, int C, int S, int I, const 
                                  (int)dvec_assign);
     } else if (lx == 1) {
         if (prune) {
-            LOUP_LAUNCH_BWD_L1(gconv_bwd_L1s, kGconvBwdL1sQS)
+            // S135: the sender-owned kernel for C = 128 / 256 (LOUP_SENDER_BWD=0: the receiver-owned one)
+            static const bool sender = [] {
+                const char* e = std::getenv("LOUP_SENDER_BWD");
+                return !(e && e[0] == '0');
+            }();
+            if (sender && (C == 128 || C == 256)) {
+                auto pick = [&](auto f_p, auto f_n) { return preloc ? f_p : f_n; };
+                auto fn = (C == 128) ? (want_dx ? pick(gconv_bwd_L1sr<4, true, true>, gconv_bwd_L1sr<4, true, false>)
+                                                : pick(gconv_bwd_L1sr<4, false, true>, gconv_bwd_L1sr<4, false, false>))
+                                     : (want_dx ? pick(gconv_bwd_L1sr<8, true, true>, gconv_bwd_L1sr<8, true, false>)
+                                                : pick(gconv_bwd_L1sr<8, false, true>, gconv_bwd_L1sr<8, false, false>));
+                fn<<<N, 128, 0, st>>>(N, S, I, sg, perm, psym, rp, snd, vl, act_slab, act_t_sx, sp, packed, dens,
+                                      bias_shift, x[0], x[1], dmid[0], dD, dx[0], dx[1], edge_dvec, (int)dvec_assign);
+            } else {
+                LOUP_LAUNCH_BWD_L1(gconv_bwd_L1s, kGconvBwdL1sQS)
+            }
         } else {
             LOUP_LAUNCH_BWD_L1(gconv_bwd_L1, 44)
         }
@@ -1668,6 +1997,49 @@ void launch_prod_ro1_fused(const GProdKernels* k, cudaStream_t st, int N, int C,
     const void* fn = scalar_only ? ((C <= 128) ? k->ro1s_128 : (C <= 256) ? k->ro1s_256 : k->ro1s_512)
                                  : ((C <= 128) ? k->ro1_128 : (C <= 256) ? k->ro1_256 : k->ro1_512);
     check_cuda(cudaLaunchKernel(fn, dim3(N), dim3(C), args, 0, st));
+}
+
+void launch_prod_ro1c_fused(const GProdKernels* k, cudaStream_t st, int N, int C, int n_ang, const int* wl,
+                            const int* pos, float* const* m, const float* D, const float* w, int64_t w_stride,
+                            const int* sp, const float* sc_skip16, const float* ro_W1, const float* ro_b1,
+                            const float* ro_W2, float ro_act_c, float* d_hidden16, double* out_energy, float* const* dm,
+                            float* dD) {
+    // S130: compact channels (C kept, the first n_ang angular; wl[l] = degree l's compact width, pos the angular
+    // channels' columns), blockDim = C rounded up to 32
+    int w1 = wl[1], w2 = wl[2], w3 = wl[3];
+    void* args[] = {&N,           &C,           &n_ang,       &w1,          &w2,          &w3,
+                    (void*)&pos,  (void*)&m[0], (void*)&m[1], (void*)&m[2], (void*)&m[3], &D,
+                    &w,           &w_stride,    &sp,          &sc_skip16,   &ro_W1,       &ro_b1,
+                    &ro_W2,       &ro_act_c,    &d_hidden16,  &out_energy,  (void*)&dm[0], (void*)&dm[1],
+                    (void*)&dm[2], (void*)&dm[3], &dD};
+    const int blk = (C + 31) / 32 * 32;
+    const void* fn = (blk <= 128) ? k->ro1c_128 : (blk <= 256) ? k->ro1c_256 : k->ro1c_512;
+    check_cuda(cudaLaunchKernel(fn, dim3(N), dim3(blk), args, 0, st));
+}
+
+void launch_prod_c(const GProdKernels* k, bool backward, cudaStream_t st, int N, int C, int kept, int n_ang,
+                   const int* wl, const int* order, const int* pos, float* const* m, const float* D, const float* w,
+                   int64_t w_stride, const int* sp, float* const* y_or_g, float* const* dm, float* dD,
+                   const float* ro_w, double* energy) {
+    // S132: compact channels of a non-terminal layer (kept / n_ang / wl / order / pos from GenericLayer::lin_compact)
+    int w0 = wl[0], w1 = wl[1], w2 = wl[2], w3 = wl[3];
+    std::vector<void*> args = {&N, &C, &kept, &n_ang, &w0, &w1, &w2, &w3, (void*)&order, (void*)&pos};
+    for (int l = 0; l < 4; ++l) args.push_back((void*)&m[l]);
+    args.push_back(&D);
+    args.push_back(&w);
+    args.push_back(&w_stride);
+    args.push_back(&sp);
+    for (int l = 0; l <= k->lmax_out; ++l) args.push_back((void*)&y_or_g[l]);
+    if (backward) {
+        for (int l = 0; l < 4; ++l) args.push_back((void*)&dm[l]);
+        args.push_back(&dD);
+        args.push_back(&ro_w);
+    } else {
+        args.push_back(&ro_w);
+        args.push_back(&energy);
+    }
+    const int blk = (C % 128 == 0) ? 128 : 32;
+    check_cuda(cudaLaunchKernel(backward ? k->bwdc : k->fwdc, dim3(N, C / blk), dim3(blk), args.data(), 0, st));
 }
 
 }  // namespace loup
@@ -1779,6 +2151,7 @@ def main():
             if lx == 1:  # S125: output degree 0 only (W_lin_1..3 exactly zero, GenericLayer::conv_prune)
                 conv_parts.append(emit_conv_fwd(1, l3s=(0,), name="gconv_fwd_L1s"))
                 conv_parts.append(emit_conv_bwd_lp(1, l3s=(0,), name="gconv_bwd_L1s", qs_name="kGconvBwdL1sQS"))
+                conv_parts.append(emit_conv_bwd_l1s_sender())  # S135
         cache["sh16"] = sh16_src
         cache["conv"] = conv_parts
         dirty_emit = True
@@ -1869,7 +2242,8 @@ def main():
         sh16_src,
         "struct GProdKernels { const char* sig; int lmax_out; int segments_w; const void* fwd; const void* bwd; "
         "const void* ro1_128; const void* ro1_256; const void* ro1_512; const void* ro1s_128; const void* ro1s_256; "
-        "const void* ro1s_512; };",
+        "const void* ro1s_512; const void* ro1c_128; const void* ro1c_256; const void* ro1c_512; const void* fwdc; "
+        "const void* bwdc; };",
         "",
         "namespace loup {",
         "const GProdKernels* find_gprod(const char* sig);",
@@ -1892,12 +2266,22 @@ def main():
         "                           const float* ro_W1, const float* ro_b1, const float* ro_W2, float ro_act_c,",
         "                           float* d_hidden16, double* out_energy, float* const* dm, float* dD,",
         "                           bool scalar_only = false);",
+        "void launch_prod_ro1c_fused(const GProdKernels* k, cudaStream_t st, int N, int C, int n_ang, const int* wl,",
+        "                            const int* pos, float* const* m, const float* D, const float* w, int64_t w_stride,",
+        "                            const int* sp, const float* sc_skip16, const float* ro_W1, const float* ro_b1,",
+        "                            const float* ro_W2, float ro_act_c, float* d_hidden16, double* out_energy,",
+        "                            float* const* dm, float* dD);",
+        "void launch_prod_c(const GProdKernels* k, bool backward, cudaStream_t st, int N, int C, int kept, int n_ang,",
+        "                   const int* wl, const int* order, const int* pos, float* const* m, const float* D,",
+        "                   const float* w, int64_t w_stride, const int* sp, float* const* y_or_g, float* const* dm,",
+        "                   float* dD, const float* ro_w = nullptr, double* energy = nullptr);",
         "}  // namespace loup",
     ]) + "\n"
 
     cu_parts = [
         "// Auto-generated by LoupMD/python/gen_generic.py. Do not edit.",
         '#include "generated_generic.cuh"',
+        "#include <cstdlib>",
         "#include <cstring>",
         "#include <stdexcept>",
         "#include <vector>",
@@ -1907,11 +2291,12 @@ def main():
     ]
     for sig, lo, segw in table:
         if lo == 0:
-            ro = ", ".join(f"(const void*)gprod_{v}_fused_{sig}<{c}, {b}>" for v in ("ro1", "ro1s")
+            ro = ", ".join(f"(const void*)gprod_{v}_fused_{sig}<{c}, {b}>" for v in ("ro1", "ro1s", "ro1c")
                            for c, b in ((128, 4), (256, 2), (512, 1)))
         else:
-            ro = ", ".join(["nullptr"] * 6)
-        cu_parts.append(f'    {{"{sig}", {lo}, {segw}, (const void*)gprod_fwd_{sig}, (const void*)gprod_bwd_{sig}, {ro}}},')
+            ro = ", ".join(["nullptr"] * 9)
+        cu_parts.append(f'    {{"{sig}", {lo}, {segw}, (const void*)gprod_fwd_{sig}, (const void*)gprod_bwd_{sig}, {ro}, '
+                        f'(const void*)gprod_fwdc_{sig}, (const void*)gprod_bwdc_{sig}}},')
     cu_parts.append("};")
     cu_parts.append(_LAUNCHERS_CPP)
     cu_text = "\n".join(cu_parts) + "\n"

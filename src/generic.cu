@@ -34,6 +34,14 @@ struct GenericLayer {
     // S125: W_lin_1..3 exactly zero (certified at load), so lin_1..3 are exactly zero: the pruned lx 1 conv kernels
     // (gconv_*_L1s, the output-degree-0 paths only) run, and the l >= 1 projections are skipped in both directions
     bool conv_prune = false;
+    // S130 / S132: compact live channels of a kind-1 layer (compact_layout, certified at load): lin_cols[l] are the
+    // compact projection widths (degree 0: the kept channels, angular first; degree l >= 1: only its live columns, d_pos
+    // mapping each angular position to its column there), n_ang the angular channels, kept the live ones; the terminal
+    // layer's fused product + readout kernel gprod_ro1c and a non-terminal layer's gprod_fwdc / bwdc (through d_order,
+    // compact position -> channel) run on them (LOUP_LIN_COMPACT=0: dense)
+    bool lin_compact = false;
+    int n_ang = 0, kept = 0;
+    int *d_order = nullptr, *d_pos = nullptr;
     int lin_cols[4] = {0, 0, 0, 0};
     int sc_has[3] = {0, 0, 0};
     SplineGrid grid{};
@@ -72,6 +80,17 @@ struct GenericLayer {
     std::vector<FoldTarget> fold[3];
     // S59 (layer 0): [S, lin_cols[0]] species table of the residual (embedding W_up[0] W_res[0]), or nullptr
     float* res0_table = nullptr;
+    // Long-range hidden fold (GenericModel::setup_lr_fold): hfold[l], degree l of hout is never formed: hout[l]
+    // aliases y[l] and dhout[l] aliases dy[l] (in the zero slab), and every consumer's weight (the next layer's W_up /
+    // W_sc, the long-range mixer and source) is composed at load with W_p[l] and the skips in between. x_extra /
+    // sc_extra: further terms of this layer's x[l] / skip sum, y_src[l] W from an earlier folded layer src (backward:
+    // dy_src[l] += dx[l] W^T / dhout[l] W^T).
+    bool hfold[3] = {false, false, false};
+    struct YTerm {
+        int src = 0;
+        float* W = nullptr;
+    };
+    std::vector<YTerm> x_extra[3], sc_extra[3];
 
     ~GenericLayer() {
         for (void* p : weights) cudaFree(p);
@@ -109,13 +128,14 @@ __device__ __forceinline__ float dsilu_f(float x) {
 
 // Nonlinear block: pre_l = lin_l * s + res_l (s = 1 / (beta D + alpha)), then the gate: out_0 = cs silu(pre_0[:C]),
 // out_l = cs_g sigmoid(pre_0[l C:(l+1) C]) * pre_l (l = 1..3). One block per atom, one thread per channel. With res0_sp,
-// res0 is the S59 [S, 4 C] species table and atom a reads row res0_sp[a] (no per-atom copy).
+// res0 is the S59 [S, 4 C] species table and atom a reads row res0_sp[a] (no per-atom copy). Degrees l with bit l of
+// `fused` set are skipped (their projection's epilogue wrote out_l: sgemm128_gate, forward).
 __global__ void gate_fwd_kernel(int N, int C, int lx, const float* __restrict__ D, float alpha, float beta, float cs,
                                 float cg, const float* __restrict__ lin0, const float* __restrict__ lin1,
                                 const float* __restrict__ lin2, const float* __restrict__ lin3,
                                 const float* __restrict__ res0, const int* __restrict__ res0_sp,
                                 const float* __restrict__ res1, const float* __restrict__ res2, float* __restrict__ o0,
-                                float* __restrict__ o1, float* __restrict__ o2, float* __restrict__ o3) {
+                                float* __restrict__ o1, float* __restrict__ o2, float* __restrict__ o3, unsigned fused) {
     const int a = blockIdx.x, c = threadIdx.x;
     if (a >= N) return;
     const float s = 1.0f / (D[a] * beta + alpha);
@@ -127,6 +147,7 @@ __global__ void gate_fwd_kernel(int N, int C, int lx, const float* __restrict__ 
     float* outs[3] = {o1, o2, o3};
     #pragma unroll
     for (int l = 1; l <= 3; ++l) {
+        if (fused >> l & 1u) continue;
         const float g = cg * sigmoid_f(pre0(l * C + c));
         const float* li = lins[l - 1];
         const float* re = (l <= lx) ? ress[l - 1] : nullptr;
@@ -139,7 +160,10 @@ __global__ void gate_fwd_kernel(int N, int C, int lx, const float* __restrict__ 
 }
 
 // Reverse of gate_fwd: dpre_l (the gradient of pre_l, also the gradient of res_l), dlin_l = dpre_l * s and
-// dD += sum dpre . lin * (-beta s^2) (one atomic per warp). res0 / res0_sp as in gate_fwd.
+// dD += sum dpre . lin * (-beta s^2) (one atomic per warp). res0 / res0_sp as in gate_fwd. Degrees l with bit l of
+// `fused` set are skipped (their W_2^T GEMM ran sgemm128_gate, which did their share). Degrees with bit l of `vform`
+// (residual-free, their forward fused: lin_l is never stored) pass the saved out_l = v as lin_l: with q = sum dgout v,
+// d pre_0[l C + c] = (1 - sigmoid) q and dD += -beta s q (the same terms; v = g (lin s)).
 __global__ void gate_bwd_kernel(int N, int C, int lx, const float* __restrict__ D, float alpha, float beta, float cs,
                                 float cg, const float* __restrict__ lin0, const float* __restrict__ lin1,
                                 const float* __restrict__ lin2, const float* __restrict__ lin3,
@@ -148,14 +172,15 @@ __global__ void gate_bwd_kernel(int N, int C, int lx, const float* __restrict__ 
                                 const float* __restrict__ g0, const float* __restrict__ g1, const float* __restrict__ g2,
                                 const float* __restrict__ g3, float* __restrict__ dp0, float* __restrict__ dp1,
                                 float* __restrict__ dp2, float* __restrict__ dl0, float* __restrict__ dl1,
-                                float* __restrict__ dl2, float* __restrict__ dl3, float* __restrict__ dD) {
+                                float* __restrict__ dl2, float* __restrict__ dl3, float* __restrict__ dD,
+                                unsigned fused, unsigned vform) {
     const int a = blockIdx.x, c = threadIdx.x;
     if (a >= N) return;
     const float s = 1.0f / (D[a] * beta + alpha);
     const int64_t r0 = (int64_t)a * 4 * C, q0 = res0_sp ? (int64_t)res0_sp[a] * 4 * C : r0;
     auto pre0 = [&](int col) { return lin0[r0 + col] * s + (res0 ? res0[q0 + col] : 0.0f); };
-    float acc = 0.0f;  // sum dpre * lin
-    {
+    float acc = 0.0f, accq = 0.0f;  // sum dpre * lin; sum dgout * v (vform degrees)
+    if (!(fused & 1u)) {
         const float p = pre0(c);
         const float d = g0[(int64_t)a * C + c] * cs * dsilu_f(p);
         if (dp0) dp0[r0 + c] = d;
@@ -169,31 +194,48 @@ __global__ void gate_bwd_kernel(int N, int C, int lx, const float* __restrict__ 
     float* dls[3] = {dl1, dl2, dl3};
     #pragma unroll
     for (int l = 1; l <= 3; ++l) {
+        if (fused >> l & 1u) continue;
         const float gp = pre0(l * C + c);
         const float sg = sigmoid_f(gp);
         const float g = cg * sg;
         const float* li = lins[l - 1];
         const float* re = (l <= lx) ? ress[l - 1] : nullptr;
         float* dpl = (l <= lx && l <= 2) ? dps[l - 1] : nullptr;
-        float dg = 0.0f;
-        for (int m = 0; m < 2 * l + 1; ++m) {
-            const int64_t idx = ((int64_t)a * (2 * l + 1) + m) * C + c;
-            const float p = li[idx] * s + (re ? re[idx] : 0.0f);
-            const float go = gs[l - 1][idx];
-            dg = fmaf(go, p, dg);
-            const float d = go * g;
-            if (dpl) dpl[idx] = d;
-            dls[l - 1][idx] = d * s;
-            acc = fmaf(d, li[idx], acc);
+        float dgp;
+        if (vform >> l & 1u) {
+            float q = 0.0f;
+            for (int m = 0; m < 2 * l + 1; ++m) {
+                const int64_t idx = ((int64_t)a * (2 * l + 1) + m) * C + c;
+                const float go = gs[l - 1][idx];
+                q = fmaf(go, li[idx], q);
+                dls[l - 1][idx] = go * g * s;
+            }
+            dgp = (1.0f - sg) * q;
+            accq += q;
+        } else {
+            float dg = 0.0f;
+            for (int m = 0; m < 2 * l + 1; ++m) {
+                const int64_t idx = ((int64_t)a * (2 * l + 1) + m) * C + c;
+                const float p = li[idx] * s + (re ? re[idx] : 0.0f);
+                const float go = gs[l - 1][idx];
+                dg = fmaf(go, p, dg);
+                const float d = go * g;
+                if (dpl) dpl[idx] = d;
+                dls[l - 1][idx] = d * s;
+                acc = fmaf(d, li[idx], acc);
+            }
+            dgp = dg * cg * sg * (1.0f - sg);
         }
-        const float dgp = dg * cg * sg * (1.0f - sg);
         if (dp0) dp0[r0 + l * C + c] = dgp;
         dl0[r0 + l * C + c] = dgp * s;
         acc = fmaf(dgp, lin0[r0 + l * C + c], acc);
     }
     #pragma unroll
-    for (int off = 16; off > 0; off >>= 1) acc += __shfl_xor_sync(0xffffffffu, acc, off);
-    if ((c & 31) == 0) atomicAdd(dD + a, -beta * s * s * acc);
+    for (int off = 16; off > 0; off >>= 1) {
+        acc += __shfl_xor_sync(0xffffffffu, acc, off);
+        accq += __shfl_xor_sync(0xffffffffu, accq, off);
+    }
+    if ((c & 31) == 0) atomicAdd(dD + a, -beta * s * s * acc - beta * s * accq);
 }
 
 // E += sum_a c[species[a]] (S73: a folded linear readout's share of the species-only layer-0 skip).
@@ -345,6 +387,12 @@ __global__ void assemble_forces_kernel(const int* __restrict__ E_dev, int S, con
     }
 }
 
+// S131: layer 0's table rows hold the J - 1 radial columns even ones first, then the odd ones (column j at
+// first_col_pos(j, Jh), Jh = ceil((J - 1) / 2)), then the density column if kept: first_bwd_edge_kernel's lanes read
+// columns 2 lane and 2 lane + 1, now one contiguous 512 B run per load (16 sectors) instead of two loads that each
+// touch the same 32 sectors; first_fwd / first_bwd still read two contiguous runs per warp.
+__device__ __forceinline__ int first_col_pos(int j, int Jh) { return (j & 1) ? Jh + (j >> 1) : (j >> 1); }
+
 // Layer 0 (input = species embedding): S0_l[a][m][s (J-1) + j] = sum over the active edges of receiver a whose sender
 // has species s of col_j(r) Y_lm, with col the radial chain's columns [h c, c] (j < J - 1); column J - 1 is the edge
 // density, summed into D. One block per receiver, one thread per column j < J - 1 (S105: the density column is summed
@@ -364,7 +412,7 @@ __global__ void __launch_bounds__(256) first_fwd_kernel(
     __shared__ __align__(16) float s_sh[32 * 16];
     const int a = blockIdx.x, tid = threadIdx.x;
     if (a >= N) return;
-    const int Jp = J - 1, K = S * Jp, sa = species[a];
+    const int Jp = J - 1, Jh = (Jp + 1) >> 1, K = S * Jp, sa = species[a];
     const int e_end = row_ptr[a + 1];
     int e_cur = row_ptr[a];
     float dsum = 0.0f;  // S105: warp 0 sums the density column in edge order (the order of the former density thread)
@@ -410,7 +458,7 @@ __global__ void __launch_bounds__(256) first_fwd_kernel(
             }
             if (tid < Jp) {
                 for (int k = 0; k < cnt; ++k) {
-                    const float4 cf = __ldg(table + ((int64_t)pr * I + s_iv[k]) * Jt + tid);
+                    const float4 cf = __ldg(table + ((int64_t)pr * I + s_iv[k]) * Jt + first_col_pos(tid, Jh));
                     const float t = s_t[k];
                     const float v = fmaf(t, fmaf(t, fmaf(t, cf.w, cf.z), cf.y), cf.x);
                     const float* sh = s_sh + k * 16;
@@ -460,7 +508,7 @@ __global__ void __launch_bounds__(256) first_bwd_kernel(
     extern __shared__ float4 s_G4[];
     const int a = blockIdx.x, tid = threadIdx.x, wid = tid >> 5, lane = tid & 31, n_warps = blockDim.x >> 5;
     if (a >= N) return;
-    const int Jp = J - 1, K = S * Jp, sa = species[a];
+    const int Jp = J - 1, Jh = (Jp + 1) >> 1, K = S * Jp, sa = species[a];
     const float dDa = dD ? __ldg(dD + a) : 0.0f;
     const int eb = row_ptr[a], ee = row_ptr[a + 1];
     if (STAGE_G) {
@@ -497,7 +545,7 @@ __global__ void __launch_bounds__(256) first_bwd_kernel(
         for (int m = 0; m < 16; ++m) dY[m] = 0.0f;
         float er = 0.0f;
         for (int j = hl; j < Jt; j += 16) {  // S128: j == Jp (the density) only when the table keeps it
-            const float4 cf = __ldg(table + ((int64_t)pr * I + iv) * Jt + j);
+            const float4 cf = __ldg(table + ((int64_t)pr * I + iv) * Jt + (j < Jp ? first_col_pos(j, Jh) : j));
             const float v = fmaf(t, fmaf(t, fmaf(t, cf.w, cf.z), cf.y), cf.x);
             const float dv = fmaf(t, fmaf(t, 3.0f * cf.w, 2.0f * cf.z), cf.y) * sxi;
             if (j == Jp) {
@@ -591,7 +639,7 @@ __global__ void __launch_bounds__(128, COLS == 2 ? LOUP_FIRST_BWD_EDGE_MINB2 : 0
     const int E = *E_dev;
     const int tid = threadIdx.x, warp = tid >> 5, warp_id = blockIdx.x * 4 + warp, lane = tid & 31;
     const int start = warp_id * CHUNK;
-    const int Jp = J - 1;
+    const int Jp = J - 1, Jh = (Jp + 1) >> 1;
 
     __shared__ __align__(16) float s_edge[4][CHUNK][20];
     double v00 = 0.0, v01 = 0.0, v02 = 0.0, v11 = 0.0, v12 = 0.0, v22 = 0.0;
@@ -679,7 +727,7 @@ __global__ void __launch_bounds__(128, COLS == 2 ? LOUP_FIRST_BWD_EDGE_MINB2 : 0
             for (int c = 0; c < COLS; ++c) {
                 const int col = (COLS == 2) ? (2 * lane + c) : (c * 32 + lane);
                 if (col < Jp) {
-                    const float4 cf = __ldg(tb + col);
+                    const float4 cf = __ldg(tb + first_col_pos(col, Jh));
                     pa[c] = fmaf(t, fmaf(t, fmaf(t, cf.w, cf.z), cf.y), cf.x);
                     pd[c] = fmaf(t, fmaf(t, 3.0f * cf.w, 2.0f * cf.z), cf.y) * sxi;
                 } else {
@@ -822,12 +870,13 @@ __global__ void zero_edge_kernel(const int* __restrict__ E_dev, float* __restric
     if (i < 3 * *E_dev) p[i] = 0.0f;
 }
 
-// C[M, N] = A[M, K] B[K, N] in double, one thread per output: load-time weight composition (S57 / S59).
+// C[M, N] = A[M, K] B[K, N] (+ D[M, N]) in double, one thread per output: load-time weight composition (S57 / S59 /
+// the long-range hidden fold).
 __global__ void dmm_kernel(int M, int N, int K, const double* __restrict__ A, const double* __restrict__ B,
-                           double* __restrict__ C) {
+                           const double* __restrict__ D, double* __restrict__ C) {
     const int n = blockIdx.x * blockDim.x + threadIdx.x, m = blockIdx.y;
     if (n >= N || m >= M) return;
-    double s = 0.0;
+    double s = D ? D[(size_t)m * N + n] : 0.0;
     for (int k = 0; k < K; ++k) s = fma(A[(size_t)m * K + k], B[(size_t)k * N + n], s);
     C[(size_t)m * N + n] = s;
 }
@@ -853,13 +902,23 @@ struct DevCompose {
         CUDA_CHECK_THROW(cudaMemcpy(q, d.data(), d.size() * sizeof(double), cudaMemcpyHostToDevice));
         return q;
     }
-    const double* mm(const double* A, int M, int K, const double* B, int N) {
-        double* C = nullptr;
-        CUDA_CHECK_THROW(cudaMalloc(&C, (size_t)M * N * sizeof(double)));
-        tmp.push_back(C);
-        dmm_kernel<<<dim3((unsigned)((N + 127) / 128), (unsigned)M), 128>>>(M, N, K, A, B, C);
+    // C = A[M, K] B[K, N] (+ D[M, N]); into `out` [M, N] if given, else a new temporary
+    const double* mm(const double* A, int M, int K, const double* B, int N, const double* D = nullptr,
+                     double* out = nullptr) {
+        double* C = out;
+        if (!C) {
+            CUDA_CHECK_THROW(cudaMalloc(&C, (size_t)M * N * sizeof(double)));
+            tmp.push_back(C);
+        }
+        dmm_kernel<<<dim3((unsigned)((N + 127) / 128), (unsigned)M), 128>>>(M, N, K, A, B, D, C);
         CUDA_CHECK_THROW(cudaGetLastError());
         return C;
+    }
+    double* alloc(int64_t n) {
+        double* q = nullptr;
+        CUDA_CHECK_THROW(cudaMalloc(&q, std::max<int64_t>(n, 1) * sizeof(double)));
+        tmp.push_back(q);
+        return q;
     }
     // Per species: C[s] = A[s or 0] B[s or 0], s < max(nsA, nsB) (each operand either one block or one per species).
     const double* mm_s(const double* A, int nsA, int M, int K, const double* B, int nsB, int N) {
@@ -869,7 +928,7 @@ struct DevCompose {
         tmp.push_back(C);
         for (int s = 0; s < ns; ++s)
             dmm_kernel<<<dim3((unsigned)((N + 127) / 128), (unsigned)M), 128>>>(
-                M, N, K, A + (nsA > 1 ? (size_t)s * M * K : 0), B + (nsB > 1 ? (size_t)s * K * N : 0),
+                M, N, K, A + (nsA > 1 ? (size_t)s * M * K : 0), B + (nsB > 1 ? (size_t)s * K * N : 0), nullptr,
                 C + (size_t)s * M * N);
         CUDA_CHECK_THROW(cudaGetLastError());
         return C;
@@ -901,6 +960,63 @@ bool device_is_cc120() {
     CUDA_CHECK_THROW(cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor, dev));
     CUDA_CHECK_THROW(cudaDeviceGetAttribute(&minor, cudaDevAttrComputeCapabilityMinor, dev));
     return major == 12 && minor == 0;
+}
+
+// S130 / S132: compact live channels of a kind-1 layer (the projections feed the product directly), certified from exact
+// zeros of the loaded float32 weights. Channel c is dead when its product weights (every species) or every projection
+// column (C0_l or W_lin_l [:, c]) are zero, or, on the fused terminal path, its folded readout row; it is angular when
+// some projection column with l >= 1 is nonzero, else scalar-only (x1..x15 exactly zero: the S127 program). The
+// positions hold the angular channels, then the scalar-only ones, then (all_channels: non-terminal layers, whose dead
+// channels write zero outputs) the dead ones, each group in channel order. Degree 0's compact projection has a column
+// per kept position; degree l >= 1 keeps only its live columns (pos: an angular position's column there, or -1). The
+// bundle holds the system's species only, so the sets depend on them: MPtrj-2022.9 on SrTiO3 keeps 205 / 1 / 2 / 12 of
+// 256 in layer 1 and 251 / 190 / 138 / 123 in layer 0 (NbCl5: 173 and 244 kept). Widths are padded to multiples of 8
+// with zero columns (against 4: MPtrj-2022.9 2.0% / 0.9% faster per step on SrTiO3 / NbCl5, MP-0 medium SrTiO3 0.35%
+// slower). False when the degree-1..3 projection work does not shrink by at least a quarter (the dense kernels stay).
+struct CompactLayout {
+    std::vector<int> order;  // compact position -> channel: the kept channels (then the dead ones with all_channels)
+    std::vector<int> pos;    // [3][n_ang]: angular position i's column in degree l's compact projection, or -1
+    int kept = 0, n_ang = 0;
+    int width[4] = {0, 0, 0, 0};
+};
+bool compact_layout(int C, const std::vector<float>* proj, const int* K, const std::vector<float>& prodw, int Sp,
+                    int segw, const std::vector<float>* roW1, int H, bool all_channels, CompactLayout& out) {
+    std::vector<unsigned char> nz[4];
+    for (int l = 0; l < 4; ++l) {
+        nz[l].assign(C, 0);
+        for (int64_t k = 0; k < K[l]; ++k)
+            for (int c = 0; c < C; ++c)
+                if (proj[l][k * C + c] != 0.0f) nz[l][c] = 1;
+    }
+    std::vector<int> ang, sca, dead;
+    for (int c = 0; c < C; ++c) {
+        bool pw = false, ro = roW1 == nullptr;
+        for (int64_t r = 0; r < (int64_t)Sp * segw && !pw; ++r) pw = prodw[r * C + c] != 0.0f;
+        for (int j = 0; j < H && !ro; ++j) ro = (*roW1)[(int64_t)c * H + j] != 0.0f;
+        const bool angular = nz[1][c] || nz[2][c] || nz[3][c];
+        if (!pw || !ro || !(nz[0][c] || angular)) {  // dead: its product output is zero or never reaches the energy
+            dead.push_back(c);
+            continue;
+        }
+        (angular ? ang : sca).push_back(c);
+    }
+    out.order = ang;
+    out.order.insert(out.order.end(), sca.begin(), sca.end());
+    out.kept = (int)out.order.size();
+    out.n_ang = (int)ang.size();
+    if (all_channels) out.order.insert(out.order.end(), dead.begin(), dead.end());
+    auto pad8 = [](int v) { return std::max(8, (v + 7) / 8 * 8); };
+    out.width[0] = pad8(out.kept);
+    out.pos.assign((size_t)3 * out.n_ang, -1);
+    int work = 0;
+    for (int l = 1; l < 4; ++l) {
+        int w = 0;
+        for (int i = 0; i < out.n_ang; ++i)
+            if (nz[l][out.order[i]]) out.pos[(size_t)(l - 1) * out.n_ang + i] = w++;
+        out.width[l] = pad8(w);
+        work += (2 * l + 1) * out.width[l];
+    }
+    return 4 * work <= 3 * 15 * C;
 }
 
 }  // namespace
@@ -1144,7 +1260,9 @@ void GenericModel::load(const Bundle& b) {
                 const float4* src = reinterpret_cast<const float4*>(tab.data());
                 std::vector<float4> host(PI * L->Jt);
                 for (size_t pi = 0; pi < PI; ++pi) {
-                    memcpy(&host[pi * L->Jt], &src[pi * L->Q1], (size_t)(L->J - 1) * sizeof(float4));
+                    const int Jp = L->J - 1, Jh = (Jp + 1) / 2;  // S131: even columns first, then the odd ones
+                    for (int j = 0; j < Jp; ++j)
+                        host[pi * L->Jt + ((j & 1) ? Jh + (j >> 1) : (j >> 1))] = src[pi * L->Q1 + j];
                     if (L->Jt == L->J) host[pi * L->Jt + L->J - 1] = src[pi * L->Q1 + L->Q1 - 1];
                 }
                 L->table = upload(W, host);
@@ -1249,8 +1367,9 @@ void GenericModel::load(const Bundle& b) {
             L->prod_species = mi("prod_species");
             L->prod_segw = mi("prod_segments_w");
             if (L->prod_segw != L->prod->segments_w) throw std::runtime_error("generic bundle: product segments mismatch");
-            L->prod_w = upload(W, b.f32(p + "prod_w", {L->prod_species ? S_ : 1, L->prod_segw, L->C_msg}));
-            std::vector<float> h_wp0;
+            const int Sp = L->prod_species ? S_ : 1;
+            std::vector<float> h_prodw = b.f32(p + "prod_w", {Sp, L->prod_segw, L->C_msg});
+            std::vector<float> h_wp0, h_roW1;
             for (int l = 0; l <= L->lmax_out; ++l) {
                 auto wp = b.f32(p + "W_p_" + std::to_string(l), {L->C_out, L->C_out});
                 if (L->ro_folded && l == 0) h_wp0 = std::move(wp);
@@ -1263,7 +1382,7 @@ void GenericModel::load(const Bundle& b) {
                 L->ro_H = mi("ro_H");
                 const auto row1 = b.f32(p + "ro_W1", {L->C_out, L->ro_H});
                 if (L->ro_folded) {
-                    L->ro_W1 = upload(W, fold_mat(h_wp0.data(), L->C_out, L->C_out, row1.data(), L->ro_H));
+                    h_roW1 = fold_mat(h_wp0.data(), L->C_out, L->C_out, row1.data(), L->ro_H);
                     if (L->sc_has[0]) {
                         const int Ss = L->sc_species ? S_ : 1;
                         std::vector<float> fsc((size_t)Ss * L->C_in * L->ro_H);
@@ -1275,7 +1394,7 @@ void GenericModel::load(const Bundle& b) {
                         L->ro_W1_sc = upload(W, fsc);
                     }
                 } else {
-                    L->ro_W1 = upload(W, row1);
+                    h_roW1 = row1;
                 }
                 L->ro_b1 = upload(W, b.f32(p + "ro_b1", {L->ro_H}));
                 L->ro_W2 = upload(W, b.f32(p + "ro_W2", {L->ro_H}));
@@ -1287,6 +1406,67 @@ void GenericModel::load(const Bundle& b) {
             } else if (L->readout != -1) {
                 throw std::runtime_error("generic bundle: unknown readout kind");
             }
+            // S130 / S132: compact live channels of a kind-1 layer: the terminal one on the fused product + readout path
+            // (gprod_ro1c; the dead channels dropped) or a non-terminal one (gprod_fwdc / bwdc: outputs written in the
+            // dense layout, so the consumers keep their weights). The projection weights (C0 for layer 0, else W_lin)
+            // were uploaded dense above and are replaced by their compact columns.
+            const char* lc = std::getenv("LOUP_LIN_COMPACT");
+            const bool fused = L->ro_folded && L->readout == 1 && L->ro_H == 16 && L->C_out <= 512;
+            const bool have_kernels = fused ? (L->prod->ro1c_128 != nullptr && !L->first_hidden)
+                                            : (!L->ro_folded && L->prod->fwdc != nullptr);
+            CompactLayout cl;
+            if (!(lc && lc[0] == '0') && L->kind == 1 && !L->conv_prune && have_kernels) {
+                const int C = L->C_msg;
+                std::vector<float> proj[4];
+                int K[4];
+                for (int l = 0; l < 4; ++l) {
+                    K[l] = L->first_hidden ? L->K0 : L->n_l3[l] * L->C_x;
+                    proj[l] = L->first_hidden ? c0_pad[l] : b.f32(p + "W_lin_" + std::to_string(l), {K[l], C});
+                }
+                if (compact_layout(C, proj, K, h_prodw, Sp, L->prod_segw, fused ? &h_roW1 : nullptr, L->ro_H, !fused,
+                                   cl)) {
+                    const int kept = cl.kept, W0 = cl.width[0], ncols = fused ? W0 : C, npw = fused ? kept : C;
+                    std::vector<float> pw((size_t)Sp * L->prod_segw * ncols, 0.0f);
+                    for (size_t r = 0; r < (size_t)Sp * L->prod_segw; ++r)
+                        for (int j = 0; j < npw; ++j) pw[r * ncols + j] = h_prodw[r * C + cl.order[j]];
+                    h_prodw.swap(pw);
+                    if (fused) {
+                        // readout rows up to the kernel's blockDim (W0 rounded up to 32), zero beyond the kept channels
+                        std::vector<float> rw((size_t)((W0 + 31) / 32 * 32) * L->ro_H, 0.0f);
+                        for (int j = 0; j < kept; ++j)
+                            memcpy(&rw[(size_t)j * L->ro_H], &h_roW1[(size_t)cl.order[j] * L->ro_H],
+                                   L->ro_H * sizeof(float));
+                        h_roW1.swap(rw);
+                    } else {
+                        L->d_order = upload(W, cl.order);
+                    }
+                    L->d_pos = upload(W, cl.pos);
+                    for (int l = 0; l < 4; ++l) {
+                        const int Wl = cl.width[l];
+                        std::vector<float> wc((size_t)K[l] * Wl, 0.0f);
+                        for (int j = 0; j < (l == 0 ? kept : cl.n_ang); ++j) {
+                            const int col = l == 0 ? j : cl.pos[(size_t)(l - 1) * cl.n_ang + j];
+                            if (col < 0) continue;
+                            for (int64_t k = 0; k < K[l]; ++k) wc[k * Wl + col] = proj[l][k * C + cl.order[j]];
+                        }
+                        float*& dst = L->first_hidden ? L->C0[l] : L->W_lin[l];
+                        auto it = std::find(W.begin(), W.end(), (void*)dst);
+                        if (it != W.end()) W.erase(it);
+                        CUDA_CHECK_THROW(cudaFree(dst));
+                        dst = upload(W, wc);
+                        L->lin_cols[l] = Wl;
+                    }
+                    L->n_ang = cl.n_ang;
+                    L->kept = kept;
+                    L->lin_compact = true;
+                    if (std::getenv("LOUP_DEBUG_COMPACT"))
+                        fprintf(stderr, "compact L%d (%s): kept %d of %d (angular %d), widths %d / %d / %d / %d\n", t,
+                                fused ? "fused readout" : "dense outputs", kept, C, cl.n_ang, cl.width[0], cl.width[1],
+                                cl.width[2], cl.width[3]);
+                }
+            }
+            L->prod_w = upload(W, h_prodw);
+            if (!h_roW1.empty()) L->ro_W1 = upload(W, h_roW1);
         }
     }
     if (layers_.back()->readout < 0) throw std::runtime_error("generic bundle: the last layer has no readout");
@@ -1318,6 +1498,7 @@ void GenericModel::load(const Bundle& b) {
     conv_tune_env_ = -1;
     if (const char* e = std::getenv("LOUP_CONV_TUNE"); e && (e[0] == '0' || e[0] == '1')) conv_tune_env_ = e[0] - '0';
     setup_chain_fold(b);
+    setup_lr_fold(b);
     // S97: whether a pass reads layer 0's input rows h_in[0] (the species embedding gathered per atom): the x products
     // of a hidden-table layer 0 without the S59 residual table, the skip / readout terms of an unfolded layer 0, and
     // the S57 fold's skip terms without the S59 tables (Wh). With the fold and the tables every consumer reads a
@@ -1453,6 +1634,99 @@ void GenericModel::setup_chain_fold(const Bundle& b) {
     for (int t = 0; t < nL - 1; ++t)
         for (int l = 0; l < 3; ++l) layers_[t]->fold[l] = std::move(out[t][l]);
     chain_fold_ = true;
+}
+
+// Long-range hidden fold. The POLAR models form every layer's hout (S57's chain fold excludes them) because the long-range
+// block reads it: the multipole sources (qsrc += hout_t[l] src_t[l]), the feature mixer (fm[l] += hout_t[l] mix_t[l]),
+// the Fukui MLP (the last layer's l = 0) and the electron energy (the last layer's l <= le_lmax()). The sources and the
+// mixer are linear, as are the next layer's linear_up and skip. For a degree l >= 1, a prefix of k layers whose
+// degree-l hout only those linear maps read (layer 0 has no skip into l; the last layer only if the electron energy
+// does not read l) never forms it: hout_u[l] = sum_{v <= u} y_v[l] G_{v,u} (G_{u,u} = W_p_u, G_{v,u} = G_{v,u-1}
+// W_sc_u), so y_v[l] feeds every consumer through one weight composed in double at load and rounded once: the next
+// layer's x (W_up' = G W_up, earlier layers' terms as x_extra), the first unfolded layer's skip (W_sc' = G W_sc,
+// sc_extra), the mixer W_p_v B_v (B_{k-1} = M_{k-1}, B_u = M_u + W_sc_{u+1} B_{u+1}) and the source (alike, per m
+// block). hout_v[l] / dhout_v[l] alias y_v[l] / dy_v[l]: the long-range block and the next layer read the same
+// pointers with the composed weights, and the backward accumulates every consumer's gradient straight into dy_v[l]
+// (zeroed with the zero slab). Degree 1 folds the first layer (h_0 = y_0 W_p_0; POLAR-1-M / -L: no W_p_0 product in
+// either direction), degree 2 every layer it can (POLAR-1-L: all three, its degree-2 sources and electron-energy
+// blocks being exactly zero; 14 fewer GEMMs per force call). Exact to float32 rounding (reassociation only). sm_120
+// by default; LOUP_POLAR_HFOLD=0 disables it, 1 / 2 / 3 (bit l - 1: degree l) choose the folded degrees on any GPU.
+void GenericModel::setup_lr_fold(const Bundle& b) {
+    if (!lr_) return;
+    int mask = device_is_cc120() ? 3 : 0;
+    if (const char* e = std::getenv("LOUP_POLAR_HFOLD"); e && e[0] >= '0' && e[0] <= '3') mask = e[0] - '0';
+    const int nL = n_layers_, C = layers_[0]->C_out, le_l = lr_->le_lmax();
+    for (int l = 1; l <= std::min(layers_[0]->lmax_out, 2); ++l) {
+        if (!((mask >> (l - 1)) & 1)) continue;
+        int k = l == 1 ? 1 : nL;
+        if (k == nL && le_l >= l) --k;  // the electron energy reads the last layer's hout[l]
+        if (k < 1) continue;
+        // every layer's degree-l output (and later layers' input) C wide, species-independent skips on the way
+        bool ok = !layers_[0]->sc_has[l];
+        for (int u = 0; u < nL; ++u) {
+            const GenericLayer* Lu = layers_[u];
+            if (Lu->lmax_out < l || Lu->C_out != C || Lu->ro_folded) ok = false;
+            if (u > 0 && (Lu->lmax_in < l || Lu->C_in != C || (u <= k && Lu->sc_has[l] && Lu->sc_species))) ok = false;
+        }
+        if (!ok || chain_fold_) continue;
+        DevCompose dc;
+        auto key = [&](int u, const char* w) { return "L" + std::to_string(u) + "." + w + std::to_string(l); };
+        std::vector<const double*> P(k), S(nL, nullptr);
+        for (int u = 0; u < k; ++u) P[u] = dc.dup(b.f32(key(u, "W_p_"), {C, C}));
+        for (int u = 1; u <= std::min(k, nL - 1); ++u)
+            if (layers_[u]->sc_has[l]) S[u] = dc.dup(b.f32(key(u, "W_sc_"), {1, C, C}));
+        // G_{v, s-1} W = W_p_v W_sc_{v+1} ... W_sc_{s-1} W for W [C, cols]; nullptr when a skip on the way is absent
+        auto chain = [&](int v, int s, const double* W, int cols) -> const double* {
+            const double* T = W;
+            for (int u = s - 1; u > v; --u) {
+                if (!S[u]) return nullptr;
+                T = dc.mm(S[u], C, C, T, cols);
+            }
+            return dc.mm(P[v], C, C, T, cols);
+        };
+        // layer s's x (s <= k) and, for the first unfolded layer, its skip: the term of layer s - 1 replaces the
+        // weight (h_in aliases y_{s-1}), the earlier layers' are extra terms
+        for (int s = 1; s <= std::min(k, nL - 1); ++s) {
+            GenericLayer* Ls = layers_[s];
+            auto fold_into = [&](const double* W, int cols, float*& primary, std::vector<GenericLayer::YTerm>& extra) {
+                for (int v = s - 1; v >= 0; --v) {
+                    const double* G = chain(v, s, W, cols);
+                    if (!G) continue;
+                    float* f = dc.to_f32(G, (int64_t)C * cols, Ls->weights);
+                    if (v == s - 1) primary = f;
+                    else extra.push_back({v, f});
+                }
+            };
+            if (Ls->lmax_x >= l)
+                fold_into(dc.dup(b.f32(key(s, "W_up_"), {C, Ls->C_x})), Ls->C_x, Ls->W_up[l], Ls->x_extra[l]);
+            if (s == k && S[s]) fold_into(S[s], C, Ls->W_sc[l], Ls->sc_extra[l]);
+        }
+        // mixer and source of each folded layer v: W_p_v B_v; a source block is m-major, (2l + 1) blocks [C, 8]
+        const int lm = layers_[0]->lmax_out, rows = dimL(l) * C;
+        const double *B = nullptr, *Bs = nullptr;
+        for (int v = k - 1; v >= 0; --v) {
+            const std::string t = std::to_string(v);
+            const double* M = dc.dup(b.f32("LR.mix_" + t + "_" + std::to_string(l), {C, C}));
+            const std::vector<float> src = b.f32("LR.src_" + t, {(lm + 1) * (lm + 1) * C, 8});
+            const double* Rv = dc.dup(std::vector<float>(src.begin() + (size_t)l * l * C * 8,
+                                                         src.begin() + ((size_t)l * l * C + rows) * 8));
+            if (v == k - 1 || !S[v + 1]) {
+                B = M;
+                Bs = Rv;
+            } else {
+                B = dc.mm(S[v + 1], C, C, B, C, M);
+                double* nb = dc.alloc((int64_t)rows * 8);
+                for (int m = 0; m < dimL(l); ++m)
+                    dc.mm(S[v + 1], C, C, Bs + (size_t)m * C * 8, 8, Rv + (size_t)m * C * 8, nb + (size_t)m * C * 8);
+                Bs = nb;
+            }
+            double* sv = dc.alloc((int64_t)rows * 8);
+            for (int m = 0; m < dimL(l); ++m) dc.mm(P[v], C, C, Bs + (size_t)m * C * 8, 8, nullptr, sv + (size_t)m * C * 8);
+            lr_->set_hidden_fold(v, l, dc.to_f32(dc.mm(P[v], C, C, B, C), (int64_t)C * C, layers_[v]->weights),
+                                 dc.to_f32(sv, (int64_t)rows * 8, dc.tmp));
+        }
+        for (int u = 0; u < k; ++u) layers_[u]->hfold[l] = true;
+    }
 }
 // ------------------------------------------------------------------------------------------------- buffers
 bool GenericModel::set_cell(const double* cell) { return lr_ ? lr_->set_cell(cell) : false; }
@@ -1600,6 +1874,9 @@ void GenericModel::alloc_system(int N) {
                 float* z = L->skip_folded ? L->msgf[l] : L->lin[l];
                 CUDA_CHECK_THROW(cudaMemset(z, 0, n * dimL(l) * (L->skip_folded ? L->C_msg : L->lin_cols[l]) * sizeof(float)));
             }
+        if (L->lin_compact)  // S130 / S132: the pad columns of the compact angular gradients are never written
+            for (int l = 1; l < 4; ++l)
+                CUDA_CHECK_THROW(cudaMemset(L->dlin[l], 0, n * dimL(l) * L->lin_cols[l] * sizeof(float)));
         if (L->kind == 4)  // with the S59 table the gates read res[0] from it
             for (int l = 0; l <= L->lmax_x; ++l)
                 L->res[l] = (l == 0 && L->res0_table) ? nullptr : alloc(n * dimL(l) * L->lin_cols[l]);
@@ -1607,6 +1884,12 @@ void GenericModel::alloc_system(int N) {
         L->dD = (L->kind >= 2) ? zalloc(n) : nullptr;
         for (int l = 0; l <= L->lmax_out; ++l) {
             L->y[l] = alloc(n * dimL(l) * L->C_out);
+            if (L->hfold[l]) {  // long-range hidden fold: hout aliases y, dhout dy (in dhout's zero-slab place)
+                L->dy[l] = zalloc(n * dimL(l) * L->C_out);
+                L->hout[l] = L->y[l];
+                L->dhout[l] = L->dy[l];
+                continue;
+            }
             L->dy[l] = alloc(n * dimL(l) * L->C_out);
             const bool no_hout = L->ro_folded || (chain_fold_ && t < n_layers_ - 1);  // S57: never formed
             L->hout[l] = no_hout ? nullptr : alloc(n * dimL(l) * L->C_out);
@@ -1724,6 +2007,7 @@ void GenericModel::record(const GenericPassInputs& in) {
 
     // ---------------- forward
     std::vector<const float*> written;  // S57 fold destinations already assigned in this pass
+    std::vector<unsigned> gate_vform(n_layers_, 0u);  // per layer: degrees whose forward gate ran in the projection
     for (int t = 0; t < n_layers_; ++t) {
         GenericLayer* L = layers_[t];
         const int Cx = L->C_x, Cm = L->C_msg, Co = L->C_out;
@@ -1734,6 +2018,9 @@ void GenericModel::record(const GenericPassInputs& in) {
             for (int l = 0; l <= L->lmax_x; ++l) {
                 if (L->lmax_x > 0) lane(l);
                 in.gemm(false, N * dimL(l), Cx, L->C_in, 1.0f, L->h_in[l], L->C_in, L->W_up[l], Cx, 0.0f, L->x[l], Cx);
+                for (const auto& e : L->x_extra[l])  // long-range hidden fold: earlier layers' y terms
+                    in.gemm(false, N * dimL(l), Cx, L->C_in, 1.0f, layers_[e.src]->y[l], L->C_in, e.W, Cx, 1.0f,
+                            L->x[l], Cx);
             }
             if (L->lmax_x > 0) join();
         }
@@ -1748,11 +2035,36 @@ void GenericModel::record(const GenericPassInputs& in) {
                     species_gemm(false, l, Kh, Cm, L->S0[l], L->C0[l], (int64_t)Kh * Cm, 0.0f, L->msgf[l], 4 * l);
                 join();
             } else {
+                // Residual-free degrees l >= 1 (l > lmax_x; res0 from the S59 table) whose projection can take the gate
+                // into its epilogue store gout_l instead of lin_l (gate_vform): the l = 0 projection, whose gate logits
+                // those epilogues read, runs first.
+                GateArgs gf;
+                gf.natoms = N;
+                gf.C = Cm;
+                gf.D = L->D;
+                gf.alpha = L->alpha;
+                gf.beta = L->beta;
+                gf.cg = L->gate_cg;
+                gf.lin0 = L->lin[0];
+                gf.res0 = L->res0_table;
+                gf.res0_sp = in.species;
+                if (L->kind == 4 && L->res0_table && in.gemm_gate_fwd)
+                    for (int l = L->lmax_x + 1; l < 4; ++l)  // A null: only asks
+                        if (in.gemm_gate_fwd(l, N * dimL(l), L->lin_cols[l], Kh, nullptr, L->C0[l], gf))
+                            gate_vform[t] |= 1u << l;
+                if (gate_vform[t])
+                    in.gemm(false, N, L->lin_cols[0], Kh, 1.0f, L->S0[0], Kh, L->C0[0], L->lin_cols[0], 0.0f, L->lin[0],
+                            L->lin_cols[0]);
                 fork();
-                for (int l = 0; l < 4; ++l) {
+                for (int l = gate_vform[t] ? 1 : 0; l < 4; ++l) {
                     lane(l);
-                    in.gemm(false, N * dimL(l), L->lin_cols[l], Kh, 1.0f, L->S0[l], Kh, L->C0[l], L->lin_cols[l],
-                            0.0f, L->lin[l], L->lin_cols[l]);
+                    gf.out = L->gout[l];
+                    if (!(gate_vform[t] >> l & 1u) ||
+                        !in.gemm_gate_fwd(l, N * dimL(l), L->lin_cols[l], Kh, L->S0[l], L->C0[l], gf)) {
+                        gate_vform[t] &= ~(1u << l);
+                        in.gemm(false, N * dimL(l), L->lin_cols[l], Kh, 1.0f, L->S0[l], Kh, L->C0[l], L->lin_cols[l],
+                                0.0f, L->lin[l], L->lin_cols[l]);
+                    }
                 }
                 if (L->kind == 4 && !L->res0_table) {
                     for (int l = 0; l <= L->lmax_x; ++l) {
@@ -1802,7 +2114,7 @@ void GenericModel::record(const GenericPassInputs& in) {
                                               L->lin[0], L->lin[1], L->lin[2], L->lin[3], res0, res0_sp,
                                               L->lmax_x >= 1 ? L->res[1] : nullptr,
                                               L->lmax_x >= 2 ? L->res[2] : nullptr, L->gout[0], L->gout[1],
-                                              L->gout[2], L->gout[3]);
+                                              L->gout[2], L->gout[3], gate_vform[t]);
             fork();
             for (int l = 0; l < 4; ++l) {
                 lane(l);
@@ -1827,17 +2139,30 @@ void GenericModel::record(const GenericPassInputs& in) {
             float* dm[4];
             for (int l = 0; l < 4; ++l) dm[l] = (L->kind == 1 || L->kind == 3) ? L->dlin[l] : L->dmsgf[l];
             float* dDp = (L->kind == 2 || L->kind == 3) ? L->dD : nullptr;
-            launch_prod_ro1_fused(L->prod, st, N, Cm, L->msgf, Dp, L->prod_w,
-                                  L->prod_species ? (int64_t)L->prod_segw * Cm : 0, in.species,
-                                  L->sc_has[0] ? L->hid : nullptr, L->ro_W1, L->ro_b1, L->ro_W2, L->ro_act_c,
-                                  L->dhid, in.energy, dm, dDp,
-                                  L->conv_prune && L->kind != 4);  // S127: m_1..3 = lin_1..3 = 0 (not for kind 4)
+            if (L->lin_compact)  // S130
+                launch_prod_ro1c_fused(L->prod, st, N, L->lin_cols[0], L->n_ang, L->lin_cols, L->d_pos, L->msgf, Dp,
+                                       L->prod_w,
+                                       L->prod_species ? (int64_t)L->prod_segw * L->lin_cols[0] : 0, in.species,
+                                       L->sc_has[0] ? L->hid : nullptr, L->ro_W1, L->ro_b1, L->ro_W2, L->ro_act_c,
+                                       L->dhid, in.energy, dm, dDp);
+            else
+                launch_prod_ro1_fused(L->prod, st, N, Cm, L->msgf, Dp, L->prod_w,
+                                      L->prod_species ? (int64_t)L->prod_segw * Cm : 0, in.species,
+                                      L->sc_has[0] ? L->hid : nullptr, L->ro_W1, L->ro_b1, L->ro_W2, L->ro_act_c,
+                                      L->dhid, in.energy, dm, dDp,
+                                      L->conv_prune && L->kind != 4);  // S127: m_1..3 = lin_1..3 = 0 (not for kind 4)
             continue;
         }
         const float* ro_fw = fused_readout(t);
-        launch_prod(L->prod, false, st, N, Cm, L->msgf, Dp, L->prod_w,
-                    L->prod_species ? (int64_t)L->prod_segw * Cm : 0, in.species, L->y, nullptr, nullptr, ro_fw,
-                    ro_fw ? in.energy : nullptr);
+        if (L->lin_compact)  // S132
+            launch_prod_c(L->prod, false, st, N, Cm, L->kept, L->n_ang, L->lin_cols, L->d_order, L->d_pos, L->msgf, Dp,
+                          L->prod_w,
+                          L->prod_species ? (int64_t)L->prod_segw * Cm : 0, in.species, L->y, nullptr, nullptr, ro_fw,
+                          ro_fw ? in.energy : nullptr);
+        else
+            launch_prod(L->prod, false, st, N, Cm, L->msgf, Dp, L->prod_w,
+                        L->prod_species ? (int64_t)L->prod_segw * Cm : 0, in.species, L->y, nullptr, nullptr, ro_fw,
+                        ro_fw ? in.energy : nullptr);
         if (chain_fold_ && t < n_layers_ - 1) {
             // S57: y_t (and layer 0's species-only skip input) into every downstream consumer of hout_t; the first
             // write of a destination in this pass assigns it, later ones accumulate (program order: race-free).
@@ -1887,6 +2212,7 @@ void GenericModel::record(const GenericPassInputs& in) {
         } else if (!L->ro_folded) {
             if (L->lmax_out > 0) fork();
             for (int l = 0; l <= L->lmax_out; ++l) {
+                if (L->hfold[l]) continue;  // long-range hidden fold: hout[l] is y[l], its consumers composed
                 if (L->lmax_out > 0) lane(l);
                 in.gemm(false, N * dimL(l), Co, Co, 1.0f, L->y[l], Co, L->W_p[l], Co, 0.0f, L->hout[l], Co);
                 if (L->sc_has[l]) {
@@ -1895,6 +2221,9 @@ void GenericModel::record(const GenericPassInputs& in) {
                                      L->hout[l]);
                     else
                         in.gemm(false, N * dimL(l), Co, L->C_in, 1.0f, L->h_in[l], L->C_in, L->W_sc[l], Co, 1.0f,
+                                L->hout[l], Co);
+                    for (const auto& e : L->sc_extra[l])
+                        in.gemm(false, N * dimL(l), Co, L->C_in, 1.0f, layers_[e.src]->y[l], L->C_in, e.W, Co, 1.0f,
                                 L->hout[l], Co);
                 }
             }
@@ -2019,6 +2348,7 @@ void GenericModel::record(const GenericPassInputs& in) {
                 const bool fork_p = L->lmax_out > 0 || (L->has_sc && t > 0);
                 if (fork_p) fork();
                 for (int l = 0; l <= L->lmax_out; ++l) {
+                    if (L->hfold[l]) continue;  // long-range hidden fold: dy[l] (= dhout[l]) accumulated in place
                     if (fork_p) lane(l);
                     in.gemm(true, N * dimL(l), Co, Co, 1.0f, L->dhout[l], Co, L->W_p[l], Co, 0.0f, L->dy[l], Co);
                     if (L->sc_has[l] && t > 0) {
@@ -2029,6 +2359,9 @@ void GenericModel::record(const GenericPassInputs& in) {
                             lane(4 + l);
                             in.gemm(true, N * dimL(l), L->C_in, Co, 1.0f, L->dhout[l], Co, L->W_sc[l], Co, 1.0f,
                                     L->dh_in[l], L->C_in);
+                            for (const auto& e : L->sc_extra[l])
+                                in.gemm(true, N * dimL(l), L->C_in, Co, 1.0f, L->dhout[l], Co, e.W, Co, 1.0f,
+                                        layers_[e.src]->dy[l], L->C_in);
                         }
                     }
                 }
@@ -2039,27 +2372,65 @@ void GenericModel::record(const GenericPassInputs& in) {
             // product backward: gradient of the product input
             float* dm[4];
             for (int l = 0; l < 4; ++l) dm[l] = (L->kind == 1 || L->kind == 3) ? L->dlin[l] : L->dmsgf[l];
-            launch_prod(L->prod, true, st, N, Cm, L->msgf, Dp, L->prod_w,
-                        L->prod_species ? (int64_t)L->prod_segw * Cm : 0, in.species, L->dy, dm, dDp,
-                        fused_readout(t));
+            if (L->lin_compact)  // S132
+                launch_prod_c(L->prod, true, st, N, Cm, L->kept, L->n_ang, L->lin_cols, L->d_order, L->d_pos, L->msgf,
+                              Dp,
+                              L->prod_w, L->prod_species ? (int64_t)L->prod_segw * Cm : 0, in.species, L->dy, dm, dDp,
+                              fused_readout(t));
+            else
+                launch_prod(L->prod, true, st, N, Cm, L->msgf, Dp, L->prod_w,
+                            L->prod_species ? (int64_t)L->prod_segw * Cm : 0, in.species, L->dy, dm, dDp,
+                            fused_readout(t));
         }
         if (L->kind == 4) {
+            const float* res0 = L->res0_table ? L->res0_table : L->res[0];
+            const int* res0_sp = L->res0_table ? in.species : nullptr;
+            float* dpre0 = t > 0 ? L->dpre[0] : nullptr;
+            const unsigned vform = gate_vform[t];  // these degrees saved gout_l instead of lin_l
+            const float* lins[4];
+            for (int l = 0; l < 4; ++l) lins[l] = (vform >> l & 1u) ? L->gout[l] : L->lin[l];
+            // dgout_l = dmsgf_l @ W_2[l]^T; degrees whose GEMM takes the gate backward into its epilogue never write
+            // dgout_l, gate_bwd_kernel does the others
+            unsigned fused = 0;
             fork();
             for (int l = 0; l < 4; ++l) {
                 lane(l);
-                in.gemm(true, N * dimL(l), Cm, Cm, 1.0f, L->dmsgf[l], Cm, L->W_2[l], Cm, 0.0f, L->dgout[l], Cm);
+                bool done = false;
+                if (in.gemm_gate_bwd) {
+                    GateArgs g;
+                    g.natoms = N;
+                    g.C = Cm;
+                    g.D = L->D;
+                    g.alpha = L->alpha;
+                    g.beta = L->beta;
+                    g.cs = L->gate_cs;
+                    g.cg = L->gate_cg;
+                    g.lin0 = L->lin[0];
+                    g.lin_l = lins[l];
+                    g.res0 = res0;
+                    g.res0_sp = res0_sp;
+                    g.res_l = (l >= 1 && l <= L->lmax_x && l <= 2) ? L->res[l] : nullptr;
+                    g.dp0 = dpre0;
+                    g.dp_l = (l >= 1 && t > 0 && l <= L->lmax_x && l <= 2) ? L->dpre[l] : nullptr;
+                    g.dl0 = L->dlin[0];
+                    g.dl_l = L->dlin[l];
+                    g.dD = L->dD;
+                    g.vform = vform >> l & 1u;
+                    done = in.gemm_gate_bwd(l, N * dimL(l), Cm, Cm, L->dmsgf[l], L->W_2[l], g);
+                }
+                if (done) fused |= 1u << l;
+                else in.gemm(true, N * dimL(l), Cm, Cm, 1.0f, L->dmsgf[l], Cm, L->W_2[l], Cm, 0.0f, L->dgout[l], Cm);
             }
             join();
-            const float* res0 = L->res0_table ? L->res0_table : L->res[0];
-            const int* res0_sp = L->res0_table ? in.species : nullptr;
-            gate_bwd_kernel<<<N, Cm, 0, st>>>(N, Cm, L->lmax_x, L->D, L->alpha, L->beta, L->gate_cs, L->gate_cg,
-                                              L->lin[0], L->lin[1], L->lin[2], L->lin[3], res0, res0_sp,
-                                              L->lmax_x >= 1 ? L->res[1] : nullptr,
-                                              L->lmax_x >= 2 ? L->res[2] : nullptr, L->dgout[0], L->dgout[1],
-                                              L->dgout[2], L->dgout[3], t > 0 ? L->dpre[0] : nullptr,
-                                              (t > 0 && L->lmax_x >= 1) ? L->dpre[1] : nullptr,
-                                              (t > 0 && L->lmax_x >= 2) ? L->dpre[2] : nullptr, L->dlin[0], L->dlin[1],
-                                              L->dlin[2], L->dlin[3], L->dD);
+            if (fused != 15u)
+                gate_bwd_kernel<<<N, Cm, 0, st>>>(N, Cm, L->lmax_x, L->D, L->alpha, L->beta, L->gate_cs, L->gate_cg,
+                                                  L->lin[0], lins[1], lins[2], lins[3], res0, res0_sp,
+                                                  L->lmax_x >= 1 ? L->res[1] : nullptr,
+                                                  L->lmax_x >= 2 ? L->res[2] : nullptr, L->dgout[0], L->dgout[1],
+                                                  L->dgout[2], L->dgout[3], dpre0,
+                                                  (t > 0 && L->lmax_x >= 1) ? L->dpre[1] : nullptr,
+                                                  (t > 0 && L->lmax_x >= 2) ? L->dpre[2] : nullptr, L->dlin[0],
+                                                  L->dlin[1], L->dlin[2], L->dlin[3], L->dD, fused, vform);
         }
         const bool density = L->kind >= 2;
         if (L->first_hidden) {
@@ -2150,6 +2521,9 @@ void GenericModel::record(const GenericPassInputs& in) {
             for (int l = 0; l <= L->lmax_x; ++l) {
                 if (L->lmax_x > 0) lane(l);
                 in.gemm(true, N * dimL(l), L->C_in, Cx, 1.0f, L->dx[l], Cx, L->W_up[l], Cx, 1.0f, L->dh_in[l], L->C_in);
+                for (const auto& e : L->x_extra[l])
+                    in.gemm(true, N * dimL(l), L->C_in, Cx, 1.0f, L->dx[l], Cx, e.W, Cx, 1.0f, layers_[e.src]->dy[l],
+                            L->C_in);
             }
             if (L->lmax_x > 0) join();
         }

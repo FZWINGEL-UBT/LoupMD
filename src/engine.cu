@@ -466,6 +466,10 @@ struct LoupHandle {
     // LOUP_FORCE_TC=1 (tests): every GEMM the tensor-core cubin can take runs its fastest cubin tile (no cuBLASLt or own
     // SGEMM candidates), so gates cover the cubin's arithmetic on every eligible shape; no plans are loaded or saved.
     bool force_tc = false;
+    // The generic path's gate in the epilogues of own-sgemm128 projections (sgemm128_gate, gemm_gate): the backward in
+    // the W_2^T GEMMs, the forward of residual-free degrees l >= 1 in layer 0's lin_l GEMMs. LOUP_GATE_FUSE=0 /
+    // LOUP_GATE_FUSE_FWD=0 disable them (tests).
+    bool gate_fuse = true, gate_fuse_fwd = true;
     cudaStream_t stream = nullptr;
     cublasHandle_t cublas = nullptr;
     cublasLtHandle_t cublas_lt = nullptr;
@@ -798,6 +802,8 @@ void sgemm128(int M, int N, int K, const float* A, const float* B, float* C, flo
 void sgemm64(int M, int N, int K, const float* A, const float* B, float* C, float beta, cudaStream_t stream);
 void sgemm32(int M, int N, int K, const float* A, const float* B, float* C, float* ws, float beta, int split_k,
              cudaStream_t stream);
+void sgemm128_gate(bool fwd, int l, int M, int N, int K, const float* A, const float* B, const GateArgs& g,
+                   cudaStream_t stream);
 void transpose(int R, int Ccols, const float* in, float* out, cudaStream_t stream);
 }
 
@@ -1068,6 +1074,23 @@ static inline void sgemm_rm(
     CUBLAS_CHECK_THROW(cublasLtMatmul(
         lt_h, plan.desc, &alpha, B, plan.layA, A, plan.layB, &beta,
         C, plan.layC, C, plan.layC, &plan.algo, ws_p, h->cublas_ws_bytes, strm));
+}
+
+// A projection fused with degree l's gate (sgemm128_gate): backward dgout_l = A @ B^T (B [N, K], a model weight),
+// forward lin_l = A @ B (B [K, N]), when sgemm_rm's plan for that GEMM is the own sgemm128 with N tiles fastest (whose
+// tiles and arithmetic the fused kernel shares) and the shape fits it. False: nothing launched (no plan yet, as in the
+// uncaptured autotune pass, or another implementation won). A null: only reports whether it would run.
+static bool gemm_gate(LoupHandle* h, bool fwd, int l, int M, int N, int K, const float* A, const float* B,
+                      const loup::GateArgs& g) {
+    if (!h->own_ext || l < (fwd ? 1 : 0) || l > 3 || M != g.natoms * (2 * l + 1) || N != g.C || (N % 128) != 0 ||
+        (K % 16) != 0 || ((((uintptr_t)A | (uintptr_t)B) & 15) != 0))
+        return false;
+    const auto it = h->lt_cache.find(std::make_tuple(M, N, K, !fwd, false));
+    if (it == h->lt_cache.end() || it->second.own_mode != 1) return false;
+    if (!A) return true;
+    cudaStream_t strm = h->gemm_stream ? h->gemm_stream : h->stream;
+    loup::sgemm128_gate(fwd, l, M, N, K, A, fwd ? B : weight_kn(h, B, N, K, strm), g, strm);
+    return true;
 }
 
 static int ensure_edge_capacity(LoupHandle* h, int needed) {
@@ -1634,6 +1657,12 @@ static void record_force_pass(LoupHandle* h, int compute_stress) {
         in.gemm_fork = [h] { gemm_fork(h); };
         in.gemm_lane = [h](int lane) { gemm_lane(h, lane); };
         in.gemm_join = [h] { gemm_join(h); };
+        if (h->gate_fuse)
+            in.gemm_gate_bwd = [h](int l, int M, int Nc, int K, const float* A, const float* B,
+                                   const loup::GateArgs& g) { return gemm_gate(h, false, l, M, Nc, K, A, B, g); };
+        if (h->gate_fuse_fwd)
+            in.gemm_gate_fwd = [h](int l, int M, int Nc, int K, const float* A, const float* B,
+                                   const loup::GateArgs& g) { return gemm_gate(h, true, l, M, Nc, K, A, B, g); };
         h->gen->record(in);
         return;
     }
@@ -1949,6 +1978,8 @@ LoupHandle* loup_create(const char* loup_path, int device_id) {
             h->wprime_rcv_small = h->is_sm120 || cc80;
             if (const char* e = std::getenv("LOUP_NB_GROUPS"); e && (e[0] == '0' || e[0] == '1')) h->nb_groups_ok = e[0] == '1';
             if (const char* e = std::getenv("LOUP_FORCE_TC"); e && e[0] == '1') h->force_tc = true;
+            if (const char* e = std::getenv("LOUP_GATE_FUSE"); e && e[0] == '0') h->gate_fuse = false;
+            if (const char* e = std::getenv("LOUP_GATE_FUSE_FWD"); e && e[0] == '0') h->gate_fuse_fwd = false;
         }
         CUDA_CHECK_THROW(cudaStreamCreate(&h->stream));
         CUBLAS_CHECK_THROW(cublasCreate(&h->cublas));

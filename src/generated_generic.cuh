@@ -56,7 +56,7 @@ __device__ __forceinline__ void sh16_grad(float x, float y, float z, const float
   gz = d10*t6 + d13*t20*t7 + d14*t5*z + d3*t0 + d4*t2 + d7*t1*y + d8*t23 - t10*t19 - t13*z - t15*t18 + t15*t27 + t16*t22 - 0x1.0000000000000p-2f*t17*t8 - t27*t8 - t3*z;
 }
 
-struct GProdKernels { const char* sig; int lmax_out; int segments_w; const void* fwd; const void* bwd; const void* ro1_128; const void* ro1_256; const void* ro1_512; const void* ro1s_128; const void* ro1s_256; const void* ro1s_512; };
+struct GProdKernels { const char* sig; int lmax_out; int segments_w; const void* fwd; const void* bwd; const void* ro1_128; const void* ro1_256; const void* ro1_512; const void* ro1s_128; const void* ro1s_256; const void* ro1s_512; const void* ro1c_128; const void* ro1c_256; const void* ro1c_512; const void* fwdc; const void* bwdc; };
 
 namespace loup {
 const GProdKernels* find_gprod(const char* sig);
@@ -79,4 +79,13 @@ void launch_prod_ro1_fused(const GProdKernels* k, cudaStream_t st, int N, int C,
                            const float* ro_W1, const float* ro_b1, const float* ro_W2, float ro_act_c,
                            float* d_hidden16, double* out_energy, float* const* dm, float* dD,
                            bool scalar_only = false);
+void launch_prod_ro1c_fused(const GProdKernels* k, cudaStream_t st, int N, int C, int n_ang, const int* wl,
+                            const int* pos, float* const* m, const float* D, const float* w, int64_t w_stride,
+                            const int* sp, const float* sc_skip16, const float* ro_W1, const float* ro_b1,
+                            const float* ro_W2, float ro_act_c, float* d_hidden16, double* out_energy,
+                            float* const* dm, float* dD);
+void launch_prod_c(const GProdKernels* k, bool backward, cudaStream_t st, int N, int C, int kept, int n_ang,
+                   const int* wl, const int* order, const int* pos, float* const* m, const float* D,
+                   const float* w, int64_t w_stride, const int* sp, float* const* y_or_g, float* const* dm,
+                   float* dD, const float* ro_w = nullptr, double* energy = nullptr);
 }  // namespace loup

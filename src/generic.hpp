@@ -21,6 +21,35 @@ class Bundle;
 using GemmFn = std::function<void(bool transB, int M, int N, int K, float alpha, const float* A, int lda,
                                   const float* B, int ldb, float beta, float* C, int ldc)>;
 
+// One degree l of the nonlinear (kind 4) block's gate in the epilogue of an own-SGEMM projection (sgemm.cu):
+// - forward (gemm_gate_fwd: lin_l = A @ B for a degree l >= 1 without residual): writes gate_fwd_kernel's gout_l =
+//   cs_g sigmoid(pre0[l C + c]) * (lin_l * s) to `out` instead of storing lin_l; reads D, lin0, res0 / res0_sp;
+// - backward (gemm_gate_bwd: dgout_l = A @ W_2[l]^T): what gate_bwd_kernel computes for degree l's columns from
+//   dgout_l, without writing dgout_l. lin_l / res_l / dp_l / dl_l are degree l's arrays (lin0 / res0 / dp0 / dl0 for
+//   l = 0); res_l, dp0 and dp_l may be null. vform: lin_l is the forward's saved gout_l (a degree whose lin_l the
+//   forward never stored; no residual), the reverse taken through it.
+struct GateArgs {
+    int natoms = 0, C = 0;
+    const float* D = nullptr;
+    float alpha = 1.0f, beta = 0.0f, cs = 1.0f, cg = 1.0f;
+    const float* lin0 = nullptr;
+    const float* lin_l = nullptr;
+    const float* res0 = nullptr;
+    const int* res0_sp = nullptr;
+    const float* res_l = nullptr;
+    float* dp0 = nullptr;
+    float* dp_l = nullptr;
+    float* dl0 = nullptr;
+    float* dl_l = nullptr;
+    float* dD = nullptr;  // += the degree's terms of dE/dD, atomically
+    float* out = nullptr;
+    int vform = 0;
+};
+// Runs the projection fused with degree l's gate (M = natoms (2l + 1), N = C) when the GEMM's plan and shape allow;
+// false: nothing launched (the caller runs the plain GEMM and the gate kernel for l). Backward: dgout_l = A[M, K] @
+// B[N, K]^T; forward: lin_l = A[M, K] @ B[K, N]. A null: only reports whether it would run.
+using GemmGateFn = std::function<bool(int l, int M, int N, int K, const float* A, const float* B, const GateArgs& g)>;
+
 struct GenericPassInputs {
     cudaStream_t stream;
     int N;
@@ -44,6 +73,8 @@ struct GenericPassInputs {
     std::function<void()> gemm_fork;
     std::function<void(int)> gemm_lane;
     std::function<void()> gemm_join;
+    GemmGateFn gemm_gate_bwd;  // empty: never fused (LOUP_GATE_FUSE=0)
+    GemmGateFn gemm_gate_fwd;  // empty: never fused (LOUP_GATE_FUSE_FWD=0)
 };
 
 struct GenericLayer;
@@ -100,6 +131,8 @@ private:
     // S59 layer-0 species tables (sm_120, cc 8.0; LOUP_SPECIES_TABLES=0 disables): see setup_species_tables.
     void setup_species_tables(const Bundle& b);
     bool species_tables_ = false;
+    // Long-range hidden fold (sm_120; LOUP_POLAR_HFOLD=0 disables, 1 / 2 / 3 picks the degrees): see setup_lr_fold.
+    void setup_lr_fold(const Bundle& b);
     int S_ = 0, n_layers_ = 0, sh_perm_ = 0, has_zbl_ = 0;
     float r_max_ = 0.0f;
     std::vector<int> Z_;
