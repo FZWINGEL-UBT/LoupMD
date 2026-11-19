@@ -187,6 +187,9 @@ Conventions:
 | [md-thermo-buffer](#md-thermo-buffer) | Thermo rows written on the device inside the captured step (release task S1-T05) | `LoupIntegrator.thermo_every` | both | DEFAULT on `release/v1`, off unless asked (5060 Ti only) | release S1-T05 | `thermo_every = 20` against off: `NbCl5` 1.0005 / 1.0041, `SrTiO3` 1.0003 / 1.0007 | [§6][s6] |
 | [rel-stage1-api](#rel-stage1-api) | Release branch, Stage 1 as a whole against its baseline (error channel, `loup_run`, state blob, memory plan, `loup_evaluate2`, per-layer sweeps, open domains) | – | both | DEFAULT on `release/v1` (5060 Ti only) | release Stage 1 | A/B 0.9994 / 1.0006 (baseline first), 0.9986 / 0.9975 (head first): tie | [§6][s6] |
 | [rel-merge-r6tip](#rel-merge-r6tip) | Release branch after merging `round6-hardening` `e21faa2` (S64 to S67), against that tip's own build | – | both | DEFAULT on `release/v1` (5060 Ti only) | release Stage 1 | seven A/B: `NbCl5` 1.0030 (0.9946 to 1.0080), `SrTiO3` 0.9997 (0.9965 to 1.0044): tie; generic families 0.9944 to 1.0066 | [§6.1][s61] |
+| [lmp-run-style-fixes](#lmp-run-style-fixes) | `run_style loupmd` runs the engine's integrator of the input's fixes (`fix nve`, `nvt`, `npt iso`, `langevin`, `temp/csvr`, `temp/berendsen`, `press/berendsen`, `setforce 0 0 0`, `momentum`) between LAMMPS's output steps | `run_style loupmd` (LAMMPS input) | both | DEFAULT on the local `release/v1` (5060 Ti under WSL 2 only) | release, O40 | run style / the package's own loop 0.996 to 1.012 on 320, 1,080 and 5,000 atoms (NVT, NPT, Langevin); LAMMPS integrating / run style: `fix nvt` 1.27 / 1.12 / 1.04, `fix npt` 1.65 / 1.43 / 1.16 | this file, [§6.37][s637] |
+| [eng-evaluate-keeps-md](#lmp-run-style-fixes) | `loup_evaluate` between two blocks of a run launches the force graph and leaves the integrator's step graphs standing (it used to capture the host step over them, and the next block the integrator's again) | – (`evaluate_once`: `keep_md`, `eval_since_run`) | both | DEFAULT on the local `release/v1` (5060 Ti under WSL 2 only) | release, O40 | Langevin on 320 atoms through LAMMPS, output every 1,000 / 100 / 10 steps: 0.600 / 0.617 / 0.920 -> 0.580 / 0.594 / 0.734 ms/step, graph captures 20 / 92 / 884 -> 6 / 6 / 6 (with the next row) | [lmp-run-style-fixes](#lmp-run-style-fixes) |
+| [lmp-system-once](#lmp-run-style-fixes) | The LAMMPS pair style sends the system to the engine only when the atomic numbers, masses or skin changed, not at every `run` command (which dropped the list, the tuned plans, the thermostat's state and the noise counter) | – (`PairLoupMD::ensure_system`) | both | DEFAULT on the local `release/v1` | release, O40 | not timed by itself (in the figures of the row above); two `run` commands continue one trajectory (`tests/gpu/test_lammps_run_style.py`) | [lmp-run-style-fixes](#lmp-run-style-fixes) |
 | [rel-merge-develop](#rel-merge-develop) | Release branch after merging `develop` `dec2e1f` (S115 to S146: the kernel rounds since `13d6337`, the run-time compiler, one kernel path, the device-resident call, `lammps/`), against `develop`'s own build and against the branch before the merge | – | both | DEFAULT on `merge/develop-s146` (step times 5060 Ti only; tests and gates also on the RTX 4000 Ada) | release, O38 | merged / develop: OMAT-0 medium `SrTiO3` 1.003, 1.001, 1.001, 0.998, OFF23-M water 1.017, 1.003, 0.998, 1.011, five more cases 0.989 to 1.001: ties. Merged / before: 0.980 (OMAT-0 medium), 0.382 (MP-0 medium), 0.859 (POLAR-1-S), 0.976 to 0.986 elsewhere | [§6.36][s636] |
 | [md-langevin-target](#md-langevin-target) | Langevin's target temperature as a device scalar that the step advances (release task S3-T06): ramps move it every step, a changed temperature captures no graph | `LoupIntegrator.temp_rate_k_per_step` | both | DEFAULT on `release/v1` (5060 Ti only) | release Stage 3 | A/B 1.0085 / 0.9989 (old first), 0.9943 / 0.9938 (new first): tie | [§6.2][s62] |
 | [md-fixed-atoms](#md-fixed-atoms) | Fixed atoms as zero inverse masses; the reported temperature counts 3 (N - n_fixed) (release task S4-T02) | `loup_set_fixed_atoms` | both | DEFAULT on `release/v1` (5060 Ti only) | release Stage 4 | A/B mean of four 1.0032 / 0.9995: tie; no step kernel changed | [§6.3][s63] |
@@ -1920,6 +1923,44 @@ Each entry has the same fields. Unless stated, the system is OMAT-0 medium on th
 - Not measured: the tip's own gate and suite; the gates of the generic families at head; anything on the RTX 4000 Ada.
 - Sources: [§6.1][s61].
 
+<a id="lmp-run-style-fixes"></a>
+#### lmp-run-style-fixes: LAMMPS's NVT and NPT inputs at the engine's step time
+- Stage: release, O40 (`LAMMPS_SYMMETRIX_PARITY_PLAN.md` L3; PLAN.md D97). Library `037b67e07ad2f5d2` on `sm_120`; LAMMPS `stable_30Sep2026_update1` built against it.
+- Status: DEFAULT on the local `release/v1` (the user chooses the route with the `run_style` line). Step times on the 5060 Ti under WSL 2 only.
+- What, three parts:
+  1. `run_style loupmd` without an ensemble reads the input's fixes (`read_fixes` in `lammps/ML-LOUPMD/integrate_loupmd.cpp`) and runs the engine's integrator of that ensemble between LAMMPS's output steps: `fix nve`, `nvt`, `npt iso`, `nve` + `langevin` / `temp/csvr` / `temp/berendsen` (+ `press/berendsen`), `setforce 0 0 0` and atoms outside the integrating group as held atoms, `momentum linear`. Everything else that acts during the steps is refused by name.
+  2. `loup_evaluate` between two blocks of a run (`evaluate_once`, `keep_md`): while the MD graphs hold an integrator's step, the first two evaluations after it check the skin and launch the force graph, which stands beside them. Before, the evaluation captured the host step over the integrator's graphs and the next block captured the integrator's again: four captures per output step.
+  3. The pair style sends the system to the engine only when the atomic numbers, the masses or the skin changed (`PairLoupMD::ensure_system`). Before, every `run` command sent it again, which dropped the list, the tuned plans, the thermostat's state and the noise counter.
+- Measured, the three routes (19 November 2026, RTX 5060 Ti, `.tmp_o/rs_l3_speed.py`: MACE-OMAT-0 medium, rattled SrTiO3, 300 K, 1 fs, thermostat time 0.1 ps, barostat time 1 ps, 200 steps and then 2,000 timed with thermo every 1,000; each run a process of its own with a fresh `LOUP_CACHE_DIR`; order own loop, run style, LAMMPS and back; ms/step, first / second run):
+
+  | atoms | input | package's own loop | `run_style loupmd` | LAMMPS integrates |
+  | --- | --- | --- | --- | --- |
+  | 320 | `fix nvt` | 0.6474 / 0.6471 | 0.6512 / 0.6468 | 0.8102 / 0.8371 |
+  | 320 | `fix npt iso` | 0.7952 / 0.7804 | 0.7829 / 0.7916 | 1.3094 / 1.2865 |
+  | 320 | `fix nve` + `fix langevin` | 0.5803 / 0.5734 | 0.5935 / 0.5776 | 0.7952 / 0.8007 |
+  | 1,080 | `fix nvt` | 1.7479 / 1.7511 | 1.7747 / 1.7612 | 1.9692 / 2.0068 |
+  | 1,080 | `fix npt iso` | 1.8465 / 1.8633 | 1.8436 / 1.8465 | 2.6300 / 2.6431 |
+  | 1,080 | `fix nve` + `fix langevin` | 1.7178 / 1.7109 | 1.7175 / 1.7162 | 1.9861 / 2.0324 |
+  | 5,000 | `fix nvt` | 7.6892 / 7.6778 | 7.7434 / 7.7290 | 8.0693 / 8.0826 |
+  | 5,000 | `fix npt iso` | 7.6874 / 7.6656 | 7.6743 / 7.6634 | 8.8910 / 8.8612 |
+  | 5,000 | `fix nve` + `fix langevin` | 7.6588 / 7.6758 | 7.6627 / 7.6765 | 8.1921 / 8.1657 |
+
+  Run style against the package's own loop: 0.996 to 1.012 (the largest: `fix nvt` on 1,080 atoms). LAMMPS integrating against the run style: `fix nvt` 1.27 / 1.12 / 1.04 at 320 / 1,080 / 5,000 atoms, `fix npt` 1.65 / 1.43 / 1.16, Langevin 1.36 / 1.17 / 1.07.
+- Measured, the output interval (`.tmp_o/rs_block.py`: 320 atoms, 200 steps and then 2,000, one plan folder; ms/step and the job's graph captures at thermo every 1,000 / 100 / 10 steps):
+
+  | | 1,000 | 100 | 10 |
+  | --- | --- | --- | --- |
+  | Langevin, before parts 2 and 3 (library `7f976766de199e71`) | 0.5996, 20 captures | 0.6174, 92 | 0.9204, 884 |
+  | Langevin, after | 0.5803, 6 | 0.5935, 6 | 0.7340, 6 |
+  | `fix nvt`, after | 0.6477, 6 | 0.6600, 6 | 0.8658, 6 |
+  | `fix npt iso`, after | 0.7654, 6 | 0.7851, 6 | 1.0095, 4 |
+
+  What an output step still costs is two force passes (its own evaluation, and the first of the next block on the same positions) and the state's way through the host.
+- Tests: `tests/gpu/test_lammps_run_style.py` runs each ensemble through LAMMPS and, from LAMMPS's own starting state, through the Python engine with the integrator the run style is to pick: the same positions, velocities and box after 40 steps (positions to 2e-5 A), as one block and as four; held atoms, `fix momentum`, two runs that continue one trajectory, the noise stream after a new state and after a new system, the captures with output every 10 steps (at most 8), eleven refusals. Tests of `57bf988`. RTX 5060 Ti (`sm_120`, library `037b67e07ad2f5d2`): `tests/gpu/test_lammps_run_style.py` 31 passed and `tests/gpu/test_lammps.py` 10 passed against an `lmp` rebuilt on this library; `tests/gpu` fast 414 passed, 7 skipped for a wrong structure path in that run (they are in `tests/gpu/test_d3.py`, which passed whole, 53, with the right one); full 52 passed and 1 failed on a timing bound (`test_a_schedule_tracks_its_target_on_5000_atoms`: the ramp's step 3.5% above the hold's where 3% is allowed; four reruns, two on this library and two on the merge's, gave 0.1 to 1.0% and passed). RTX 4000 Ada (`sm_89`, library built on `leto` from `57bf988`): `tests/cpu` 500 passed, 1 skipped; fast 351 passed, 72 skipped (no `lmp` and no `dftd3` there), 2 failed, both the machine's: the kernel-plugin test (its `/usr/bin/nvcc` does not know `sm_89`) and the first device call after `loup_set_state`, whose child process crashed at `import torch` because that build exported its statically linked libstdc++ (linked again with those symbols hidden, `tests/gpu/test_device_io.py`, `test_engine.py` and `test_run_api.py`: 59 passed); full 52 passed, 1 skipped (`leeloo`).
+- Not measured: the RTX 4000 Ada (no LAMMPS build there); native Linux; `fix temp/csvr` and the Berendsen pair for speed (the same step graphs as the engine's own runs of those integrators).
+- Left open: `fix npt aniso` / `tri` (the engine's full-cell mode is neither); fixes that only read the state every N steps (`fix ave/time`, `fix print`), which could be served as output is; the second force pass per output step.
+- Sources: `LAMMPS_SYMMETRIX_PARITY_PLAN.md` L3; [§6.37][s637]; `.tmp_o/mrg/gpu_rs4.log` (not kept in the tree).
+
 <a id="rel-merge-develop"></a>
 #### rel-merge-develop: the release branch after merging `develop`
 - Stage: release, O38 (`merge/develop-s146`: `1d15783` the merge, `00f6b75` the two fixes below; library `7f976766de199e71` on `sm_120`) against `develop` `dec2e1f` (library `1b4afd6065012b28`) and against the branch before the merge (`./libloupmd.so` of 18 November, the code of 0.0.1).
@@ -3518,6 +3559,7 @@ Time against the memory fraction (kept calls, the plans after this change where 
 [s616]: STATUS_AND_PROFILE.md#616-tile-lists-kept-and-the-workspace-kept-between-calls-16-november-2026-0040
 [s618]: STATUS_AND_PROFILE.md#618-tiled-md-lists-kept-across-steps-16-november-2026-0220
 [s636]: STATUS_AND_PROFILE.md#636-the-merge-of-develop-19-november-2026-planmd-o38
+[s637]: STATUS_AND_PROFILE.md#637-lammpss-nvt-and-npt-at-the-engines-step-time-19-november-2026-planmd-o40
 
 ### Dispersion
 

@@ -2362,3 +2362,44 @@ to 0.67 ms (0.382), POLAR-1-S `NaCl` 216 atoms 1.30 to 1.12 ms (0.859), OMAT-0 s
 **Not done.** Step times on the RTX 4000 Ada; the wheel with the merged sources (the wheel build's rule for
 `src/jit.cu` is in the Makefile and compiles; the full build was not run); the export-version checks of D91 on the
 merged code; NVRTC as a dependency of the wheel (D94).
+
+### 6.37 LAMMPS's NVT and NPT at the engine's step time (19 November 2026, PLAN.md O40)
+
+`run_style loupmd` now reads the input's fixes and runs the engine's integrator of that ensemble between LAMMPS's
+output steps (stage L3 of `LAMMPS_SYMMETRIX_PARITY_PLAN.md`; PLAN.md D97 for the decisions; the ledger's entry
+`lmp-run-style-fixes` has every run). All figures are from the RTX 5060 Ti in WSL 2, library `037b67e07ad2f5d2`.
+
+**What is taken over.** `fix nve` (velocity Verlet); `fix nve` with `fix langevin`, `fix temp/csvr` or
+`fix temp/berendsen` (and `fix press/berendsen`); `fix nvt` (Nose-Hoover chain); `fix npt ... iso`
+(Martyna-Tobias-Klein); `fix setforce 0 0 0` and atoms outside the integrating fix's group (held atoms);
+`fix momentum ... linear 1 1 1`. Any other fix that acts during the steps stops the run with its name.
+
+**Step times** (MACE-OMAT-0 medium, rattled SrTiO3, 300 K, 1 fs, 2,000 steps after 200, thermo every 1,000, two
+runs each with fresh GEMM plans; ms/step):
+
+| atoms | input | package's own loop | `run_style loupmd` | LAMMPS integrates |
+| --- | --- | --- | --- | --- |
+| 320 | `fix nvt` | 0.6474 / 0.6471 | 0.6512 / 0.6468 | 0.8102 / 0.8371 |
+| 320 | `fix npt iso` | 0.7952 / 0.7804 | 0.7829 / 0.7916 | 1.3094 / 1.2865 |
+| 320 | `fix nve` + `fix langevin` | 0.5803 / 0.5734 | 0.5935 / 0.5776 | 0.7952 / 0.8007 |
+| 1,080 | `fix nvt` | 1.7479 / 1.7511 | 1.7747 / 1.7612 | 1.9692 / 2.0068 |
+| 1,080 | `fix npt iso` | 1.8465 / 1.8633 | 1.8436 / 1.8465 | 2.6300 / 2.6431 |
+| 1,080 | `fix nve` + `fix langevin` | 1.7178 / 1.7109 | 1.7175 / 1.7162 | 1.9861 / 2.0324 |
+| 5,000 | `fix nvt` | 7.6892 / 7.6778 | 7.7434 / 7.7290 | 8.0693 / 8.0826 |
+| 5,000 | `fix npt iso` | 7.6874 / 7.6656 | 7.6743 / 7.6634 | 8.8910 / 8.8612 |
+| 5,000 | `fix nve` + `fix langevin` | 7.6588 / 7.6758 | 7.6627 / 7.6765 | 8.1921 / 8.1657 |
+
+The run style is within 1% of the package's own loop in every row (0.996 to 1.012). LAMMPS integrating itself with
+`pair_style loupmd` takes 1.04 to 1.27 times as long with `fix nvt` and 1.16 to 1.65 times with `fix npt`, where
+every step moves the box and rebuilds the engine's list.
+
+**Output inside a run.** At an output step LAMMPS takes the state back and the pair style evaluates. That evaluation
+used to capture its own step graph over the integrator's, and the next block the integrator's again; it now runs
+the force graph beside them. With that and with the pair style no longer sending an unchanged system at every
+`run` command, Langevin on 320 atoms with output every 1,000 / 100 / 10 steps went from 0.600 / 0.617 / 0.920 to
+0.580 / 0.594 / 0.734 ms per step, and the job's graph captures from 20 / 92 / 884 to 6 / 6 / 6. `fix nvt`: 0.648 /
+0.660 / 0.866; `fix npt iso`: 0.765 / 0.785 / 1.010. An output step still costs two force passes.
+
+**Tests.** Tests of `57bf988`. RTX 5060 Ti (`sm_120`, library `037b67e07ad2f5d2`): `tests/gpu/test_lammps_run_style.py` 31 passed and `tests/gpu/test_lammps.py` 10 passed against an `lmp` rebuilt on this library; `tests/gpu` fast 414 passed, 7 skipped for a wrong structure path in that run (they are in `tests/gpu/test_d3.py`, which passed whole, 53, with the right one); full 52 passed and 1 failed on a timing bound (`test_a_schedule_tracks_its_target_on_5000_atoms`: the ramp's step 3.5% above the hold's where 3% is allowed; four reruns, two on this library and two on the merge's, gave 0.1 to 1.0% and passed). RTX 4000 Ada (`sm_89`, library built on `leto` from `57bf988`): `tests/cpu` 500 passed, 1 skipped; fast 351 passed, 72 skipped (no `lmp` and no `dftd3` there), 2 failed, both the machine's: the kernel-plugin test (its `/usr/bin/nvcc` does not know `sm_89`) and the first device call after `loup_set_state`, whose child process crashed at `import torch` because that build exported its statically linked libstdc++ (linked again with those symbols hidden, `tests/gpu/test_device_io.py`, `test_engine.py` and `test_run_api.py`: 59 passed); full 52 passed, 1 skipped (`leeloo`).
+
+**Not done.** the acceptance tier (no kernel and no arithmetic changed); LAMMPS on the RTX 4000 Ada and on native Linux; `fix npt aniso` / `tri` and fixes that only read the state every N steps (refused today); the wheel; a push (O37).
