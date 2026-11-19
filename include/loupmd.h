@@ -27,6 +27,11 @@ typedef struct {
 LoupHandle* loup_create(const char* loup_path, int device_id);
 void loup_destroy(LoupHandle* h);
 
+// Facts of the loaded model: the cutoff radius in A (0 on a null handle), and the atomic numbers of the bundle's
+// species (returns their count and writes at most `max` of them to out_atomic_numbers, which may be NULL).
+double loup_cutoff(const LoupHandle* h);
+int loup_species(const LoupHandle* h, int* out_atomic_numbers, int max);
+
 // Set system topology (species as atomic numbers Z[0..n_atoms-1], masses in amu).
 // Internally groups atoms by species for contiguous GEMMs; for systems whose per-atom working set exceeds L2, atoms
 // inside each species group are also reordered spatially at every neighbour-list rebuild. All inputs and outputs
@@ -75,6 +80,38 @@ int loup_get_state(LoupHandle* h, double* out_positions, double* out_velocities,
 
 // Timing breakdown across components for diagnostics (averages over `n_calls` force evaluations).
 int loup_profile_force(LoupHandle* h, int warmup, int n_calls, double* out_total_us);
+
+// Device-resident evaluation, for host codes that keep their atoms on the GPU and integrate themselves (the LAMMPS
+// Kokkos pair style `loupmd/kk`, lammps/ in this repository). All pointers in LoupDeviceIO are device pointers on the
+// engine's CUDA device.
+#define LOUP_IO_ENERGY 1       /* out_energy_ev is filled (the call then waits for the force pass) */
+#define LOUP_IO_VIRIAL 2       /* out_virial is filled (the call then waits for the force pass) */
+#define LOUP_IO_ATOM_ENERGY 4  /* reserved: per-atom energies are not available yet (the call is refused) */
+typedef struct {
+    int n_rows;               // rows of the caller's arrays; must equal n_atoms of loup_set_system
+    // Component c (0 = x, 1 = y, 2 = z) of row r is at base[r * row_stride + c * comp_stride], in doubles: a row-major
+    // [n][3] array has strides (3, 1), a column-major [n_alloc][3] array (Kokkos::LayoutLeft) (1, n_alloc).
+    const double* positions;  // A. Rows may be unwrapped (any periodic image); they must be continuous from call to
+                              // call, since the skin check compares them with the positions of the last list build.
+    long long pos_row_stride, pos_comp_stride;
+    const int* ids;           // [n_rows]: the engine atom (index in loup_set_system's order, 0 .. n_atoms-1) each row
+                              // holds; every atom exactly once. NULL: row r is atom r.
+    double* forces;           // eV/A: the forces are ADDED to the rows (NULL: no forces written)
+    long long f_row_stride, f_comp_stride;
+    double* atom_energy;      // reserved, must be NULL
+    int flags;                // LOUP_IO_* bits
+} LoupDeviceIO;
+
+// Queues one force evaluation behind the work already on `stream` (a cudaStream_t of the same device; NULL is the
+// default stream) and makes `stream` wait for the forces, so work the caller queues on it afterwards sees them. `cell`
+// is a host [3, 3] row-major matrix in A, as for loup_evaluate; a changed cell rebuilds the neighbour list.
+// The call returns as soon as the step is queued and its neighbour-list decision is known; it waits for the result
+// only when energy or virial is asked for. out_energy_ev (with LOUP_IO_ENERGY) is the potential energy in eV.
+// out_virial (with LOUP_IO_VIRIAL) is the virial tensor -dE/d(strain) in eV, as [xx, yy, zz, xy, xz, yz] (the layout
+// and sign of LAMMPS's `virial`; the stress of loup_evaluate is -virial / volume).
+// loup_evaluate, loup_set_state and the run calls may be mixed with it on one handle; MD velocities are untouched.
+int loup_compute_device(LoupHandle* h, const LoupDeviceIO* io, const double* cell, void* stream,
+                        double* out_energy_ev, double* out_virial);
 
 // Environment:
 //   LOUP_CACHE_DIR  directory for the per-GPU GEMM plan cache (default $HOME/.cache/loupmd). Files are keyed by GPU

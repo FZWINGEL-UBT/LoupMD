@@ -635,7 +635,30 @@ struct LoupHandle {
         if (md_checked_exec) { cudaGraphExecDestroy(md_checked_exec); md_checked_exec = nullptr; }
         if (md_checked_graph) { cudaGraphDestroy(md_checked_graph); md_checked_graph = nullptr; }
         md_dev_rebuild = false;
+        md_graph_key = -1;
     }
+    // Which step the MD graphs hold: -1 none, -2 an integrator's (they bake in dt, thermostat and seed: md_int_*, so
+    // a run call with other values drops them and one with the same values, e.g. a run in blocks, reuses them),
+    // 2 * kind + compute_stress the external steps of loup_compute_device / loup_evaluate, kept across calls.
+    int md_graph_key = -1;
+    int md_int_kind = -1;
+    double md_int_dt = 0.0, md_int_temp = 0.0, md_int_fric = 0.0;
+    unsigned long long md_int_seed = 0;
+
+    // loup_compute_device (host codes whose atoms stay on the GPU, e.g. LAMMPS Kokkos): the caller's rows are gathered
+    // into the engine's order and the forces added back through a device copy of the inverse permutation.
+    int* d_inv_perm = nullptr;    // [N] caller atom -> device index
+    int perm_epoch = 0;           // bumped whenever perm changes (set_system, an atom reorder)
+    int inv_perm_epoch = -1;      // the perm_epoch d_inv_perm was written for
+    int* d_io_bad = nullptr;      // set by io_gather_kernel when an id is outside 0 .. N-1
+    // loup_evaluate's host I/O: page-locked staging [3N positions | 3N forces | energy | 6 virial], so the uploads and
+    // downloads are asynchronous copies and the host learns that the results have landed from one publication instead
+    // of blocking transfers and a stream synchronisation (a host round trip each, 100-200 us under WSL 2).
+    double* h_stage = nullptr;
+    double* stage_pos() const { return h_stage; }
+    double* stage_f() const { return h_stage + (size_t)3 * N; }
+    double* stage_ev() const { return h_stage + (size_t)6 * N; }
+    cudaEvent_t ev_io_in = nullptr, ev_io_out = nullptr;
 
     int n_rebuilds = 0;     // rebuilds since set_system (atom reorder cadence)
     int* d_order_err = nullptr;  // set by sort_gather_rows_kernel when a row breaks the species-run contract
@@ -657,6 +680,8 @@ struct LoupHandle {
         freep(d_species); freep(d_pos64); freep(d_ref_pos64); freep(d_vel64);
         freep(d_masses); freep(d_inv_masses); freep(d_sqrt_inv_masses); freep(d_rnd_vel);
         freep(d_need_rebuild); freep(d_step_counter); freep(d_ke_f64);
+        freep(d_inv_perm); freep(d_io_bad); inv_perm_epoch = -1;
+        if (h_stage) { cudaFreeHost(h_stage); h_stage = nullptr; }
         freep(d_pos_wrapped); freep(d_atom_wrap); freep(d_atom_bin);
         freep(d_ro_keys); freep(d_ro_vals); freep(d_ro_tmp); freep(d_order_err); freep(d_max_deg);
         freep(d_bin_counts); freep(d_bin_offsets); freep(d_bin_cursor);
@@ -1284,6 +1309,7 @@ static int rebuild_neighbors(LoupHandle* h, bool check_order = true) {
                 gather(h->d_rnd_vel, 3)) return -1;
             std::vector<int> old_perm = h->perm;
             for (int i = 0; i < N; ++i) h->perm[i] = old_perm[h->h_order[i]];
+            ++h->perm_epoch;
             if (nl_bin(h, g) != 0) return -1;
         }
     }
@@ -1533,6 +1559,8 @@ void loup_destroy(LoupHandle* h) {
     cudaSetDevice(h->device_id);
     h->free_system();
     if (h->ev_fork) cudaEventDestroy(h->ev_fork);
+    if (h->ev_io_in) cudaEventDestroy(h->ev_io_in);
+    if (h->ev_io_out) cudaEventDestroy(h->ev_io_out);
     for (int i = 0; i < LoupHandle::kSide; ++i) {
         if (h->ev_join[i]) cudaEventDestroy(h->ev_join[i]);
         if (h->side_ws[i]) cudaFree(h->side_ws[i]);
@@ -1580,6 +1608,7 @@ static int set_system_impl(LoupHandle* h, int n_atoms, const int* atomic_numbers
     h->e0_total = e0_total;
 
     // Build stable species-grouping permutation (the spatial order inside each group is set at every rebuild)
+    ++h->perm_epoch;
     h->perm.resize(n_atoms);
     h->h_order.resize(n_atoms);
     h->species_start.assign(S + 1, 0);
@@ -1660,6 +1689,7 @@ static int set_system_impl(LoupHandle* h, int n_atoms, const int* atomic_numbers
     h->d_virial_grad_f64 = reinterpret_cast<double*>(base + off_v64);
     h->gen->alloc_system(n_atoms);
     if (h->E_cap > 0) h->gen->ensure_edges(h->E_cap);
+    CUDA_CHECK(cudaHostAlloc(&h->h_stage, ((size_t)6 * n_atoms + 8) * sizeof(double), cudaHostAllocDefault));
     h->N = n_atoms;
     return 0;
 }
@@ -1668,8 +1698,8 @@ static int set_system_impl(LoupHandle* h, int n_atoms, const int* atomic_numbers
 // shifts depend on it, so the list must be rebuilt), 0 if not, -1 on error.
 // The engine is always fully periodic: the cell must be finite and non-degenerate (ASE's zero cell for a molecule
 // is rejected; put molecules in a box larger than 2 (r_max + skin)), and positions finite.
-static bool valid_input(int n, const double* positions, const double* cell, const double* velocities) {
-    if (!positions || !cell) return false;
+static bool valid_cell(const double* cell) {
+    if (!cell) return false;
     for (int i = 0; i < 9; ++i)
         if (!std::isfinite(cell[i])) return false;
     const double det = cell[0] * (cell[4] * cell[8] - cell[5] * cell[7]) - cell[1] * (cell[3] * cell[8] - cell[5] * cell[6]) +
@@ -1680,6 +1710,11 @@ static bool valid_input(int n, const double* positions, const double* cell, cons
         fprintf(stderr, "loupmd: singular or zero cell (det = %g); the engine is fully periodic\n", det);
         return false;
     }
+    return true;
+}
+
+static bool valid_input(int n, const double* positions, const double* cell, const double* velocities) {
+    if (!positions || !valid_cell(cell)) return false;
     for (size_t i = 0; i < (size_t)n * 3; ++i) {
         if (!std::isfinite(positions[i]) || (velocities && !std::isfinite(velocities[i]))) {
             fprintf(stderr, "loupmd: non-finite position or velocity (atom %zu)\n", i / 3);
@@ -1689,23 +1724,48 @@ static bool valid_input(int n, const double* positions, const double* cell, cons
     return true;
 }
 
-static int upload_positions(LoupHandle* h, const double* positions, const double* cell) {
+// Takes the cell and writes the positions, in the engine's order, to the page-locked staging. Returns 1 if the cell
+// changed, 0 if not, -1 on error.
+static int stage_positions(LoupHandle* h, const double* positions, const double* cell) {
     if (!valid_input(h->N, positions, cell, nullptr)) return -1;
     loup::CellMat64 old_cell = h->cell;
     loup::compute_cell_mat(cell, h->cell, h->cell_vol, h->cell_heights);
     const int cell_changed = memcmp(&old_cell, &h->cell, sizeof(old_cell)) != 0 ? 1 : 0;
     if (h->gen->set_cell(cell)) h->invalidate_graphs();
 
-    std::vector<double> p_sorted((size_t)h->N * 3);
+    // The staging is free here: every call that fills it has read its results back before returning.
+    double* p_sorted = h->stage_pos();
     for (int dst = 0; dst < h->N; ++dst) {
         int src = h->perm[dst];
         p_sorted[dst * 3 + 0] = positions[src * 3 + 0];
         p_sorted[dst * 3 + 1] = positions[src * 3 + 1];
         p_sorted[dst * 3 + 2] = positions[src * 3 + 2];
     }
-    CUDA_CHECK(cudaMemcpyAsync(h->d_pos64, p_sorted.data(), (size_t)h->N * 3 * sizeof(double), cudaMemcpyHostToDevice, h->stream));
     return cell_changed;
 }
+
+static int upload_positions(LoupHandle* h, const double* positions, const double* cell) {
+    const int cell_changed = stage_positions(h, positions, cell);
+    if (cell_changed < 0) return -1;
+    CUDA_CHECK(cudaMemcpyAsync(h->d_pos64, h->stage_pos(), (size_t)h->N * 3 * sizeof(double), cudaMemcpyHostToDevice, h->stream));
+    return cell_changed;
+}
+
+// Queues (or, during capture, records) the copies of the energy, the forces and with `stress` the virial into the
+// page-locked staging, and behind them a publication of the neighbour rows' order flag: once the host has read that
+// publication the results have landed, with no blocking transfer and no stream synchronisation.
+static int queue_results(LoupHandle* h, int stress) {
+    double* ev = h->stage_ev();
+    CUDA_CHECK(cudaMemcpyAsync(ev, h->d_energy_f64, sizeof(double), cudaMemcpyDeviceToHost, h->stream));
+    CUDA_CHECK(cudaMemcpyAsync(h->stage_f(), h->d_forces_f64, (size_t)h->N * 3 * sizeof(double), cudaMemcpyDeviceToHost, h->stream));
+    if (stress)
+        CUDA_CHECK(cudaMemcpyAsync(ev + 1, h->d_virial_grad_f64, 6 * sizeof(double), cudaMemcpyDeviceToHost, h->stream));
+    loup::publish_kernel<<<1, 1, 0, h->stream>>>(h->d_order_err, nullptr, nullptr, h->d_pub_counter, h->d_pub);
+    return 0;
+}
+
+static int run_md_loop(LoupHandle* h, int kind, int n_steps, double dt_fs, double temp_k, double friction_per_fs,
+                       unsigned long long seed, LoupMDStats* out_stats);
 
 static int set_state_impl(LoupHandle* h, const double* positions, const double* velocities, const double* cell) {
     if (!h || h->N <= 0) return -1;
@@ -1754,34 +1814,29 @@ static int evaluate_once(
     CUDA_CHECK(cudaSetDevice(h->device_id));
     // Positions only: MD velocities are kept. The neighbour list is rebuilt only when the cell changed or an atom
     // moved more than skin/2 since the last build; the force graph is reused unless the rebuild outgrew it.
-    const int cell_changed = upload_positions(h, positions, cell);
+    const int cell_changed = stage_positions(h, positions, cell);
     if (cell_changed < 0) return -1;
-    bool rebuild = cell_changed != 0 || !h->nl_valid;
-    if (!rebuild) {
-        const double half_skin = 0.5 * h->skin;
-        CUDA_CHECK(cudaMemsetAsync(h->d_need_rebuild, 0, sizeof(int), h->stream));
-        loup::check_skin_kernel<<<(h->N + 255) / 256, 256, 0, h->stream>>>(h->N, half_skin, h->d_pos64,
-                                                                          h->d_ref_pos64, h->d_need_rebuild);
-        int v[3];
-        if (read_device_ints(h, h->d_need_rebuild, nullptr, nullptr, v) != 0) return -1;
-        rebuild = v[0] != 0;
+    const int stress = compute_stress && out_stress ? 1 : 0;
+    const double* f_sorted = h->stage_f();
+    double* ev = h->stage_ev();
+    for (int i = 0; i < 7; ++i) ev[i] = 0.0;
+    if (cell_changed != 0 || !h->nl_valid) {
+        // A new cell (the list's Cartesian shifts depend on it) or no list yet: the host-driven rebuild, then the pass.
+        CUDA_CHECK(cudaMemcpyAsync(h->d_pos64, h->stage_pos(), (size_t)h->N * 3 * sizeof(double), cudaMemcpyHostToDevice, h->stream));
+        if (rebuild_neighbors(h) != 0) return -1;
+        if (ensure_force_graph(h, stress) != 0) return -1;
+        CUDA_CHECK(cudaGraphLaunch(h->force_graph_exec, h->stream));
+        int fin[3];
+        if (queue_results(h, stress) != 0 || wait_published(h, ++h->pub_count, fin) != 0) return -1;
+    } else if (run_md_loop(h, 3, 1, 1.0, 0.0, 0.0, (unsigned long long)stress, nullptr) != 0) {
+        // One launch of the host step graph: upload, skin check, guard, force pass or on-device rebuild, downloads.
+        return -1;
     }
-    if (rebuild && rebuild_neighbors(h) != 0) return -1;
-    if (ensure_force_graph(h, compute_stress) != 0) return -1;
-
-    CUDA_CHECK(cudaGraphLaunch(h->force_graph_exec, h->stream));
-    double inter_e = 0.0;
-    std::vector<double> f_sorted((size_t)h->N * 3);
-    double v_grad[6] = {0};
-    CUDA_CHECK(cudaMemcpyAsync(&inter_e, h->d_energy_f64, sizeof(double), cudaMemcpyDeviceToHost, h->stream));
-    CUDA_CHECK(cudaMemcpyAsync(f_sorted.data(), h->d_forces_f64, (size_t)h->N * 3 * sizeof(double), cudaMemcpyDeviceToHost, h->stream));
-    if (compute_stress && out_stress) {
-        CUDA_CHECK(cudaMemcpyAsync(v_grad, h->d_virial_grad_f64, 6 * sizeof(double), cudaMemcpyDeviceToHost, h->stream));
-    }
-    CUDA_CHECK(cudaStreamSynchronize(h->stream));
+    const double inter_e = ev[0];
+    const double* v_grad = ev + 1;
 
     *finite = std::isfinite(inter_e);
-    for (size_t i = 0; *finite && i < f_sorted.size(); ++i) *finite = std::isfinite(f_sorted[i]);
+    for (size_t i = 0; *finite && i < (size_t)h->N * 3; ++i) *finite = std::isfinite(f_sorted[i]);
     for (int i = 0; *finite && i < 6; ++i) *finite = std::isfinite(v_grad[i]);
     if (out_energy_ev) *out_energy_ev = h->e0_total + inter_e;
     if (out_forces) {
@@ -1792,7 +1847,7 @@ static int evaluate_once(
             out_forces[orig * 3 + 2] = f_sorted[dst * 3 + 2];
         }
     }
-    if (compute_stress && out_stress) {
+    if (stress) {
         double inv_v = 1.0 / h->cell_vol;
         out_stress[0] = v_grad[0] * inv_v; out_stress[1] = v_grad[1] * inv_v; out_stress[2] = v_grad[2] * inv_v;
         out_stress[3] = v_grad[1] * inv_v; out_stress[4] = v_grad[3] * inv_v; out_stress[5] = v_grad[4] * inv_v;
@@ -1817,13 +1872,21 @@ static int evaluate_impl(
     return rc;
 }
 
-static int run_md_loop(
-    LoupHandle* h, int kind, int n_steps, double dt_fs,
-    double temp_k, double friction_per_fs, unsigned long long seed, LoupMDStats* out_stats
-) {
+static int run_md_loop(LoupHandle* h, int kind, int n_steps, double dt_fs, double temp_k, double friction_per_fs,
+                       unsigned long long seed, LoupMDStats* out_stats) {
     // nl_valid: positions and a neighbour list exist (set_state or evaluate ran and its rebuild completed).
     if (!h || h->N <= 0 || !h->nl_valid || n_steps <= 0 || !std::isfinite(dt_fs) || !(dt_fs > 0.0)) return -1;
     CUDA_CHECK(cudaSetDevice(h->device_id));
+    // kind 2, the external step of loup_compute_device: the caller integrates and has written the positions, so one
+    // step is the skin check and the force pass (with the virial when `seed` is 1), with the same guard, on-device
+    // rebuild and host fallback as an MD step. It queues the step and returns: nothing below waits for the forces.
+    // kind 3, the host step of loup_evaluate: the same, with the positions' upload from the page-locked staging at the
+    // head of the step graph and the results' copies and their publication (queue_results) at its end, so a call is
+    // one graph launch. The host reads the guard's publication and then that last one.
+    const bool ext = kind == 2 || kind == 3;
+    const bool host_io = kind == 3;
+    const int ext_stress = ext && seed ? 1 : 0;
+    const int graph_key = ext ? 2 * kind + ext_stress : -1;
     const int N = h->N;
     const int gridN = (N + 255) / 256;
     const double dt_ase = dt_fs * loup::ASE_FS;
@@ -1837,11 +1900,13 @@ static int run_md_loop(
     // rest graph (rest_guard_kernel + IF (valid rows) rest).
 
     // Initial force evaluation at step 0
-    if (ensure_force_graph(h, 0) != 0) return -1;
-    CUDA_CHECK(cudaGraphLaunch(h->force_graph_exec, h->stream));
-    // The Langevin step counter persists across run calls (reset only in loup_set_system), so chunked runs with
-    // one seed continue the noise sequence instead of replaying it.
-    CUDA_CHECK(cudaStreamSynchronize(h->stream));
+    if (!ext) {
+        if (ensure_force_graph(h, 0) != 0) return -1;
+        CUDA_CHECK(cudaGraphLaunch(h->force_graph_exec, h->stream));
+        // The Langevin step counter persists across run calls (reset only in loup_set_system), so chunked runs with
+        // one seed continue the noise sequence instead of replaying it.
+        CUDA_CHECK(cudaStreamSynchronize(h->stream));
+    }
 
     double c1 = 0, c2 = 0, k_c3 = 0, k_c4 = 0, k_c5 = 0;
     if (kind == 1) {
@@ -1858,7 +1923,7 @@ static int run_md_loop(
         if (kind == 0) {
             loup::nve_first_half_kernel<<<gridN, 256, 0, h->stream>>>(
                 N, dt_ase, h->d_forces_f64, h->d_inv_masses, h->d_pos64, h->d_vel64);
-        } else {
+        } else if (kind == 1) {
             // 32 atoms per block: the FP64 Box-Muller (3 curand_normal2_double per atom) is FP64-throughput bound on
             // consumer GPUs, so spread the atoms over every SM instead of N / 256 of them; S106: one thread per draw.
             loup::langevin_first_half_kernel<<<(N + 31) / 32, 96, 0, h->stream>>>(
@@ -1866,15 +1931,18 @@ static int run_md_loop(
                 h->d_forces_f64, h->d_inv_masses, h->d_sqrt_inv_masses,
                 h->d_pos64, h->d_vel64, h->d_rnd_vel);
         }
+        if (host_io)
+            CUDA_CHECK_THROW(cudaMemcpyAsync(h->d_pos64, h->stage_pos(), (size_t)N * 3 * sizeof(double),
+                                             cudaMemcpyHostToDevice, h->stream));
         loup::check_skin_kernel<<<gridN, 256, 0, h->stream>>>(N, half_skin, h->d_pos64, h->d_ref_pos64,
                                                               h->d_need_rebuild);
     };
     auto record_rest = [&]() {
-        record_force_pass(h, 0);
+        record_force_pass(h, ext_stress);
         if (kind == 0) {
             loup::nve_second_half_kernel<<<gridN, 256, 0, h->stream>>>(
                 N, dt_ase, h->d_forces_f64, h->d_inv_masses, h->d_vel64);
-        } else {
+        } else if (kind == 1) {
             loup::langevin_second_half_kernel<<<gridN, 256, 0, h->stream>>>(
                 N, c1, c2, h->d_forces_f64, h->d_inv_masses, h->d_rnd_vel, h->d_vel64, h->d_step_counter);
         }
@@ -1988,6 +2056,8 @@ static int run_md_loop(
             CUDA_CHECK(cudaGraphAddNode(&node, g, deps.data(), nullptr, deps.size(), &cp));
             CUDA_CHECK(cudaStreamUpdateCaptureDependencies(h->stream, &node, nullptr, 1,
                                                            cudaStreamSetCaptureDependencies));
+            // After the SWITCH node, whichever body ran (or none): the results' copies and their publication.
+            if (host_io && queue_results(h, ext_stress) != 0) return -1;
             cudaGraph_t captured = nullptr;
             CUDA_CHECK(cudaStreamEndCapture(h->stream, &captured));
             if (rest_body(cp.conditional.phGraph_out[0]) != 0) return -1;
@@ -1997,24 +2067,40 @@ static int run_md_loop(
         if (instantiate(h->md_step_graph, h->md_step_exec, step_body) != 0) return -1;
         if (instantiate(h->md_checked_graph, h->md_checked_exec, checked_rest_body) != 0) return -1;
         h->md_dev_rebuild = dev;
+        h->md_graph_key = ext ? graph_key : -2;
+        if (!ext) {
+            h->md_int_kind = kind;
+            h->md_int_dt = dt_fs;
+            h->md_int_temp = temp_k;
+            h->md_int_fric = friction_per_fs;
+            h->md_int_seed = seed;
+        }
         return 0;
     };
-    // The graphs bake in this call's dt, thermostat and seed: drop any from an earlier call.
-    h->invalidate_md_graphs();
+    // The graphs bake in this call's dt, thermostat and seed: drop those of a call with other values (the Langevin
+    // noise continues through the device step counter, so equal values give the same graphs). The external steps
+    // bake in only whether the virial is formed, so their graphs are kept from call to call.
+    const bool same_run = !ext && h->md_graph_key == -2 && h->md_int_kind == kind && h->md_int_dt == dt_fs &&
+                          h->md_int_temp == temp_k && h->md_int_fric == friction_per_fs && h->md_int_seed == seed;
+    if (!(ext && h->md_graph_key == graph_key) && !same_run) h->invalidate_md_graphs();
 
     int rebuilds = 0;
     double tune_ms = 0.0;
-    EventPairGuard evg;
-    cudaEvent_t ev0 = evg.e0, ev1 = evg.e1;
-    CUDA_CHECK(cudaEventRecord(ev0, h->stream));
-
-    for (int step = 0; step < n_steps; ++step) {
+    // One step: launch the step graph, read the guard's publication, and on a rebuild that the graph could not finish
+    // on the GPU, finish it on the host and launch the checked rest.
+    auto one_step = [&]() -> int {
         if (ensure_graphs() != 0) return -1;
         CUDA_CHECK(cudaGraphLaunch(h->md_step_exec, h->stream));
         int v[3];
         if (wait_published(h, ++h->pub_count, v) != 0) return -1;
         if (v[1]) return order_error();
-        if (!v[0]) continue;
+        // host_io: the step graph ends with the results' copies and their publication `fin` (the rows' order flag),
+        // whichever branch ran; the staging holds this step's results once it has landed, if the force pass ran.
+        int fin[3] = {0, 0, 0};
+        if (!v[0]) {
+            if (host_io && wait_published(h, ++h->pub_count, fin) != 0) return -1;
+            return fin[0] ? order_error() : 0;
+        }
         ++rebuilds;
         if (h->md_dev_rebuild) {
             // The step graph's rebuild branch has counted the new rows; it went on to fill them and run the checked
@@ -2023,7 +2109,8 @@ static int run_md_loop(
             if (wait_published(h, ++h->pub_count, w) != 0) return -1;
             h->E_skin = w[0];
             h->max_deg_last = w[1];
-            if (w[2]) continue;
+            if (host_io && wait_published(h, ++h->pub_count, fin) != 0) return -1;
+            if (w[2]) return fin[0] ? order_error() : 0;
             // They did not: once the step graph has drained, finish the rebuild on the host from the counted rows and
             // recapture the graphs for the new sizes.
             int z[3];
@@ -2032,6 +2119,7 @@ static int run_md_loop(
             if (nl_finish(h, nl_g, w[0], w[1], false) != 0) return -1;
             h->invalidate_md_graphs();
         } else {
+            if (host_io && wait_published(h, ++h->pub_count, fin) != 0) return -1;  // of the pass the guard skipped
             // The per-system variant timing (first rebuild only) is not part of the steps: it is timed and excluded.
             if (!h->variants_tuned) {
                 const auto t0 = std::chrono::steady_clock::now();
@@ -2045,7 +2133,19 @@ static int run_md_loop(
         }
         if (ensure_graphs() != 0) return -1;
         CUDA_CHECK(cudaGraphLaunch(h->md_checked_exec, h->stream));
-    }
+        if (host_io) {
+            if (queue_results(h, ext_stress) != 0 || wait_published(h, ++h->pub_count, fin) != 0) return -1;
+            if (fin[0]) return order_error();
+        }
+        return 0;
+    };
+    if (ext) return one_step();
+
+    EventPairGuard evg;
+    cudaEvent_t ev0 = evg.e0, ev1 = evg.e1;
+    CUDA_CHECK(cudaEventRecord(ev0, h->stream));
+    for (int step = 0; step < n_steps; ++step)
+        if (one_step() != 0) return -1;
     CUDA_CHECK(cudaEventRecord(ev1, h->stream));
     CUDA_CHECK(cudaEventSynchronize(ev1));
     float ms = 0.0f;
@@ -2083,6 +2183,168 @@ static int run_md_loop(
 
 static int run_nve_impl(LoupHandle* h, int n_steps, double dt_fs, LoupMDStats* out_stats) {
     return run_md_loop(h, 0, n_steps, dt_fs, 0.0, 0.0, 0, out_stats);
+}
+
+// loup_compute_device: the caller's rows (row r holds engine atom ids[r], or r without ids) to the engine's atom
+// order and back. An id outside 0 .. n-1 sets bit 0 of *bad, a non-finite force bit 1.
+static __global__ void io_gather_kernel(int n, const double* __restrict__ pos, long long rs, long long cs,
+                                        const int* __restrict__ ids, const int* __restrict__ inv_perm,
+                                        double* __restrict__ pos_out, int* bad) {
+    const int r = blockIdx.x * blockDim.x + threadIdx.x;
+    if (r >= n) return;
+    const int a = ids ? ids[r] : r;
+    if ((unsigned)a >= (unsigned)n) {
+        atomicOr(bad, 1);
+        return;
+    }
+    const int d = inv_perm[a];
+    const double* p = pos + (long long)r * rs;
+    pos_out[3 * d + 0] = p[0];
+    pos_out[3 * d + 1] = p[cs];
+    pos_out[3 * d + 2] = p[2 * cs];
+}
+
+static __global__ void io_scatter_kernel(int n, const int* __restrict__ ids, const int* __restrict__ inv_perm,
+                                         const double* __restrict__ f, double* __restrict__ out, long long rs,
+                                         long long cs, int* bad) {
+    const int r = blockIdx.x * blockDim.x + threadIdx.x;
+    if (r >= n) return;
+    const int a = ids ? ids[r] : r;
+    if ((unsigned)a >= (unsigned)n) return;
+    const int d = inv_perm[a];
+    const double fx = f[3 * d + 0], fy = f[3 * d + 1], fz = f[3 * d + 2];
+    if (!(isfinite(fx) && isfinite(fy) && isfinite(fz))) atomicOr(bad, 2);
+    double* o = out + (long long)r * rs;
+    o[0] += fx;
+    o[cs] += fy;
+    o[2 * cs] += fz;
+}
+
+// One force evaluation for a host code that keeps its atoms on the GPU and integrates itself (LAMMPS Kokkos,
+// LAMMPS_KOKKOS_PLAN.md stage B). Everything is queued behind the work already on the caller's stream, and the caller's
+// stream is made to wait for the forces; the host waits only for the step graph's guard (which lands before the force
+// pass starts), for a neighbour rebuild the graph could not finish on the GPU, and for the energy / virial when asked.
+static int compute_device_impl(LoupHandle* h, const LoupDeviceIO* io, const double* cell, void* stream,
+                               double* out_energy_ev, double* out_virial) {
+    if (!h || h->N <= 0 || !io) return -1;
+    CUDA_CHECK(cudaSetDevice(h->device_id));
+    const int N = h->N;
+    if (io->n_rows != N || !io->positions || io->pos_row_stride <= 0 || io->pos_comp_stride <= 0 ||
+        (io->forces && (io->f_row_stride <= 0 || io->f_comp_stride <= 0))) {
+        fprintf(stderr, "loup_compute_device: %d rows for a system of %d atoms, positions %s, strides %lld %lld / %lld %lld\n",
+                io->n_rows, N, io->positions ? "set" : "null", io->pos_row_stride, io->pos_comp_stride,
+                io->f_row_stride, io->f_comp_stride);
+        return -1;
+    }
+    if ((io->flags & LOUP_IO_ATOM_ENERGY) || io->atom_energy) {
+        fprintf(stderr, "loup_compute_device: per-atom energies are not available\n");
+        return -1;
+    }
+    if (!valid_cell(cell)) return -1;
+    const bool want_e = (io->flags & LOUP_IO_ENERGY) && out_energy_ev;
+    const bool want_v = (io->flags & LOUP_IO_VIRIAL) && out_virial;
+    // The virial is formed in every pass: the steps that ask for it (thermo output, barostats) then run the same
+    // captured graphs as the others instead of re-capturing them.
+    const int stress = 1;
+    const cudaStream_t cs = static_cast<cudaStream_t>(stream);
+
+    if (!h->ev_io_in) {
+        CUDA_CHECK(cudaEventCreateWithFlags(&h->ev_io_in, cudaEventDisableTiming));
+        CUDA_CHECK(cudaEventCreateWithFlags(&h->ev_io_out, cudaEventDisableTiming));
+    }
+    if (!h->d_inv_perm) {
+        CUDA_CHECK(cudaMalloc(&h->d_inv_perm, (size_t)N * sizeof(int)));
+        CUDA_CHECK(cudaMalloc(&h->d_io_bad, sizeof(int)));
+        CUDA_CHECK(cudaMemsetAsync(h->d_io_bad, 0, sizeof(int), h->stream));
+    }
+    auto sync_inv_perm = [&]() -> int {
+        if (h->inv_perm_epoch == h->perm_epoch) return 0;
+        std::vector<int> inv(N);
+        for (int d = 0; d < N; ++d) inv[h->perm[d]] = d;
+        CUDA_CHECK(cudaMemcpyAsync(h->d_inv_perm, inv.data(), (size_t)N * sizeof(int), cudaMemcpyHostToDevice, h->stream));
+        h->inv_perm_epoch = h->perm_epoch;
+        return 0;
+    };
+    if (sync_inv_perm() != 0) return -1;
+
+    // The engine's work starts after everything the caller has queued on its stream.
+    CUDA_CHECK(cudaEventRecord(h->ev_io_in, cs));
+    CUDA_CHECK(cudaStreamWaitEvent(h->stream, h->ev_io_in, 0));
+
+    loup::CellMat64 old_cell = h->cell;
+    loup::compute_cell_mat(cell, h->cell, h->cell_vol, h->cell_heights);
+    const bool cell_changed = memcmp(&old_cell, &h->cell, sizeof(old_cell)) != 0;
+    if (h->gen->set_cell(cell)) h->invalidate_graphs();
+
+    const int grid = (N + 255) / 256;
+    io_gather_kernel<<<grid, 256, 0, h->stream>>>(N, io->positions, io->pos_row_stride, io->pos_comp_stride, io->ids,
+                                                  h->d_inv_perm, h->d_pos64, h->d_io_bad);
+    if (cell_changed || !h->nl_valid) {
+        // A new cell (the list's Cartesian shifts depend on it) or no list yet: the host-driven rebuild.
+        if (rebuild_neighbors(h) != 0) return -1;
+        if (ensure_force_graph(h, stress) != 0) return -1;
+        CUDA_CHECK(cudaGraphLaunch(h->force_graph_exec, h->stream));
+    } else if (run_md_loop(h, 2, 1, 1.0, 0.0, 0.0, (unsigned long long)stress, nullptr) != 0) {
+        return -1;
+    }
+
+    double inter_e = 0.0, v_grad[6] = {0, 0, 0, 0, 0, 0};
+    if (want_e || want_v) {
+        int flags[2] = {0, 0};
+        auto fetch = [&]() -> int {
+            CUDA_CHECK(cudaMemcpyAsync(&inter_e, h->d_energy_f64, sizeof(double), cudaMemcpyDeviceToHost, h->stream));
+            if (want_v)
+                CUDA_CHECK(cudaMemcpyAsync(v_grad, h->d_virial_grad_f64, 6 * sizeof(double), cudaMemcpyDeviceToHost, h->stream));
+            CUDA_CHECK(cudaMemcpyAsync(&flags[0], h->d_io_bad, sizeof(int), cudaMemcpyDeviceToHost, h->stream));
+            CUDA_CHECK(cudaMemcpyAsync(&flags[1], h->d_order_err, sizeof(int), cudaMemcpyDeviceToHost, h->stream));
+            CUDA_CHECK(cudaStreamSynchronize(h->stream));
+            return 0;
+        };
+        auto finite = [&] {
+            bool ok = std::isfinite(inter_e);
+            for (int i = 0; ok && i < 6; ++i) ok = std::isfinite(v_grad[i]);
+            return ok;
+        };
+        if (fetch() != 0) return -1;
+        if (flags[0] & 1) {
+            fprintf(stderr, "loup_compute_device: an atom id is outside 0 .. %d\n", N - 1);
+            CUDA_CHECK(cudaMemsetAsync(h->d_io_bad, 0, sizeof(int), h->stream));  // a corrected call is accepted
+            return -1;
+        }
+        if (flags[1]) return order_error();
+        // As loup_evaluate: with the tensor-core GEMM cubin loaded, a non-finite result drops it and the pass is run
+        // again (the positions are still in place; no force has been added to the caller's rows yet).
+        if ((!finite() || (flags[0] & 2)) && drop_hybrid(h)) {
+            CUDA_CHECK(cudaMemsetAsync(h->d_io_bad, 0, sizeof(int), h->stream));
+            if (ensure_force_graph(h, stress) != 0) return -1;
+            CUDA_CHECK(cudaGraphLaunch(h->force_graph_exec, h->stream));
+            if (fetch() != 0) return -1;
+        }
+        if (!finite() || (flags[0] & 2)) {
+            fprintf(stderr, "loupmd: non-finite energy / forces (model output; the configuration may be unphysical)\n");
+            return -1;
+        }
+    }
+
+    if (sync_inv_perm() != 0) return -1;  // an atom reorder in this step's rebuild changed the permutation
+    if (io->forces)
+        io_scatter_kernel<<<grid, 256, 0, h->stream>>>(N, io->ids, h->d_inv_perm, h->d_forces_f64, io->forces,
+                                                       io->f_row_stride, io->f_comp_stride, h->d_io_bad);
+    CUDA_CHECK(cudaGetLastError());
+    CUDA_CHECK(cudaEventRecord(h->ev_io_out, h->stream));
+    CUDA_CHECK(cudaStreamWaitEvent(cs, h->ev_io_out, 0));
+
+    if (want_e) *out_energy_ev = h->e0_total + inter_e;
+    if (want_v) {
+        // v_grad = dE/d(strain) as [xx, xy, xz, yy, yz, zz]; the virial is its negative, in the order xx yy zz xy xz yz.
+        out_virial[0] = -v_grad[0];
+        out_virial[1] = -v_grad[3];
+        out_virial[2] = -v_grad[5];
+        out_virial[3] = -v_grad[1];
+        out_virial[4] = -v_grad[2];
+        out_virial[5] = -v_grad[4];
+    }
+    return 0;
 }
 
 static int run_langevin_impl(
@@ -2191,6 +2453,22 @@ int loup_run_langevin(
 int loup_get_state(LoupHandle* h, double* out_positions, double* out_velocities, double* out_forces, double* out_energy_ev) {
     return guarded(h, "loup_get_state", [&] {
         return get_state_impl(h, out_positions, out_velocities, out_forces, out_energy_ev);
+    });
+}
+
+double loup_cutoff(const LoupHandle* h) { return h && h->gen ? (double)h->cutoff() : 0.0; }
+
+int loup_species(const LoupHandle* h, int* out_atomic_numbers, int max) {
+    if (!h || !h->gen) return 0;
+    const int S = h->n_species();
+    for (int s = 0; out_atomic_numbers && s < S && s < max; ++s) out_atomic_numbers[s] = h->species_z(s);
+    return S;
+}
+
+int loup_compute_device(LoupHandle* h, const LoupDeviceIO* io, const double* cell, void* stream,
+                        double* out_energy_ev, double* out_virial) {
+    return guarded(h, "loup_compute_device", [&] {
+        return compute_device_impl(h, io, cell, stream, out_energy_ev, out_virial);
     });
 }
 

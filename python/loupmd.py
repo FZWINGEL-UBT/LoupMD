@@ -22,6 +22,24 @@ class LoupMDStats(ctypes.Structure):
     ]
 
 
+class LoupDeviceIO(ctypes.Structure):
+    """include/loupmd.h's LoupDeviceIO: device pointers and strides of the caller's position and force arrays."""
+    _fields_ = [
+        ("n_rows", ctypes.c_int),
+        ("positions", ctypes.c_void_p),
+        ("pos_row_stride", ctypes.c_longlong),
+        ("pos_comp_stride", ctypes.c_longlong),
+        ("ids", ctypes.c_void_p),
+        ("forces", ctypes.c_void_p),
+        ("f_row_stride", ctypes.c_longlong),
+        ("f_comp_stride", ctypes.c_longlong),
+        ("atom_energy", ctypes.c_void_p),
+        ("flags", ctypes.c_int),
+    ]
+
+
+LOUP_IO_ENERGY, LOUP_IO_VIRIAL = 1, 2
+
 _LIB = None
 
 
@@ -117,6 +135,20 @@ def _load_lib():
         ctypes.POINTER(ctypes.c_double),
     ]
     lib.loup_profile_force.restype = ctypes.c_int
+    if hasattr(lib, "loup_compute_device"):  # libraries from before the device-resident call lack these three
+        lib.loup_compute_device.argtypes = [
+            ctypes.c_void_p,
+            ctypes.POINTER(LoupDeviceIO),
+            ctypes.POINTER(ctypes.c_double),
+            ctypes.c_void_p,
+            ctypes.POINTER(ctypes.c_double),
+            ctypes.POINTER(ctypes.c_double),
+        ]
+        lib.loup_compute_device.restype = ctypes.c_int
+        lib.loup_cutoff.argtypes = [ctypes.c_void_p]
+        lib.loup_cutoff.restype = ctypes.c_double
+        lib.loup_species.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_int), ctypes.c_int]
+        lib.loup_species.restype = ctypes.c_int
     _LIB = lib
     return lib
 
@@ -250,6 +282,38 @@ class LoupEngine:
         if rc != 0:
             raise RuntimeError("loup_evaluate failed")
         return float(energy.value), forces, stress
+
+    def cutoff(self) -> float:
+        """The model's cutoff radius in A."""
+        return float(self._lib.loup_cutoff(self._h))
+
+    def species(self) -> list[int]:
+        """The atomic numbers of the bundle's species."""
+        zs = (ctypes.c_int * 128)()
+        n = self._lib.loup_species(self._h, zs, 128)
+        return [int(zs[i]) for i in range(min(n, 128))]
+
+    def compute_device(self, positions_ptr: int, cell, forces_ptr: int = 0, ids_ptr: int = 0, pos_strides=(3, 1),
+                       f_strides=(3, 1), stream: int = 0, energy: bool = True, virial: bool = False):
+        """One force evaluation on arrays that live on the GPU (loup_compute_device).
+
+        ``positions_ptr`` / ``forces_ptr`` / ``ids_ptr`` are device addresses (e.g. ``tensor.data_ptr()`` of CUDA
+        float64 / int32 tensors of this engine's device); the strides are (row, component) in elements. Forces are
+        added to the caller's array. ``stream`` is a ``cudaStream_t`` as an integer (0: the default stream). Returns
+        (energy in eV or None, virial [xx, yy, zz, xy, xz, yz] in eV or None); without ``energy`` and ``virial`` the
+        call returns before the forces are there, and work queued on ``stream`` afterwards waits for them."""
+        cel = _array(cell, (3, 3), "cell")
+        io = LoupDeviceIO(self._n, positions_ptr, pos_strides[0], pos_strides[1], ids_ptr or None, forces_ptr or None,
+                          f_strides[0], f_strides[1], None,
+                          (LOUP_IO_ENERGY if energy else 0) | (LOUP_IO_VIRIAL if virial else 0))
+        e = ctypes.c_double()
+        v = (ctypes.c_double * 6)()
+        rc = self._lib.loup_compute_device(self._h, ctypes.byref(io),
+                                           cel.ctypes.data_as(ctypes.POINTER(ctypes.c_double)), stream or None,
+                                           ctypes.byref(e), v)
+        if rc != 0:
+            raise RuntimeError("loup_compute_device failed")
+        return (float(e.value) if energy else None), (np.array(v[:]) if virial else None)
 
     def set_state(self, positions, velocities, cell):
         pos = _array(positions, (self._n, 3), "positions")
