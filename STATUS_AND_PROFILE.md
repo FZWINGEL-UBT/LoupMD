@@ -492,6 +492,15 @@ S142 (`gen-conv-bwd-fold4`, `gen-first-bwd-edge-j64`, 19 November, branch `devel
 - The lx <= 1 conv backwards fold their four pull partials together (9 shuffles instead of 20, lane 0's sums bitwise the old ones): `gconv_bwd_L1` 2,773 -> 2,741 us per force call on OMAT-0 generic SrTiO3.
 - The layer-0 edge backward is compiled for 64 radial columns when the model has them: 424 -> 375 us per force call (OMAT-0 generic SrTiO3), MP-0 NbCl5 62.4 -> 59.0 us.
 - Together, against the develop library `595ee89` on shared plans: OMAT-0 medium generic SrTiO3 `0.991` (7.742 -> 7.672 ms), OMAT-0 small SrTiO3 `0.988`, MP-0 medium SrTiO3 `0.988`, MP-0 NbCl5 `0.984` (a first run read `1.020`; that cell scatters by 2%). 13 gate cases (213 rows) and 77 tests pass. The other items of the owner's eighth list: the ledger's S142 rows (six lab variants rejected, four bounds, eight paper verdicts).
+S143 (`gen-jit-layer0`, 19 November, branch `develop`, 5060 Ti only): stage 1 of `JIT_DESIGN.md`, the run-time compiler.
+- Pieces:
+  - layer 0's kernels live in one header (`src/layer0_kernels.cuh`) that `nvcc` compiles and the library embeds;
+  - with `LOUP_JIT=1`, NVRTC (loaded with `dlopen`) compiles it at load with the model's layer-0 constants (`src/kernel_ir.hpp`);
+  - the cubins are kept in `<cache>/jit/`, and launches go through `cudaLaunchKernel` inside the captured graphs;
+  - without NVRTC, or on any failure, the built-in kernels run.
+- Result: a tie. `first_bwd_edge` 374.4 → 375.1 µs and `first_fwd` 231.5 → 230.3 µs (OMAT-0 generic SrTiO3); OFF23-S and MH-1 within ±2.4%. Static SASS is 5–37% smaller, but the kernels are latency / load-store bound, and S142 had already compiled in the width that mattered.
+- Compiling the spline grid in as well is slower (+2.5%, rejected).
+- Gates with `LOUP_JIT=1`: five cases, 68 rows, all pass. Tests: 79 pass (new `tests/test_jit.py`). The switch stays off.
 
 ### 5.4 Fixes Found by the Family Work
 - **POLAR LayerNorm-MLP reverse wrote its GEMM output over its own input** (`mlp_bwd`: after the first hidden layer

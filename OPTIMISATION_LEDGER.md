@@ -284,6 +284,42 @@ Conventions:
 | [gen-conv-bwd-expanded-path](#gen-s142-lab-screens) | One backward path (9) read as four FP32 coefficients (16 B) instead of the packed 8 B entry | lab stand-in table (reverted) | gen | REJECTED (5060 Ti only) | S142 | `gconv_bwd_L1` x1.022 (+61 us): the extra L2 traffic costs more than the saved decode | [gen-s142-lab-screens](#gen-s142-lab-screens) |
 | [gen-readout-shfl16](#gen-s142-lab-screens) | The fused readout's first barrier replaced by width-16 shuffles of `y0` | lab (reverted) | gen | REJECTED (5060 Ti only) | S142 | `gprod_ro1_fused` x0.980, within its +-3% round-to-round scatter (an untouched variant read x0.975) | [gen-s142-lab-screens](#gen-s142-lab-screens) |
 | [gen-readout-unit-seed](#gen-s142-lab-screens) | The fused readout's polynomial backward run with unit seed before the readout's barriers, scaled by the gradient after them | lab (reverted) | gen | REJECTED (5060 Ti only) | S142 | `gprod_ro1_fused` x0.989 (noise), registers 110 -> 124 | [gen-s142-lab-screens](#gen-s142-lab-screens) |
+| [gen-jit-layer0](#gen-jit-layer0) | JIT stage 1 (`JIT_DESIGN.md`): layer 0's `first_fwd_kernel` and `first_bwd_edge_kernel` compiled at load by NVRTC with the model's species count, intervals, table width and stride, `K0`, `sh_perm` and pair symmetry as constants (one source, `src/layer0_kernels.cuh`, for both builds; disk cache of the cubins) | `LOUP_JIT=1` (`src/jit.cu`, `src/kernel_ir.cu`, `GenericModel::setup_jit`) | gen (layer 0 with up to 96 radial columns) | OFF (opt-in; a tie, 5060 Ti only) | S143 | `first_bwd_edge` 374.4 -> 375.1 us, `first_fwd` 231.5 -> 230.3 (OMAT-0 generic SrTiO3); OFF23-S 28.2 -> 28.7 / 15.3 -> 15.0; MH-1 21.2 -> 20.7 / 8.3 -> 8.3; static SASS 5-37% smaller, same registers; forces at the cross-process level; 5 gate cases (68 rows) pass | this file |
+| [gen-jit-layer0-grid](#gen-jit-layer0) | The same with the spline grid's numbers compiled in as literals (`LOUP_JIT_BAKE_GRID=1`, lab knob) | `Layer0IR::bake_grid` | gen | REJECTED (5060 Ti only) | S143 | OFF23-S `first_bwd_edge` 28.2 -> 28.9 us, `first_fwd` 15.3 -> 15.4 (and OMAT-0 generic +0.9% / +2.2% in the first job): seven bands become select chains over literals (about 60 instructions more per kernel than the grid argument) where the argument costs one indexed constant load per field | [gen-jit-layer0](#gen-jit-layer0) |
+
+<a id="gen-jit-layer0"></a>
+#### gen-jit-layer0: layer 0's kernels compiled at load (JIT stage 1)
+- Switch: `LOUP_JIT=1` (off by default); `LOUP_NVRTC` names the NVRTC library (only that one is tried); `LOUP_DEBUG_JIT=1` prints each layer's IR and whether its kernels were compiled or read from the cache; `LOUP_JIT_BAKE_GRID=1` (lab knob) compiles the grid in as well.
+- Stage: S143 (19 November 2026), the owner's request "do the single IR and jit compiler first" after the five-pillar redesign proposal; plan and later stages in `JIT_DESIGN.md`.
+- Design:
+  - The layer-0 kernels and the ZBL pair term moved, unchanged apart from their parameter names, from `src/generic.cu` to `src/layer0_kernels.cuh`.
+  - `nvcc` compiles the header as before. The Makefile also embeds it, `kernels_common.cuh` and the new `generated_sh16.cuh` (`sh16_grad`, which `gen_generic.py` now writes to a header of its own) as raw strings.
+  - At load `GenericModel::setup_jit` lowers layer 0 to a `Layer0IR` (`src/kernel_ir.hpp`). `layer0_jit_source` writes a prelude of `LOUP_JIT_L0_*` defines, and `LOUP_L0_INT` turns each argument into a `constexpr`.
+  - `jit::build` (`src/jit.cu`):
+    - loads NVRTC with `dlopen`, so the library gains no link dependency;
+    - compiles for the device's `sm_XY`;
+    - keeps the cubin in `<LOUP_CACHE_DIR or ~/.cache/loupmd>/jit/layer0_<key>.bin`, keyed by FNV-1a over source, headers, options, NVRTC version and architecture;
+    - loads it with `cudaLibraryLoadData`;
+    - returns `cudaLibraryGetKernel` handles.
+  - The launches (`launch_jit_as`) pass the ahead-of-time kernel's parameter list to `cudaLaunchKernel`, inside the captured graphs as before.
+  - On any failure (no NVRTC, a compile error, a refused cubin) the library prints one message and keeps the built-in kernels.
+- Measured (5060 Ti, nsys over 16 force calls, three interleaved rounds, same library and plans, conv tuning off):
+
+  | family | `first_bwd_edge`, AOT → JIT | `first_fwd`, AOT → JIT |
+  | --- | --- | --- |
+  | OMAT-0 medium generic SrTiO3 (R5) | 374.4 → 375.1 us (AOT the S142 `J_FIX = 65` kernel) | 231.5 → 230.3 |
+  | OFF23-S water216 | 28.2 → 28.7 (`J_FIX = 65`) | 15.3 → 15.0 |
+  | MH-1 NaCl216 (J 66, three columns per lane, no fixed-width AOT kernel) | 21.2 → 20.7 | 8.3 → 8.3 |
+
+  - Static SASS without `NOP`s (offline NVRTC census of the models' IRs on a seven-band grid): `first_bwd_edge` 1,398 → 1,274, 1,031 → 897 and 1,412 → 1,365; `first_fwd` 1,312 → 1,028, 832 and 1,050. Registers are unchanged (80, `first_fwd` 54 → 53 / 45).
+  - The fewer instructions buy no time: the edge backward is bound by its load/store pipe, and the S142 fixed-width kernel had already folded the constant that mattered (`J`).
+- Accuracy:
+  - Forces and energies against the built-in kernels with conv tuning off: OMAT-0 generic dF 3.6e-6 (two built-in runs: 4.6e-6), OFF23-S 2.2e-6 (1.3e-6), MH-1 1.6e-7 (2.3e-7). The difference is the order of the floating-point atomics between processes.
+  - Gates with `LOUP_JIT=1`: OMAT-0 medium generic, OMAT-0 small, MH-1 and MP-0 medium oxide, OFF23-S organic. 68 rows, none failing; worst force / stress ratio 2.03 / 1.77.
+- Cost: the first load of a model compiles three kernels; later loads read the disk cache. The compile was not timed on its own; `tests/test_jit.py`'s first test (a built-in run, a compiling run and a cached run of MH-1 NaCl54, each with its imports and model load) takes 7 s.
+- Tests: 43 + 36 = 79 passed, including the new `tests/test_jit.py`: JIT against built-in, the cache file written and then read, and the fallback with `LOUP_NVRTC` pointing at a missing library.
+- Status: OFF (opt-in; a tie on the 5060 Ti; sm_89 not measured). The infrastructure is what stages 2-3 of `JIT_DESIGN.md` build on: conv kernels for widths without an AOT instance, and products of models outside the build set without `nvcc`. The grid variant is REJECTED.
+- Sources: this file, `JIT_DESIGN.md`.
 
 <a id="gen-conv-bwd-fold4"></a>
 #### gen-conv-bwd-fold4: the four pull partials of the L1 conv backwards folded together
@@ -508,6 +544,8 @@ Do not retry these unless the stated condition changes.
 | One 144-column projection for the 128 scalar features and the 16 skip outputs | not built: the skip is per species (16 columns, `ns` rows each) while `linear_up` is one GEMM over all atoms, so the merge turns the 128-column GEMM into per-species GEMMs; it saves one more read of the 2.6 MB scalar block from L2 and a few small launches, under 10 us per step | owner's idea list, 19 Nov |
 | Hybrid GEMM weights pre-split into TF32-high and FP16-residual fragments at load | not built: the hybrid cubin runs 119 us per step on OMAT-0 generic SrTiO3 (2 launches, `fm_tf32x3_rr_64x64`); the B half of its fragment transform is a fraction of that while the weight operand's bytes double, and the cubin is FastMACE's container build | owner's idea list, 19 Nov |
 | One level of Strassen on the 25,000 x 128 x 384 projection | not built: seven products instead of eight save at most 1/8 of its 192.5 us (24 us); five of the seven need a sum of two activation blocks (12,500 x 192, 9.6 MB each), as passes ~145 MB of DRAM traffic (> 300 us) or as fused loads 50% more A reads in a GEMM bound by FP32 issue, plus the recombination of four output blocks from seven | owner's idea list, 19 Nov |
+| JIT stage 2: the conv kernels compiled at load for the layer's width, species and intervals (`JIT_DESIGN.md`) | open: stage 1 ([gen-jit-layer0](#gen-jit-layer0)) showed that constants alone buy nothing in a latency-bound kernel whose main width is already compiled in, so the candidates are the widths without an AOT instance (the `C = 0` templates: OFF23-L, OMOL-0 extra large, ...); measure what the `C = 128` instance gains over the `C = 0` template on one model first | owner's request, 19 Nov |
+| JIT stage 3: products of models outside the build set from the bundle's factored program, compiled by NVRTC instead of `loupmd build-kernels`' `nvcc` | open: a coverage feature, not a speed-up; the release's plugin path (`release/v1`) is what it would replace | owner's request, 19 Nov |
 
 ## Appendix: entries
 

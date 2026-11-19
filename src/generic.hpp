@@ -133,6 +133,8 @@ private:
     bool species_tables_ = false;
     // Long-range hidden fold (sm_120; LOUP_POLAR_HFOLD=0 disables, 1 / 2 / 3 picks the degrees): see setup_lr_fold.
     void setup_lr_fold(const Bundle& b);
+    // JIT_DESIGN.md stage 1 (LOUP_JIT=1): layer 0's kernels compiled for this model at load; see setup_jit in generic.cu.
+    void setup_jit();
     int S_ = 0, n_layers_ = 0, sh_perm_ = 0, has_zbl_ = 0;
     float r_max_ = 0.0f;
     std::vector<int> Z_;
