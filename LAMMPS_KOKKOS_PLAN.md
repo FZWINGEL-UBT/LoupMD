@@ -50,14 +50,19 @@ differs from the plan that follows it. Figures marked *estimate* are not measure
 
 | system (MACE-OMAT-0 medium unless noted) | engine's own loop | `run_style loupmd` | `loupmd` | `loupmd/kk` | Symmetrix foundation float32/kk |
 |---|---|---|---|---|---|
-| SrTiO3, 5,000 atoms | 8.45 (16 Nov) | 7.84 - 7.86 | 8.20 | 8.38 - 8.45 | 13.47 - 13.54 |
-| SrTiO3, 320 atoms | not run | 0.61 - 0.63 | 0.86 - 0.90 | 1.29 - 1.38 | 1.55 - 1.59 |
+| SrTiO3, 5,000 atoms | 7.71 - 7.74 | 7.81 - 7.86 | 8.20 | 8.38 - 8.45 | 13.47 - 13.54 |
+| SrTiO3, 320 atoms | 0.59 - 0.61 | 0.61 - 0.64 | 0.86 - 0.90 | 1.29 - 1.38 | 1.55 - 1.59 |
 | NaCl, 216 atoms | 0.29 - 0.30 | not run | 0.52 - 0.54 | 1.60 | not run |
 | OFF23-S water, 648 atoms | 0.34 - 0.36 | 0.376 (NVE, output every 100 steps) | 0.57 - 0.59 | 2.2 - 2.9 | – |
 
 - The SrTiO3 rows use the benchmark environment's inputs and protocol (`in.sym_md`: from rest, damp 0.5 ps, 100 + 256
   steps), each code twice in one job. Symmetrix is the benchmark environment's build of 16 November, on the same
   LAMMPS release.
+- The engine's own loop on the SrTiO3 rows is `LoupEngine.run_langevin` on the same data files with the same
+  protocol, in one job with the run style (`a b b a`): the run style is 1 - 1.5% slower at 5,000 atoms and 2 - 7%
+  at 320 (single runs 3% apart), the cost of handing the state back and evaluating energy and pressure at each
+  output step. It is the same loop, so it cannot be faster; both end at the same temperature (158 K, 149 - 150 K).
+  The 16 November five-engine run had the engine at 8.45 ms/step on the 5,000-atom case, with that day's library.
 - Symmetrix-XL on the NaCl case was 3.55 - 3.61 ms/step on 5 November (not rerun).
 
 **What the measurements changed:**

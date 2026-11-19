@@ -1635,6 +1635,7 @@ Each entry has the same fields. Unless stated, the system is OMAT-0 medium on th
     | `pair_style loupmd/kk` | 8.38-8.45 | 1.29-1.38 |
     | Symmetrix `symmetrix/mace/foundation/float32/kk` (benchmark build, 16 Nov) | 13.47-13.54 | 1.55-1.59 |
 
+  - The engine's own loop (`LoupEngine.run_langevin`) on the same two data files and protocol, in one job with the run style (`a b b a`): 7.71-7.74 against 7.81-7.83 ms/step at 5,000 atoms, 0.59-0.61 against 0.62-0.64 at 320. The run style is the same loop plus the hand-back at each output step: 1-1.5% and 2-7% slower, never faster.
   - NaCl 216 atoms (the 5 November Symmetrix-XL case, 500 + 3,000 steps): `loupmd` 0.52-0.54, `loupmd/kk` 1.60, the engine's own loop 0.29-0.30 ms/step; Symmetrix-XL was 3.55-3.61 on 5 November (not rerun).
   - LAMMPS-Kokkos alone (zero-strength LJ, the 648 water atoms, `fix nve/kk` + `fix langevin/kk`): 2.43 ms/step; with `neigh_modify every 20 delay 0 check no` 0.52; plain LAMMPS 0.115. On this machine the Kokkos style's small-system step is LAMMPS-Kokkos's own cost.
   - `ghost no`: `loupmd/kk` water216 2.64 -> 2.25-2.53 ms/step, inside the spread (2.2-2.9 over the day's runs).
