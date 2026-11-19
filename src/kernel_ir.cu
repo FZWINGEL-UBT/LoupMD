@@ -65,6 +65,64 @@ std::string layer0_jit_source(const Layer0IR& ir) {
     return s;
 }
 
+std::string conv_jit_source() {
+    return "// LoupMD conv kernels, JIT (kernel_ir.cu)\n#include \"generated_conv.cuh\"\n";
+}
+
+std::vector<std::string> conv_jit_names(const ConvIR& ir, int* n_fwd_kernels, int* n_bwd_kernels) {
+    const std::string C = std::to_string(ir.C), M = ir.C <= 256 ? "256" : "512";
+    // the paired-edge decode (PAIR) as the C = 128 instances use it, up to 256 channels (S143: lx 1 at C 128 on the
+    // run-time-width branch 2,053 us unpaired against 1,780 paired, OMAT-0 generic SrTiO3)
+    const std::string pr = (ir.pair && ir.C <= 256) ? "true" : "false";
+    std::vector<std::string> fk, bk;  // kernel templates up to the PRELOC / WANT_DX arguments
+    if (ir.fwd) {
+        if (ir.lx == 0) {
+            fk = {"gconv_fwd_L0<1, " + pr + ", " + M + ", %P, " + C + ">"};
+        } else if (ir.lx == 1) {
+            fk = {std::string(ir.prune ? "gconv_fwd_L1s" : "gconv_fwd_L1") + "<1, " + pr + ", " + M + ", %P, " + C + ">"};
+        } else {
+            const std::string pa = ir.C <= 256 ? "1, true, 256" : "1, false, 512";
+            fk = {"gconv_fwd_L2a<" + pa + ", %P, " + C + ">", "gconv_fwd_L2b<" + pa + ", %P, " + C + ">"};
+        }
+    }
+    if (ir.bwd) {
+        if (ir.lx == 0) bk = {"gconv_bwd_L0<%W, " + C + ", %P>"};
+        else if (ir.lx == 1) bk = {std::string(ir.prune ? "gconv_bwd_L1s" : "gconv_bwd_L1") + "<%W, " + C + ", %P>"};
+        else bk = {"gconv_bwd_L2lp<%W, " + C + ", %P>", "gconv_bwd_L2<%W, " + C + ", %P>"};
+    }
+    auto sub = [](std::string t, const char* key, const char* v) {
+        const size_t k = t.find(key);
+        if (k != std::string::npos) t.replace(k, 2, v);
+        return t;
+    };
+    std::vector<std::string> out;
+    for (const auto& t : fk)
+        for (const char* p : {"false", "true"}) out.push_back(sub(t, "%P", p));
+    for (const auto& t : bk)
+        for (const char* w : {"false", "true"})
+            for (const char* p : {"false", "true"}) out.push_back(sub(sub(t, "%W", w), "%P", p));
+    *n_fwd_kernels = (int)fk.size();
+    *n_bwd_kernels = (int)bk.size();
+    return out;
+}
+
+std::string product_jit_source(const std::string& bundle_src) {
+    return "// LoupMD product kernels, JIT (kernel_ir.cu; source from the bundle)\n#include \"kernels_common.cuh\"\n"
+           "#include \"generated_sh16.cuh\"\n" +
+           bundle_src;
+}
+
+std::vector<std::string> product_jit_names(const std::string& sig, int lmax_out) {
+    std::vector<std::string> out = {"gprod_fwd_" + sig, "gprod_bwd_" + sig};
+    if (lmax_out == 0)
+        for (const char* v : {"ro1", "ro1s", "ro1c"})
+            for (const char* cb : {"128, 4", "256, 2", "512, 1"})
+                out.push_back(std::string("gprod_") + v + "_fused_" + sig + "<" + cb + ">");
+    out.push_back("gprod_fwdc_" + sig);
+    out.push_back("gprod_bwdc_" + sig);
+    return out;
+}
+
 std::vector<std::string> layer0_jit_names(const Layer0IR& ir) {
     const std::string c = std::to_string(layer0_edge_cols(ir.J)), z = ir.zbl ? "true" : "false";
     return {"&first_fwd_kernel", "first_bwd_edge_kernel<" + c + ", " + z + ", false, 0>",

@@ -19,8 +19,11 @@ struct Header {
 // The kernel headers compiled into the library (Makefile: jit_src/*.inc).
 const std::vector<Header>& embedded_headers();
 
-// LOUP_JIT=1: use the JIT kernels (stage 1: off unless set). Read once.
-bool enabled();
+// What the JIT compiles (LOUP_JIT, read once): 0 nothing; unset (default) the kernels the library has no instance
+// for (stage 2: conv layers of other widths; stage 3: products of models outside the build set); 1 also layer 0's
+// kernels (stage 1, a tie).
+int level();
+inline bool enabled() { return level() >= 2; }  // layer 0 too
 
 // Kernels for `name_exprs` (NVRTC name expressions, e.g. "first_bwd_edge_kernel<2, true, false, 0>"), in that order,
 // as handles for cudaLaunchKernel / cudaFuncSetAttribute. Compiled once per (source, headers, options, NVRTC version,

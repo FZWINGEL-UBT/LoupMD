@@ -4,6 +4,9 @@
 #include <cmath>
 #include <cstring>
 #include <cstdlib>
+#include <map>
+#include <memory>
+#include <mutex>
 #include <stdexcept>
 
 #include "bundle.hpp"
@@ -52,6 +55,9 @@ struct GenericLayer {
     // null: the ahead-of-time kernels
     const void* jit_fwd = nullptr;
     const void* jit_bwd_edge[2] = {nullptr, nullptr};  // [stress]
+    // stage 2: the conv kernels of a width without a built-in instance (the launchers' run-time-width branches)
+    ConvJit jit_conv;
+    bool jit_conv_on = false;
     float alpha = 1.0f, beta = 0.0f, gate_cs = 1.0f, gate_cg = 1.0f, ro_act_c = 1.0f;
     const GProdKernels* prod = nullptr;
     // weights (device)
@@ -116,6 +122,44 @@ T* upload(std::vector<void*>& owner, const std::vector<T>& host) {
 }
 
 inline int dimL(int l) { return 2 * l + 1; }
+
+// JIT_DESIGN.md stage 3: a product's kernels compiled from the bundle's source, one table per (signature, source) for
+// the process (the modules are never unloaded, jit.hpp). Null on failure, `err` says why.
+const GProdKernels* jit_product(const std::string& sig, int lmax_out, int segw, const std::string& src,
+                                std::string* err) {
+    struct Entry {
+        std::string sig;
+        GProdKernels k;
+    };
+    static std::mutex mu;
+    static std::map<std::string, std::unique_ptr<Entry>> made;
+    const std::string key = sig + ":" + std::to_string(std::hash<std::string>{}(src));
+    std::lock_guard<std::mutex> lk(mu);
+    if (auto it = made.find(key); it != made.end()) return &it->second->k;
+    const std::vector<std::string> names = product_jit_names(sig, lmax_out);
+    const std::vector<const void*> h = jit::build("prod", product_jit_source(src), jit::embedded_headers(), names, err);
+    if (h.size() != names.size()) return nullptr;
+    auto e = std::make_unique<Entry>();
+    e->sig = sig;
+    GProdKernels& k = e->k;
+    k = GProdKernels{};
+    k.sig = e->sig.c_str();
+    k.lmax_out = lmax_out;
+    k.segments_w = segw;
+    size_t i = 0;
+    k.fwd = h[i++];
+    k.bwd = h[i++];
+    if (lmax_out == 0) {
+        for (const void** f : {&k.ro1_128, &k.ro1_256, &k.ro1_512, &k.ro1s_128, &k.ro1s_256, &k.ro1s_512, &k.ro1c_128,
+                               &k.ro1c_256, &k.ro1c_512})
+            *f = h[i++];
+    }
+    k.fwdc = h[i++];
+    k.bwdc = h[i++];
+    const GProdKernels* out = &k;
+    made.emplace(key, std::move(e));
+    return out;
+}
 
 // ------------------------------------------------------------------------------------------------- kernels
 __global__ void gather_rows_kernel(int N, int C, const int* __restrict__ sp, const float* __restrict__ table,
@@ -986,11 +1030,30 @@ void GenericModel::load(const Bundle& b) {
         // product
         {
             const std::string sig = b.meta(p + "prod_sig");
-            L->prod = find_gprod(sig.c_str());
-            if (!L->prod) throw std::runtime_error("generic bundle: no compiled product kernel for signature " + sig);
-            if (L->prod->lmax_out != L->lmax_out) throw std::runtime_error("generic bundle: product degree mismatch");
             L->prod_species = mi("prod_species");
             L->prod_segw = mi("prod_segments_w");
+            L->prod = find_gprod(sig.c_str());
+            // JIT_DESIGN.md stage 3: a product outside the library's build set is compiled from the bundle's source
+            // (LOUP_JIT_PRODUCTS=1: every product, for tests and gates)
+            const char* fp = std::getenv("LOUP_JIT_PRODUCTS");
+            const bool force = fp && fp[0] == '1';
+            std::string why;
+            if ((!L->prod || force) && jit::level() > 0 && b.has(p + "prod_src")) {
+                const auto& raw = b.entry(p + "prod_src").data;
+                const GProdKernels* k =
+                    jit_product(sig, L->lmax_out, L->prod_segw, std::string(raw.begin(), raw.end()), &why);
+                if (k) L->prod = k;
+                else if (L->prod)
+                    fprintf(stderr, "[loupmd] JIT (LOUP_JIT=0 turns it off): %s; using the built-in kernels\n",
+                            why.c_str());
+            } else if (!L->prod) {
+                why = !b.has(p + "prod_src") ? "the bundle has no product source (exported before JIT_DESIGN.md stage 3)"
+                                             : "LOUP_JIT=0";
+            }
+            if (!L->prod)
+                throw std::runtime_error("generic bundle: no compiled product kernel for signature " + sig + " (" + why +
+                                         ")");
+            if (L->prod->lmax_out != L->lmax_out) throw std::runtime_error("generic bundle: product degree mismatch");
             if (L->prod_segw != L->prod->segments_w) throw std::runtime_error("generic bundle: product segments mismatch");
             const int Sp = L->prod_species ? S_ : 1;
             std::vector<float> h_prodw = b.f32(p + "prod_w", {Sp, L->prod_segw, L->C_msg});
@@ -1145,9 +1208,45 @@ void GenericModel::load(const Bundle& b) {
 // the same arguments. Any failure (no NVRTC, a compile error, a cubin the driver refuses) keeps the ahead-of-time
 // kernels, with one message on stderr.
 void GenericModel::setup_jit() {
-    if (!jit::enabled()) return;
+    if (jit::level() == 0) return;
+    const bool dbg = [] {
+        const char* e = std::getenv("LOUP_DEBUG_JIT");
+        return e && e[0] == '1';
+    }();
     for (GenericLayer* L : layers_) {
-        if (!L->first_hidden || L->J - 1 > 96) continue;  // above 96 columns: first_bwd_kernel (not compiled here)
+        if (!L->first_hidden) {  // stage 2: conv layers whose width has no built-in instance
+            ConvIR ci;
+            ci.lx = L->lmax_x;
+            ci.C = L->C_x;
+            ci.prune = L->conv_prune;
+            ci.fwd = conv_fwd_generic(ci.lx, ci.C);
+            ci.bwd = conv_bwd_generic(ci.lx, ci.C, ci.prune);
+            if (const char* e = std::getenv("LOUP_JIT_PAIR"); e && e[0] == '0') ci.pair = false;  // lab knob
+            if (dbg)
+                fprintf(stderr, "[loupmd jit] conv IR: lx %d C %d prune %d run-time-width fwd %d bwd %d\n", ci.lx, ci.C,
+                        ci.prune ? 1 : 0, ci.fwd ? 1 : 0, ci.bwd ? 1 : 0);
+            if (!ci.fwd && !ci.bwd) continue;
+            int nf = 0, nb = 0;
+            const std::vector<std::string> names = conv_jit_names(ci, &nf, &nb);
+            std::string err;
+            const std::vector<const void*> k =
+                jit::build("conv", conv_jit_source(), jit::embedded_headers(), names, &err);
+            if (k.size() != names.size()) {
+                static bool told = false;
+                if (!told) fprintf(stderr, "[loupmd] JIT (LOUP_JIT=0 turns it off): %s; using the built-in kernels\n", err.c_str());
+                told = true;
+                continue;
+            }
+            size_t i = 0;
+            for (int f = 0; f < nf; ++f)
+                for (int p = 0; p < 2; ++p) L->jit_conv.fwd[f][p] = k[i++];
+            for (int b = 0; b < nb; ++b)
+                for (int w = 0; w < 2; ++w)
+                    for (int p = 0; p < 2; ++p) L->jit_conv.bwd[b][w][p] = k[i++];
+            L->jit_conv_on = true;
+            continue;
+        }
+        if (!jit::enabled() || L->J - 1 > 96) continue;  // stage 1 (LOUP_JIT=1); above 96 columns: first_bwd_kernel
         Layer0IR ir;
         ir.S = S_;
         ir.I = L->intervals;
@@ -1167,7 +1266,7 @@ void GenericModel::setup_jit() {
             jit::build("layer0", layer0_jit_source(ir), jit::embedded_headers(), layer0_jit_names(ir), &err);
         if (k.size() != 3) {
             static bool told = false;
-            if (!told) fprintf(stderr, "[loupmd] LOUP_JIT=1: %s; using the built-in kernels\n", err.c_str());
+            if (!told) fprintf(stderr, "[loupmd] JIT (LOUP_JIT=0 turns it off): %s; using the built-in kernels\n", err.c_str());
             told = true;
             continue;
         }
@@ -1439,7 +1538,8 @@ int GenericModel::tune_conv_variants(cudaStream_t st) {
                 CUDA_CHECK_THROW(cudaEventRecord(e0, st));
                 launch_conv_fwd(L->lmax_x, st, a.N, L->C_x, S_, L->intervals, L->grid, sh_perm_, L->pair_sym, a.row_ptr,
                                 a.senders, a.vec_len, a.slab, a.t_sx, L->last_preloc, a.species, L->packed_table,
-                                L->density_table, L->cubic_bias_shift, L->x, L->mid, L->D, v, nullptr, L->conv_prune);
+                                L->density_table, L->cubic_bias_shift, L->x, L->mid, L->D, v, nullptr, L->conv_prune,
+                                L->jit_conv_on ? &L->jit_conv : nullptr);
                 CUDA_CHECK_THROW(cudaEventRecord(e1, st));
                 CUDA_CHECK_THROW(cudaEventSynchronize(e1));
                 float ms = 0.0f;
@@ -1765,7 +1865,7 @@ void GenericModel::record(const GenericPassInputs& in) {
             launch_conv_fwd(L->lmax_x, st, N, Cx, S, L->intervals, L->grid, sh_perm_, L->pair_sym, in.act_row_ptr,
                             in.act_senders, in.act_vec_len, in.act_slab, in.act_t_sx, L->last_preloc, in.species,
                             L->packed_table, L->density_table, L->cubic_bias_shift, L->x, L->mid, L->D, var, L->dx,
-                            L->conv_prune);
+                            L->conv_prune, L->jit_conv_on ? &L->jit_conv : nullptr);
             const int n_proj = L->conv_prune ? 1 : 4;  // S125: lin_1..3 stay zero (W_lin_1..3 = 0)
             if (L->skip_folded) {
                 fork();
@@ -2211,7 +2311,8 @@ void GenericModel::record(const GenericPassInputs& in) {
         launch_conv_bwd(L->lmax_x, st, N, Cx, S, L->intervals, L->grid, sh_perm_, L->pair_sym, in.act_row_ptr,
                         in.act_senders, in.act_vec_len, in.act_slab, in.act_t_sx, can_preloc(L), in.species,
                         L->packed_table, L->density_table, L->cubic_bias_shift, L->x, L->mid,
-                        density ? L->dD : nullptr, L->dx, t > 0, d_edge_dvec_, t == n_layers_ - 1, L->conv_prune);
+                        density ? L->dD : nullptr, L->dx, t > 0, d_edge_dvec_, t == n_layers_ - 1, L->conv_prune,
+                        L->jit_conv_on ? &L->jit_conv : nullptr);
         if (t > 0 && !chain_fold_) {  // S57: the earlier layers' fold reads dx directly
             if (L->lmax_x > 0) fork();
             for (int l = 0; l <= L->lmax_x; ++l) {

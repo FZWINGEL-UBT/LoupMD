@@ -29,6 +29,9 @@ const char kSh16[] =
 const char kLayer0[] =
 #include "jit_src/layer0_kernels.cuh.inc"
     ;
+const char kConv[] =
+#include "jit_src/generated_conv.cuh.inc"
+    ;
 
 // The cache file format; bump when the key or the file layout changes.
 constexpr const char kMagic[8] = {'L', 'O', 'U', 'P', 'J', 'I', 'T', '1'};
@@ -187,16 +190,19 @@ const std::vector<Header>& embedded_headers() {
         {"kernels_common.cuh", kKernelsCommon},
         {"generated_sh16.cuh", kSh16},
         {"layer0_kernels.cuh", kLayer0},
+        {"generated_conv.cuh", kConv},
     };
     return h;
 }
 
-bool enabled() {
-    static const bool on = [] {
+int level() {
+    static const int lv = [] {
         const char* e = std::getenv("LOUP_JIT");
-        return e && e[0] == '1';
+        if (e && e[0] == '0') return 0;
+        if (e && e[0] == '1') return 2;
+        return 1;
     }();
-    return on;
+    return lv;
 }
 
 Stats stats() {

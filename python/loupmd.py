@@ -141,7 +141,8 @@ _PY = Path(__file__).resolve().parent
 # an old bundle, with no version number to remember. (A FastMACE change to the product basis is caught separately:
 # the loader compares the product signatures a bundle carries with the compiled kernels'.)
 EXPORTER_SOURCES = [_PY / name for name in ("export.py", "export_omat0.py", "export_generic.py", "export_polar.py",
-                                            "bundle.py")] + [_PY.parent / "src" / "generated_kernels_signature.h"]
+                                            "bundle.py", "gen_product.py")] + [
+    _PY.parent / "src" / "generated_kernels_signature.h"]
 
 
 def exporter_fingerprint(paths=None) -> str:

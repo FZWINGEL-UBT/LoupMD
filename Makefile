@@ -25,7 +25,7 @@ $(OBJDIR):
 	mkdir -p $@
 
 # Kernel headers the library also compiles at run time (src/jit.cu, JIT_DESIGN.md): each one embedded as a raw string.
-JIT_HDRS = src/kernels_common.cuh src/generated_sh16.cuh src/layer0_kernels.cuh
+JIT_HDRS = src/kernels_common.cuh src/generated_sh16.cuh src/layer0_kernels.cuh src/generated_conv.cuh
 JIT_INCS = $(patsubst src/%,$(OBJDIR)/jit_src/%.inc,$(JIT_HDRS))
 $(OBJDIR)/jit_src/%.inc: src/% | $(OBJDIR)
 	mkdir -p $(dir $@)
