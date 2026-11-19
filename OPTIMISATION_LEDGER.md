@@ -193,6 +193,12 @@ Conventions:
 | [md-device-rebuild](#md-device-rebuild) | Neighbour rebuild inside the MD step graph: the guard's second IF node runs bin + count + a gate kernel (edge count, longest row: within the captured sizes?) and then fill + sort + commit + the checked rest, without a host round trip; when the new list does not fit, the host finishes from the counted rows and recaptures | `run_md_loop` (`capture_ifs`, `rebuild_gate_kernel`), `nl_bin` / `nl_count` / `nl_fill` / `nl_commit` / `nl_finish`; `LOUP_MD_REBUILD=host\|fallback` (tests) | both | DEFAULT | S76 | 5060 Ti ABBA over S75: `OFF23-M` water216 `0.939`, `OFF23-S` water216 `0.862`, `OFF24-M` water `0.992`, `MH-1` `NaCl216` `0.998`, `OMAT-0` `SrTiO3` `0.998` | this file |
 | [md-langevin-draw-threads](#md-langevin-draw-threads) | Langevin first half with one thread per normal pair (three per atom, the same Philox words), each thread then updating one component, instead of one thread drawing all three pairs | `src/integrator.cu` `langevin_first_half_kernel` (96 threads per 32 atoms) | both | DEFAULT | S106 | kernel 7.8 -> 3.6 us (water216); ABBA over S105 POLAR-1-S `NaCl216` `0.990`, OMAT-0 generic `SrTiO3` `0.997` (both orders), the rest ties; noise bitwise unchanged | this file |
 | [nl-bin-skip](#nl-bin-skip) | Lane-group neighbour count / fill: a bin whose lower distance bound (lattice-plane distances per axis; their root sum of squares in an axis-aligned orthogonal cell) reaches the float pre-test radius `r_hi` is skipped before its image shift and candidates; the same rows in the same order | `src/neighbors.cu` `scan_neighbor_bins` | both (lane-group kernels: sm_120 and cc 8.0) | DEFAULT (5060 Ti only) | S120 | `nsys` count + fill per MD step: OFF23-S water216 21.4 -> 20.1 us (-6%), OFF23-M water216 -4%, OFF24-M water -1%; library ABBA OFF23-S water216 `0.988`, OFF23-M `0.996` (both orders, small); forces at noise (NbCl5's non-orthogonal cell included); gates pass | this file |
+| [eng-evaluate-one-graph](#eng-evaluate-one-graph) | `loup_evaluate` as one captured graph per call: positions and results through page-locked staging, the upload, skin check, guard, force pass or on-device rebuild and the downloads in the MD loop's step graph (kind 3), the host polling two publications instead of blocking transfers and a stream synchronisation | – (`run_md_loop` kind 3, `queue_results`) | both | DEFAULT (5060 Ti under WSL 2 only) | S145 | OFF23-S water216: 0.95-1.14 -> 0.41-0.51 ms per call (Python, same job); LAMMPS `pair_style loupmd` 0.87 -> 0.57-0.59 ms/step | this file |
+| [eng-device-io](#eng-device-io) | `loup_compute_device`: an evaluation on the caller's device arrays (rows in any order by atom id, any strides, forces added), queued behind the caller's stream and handed back through an event; the external step of the MD graph (kind 2, no integrator) | – (new entry point; `LoupEngine.compute_device`) | both | DEFAULT (new call) | S145 | forces / energy / virial equal `loup_evaluate`'s (tests/test_device_io.py); used by `pair_style loupmd/kk` | this file |
+| [eng-run-graph-reuse](#eng-run-graph-reuse) | `loup_run_nve` / `loup_run_langevin` reuse the captured MD graphs when called again with the same step, thermostat and seed (they were re-captured in every call) | – | both | DEFAULT | S145 | not timed on its own; with it `run_style loupmd` in blocks of 100 steps runs water216 NVE at 0.376 ms/step (the engine's Langevin loop in 256-step blocks: 0.34-0.36) | this file |
+| [lmp-styles](#lmp-styles) | LAMMPS package ML-LOUPMD (`lammps/`): `pair_style loupmd` (host arrays), `loupmd/kk` (Kokkos device views), `run_style loupmd` (the engine integrates between output steps) | LAMMPS input | both | MEASUREMENT (new interface; 5060 Ti under WSL 2 only) | S145 | OMAT-0 medium SrTiO3 5,000 / 320 atoms, ms/step: run style 7.84-7.86 / 0.61-0.63, `loupmd` 8.20 / 0.86-0.90, `loupmd/kk` 8.38-8.45 / 1.29-1.38, Symmetrix foundation float32/kk 13.47-13.54 / 1.55-1.59 | `LAMMPS_KOKKOS_PLAN.md` |
+| [lmp-kokkos-wsl-cost](#lmp-styles) | LAMMPS-Kokkos's own per-step cost on this machine (WSL 2): zero-strength LJ on 648 atoms, `fix nve/kk` + `fix langevin/kk` | – | – | MEASUREMENT | S145 | 2.43 ms/step (`neigh_modify check no`: 0.52; plain LAMMPS 0.115): several blocking host-GPU exchanges per step at 0.1-0.2 ms each | [lmp-styles](#lmp-styles) |
+| [lmp-ghost-no](#lmp-styles) | `pair_style loupmd ghost no`: a pair cutoff of zero reported to LAMMPS, so it creates no ghost atoms and skips their communication | `ghost yes\|no` (default yes) | – | OFF (kept as an option; no gain on this machine) | S145 | `loupmd/kk` water216 2.64 -> 2.25-2.53 ms/step, inside the run-to-run spread: the Kokkos cost is not ghost traffic | [lmp-styles](#lmp-styles) |
 
 ### Generic path (other model families, 12-13 November 2026)
 
@@ -1570,6 +1576,72 @@ Each entry has the same fields. Unless stated, the system is OMAT-0 medium on th
 - Sources: `OMAT0_SPEEDUP_BRIEF.md`.
 
 ### Neighbour list, integrator and MD loop
+
+<a id="eng-evaluate-one-graph"></a>
+#### eng-evaluate-one-graph: loup_evaluate as one graph launch
+- Switch: none (default).
+- Stage: S145 (19 November 2026), found while timing the LAMMPS pair style.
+- Before: a call copied the positions from pageable memory (a stream synchronisation before the copy), launched the skin check and a publication, read the flag, launched the force graph, copied energy, forces and virial to pageable memory and synchronised the stream: about eight submissions and three blocking host-GPU exchanges, each 0.1-0.2 ms under WSL 2.
+- Now:
+  - `set_system` allocates page-locked staging (3N positions, 3N forces, energy, virial).
+  - With a standing list and an unchanged cell, a call is one launch of the MD loop's step graph without an integrator (`run_md_loop` kind 3): upload from the staging, skin check, `guard_step_kernel`, the SWITCH node (force pass, or the on-device rebuild and checked force pass), then, after the SWITCH node, the results' copies into the staging and a publication of the rows' order flag (`queue_results`).
+  - The host reads the guard's publication and the last one. No transfer blocks and nothing synchronises the stream.
+  - A new cell or a first call takes the host-driven rebuild and the force graph as before, with the same staging and publication.
+- Measured (5060 Ti, WSL 2, OFF23-S water216, Python `LoupEngine.evaluate`, 300 calls with 1e-3 A noise, medians, old and new library in one job): 0.95 / 1.14 ms per call (without / with stress) -> 0.51 / 0.41. The engine's own MD step is 0.34-0.36 ms: a call still waits for its forces before the caller can queue the next one.
+- Accuracy: unchanged arithmetic (the same force pass). 101 tests pass on the library, the families' gates among them (`STATUS_AND_PROFILE.md` S145).
+- Status: DEFAULT (5060 Ti under WSL 2 only; the gain on native Linux, where a host-GPU exchange is cheaper, is not measured).
+- Sources: this file, `LAMMPS_KOKKOS_PLAN.md`.
+
+<a id="eng-device-io"></a>
+#### eng-device-io: loup_compute_device, an evaluation on the caller's device arrays
+- Switch: a new entry point (`include/loupmd.h`), with `loup_cutoff` and `loup_species`; `LoupEngine.compute_device`, `cutoff`, `species` in `python/loupmd.py`.
+- Stage: S145, `LAMMPS_KOKKOS_PLAN.md` stage B.
+- Design:
+  - `LoupDeviceIO` names device pointers with row and component strides (row-major and column-major arrays both fit), an optional id per row (rows in any order) and flags.
+  - The engine orders itself behind the caller's stream with an event, gathers the rows into its atom order through a device copy of the inverse permutation (refreshed after `set_system` and after an atom reorder), runs the external step (kind 2 of the MD graph: skin check, guard, force pass or on-device rebuild), adds the forces to the caller's rows and makes the caller's stream wait on a second event.
+  - The host waits only for the guard's publication, and for energy or virial when asked. With those, a non-finite result drops the tensor-core cubin and reruns the pass before any force is added, as `loup_evaluate` does.
+  - The virial is formed in every pass, so steps that ask for it run the same graphs.
+- Tests: `tests/test_device_io.py` (twelve): shuffled rows and both layouts against `loup_evaluate`; the device call and `loup_evaluate` through moves and rebuilds on each rebuild path (on-device, `LOUP_MD_REBUILD=host`, `fallback`, `LOUP_REORDER=1`) against freshly built lists; refusals (and a corrected call accepted again); run calls in blocks; the model facts.
+- Status: DEFAULT (a new call; nothing existing changes).
+- Sources: this file, `LAMMPS_KOKKOS_PLAN.md`.
+
+<a id="eng-run-graph-reuse"></a>
+#### eng-run-graph-reuse: run calls with the same parameters keep their graphs
+- Switch: none.
+- Stage: S145.
+- The MD graphs bake in the step, the thermostat constants and the seed, so every `loup_run_*` call dropped and re-captured them. They are now kept while those values are unchanged (`md_graph_key` -2 with `md_int_*`); the Langevin noise continues through the device step counter as before. The external steps (kinds 2 and 3) have their own keys.
+- Effect: a run in blocks (the LAMMPS run style, between output steps) costs one initial force pass per block and no re-capture. Not timed on its own.
+- Status: DEFAULT.
+- Sources: this file.
+
+<a id="lmp-styles"></a>
+#### lmp-styles: LoupMD in LAMMPS (package ML-LOUPMD)
+- Switch: LAMMPS input (`pair_style loupmd [device N] [skin S] [ghost yes|no]`, `pair_style loupmd/kk`, `run_style loupmd nve | langevin T damp seed`); user guide `lammps/README.md`.
+- Stage: S145 (19 November 2026), the owner's "build the lammps version"; plan and results in `LAMMPS_KOKKOS_PLAN.md`.
+- Design:
+  - The engine keeps the system by atom ID (its atom k is the atom with ID k + 1) and evaluates the whole periodic cell with its own neighbour list; LAMMPS's lists and ghost atoms are not used. One MPI process.
+  - Positions are unwrapped with the image flags, so LAMMPS's re-wrapping does not look like motion to the skin check. The system is sent again only when the atom count, a type or the skin changed (looked for at run start and on reneighbouring steps).
+  - `loupmd`: `loup_evaluate` per step. `loupmd/kk`: one Kokkos kernel (unwrap, ids), then `loup_compute_device` on LAMMPS's device views behind Kokkos's stream. `run_style loupmd`: `loup_run_nve` / `loup_run_langevin` in blocks up to the next output step, where the state comes back and the pair style evaluates energy and pressure.
+  - LAMMPS build used: a local clone of `stable_30Sep2026_update1` with Kokkos 5.2.1 (CUDA, `sm_120`), system g++ 13.3, OpenMPI, CUDA 13.3, in `~/loupmd_lammps`.
+- Measured (5060 Ti under WSL 2):
+  - Accuracy, `run 0` against the Python engine, both pair styles, five cases (OFF23-S water216; OMAT-0 medium SrTiO3 320 atoms in a sheared cell and 5,000 atoms; MH-1 NaCl216; POLAR-1-M NaCl216 in a sheared cell): forces within 2e-7 to 5e-6 eV/A and the six pressure components within 6e-4 to 0.08 bar (of up to 7.8e4), the spread of two engine runs.
+  - MD, OFF23-S water216, 2,000 steps of 0.5 fs: total-energy drift +0.092 (engine integrator), +0.099 (`fix nve`, `loupmd`), +0.080 meV/atom (`fix nve/kk`, `loupmd/kk`). After 100 steps the engine's integrator and `fix nve` agree to 5e-9 eV/atom in the kinetic energy. Sorting every step changes nothing. `fix npt` runs (1.7-1.9x the NVE step: the list is rebuilt every step).
+  - Speed, MACE-OMAT-0 medium, Langevin, the benchmark environment's SrTiO3 inputs and protocol (100 + 256 steps, each code twice in one job):
+
+    | | 5,000 atoms, ms/step | 320 atoms, ms/step |
+    | --- | --- | --- |
+    | `run_style loupmd` | 7.84-7.86 | 0.61-0.63 |
+    | `pair_style loupmd` | 8.20 | 0.86-0.90 |
+    | `pair_style loupmd/kk` | 8.38-8.45 | 1.29-1.38 |
+    | Symmetrix `symmetrix/mace/foundation/float32/kk` (benchmark build, 16 Nov) | 13.47-13.54 | 1.55-1.59 |
+
+  - NaCl 216 atoms (the 5 November Symmetrix-XL case, 500 + 3,000 steps): `loupmd` 0.52-0.54, `loupmd/kk` 1.60, the engine's own loop 0.29-0.30 ms/step; Symmetrix-XL was 3.55-3.61 on 5 November (not rerun).
+  - LAMMPS-Kokkos alone (zero-strength LJ, the 648 water atoms, `fix nve/kk` + `fix langevin/kk`): 2.43 ms/step; with `neigh_modify every 20 delay 0 check no` 0.52; plain LAMMPS 0.115. On this machine the Kokkos style's small-system step is LAMMPS-Kokkos's own cost.
+  - `ghost no`: `loupmd/kk` water216 2.64 -> 2.25-2.53 ms/step, inside the spread (2.2-2.9 over the day's runs).
+- Not built: a strain-aware list for changing cells, per-atom energies, open boundaries, several processes or GPUs (`LAMMPS_KOKKOS_PLAN.md` stages C-F).
+- Tests: `tests/test_lammps.py` (needs `LOUPMD_LMP`), `tests/test_device_io.py`.
+- Status: a new interface on `develop`; 5060 Ti under WSL 2 only (native Linux, sm_89 and the A100 not measured).
+- Sources: this file, `LAMMPS_KOKKOS_PLAN.md`, `lammps/README.md`.
 
 <a id="nl-bucketing-sort"></a>
 #### nl-bucketing-sort: edge-grid bucketing and segmented sort

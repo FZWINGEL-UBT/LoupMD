@@ -522,6 +522,22 @@ S144 (`gen-jit-conv`, `gen-jit-products`, `gen-jit-epilogue-bound`, `gen-retire-
 - Tests on the generic-only library: 47 + 35 = 82 pass (`tests/test_jit.py` with five tests, the refused-bundle test in
   `tests/test_engine_guards.py`, `tests/test_export.py` rewritten for the one exporter).
 
+S145 (`lmp-styles`, `eng-evaluate-one-graph`, `eng-device-io`, `eng-run-graph-reuse`, 19 November, branch `develop`,
+5060 Ti under WSL 2 only): LoupMD in LAMMPS (`lammps/`, `LAMMPS_KOKKOS_PLAN.md`).
+- Styles: `pair_style loupmd` (host arrays), `pair_style loupmd/kk` (Kokkos device views through the new
+  `loup_compute_device`), `run_style loupmd` (the engine integrates between LAMMPS's output steps).
+- Accuracy: `run 0` equals the Python engine within two engine runs' spread on five cases (two sheared cells, POLAR-1-M
+  among them), forces and all six pressure components.
+- Speed, OMAT-0 medium SrTiO3 5,000 / 320 atoms, ms/step: run style 7.84-7.86 / 0.61-0.63, `loupmd` 8.20 / 0.86-0.90,
+  `loupmd/kk` 8.38-8.45 / 1.29-1.38; Symmetrix foundation float32/kk in the same job 13.47-13.54 / 1.55-1.59.
+- `loup_evaluate` is now one graph launch per call with page-locked staging: 0.95-1.14 → 0.41-0.51 ms per call on
+  OFF23-S water216.
+- LAMMPS-Kokkos's own step on this machine is 2.43 ms (zero-strength LJ, 648 atoms), which bounds `loupmd/kk` on
+  small systems under WSL 2.
+- Tests on the final library: 47 + 35 of the existing suite (the families' gates among them), 12 in the new
+  `tests/test_device_io.py` (the device call and `loup_evaluate` on every rebuild path of the step graph, run calls in
+  blocks) and 7 in the new `tests/test_lammps.py` (both pair styles and the run style): 101 pass.
+
 ### 5.4 Fixes Found by the Family Work
 - **POLAR LayerNorm-MLP reverse wrote its GEMM output over its own input** (`mlp_bwd`: after the first hidden layer
   the destination buffer was the one holding dz). Harmless while one GEMM tile covered all rows; from ~1,700 atoms
