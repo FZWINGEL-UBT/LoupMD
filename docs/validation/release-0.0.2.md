@@ -35,6 +35,7 @@ WSL 2 (Ubuntu) on Windows 11. The CPU suite ran on the workstation leto.
 | Barostat in tiled mode from the wheel | `lm.Simulation` with `MTK` on 5,000 atoms, `capacity="whole"` against `CapacityConfig(mode="tiled", receivers=2000)` | ran tiled; after 200 steps the volume agrees with the whole-cell run to 1e-8 and the positions to 4.2e-7 A |
 | Rocky Linux 8 container, no GPU | `pip install` of the wheel, `loupmd doctor` | installs; the library loads (only the GPU check fails) |
 | GPU, fast tier on the wheel's library | `pytest -q tests/gpu -m fast` with `LOUP_LIB` set to the installed library | 380 passed, 1 failed, 51 skipped (a timing test: below) |
+| The release from PyPI, after the upload | `pip install "loupmd[export]"` by name into a fresh environment, then `loupmd models --download`, `loupmd doctor`, `loupmd md --check gate`, the quickstart | passed: the file on PyPI is the tested wheel (the same SHA-256), the installed library is the tested one; doctor 9 of 9, the gate, the quickstart's five steps (`bench --quick` refused: the card was in use) |
 
 `ada48e8` and `9f1442e` have the same C++/CUDA sources but for the version string in `include/loupmd.h`.
 
@@ -135,4 +136,29 @@ which takes the mode only and refused it. `docs/guide/large-cells.md` had shown 
 
 ## The release from PyPI
 
-To follow the owner's upload.
+**PyPI.** The owner uploaded the wheel on 20 November 2026 at 20:12 UTC. PyPI lists one file for 0.0.2, with the
+tested wheel's size (12,775,565 bytes) and SHA-256 (`bbf883be...61201acc99`). `release/v1` (`9a1fd0b`) and the tag
+`v0.0.2` (on `9f1442e`) were pushed right after, and the site was rebuilt from that push.
+
+**GitHub release.** The release `v0.0.2` holds the wheel that is on PyPI, `loupmd-0.0.2-src.tar.gz` and
+`SHA256SUMS`, with release notes that summarise `CHANGELOG.md`'s 0.0.2 entry. An anonymous download of the three files passed
+`sha256sum -c SHA256SUMS`, and the API names `v0.0.2` as the latest release.
+
+**The install by name.** `pip install "loupmd[export]"` into a fresh environment (Python 3.12.3, no pip cache, none
+of the development set-up's variables): 255 s, 68 distributions, 5.8 GB, `pip check` clean. pip took
+`loupmd-0.0.2-py3-none-manylinux_2_28_x86_64.whl`, and the installed library is the tested one (SHA-256
+`89b9dc040e0565a7...`). The export extra brought torch 2.15.0+cu132, mace-torch 0.3.17 and e3nn 0.4.4. Then, from a
+folder outside the checkout, with an empty cache and the model from `loupmd models --download omat0-medium` (7 s,
+the SHA-256 matches the label table):
+
+- `loupmd doctor`: 9 checks, none failed.
+- `loupmd md nacl.cif --repeat 3 3 3 --check gate`: the gate passed (0.41 / 1.55 / 1.22), with the bundle exported
+  there.
+- The quickstart's five steps: the command line, Python and the ASE calculator, each 10,000 steps of NVT on 216
+  atoms; `loupmd relax` (23 steps to 0.0082 eV/A); the relaxation in Python (23 and 30 steps).
+- `loupmd bench --quick` refused to start: "the GPU is in use: 22 % utilised before the benchmark started". The
+  desktop's own programs held 7.8 GB of the card at the time, and no LoupMD process was running. Its timing would
+  not have counted on this card anyway; the export it starts with ran in the gated run above.
+
+Not run on this install: `loupmd validate`, the Rocky Linux 8 container and the fast GPU tier. They ran on the same
+file before the upload (the sections above).
