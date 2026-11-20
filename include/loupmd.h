@@ -307,7 +307,7 @@ int loup_get_cell(LoupHandle* h, double* out_cell);
 
 // The volume V0 the cell limits of a variable-cell run refer to (it stops outside [V0 / 20, 20 V0]).
 // loup_set_state sets it to the volume it is given; a run that goes on in another process from a state block
-// passes the first run's here.
+// passes the first run's here. On a handle with tiled MD state (loup_tiled_set_state) it sets that state's V0.
 int loup_set_reference_volume(LoupHandle* h, double volume_a3);
 
 // A new cell for the positions on the handle. scale_atoms != 0: the atoms keep their fractional coordinates
@@ -408,14 +408,19 @@ int loup_get_execution(LoupHandle* h, LoupExecution* out);
 // out_tiles (optional) receives the tile count. Bundles of the generic path without long range and without a
 // dispersion term, of two or more layers (LOUP_EXEC_WAVEFRONT: exactly two).
 // receivers: pass the cap of loup_plan_execution (LoupMemoryPlan.receivers) or a cap of the caller's. With 0 or less
-// the call keeps the cap of the previous tiled call on the same system, but on a changed one (another cell, skin,
-// atom count or atomic numbers) plans again, which sets up a probe tile and drops the kept tile lists and state.
+// the call keeps the cap of the previous tiled call on the same system while it keeps the lists (below); when the
+// system changed (another skin, atom count or atomic numbers) or its cell changed beyond what the kept lists allow,
+// it plans again, which sets up a probe tile and drops the kept tile lists and state.
 // What stays between calls: the tile plan, the tile lists and the whole-system layer state are kept while the
-// atomic numbers, the cell (bit for bit), the skin and the cap are the same and no atom has moved more than skin/2
-// since the lists were built, measured as the plain Cartesian difference of the positions passed (no minimum image:
-// pass unwrapped positions, or atoms that cross a face count as moved by a cell vector and the lists are built
-// again). The tiled MD calls below share that state, so an evaluation between two blocks of loup_tiled_run on the
-// same positions builds no lists. loup_get_execution afterwards: the cap, tiles, lists kept and list builds.
+// atomic numbers, the skin and the cap are the same and no atom has moved more than skin/2 since the lists were built,
+// measured as the plain Cartesian difference of the positions passed (no minimum image: pass unwrapped positions, or
+// atoms that cross a face count as moved by a cell vector and the lists are built again). In a cell other than the
+// one the lists were built in (a barostat's), the test is that of the variable-cell step: with F = h0^-1 h (h0 that
+// cell), the lists stay while r_list (1 - |F - 1|) > r_max (|.| the Frobenius norm, r_list = cutoff + skin) and every
+// atom lies within (r_list (1 - |F - 1|) - r_max) / 2 of x0 F + t, x0 its position then and t the atoms' mean
+// displacement, so a common translation does not count. The tiled MD calls below share that state, so an
+// evaluation between two blocks of loup_tiled_run on the same positions builds no lists. loup_get_execution
+// afterwards: the cap, tiles, lists kept and list builds.
 // The handle then holds the last tile's domain: loup_evaluate, loup_run and the other whole-system calls refuse
 // until loup_set_system. loup_set_system drops the kept tiled state.
 int loup_evaluate_tiled(LoupHandle* h, int n_atoms, const int* atomic_numbers, const double* positions,
@@ -478,20 +483,27 @@ int loup_debug_evaluate_tiled(LoupHandle* h, int n_atoms, const int* atomic_numb
                               double* out_stress, long long* out_tiles);
 
 // Tiled MD on the device (PLAN.md O31): the trajectory of a system in the tiled mode, with positions, velocities and
-// forces kept on the GPU between steps, so a step costs one tiled force call and a few small kernels. Fixed cell.
+// forces kept on the GPU between steps, so a step costs one tiled force call and a few small kernels. The barostats
+// move the cell (LAMMPS_TILED_PLAN.md LT6 (a)): each step's tiled call then carries the stress, and the tile lists
+// stay across the cell's changes as loup_evaluate_tiled says.
 // loup_tiled_set_state: the system (n_atoms, atomic_numbers, masses in amu, positions and velocities in A and
 // A/(ASE time unit) [n_atoms, 3], cell rows), optional `fixed` flags [n_atoms] (velocities of fixed atoms are
 // zeroed), the receiver cap (pass the plan's; 0 as loup_evaluate_tiled takes it) and skin, the noise step counter
 // of the stochastic integrators, and optionally the integrator state block [64] with its kind (a restart; NULL: zero).
 // With positions and velocities both NULL on a handle that holds n_atoms atoms, the state stays and only the step
 // count of the thermo rows starts anew.
-// loup_tiled_run: n_steps steps of `integrator` (LOUP_NVE, LOUP_LANGEVIN, LOUP_CSVR, LOUP_NHC, LOUP_BERENDSEN_NVT; no
-// barostat; fix_com refused with fixed atoms). With integrator->thermo_every > 0 and `rows`, up to max_rows thermo
-// rows (pressure 0) are written and *out_rows counts them. out_stats: step_ms the wall time per step, rebuilds the
-// tiled calls that built their lists; dangerous_builds, tune_ms and pipelined_steps are 0. *out_max_step_a
-// (optional): the longest distance an atom moved in one step of the call, in A.
+// loup_tiled_run: n_steps steps of `integrator`: any kind of loup_run, with its rules (fix_com refused with fixed
+// atoms; the barostats LOUP_BERENDSEN_NPT, LOUP_BAOAB_NPT and LOUP_MTK_NPT not with fixed atoms, and their
+// variables carried in the integrator state block as loup_run carries them). The barostats stop the run with an
+// error when the cell's volume leaves [V0 / 20, 20 V0]; V0 is the volume of loup_tiled_set_state's cell, or
+// loup_set_reference_volume's after it. With integrator->thermo_every > 0 and `rows`, up to max_rows thermo rows are
+// written and *out_rows counts them (pressure and volume of the cell under a barostat, else pressure 0).
+// out_stats: step_ms the wall time per step, rebuilds the tiled calls that built their lists; dangerous_builds,
+// tune_ms and pipelined_steps are 0. *out_max_step_a (optional): the longest distance an atom moved in one step of the
+// call, in A. A tiled call that fails in a cell other than the one its cap was planned or set for plans once more.
 // loup_tiled_get_state: any of positions, velocities, forces [n_atoms, 3], the energy of the last force call (eV),
 // the noise step counter and the integrator state block [64] with its kind (-1: none); NULL skips an output.
+// loup_tiled_get_cell: the tiled MD's cell [3, 3] (rows), as a barostat left it.
 int loup_tiled_set_state(LoupHandle* h, int n_atoms, const int* atomic_numbers, const double* masses_amu,
                          const double* positions, const double* velocities, const double* cell,
                          const unsigned char* fixed, int receivers, double skin, unsigned long long noise_step,
@@ -500,6 +512,7 @@ int loup_tiled_run(LoupHandle* h, const LoupIntegrator* integrator, int n_steps,
                    LoupThermoRow* rows, int max_rows, int* out_rows, double* out_max_step_a);
 int loup_tiled_get_state(LoupHandle* h, double* positions, double* velocities, double* forces, double* out_energy_ev,
                          unsigned long long* noise_step, double* int_state, int* int_state_kind);
+int loup_tiled_get_cell(LoupHandle* h, double* out_cell);
 // Testing only: the noise CSVR draws in steps first_step .. first_step + n_steps - 1 (counted by the handle's step
 // counter, which loup_set_system zeroes) with `seed` for `ndof` degrees of freedom: the standard normal R1 and the
 // chi-square variate of ndof - 1 degrees of freedom of each step.

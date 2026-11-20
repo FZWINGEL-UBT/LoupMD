@@ -103,9 +103,9 @@ pdamp_fs = 1000.0
 - **Fixed atoms** (`FixAtoms`) are refused with every barostat: the cell's scaling would move them.
 - **Long-range models** (MACE-POLAR-1) are refused with a barostat: their k-space terms are set up for one cell in
   this version.
-- **Tiled execution** keeps the cell fixed: it runs NVE and the NVT thermostats (Langevin, CSVR, Nose-Hoover chain,
-  Berendsen) and refuses every barostat, so a barostat needs a cell that fits the GPU whole. With
-  `capacity="auto"` a cell that does not fit is refused at the start of an NPT run ([large cells](large-cells.md)).
+- **Tiled execution** runs every barostat on the GPU, as the whole cell does ([large cells](large-cells.md)). The
+  exception is a run with a dispersion term, whose tiled integrator runs on the host and keeps the cell fixed: a
+  barostat is refused there when the run starts.
 - **Volume limits.** The engine stops a run whose volume leaves V0 / 20 to 20 V0, with V0 the starting volume (kept
   across restarts). The run raises `CellDivergedError` naming the steps; the structure has usually left its
   condensed phase or the barostat diverged: raise the pressure or lower the temperature.

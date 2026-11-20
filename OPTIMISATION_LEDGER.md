@@ -569,6 +569,7 @@ Conventions:
 | [tile-wavefront](#tile-wavefront) | Two-layer models in the tiled call: the sweeps in the wavefront's order, layer outputs and gradients in a row pool instead of whole-system arrays | `LOUP_TILE_WAVEFRONT=0` | generic, tiled | ADOPTED (`auto` from 2^20 atoms and 12 layers) | S5 | 368,640 atoms 20,000 receivers: device peak 4.91 -> 4.05 GiB, kept call 0.80 s both; 1,081,600 atoms: pool 11.1% of the atoms, 10.84 GiB, 2.35 s per call | [§6.22][s622] |
 | [tile-overhead-screen](#tile-overhead-screen) | Receiver cap below the plan's; CUDA graphs per tile bucket; list builds without host round trips | - | generic, tiled | REJECTED | S5 | cap: 0.68-0.73 s at 320,000 atoms for 8,192-65,536, the largest fastest; graphs and device list builds bounded at 1.5% and 1% of a step (estimated from measured phases) | [§6.23][s623] |
 | tile-lists-across-steps | The tiled state (plan, kept lists, whole-system buffers) stays between tiled calls until an atom moves skin/2; a kept call refreshes the tiles' positions on the device | none | generic, tiled | ADOPTED | S5 | NVE 320,000 atoms: 1.120 s per step (3.50 us/atom, 2.1x the whole-system call per atom), 55 list builds in 1,000 steps | [§6.18][s618] |
+| [tile-strained-lists](#tile-strained-lists) | The tiled state's lists kept across a change of the cell (a barostat, LAMMPS's `fix npt` through the pair style) while the strain since their build leaves the atoms room: the whole system's variable-cell rule on the displacement from x0 F less its mean; the rows' places refreshed in the new cell | none | generic, tiled | ADOPTED | O42, D99 | MH-1 50,820 atoms, `fix npt` through the pair style: 491 -> 412.4 / 413.2 ms per step (a fixed cell with the virial: 410.4 / 413.2); no list build in 30 measured steps, before one per step | [§6.41][s641] |
 
 ### Dispersion (Stage 6D)
 
@@ -3559,6 +3560,8 @@ Time against the memory fraction (kept calls, the plans after this change where 
 
 <a id="tile-overhead-screen"></a>**tile-overhead-screen** (REJECTED, 16 November 2026, 5060 Ti only). S5-T10 listed a receiver-cap screen, graphs per bucket and list builds without host round trips as the way to the 1M-atom speed. The cap screen: kept calls change by under 7% from 8,192 to 65,536 receivers at 320,000 atoms and by under 3% from 16,384 to 49,152 at 1,081,600, the largest cap fastest or tied, so the plan keeps the largest cap that fits. 46 more tiles cost 48 ms, so launches are at most about 1 ms per tile and graphs could save at most 1.5% at the plan's caps; a list rebuild with timed plans costs 190 ms, about 1% of a step at a rebuild every 20 steps. Neither was built. The cost left is the halo: the last-layer sweep is 65% of a kept call. Status §6.23.
 
+<a id="tile-strained-lists"></a>**tile-strained-lists** (ADOPTED, 20 November 2026, 5060 Ti only; LT6 (a) of `LAMMPS_TILED_PLAN.md`, the owner's go D99). Before, any cell not bit for bit the build's dropped the tiled state: the plan, a probe at cap 0, and every tile's list. LAMMPS's `fix npt` through the tiled pair style changes the box in every step, so each step planned and built lists: 491 against 424 ms per step on MH-1 at 50,820 atoms (+16%, §6.40). Now the lists stay while r_list (1 - |F - 1|_F) > r_max and every atom lies within (r_list (1 - |F - 1|_F) - r_max) / 2 of x0 F + t (F = h0^-1 h, t the mean displacement, so the box's dilation about its centre does not count), the variable-cell step's rule; `tile_place_rows_cell_kernel` places each tile's rows in the new cell from the kept offsets. No new device memory. Against the whole call at the strained cell: dE 3.5e-9 to 1.7e-8 eV/atom, dF at most 3.6e-6 eV/Å. MH-1 at 50,820 atoms (8 tiles of at most 12,288), 10 + 30 steps, two rounds: `fix npt` through the pair style 412.4 and 413.2 ms per step, a fixed cell with the virial in every step 410.4 and 413.2, no list build in the measured steps (before: one per step, 491 ms). Status §6.41.
+
 [s621]: STATUS_AND_PROFILE.md#621-tile-gemm-size-buckets-16-november-2026-0410
 [s634]: STATUS_AND_PROFILE.md#634-tiled-md-on-the-device-and-where-the-tiled-calls-time-goes-16-november-2026-planmd-o31
 [s635]: STATUS_AND_PROFILE.md#635-the-memory-plan-against-what-the-calls-take-and-the-capacity-of-the-rtx-5060-ti-18-november-2026-planmd-o33
@@ -3572,6 +3575,7 @@ Time against the memory fraction (kept calls, the plans after this change where 
 [s636]: STATUS_AND_PROFILE.md#636-the-merge-of-develop-19-november-2026-planmd-o38
 [s637]: STATUS_AND_PROFILE.md#637-lammpss-nvt-and-npt-at-the-engines-step-time-19-november-2026-planmd-o40
 [s639]: STATUS_AND_PROFILE.md#639-the-benchmarks-warm-up-and-systems-without-a-rebuild-20-november-2026-planmd-o41
+[s641]: STATUS_AND_PROFILE.md#641-barostats-in-tiled-mode-20-november-2026-planmd-o42-d99
 
 ### Dispersion
 

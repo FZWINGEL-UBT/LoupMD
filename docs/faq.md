@@ -57,8 +57,8 @@ models and built kernel plugins are removed only when named with `--kind models`
 ## The cell does not fit the GPU. What now?
 
 With `capacity="auto"` (the default) a cell that does not fit in 90% of the free GPU memory runs in tiles of up to
-65,536 atoms; still larger cells keep parts of their state in host memory. The tiled mode keeps the cell fixed: it
-runs NVE and the NVT thermostats (with a dispersion term NVE and Langevin only) and refuses the barostats.
+65,536 atoms; still larger cells keep parts of their state in host memory. The tiled mode runs every integrator,
+the barostats included (with a dispersion term NVE and Langevin only).
 `capacity="whole"` forces the whole cell and fails with the engine's out-of-memory error when it does not fit. On a
 16 GB card with 39 GiB of host memory, OMAT-0 medium ran 121,945 atoms whole and 10,985,000 in tiles. See
 [large cells](guide/large-cells.md).

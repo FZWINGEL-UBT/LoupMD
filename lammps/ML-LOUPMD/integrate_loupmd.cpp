@@ -255,13 +255,6 @@ void IntegrateLoupMD::init()
 
   triclinic = domain->triclinic;
   if (from_fixes) read_fixes();
-  // capacity tiled or wavefront: the mode is known before the setup, so a barostat is refused here already
-  const int cap_mode = pair->capacity_mode();
-  if (varcell && (cap_mode == LOUP_EXEC_TILED || cap_mode == LOUP_EXEC_WAVEFRONT))
-    error->all(FLERR, "run_style loupmd: pair_style loupmd capacity {} runs the engine's tiled MD, which keeps the "
-                      "cell fixed: a barostat cannot be taken over there. Use the default run style with pair_style "
-                      "loupmd, which plans the tiles again in every step, or capacity whole / auto with a cell that "
-                      "fits the card", cap_mode == LOUP_EXEC_TILED ? "tiled" : "wavefront");
 }
 
 /* ----------------------------------------------------------------------
@@ -552,22 +545,19 @@ void IntegrateLoupMD::describe()
 
 /* ----------------------------------------------------------------------
    The pair style plans whole or tiled when it sends the system, in the setup's force call: only then is the mode
-   known (LAMMPS_TILED_PLAN.md LD6). The engine's tiled MD runs NVE, Langevin, CSVR, the Nose-Hoover chain and
-   Berendsen NVT on a fixed cell.
+   known (LAMMPS_TILED_PLAN.md LD6). The engine's tiled MD runs every integrator the run style maps a fix to, the
+   barostats too (fix npt, press/berendsen; LT6 (a)): it keeps its tile lists across the cell's changes.
 ------------------------------------------------------------------------- */
 
 void IntegrateLoupMD::check_tiled()
 {
   tiled = pair->tiled();
   if (!tiled) return;
-  if (varcell)
-    error->all(FLERR, "run_style loupmd: the cell does not fit the card whole, so it runs in tiles, and the engine's "
-                      "tiled MD keeps the cell fixed: a barostat cannot be taken over there. Use the default run "
-                      "style with pair_style loupmd, which plans the tiles again in every step, or a smaller cell");
   if (ens.kind != LOUP_NVE && ens.kind != LOUP_LANGEVIN && ens.kind != LOUP_CSVR && ens.kind != LOUP_NHC &&
-      ens.kind != LOUP_BERENDSEN_NVT)
+      ens.kind != LOUP_BERENDSEN_NVT && ens.kind != LOUP_BERENDSEN_NPT && ens.kind != LOUP_BAOAB_NPT &&
+      ens.kind != LOUP_MTK_NPT)
     error->all(FLERR, "run_style loupmd: the engine's tiled MD has no integrator of kind {} (it runs nve, langevin, "
-                      "temp/csvr, nvt and temp/berendsen). {}", ens.kind, kVerlet);
+                      "temp/csvr, nvt, npt, temp/berendsen and press/berendsen). {}", ens.kind, kVerlet);
 }
 
 /* ---------------------------------------------------------------------- */
@@ -911,14 +901,15 @@ void IntegrateLoupMD::push_state()
 
 /* ----------------------------------------------------------------------
    The engine scales the cell and the positions about the origin; LAMMPS's box follows: its lower corner keeps its
-   fractional coordinates.
+   fractional coordinates. In tiled mode the cell is the tiled MD's (loup_tiled_get_cell).
 ------------------------------------------------------------------------- */
 
 void IntegrateLoupMD::pull_box()
 {
   double c[9];
-  if (loup_get_cell(pair->engine(), c) != 0)
-    error->one(FLERR, "run_style loupmd: could not read the engine's cell: {}", loup_last_error(pair->engine()));
+  LoupHandle *engine = pair->engine();
+  if ((tiled ? loup_tiled_get_cell(engine, c) : loup_get_cell(engine, c)) != 0)
+    error->one(FLERR, "run_style loupmd: could not read the engine's cell: {}", loup_last_error(engine));
   const double scale = fabs(c[0]) + fabs(c[4]) + fabs(c[8]);
   if (fabs(c[1]) > 1.0e-9 * scale || fabs(c[2]) > 1.0e-9 * scale || fabs(c[5]) > 1.0e-9 * scale)
     error->one(FLERR, "run_style loupmd: the engine's cell is no longer of LAMMPS's triangular form");

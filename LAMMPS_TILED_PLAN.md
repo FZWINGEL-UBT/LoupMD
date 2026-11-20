@@ -8,8 +8,9 @@ after crash fix and benchmark". It is carried out after two other pieces of work
 
 Figures marked *estimate* were not measured. Measured figures name the card: all were taken on the RTX 5060 Ti only.
 
-**Status, 20 November 2026:** LT0 to LT5 done (STATUS §6.40). LT6 (a) qualifies by its rule (16% per step) and
-waits for the owner; LT6 (b) waits for a user case.
+**Status, 20 November 2026:** LT0 to LT5 done (STATUS §6.40). LT6 (a) qualified by its rule (16% per step); the
+owner gave the go the same evening ("Start the barostat", D99), and it is done (STATUS §6.41, §4 LT6): the tiled call
+keeps its lists across a strained cell, and tiled MD runs the three barostats. LT6 (b) waits for a user case.
 
 ## 1. Goal
 
@@ -37,7 +38,8 @@ Not in scope:
 - D3 in tiled mode. The tiled call refuses a dispersion term (`src/engine.cu:6428`, S6-D09). The LAMMPS styles have
   no D3 option today.
 - Per-atom energies and virials: refused in every mode, as today.
-- Barostats in `run_style loupmd` tiled. Tiled MD has a fixed cell (`src/engine.cu:7941-7946`). LT6 may lift this.
+- Barostats in `run_style loupmd` tiled. Tiled MD had a fixed cell (`src/engine.cu:7941-7946`). LT6 (a) lifted this
+  on 20 November (D99).
 
 ## 2. What exists today
 
@@ -246,9 +248,10 @@ Each step:
 
 Notes:
 - Kept lists survive LAMMPS's wrapping and sorting: the positions are continuous and in tag order.
-- Under `fix npt`, `deform` or `box/relax` the cell changes every step, so every step re-plans its tiles and builds
-  lists. That is correct but slow. LT5 measures it, and LT6 is the remedy. Until then the log warns once: "the box
-  changes in every step: tiled mode rebuilds its tile lists in each".
+- Under `fix npt`, `deform` or `box/relax` the cell changes every step. Until LT6 (a) every step re-planned its tiles
+  and built lists, and the log warned once: "the box changes in every step: tiled mode rebuilds its tile lists in
+  each". LT5 measured 16% per step. Since LT6 (a) the lists stay while the strain rule allows, and the warning is
+  gone.
 - `ahead yes` has no tiled counterpart. It is ignored with a log line.
 - Transfers are small next to the call. At 98,415 atoms each way carries 2.4 MB, about 1 ms *estimate*. A tiled
   MH-1 step there is about 0.8 s: 8.2 µs/atom measured in the 20 November run.
@@ -282,15 +285,18 @@ is not planned. It becomes worth doing only if tiles ever run at tens of millise
 - The seed shift by `system_serial` stays as it is.
 
 **Ensembles.** Tiled MD takes `nve`, `langevin`, `temp/csvr`, `nvt` and `temp/berendsen`, with `setforce 0 0 0`
-(fixed atoms) and `momentum` (`fix_com`). It refuses by name:
+(fixed atoms) and `momentum` (`fix_com`). Until LT6 (a) it refused by name:
 - `fix npt`;
 - `press/berendsen`.
 
 Example message: "the cell does not fit the card whole, so it runs tiled, and tiled MD keeps the cell fixed. Use the
 default run style with pair_style loupmd, which re-plans the tiles in every step, or a smaller cell".
 
-The mode is known only after the setup's `forces()` call. So the refusal sits in `setup` right after `forces()`,
-before `push_state`. With `capacity tiled` or `wavefront` set, `init` can refuse earlier.
+The mode is known only after the setup's `forces()` call. So the refusal sat in `setup` right after `forces()`,
+before `push_state`, and with `capacity tiled` or `wavefront` set `init` refused earlier.
+
+Since LT6 (a) tiled MD takes both (MTK and Berendsen NPT), and the run style sets LAMMPS's box from
+`loup_tiled_get_cell` after each block. `check_tiled` still refuses, by kind, an integrator the tiled MD lacks.
 
 **Output steps.**
 - Each output costs one tiled call with stress.
@@ -319,7 +325,7 @@ The guard since `bf595d5` (17 November) refuses a host pool beyond it.
 | `capacity wavefront` with another layer count | the engine (6442-6445) | first tiled call |
 | a cell no cap fits | the plan (6394-6415) | `ensure_system` |
 | per-atom energy or virial | `refuse_per_atom`, unchanged | `compute` |
-| barostat under `run_style loupmd` tiled | LD6 | `setup` |
+| barostat under `run_style loupmd` tiled | refused until LT6 (a); accepted since | — |
 
 ### LD9. What is not changed
 
@@ -405,6 +411,83 @@ keeps its list:
 That serves `pair_style loupmd` with `fix npt`, and later a barostat in tiled MD (MTK or Berendsen on the tiled
 state's arrays, D65's (a)). Engine work, 2-4 days *estimate*. Only if LT5 shows the per-step re-plan costs more than
 about 10% of the step.
+
+LT5 measured 16% (`fix npt` through the tiled pair style, 491 ms per step against 424 at a fixed cell, MH-1, 50,820
+atoms). The owner's go, 20 November 2026: "Start the barostat" (PLAN.md D99). The design:
+
+*A1. The tiled call keeps its lists across a cell change (engine).*
+- A tile is an open domain. Its row r sits at `x_a + S_r h - o`: `S_r` is the row's whole-cell image, `o` the
+  tile's origin. Every edge's shift is zero, since the tile's own box images lie beyond the list's reach. So a kept
+  tile needs only its rows placed in the new cell: `pos = x_a + offset_r + S_r (h - h0)`. `S_r` is
+  `rint((offset_r + o) h0^-1)`, from the kept offset and the tile's origin, so no new array is needed.
+- The test is the whole system's variable-cell test (`src/cell.cu`): `F = h0^-1 h`, `thr = (r_list (1 - |F - 1|_F)
+  - r_max) / 2`. The lists stay while every atom lies within `thr` of `x0 F + t`, where `t` is the mean of the
+  displacements `x - x0 F`. A common translation moves no pair vector: LAMMPS's `fix npt` scales about the box's
+  centre, the engine's barostats about the origin.
+- A cell bit for bit equal to the build's keeps today's test.
+- `receivers` 0 takes the kept cap while the lists are kept. When a changed cell needs new lists, it plans again, as
+  today.
+- No new device memory, so the memory plan's figures stay.
+
+*A2. Barostats in tiled MD (engine).* `loup_tiled_run` takes `LOUP_BERENDSEN_NPT`, `LOUP_BAOAB_NPT` and
+`LOUP_MTK_NPT`. They run the whole system's kernels (`integrator.cu`, `cell.cu`) on the tiled MD's arrays, with
+its own `CellDev` and virial.
+- The first half runs as `run_md_loop`'s `record_move`, then `cell_derive_kernel`.
+- The new cell comes back to the host (72 B), and the tiled call runs with stress at that cell. Its virial goes to
+  the device.
+- The second half runs as `record_rest`.
+- The validation is shared with `loup_run` (one function): no fixed atoms, and BAOAB without `fix_com`, as for the
+  whole system.
+- Thermo rows carry pressure and volume, as `thermo_row_kernel` writes them.
+- `loup_tiled_get_cell` (new) returns the tiled MD's cell.
+- `loup_set_reference_volume` on a handle with tiled MD sets its V0. The default V0 is the volume at
+  `loup_tiled_set_state`.
+- A tiled call that fails after a cell change plans once more at the new cell: LD3's rule, in the engine.
+
+*A3. Python.* `TiledEngine` runs the three barostats on the device loop; the host loop refuses them. `get_cell`
+reads the device's cell, and V0 is passed on. `Simulation` accepts its NPT schemes in tiled mode.
+
+*A4. LAMMPS.*
+- The pair style's warning about rebuilds in every step goes.
+- `run_style loupmd` takes `fix npt` and `press/berendsen` in tiled mode (MTK, Berendsen).
+- After each block the run style sets LAMMPS's box from `loup_tiled_get_cell`, as the whole mode does from
+  `loup_get_cell`.
+
+*Tests, written first.*
+- `tests/gpu/test_tiled_md.py`:
+  1. An affine strain plus a translation keeps the lists and gives the whole system's result at the new cell (1e-7
+     eV/atom, 1e-5 eV/Å, 1e-8 eV/Å^3). A strain beyond the margin builds new lists, and `receivers` 0 then plans
+     again. This replaces `test_a_tiled_call_after_a_cell_change_keeps_a_passed_cap_and_plans_on_zero`.
+  2. The three barostats: the tiled device loop against the whole system's loop on 5,000 atoms in 3 tiles, 20 steps,
+     compared on positions and cell.
+  3. A tiled NPT run, stopped and resumed, ends where the unbroken run ends.
+  4. The volume limit stops a tiled run.
+- `tests/gpu/test_lammps_tiled.py`:
+  - The run style with `fix npt` and with `press/berendsen` in tiled mode, against the engine's tiled run of the same
+    ensemble.
+  - The pair style with `fix npt`: lists are built about as often as LAMMPS's own neighbour list, and the result
+    matches the whole cell's.
+- `tests/cpu`: the refusals that move, for NPT in tiled mode.
+
+*Measurement* (MH-1, 50,820 atoms):
+- `fix npt` through the pair style;
+- the run style with `fix npt` in tiled mode;
+- the package's own loop with MTK in tiled mode.
+
+*Effort estimate:* engine 1.5-2 days, Python 0.5, LAMMPS 0.5-1, tests, measurement and docs 1.
+
+*Result, 20 November 2026* (STATUS §6.41; RTX 5060 Ti only). Done as designed, in one evening.
+- The barostat test runs 5,000 atoms in 8 tiles of at most 2,000, not 3. Tiled against whole over 20 steps at 2 GPa:
+  positions within 1e-7 Å and the cell within 7.3e-8 Å for all three barostats.
+- The comparison found a whole-mode fault: MTK's barostat mass counted 3N degrees of freedom with `fixcm` in the first
+  call on an engine and 3N - 3 later. It is fixed in the same change.
+- A2's re-plan is in `tiled_md_forces`: a tiled MD force call that fails in a cell other than the one its cap was
+  planned or set for plans once more at that cell. No test forces that failure.
+- `fix npt` through the pair style: 412-413 ms per step against 410-413 at a fixed cell with the virial (MH-1, 50,820
+  atoms), where it was 491 against 424. The package's MTK: 411-412 against NVE 410-411.
+- 200 steps of `fix npt` through the tiled pair style built tile lists 7 times. LAMMPS's own neighbour list was built
+  13 times over the same steps.
+- LT6 (b) stays open.
 
 **(b) Out-of-memory fallback.** A whole system whose list outgrows its buffers in a run (density under a barostat)
 switches to tiled instead of stopping. Pair style only: the run style's state would have to move between the two

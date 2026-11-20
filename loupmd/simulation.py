@@ -38,9 +38,10 @@ THERMO_ROWS_PER_CALL = 4000
 # an unavailable gate is recorded and the run goes on.
 CHECK_MODES = ("skip", "gate", "allow_unavailable")
 CAPACITY_MODES = ("auto", "whole", "tiled", "wavefront")
-# what the tiled mode integrates: fixed-cell schemes (PLAN.md D65, O31). On the host loop (a dispersion term or a
-# library without loup_tiled_run) only NVE and Langevin; TiledEngine refuses the others there.
-TILED_SCHEMES = ("nve", "langevin", "csvr", "nose_hoover", "berendsen")
+# what the tiled mode integrates (PLAN.md D65, O31): every scheme, the barostats (baoab, mtk, berendsen NPT) on the
+# device loop of a library with loup_tiled_get_cell (LAMMPS_TILED_PLAN.md LT6 (a)). On the host loop (a dispersion term
+# or a library without loup_tiled_run) only NVE and Langevin; TiledEngine refuses the others there.
+TILED_SCHEMES = ("nve", "langevin", "csvr", "nose_hoover", "berendsen", "baoab", "mtk")
 
 
 def fixed_mask(atoms):
@@ -95,9 +96,9 @@ class Simulation:
       ``"auto"`` plans the execution before the first step and runs a system that does not fit the GPU whole in
       tiles of at most ``receivers`` atoms (``Simulation.execution`` says which); from 2^20 atoms in a cell long
       enough for 12 layers of tiles it uses the wavefront schedule, which ``"wavefront"`` forces (two-layer models;
-      S5-T08). The tiled modes run the fixed-cell integrators (NVE, Langevin, CSVR, Nose-Hoover chain,
-      Berendsen NVT) on the device (PLAN.md O31); barostats are refused in them. With a dispersion term the
-      integrator runs on the host, NVE and Langevin only.
+      S5-T08). The tiled modes run every integrator on the device (PLAN.md O31), the barostats too (Langevin
+      BAOAB, MTK and Berendsen NPT; LAMMPS_TILED_PLAN.md LT6 (a)). With a dispersion term the integrator runs on
+      the host, NVE and Langevin only.
 
     - ``elements``: more elements (symbols or atomic numbers) for the run's bundle than the structure has, for
       species events (``set_species``) and transmute moves that bring them in.
@@ -211,12 +212,18 @@ class Simulation:
         # (S6-D07, _choose_dispersion), and that check's findings
         self.dispersion_used, self.dispersion_choice = self.dispersion, None
 
-    def _check_tiled_scheme(self):
-        if self.config.scheme not in TILED_SCHEMES or self.config.ensemble == "npt":
+    def _check_tiled_scheme(self, engine=None):
+        if self.config.scheme not in TILED_SCHEMES:
             raise PlanRefused(f"the {self.config.scheme} {self.config.ensemble} integrator in tiled mode",
-                              why="the tiled mode keeps the cell fixed: barostats need a cell that fits the GPU whole "
-                                  "(PLAN.md D65)",
-                              next_step="Use an NVE or NVT integrator, or a cell that fits the GPU whole.")
+                              why="the tiled mode has no such integrator",
+                              next_step="Use an NVE, NVT or NPT integrator, or a cell that fits the GPU whole.")
+        runs = getattr(engine, "runs_barostats", None)
+        if self._npt and runs is not None and not runs():
+            raise PlanRefused(f"the {self.config.scheme} barostat in tiled mode",
+                              why="this tiled run integrates on the host (a dispersion term, LOUP_TILED_HOST_MD=1, or a "
+                                  "library without the tiled barostats), which keeps the cell fixed",
+                              next_step="Run without the dispersion term or LOUP_TILED_HOST_MD, or a cell that fits "
+                                        "the GPU whole.")
 
     # ---------------------------------------------------------------------------------------------- start
 
@@ -248,7 +255,7 @@ class Simulation:
         self._bundle = self.force_field.last_bundle
         self.execution = dict(self.force_field.last_execution or {"mode": "whole", "receivers": 0, "plan": None})
         if self.execution["mode"] in ("tiled", "wavefront"):
-            self._check_tiled_scheme()
+            self._check_tiled_scheme(engine)
         if self._npt and getattr(getattr(engine, "info", lambda: None)(), "has_long_range", False):
             raise PlanRefused("a barostat with a long-range model (MACE-POLAR-1)",
                               why="the model's k-space terms are set up for one cell in this version")

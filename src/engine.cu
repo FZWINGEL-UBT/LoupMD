@@ -3372,7 +3372,10 @@ static int run_md_loop(
         const double kt_mass = loup::ASE_KB * mass_temp_k;
         mtk_q = kt_mass * tdamp * tdamp;
         mtk_r = kt_mass * pdamp * pdamp;
-        mtk_w = (npt->full ? (double)h->kinetic_dof() / 3.0 + 1.0 : (double)h->kinetic_dof() + 3.0) * mtk_r;
+        // N_f of this call: h->fix_com is set for it further down, so h->kinetic_dof() would still be the last call's
+        // (a first call with fix_com made W from 3N, later ones from 3N - 3; the tiled MD's W is the same as this one)
+        const int n_f = 3 * (N - h->n_fixed) - (fix_com ? 3 : 0);
+        mtk_w = (npt->full ? (double)n_f / 3.0 + 1.0 : (double)n_f + 3.0) * mtk_r;
         const double target[5] = {temp_k + temp_rate, temp_rate, 0.0, 0.0, 0.0};
         CUDA_CHECK(cudaMemcpy(h->d_langevin_target, target, sizeof(target), cudaMemcpyHostToDevice));
         if (h->int_state_kind != LOUP_MTK_NPT) {
@@ -4479,6 +4482,35 @@ static const char* integrator_name(int kind) {
     }
 }
 
+// One integrator call's settings as run_md_loop takes them: loup_run and loup_tiled_run (LT6 (a)) share their
+// validation (integrator_settings).
+struct RunSpec {
+    int kind = 0;
+    double dt_fs = 0.0, temp_k = 0.0, temp_rate = 0.0, friction = 0.0;
+    unsigned long long seed = 0;
+    int thermo_every = 0;
+    bool fix_com = false;
+    double tau_fs = 0.0;
+    int tchain = 0, tloop = 1;
+    double mass_temp_k = 0.0;
+    bool has_npt = false;
+    NptParams npt;
+};
+// Fills *out with run_md_loop's arguments (in its order, without the handle, step count and stats) and returns 0.
+static int spec(RunSpec* out, int kind, double dt_fs, double temp_k, double temp_rate, double friction,
+                unsigned long long seed, int thermo_every, bool fix_com, double tau_fs = 0.0, int tchain = 0,
+                int tloop = 1, double mass_temp_k = 0.0, const NptParams* npt = nullptr) {
+    RunSpec s;
+    s.kind = kind; s.dt_fs = dt_fs; s.temp_k = temp_k; s.temp_rate = temp_rate; s.friction = friction;
+    s.seed = seed; s.thermo_every = thermo_every; s.fix_com = fix_com; s.tau_fs = tau_fs; s.tchain = tchain;
+    s.tloop = tloop; s.mass_temp_k = mass_temp_k;
+    if (npt) { s.has_npt = true; s.npt = *npt; }
+    *out = s;
+    return 0;
+}
+// The checks of every integrator's settings; n_fixed: the system's fixed atoms; has_lr: a long-range model.
+static int integrator_settings(const LoupIntegrator& it, int n_steps, int n_fixed, bool has_lr, RunSpec* out);
+
 static int run_impl(LoupHandle* h, const LoupIntegrator* caller, int n_steps, LoupMDStats* out_stats) {
     if (!caller) { loup::set_error("the integrator is NULL"); return -1; }
     // Size-versioned: this is the first released layout, so nothing smaller exists, and a larger struct comes from
@@ -4520,8 +4552,16 @@ static int run_impl(LoupHandle* h, const LoupIntegrator* caller, int n_steps, Lo
             }
         }
     }
+    RunSpec s;
+    if (integrator_settings(it, n_steps, h ? h->n_fixed : 0, h && h->gen && h->gen->has_lr(), &s) != 0) return -1;
+    if (s.has_npt && h) h->req_var_cell = true;
+    return run_md_loop(h, s.kind, n_steps, s.dt_fs, s.temp_k, s.temp_rate, s.friction, s.seed, s.thermo_every,
+                       s.fix_com, out_stats, s.tau_fs, s.tchain, s.tloop, s.mass_temp_k, s.has_npt ? &s.npt : nullptr);
+}
+
+static int integrator_settings(const LoupIntegrator& it, int n_steps, int n_fixed, bool has_lr, RunSpec* out) {
     if (it.kind == LOUP_NVE) {
-        return run_md_loop(h, 0, n_steps, it.dt_fs, 0.0, 0.0, 0.0, 0, it.thermo_every, it.fix_com != 0, out_stats);
+        return spec(out, 0, it.dt_fs, 0.0, 0.0, 0.0, 0, it.thermo_every, it.fix_com != 0);
     }
     if (!std::isfinite(it.temp_k) || it.temp_k < 0.0) {
         loup::set_error("temp_k must be finite and not negative, got %g K", it.temp_k);
@@ -4563,11 +4603,11 @@ static int run_impl(LoupHandle* h, const LoupIntegrator* caller, int n_steps, Lo
                             "steps of %g K", it.temp_k, n_steps, it.temp_rate_k_per_step);
             return -1;
         }
-        if (h && h->n_fixed > 0) {
-            loup::set_error("a barostat with fixed atoms: the cell's scaling would move the %d fixed atoms", h->n_fixed);
+        if (n_fixed > 0) {
+            loup::set_error("a barostat with fixed atoms: the cell's scaling would move the %d fixed atoms", n_fixed);
             return -1;
         }
-        if (h && h->gen && h->gen->has_lr()) {
+        if (has_lr) {
             loup::set_error("the variable cell is not built for long-range models (MACE-POLAR-1): their k-space "
                             "terms are set up for one cell");
             return -1;
@@ -4576,9 +4616,8 @@ static int run_impl(LoupHandle* h, const LoupIntegrator* caller, int n_steps, Lo
         npt.pressure = it.pressure_gpa / loup::GPA_PER_EV_A3;
         npt.tau_p_fs = it.tau_p_fs;
         npt.full = it.cell_mode == LOUP_CELL_FULL ? 1 : 0;
-        if (h) h->req_var_cell = true;
-        return run_md_loop(h, 6, n_steps, it.dt_fs, it.temp_k, it.temp_rate_k_per_step, it.friction_per_fs, it.seed,
-                           it.thermo_every, false, out_stats, 0.0, 0, 1, 0.0, &npt);
+        return spec(out, 6, it.dt_fs, it.temp_k, it.temp_rate_k_per_step, it.friction_per_fs, it.seed,
+                    it.thermo_every, false, 0.0, 0, 1, 0.0, &npt);
     }
     if ((it.kind == LOUP_CSVR || it.kind == LOUP_NHC || it.kind == LOUP_BERENDSEN_NVT ||
          it.kind == LOUP_BERENDSEN_NPT || it.kind == LOUP_MTK_NPT) &&
@@ -4592,8 +4631,8 @@ static int run_impl(LoupHandle* h, const LoupIntegrator* caller, int n_steps, Lo
         return -1;
     }
     if (it.kind == LOUP_CSVR) {
-        return run_md_loop(h, 2, n_steps, it.dt_fs, it.temp_k, it.temp_rate_k_per_step, 0.0, it.seed,
-                           it.thermo_every, it.fix_com != 0, out_stats, it.tau_t_fs);
+        return spec(out, 2, it.dt_fs, it.temp_k, it.temp_rate_k_per_step, 0.0, it.seed,
+                    it.thermo_every, it.fix_com != 0, it.tau_t_fs);
     }
     if (it.kind == LOUP_MTK_NPT) {
         // ASE's IsotropicMTKNPT (LOUP_CELL_HYDROSTATIC) and MTKNPT (LOUP_CELL_FULL): tdamp = tau_t_fs, pdamp =
@@ -4633,11 +4672,11 @@ static int run_impl(LoupHandle* h, const LoupIntegrator* caller, int n_steps, Lo
                             "are made for it), got %g K with mass_temp_k = %g K", it.temp_k, it.mass_temp_k);
             return -1;
         }
-        if (h && h->n_fixed > 0) {
-            loup::set_error("a barostat with fixed atoms: the cell's scaling would move the %d fixed atoms", h->n_fixed);
+        if (n_fixed > 0) {
+            loup::set_error("a barostat with fixed atoms: the cell's scaling would move the %d fixed atoms", n_fixed);
             return -1;
         }
-        if (h && h->gen && h->gen->has_lr()) {
+        if (has_lr) {
             loup::set_error("the variable cell is not built for long-range models (MACE-POLAR-1): their k-space "
                             "terms are set up for one cell");
             return -1;
@@ -4648,10 +4687,8 @@ static int run_impl(LoupHandle* h, const LoupIntegrator* caller, int n_steps, Lo
         npt.full = it.cell_mode == LOUP_CELL_FULL ? 1 : 0;
         npt.pchain = pchain;
         npt.ploop = it.p_chain_loops == 0 ? 1 : it.p_chain_loops;
-        if (h) h->req_var_cell = true;
-        return run_md_loop(h, 7, n_steps, it.dt_fs, it.temp_k, it.temp_rate_k_per_step, 0.0, 0, it.thermo_every,
-                           it.fix_com != 0, out_stats, it.tau_t_fs, tchain, it.chain_loops == 0 ? 1 : it.chain_loops,
-                           mass_temp, &npt);
+        return spec(out, 7, it.dt_fs, it.temp_k, it.temp_rate_k_per_step, 0.0, 0, it.thermo_every,
+                    it.fix_com != 0, it.tau_t_fs, tchain, it.chain_loops == 0 ? 1 : it.chain_loops, mass_temp, &npt);
     }
     if (it.kind == LOUP_BERENDSEN_NVT || it.kind == LOUP_BERENDSEN_NPT) {
         if (it.tau_t_fs < it.dt_fs) {  // sqrt(1 + (T0 / T - 1) dt / taut) needs dt / taut <= 1
@@ -4660,8 +4697,8 @@ static int run_impl(LoupHandle* h, const LoupIntegrator* caller, int n_steps, Lo
             return -1;
         }
         if (it.kind == LOUP_BERENDSEN_NVT) {
-            return run_md_loop(h, 4, n_steps, it.dt_fs, it.temp_k, it.temp_rate_k_per_step, 0.0, 0,
-                               it.thermo_every, it.fix_com != 0, out_stats, it.tau_t_fs);
+            return spec(out, 4, it.dt_fs, it.temp_k, it.temp_rate_k_per_step, 0.0, 0,
+                        it.thermo_every, it.fix_com != 0, it.tau_t_fs);
         }
         // The barostat (ASE's NPTBerendsen; with LOUP_CELL_FULL its Inhomogeneous_NPTBerendsen and the mask).
         if (!std::isfinite(it.tau_p_fs) || !(it.tau_p_fs > 0.0)) {
@@ -4702,18 +4739,17 @@ static int run_impl(LoupHandle* h, const LoupIntegrator* caller, int n_steps, Lo
                 return -1;
             }
         }
-        if (h && h->n_fixed > 0) {
-            loup::set_error("a barostat with fixed atoms: the cell's scaling would move the %d fixed atoms", h->n_fixed);
+        if (n_fixed > 0) {
+            loup::set_error("a barostat with fixed atoms: the cell's scaling would move the %d fixed atoms", n_fixed);
             return -1;
         }
-        if (h && h->gen && h->gen->has_lr()) {
+        if (has_lr) {
             loup::set_error("the variable cell is not built for long-range models (MACE-POLAR-1): their k-space "
                             "terms are set up for one cell");
             return -1;
         }
-        if (h) h->req_var_cell = true;
-        return run_md_loop(h, 5, n_steps, it.dt_fs, it.temp_k, it.temp_rate_k_per_step, 0.0, 0, it.thermo_every,
-                           it.fix_com != 0, out_stats, it.tau_t_fs, 0, 1, 0.0, &npt);
+        return spec(out, 5, it.dt_fs, it.temp_k, it.temp_rate_k_per_step, 0.0, 0, it.thermo_every,
+                    it.fix_com != 0, it.tau_t_fs, 0, 1, 0.0, &npt);
     }
     if (it.kind == LOUP_NHC) {
         if (it.chain_length < 1 || it.chain_length > 16) {
@@ -4730,12 +4766,11 @@ static int run_impl(LoupHandle* h, const LoupIntegrator* caller, int n_steps, Lo
                             "mass_temp_k is %g K and temp_k %g K", it.mass_temp_k, it.temp_k);
             return -1;
         }
-        return run_md_loop(h, 3, n_steps, it.dt_fs, it.temp_k, it.temp_rate_k_per_step, 0.0, 0, it.thermo_every,
-                           it.fix_com != 0, out_stats, it.tau_t_fs, it.chain_length,
-                           it.chain_loops > 0 ? it.chain_loops : 1, mass_temp);
+        return spec(out, 3, it.dt_fs, it.temp_k, it.temp_rate_k_per_step, 0.0, 0, it.thermo_every,
+                    it.fix_com != 0, it.tau_t_fs, it.chain_length, it.chain_loops > 0 ? it.chain_loops : 1, mass_temp);
     }
-    return run_md_loop(h, 1, n_steps, it.dt_fs, it.temp_k, it.temp_rate_k_per_step, it.friction_per_fs, it.seed,
-                       it.thermo_every, it.fix_com != 0, out_stats);
+    return spec(out, 1, it.dt_fs, it.temp_k, it.temp_rate_k_per_step, it.friction_per_fs, it.seed,
+                it.thermo_every, it.fix_com != 0);
 }
 
 static int run_nve_impl(LoupHandle* h, int n_steps, double dt_fs, LoupMDStats* out_stats) {
@@ -5214,6 +5249,67 @@ __global__ void tile_place_rows_kernel(int rows, const int* __restrict__ row_ato
     pos[k] = whole[(int64_t)row_atom[r] * 3 + c] + offset[k];
 }
 
+// LT6 (a): a kept tile's rows in a cell h other than the build's h0. Row r's place is its atom's position + S h - org
+// (TileDomain), and offset = S h0 - org was kept at the build, so S = rint((offset + org) h0^-1) and the place in
+// h is position + offset + S (h - h0). Every edge of an open domain has a zero shift, so the edges need nothing.
+struct TileCellMove {
+    double inv0[9];  // h0^-1 (frac = x inv0)
+    double dh[9];    // h - h0
+    double org[3];   // the tile's origin
+};
+__global__ void tile_place_rows_cell_kernel(int rows, const int* __restrict__ row_atom,
+                                            const double* __restrict__ offset, const double* __restrict__ whole,
+                                            TileCellMove m, double* __restrict__ pos) {
+    const int r = blockIdx.x * blockDim.x + threadIdx.x;
+    if (r >= rows) return;
+    const double o0 = offset[(int64_t)r * 3 + 0], o1 = offset[(int64_t)r * 3 + 1], o2 = offset[(int64_t)r * 3 + 2];
+    const double a0 = o0 + m.org[0], a1 = o1 + m.org[1], a2 = o2 + m.org[2];
+    double s[3];
+    for (int k = 0; k < 3; ++k) s[k] = rint(a0 * m.inv0[k] + a1 * m.inv0[3 + k] + a2 * m.inv0[6 + k]);
+    const int64_t a = row_atom[r];
+    const double o[3] = {o0, o1, o2};
+    for (int c = 0; c < 3; ++c)
+        pos[(int64_t)r * 3 + c] = whole[a * 3 + c] + o[c] + (s[0] * m.dh[c] + s[1] * m.dh[3 + c] + s[2] * m.dh[6 + c]);
+}
+
+// LT6 (a): the displacements d = x - x0 F of a strained cell (F = h0^-1 h, row vectors), summed into sum[0..2] for
+// their mean t; then the largest |d - t|^2 as max_disp2_kernel gives it. A common translation moves no pair vector.
+struct Mat9 {
+    double m[9];
+};
+__device__ __forceinline__ void strain_disp(const double* __restrict__ pos, const double* __restrict__ ref,
+                                            const Mat9& f, int i, double d[3]) {
+    const double x0 = ref[i * 3 + 0], y0 = ref[i * 3 + 1], z0 = ref[i * 3 + 2];
+    for (int c = 0; c < 3; ++c) d[c] = pos[i * 3 + c] - (x0 * f.m[c] + y0 * f.m[3 + c] + z0 * f.m[6 + c]);
+}
+__global__ void strain_disp_sum_kernel(int n, const double* __restrict__ pos, const double* __restrict__ ref, Mat9 f,
+                                       double* __restrict__ sum) {
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    double d[3] = {0.0, 0.0, 0.0};
+    if (i < n) strain_disp(pos, ref, f, i, d);
+    for (int c = 0; c < 3; ++c) {
+        double v = d[c];
+        for (int o = 16; o > 0; o >>= 1) v += __shfl_down_sync(0xffffffffu, v, o);
+        if ((threadIdx.x & 31) == 0) atomicAdd(sum + c, v);
+    }
+}
+__global__ void strain_disp_max_kernel(int n, const double* __restrict__ pos, const double* __restrict__ ref, Mat9 f,
+                                       const double* __restrict__ sum, unsigned long long* __restrict__ out) {
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    double d2 = 0.0;
+    if (i < n) {
+        double d[3];
+        strain_disp(pos, ref, f, i, d);
+        const double inv_n = 1.0 / (double)n;
+        for (int c = 0; c < 3; ++c) {
+            const double e = d[c] - sum[c] * inv_n;
+            d2 += e * e;
+        }
+    }
+    for (int o = 16; o > 0; o >>= 1) d2 = fmax(d2, __shfl_down_sync(0xffffffffu, d2, o));
+    if ((threadIdx.x & 31) == 0) atomicMax(out, (unsigned long long)__double_as_longlong(d2));
+}
+
 // The largest squared displacement of `pos` from `ref` [n, 3], as the bits of a non-negative double (which order
 // as unsigned integers).
 __global__ void max_disp2_kernel(int n, const double* __restrict__ pos, const double* __restrict__ ref,
@@ -5237,6 +5333,7 @@ struct TileDomain {        // one tile as an open domain: locals, then the ghost
     std::vector<int> z;
     std::vector<double> place;       // [rows, 3] positions in the domain's box
     double box[9] = {0, 0, 0, 0, 0, 0, 0, 0, 0};
+    double org[3] = {0, 0, 0};       // the domain's origin: a row's place is its atom's position + S h - org
     int n_ghost() const { return (int)atom.size() - n_local; }
 };
 }  // namespace
@@ -5266,7 +5363,10 @@ static void host_domain(const loup::TilePlan& plan, int64_t k, const int* atomic
     const double pad = r_list + 1.0;  // the box's own images then lie beyond the list's reach
     for (size_t r = 0; r < all.atom.size(); ++r)
         for (int c = 0; c < 3; ++c) all.place[r * 3 + c] -= lo[c] - pad;
-    for (int c = 0; c < 3; ++c) all.box[c * 4] = hi[c] - lo[c] + 2.0 * pad;
+    for (int c = 0; c < 3; ++c) {
+        all.box[c * 4] = hi[c] - lo[c] + 2.0 * pad;
+        all.org[c] = lo[c] - pad;
+    }
 }
 
 // Device bytes of the handle's per-system buffers (released when another system or workspace is set up).
@@ -5391,6 +5491,7 @@ constexpr int kTileFullEdgeB = 28;
 struct TileList {
     int n_local = 0, rows = 0, E = 0;
     double e0 = 0.0, box[9] = {0, 0, 0, 0, 0, 0, 0, 0, 0};
+    double org[3] = {0, 0, 0};  // TileDomain::org: a row's whole-cell image is rint((offset + org) h0^-1) (LT6 (a))
     std::vector<int> perm, species_start, species_count;
     // O32: one allocation (blk) cut into the arrays below (tile-slot-block's rounding: about 2 MB per allocation)
     DeviceBufferGuard blk;
@@ -5513,7 +5614,8 @@ struct TiledState {
     std::vector<int> cact_free;
     int keep_l0 = -1;           // the tiles keep layer 0's forward results (TileList::keep0): -1 not decided
     int64_t T = 0;
-    double skin = 0.0, cell[9] = {0, 0, 0, 0, 0, 0, 0, 0, 0};
+    double skin = 0.0, cell[9] = {0, 0, 0, 0, 0, 0, 0, 0, 0};  // the cell the lists were built in
+    double ref_inv[9] = {0, 0, 0, 0, 0, 0, 0, 0, 0};            // its inverse (frac = x ref_inv; LT6 (a))
     double bytes = 0.0;  // device bytes of everything below
     bool host_lists = false;  // the lists' edge arrays in pinned host memory (O31, S5-T07)
     double host_bytes = 0.0;  // their bytes
@@ -5559,6 +5661,12 @@ struct TiledMD {
     double energy = 0.0;
     int state_kind = -1;          // the integrator whose scalars int_state holds
     long long md_steps = 0;       // steps since loup_tiled_set_state (the thermo rows' step)
+    // LT6 (a), the barostats: the cell on the device (loup::CellDev), the last force call's virial [6] there (valid
+    // while virial_current), the cell check's flag; V0 of the volume limits; the cell the cap was planned or set for
+    DeviceBufferGuard celldev, virial, flag;
+    bool virial_current = false;
+    double virial_h[6] = {0, 0, 0, 0, 0, 0};  // its host copy (the thermo rows' pressure)
+    double v0 = 0.0, plan_cell[9] = {0, 0, 0, 0, 0, 0, 0, 0, 0};
 };
 }  // namespace
 
@@ -5753,6 +5861,7 @@ static int build_tile_list(LoupHandle* h, const TileDomain& t, const double* pos
     const int rows = (int)t.atom.size(), N = t.n_local, E = h->E_skin;
     out.n_local = N; out.rows = rows; out.E = E; out.e0 = h->e0_total;
     std::copy(t.box, t.box + 9, out.box);
+    std::copy(t.org, t.org + 3, out.org);
     out.perm = h->perm; out.species_start = h->species_start; out.species_count = h->species_count;
     auto keep = [&](SlotView& g, const void* src, size_t bytes) -> int {
         if (bytes) CUDA_CHECK(cudaMemcpyAsync(g.p, src, bytes, cudaMemcpyDeviceToDevice, h->stream));
@@ -6522,9 +6631,11 @@ static int plan_execution_impl(LoupHandle* h, int n_atoms, const int* atomic_num
 static int evaluate_tiled_impl(LoupHandle* h, int n_atoms, const int* atomic_numbers, const double* positions,
                                const double* cell, int receivers, double skin, double* out_energy_ev,
                                double* out_forces, double* out_stress, long long* out_tiles,
-                               const double* d_positions = nullptr, double* d_out_forces = nullptr) {
+                               const double* d_positions = nullptr, double* d_out_forces = nullptr,
+                               double* out_virial = nullptr) {
     // d_positions / d_out_forces (tiled MD, PLAN.md O31): the positions on the device instead of `positions`, and
     // the forces left on the device. The positions are copied to the host only when the lists are built.
+    // out_virial (tiled MD's barostats, LT6 (a)): with out_stress, the virial [xx, xy, xz, yy, yz, zz] (eV).
     if (!h) return -1;
     if (h->disp) {
         loup::set_error("the tiled call has no dispersion term yet (PLAN.md S6-D09)");
@@ -6552,26 +6663,56 @@ static int evaluate_tiled_impl(LoupHandle* h, int n_atoms, const int* atomic_num
     // The tiled state of an earlier call stays while the system, cell, skin and cap are the same and no atom has
     // moved skin/2 since its lists were built (S5-T06): only the tiles' positions are refreshed then.
     TiledState* st = h->tiled_state;
-    const bool same_system = st && h->tile_workspace && st->n == n_atoms && st->skin == skin &&
-                             memcmp(st->cell, cell, sizeof(st->cell)) == 0 &&
-                             std::equal(st->z.begin(), st->z.end(), atomic_numbers);
-    if (same_system && receivers <= 0) receivers = st->receivers;  // a rebuild of the same system keeps its cap
-    bool keep = same_system && receivers == st->receivers;
+    const double r_max = (double)h->gen->r_max(), r_list = r_max + skin;
+    const bool same_atoms = st && h->tile_workspace && st->n == n_atoms && st->skin == skin &&
+                            std::equal(st->z.begin(), st->z.end(), atomic_numbers);
+    const bool same_cell = same_atoms && memcmp(st->cell, cell, sizeof(st->cell)) == 0;
+    // LT6 (a): on another cell the lists stay while the strain since their build leaves a margin (the whole system's
+    // variable-cell test, cell.hpp): F = h0^-1 h, thr = (r_list (1 - |F - 1|) - r_max) / 2 > 0, and every atom lies
+    // within thr of x0 F + t, t the atoms' mean displacement (a common translation moves no pair vector).
+    Mat9 strain{};
+    double thr = -1.0;
+    if (same_atoms && !same_cell) {
+        double dev2 = 0.0;
+        for (int r = 0; r < 3; ++r)
+            for (int c = 0; c < 3; ++c) {
+                double v = 0.0;
+                for (int k = 0; k < 3; ++k) v += st->ref_inv[r * 3 + k] * cell[k * 3 + c];
+                strain.m[r * 3 + c] = v;
+                const double e = v - (r == c ? 1.0 : 0.0);
+                dev2 += e * e;
+            }
+        thr = 0.5 * (r_list * (1.0 - std::sqrt(dev2)) - r_max);
+        if (!std::isfinite(thr)) thr = -1.0;
+    }
+    const bool strained = thr > 0.0;
+    const int asked = receivers;
+    if ((same_cell || strained) && receivers <= 0) receivers = st->receivers;  // the kept cap while the lists may stay
+    bool keep = (same_cell || strained) && receivers == st->receivers;
     if (keep) {
         CUDA_CHECK(cudaMemcpyAsync(st->whole_pos.p, d_positions ? d_positions : positions,
                                    (size_t)n_atoms * 3 * sizeof(double),
                                    d_positions ? cudaMemcpyDeviceToDevice : cudaMemcpyHostToDevice, h->stream));
-        CUDA_CHECK(cudaMemsetAsync(st->disp2.p, 0, sizeof(unsigned long long), h->stream));
-        max_disp2_kernel<<<blocks(n_atoms), 256, 0, h->stream>>>(n_atoms, static_cast<const double*>(st->whole_pos.p),
-                                                                 static_cast<const double*>(st->ref_pos.p),
-                                                                 static_cast<unsigned long long*>(st->disp2.p));
+        CUDA_CHECK(cudaMemsetAsync(st->disp2.p, 0, 4 * sizeof(double), h->stream));
+        const double* wp = static_cast<const double*>(st->whole_pos.p);
+        const double* rp = static_cast<const double*>(st->ref_pos.p);
+        unsigned long long* bits_d = static_cast<unsigned long long*>(st->disp2.p);
+        if (same_cell) {
+            max_disp2_kernel<<<blocks(n_atoms), 256, 0, h->stream>>>(n_atoms, wp, rp, bits_d);
+        } else {
+            double* sum = reinterpret_cast<double*>(bits_d + 1);
+            strain_disp_sum_kernel<<<blocks(n_atoms), 256, 0, h->stream>>>(n_atoms, wp, rp, strain, sum);
+            strain_disp_max_kernel<<<blocks(n_atoms), 256, 0, h->stream>>>(n_atoms, wp, rp, strain, sum, bits_d);
+        }
         unsigned long long bits = 0;
-        CUDA_CHECK(cudaMemcpyAsync(&bits, st->disp2.p, sizeof(bits), cudaMemcpyDeviceToHost, h->stream));
+        CUDA_CHECK(cudaMemcpyAsync(&bits, bits_d, sizeof(bits), cudaMemcpyDeviceToHost, h->stream));
         CUDA_CHECK(cudaStreamSynchronize(h->stream));
         double d2 = 0.0;
         memcpy(&d2, &bits, sizeof(d2));
-        keep = std::isfinite(d2) && d2 <= 0.25 * skin * skin;
+        keep = std::isfinite(d2) && (same_cell ? d2 <= 0.25 * skin * skin : d2 <= thr * thr);
     }
+    // a changed cell that needs new lists plans again on receivers 0 (LD3), as before LT6 (a)
+    if (!keep && !same_cell && asked <= 0) receivers = asked;
     if (!keep) {
         release_tiled_state(h);
         st = nullptr;
@@ -6604,7 +6745,6 @@ static int evaluate_tiled_impl(LoupHandle* h, int n_atoms, const int* atomic_num
         least_free = std::min(least_free, f);
         return 0;
     };
-    const double r_list = (double)h->gen->r_max() + skin;
     const bool tile_times = std::getenv("LOUP_DEBUG_TILE_TIMES") && std::getenv("LOUP_DEBUG_TILE_TIMES")[0] == '1';
     auto tick_last = std::chrono::steady_clock::now();
     auto tick = [&](const char* what) {
@@ -6681,6 +6821,7 @@ static int evaluate_tiled_impl(LoupHandle* h, int n_atoms, const int* atomic_num
             CUDA_CHECK(cudaStreamSynchronize(h->stream));
             t.n_local = all.n_local;
             std::copy(all.box, all.box + 9, t.box);
+            std::copy(all.org, all.org + 3, t.org);
             for (int r = 0; r < (int)all.atom.size(); ++r) {
                 if (r >= all.n_local && !used[(size_t)(r - all.n_local)]) continue;
                 t.atom.push_back(all.atom[r]);
@@ -6836,6 +6977,12 @@ static int evaluate_tiled_impl(LoupHandle* h, int n_atoms, const int* atomic_num
         for (TileList& tl : st->lists) std::vector<int>().swap(tl.h_row_atom);
         const int64_t layer_rows = st->wave ? st->pool_rows : n_atoms;
         std::copy(cell, cell + 9, st->cell);
+        {
+            loup::CellMat64 cm;
+            double vol = 0.0, heights[3];
+            loup::compute_cell_mat(cell, cm, vol, heights);
+            std::copy(cm.inv, cm.inv + 9, st->ref_inv);
+        }
         st->z.assign(atomic_numbers, atomic_numbers + n_atoms);
         auto alloc = [&](DeviceBufferGuard& g, size_t bytes) -> int {
             CUDA_CHECK(cudaMalloc(&g.p, std::max<size_t>(bytes, 1)));
@@ -6846,8 +6993,9 @@ static int evaluate_tiled_impl(LoupHandle* h, int n_atoms, const int* atomic_num
         // The whole system's positions, layer outputs, their gradients and the forces, on the device
         st->x = std::vector<DeviceBufferGuard>((size_t)(L - 1) * 4);
         st->dx = std::vector<DeviceBufferGuard>((size_t)(L - 1) * 4);
+        // disp2: the largest squared displacement's bits, then (LT6 (a)) the summed displacements of a strained cell
         int fail = alloc(st->whole_pos, pos_bytes) | alloc(st->ref_pos, pos_bytes) |
-                   alloc(st->disp2, sizeof(unsigned long long)) | alloc(st->forces, pos_bytes);
+                   alloc(st->disp2, 4 * sizeof(double)) | alloc(st->forces, pos_bytes);
         if (st->host_state) {
             st->hx = std::vector<HostBufferGuard>((size_t)(L - 1) * 4);
             st->hdx = std::vector<HostBufferGuard>((size_t)(L - 1) * 4);
@@ -6910,12 +7058,23 @@ static int evaluate_tiled_impl(LoupHandle* h, int n_atoms, const int* atomic_num
         st->act_slots.clear();
         ++h->tile_list_builds;
         tick("state allocations");
-    } else {
+    } else if (same_cell) {
         for (TileList& t : st->lists)
             tile_place_rows_kernel<<<blocks((int64_t)t.rows * 3), 256, 0, h->stream>>>(
                 t.rows, static_cast<const int*>(t.row_atom.p), static_cast<const double*>(t.offset.p),
                 static_cast<const double*>(st->whole_pos.p), static_cast<double*>(t.pos.p));
         tick("kept lists refreshed");
+    } else {  // LT6 (a): the kept lists' rows placed in the strained cell
+        TileCellMove m{};
+        std::copy(st->ref_inv, st->ref_inv + 9, m.inv0);
+        for (int i = 0; i < 9; ++i) m.dh[i] = cell[i] - st->cell[i];
+        for (TileList& t : st->lists) {
+            std::copy(t.org, t.org + 3, m.org);
+            tile_place_rows_cell_kernel<<<blocks(t.rows), 256, 0, h->stream>>>(
+                t.rows, static_cast<const int*>(t.row_atom.p), static_cast<const double*>(t.offset.p),
+                static_cast<const double*>(st->whole_pos.p), m, static_cast<double*>(t.pos.p));
+        }
+        tick("kept lists refreshed (strained cell)");
     }
     h->E_graph = st->max_edges;  // the edge kernels' grid: every tile's edges
     h->invalidate_graphs();
@@ -7937,6 +8096,7 @@ static int evaluate_tiled_impl(LoupHandle* h, int n_atoms, const int* atomic_num
         out_stress[0] = v[0] * inv_v; out_stress[1] = v[1] * inv_v; out_stress[2] = v[2] * inv_v;
         out_stress[3] = v[1] * inv_v; out_stress[4] = v[3] * inv_v; out_stress[5] = v[4] * inv_v;
         out_stress[6] = v[2] * inv_v; out_stress[7] = v[4] * inv_v; out_stress[8] = v[5] * inv_v;
+        if (out_virial) std::copy(virial, virial + 6, out_virial);
     }
     h->save_disk_plans();
     return 0;
@@ -8012,23 +8172,45 @@ static int tiled_set_state_impl(LoupHandle* h, int n_atoms, const int* atomic_nu
     CUDA_CHECK(cudaStreamSynchronize(h->stream));  // the host vectors go out of scope
     md->z.assign(atomic_numbers, atomic_numbers + n);
     std::copy(cell, cell + 9, md->cell);
+    std::copy(cell, cell + 9, md->plan_cell);
+    md->v0 = std::fabs(cell[0] * (cell[4] * cell[8] - cell[5] * cell[7]) - cell[1] * (cell[3] * cell[8] - cell[5] * cell[6]) +
+                       cell[2] * (cell[3] * cell[7] - cell[4] * cell[6]));
     md->receivers = receivers;
     md->skin = skin;
     md->forces_current = false;
+    md->virial_current = false;
     md->md_steps = 0;
     return 0;
 }
 
-// The tiled call on the device positions; the forces stay in md->forces.
-static int tiled_md_forces(LoupHandle* h, TiledMD* md, long long* tiles) {
-    double e = 0.0;
-    if (evaluate_tiled_impl(h, md->n, md->z.data(), nullptr, md->cell, md->receivers, md->skin, &e, nullptr, nullptr,
-                            tiles, static_cast<const double*>(md->pos.p), static_cast<double*>(md->forces.p)) != 0)
-        return -1;
+// The tiled call on the device positions; the forces stay in md->forces. With `stress` (the barostats, LT6 (a)) the
+// virial goes to md->virial. A call that fails in a cell other than the one the cap was planned or set for plans once
+// more at this cell (LAMMPS_TILED_PLAN.md LD3: a compressed cell can make the tiles denser than the plan measured).
+static int tiled_md_forces(LoupHandle* h, TiledMD* md, long long* tiles, bool stress = false) {
+    double e = 0.0, s[9], vir[6] = {0, 0, 0, 0, 0, 0};
+    auto call = [&] {
+        return evaluate_tiled_impl(h, md->n, md->z.data(), nullptr, md->cell, md->receivers, md->skin, &e, nullptr,
+                                   stress ? s : nullptr, tiles, static_cast<const double*>(md->pos.p),
+                                   static_cast<double*>(md->forces.p), stress ? vir : nullptr);
+    };
+    if (call() != 0) {
+        if (!md->receivers || memcmp(md->cell, md->plan_cell, sizeof(md->cell)) == 0) return -1;
+        (void)cudaGetLastError();
+        md->receivers = 0;
+        if (call() != 0) return -1;
+        std::copy(md->cell, md->cell + 9, md->plan_cell);
+    }
     if (!std::isfinite(e)) { loup::set_error("non-finite energy (%g) in the tiled call", e); return -1; }
     if (!md->receivers) md->receivers = h->last_exec.receivers;  // the plan's cap, kept for the next call
     md->energy = e;
     md->forces_current = true;
+    md->virial_current = stress;
+    if (stress) {
+        std::copy(vir, vir + 6, md->virial_h);
+        if (!md->virial.p) CUDA_CHECK(loup::device_malloc(&md->virial.p, 6 * sizeof(double)));
+        CUDA_CHECK(cudaMemcpyAsync(md->virial.p, vir, sizeof(vir), cudaMemcpyHostToDevice, h->stream));
+        CUDA_CHECK(cudaStreamSynchronize(h->stream));  // `vir` goes out of scope
+    }
     return 0;
 }
 
@@ -8042,12 +8224,23 @@ static int tiled_run_impl(LoupHandle* h, const LoupIntegrator* it, int n_steps, 
     if (!it || it->size < sizeof(unsigned) + sizeof(int)) { loup::set_error("integrator is NULL or too small"); return -1; }
     if (n_steps <= 0) { loup::set_error("n_steps must be positive, got %d", n_steps); return -1; }
     const int kind = it->kind;
-    if (kind != LOUP_NVE && kind != LOUP_LANGEVIN && kind != LOUP_CSVR && kind != LOUP_NHC &&
-        kind != LOUP_BERENDSEN_NVT) {
-        loup::set_error("integrator kind %d in tiled mode: the tiled mode runs NVE, Langevin, CSVR, the Nose-Hoover "
-                        "chain and Berendsen NVT (no barostat: the cell is fixed)", kind);
+    // LT6 (a): the barostats, with loup_run's checks of their settings
+    const bool npt_kind = kind == LOUP_BERENDSEN_NPT || kind == LOUP_BAOAB_NPT || kind == LOUP_MTK_NPT;
+    RunSpec rs;
+    if (npt_kind) {
+        if (it->size != sizeof(LoupIntegrator)) {
+            loup::set_error("LoupIntegrator.size is %u, and this library's layout has %zu bytes (set size to "
+                            "sizeof(LoupIntegrator) of the header the library was built from)", it->size,
+                            sizeof(LoupIntegrator));
+            return -1;
+        }
+        if (integrator_settings(*it, n_steps, md->n_fixed, false, &rs) != 0) return -1;
+    } else if (kind != LOUP_NVE && kind != LOUP_LANGEVIN && kind != LOUP_CSVR && kind != LOUP_NHC &&
+               kind != LOUP_BERENDSEN_NVT) {
+        loup::set_error("unknown integrator kind %d", kind);
         return -1;
     }
+    const NptParams* npt = npt_kind ? &rs.npt : nullptr;
     const bool fix_com = it->fix_com != 0;
     if (fix_com && md->n_fixed) { loup::set_error("fix_com together with fixed atoms is refused"); return -1; }
     const double dt_fs = it->dt_fs;
@@ -8066,10 +8259,10 @@ static int tiled_run_impl(LoupHandle* h, const LoupIntegrator* it, int n_steps, 
         loup::set_error("friction_per_fs must not be negative, got %g", it->friction_per_fs);
         return -1;
     }
-    const int tchain = it->chain_length > 0 ? it->chain_length : 3;
-    const int tloop = it->chain_loops > 0 ? it->chain_loops : 1;
+    const int tchain = npt_kind ? rs.tchain : it->chain_length > 0 ? it->chain_length : 3;
+    const int tloop = npt_kind ? rs.tloop : it->chain_loops > 0 ? it->chain_loops : 1;
     if (kind == LOUP_NHC && tchain > 16) { loup::set_error("chain_length must be at most 16"); return -1; }
-    const double mass_temp_k = it->mass_temp_k > 0.0 ? it->mass_temp_k : temp_k;
+    const double mass_temp_k = npt_kind ? rs.mass_temp_k : it->mass_temp_k > 0.0 ? it->mass_temp_k : temp_k;
     const int thermo_every = it->thermo_every > 0 ? it->thermo_every : 0;
     CUDA_CHECK(cudaSetDevice(h->device_id));
     const int N = md->n;
@@ -8095,9 +8288,12 @@ static int tiled_run_impl(LoupHandle* h, const LoupIntegrator* it, int n_steps, 
 
     const long long builds0 = h->tile_list_builds;
     long long tiles = 0;
-    if (!md->forces_current && tiled_md_forces(h, md, &tiles) != 0) return -1;
+    // the barostats start from the virial of the forces they start from
+    if ((!md->forces_current || (npt_kind && !md->virial_current)) && tiled_md_forces(h, md, &tiles, npt_kind) != 0)
+        return -1;
 
     // The coefficients and targets as loup_run sets them (run_md_loop).
+    const bool fresh_state = md->state_kind != kind;  // the integrator's variables start from zero
     double c1 = 0, c2 = 0, a3 = 0, a4 = 0, a5 = 0, two_fr_kb = 0, csvr_exp = 0, nhc_q = 0;
     const double first = temp_k + temp_rate;
     if (kind == LOUP_LANGEVIN) {
@@ -8125,6 +8321,65 @@ static int tiled_run_impl(LoupHandle* h, const LoupIntegrator* it, int n_steps, 
         }
         CUDA_CHECK(cudaMemsetAsync(work, 0, kIntWorkSlots * sizeof(double), h->stream));
     }
+    // LT6 (a): the barostats' constants as run_md_loop makes them, and the cell on the device (cell.hpp). The
+    // whole system's kernels run on the tiled MD's arrays; the tiled call stands in for the force pass.
+    double bao_gamma = 0.0, bao_ou = 0.0, bao_gamma_b = 0.0, bao_ou_b = 0.0, bao_mass = 0.0;
+    double mtk_q = 0.0, mtk_r = 0.0, mtk_w = 0.0;
+    const int bao_ndof = 3 * N;
+    loup::CellDev* celldev = nullptr;
+    double* virial_d = nullptr;
+    int* flag = nullptr;
+    if (npt_kind) {
+        // SPDX-SnippetBegin
+        // SPDX-License-Identifier: LGPL-2.1-or-later
+        // Provenance: the barostats' constants, up to the end marker, follow ASE 3.27's ase/md classes (LGPL-2.1-or-
+        // later, (c) the ASE developers, https://gitlab.com/ase/ase), as run_md_loop's; see NOTICE.md.
+        if (kind == LOUP_BAOAB_NPT) {
+            bao_gamma = rs.friction / loup::ASE_FS;
+            bao_ou = sqrt(1.0 - exp(-2.0 * bao_gamma * dt_ase));
+            const double p_tau = (npt->tau_p_fs > 0.0 ? npt->tau_p_fs : 20.0 / rs.friction) * loup::ASE_FS;
+            const double c = 1.66 * loup::ASE_FS;
+            bao_mass = pow((p_tau / 4.0) / c * pow((double)N, 1.0 / 6.0), 2.0);
+            bao_gamma_b = 1.0 / p_tau;
+            bao_ou_b = sqrt(1.0 - exp(-2.0 * bao_gamma_b * dt_ase)) * sqrt(bao_mass);
+        }
+        if (kind == LOUP_MTK_NPT) {
+            const double tdamp = tau_fs * loup::ASE_FS, pdamp = npt->tau_p_fs * loup::ASE_FS;
+            const double kt_mass = loup::ASE_KB * mass_temp_k;
+            mtk_q = kt_mass * tdamp * tdamp;
+            mtk_r = kt_mass * pdamp * pdamp;
+            mtk_w = (npt->full ? (double)dof / 3.0 + 1.0 : (double)dof + 3.0) * mtk_r;
+        }
+        // SPDX-SnippetEnd
+        if (!md->celldev.p) CUDA_CHECK(loup::device_malloc(&md->celldev.p, sizeof(loup::CellDev)));
+        if (!md->flag.p) CUDA_CHECK(loup::device_malloc(&md->flag.p, sizeof(int)));
+        loup::CellDev c{};
+        loup::CellMat64 cm;
+        double vol = 0.0, heights[3];
+        loup::compute_cell_mat(md->cell, cm, vol, heights);
+        for (int i = 0; i < 9; ++i) {
+            c.h[i] = md->cell[i];
+            c.ref_inv[i] = cm.inv[i];
+            c.f[i] = c.move[i] = (i % 4 == 0) ? 1.0 : 0.0;
+        }
+        c.row_scale[0] = c.row_scale[1] = c.row_scale[2] = 1.0;
+        c.r_max = (double)h->gen->r_max();
+        c.r_list = c.r_max + md->skin;
+        c.thr = 0.5 * md->skin;
+        c.volume = vol;
+        c.v0 = md->v0 > 0.0 ? md->v0 : vol;
+        c.has_move = 0;
+        CUDA_CHECK(cudaMemcpyAsync(md->celldev.p, &c, sizeof(c), cudaMemcpyHostToDevice, h->stream));
+        celldev = static_cast<loup::CellDev*>(md->celldev.p);
+        virial_d = static_cast<double*>(md->virial.p);
+        flag = static_cast<int*>(md->flag.p);
+        if (kind == LOUP_BAOAB_NPT && fresh_state) {  // LangevinBAOAB.__init__: the cell force it starts from
+            loup::kinetic_tensor_kernel<<<gridN, 256, 0, h->stream>>>(N, masses, vel, work);
+            loup::baoab_cell_second_kernel<<<1, 1, 0, h->stream>>>(npt->full, 0, 0, dt_ase, bao_ndof, -npt->pressure,
+                                                                   virial_d, celldev, work, ist, step);
+        }
+        CUDA_CHECK(cudaStreamSynchronize(h->stream));  // `c` goes out of scope
+    }
     const double inv_total_mass = fix_com ? 1.0 / md->total_mass : 0.0;
     if (fix_com && kind != LOUP_LANGEVIN) {  // the total momentum removed once (the forces sum to zero)
         CUDA_CHECK(cudaMemsetAsync(com, 0, 6 * sizeof(double), h->stream));
@@ -8145,7 +8400,28 @@ static int tiled_run_impl(LoupHandle* h, const LoupIntegrator* it, int n_steps, 
     const auto t0 = std::chrono::steady_clock::now();
     for (int s = 0; s < n_steps; ++s) {
         // first half: as record_move of run_md_loop
-        if (kind == LOUP_LANGEVIN && fix_com) {
+        if (kind == LOUP_MTK_NPT) {
+            loup::kinetic_tensor_kernel<<<gridN, 256, 0, h->stream>>>(N, masses, vel, work + 44);
+            loup::mtk_first_kernel<<<1, 1, 0, h->stream>>>(npt->full, dt_ase, tchain, tloop, npt->pchain, npt->ploop,
+                                                           dof, mtk_q, mtk_r, mtk_w, loup::ASE_KB, npt->pressure,
+                                                           target, ist, work, virial_d, celldev);
+            loup::mtk_first_atoms_kernel<<<gridN, 256, 0, h->stream>>>(N, dt_ase, work, frc, inv_m, pos, vel, disp);
+        } else if (kind == LOUP_BAOAB_NPT) {
+            loup::baoab_cell_first_kernel<<<1, 1, 0, h->stream>>>(npt->full, dt_ase, bao_gamma, bao_ou, bao_gamma_b,
+                                                                  bao_ou_b, bao_mass, bao_ndof, loup::ASE_KB, seed,
+                                                                  step, target, ist, work, celldev);
+            loup::baoab_first_kernel<<<grid32, 32, 0, h->stream>>>(N, dt_ase, work, seed, step, frc, inv_m, sqrt_inv_m,
+                                                                   pos, vel, disp);
+        } else if (kind == LOUP_BERENDSEN_NPT) {
+            loup::kinetic_energy_kernel<<<gridN, 256, 0, h->stream>>>(N, masses, vel, work);
+            if (npt->full) loup::kinetic_diag_kernel<<<gridN, 256, 0, h->stream>>>(N, masses, vel, work + 2);
+            loup::berendsen_scale_kernel<<<1, 1, 0, h->stream>>>(dof, dt_fs / tau_fs, loup::ASE_KB, target, work);
+            loup::berendsen_npt_kernel<<<1, 1, 0, h->stream>>>(npt->full, npt->mask[0], npt->mask[1], npt->mask[2],
+                                                               npt->pressure, dt_fs, npt->tau_p_fs,
+                                                               npt->compressibility, work, virial_d, celldev);
+            loup::cell_move_positions_kernel<<<gridN, 256, 0, h->stream>>>(N, celldev, pos);
+            loup::csvr_first_half_kernel<<<gridN, 256, 0, h->stream>>>(N, dt_ase, work, frc, inv_m, pos, vel, disp);
+        } else if (kind == LOUP_LANGEVIN && fix_com) {
             CUDA_CHECK(cudaMemsetAsync(com, 0, 6 * sizeof(double), h->stream));
             loup::langevin_noise_kernel<<<grid32, 32, 0, h->stream>>>(N, target, seed, step, masses, sqrt_inv_m,
                                                                       rnd_pos, rnd_vel, com);
@@ -8168,12 +8444,45 @@ static int tiled_run_impl(LoupHandle* h, const LoupIntegrator* it, int n_steps, 
                                                                 ist);
             loup::csvr_first_half_kernel<<<gridN, 256, 0, h->stream>>>(N, dt_ase, work, frc, inv_m, pos, vel, disp);
         }
-        if (tiled_md_forces(h, md, &tiles) != 0) return -1;
+        if (npt_kind) {
+            // the cell follows this step's deformation (cell_derive_kernel), and the tiled call runs in it
+            CUDA_CHECK(cudaMemsetAsync(flag, 0, sizeof(int), h->stream));
+            loup::cell_derive_kernel<<<1, 1, 0, h->stream>>>(celldev, flag);
+            loup::CellDev c;
+            int bad = 0;
+            CUDA_CHECK(cudaMemcpyAsync(&c, celldev, sizeof(c), cudaMemcpyDeviceToHost, h->stream));
+            CUDA_CHECK(cudaMemcpyAsync(&bad, flag, sizeof(int), cudaMemcpyDeviceToHost, h->stream));
+            CUDA_CHECK(cudaStreamSynchronize(h->stream));
+            bool finite = std::isfinite(c.volume);
+            for (int i = 0; i < 9; ++i) finite = finite && std::isfinite(c.h[i]);
+            if ((bad & 8) || !finite) {
+                loup::set_error("the cell diverged: its volume is %g A^3, outside [V0 / 20, 20 V0] with V0 = %g A^3 "
+                                "(step %lld of the tiled run)", c.volume, c.v0, md->md_steps + 1);
+                md->forces_current = md->virial_current = false;
+                return -1;
+            }
+            std::copy(c.h, c.h + 9, md->cell);
+        }
+        if (tiled_md_forces(h, md, &tiles, npt_kind) != 0) return -1;
+        virial_d = static_cast<double*>(md->virial.p);
         // second half: as record_rest
-        if (kind == LOUP_LANGEVIN) {
+        if (kind == LOUP_MTK_NPT) {  // the atom kick, the cell kick with the new stress, both chains
+            loup::mtk_kick_kernel<<<gridN, 256, 0, h->stream>>>(N, dt_ase, work, frc, inv_m, vel);
+            loup::kinetic_tensor_kernel<<<gridN, 256, 0, h->stream>>>(N, masses, vel, work + 44);
+            loup::mtk_second_kernel<<<1, 1, 0, h->stream>>>(npt->full, dt_ase, tchain, tloop, npt->pchain, npt->ploop,
+                                                            dof, mtk_q, mtk_r, mtk_w, loup::ASE_KB, npt->pressure,
+                                                            target, ist, work, virial_d, celldev);
+            loup::scale_velocities_kernel<<<gridN, 256, 0, h->stream>>>(N, work, vel);
+        } else if (kind == LOUP_LANGEVIN) {
             loup::langevin_second_half_kernel<<<gridN, 256, 0, h->stream>>>(N, c1, c2, frc, inv_m, rnd_vel, vel, step,
                                                                             target, a3, a4, a5, two_fr_kb);
         } else {
+            if (kind == LOUP_BAOAB_NPT) {  // the cell force from the velocities before the last kick, then barostat B
+                loup::kinetic_tensor_kernel<<<gridN, 256, 0, h->stream>>>(N, masses, vel, work);
+                loup::baoab_cell_second_kernel<<<1, 1, 0, h->stream>>>(npt->full, 1, 1, dt_ase, bao_ndof,
+                                                                       -npt->pressure, virial_d, celldev, work, ist,
+                                                                       step);
+            }
             loup::nve_second_half_kernel<<<gridN, 256, 0, h->stream>>>(N, dt_ase, frc, inv_m, vel);
         }
         if (kind == LOUP_NHC) {
@@ -8196,6 +8505,13 @@ static int tiled_run_impl(LoupHandle* h, const LoupIntegrator* it, int n_steps, 
             r.temp_k = dof > 0 ? 2.0 * e_kin / (dof * loup::ASE_KB) : 0.0;
             r.pressure_gpa = 0.0;
             r.volume_a3 = volume;
+            if (npt_kind) {  // as thermo_row_kernel: minus a third of the stress's trace plus 2 E_kin / (3 V), in GPa
+                const double* c = md->cell;
+                r.volume_a3 = std::fabs(c[0] * (c[4] * c[8] - c[5] * c[7]) - c[1] * (c[3] * c[8] - c[5] * c[6]) +
+                                        c[2] * (c[3] * c[7] - c[4] * c[6]));
+                const double* v = md->virial_h;
+                r.pressure_gpa = (2.0 * e_kin - (v[0] + v[3] + v[5])) / (3.0 * r.volume_a3) * 160.21766208;
+            }
             r.conserved = md->energy + e_kin - transferred;
         }
     }
@@ -8523,6 +8839,15 @@ int loup_tiled_get_state(LoupHandle* h, double* positions, double* velocities, d
     });
 }
 
+int loup_tiled_get_cell(LoupHandle* h, double* out_cell) {
+    return guarded(h, "loup_tiled_get_cell", [&] {
+        if (!h->tiled_md) { loup::set_error("no tiled MD state: call loup_tiled_set_state first"); return -1; }
+        if (!out_cell) { loup::set_error("out_cell is NULL"); return -1; }
+        std::copy(h->tiled_md->cell, h->tiled_md->cell + 9, out_cell);
+        return 0;
+    });
+}
+
 int loup_set_execution(LoupHandle* h, int mode, int receivers, double memory_fraction) {
     return guarded(h, "loup_set_execution", [&] {
         if (!h) return -1;
@@ -8576,7 +8901,17 @@ int loup_get_cell(LoupHandle* h, double* out_cell) {
 }
 
 int loup_set_reference_volume(LoupHandle* h, double volume_a3) {
-    return guarded(h, "loup_set_reference_volume", [&] { return set_reference_volume_impl(h, volume_a3); });
+    return guarded(h, "loup_set_reference_volume", [&] {
+        if (h && h->tiled_md) {  // LT6 (a): the tiled MD's V0 (loup_tiled_set_state takes its cell's volume)
+            if (!std::isfinite(volume_a3) || !(volume_a3 > 0.0)) {
+                loup::set_error("the reference volume must be finite and positive, got %g A^3", volume_a3);
+                return -1;
+            }
+            h->tiled_md->v0 = volume_a3;
+            return 0;
+        }
+        return set_reference_volume_impl(h, volume_a3);
+    });
 }
 
 int loup_debug_csvr_noise(LoupHandle* h, unsigned long long seed, unsigned long long first_step, int n_steps,

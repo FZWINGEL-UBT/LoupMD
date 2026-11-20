@@ -2617,3 +2617,99 @@ within 0.7% in these runs, which hold two outputs per block.
 **Not covered.** The `sm_89` workstations. A barostat in tiled MD (LT6 (a)). The whole-to-tiled fallback when a
 list outgrows its buffers in a run (LT6 (b)). An output step without the extra tiled call: the last MD step of a
 block would have to form the virial.
+
+### 6.41 Barostats in tiled mode (20 November 2026, PLAN.md O42, D99)
+
+The owner, after §6.40's 16%: "Start the barostat". `LAMMPS_TILED_PLAN.md` LT6 (a). RTX 5060 Ti in WSL 2 only;
+library `ad99a7df36d5d9a6` (the test LAMMPS `~/loupmd_lammps` links it).
+
+**What changed.**
+
+- *Lists across a cell change (engine).* A tiled call in a cell other than its lists' build cell used to drop the
+  tiled state and plan again. Now it keeps the lists by the variable-cell step's rule (`src/cell.cu`). With F = h0^-1
+  h (row vectors), the lists stay while r_list (1 - |F - 1|_F) > r_max and every atom lies within (r_list (1 -
+  |F - 1|_F) - r_max) / 2 of x0 F + t. Here t is the atoms' mean displacement, so LAMMPS's `fix npt`, which dilates
+  about the box centre, counts no move. The build's reference stays fixed until the next build.
+  `tile_place_rows_cell_kernel` places each tile's rows in the new cell from the kept offsets and the tile's origin.
+  `receivers` 0 keeps the cap while the lists are kept. No new device memory but the barostat's 48 B virial, its cell
+  block and a flag.
+- *Barostats in tiled MD (engine).* `loup_tiled_run` takes `LOUP_BERENDSEN_NPT`, `LOUP_BAOAB_NPT` and
+  `LOUP_MTK_NPT`, with the whole loop's kernels on a `CellDev` of the tiled state. Each step's tiled call carries the
+  stress. The virial is kept across blocks (`virial_current`), and V0 is set per state (`loup_set_reference_volume`).
+  The barostat's variables ride in the integrator state block, so a restart carries them. `loup_tiled_get_cell` is
+  new. The validation is `loup_run`'s: no fixed atoms with a barostat, and BAOAB without `fix_com`.
+- *A whole-mode fault found by the comparison.* MTK's barostat mass used `h->kinetic_dof()` before the call set
+  `h->fix_com`. So the first call on an engine counted 3N degrees of freedom with `fixcm`, and later calls (or a
+  graph capture after one) 3N - 3: W differed by 1 part in N. Tiled against whole, MTK differed by 4.4e-5 Å
+  against the 1e-5 bound. It now uses the call's own count, 3 (N - fixed) - 3 with `fix_com`.
+- *Python.* `TiledEngine` runs the three barostats on the device loop of a library with `loup_tiled_get_cell`,
+  reads the cell from the device, and passes V0 on. The host loop (a dispersion term, `LOUP_TILED_HOST_MD=1`)
+  refuses them by name, and so does `Simulation` when it starts.
+- *LAMMPS.* The pair style's warning about rebuilds in every step is gone. `run_style loupmd` takes `fix npt ... iso`
+  (MTK) and `fix press/berendsen` (Berendsen NPT) in tiled mode, and sets LAMMPS's box from `loup_tiled_get_cell`
+  after each block.
+
+**Tests.**
+
+- `tests/gpu/test_tiled_md.py` (full tier):
+  - A strained cell, 2,560 atoms of SrTiO3 at cap 1,000, with a shift and noise, keeps the lists. Against the
+    whole call at the new cell: dilated ×1.003, dE 1.7e-8 eV/atom, dF 2.8e-6 eV/Å, dS 7.9e-10 eV/Å^3; sheared, dE
+    3.5e-9, dF 3.6e-6, dS 1.6e-9. A ×1.05 strain builds again.
+  - The cap after a cell change: ×1.002 with 0 keeps cap and lists; ×1.05 with the cap rebuilds at the cap; ×1.10
+    with 0 plans again (65,536); the next call keeps.
+  - The three barostats, tiled (5,000 atoms in 8 tiles of at most 2,000) against the whole loop, 20 steps at 2 GPa:
+    MTK dx 7.0e-8 Å, dcell 1.5e-8 Å; BAOAB 9.6e-8, 7.3e-8; Berendsen 5.8e-8, 2.6e-8; dE at most 6.0e-8 eV/atom,
+    with the cell moving 0.13 to 0.43 Å. BAOAB runs on atoms sorted by species, so that the tiled and whole runs
+    draw the same noise per atom.
+  - MTK in blocks against unbroken: dx 2.4e-7 Å, dcell 2.1e-7 Å; resumed from a restart: 1.0e-7, 3.8e-8. Force
+    atomics differ between calls at about 1e-7, so the bounds are 1e-6.
+  - The volume limit stops a tiled Berendsen run (`the cell diverged`).
+- `tests/gpu/test_mtk_gpu.py`: 6 passed after the MTK fix (whole MTK against ASE: volume within 2.1e-9 relative).
+- `tests/gpu/test_lammps_tiled.py`: 24 passed in 130 s.
+  - `fix npt` through the tiled pair style builds tile lists 7 times in 200 steps, against LAMMPS's own 13 list
+    builds (before: in every step).
+  - The run style with `fix npt` and with `fix press/berendsen` against the engine's tiled run of the same
+    ensemble: box within 1e-6.
+  - Output every 10 of 40 steps builds as many lists as the engine's own run (3), for NPT and Berendsen NPT too.
+- `tests/cpu/test_tiled_engine.py`: a fake device engine with barostats checks that the cell reaches thermo rows,
+  atoms and restarts, and that the host loop refuses.
+- The other suites:
+
+  | suite | result |
+  |---|---|
+  | fast tier | 380 passed, 1 failed, 51 skipped |
+  | full tier | 59 passed, 21 skipped (the LAMMPS files without `LOUPMD_LMP`) |
+  | LAMMPS whole-cell files | 41 passed |
+  | `tests/cpu` | not run: each workstation had another user's process on its GPU, and the suite does not run on this PC |
+
+  The fast tier's failure is `test_memory_plan.py` at 20,480 atoms (whole mode, code this work does not touch). The
+  drop in free memory read 1,963 MB against 2,073 MB predicted, while the engine's own count of the same system
+  was 2,072.9. The file run again: 9 passed, and 40,000 atoms failed the other way (4,287 MB measured, 3,980
+  predicted, own count 3,979.7). Under WSL 2 the free memory moves with what other programs hold. A native Linux
+  workstation would settle it (the owner's suggestion); none was free.
+
+**Measurements** (MH-1 on 50,820 atoms of SrTiO3, `capacity auto`, 8 tiles of at most 12,288; 10 warm-up + 30
+measured steps from rest; fresh GEMM plans per run; two rounds). Figures are ms per step.
+
+| run | round 1 | round 2 |
+|---|---:|---:|
+| LAMMPS `fix nve` with the virial in every step (`fix ave/time` on the pressure), pair style | 410.4 | 413.2 |
+| LAMMPS `fix npt ... iso` through the pair style | 412.4 | 413.2 |
+| `run_style loupmd` with `fix npt ... iso` (tiled MTK), thermo every 30 | 440.8 | 439.1 |
+| own loop, NVE | 409.6 | 410.6 |
+| own loop, MTK (iso, 0 GPa) | 410.6 | 412.3 |
+
+- *`fix npt` through the pair style.* 491.2 and 490.3 ms in §6.40, 412.4 and 413.2 now: within 0.5% of the fixed
+  cell with the virial. The measured 30 steps built no lists (the first call of the warm-up built them once);
+  before, they built them in each of the 30. The fixed-cell reference reads 410-413 ms today against 421-427 in
+  §6.40, so the comparison is within each round.
+- *The package's MTK* costs 0.2% and 0.4% over NVE: the stress in every call. The cell grew from 605,240 to 622,633
+  Å^3 (+2.9%) in the 40 steps from rest at 0 GPa.
+- *The run style.* Its block of 30 steps holds two output steps (thermo 30: steps 30 and 40), each a tiled call
+  with stress of about 0.4 s (§6.40). Taking two such calls of the own loop's step time out leaves 413.4 and 411.6
+  ms per MD step (*estimate*, not measured on its own), the own loop's MTK time. A longer block shares the output
+  steps out over more steps (§6.40: 423 against 420 ms in blocks of 200).
+
+**Not covered.** The `sm_89` workstations. A barostat with a dispersion term in tiled mode (the host loop keeps the
+cell fixed). LT6 (b). `fix npt` with `aniso` or `tri` under the run style, whole or tiled: the run style maps only
+`iso`.

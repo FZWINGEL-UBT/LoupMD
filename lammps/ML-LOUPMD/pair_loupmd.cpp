@@ -64,8 +64,7 @@ constexpr double kGiB = 1024.0 * 1024.0 * 1024.0;
 PairLoupMD::PairLoupMD(LAMMPS *lmp) :
     Pair(lmp), handle(nullptr), device(-1), device_loaded(-1), skin_user(-1.0), rmax(0.0), ghost(true), ahead(false),
     system_dirty(true), skin_sent(-1.0), serial(0), exec_mode(LOUP_EXEC_AUTO), receivers_user(0),
-    memory_fraction(0.9), memory_sent(-1.0), tiled_mode(false), tile_cap(0), cell_changes(0), box_warned(false),
-    plan_pending(false), plan_whole_gib(0.0), plan_free_gib(0.0), tiled_calls(0), tiled_md_steps(0),
+    memory_fraction(0.9), memory_sent(-1.0), tiled_mode(false), tile_cap(0), plan_pending(false), plan_whole_gib(0.0), plan_free_gib(0.0), tiled_calls(0), tiled_md_steps(0),
     builds_at_start(0)
 {
   single_enable = 0;
@@ -75,7 +74,7 @@ PairLoupMD::PairLoupMD(LAMMPS *lmp) :
   no_virial_fdotr_compute = 1;    // the engine returns the virial, not pair forces
   centroidstressflag = CENTROID_NOTAVAIL;
   exec_sent[0] = exec_sent[1] = -1;
-  for (int k = 0; k < 9; k++) cell_planned[k] = cell_last[k] = 0.0;
+  for (int k = 0; k < 9; k++) cell_planned[k] = 0.0;
 }
 
 /* ---------------------------------------------------------------------- */
@@ -259,7 +258,6 @@ void PairLoupMD::init_style()
   tiled_calls = tiled_md_steps = 0;
   LoupExecution ex{};
   builds_at_start = loup_get_execution(handle, &ex) == 0 ? ex.list_builds : 0;
-  cell_changes = 0;
 
   // the engine builds its own neighbour list: none is requested from LAMMPS
   system_dirty = true;
@@ -344,8 +342,6 @@ void PairLoupMD::send_system(const std::vector<int> &z, const std::vector<double
       tiled_mode = true;
       tile_cap = plan.receivers;
       memcpy(cell_planned, cell, sizeof(cell));
-      memcpy(cell_last, cell, sizeof(cell));
-      cell_changes = 0;
       plan_pending = true;    // the line follows the first tiled call, which knows the tiles and the schedule
       if (ahead && comm->me == 0) utils::logmesg(lmp, "LoupMD: 'ahead yes' has no effect in tiled mode\n");
     }
@@ -422,34 +418,16 @@ void PairLoupMD::refuse_per_atom() const
 }
 
 /* ----------------------------------------------------------------------
-   A box that changes in every step (fix npt, fix deform, box/relax) makes every tiled call plan its tiles and build
-   its lists again: correct, but several times the fixed-cell step (LAMMPS_TILED_PLAN.md LD4). Said once.
-------------------------------------------------------------------------- */
-
-void PairLoupMD::note_cell(const double *cell)
-{
-  if (memcmp(cell, cell_last, 9 * sizeof(double)) == 0) {
-    cell_changes = 0;
-    return;
-  }
-  memcpy(cell_last, cell, 9 * sizeof(double));
-  if (++cell_changes >= 3 && !box_warned) {
-    error->warning(FLERR, "Pair style loupmd: the box changes in every step, and tiled mode builds its tile lists "
-                          "in each (a barostat, fix deform or box/relax)");
-    box_warned = true;
-  }
-}
-
-/* ----------------------------------------------------------------------
-   The tiled force call (LD4) with the plan's cap. When it fails on a cell other than the plan's, the engine plans
-   once more at this cell and the call is repeated (LD3): the tiles of a denser cell may need a smaller cap.
+   The tiled force call (LD4) with the plan's cap. A box that changes in every step (fix npt, fix deform, box/relax)
+   keeps the tile lists while the strain since their build leaves room for the atoms' moves (LAMMPS_TILED_PLAN.md
+   LT6 (a)). When the call fails on a cell other than the plan's, the engine plans once more at this cell and the
+   call is repeated (LD3): the tiles of a denser cell may need a smaller cap.
 ------------------------------------------------------------------------- */
 
 void PairLoupMD::evaluate_tiled(const double *x, double *energy, double *f, double *stress)
 {
   double cell[9];
   box_to_cell(cell);
-  note_cell(cell);
   const int n = (int) z_sent.size();
   long long tiles = 0;
   int rc = loup_evaluate_tiled(handle, n, z_sent.data(), x, cell, tile_cap, skin_sent, energy, f, stress, &tiles);

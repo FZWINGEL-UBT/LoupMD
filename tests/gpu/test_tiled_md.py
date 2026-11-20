@@ -19,11 +19,11 @@ def _bundle():
     return ensure_loup_bundle(find_model("mace-omat-0-medium.model"), [8, 22, 38])
 
 
-def _whole(bundle, at, positions):
+def _whole(bundle, at, positions, cell=None):
     eng = LoupEngine(bundle)
     try:
         eng.set_system(at.get_atomic_numbers(), at.get_masses(), skin=SKIN)
-        return eng.evaluate(positions, at.cell.array)
+        return eng.evaluate(positions, at.cell.array if cell is None else cell)
     finally:
         del eng
         gc.collect()
@@ -114,9 +114,51 @@ def test_an_output_evaluation_between_tiled_run_blocks_keeps_the_lists_and_the_t
 
 
 @pytest.mark.full
+def test_a_strained_cell_keeps_the_tile_lists_and_gives_the_whole_systems_result(monkeypatch):
+    """LAMMPS_TILED_PLAN.md LT6 (a): a cell change keeps the tile lists while the strain since their build leaves
+    room for the atoms' moves (the strained displacement test, which ignores a uniform translation: LAMMPS's fix npt
+    dilates about the box centre), and the results are the whole call's at the new cell. Beyond that room the lists
+    are built again, with the cap passed."""
+    monkeypatch.setenv("LOUP_NO_HYBRID", "1")
+    at = srtio3(8)
+    rng = np.random.default_rng(21)
+    at.positions += rng.normal(scale=0.03, size=at.positions.shape)
+    bundle = _bundle()
+    n, z, cell = len(at), at.numbers, at.cell.array
+    shear = np.eye(3) + np.array([[0.002, 0.001, 0.0], [0.0, -0.001, 0.0], [0.0015, 0.0, 0.001]])
+    shift = np.array([0.4, -0.3, 0.25])
+    cases = {}
+    eng = LoupEngine(bundle)
+    try:
+        eng.evaluate_tiled(z, at.positions, cell, 1000, skin=SKIN)
+        first = eng.last_execution()
+        for name, f in (("dilated", np.eye(3) * 1.003), ("sheared", shear)):   # both against the lists' build
+            pos = at.positions @ f + shift + rng.uniform(-0.04, 0.04, size=at.positions.shape)
+            e, frc, s, tiles = eng.evaluate_tiled(z, pos, cell @ f, 1000, skin=SKIN)
+            cases[name] = (pos, cell @ f, e, frc, s, eng.last_execution())
+        eng.evaluate_tiled(z, at.positions * 1.05, cell * 1.05, 1000, skin=SKIN)
+        rebuilt = eng.last_execution()
+    finally:
+        del eng
+        gc.collect()
+    assert tiles >= 3 and not first.lists_kept
+    for name, (pos, c, e, frc, s, done) in cases.items():
+        with unfolded():
+            e0, f0, s0 = _whole(bundle, at, pos, c)
+        print(f"{name} cell, kept lists: dE {abs(e - e0) / n:.2e} eV/atom, dF {np.abs(frc - f0).max():.2e} eV/A, "
+              f"dS {np.abs(s - s0).max():.2e}")
+        assert done.lists_kept and done.list_builds == first.list_builds and done.receivers == 1000
+        assert abs(e - e0) / n <= 1e-7
+        assert np.abs(frc - f0).max() <= 1e-5
+        assert np.abs(s - s0).max() <= 1e-8
+    assert not rebuilt.lists_kept and rebuilt.list_builds == first.list_builds + 1 and rebuilt.receivers == 1000
+
+
+@pytest.mark.full
 def test_a_tiled_call_after_a_cell_change_keeps_a_passed_cap_and_plans_on_zero():
-    """receivers 0 takes the kept cap on the same system but plans again after a cell change (LAMMPS_TILED_PLAN.md
-    LD3), so a caller whose cell changes passes its cap."""
+    """A cell change within the lists' room keeps them and their cap, whatever receivers says (LT6 (a)). Beyond it a
+    passed cap stays and receivers 0 plans again (LAMMPS_TILED_PLAN.md LD3), so a caller whose cell changes much
+    passes its cap."""
     at = srtio3(10)
     bundle, cap = _bundle(), 2000
     z, cell = at.numbers, at.cell.array
@@ -124,16 +166,20 @@ def test_a_tiled_call_after_a_cell_change_keeps_a_passed_cap_and_plans_on_zero()
     try:
         eng.evaluate_tiled(z, at.positions, cell, cap, skin=SKIN)
         first = eng.last_execution()
-        eng.evaluate_tiled(z, at.positions * 1.002, cell * 1.002, cap, skin=SKIN)
+        eng.evaluate_tiled(z, at.positions * 1.002, cell * 1.002, 0, skin=SKIN)
+        strained = eng.last_execution()
+        eng.evaluate_tiled(z, at.positions * 1.05, cell * 1.05, cap, skin=SKIN)
         passed = eng.last_execution()
-        eng.evaluate_tiled(z, at.positions * 1.004, cell * 1.004, 0, skin=SKIN)
+        eng.evaluate_tiled(z, at.positions * 1.10, cell * 1.10, 0, skin=SKIN)
         planned = eng.last_execution()
-        eng.evaluate_tiled(z, at.positions * 1.004 + 0.01, cell * 1.004, 0, skin=SKIN)
+        eng.evaluate_tiled(z, at.positions * 1.10 + 0.01, cell * 1.10, 0, skin=SKIN)
         kept = eng.last_execution()
     finally:
         del eng
         gc.collect()
-    print(f"caps: first {first.receivers}, after a cell change passed {passed.receivers}, zero {planned.receivers}")
+    print(f"caps: first {first.receivers}, strained {strained.receivers}, after a large cell change passed "
+          f"{passed.receivers}, zero {planned.receivers}")
+    assert strained.lists_kept and strained.receivers == cap and strained.list_builds == first.list_builds
     assert first.receivers == passed.receivers == cap and passed.tiles >= 3 and not passed.lists_kept
     assert planned.receivers >= 4096 and not planned.lists_kept
     assert kept.lists_kept and kept.receivers == planned.receivers
@@ -385,3 +431,118 @@ def test_a_tiled_device_run_resumes_where_it_stopped(tmp_path):
     gc.collect()
     print(f"tiled CSVR resumed vs unbroken: dx {dx:.2e} A")
     assert dx <= 1e-6        # the resumed engine rebuilds its tile lists: float32 summation order only
+
+
+# ------------------------------------------------------------------------- barostats (LAMMPS_TILED_PLAN.md LT6 (a))
+
+def _npt_records():
+    from loupmd import integrators
+
+    return (integrators.MTK(timestep_fs=1.0, temperature_K=300.0, pressure_GPa=2.0, tdamp_fs=50.0, pdamp_fs=200.0),
+            integrators.LangevinBAOAB(timestep_fs=1.0, temperature_K=300.0, friction_per_fs=0.02, pressure_GPa=2.0,
+                                      barostat_tau_fs=200.0, cell_mode="full"),
+            integrators.Berendsen(timestep_fs=1.0, temperature_K=300.0, taut_fs=50.0, pressure_GPa=2.0, taup_fs=50.0,
+                                  compressibility_per_GPa=0.01))
+
+
+def _sorted_srtio3():
+    """SrTiO3 10 x 10 x 10 (5,000 atoms) with its atoms in species order: the whole system's rows are sorted by
+    species, and the device loop's noise is drawn per row, so in this order Langevin BAOAB draws the same noise in
+    both modes."""
+    at = srtio3(10)
+    at = at[np.argsort(at.numbers, kind="stable")]
+    at.set_velocities(maxwell_velocities(at, 300.0, seed=14))
+    return at
+
+
+@pytest.mark.full
+def test_the_tiled_barostats_follow_the_whole_systems_trajectories(monkeypatch):
+    """lm.Simulation in tiles (the device loop) against the whole system for MTK, Langevin BAOAB (full cell) and
+    Berendsen NPT, without hybrids: 20 steps of 1 fs at 2 GPa move the cell, and positions, cell and energy stay
+    with the whole system's to float32 force rounding."""
+    import loupmd
+
+    monkeypatch.setenv("LOUP_NO_HYBRID", "1")
+    at = _sorted_srtio3()
+    ff = loupmd.load(find_model("mace-omat-0-medium.model"), trusted=True)
+    tiled = CapacityConfig(mode="tiled", receivers=2000)
+    for it in _npt_records():
+        out = {}
+        for name, cap in (("whole", "whole"), ("tiled", tiled)):
+            sim = loupmd.Simulation(at, ff, integrator=it, seed=5, skin=SKIN, capacity=cap)
+            sim.run(steps=20)
+            got = sim.atoms
+            out[name] = (got.positions.copy(), got.cell.array.copy(), got.get_potential_energy(),
+                         getattr(sim._engine, "integrator_on", "whole"), getattr(sim._engine, "tiles", 1))
+            sim.close()
+            del sim
+            gc.collect()
+        (xw, cw, ew, _, _), (xt, ct, et, on, tiles) = out["whole"], out["tiled"]
+        dx, dc, de = np.abs(xt - xw).max(), np.abs(ct - cw).max(), abs(et - ew) / len(at)
+        moved = np.abs(cw - at.cell.array).max()
+        print(f"tiled vs whole, {type(it).__name__} 20 steps at 2 GPa: {tiles} tiles, cell moved {moved:.2e} A, "
+              f"dx {dx:.2e} A, dcell {dc:.2e} A, dE {de:.2e} eV/atom")
+        assert on == "device" and tiles >= 3
+        assert moved > 1e-4
+        assert dx <= 1e-5 and dc <= 1e-6 and de <= 1e-6
+
+
+@pytest.mark.full
+def test_a_tiled_barostat_run_in_blocks_and_resumed_ends_where_the_unbroken_run_ends(tmp_path):
+    """MTK in tiles: 30 steps in one block, in blocks of 10 (the device keeps the virial and the barostat's variables
+    between blocks), and 15 steps resumed from a restart after 15 (state block: cell, chains, cell velocity; the
+    run's V0) end at the same positions and cell."""
+    import loupmd
+
+    at = _sorted_srtio3()
+    ff = loupmd.load(find_model("mace-omat-0-medium.model"), trusted=True)
+    mtk = _npt_records()[0]
+    tiled = CapacityConfig(mode="tiled", receivers=2000)
+
+    def end(sim):
+        got = sim.atoms
+        out = got.positions.copy(), got.cell.array.copy()
+        sim.close()
+        gc.collect()
+        return out
+
+    full = loupmd.Simulation(at, ff, integrator=mtk, seed=2, skin=SKIN, capacity=tiled)
+    full.run(steps=30)
+    x_full, c_full = end(full)
+    blocks = loupmd.Simulation(at, ff, integrator=mtk, seed=2, skin=SKIN, capacity=tiled)
+    for _ in range(3):
+        blocks.run(steps=10)
+    x_blocks, c_blocks = end(blocks)
+    half = loupmd.Simulation(at, ff, integrator=mtk, seed=2, skin=SKIN, capacity=tiled,
+                             output=loupmd.Output(str(tmp_path / "half")))
+    half.run(steps=15)
+    half.save_restart()
+    half.close()
+    again = loupmd.Simulation.resume(tmp_path / "half", force_field=ff)
+    again.run(steps=15)
+    x_again, c_again = end(again)
+    for name, x, c in (("blocks", x_blocks, c_blocks), ("resumed", x_again, c_again)):
+        print(f"tiled MTK {name} vs unbroken: dx {np.abs(x - x_full).max():.2e} A, "
+              f"dcell {np.abs(c - c_full).max():.2e} A")
+        # the force sums' order differs from call to call (atomics), and a resumed state rebuilds its tile lists
+        assert np.abs(c - c_full).max() <= 1e-6
+        assert np.abs(x - x_full).max() <= 1e-6
+    assert np.abs(c_full - at.cell.array).max() > 1e-4
+
+
+@pytest.mark.full
+def test_a_tiled_barostat_stops_at_the_volume_limits():
+    """A Berendsen barostat driven far past the limits [V0 / 20, 20 V0] stops the tiled run with the reason."""
+    from loupmd import BackendError
+
+    at = srtio3(10)
+    at.set_velocities(maxwell_velocities(at, 300.0, seed=12))
+    eng = _tiled_md_engine(_bundle(), at, 2000)
+    blow_up = _core.integrator(_core.LOUP_BERENDSEN_NPT, 1.0, temp_k=300.0, tau_t_fs=50.0, pressure_gpa=-1000.0,
+                               tau_p_fs=1.0, compressibility_per_gpa=1.0)
+    try:
+        with pytest.raises(BackendError, match=r"the cell diverged: its volume is .* outside \[V0 / 20, 20 V0\]"):
+            eng.tiled_run(5, blow_up)
+    finally:
+        del eng
+        gc.collect()

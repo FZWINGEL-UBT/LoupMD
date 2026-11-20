@@ -56,7 +56,6 @@ class PairLoupMD : public Pair {
   // loup_evaluate_tiled with cap() receivers per tile, and MD runs through loup_tiled_*
   bool tiled() const { return tiled_mode; }
   int cap() const { return tile_cap; }
-  int capacity_mode() const { return exec_mode; }    // the capacity keyword (LOUP_EXEC_*)
   // the system as sent: atomic numbers and masses by atom ID - 1, and the skin
   const std::vector<int> &sent_numbers() const { return z_sent; }
   const std::vector<double> &sent_masses() const { return m_sent; }
@@ -94,10 +93,7 @@ class PairLoupMD : public Pair {
   bool tiled_mode;              // the system the engine holds runs tiled
   int tile_cap;                 // its receivers per tile (passed to every tiled call, never 0)
   double cell_planned[9];       // the cell of the last plan
-  double cell_last[9];          // the cell of the last tiled call
-  int cell_changes;             // tiled calls in a row on a cell other than the previous call's
-  bool box_warned;              // the warning on a box that changes in every step was given
-  bool plan_pending;            // the plan's line waits for the first tiled call (tiles, wavefront)
+  bool plan_pending;           // the plan's line waits for the first tiled call (tiles, wavefront)
   double plan_whole_gib, plan_free_gib;
   bigint tiled_calls;           // tiled calls in this run, the run style's tiled MD steps, and the list builds the
   bigint tiled_md_steps;        // engine had when the run began
@@ -114,7 +110,6 @@ class PairLoupMD : public Pair {
   void gather_unwrapped();      // xbuf from atom->x
   void box_to_cell(double *) const;
   void refuse_per_atom() const;
-  void note_cell(const double *cell);
 };
 
 }    // namespace LAMMPS_NS

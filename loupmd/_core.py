@@ -601,6 +601,19 @@ class LoupEngine:
                     "loup_tiled_get_state")
         return pos, vel, frc, float(en.value), int(step.value), ist, int(kind.value)
 
+    def has_tiled_barostats(self) -> bool:
+        """Whether the library's tiled MD runs the barostats (``loup_tiled_get_cell``, LAMMPS_TILED_PLAN.md LT6
+        (a)): older libraries keep the cell fixed in tiled mode."""
+        return hasattr(self._lib, "loup_tiled_get_cell")
+
+    def tiled_get_cell(self) -> np.ndarray:
+        """``loup_tiled_get_cell``: the tiled MD's cell (rows), as a barostat left it."""
+        lib = self._lib
+        lib.loup_tiled_get_cell.argtypes = [ctypes.c_void_p, _c_double_p]
+        out = np.empty((3, 3), dtype=np.float64)
+        self._check(lib.loup_tiled_get_cell(self._h, _ptr(out)), "loup_tiled_get_cell")
+        return out
+
     def set_execution(self, mode: int, receivers: int = 0, memory_fraction: float = 0.9):
         """``loup_set_execution``: the mode (``LOUP_EXEC_*``), a receiver cap (0: from the memory plan) and the
         fraction of free device memory the plan may use."""

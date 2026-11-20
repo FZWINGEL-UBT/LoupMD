@@ -183,21 +183,26 @@ def test_sorting_and_wrapping_keep_the_tile_lists(rod):
 
 
 @pytest.mark.full
-def test_a_barostat_through_the_tiled_pair_style_runs_and_warns(rod):
-    """fix npt with the pair style in tiles (LAMMPS integrates): the box changes in every step, so every call plans
-    its tiles and builds its lists again; it runs, and the log says so once."""
+def test_a_barostat_through_the_tiled_pair_style_keeps_the_tile_lists(rod):
+    """fix npt with the pair style in tiles (LAMMPS integrates and dilates the box about its centre in every step):
+    the engine keeps its tile lists while the strain since their build leaves room for the atoms' moves
+    (LAMMPS_TILED_PLAN.md LT6 (a)), so it builds them no more often than LAMMPS builds its own neighbour list,
+    whose box check is the stricter one."""
     d, at, bundle = rod
-    out = _lmp(d, "npt_t", _md(bundle, TILED, 20, fixes="fix 1 all npt temp 300.0 300.0 0.05 iso 0.0 0.0 0.5"))
+    out = _lmp(d, "npt_t", _md(bundle, TILED, 200, fixes="fix 1 all npt temp 300.0 300.0 0.05 iso 0.0 0.0 0.5"))
     rows = _thermo(d, "npt_t")
-    assert out.count("the box changes in every step") == 1
-    assert np.isfinite(rows[-1][5]) and _builds(out) >= 15
+    b = _builds(out)
+    nl = int(re.findall(r"Neighbor list builds = (\d+)", out)[-1])
+    print(f"200 NPT steps through the tiled pair style: tile list builds {b}, LAMMPS's own {nl}")
+    assert "the box changes in every step" not in out
+    assert np.isfinite(rows[-1][5]) and b is not None and b <= nl + 1 and b < 40
 
 
 # ------------------------------------------------------------------------------------------------- the run style
 
-def _run_rs(d, name, bundle, fixes, steps, thermo=None, runs=1, style=TILED, pre=""):
+def _run_rs(d, name, bundle, fixes, steps, thermo=None, runs=1, style=TILED, pre="", data="sys.data"):
     per_run = steps // runs
-    body = _head(bundle, style) + f"""timestep {DT_PS}
+    body = _head(bundle, style, data=data) + f"""timestep {DT_PS}
 velocity all create 300.0 4928459 mom yes rot no dist gaussian
 {pre}
 {fixes}
@@ -230,6 +235,8 @@ def _tiled_engine_run(d, at, bundle, start, steps, **fields):
         eng.tiled_set_state(at.get_atomic_numbers(), _masses(d, at), pos, vel, box, receivers=CAP, skin=0.5)
         eng.tiled_run(steps, _core.integrator(dt_fs=1000.0 * DT_PS, **fields))
         p, v = eng.tiled_get_state()[:2]
+        if fields["kind"] in BAROSTATS:
+            box = eng.tiled_get_cell()
         builds = eng.last_execution().list_builds
     finally:
         del eng
@@ -237,34 +244,56 @@ def _tiled_engine_run(d, at, bundle, start, steps, **fields):
     return (p, v, box), builds
 
 
-TILED_CASES = ["nve", "nvt", "langevin", "langevin_zero", "berendsen"]
+BAROSTATS = (_core.LOUP_MTK_NPT, _core.LOUP_BERENDSEN_NPT)
+TILED_CASES = ["nve", "nvt", "langevin", "langevin_zero", "berendsen", "npt", "berendsen_npt"]
+ORTHO = ("berendsen_npt",)          # fix press/berendsen refuses a sheared box
 
 
-def _check_rs(rod, name, tag, thermo=None, runs=1, steps=40):
+@pytest.fixture(scope="module")
+def rod_ortho(rod):
+    """The rod in its orthogonal box, as ortho.data in the rod's folder."""
+    from ase.io import write
+
+    d = rod[0]
+    at = srtio3(1).repeat((32, 6, 6))
+    at.positions += np.random.default_rng(13).normal(scale=0.04, size=at.positions.shape)
+    write(str(d / "ortho.data"), at, format="lammps-data", specorder=["O", "Ti", "Sr"], masses=True, units="metal",
+          atom_style="atomic")
+    return at
+
+
+def _check_rs(rod, name, tag, thermo=None, runs=1, steps=40, ortho=None):
     d, at, bundle = rod
+    data = "sys.data"
+    if name in ORTHO:
+        at, data = ortho, "ortho.data"
     fixes, fields = CASES[name]
-    out = _run_rs(d, tag, bundle, fixes, steps, thermo=thermo, runs=runs)
+    out = _run_rs(d, tag, bundle, fixes, steps, thermo=thermo, runs=runs, data=data)
     start, end, rows = _states(d, tag, len(at))
     assert "the LoupMD engine's tiled MD" in out and "Capacity      : tiled" in out, out[-2000:]
     assert f"{steps // runs} tiled MD steps" in out
     ref, builds = _tiled_engine_run(d, at, bundle, start, steps, **fields)
-    _same(end, ref, len(at))
+    moves_box = fields["kind"] in BAROSTATS
+    _same(end, ref, len(at), box_tol=1e-6 if moves_box else 0.0)
+    if moves_box:
+        assert np.abs(end[2] - start[2]).max() > 1e-5        # the box did move
     return out, rows, builds
 
 
-@pytest.mark.parametrize("name", [n if n == "nve" else pytest.param(n, marks=pytest.mark.full) for n in TILED_CASES])
-def test_the_tiled_run_style_follows_the_engines_tiled_md(rod, name):
-    _check_rs(rod, name, "rs_" + name)
+@pytest.mark.parametrize("name", [n if n in ("nve", "npt") else pytest.param(n, marks=pytest.mark.full)
+                                  for n in TILED_CASES])
+def test_the_tiled_run_style_follows_the_engines_tiled_md(rod, rod_ortho, name):
+    _check_rs(rod, name, "rs_" + name, ortho=rod_ortho)
 
 
 @pytest.mark.full
-@pytest.mark.parametrize("name", ["nvt", "langevin"])
-def test_output_inside_a_tiled_run_leaves_the_trajectory_alone(rod, name):
-    """Thermo every 10 steps makes four blocks of the 40: at each, LAMMPS takes the state, wraps the atoms and has
-    the pair style evaluate (a tiled call with stress, on the kept lists), and the engine goes on from its own
-    state. The end is that of one run of 40 steps, and no list is built for the output: the engine's own 40 steps
-    build as many."""
-    out, rows, builds = _check_rs(rod, name, "rs_blocks_" + name, thermo=10)
+@pytest.mark.parametrize("name", ["nvt", "langevin", "npt", "berendsen_npt"])
+def test_output_inside_a_tiled_run_leaves_the_trajectory_alone(rod, rod_ortho, name):
+    """Thermo every 10 steps makes four blocks of the 40: at each, LAMMPS takes the state (and, under a barostat,
+    the engine's cell), wraps the atoms and has the pair style evaluate (a tiled call with stress, on the kept
+    lists), and the engine goes on from its own state. The end is that of one run of 40 steps, and no list is built
+    for the output: the engine's own 40 steps build as many."""
+    out, rows, builds = _check_rs(rod, name, "rs_blocks_" + name, thermo=10, ortho=rod_ortho)
     assert len(rows) == 5 and all(np.isfinite(r[10]) for r in rows)
     print(f"tiled run style, thermo every 10 of 40 steps: list builds {_builds(out)}, the engine's own run {builds}")
     assert _builds(out) == builds
@@ -350,9 +379,6 @@ def test_tiled_refusals_say_why(rod):
     out = _lmp(d, "ref_polar", _head(polar, "loupmd capacity tiled", data="nacl.data", elements="Na Cl")
                + "run 0\n", ok=False)
     assert "long-range models (MACE-POLAR-1) cannot run in tiles" in out
-    out = _lmp(d, "ref_npt", _head(bundle, TILED) + "fix 1 all npt temp 300.0 300.0 0.05 iso 0.0 0.0 0.5\n"
-               "run_style loupmd\nrun 10\n", ok=False)
-    assert "keeps the cell fixed" in out
     out = _lmp(d, "ref_peratom", _head(bundle, TILED) + "compute pa all pe/atom\n"
                "dump d all custom 1 pa.dump id c_pa\nrun 0\n", ok=False)
     assert "does not provide per-atom energies" in out

@@ -187,15 +187,22 @@ def test_auto_keeps_a_cell_that_fits_whole(ff, tmp_path):
     assert not isinstance(res.simulation._engine, TiledEngine)
 
 
-def test_the_tiled_mode_refuses_the_integrators_it_does_not_run(ff, tmp_path):
-    npt = integrators.Berendsen(timestep_fs=1.0, temperature_K=300, taut_fs=100.0, pressure_GPa=0.0, taup_fs=1000.0, compressibility_per_GPa=0.01)
+def test_the_tiled_mode_refuses_the_integrators_it_does_not_run(ff, ff_dev, tmp_path):
+    npt = integrators.Berendsen(timestep_fs=1.0, temperature_K=300, taut_fs=100.0, pressure_GPa=0.0, taup_fs=1000.0,
+                                compressibility_per_GPa=0.01)
     at = _big()
     quick.draw_initial_velocities(at, 300.0, 1)
-    with pytest.raises(PlanRefused, match="berendsen npt integrator in tiled mode"):
-        loupmd.Simulation(at, ff, integrator=npt, capacity="tiled")         # before anything is exported
-    with pytest.raises(PlanRefused, match="berendsen npt integrator in tiled mode"):
-        loupmd.Simulation(at, ff, integrator=npt, capacity="wavefront")
-    assert SpringEngine.made == []
+    # a barostat needs the device loop with the tiled barostats (LT6 (a)): not the host loop, not an older library
+    for model in (ff, ff_dev):
+        for capacity in ("tiled", "wavefront"):
+            with pytest.raises(PlanRefused, match="the berendsen barostat in tiled mode") as caught:
+                loupmd.Simulation(at, model, integrator=npt, capacity=capacity).run(steps=5)
+            assert "keeps the cell fixed" in str(caught.value.why)
+    eng = TiledEngine(DeviceTileSpringEngine("bundle"))
+    eng.set_system(np.asarray(at.numbers), at.get_masses())
+    eng.set_state(at.positions, at.get_velocities(), at.cell.array)
+    with pytest.raises(PlanRefused, match="on the host loop"):
+        eng.run(5, npt.to_config(seed=1).to_struct())
     # the host loop (a library without loup_tiled_run) runs NVE and Langevin only
     csvr = integrators.CSVR(timestep_fs=1.0, temperature_K=300, tau_fs=100.0)
     sim = loupmd.Simulation(at, ff, integrator=csvr)                         # auto: the plan says tiled
@@ -248,6 +255,76 @@ def test_the_device_loop_runs_the_thermostats_and_restarts_carry_their_state(ff_
     eng.set_system(np.asarray(at.numbers), at.get_masses())
     eng.import_state(blob)                                              # version 2 with the block
     assert eng._int_kind == _core.LOUP_CSVR and eng._int_state[0] == 30
+
+
+class DeviceNptTileSpringEngine(DeviceTileSpringEngine):
+    """DeviceTileSpringEngine with the tiled barostats (LT6 (a)): a barostat's step scales the cell, the positions and
+    the springs' sites by 1 + 1e-4, so the cell the Simulation reads can be checked against the device's."""
+
+    def has_tiled_barostats(self):
+        return True
+
+    def set_reference_volume(self, volume):
+        self.log.append(("reference volume", float(volume)))
+        self.v0 = float(volume)
+
+    def tiled_get_cell(self):
+        return self.dev["cell"].copy()
+
+    def tiled_run(self, n_steps, it, max_rows=0):
+        if it.kind not in (_core.LOUP_BERENDSEN_NPT, _core.LOUP_BAOAB_NPT, _core.LOUP_MTK_NPT):
+            return super().tiled_run(n_steps, it, max_rows)
+        rows, done = [], None
+        for _ in range(n_steps):
+            d = self.dev
+            d["cell"] *= 1.0 + 1e-4
+            d["x"] *= 1.0 + 1e-4
+            sites = TileSpringEngine.shared_sites[len(d["z"])]
+            sites *= 1.0 + 1e-4
+            d["f"] = None
+            st, r, step = super().tiled_run(1, it, max_rows=1)
+            done = (st, step)
+            rows.extend(r.tolist())
+        return done[0], np.array(rows, dtype=_core.THERMO_DTYPE), done[1]
+
+
+@pytest.fixture
+def ff_npt(tmp_path):
+    checkpoint = tmp_path / "npt.model"
+    checkpoint.write_bytes(b"never unpickled here")
+    SpringEngine.made, SpringEngine.poison_at = [], None
+    TileSpringEngine.shared_sites = {}
+    return loupmd.load(str(checkpoint), trusted=True, engine_factory=DeviceNptTileSpringEngine,
+                       ensure_bundle=lambda path, numbers, **kw: path.with_name("bundle.loup"), probe=lambda p: None)
+
+
+def test_a_barostat_runs_on_the_tiled_device_loop_and_its_cell_reaches_rows_atoms_and_restarts(ff_npt, tmp_path):
+    """LT6 (a): a tiled NPT run goes to the device loop; the device's cell is the run's (atoms, rows, restart), V0
+    follows every state sent, and a resumed run starts from the saved cell."""
+    npt = integrators.MTK(timestep_fs=1.0, temperature_K=300.0, pressure_GPa=0.0, tdamp_fs=100.0, pdamp_fs=900.0)
+    at = _big()
+    quick.draw_initial_velocities(at, 300.0, 1)
+    start = at.get_volume()
+    sim = loupmd.Simulation(at, ff_npt, integrator=npt, seed=4, capacity="tiled",
+                            output=loupmd.Output(str(tmp_path / "p"), thermo_every=10, restart_every=30))
+    sim.run(steps=30)
+    eng = sim._engine._eng
+    assert sim._engine.integrator_on == "device" and eng.device_steps == 30
+    grown = start * (1.0 + 1e-4) ** 90
+    assert np.allclose(sim.atoms.cell.array, eng.tiled_get_cell(), rtol=0, atol=0)
+    assert sim.atoms.get_volume() == pytest.approx(grown, rel=1e-12)
+    assert eng.log.count("tiled_set_state") == 1 and ("reference volume", pytest.approx(start)) in eng.log
+    header, rows = output.read_thermo(tmp_path / "p")
+    assert header == list(output.THERMO_HEADER + output.NPT_COLUMNS)
+    volumes = [float(r[8]) * len(at) for r in rows]
+    assert [int(r[0]) for r in rows] == [0, 10, 20, 30] and volumes[0] == pytest.approx(start, rel=1e-12)
+    assert volumes[-1] == pytest.approx(grown, rel=1e-12) and volumes[1] > volumes[0]
+    sim.close()
+    again = loupmd.Simulation.resume(tmp_path / "p", force_field=ff_npt)
+    again.run(steps=10)
+    eng2 = again._engine._eng
+    assert ("reference volume", pytest.approx(start)) in eng2.log            # the run's V0, not the resumed cell's
+    assert again.atoms.get_volume() == pytest.approx(grown * (1.0 + 1e-4) ** 30, rel=1e-12)
 
 
 def test_a_version_1_state_block_is_still_read(ff):

@@ -100,17 +100,21 @@ memory give other limits: the plan decides from what it measures on the machine.
 
 ## What the tiled mode runs
 
-- **Integrators:** the fixed-cell ones: `NVE`, `Langevin`, `CSVR`, `NoseHooverChain` and `Berendsen` without a
-  pressure. They run on the GPU with the whole-cell run's kernels; positions, velocities and forces stay on the card
-  between steps. Barostats are refused in tiled mode, with a message: the cell stays fixed (PLAN.md D65).
+- **Integrators:** all of them: `NVE`, `Langevin`, `CSVR`, `NoseHooverChain`, `Berendsen` with or without a
+  pressure, `LangevinBAOAB` and `MTK`. They run on the GPU with the whole-cell run's kernels; positions, velocities
+  and forces stay on the card between steps, and under a barostat the cell, its momentum and the virial too.
 - **Random stream:** the noise is the whole-cell run's, so a tiled Langevin or CSVR run follows the whole-cell
   trajectory to float32 force rounding, and a resumed run continues the stream and the thermostat's state.
 - **With a dispersion term** the D3 energy is added on the host each step, so the integrator runs on the host in
   numpy, `NVE` and `Langevin` only, with its own Langevin noise stream (`LOUP_TILED_HOST_MD=1` forces this loop).
-  The report says where the integrator ran.
+  That loop keeps the cell fixed, so a barostat is refused with a dispersion term. The report says where the
+  integrator ran.
 - **Fixed atoms and centre of mass:** both are handled as in the whole-cell run (`FixAtoms`, `fixcm`).
 - **Neighbour lists:** each tile keeps its list across steps. All lists are rebuilt once any atom has moved half the
-  skin.
+  skin. When the cell changes (a barostat), the strain since the lists were built takes part of the skin: they are
+  rebuilt once an atom has moved, beyond what the strain and a uniform shift explain, more than
+  (r<sub>list</sub> (1 − |F − I|) − r<sub>max</sub>) / 2, with F the cell's deformation since the build,
+  r<sub>max</sub> the model's cutoff and r<sub>list</sub> = r<sub>max</sub> + skin.
 - **Models:** generic-path models with two or more interaction layers and no long-range terms. `MACE-POLAR-1` always
   runs whole.
 - **Restarts:** a restart records the mode, and a resume uses the same one. A whole-cell restart cannot be read by
@@ -127,9 +131,9 @@ pair_style loupmd capacity auto memory 0.9
 ```
 
 - `pair_style loupmd` and `pair_style loupmd/kk` make one tiled call per step, with LAMMPS's integrator and fixes,
-  barostats included: a box that changes in every step plans its tiles and builds their lists in every step.
-- `run_style loupmd` runs the integrators listed above as the engine's tiled MD, with `fix setforce 0 0 0` as fixed
-  atoms and `fix momentum` as `fixcm`. A barostat is refused there, as here.
+  barostats included: under `fix npt` the tile lists stay across the box's changes by the rule above.
+- `run_style loupmd` runs the integrators listed above as the engine's tiled MD, `fix npt ... iso` (MTK) and
+  `fix press/berendsen` included, with `fix setforce 0 0 0` as fixed atoms and `fix momentum` as `fixcm`.
 - The log says at the first step whether the cell runs whole or in tiles, and why; at the end of a run it counts the
   tiled calls, the tiled MD steps and the list builds.
 - Speed (RTX 5060 Ti, MACE-MH-1 on 50,820 and 98,415 atoms of SrTiO3, NVE): the pair style and the run style take

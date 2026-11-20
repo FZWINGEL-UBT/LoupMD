@@ -9,7 +9,9 @@ the whole-system loop's kernels (the same noise streams). Without it, with a dis
 ``LOUP_TILED_HOST_MD=1``, the host loop runs: velocity Verlet (NVE) and ASE's Langevin step, with fixed atoms and the
 centre of mass held at rest as the device loop does; its Langevin noise is its own random stream (seeded from the
 run's seed and the step), so a host run does not repeat a device run's trajectory. A restart continues either
-stream. Barostats are refused in tiled mode (the cell is fixed, D65).
+stream. The barostats (Berendsen, Langevin BAOAB, MTK) run on the device loop of a library that has them
+(``loup_tiled_get_cell``, LAMMPS_TILED_PLAN.md LT6 (a)): the tile lists stay across the cell's changes. The host
+loop keeps the cell fixed and refuses them.
 
 A dispersion term (``set_dispersion``, PLAN.md S6-D09, D76) is computed for the whole system by the library's D3
 term kept across calls (``loupmd._d3.Term``): it needs no neighbour list and holds about 200 bytes per atom, so it
@@ -31,6 +33,7 @@ _VERSION = 2                                 # 2: the integrator state block and
 _HEAD = "<8sIqq"
 _SUPPORTED = {_core.LOUP_NVE: "NVE", _core.LOUP_LANGEVIN: "Langevin"}
 _DEVICE_KINDS = {_core.LOUP_NVE, _core.LOUP_LANGEVIN, _core.LOUP_CSVR, _core.LOUP_NHC, _core.LOUP_BERENDSEN_NVT}
+_NPT_KINDS = {_core.LOUP_BERENDSEN_NPT, _core.LOUP_BAOAB_NPT, _core.LOUP_MTK_NPT}   # LT6 (a): the device loop only
 _SLOTS = _core.TILED_STATE_SLOTS
 
 
@@ -51,6 +54,7 @@ class TiledEngine:
         self._d3 = None
         self._dev = False                        # the device's tiled MD state is the current one
         self._host = True                        # the host arrays are the current state
+        self._v0 = None                          # V0 of a barostat's volume limits (set_reference_volume)
 
     # ------------------------------------------------------------------------------------------------- system
     def set_system(self, numbers, masses, skin=0.5):
@@ -92,8 +96,13 @@ class TiledEngine:
             self._vel[self._fixed] = 0.0
 
     def set_reference_volume(self, volume):
-        raise PlanRefused("a barostat in tiled mode", why="the tiled mode has no variable cell yet (PLAN.md D65)",
-                          next_step="Run NVT or NVE in tiled mode, or a cell that fits the GPU whole.")
+        """V0 of a barostat's volume limits: passed to the device state now, or when it is sent."""
+        self._v0 = float(volume)
+        if self._dev:
+            self._eng.set_reference_volume(self._v0)
+
+    def _barostats(self) -> bool:
+        return hasattr(self._eng, "has_tiled_barostats") and self._eng.has_tiled_barostats()
 
     def set_state(self, positions, velocities, cell):
         self._pos = np.array(positions, dtype=np.float64)
@@ -106,6 +115,8 @@ class TiledEngine:
         self._dev, self._host = False, True
 
     def get_cell(self):
+        if not self._host and self._barostats():  # a barostat on the device moves the cell
+            return self._eng.tiled_get_cell()
         return self._cell.copy()
 
     # ------------------------------------------------------------------------------------------------- device state
@@ -115,7 +126,11 @@ class TiledEngine:
             return False
         if not (hasattr(self._eng, "has_tiled_md") and self._eng.has_tiled_md()):
             return False
-        return kind is None or kind in _DEVICE_KINDS
+        return kind is None or kind in _DEVICE_KINDS or (kind in _NPT_KINDS and self._barostats())
+
+    def runs_barostats(self) -> bool:
+        """Whether a barostat's run goes to the device loop (the host loop refuses it)."""
+        return self._device_md(_core.LOUP_MTK_NPT)
 
     @property
     def integrator_on(self) -> str:
@@ -128,6 +143,8 @@ class TiledEngine:
             return
         pos, vel, frc, e, step, ist, kind = self._eng.tiled_get_state()
         self._pos, self._vel, self._forces, self._energy = pos, vel, frc, e
+        if self._barostats():
+            self._cell = self._eng.tiled_get_cell()
         self._stress = None
         self._noise_step, self._int_state, self._int_kind = step, ist, kind
         self._host = True
@@ -140,6 +157,8 @@ class TiledEngine:
                                   receivers=self.receivers, skin=self.skin, noise_step=self._noise_step,
                                   int_state=self._int_state if self._int_kind >= 0 else None,
                                   int_state_kind=self._int_kind)
+        if self._v0 is not None and self._barostats():
+            self._eng.set_reference_volume(self._v0)
         self._dev = True
 
     # ------------------------------------------------------------------------------------------------- forces
@@ -186,14 +205,17 @@ class TiledEngine:
 
         if n_steps <= 0:
             raise BackendError(f"loup_run: n_steps must be positive, got {n_steps}", call="loup_run")
-        if it.kind not in _DEVICE_KINDS:
-            raise PlanRefused(f"integrator kind {it.kind} in tiled mode",
-                              why="the tiled mode runs NVE, Langevin, CSVR, the Nose-Hoover chain and Berendsen NVT "
-                                  "on a fixed cell (the host loop without the device integrator: NVE and Langevin); "
-                                  "barostats need a cell that fits the GPU whole (PLAN.md D65)",
-                              next_step="Use one of those integrators, or a cell that fits the GPU whole.")
+        if it.kind not in _DEVICE_KINDS | _NPT_KINDS:
+            raise PlanRefused(f"integrator kind {it.kind} in tiled mode", why="the tiled mode has no such integrator",
+                              next_step="Use NVE, an NVT or an NPT integrator of loupmd.integrators.")
         if self._device_md(it.kind):
             return self._run_device(n_steps, it)
+        if it.kind in _NPT_KINDS:
+            raise PlanRefused(f"a barostat (integrator kind {it.kind}) in tiled mode on the host loop",
+                              why="the host loop (with a dispersion term, LOUP_TILED_HOST_MD=1, or a library without "
+                                  "the tiled barostats) keeps the cell fixed",
+                              next_step="Run without the dispersion term or LOUP_TILED_HOST_MD, or a cell that fits "
+                                        "the GPU whole.")
         if it.kind not in _SUPPORTED:
             raise PlanRefused(f"integrator kind {it.kind} in tiled mode on the host loop",
                               why="the host loop (with a dispersion term, LOUP_TILED_HOST_MD=1, or a library without "
@@ -297,8 +319,8 @@ class TiledEngine:
         self._step_disp = step
         self._energy = stats.final_potential_energy_ev
         for r in rows:                           # the device counts as this engine does (both restart together)
-            self._rows.append((int(r["step"]), float(r["e_pot"]), float(r["e_kin"]), float(r["temp_k"]), 0.0,
-                               float(r["volume_a3"]), float(r["conserved"])))
+            self._rows.append((int(r["step"]), float(r["e_pot"]), float(r["e_kin"]), float(r["temp_k"]),
+                               float(r["pressure_gpa"]), float(r["volume_a3"]), float(r["conserved"])))
         self._md_steps += n_steps
         return stats
 

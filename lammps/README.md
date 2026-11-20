@@ -152,13 +152,17 @@ the forces within 3.2e-6 eV/Å of the whole call over the test runs (both withou
   - `pair_style loupmd/kk`: in tiled mode it works on LAMMPS's host arrays. The transfers take milliseconds, a tiled
     step hundreds of milliseconds on cells that need tiles.
   - `run_style loupmd` runs the engine's tiled MD between the output steps: `fix nve`, `fix nve` with `fix langevin`,
-    `fix temp/csvr` or `fix temp/berendsen`, and `fix nvt`, with `fix setforce 0 0 0` and `fix momentum`, as in the
-    table above. The tile lists stay across output steps and from one `run` command to the next.
-- **The cell stays fixed in tiled MD.** `fix npt` and `fix press/berendsen` under `run_style loupmd` are refused
-  in tiled mode. With the pair style and LAMMPS's own `fix npt`, `fix deform` or `fix box/relax`, a tiled cell runs,
-  but its box changes in every step, so every step plans its tiles and builds their lists again; the log warns once.
-- **Kept lists.** The tile lists are kept from step to step until an atom has moved half the skin. LAMMPS's sorting
-  and re-wrapping do not break them: the pair style passes unwrapped positions by atom ID.
+    `fix temp/csvr` or `fix temp/berendsen`, `fix nvt`, `fix npt ... iso`, and `fix nve` + `fix temp/berendsen` +
+    `fix press/berendsen`, with `fix setforce 0 0 0` and `fix momentum`, as in the table above. The tile lists stay
+    across output steps and from one `run` command to the next.
+- **Barostats.** Under `run_style loupmd` the engine moves the cell in tiled MD as it does whole, and LAMMPS's box
+  follows it at each output step. With the pair style and LAMMPS's own `fix npt`, `fix deform` or `fix box/relax`
+  the box changes in every step, and the tile lists stay across those changes (next item).
+- **Kept lists.** The tile lists are kept from step to step until an atom has moved half the skin. In a box that
+  changes, the strain since the lists were built takes part of the skin: they are kept while no atom has moved,
+  beyond what the strain and a uniform shift explain (`fix npt` dilates about the box centre), more than
+  (r_list (1 - |F - I|) - r_max) / 2, with F the box's deformation since the build and r_list = r_max + skin.
+  LAMMPS's sorting and re-wrapping do not break them: the pair style passes unwrapped positions by atom ID.
 - **Speed.** Measured on an RTX 5060 Ti under WSL 2 (20 November 2026): MACE-MH-1 on SrTiO3 from rest, 100 warm-up
   and 200 measured NVE steps, `capacity auto`, milliseconds per step. Whole, the two cells need 24.7 and 47.8 GiB;
   under LAMMPS they used to run out of memory.
@@ -173,8 +177,11 @@ the forces within 3.2e-6 eV/Å of the whole call over the test runs (both withou
   MACE-OMAT-0 medium on 320,000 atoms (8 tiles of 65,536) took 537 ms per step under the run style and 513 in the
   Python package, over 40 measured steps. The difference is the block's two output steps: in a tiled run an output
   step costs about one tiled force call (0.39 s on the 50,820 atoms above), so thermo every 10 steps made the run
-  style 8% slower than every 200. Under `fix npt` through the pair style each step builds the tile lists again: 491
-  against 424 ms per step on the 50,820 atoms, against a fixed cell with the virial in every step (16% more).
+  style 8% slower than every 200. Under `fix npt` through the pair style the tile lists stay across the box's
+  changes: 412 and 413 ms per step on the 50,820 atoms, against 410 and 413 at a fixed cell with the virial in every
+  step (before the lists were kept: 491 against 424). `run_style loupmd` with `fix npt ... iso` runs the engine's
+  tiled MTK, which took 411 and 412 ms per step in the Python package; under the run style its output steps come on
+  top, as above.
 - **`ghost no`** is recommended for tiled cells: LAMMPS's ghost atoms of a 100,000-atom cell are host work the
   engine never reads.
 - **Not tiled:** MACE-POLAR-1 (long range). `capacity tiled` is refused for it, and under `auto` a cell too large to
@@ -192,8 +199,9 @@ the forces within 3.2e-6 eV/Å of the whole call over the test runs (both withou
   `recenter`, `addforce`, `deform`, `nve/limit`, `viscous`, `shake`, `rattle`, `rigid/nve/small`,
   `rigid/nvt/small`, `box/relax` with `minimize`, `hybrid/overlay`. `fix press/berendsen` needs the material's
   `modulus`: LAMMPS's default of 10 bar makes a solid's box explode.
-- With LAMMPS's own integrator a changing box (`fix npt`) rebuilds the engine's neighbour list in every step.
-  `run_style loupmd` runs `fix npt ... iso` at the engine's step time instead (see Speed), on cells that fit whole.
+- With LAMMPS's own integrator a changing box (`fix npt`) rebuilds the engine's neighbour list in every step of a
+  whole cell (a tiled cell keeps its tile lists, above). `run_style loupmd` runs `fix npt ... iso` at the engine's
+  step time instead (see Speed), whole or in tiles.
 - An isolated molecule needs a periodic box with more than 2 (cutoff + skin) of vacuum.
 - MACE-POLAR-1 models run as in the engine: neutral, singlet, zero field.
 - `hybrid/overlay` with other pair styles works with the pair styles (forces are added), not with `run_style loupmd`.
