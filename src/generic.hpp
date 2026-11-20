@@ -113,6 +113,7 @@ struct GenericPassInputs {
     std::function<void()> gemm_join;
     GemmGateFn gemm_gate_bwd;  // empty: never fused (LOUP_GATE_FUSE=0)
     GemmGateFn gemm_gate_fwd;  // empty: never fused (LOUP_GATE_FUSE_FWD=0)
+    GemmGateFn gemm_gate_fwd_l1;  // LOUP_GATE_FWD_L1=1|2 only: later layers' forward gate (1: own sgemm128 forced)
     GemmH2GateFn gemm_h2_gate; // empty: the FP32 W_2^T path (the model also needs LOUP_W2T_HALF=1 at load)
 };
 

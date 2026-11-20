@@ -2180,14 +2180,50 @@ void GenericModel::record(const GenericPassInputs& in) {
                                  (int64_t)L->n_l3[l] * Cx * Cm, 0.0f, L->msgf[l], 4 * l);
                 join();
             } else {
+                // LOUP_GATE_FWD_L1=1|2 (prototype, whole passes only): a later kind-4 layer's residual-free degrees
+                // l > lmax_x store gout_l from their lin_l GEMM's epilogue (gate_vform; 1: own sgemm128 forced, 2:
+                // where it is the plan), as layer 0 does; the l = 0 projection and residual, whose sum the epilogues'
+                // gate logits read, first.
+                GateArgs gf;
+                gf.natoms = N;
+                gf.C = Cm;
+                gf.D = L->D;
+                gf.alpha = L->alpha;
+                gf.beta = L->beta;
+                gf.cg = L->gate_cg;
+                gf.lin0 = L->lin[0];
+                gf.res0 = L->res[0];
+                gf.res0_sp = nullptr;
+                if (L->kind == 4 && in.gemm_gate_fwd_l1 && n_proj == 4 && sweep == GenericPassInputs::SweepAll)
+                    for (int l = L->lmax_x + 1; l < 4; ++l)  // A null: only asks
+                        if (in.gemm_gate_fwd_l1(l, N * dimL(l), L->lin_cols[l], L->n_l3[l] * Cx, nullptr,
+                                                L->W_lin[l], gf))
+                            gate_vform[t] |= 1u << l;
+                const int l_first = gate_vform[t] ? 1 : 0;
+                if (gate_vform[t]) {
+                    fork();
+                    lane(0);
+                    in.gemm(false, N, L->lin_cols[0], L->n_l3[0] * Cx, 1.0f, L->mid[0], L->n_l3[0] * Cx, L->W_lin[0],
+                            L->lin_cols[0], 0.0f, L->lin[0], L->lin_cols[0]);
+                    lane(4);
+                    in.gemm(false, N, L->lin_cols[0], Cx, 1.0f, L->x[0], Cx, L->W_res[0], L->lin_cols[0], 0.0f,
+                            L->res[0], L->lin_cols[0]);
+                    join();
+                }
                 fork();
-                for (int l = 0; l < n_proj; ++l) {
+                for (int l = l_first; l < n_proj; ++l) {
                     lane(l);
-                    in.gemm(false, N * dimL(l), L->lin_cols[l], L->n_l3[l] * Cx, 1.0f, L->mid[l], L->n_l3[l] * Cx,
-                            L->W_lin[l], L->lin_cols[l], 0.0f, L->lin[l], L->lin_cols[l]);
+                    gf.out = L->gout[l];
+                    if (!(gate_vform[t] >> l & 1u) ||
+                        !in.gemm_gate_fwd_l1(l, N * dimL(l), L->lin_cols[l], L->n_l3[l] * Cx, L->mid[l], L->W_lin[l],
+                                             gf)) {
+                        gate_vform[t] &= ~(1u << l);
+                        in.gemm(false, N * dimL(l), L->lin_cols[l], L->n_l3[l] * Cx, 1.0f, L->mid[l], L->n_l3[l] * Cx,
+                                L->W_lin[l], L->lin_cols[l], 0.0f, L->lin[l], L->lin_cols[l]);
+                    }
                 }
                 if (L->kind == 4) {
-                    for (int l = 0; l <= L->lmax_x; ++l) {
+                    for (int l = l_first; l <= L->lmax_x; ++l) {
                         lane(4 + l);
                         in.gemm(false, N * dimL(l), L->lin_cols[l], Cx, 1.0f, L->x[l], Cx, L->W_res[l],
                                 L->lin_cols[l], 0.0f, L->res[l], L->lin_cols[l]);

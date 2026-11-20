@@ -669,6 +669,10 @@ struct LoupHandle {
     // the W_2^T GEMMs, the forward of residual-free degrees l >= 1 in layer 0's lin_l GEMMs. LOUP_GATE_FUSE=0 /
     // LOUP_GATE_FUSE_FWD=0 disable them (tests).
     bool gate_fuse = true, gate_fuse_fwd = true;
+    // LOUP_GATE_FWD_L1 (prototype, off by default): the forward gate of later kind-4 layers' residual-free degrees
+    // in their lin_l GEMMs' epilogue too; 1: with the own sgemm128 forced for those GEMMs whatever their plan, 2: only
+    // where the tuned plan is the own sgemm128 (as layer 0).
+    int gate_fwd_l1 = 0;
     cudaStream_t stream = nullptr;
     cublasHandle_t cublas = nullptr;
     cublasLtHandle_t cublas_lt = nullptr;
@@ -1457,14 +1461,15 @@ static inline void sgemm_rm(
 // A projection fused with degree l's gate (sgemm128_gate): backward dgout_l = A @ B^T (B [N, K], a model weight),
 // forward lin_l = A @ B (B [K, N]), when sgemm_rm's plan for that GEMM is the own sgemm128 with N tiles fastest (whose
 // tiles and arithmetic the fused kernel shares) and the shape fits it. False: nothing launched (no plan yet, as in the
-// uncaptured autotune pass, or another implementation won). A null: only reports whether it would run.
+// uncaptured autotune pass, or another implementation won). A null: only reports whether it would run. force_own
+// (LOUP_GATE_FWD_L1): runs whatever the plan picked, once the shape has one.
 static bool gemm_gate(LoupHandle* h, bool fwd, int l, int M, int N, int K, const float* A, const float* B,
-                      const loup::GateArgs& g) {
+                      const loup::GateArgs& g, bool force_own = false) {
     if (!h->own_ext || l < (fwd ? 1 : 0) || l > 3 || M != g.natoms * (2 * l + 1) || N != g.C || (N % 128) != 0 ||
         (K % 16) != 0 || ((((uintptr_t)A | (uintptr_t)B) & 15) != 0))
         return false;
     const auto it = h->lt_cache.find(std::make_tuple(M, N, K, !fwd, false));
-    if (it == h->lt_cache.end() || it->second.own_mode != 1) return false;
+    if (it == h->lt_cache.end() || (it->second.own_mode != 1 && !force_own)) return false;
     if (!A) return true;
     cudaStream_t strm = h->gemm_stream ? h->gemm_stream : h->stream;
     loup::sgemm128_gate(fwd, l, M, N, K, A, fwd ? B : weight_kn(h, B, N, K, strm), g, strm);
@@ -2119,6 +2124,11 @@ static void record_force_pass(LoupHandle* h, int compute_stress, bool energy_onl
     if (h->gate_fuse_fwd)
         in.gemm_gate_fwd = [h](int l, int M, int Nc, int K, const float* A, const float* B,
                                const loup::GateArgs& g) { return gemm_gate(h, true, l, M, Nc, K, A, B, g); };
+    if (h->gate_fwd_l1 && h->gate_fuse_fwd)
+        in.gemm_gate_fwd_l1 = [h](int l, int M, int Nc, int K, const float* A, const float* B,
+                                  const loup::GateArgs& g) {
+            return gemm_gate(h, true, l, M, Nc, K, A, B, g, h->gate_fwd_l1 == 1);
+        };
     // LOUP_W2T_HALF (hgemm2.cu): used only by layers the model set up at load (GenericModel::w2t_half)
     in.gemm_h2_gate = [h](int l, int M, int Nc, int K, const void* A, const void* B, float oscale,
                           const loup::GateArgs& g) {
@@ -2436,6 +2446,8 @@ LoupHandle* loup_create(const char* loup_path, int device_id) {
             if (const char* e = std::getenv("LOUP_FORCE_TC"); e && e[0] == '1') h->force_tc = true;
             if (const char* e = std::getenv("LOUP_GATE_FUSE"); e && e[0] == '0') h->gate_fuse = false;
             if (const char* e = std::getenv("LOUP_GATE_FUSE_FWD"); e && e[0] == '0') h->gate_fuse_fwd = false;
+            if (const char* e = std::getenv("LOUP_GATE_FWD_L1"); e && (e[0] == '1' || e[0] == '2'))
+                h->gate_fwd_l1 = e[0] - '0';
             if (const char* e = std::getenv("LOUP_DEBUG_EVAL_TIMES"); e && e[0] == '1') h->probe = true;
             if (const char* e = std::getenv("LOUP_EVAL_ARM"); e && e[0] == '1') h->arm_enabled = true;
             else if (e && e[0] == '0') h->arm_state = -1;

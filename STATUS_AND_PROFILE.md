@@ -2713,3 +2713,36 @@ measured steps from rest; fresh GEMM plans per run; two rounds). Figures are ms 
 **Not covered.** The `sm_89` workstations. A barostat with a dispersion term in tiled mode (the host loop keeps the
 cell fixed). LT6 (b). `fix npt` with `aniso` or `tri` under the run style, whole or tiled: the run style maps only
 `iso`.
+
+### 6.42 MH-1's reverse projections in two halves, and the 20 November research list (20 November 2026)
+
+The MH-1 force audit's recommendation A1 and the ideas of the research list the owner pasted that evening, on the
+branch `mh1-two-half-adjoint`. The owner then let the RTX 5060 Ti in WSL 2 be used for timing while the PC was quiet;
+everything below was timed there only. The RTX 4000 Ada job is ready on `leto` / `leeloo` but has not run (both GPUs
+busy). Ledger entries: `gen-w2t-two-half`, `gen-gate-fwd-l1`, `ideas-20261120-not-built`, `meas-small-cell-idle`,
+`meas-mh1-conv-l2`.
+
+**Two-half reverse projections (`LOUP_W2T_HALF=1`, off by default).** The eight `W_2^T` projections of MH-1's force
+backward run as two compensated binary16 tensor-core products with FP32 accumulation; the product kernels write the
+two panels themselves, and the gate backward runs in the GEMM's epilogue. Gates: MH-1 crystals 108 / 108 over three
+heads and both fuse settings (worst force 1.03, stress 0.89, limit 3); the audit's seven physics cases pass. One
+contact cell fails: a Ti-O pair at 1.2 A puts the stress at 1.39 of the 3x allowance (default 0.62). A pair at 0.5 A
+overflows binary16; that is caught, and the call is redone on the FP32 path. Against the release tree built locally
+(A B B A twice, fresh plans, 4 runs per side, 5,000-atom SrTiO3): 29.68 to 28.27 ms per call (0.952), with stress
+0.951; the `W_2^T` + gate kernels 7.36 to 5.68 ms (0.77 against the audit's 0.79 stop rule). Not adopted yet: it
+needs the RTX 4000 Ada timing and the owner's view of the contact result. OMOL-0 loads the path too and was not gated.
+
+**Layer 1's forward gate in its projections (`LOUP_GATE_FWD_L1=1`, off by default).** Layer 0's gated store
+(`gen-gate-fwd-store`) for MH-1's layer 1, degrees 2 and 3, with the own `sgemm128` forced (the autotune puts these
+GEMMs on cuBLASLt). MH-1 gates 54 / 54. Layer 1's projections + gate 3.40-3.66 to 2.80-3.01 ms; whole call 29.58 to
+29.07 ms (0.983), with stress 0.987. Respecting the tuned plans instead fuses nothing on most plan sets (1.017 slower).
+Before it is the default on `sm_120` it needs the OMOL-0 and POLAR-1 gates.
+
+**Measured, not built.** A persistent megakernel for small cells can save at most 4.8-7.5% of MH-1's 1.27 ms NaCl216
+call (idle 2.6%, only under-filled kernels 2.2-4.9%), under the 15% asked. MH-1's layer-1 conv tables stay in the
+L2 on the 5060 Ti (hit 92.7% forward, 95.4-95.8% backward, DRAM throughput ~20%).
+
+**Rejected without building.** The f16-accumulated correction product (no saving on GeForce cards, a loss where f32
+accumulation runs at full rate), warp-pair same-slab decode in `gconv_bwd_L1` (the match rate was already measured at
+8-25%, and the exchange needs ~80 KB of shared memory per block) and the `U [W_lin^T, W_res^T]` epilogue (S54's bound
+is under its stop rule).
