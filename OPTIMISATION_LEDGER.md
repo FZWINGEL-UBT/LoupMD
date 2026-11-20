@@ -323,6 +323,7 @@ Conventions:
 | [gen-jit-conv](#gen-jit-conv) | JIT stage 2: a conv layer whose width has no built-in instance compiled at load with its width as a constant (`src/generated_conv.cuh`, embedded), instead of the launchers' run-time-width branch | default (`LOUP_JIT=0` off; `LOUP_CONV_GENERIC=1` forces every conv layer there, tests) | gen (conv widths outside 128 / 256 / 224, e.g. OFF23-S's forward at 96) | DEFAULT (5060 Ti only) | S144 | OFF23-S water216 MD `LOUP_JIT=0` vs default b/a 1.014 (orders 1.020 / 1.009), inside the single-run spread; forces at the cross-process level; tests | this file |
 | [gen-jit-products](#gen-jit-products) | JIT stage 3: each bundle carries its products' source (`gen_product.py`, `L<t>.prod_src`); a signature the library was not built with is compiled at load instead of needing `nvcc` | default (`LOUP_JIT_PRODUCTS=1` compiles every product so, gates; `LOUP_JIT=0` refuses such a bundle) | gen (every family) | DEFAULT (coverage; 5060 Ti only) | S144 | with every product compiled from the bundle 92/92 gate rows over seven families (worst force / stress 2.63 / 1.83); a renamed-signature bundle compiles and matches; 1.3 s per product compile, then the disk cache | this file |
 | [gen-retire-specialised](#gen-retire-specialised) | JIT stage 5: the specialised OMAT-0-medium path retired (`interaction0.cu`, `model_loader.cu`, `generated_kernels.cuh`, `gen_kernels.py`, `export_omat0.py`); OMAT-0 medium runs the generic path | always (`arch=omat0_medium_spec` bundles refused) | OMAT-0 medium | DEFAULT (owner's approval; 5060 Ti only) | S144 | MD specialised -> generic: SrTiO3 7.905 -> 7.671 ms/step (b/a 0.970, orders 0.972 / 0.969), NbCl5 1.756 -> 1.713 (0.975, 0.975 / 0.976); library 10.48 -> 9.97 MB | this file |
+| [gen-conv-tune-early](#gen-conv-tune-early) | The conv forward variants timed after 50 force passes when no rebuild has come (a solid near its lattice, LAMMPS's pair style under `fix npt`); the first rebuild still times them again | `tune_early_variants` (`LOUP_CONV_TUNE=0` disables) | gen (lx 1, `C = 128`) | DEFAULT on the local `release/v1` (5060 Ti only) | release, O41 | the benchmark's SrTiO3 cells from rest, f g g f f g g f: OMAT-0 medium 5,000 / 10,140 atoms `0.978` / `0.978`, MH-1 5,000 `0.992`; OFF24-M water tie (`0.999`, it rebuilds first); 20-39 ms of timing | [gen-conv-tune-early](#gen-conv-tune-early), [§6.39][s639] |
 | [gen-jit-epilogue-bound](#gen-jit-epilogue-bound) | JIT stage 4 bound: what epilogue fusion chosen from the IR (gate, readout, density into the GEMM epilogues) could still save | – | gen | MEASUREMENT (not built; 5060 Ti only) | S144 | the gate kernels left after S137 are 3.9% / 3.8% of kernel time on MH-1 NaCl216 / SrTiO3, 3.1% on OMOL-0 XL water216, 1.7% on POLAR-1-L NaCl216 and absent elsewhere; readout and density already run inside the product kernels (`gprod_ro1_fused`), so the bound is ~2-3% on those families only | this file |
 
 <a id="gen-jit-layer0"></a>
@@ -3052,6 +3053,16 @@ POLAR-1 NaCl 3x3x3 (216) and POLAR-1-M `NbCl5` 3x3x3 (1,944).
 - Status: REJECTED (5060 Ti only).
 - Sources: this file.
 
+<a id="gen-conv-tune-early"></a>
+#### gen-conv-tune-early: the conv forward variants timed after 50 passes without a rebuild
+- Switch: `tune_early_variants` (`src/engine.cu`, `kTuneEarlyPasses` = 50), after every MD or caller-integrated step (`run_md_loop`'s `one_step`) and after an evaluation that rebuilt on the host (`evaluate_once`); `LOUP_CONV_TUNE=0` and `LOUP_CONV_FWD_VARIANT` act on it as on the rebuild's timing.
+- Stage: release, PLAN.md O41 (20 November 2026), 5060 Ti only.
+- What: [gen-conv-fwd-variants](#gen-conv-fwd-variants) times the variants at a system's first MD rebuild, so a system whose list is never rebuilt kept variant 0: a solid near its lattice (the benchmark's SrTiO3 cells from rest: no rebuild in 300 steps), short runs, and callers whose every evaluation rebuilds on the host (LAMMPS's pair style under `fix npt`: a new cell at every call). After 50 force passes without a timing the variants are timed on the last pass's inputs; the first rebuild, if one comes, times them again (the set-up lattice picked wrongly for thermalised `NbCl5`, [spl-multi-receiver](#spl-multi-receiver)). Runs that rebuild before 50 passes (water from rest: 7 rebuilds in 100 steps) are unchanged. The `loup_evaluate` step graph already went through `run_md_loop` and was timed at its first rebuild (LAMMPS's pair style on OFF24-M water picked R5), contrary to what §6.38 first said.
+- Measured (5060 Ti, the benchmark's NVE from rest, 100 + 200 steps, `step_ms` of the 200, fresh process and GEMM plans per run, library `42425b8a699e8a90` (f) against `6c14052532dc53b4` (g), f g g f f g g f): OMAT-0 medium generic SrTiO3 5,000 atoms 7.288 -> 7.131 ms (`0.978`), 10,140 atoms 14.870 -> 14.547 (`0.978`); MH-1 SrTiO3 5,000 29.413 -> 29.169 (`0.992`); every g run below every f run. OFF24-M water 5,184 8.812 -> 8.804 (`0.999`, tie: timed at its first rebuild on both). The timing: 20-23 ms at 5,000 atoms, 39 ms at 10,140, reported as `tune_ms`. Forced variant 2 against variant 0 on library f gave the same picture (A B B A, A B at 98,415: OMAT-0 SrTiO3 5,000 / 10,140 / 98,415 `0.978` / `0.980` / `0.977`, MH-1 5,000 / 10,140 `0.988` / `0.986`).
+- Not measured: the RTX 4000 Ada, where the variants are not timed (cc 12.0 only) and nothing changes by construction.
+- Status: DEFAULT on the local `release/v1` (5060 Ti only).
+- Sources: this file, [§6.39][s639].
+
 ### MACE-POLAR-1 long range
 
 <a id="pol-double-sf"></a>
@@ -3560,6 +3571,7 @@ Time against the memory fraction (kept calls, the plans after this change where 
 [s618]: STATUS_AND_PROFILE.md#618-tiled-md-lists-kept-across-steps-16-november-2026-0220
 [s636]: STATUS_AND_PROFILE.md#636-the-merge-of-develop-19-november-2026-planmd-o38
 [s637]: STATUS_AND_PROFILE.md#637-lammpss-nvt-and-npt-at-the-engines-step-time-19-november-2026-planmd-o40
+[s639]: STATUS_AND_PROFILE.md#639-the-benchmarks-warm-up-and-systems-without-a-rebuild-20-november-2026-planmd-o41
 
 ### Dispersion
 

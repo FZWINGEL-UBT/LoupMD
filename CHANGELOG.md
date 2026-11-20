@@ -41,6 +41,14 @@
   which are not tiled, with a smaller system). This concerns `capacity="whole"`, the LAMMPS pair style and the
   MACE-POLAR-1 models, which the capacity plan does not cover.
   An allocation is refused when it is larger than the card's free memory as NVML reports it.
+- On RTX 50-series GPUs a system whose neighbour list is not rebuilt within 50 steps (a crystal near its lattice, a
+  short run, LAMMPS's pair style under `fix npt`) now gets the faster convolution kernel as well: the kernel
+  variants are timed then, instead of only at the first rebuild. MACE-OMAT-0 medium on 5,000 and 10,000 atoms of
+  SrTiO3 from rest: 2.2% faster per step; MACE-MH-1: 0.8%.
+- An engine freed in another thread no longer breaks a run. Python's garbage collector can free an engine in one of
+  the package's output threads while another engine starts a run; that run could fail ("operation failed due to a
+  previous error during capture"), the next engine could not be created, or the process crashed. An engine may now
+  be freed in any thread while others run.
 - Every bundle is exported again on its first use (the cache key changed, and a bundle now carries the source of
   its product kernels). A kernel plugin built by 0.0.1's `loupmd build-kernels` is not loaded: build it again.
 

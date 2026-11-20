@@ -2407,8 +2407,9 @@ the force graph beside them. With that and with the pair style no longer sending
 ### 6.38 Systems too large for the card, and the first rebuild's timing (20 November 2026, PLAN.md O41)
 
 The new version of the benchmark (`MargrafGroup/Benchmark_loup`: the package's own loop, `pair_style loupmd` and
-LAMMPS with Symmetrix, 5k to 100k atoms of OMAT-0 small, MH-1, OFF24 medium and POLAR-1-S) ran on the RTX 5060 Ti
-in WSL 2 on 20 November and showed two things in the engine. RTX 5060 Ti only.
+LAMMPS with Symmetrix, 5k to 100k atoms of OMAT-0 medium, MH-1, OFF24 medium and POLAR-1-M) ran on the RTX 5060 Ti
+in WSL 2 on 20 November and showed two things in the engine. RTX 5060 Ti only. (Corrected the same day: this section
+first named OMAT-0 small and POLAR-1-S, which are not the benchmark's models.)
 
 **A whole system too large for the card.** Under WSL 2 a `cudaMalloc` beyond the free memory succeeds: Windows'
 video memory manager pages the allocations out to system memory and every kernel then runs at bus speed. MACE-MH-1
@@ -2420,8 +2421,8 @@ The buffers that grow with the system are now allocated through `loup::device_ma
 driver refuses it (CUDA's figure where NVML is missing: under WSL it falls 1.2 GiB too far above 10 GiB held, §6.35,
 and would refuse requests that fit). With the library `42425b8a699e8a90`: MH-1 50,820 atoms, whole, out of memory
 after about 4 s ("refused 297.8 MB with 230.2 MB free"); MH-1 98,415 atoms after 2.3 s ("refused 1345.5 MB with
-148.2 MB free"); POLAR-1-S 51,840 atoms after 2.1 s; OMAT-0 small on 98,415 atoms, whole, still runs (142.53 ms per
-step). In the benchmark the LAMMPS cells of MH-1 and POLAR-1-S at 100k atoms and the own loop's POLAR-1-S at 50k now
+148.2 MB free"); POLAR-1-M 51,840 atoms after 2.1 s; OMAT-0 medium on 98,415 atoms, whole, still runs (142.53 ms per
+step). In the benchmark the LAMMPS cells of MH-1 and POLAR-1-M at 100k atoms and the own loop's POLAR-1-M at 50k now
 end with out of memory, and the own loop's MH-1 at 98k goes on to the tiled call (8.17 to 8.27 µs/atom/step); a
 15,400 MiB watchdog over every such run never fired. `LOUP_DEBUG_ALLOC_FREE=<MiB>` caps the free figure for the test
 (`test_system_beyond_the_free_memory_refused_and_handle_takes_one_again`).
@@ -2432,12 +2433,85 @@ variants (`tune_rebuild_variants`, `sm_120` only), which waits for the first hos
 `spl-multi-receiver`: timed on the set-up's lattice it picked wrongly for thermalised NbCl5) and which `step_ms`
 leaves out (`LoupMDStats::tune_ms`): 31.5 ms on 5,184 atoms and 590.6 ms on 97,200. Every model of the benchmark
 picks variant 2 (R5), 7 to 24% faster in the conv forward, so the timing pays for itself within about 50 to 100
-steps. The SrTiO3 cells do not rebuild within 25 steps and run untuned, as do the LAMMPS pair style and
-`loup_evaluate` (no host-driven MD rebuild). Nothing changed: a warm-up through the first rebuild is the benchmark's
-choice, and tuning in the evaluation path or at set-up as well is an optimisation with its own A B B A.
+steps. The SrTiO3 cells do not rebuild at all (none in 300 steps either) and run untuned. (Not, as first written
+here, the LAMMPS pair style: `loup_evaluate`'s step goes through the same loop and times the variants at its first
+rebuild; measured on water, §6.39.) The benchmark's warm-up and the timing of systems without a rebuild: §6.39.
 
 **Tests** (library `42425b8a699e8a90`, RTX 5060 Ti): `tests/gpu/test_engine.py` and `test_memory_plan.py` 42
 passed; `test_lammps.py` and `test_lammps_run_style.py` 41 passed against an `lmp` on this library; fast tier 419
 passed, 7 skipped (the benchmark structures' folder unset; the skipping files again with it set and `LOUPMD_LMP`:
 103 passed); full tier 53 passed. Not run: the acceptance tier (no kernel and no arithmetic changed), the RTX 4000
 Ada, native Linux.
+
+### 6.39 The benchmark's warm-up and systems without a rebuild (20 November 2026, PLAN.md O41)
+
+The two follow-ups of §6.38 (the owner: "then do a and then after it b"), and a crash that the second one's tests
+turned up. RTX 5060 Ti in WSL 2 only.
+
+**(a) The benchmark's MD protocol.** In the local checkout of `Benchmark_loup` (879f4c0 plus local changes; not
+pushed, the repository is the owner's), every code's MD now runs 100 warm-up and 200 measured steps up to the 1M
+size, instead of 5 + 20 (`reproduce/bench.sh`: `MD_WARMUPS`, `MD_SAMPLES`; the ASE calls keep 5 + 20). From rest,
+the first steps are not the steady state: LoupMD times its kernel variants at the first rebuild (§6.38), which the
+warm-up now holds. `run_md.py` records `warmup_rebuilds`, so a one-off inside the measured block can be seen. The
+benchmark was run again under this protocol (`~/loup_bench_runs/5060ti-20261120-v3`, library `42425b8a699e8a90`
+for every LoupMD route).
+
+**(b) Systems without a rebuild.** The conv forward's variants were timed only at a system's first MD rebuild, so a
+system whose list is never rebuilt kept variant 0: a crystal near its lattice (the benchmark's SrTiO3 cells from
+rest: no rebuild in 300 steps), short runs, and LAMMPS's pair style under `fix npt`. They are now timed also after
+50 force passes without a timing (`tune_early_variants`, `kTuneEarlyPasses`); the first rebuild, if one comes, times
+them again. Measured (NVE from rest, 100 + 200 steps, fresh process and plans per run, f g g f f g g f): OMAT-0
+medium SrTiO3 5,000 atoms 7.288 to 7.131 ms per step (0.978), 10,140 atoms 14.870 to 14.547 (0.978); MH-1 5,000
+29.413 to 29.169 (0.992); OFF24 medium water 5,184 a tie (0.999: it is timed at its first rebuild either way). The
+timing costs 20 to 39 ms once (`tune_ms`). Ledger: `gen-conv-tune-early`. (§6.38's correction: `loup_evaluate`'s
+step goes through the MD loop and was always timed at its first rebuild.)
+
+**The fast tier's segmentation fault.** The fast tier crashed on the library of (b) with a segmentation fault. The
+library before (b) (`42425b8a699e8a90`) crashed the same way, so (b) did not cause it. The cause: Python's garbage
+collector can run an engine's `loup_destroy` in one of the package's output writer threads (`LoupEngine.__del__` of
+an earlier test's engine) while the main thread's engine captures its graphs. A script that forces this
+(`.tmp_o/destroy_race.py`: engine A destroyed in a worker thread after a random 0 to 80 ms while engine B, SrTiO3
+320 atoms, runs 60 NVE steps) failed in every run. On `42425b8a699e8a90` and the library of (b) the first run's
+capture was invalidated ("operation failed due to a previous error during capture") and the next `loup_create`
+failed. With thread-local capture (below) the process crashed within the first 40 iterations in four runs out of
+four. The SIGSEGV backtrace showed `loup_run_nve`'s error path in `cudaGraphDestroy`; other runs ended with glibc's
+"double free or corruption" and "free(): invalid pointer".
+Three faults made it:
+
+1. *The trigger.* `cublasDestroy`, which cuBLAS documents as synchronising the device, invalidates every capture in
+   progress on the device in any capture mode. With the destroy's parts left out one at a time, only leaving out
+   the two cuBLAS handles' destruction made 40 of 40 iterations pass. Leaving out the cuBLAS destruction, everything,
+   or serialising every entry point passed; leaving out only the GEMM cubin's unload, `free_system`, or the
+   streams, events and workspaces did not. Thread-local capture mode, the first fix tried, was needed too:
+   in global mode another thread's `cudaFree` invalidates the capture as well.
+2. *A failed capture stayed open.* A `CUDA_CHECK` inside a capture returned -1 without ending it, and `guarded`
+   closed captures only after an exception. The thread's next call failed with "operation not permitted when stream
+   is capturing" (seen as `loup_create` failing after the failed run).
+3. *A graph destroyed twice.* After an exception, `guarded` destroyed the graph that `cudaStreamEndCapture` returned.
+   For a capture into a graph (the MD step graphs and their conditional bodies) that graph belongs to the handle or
+   to a conditional node and was destroyed again later.
+
+The fix (`src/engine.cu`):
+
+- **Capture mode.** Every capture runs in thread-local mode (`kCaptureMode`).
+- **`DeviceOrder`.** A process-wide shared lock. Every capture holds it shared from begin to end, so captures in
+  several threads still run side by side. The calls that synchronise the device or use the legacy stream hold it
+  exclusively: `loup_create` (the bundle's load), `loup_set_system`, `loup_destroy`, and the release of a tiled state.
+- **`CaptureScope`.** It ends each capture on every path, and destroys the returned graph only when the capture
+  made it.
+- **`guarded`.** It closes a capture left open after a plain failure too, and never destroys the graph it gets back.
+
+On the fixed library (`84d92d872ef41860`) the script ran 60 + 60 iterations (0 to 80 ms) and 40 (0 to 300 ms)
+without a failed run. The new test `test_an_engine_destroyed_in_another_thread_leaves_a_run_alone`
+(`tests/gpu/test_engine.py`) fails on `42425b8a699e8a90` and passes on the fixed library.
+
+**Tests** (library `84d92d872ef41860`, RTX 5060 Ti): fast tier 381 passed, 48 skipped (the LAMMPS files without
+`LOUPMD_LMP`, and the benchmark structures' folder unset), none failed. After the benchmark run: the full tier 53
+passed, and the LAMMPS files (`test_lammps.py`, `test_lammps_run_style.py`, with the test build's `lmp` on this
+library) 41 passed.
+
+**Not covered.** Two engines driven at once from two threads on one GPU. Plain `cudaMemcpy` / `cudaMemset` (on the
+legacy stream) remain in other entry points: 24 calls in `src/engine.cu`, some of them inside `set_system_impl`,
+which holds the lock. One of them in one thread would invalidate a capture in the other. The package frees engines in
+other threads but drives them from one.
+

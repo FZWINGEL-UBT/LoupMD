@@ -1652,8 +1652,8 @@ bool GenericModel::set_cell(const double* cell) { return lr_ ? lr_->set_cell(cel
 // unpaired one, and five receivers per 640-thread block) rank differently per system (5060 Ti, gconv_fwd_L1 us per
 // step R1p / R1 / R5: OMAT-0 medium SrTiO3 2,200 / 2,176 / 1,742, NbCl5 346 / 327 / 321; OFF24-M water 2,723 /
 // 2,686 / 2,437; MP-0 medium SrTiO3 2,385 / 2,273 / 2,136, NbCl5 354 / 348 / 357), so each layer's are timed once
-// per system on the last force pass's inputs (from
-// tune_rebuild_variants); a variant replaces the current one only if >= 2% faster. Its outputs (mid, D) are
+// per system on the last force pass's inputs (from tune_rebuild_variants at the first rebuild, and from
+// tune_early_variants after 50 passes without one); a variant replaces the current one only if >= 2% faster. Its outputs (mid, D) are
 // rewritten by every force pass. sm_120 by default; LOUP_CONV_TUNE=0 keeps the default variant, LOUP_CONV_TUNE=1
 // times them on any GPU (tests). Returns -1 before a pass has been recorded for this system (call again later), 0 if
 // nothing changed, 1 if a variant changed.

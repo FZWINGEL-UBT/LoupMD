@@ -22,6 +22,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <shared_mutex>
 #include <chrono>
 #include <functional>
 #include <tuple>
@@ -703,6 +704,8 @@ struct LoupHandle {
     std::map<std::tuple<const float*, int, int>, float*> bt_cache;  // [K, N] copies of transposed weights (weight_kn)
     VariantOverrides ovr;         // test overrides from the environment, read at loup_create
     bool variants_tuned = false;  // tune_rebuild_variants ran for this system
+    bool variants_early = false;  // tune_early_variants ran for this system (no rebuild came first)
+    long long passes_untuned = 0; // force passes on this system before its variants were timed (tune_early_variants)
     struct DiskPlan {
         int M, N, K;
         uint8_t transB, beta_nz, use_hyb, hyb_tile, use_own;
@@ -1091,6 +1094,8 @@ struct LoupHandle {
         invalidate_graphs();
         clear_lt_cache();
         variants_tuned = false;
+        variants_early = false;
+        passes_untuned = 0;
         nl_valid = false;
         forces_current = false;
         disp_window_steps = 0;
@@ -1965,6 +1970,25 @@ static void tune_rebuild_variants(LoupHandle* h) {
     if (r > 0) h->invalidate_graphs();
 }
 
+// A system whose list is not rebuilt within kTuneEarlyPasses force passes (a solid near its lattice, a short run, NPT
+// through LAMMPS's pair style, where every call rebuilds on the host and no MD step's rebuild comes) would keep the
+// default variants: they are timed then instead, on the last pass's inputs, after the call's step or evaluation; the
+// first rebuild, if one comes, times them again on thermalised positions (timing at set-up picked wrongly for NbCl5,
+// the ledger's spl-multi-receiver). Counts the pass it follows; returns the milliseconds spent (0 if nothing ran). The
+// stream must be free to wait on (nothing armed behind cuStreamWaitValue32).
+constexpr long long kTuneEarlyPasses = 50;
+static double tune_early_variants(LoupHandle* h) {
+    if (h->variants_tuned || h->variants_early) return 0.0;
+    if (++h->passes_untuned < kTuneEarlyPasses || h->E_graph == 0 || !h->gen) return 0.0;
+    CUDA_CHECK_THROW(cudaStreamSynchronize(h->stream));  // the step may still run: its time is not the timing's
+    const auto t0 = std::chrono::steady_clock::now();
+    const int r = h->gen->tune_conv_variants(h->stream);
+    if (r < 0) return 0.0;  // no force pass recorded yet: try after the next one
+    h->variants_early = true;
+    if (r > 0) h->invalidate_graphs();
+    return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+}
+
 // One sweep of the generic pass (GenericPassInputs::Sweep), for a driver that runs a domain sweep by sweep.
 struct DomainSweep {
     int kind = 0, layer = 0;
@@ -2099,6 +2123,90 @@ static void record_force_pass(LoupHandle* h, int compute_stress, bool energy_onl
     if (!sweep) record_dispersion(h, compute_stress, energy_only);
 }
 
+// Graph captures and other threads (the tests' fast-tier segmentation fault, 20 November 2026; STATUS §6.39). Python's
+// garbage collector can run one engine's loup_destroy in one of the package's output writer threads while another
+// engine captures its graphs in the main thread. Two things break such a capture:
+// - In CUDA's global capture mode any potentially unsafe call in any thread (a cudaFree of the destroy) invalidates
+//   it. Every graph is therefore captured in thread-local mode, where only the capturing thread's own calls are
+//   checked.
+// - A device-wide synchronisation invalidates every capture in progress on the device, in any mode, and so does work
+//   on the legacy default stream, which waits for every blocking stream (h->stream is one). cuBLAS's handle
+//   destruction synchronises the device (cuBLAS documents it), and so do the release of a tiled state and the load
+//   of a bundle, which also copies on the legacy stream. Measured: with cublasDestroy left out of loup_destroy, 40
+//   runs with a destroy in another thread came through, and none did with it.
+// DeviceOrder orders them process-wide: every capture holds it shared from its begin to its end (captures in several
+// threads still run side by side), and loup_create, loup_set_system, loup_destroy and the release of a tiled state
+// hold it exclusively. A thread that holds it already, either way, does not take it again (loup_create's failure
+// path calls loup_destroy; nothing that synchronises the device may run inside a capture anyway).
+// A failed capture used to stay open: a CUDA_CHECK inside it returned -1 without ending it, and the next call of the
+// thread failed with "operation not permitted when stream is capturing"; the clean-up after an exception destroyed the
+// graph that cudaStreamEndCapture handed back, which for a capture into a graph is the handle's or a conditional
+// node's, destroyed again later ("double free or corruption"). CaptureScope ends every capture on every path.
+constexpr cudaStreamCaptureMode kCaptureMode = cudaStreamCaptureModeThreadLocal;
+
+static std::shared_mutex g_device_order;
+static thread_local int t_device_order = 0;  // > 0: this thread holds g_device_order
+
+class DeviceOrder {
+public:
+    explicit DeviceOrder(bool exclusive) : exclusive_(exclusive), held_(t_device_order == 0) {
+        if (held_) exclusive_ ? g_device_order.lock() : g_device_order.lock_shared();
+        ++t_device_order;
+        counted_ = true;
+    }
+    DeviceOrder(const DeviceOrder&) = delete;
+    DeviceOrder& operator=(const DeviceOrder&) = delete;
+    void release() {
+        if (!counted_) return;
+        counted_ = false;
+        --t_device_order;
+        if (held_) exclusive_ ? g_device_order.unlock() : g_device_order.unlock_shared();
+        held_ = false;
+    }
+    ~DeviceOrder() { release(); }
+
+private:
+    bool exclusive_, held_, counted_ = false;
+};
+
+// One capture on h->stream, ended on every path: begin() makes a new graph (cudaStreamBeginCapture), begin_into(g)
+// captures into g, which its owner (the handle, or a conditional node) keeps. A capture the scope did not end is ended
+// in its destructor; the graph that comes back is destroyed only when the capture made it.
+class CaptureScope {
+public:
+    explicit CaptureScope(LoupHandle* h) : h_(h), order_(false) {}
+    CaptureScope(const CaptureScope&) = delete;
+    CaptureScope& operator=(const CaptureScope&) = delete;
+    cudaError_t begin() { return opened(cudaStreamBeginCapture(h_->stream, kCaptureMode), true); }
+    cudaError_t begin_into(cudaGraph_t g) {
+        return opened(cudaStreamBeginCaptureToGraph(h_->stream, g, nullptr, nullptr, 0, kCaptureMode), false);
+    }
+    cudaError_t end(cudaGraph_t* out) {
+        open_ = false;
+        const cudaError_t err = cudaStreamEndCapture(h_->stream, out);
+        order_.release();
+        return err;
+    }
+    ~CaptureScope() {
+        if (open_) {
+            cudaGraph_t g = nullptr;
+            cudaStreamEndCapture(h_->stream, &g);
+            if (g && own_graph_) cudaGraphDestroy(g);
+            (void)cudaGetLastError();
+        }
+    }
+
+private:
+    cudaError_t opened(cudaError_t err, bool own_graph) {
+        open_ = err == cudaSuccess;
+        own_graph_ = own_graph;
+        return err;
+    }
+    LoupHandle* h_;
+    DeviceOrder order_;
+    bool open_ = false, own_graph_ = false;
+};
+
 static int ensure_force_graph(LoupHandle* h, int compute_stress) {
     h->last_pass_stress = compute_stress != 0;  // every launch of the force graph comes through here first
     if (h->force_graph_exec && h->force_graph_stress == compute_stress) return 0;
@@ -2122,9 +2230,10 @@ static int ensure_force_graph(LoupHandle* h, int compute_stress) {
         plan_dbg("after the uncaptured pass");
     }
 
-    CUDA_CHECK(cudaStreamBeginCapture(h->stream, cudaStreamCaptureModeGlobal));
+    CaptureScope cap(h);
+    CUDA_CHECK(cap.begin());
     record_force_pass(h, compute_stress);
-    CUDA_CHECK(cudaStreamEndCapture(h->stream, &h->force_graph));
+    CUDA_CHECK(cap.end(&h->force_graph));
     plan_dbg("after the capture");
     CUDA_CHECK(cudaGraphInstantiate(&h->force_graph_exec, h->force_graph, nullptr, nullptr, 0));
     plan_dbg("after the instantiation");
@@ -2138,9 +2247,10 @@ static int ensure_energy_graph(LoupHandle* h) {
     if (h->energy_graph_exec) return 0;
     if (h->lt_cache.empty() && ensure_force_graph(h, 0) != 0) return -1;
     if (h->energy_graph) { cudaGraphDestroy(h->energy_graph); h->energy_graph = nullptr; }
-    CUDA_CHECK(cudaStreamBeginCapture(h->stream, cudaStreamCaptureModeGlobal));
+    CaptureScope cap(h);
+    CUDA_CHECK(cap.begin());
     record_force_pass(h, 0, true);
-    CUDA_CHECK(cudaStreamEndCapture(h->stream, &h->energy_graph));
+    CUDA_CHECK(cap.end(&h->energy_graph));
     CUDA_CHECK(cudaGraphInstantiate(&h->energy_graph_exec, h->energy_graph, nullptr, nullptr, 0));
     return 0;
 }
@@ -2242,6 +2352,19 @@ static void arm_evaluate(LoupHandle* h, int stress) {
 // Evaluate ahead: a step that loup_evaluate queued ahead runs before anything else an entry point does
 // (settle_armed), unless the entry point takes care of it itself (`keep_armed`: loup_evaluate, whose matching call
 // releases the queued step as its own).
+// A capture still open on h->stream (none should be: CaptureScope ends each on every path) is ended, and the graph
+// that comes back is left alone: it may be the handle's or a conditional node's body (a capture into a graph), and a
+// graph leaked on an error path costs nothing where a second destroy crashes. True when one was open.
+static bool end_open_capture(LoupHandle* h) {
+    cudaStreamCaptureStatus st = cudaStreamCaptureStatusNone;
+    if (!h || !h->stream || cudaStreamIsCapturing(h->stream, &st) != cudaSuccess || st == cudaStreamCaptureStatusNone)
+        return false;
+    cudaGraph_t g = nullptr;
+    cudaStreamEndCapture(h->stream, &g);
+    (void)cudaGetLastError();
+    return true;
+}
+
 template <class F>
 static int guarded(LoupHandle* h, const char* name, F&& f, bool keep_armed = false) {
     loup::pending_error().clear();
@@ -2255,6 +2378,12 @@ static int guarded(LoupHandle* h, const char* name, F&& f, bool keep_armed = fal
             return 0;
         }
         store_error(h, name);
+        if (end_open_capture(h)) {  // a failure inside a capture must not leave the stream capturing
+            h->drain_armed();
+            h->invalidate_graphs();
+            h->gemm_stream = nullptr;
+            h->gemm_ws = nullptr;
+        }
         return rc;
     } catch (const std::exception& e) {
         loup::pending_error() = e.what();
@@ -2263,12 +2392,7 @@ static int guarded(LoupHandle* h, const char* name, F&& f, bool keep_armed = fal
     }
     store_error(h, name);
     if (h && h->stream) {
-        cudaStreamCaptureStatus st = cudaStreamCaptureStatusNone;
-        if (cudaStreamIsCapturing(h->stream, &st) == cudaSuccess && st != cudaStreamCaptureStatusNone) {
-            cudaGraph_t g = nullptr;
-            cudaStreamEndCapture(h->stream, &g);
-            if (g) cudaGraphDestroy(g);
-        }
+        end_open_capture(h);
         h->drain_armed();
         h->invalidate_graphs();
         h->gemm_stream = nullptr;  // a throw between gemm_lane and gemm_join leaves the routing on a side stream
@@ -2280,6 +2404,7 @@ static int guarded(LoupHandle* h, const char* name, F&& f, bool keep_armed = fal
 extern "C" {
 
 LoupHandle* loup_create(const char* loup_path, int device_id) {
+    const DeviceOrder order(true);  // the bundle's load synchronises the device and copies on the legacy stream
     LoupHandle* h = nullptr;
     loup::pending_error().clear();
     tl_null_error.clear();
@@ -2359,6 +2484,7 @@ LoupHandle* loup_create(const char* loup_path, int device_id) {
 
 void loup_destroy(LoupHandle* h) {
     if (!h) return;
+    const DeviceOrder order(true);  // cuBLAS's handle destruction synchronises the device (see DeviceOrder)
     cudaSetDevice(h->device_id);
     release_tiled_md(h);
     if (h->probe && h->probe_n > 0)
@@ -2858,6 +2984,7 @@ static int evaluate_once(
         CUDA_CHECK(cudaGraphLaunch(h->force_graph_exec, h->stream));
         int fin[3];
         if (queue_results(h) != 0 || wait_published(h, ++h->pub_count, fin) != 0) return -1;
+        tune_early_variants(h);  // a caller whose every call takes this path (a new cell each call) is timed too
     } else {
         // One launch of the host step graph (or the release of the one queued ahead): upload, skin check, guard,
         // force pass or on-device rebuild, downloads.
@@ -3455,7 +3582,8 @@ static int run_md_loop(
         const size_t n = bodies.size();
         std::vector<cudaGraphConditionalHandle> conds(n);
         for (size_t i = 0; i < n; ++i) CUDA_CHECK(cudaGraphConditionalHandleCreate(&conds[i], g, 0, 0));
-        CUDA_CHECK(cudaStreamBeginCaptureToGraph(h->stream, g, nullptr, nullptr, 0, cudaStreamCaptureModeGlobal));
+        CaptureScope cap(h);
+        CUDA_CHECK(cap.begin_into(g));
         prologue(conds.data());
         cudaStreamCaptureStatus status;
         const cudaGraphNode_t* deps_p = nullptr;
@@ -3476,16 +3604,17 @@ static int run_md_loop(
         CUDA_CHECK(cudaStreamUpdateCaptureDependencies(h->stream, nodes.data(), nullptr, n,
                                                        cudaStreamSetCaptureDependencies));
         cudaGraph_t captured = nullptr;
-        CUDA_CHECK(cudaStreamEndCapture(h->stream, &captured));
+        CUDA_CHECK(cap.end(&captured));
         for (size_t i = 0; i < n; ++i)
             if (bodies[i](body_graphs[i]) != 0) return -1;
         return 0;
     };
     const Body rest_body = [&](cudaGraph_t g) -> int {
-        CUDA_CHECK(cudaStreamBeginCaptureToGraph(h->stream, g, nullptr, nullptr, 0, cudaStreamCaptureModeGlobal));
+        CaptureScope cap(h);
+        CUDA_CHECK(cap.begin_into(g));
         record_rest();
         cudaGraph_t captured = nullptr;
-        CUDA_CHECK(cudaStreamEndCapture(h->stream, &captured));
+        CUDA_CHECK(cap.end(&captured));
         return 0;
     };
     // The checked rest: rest_guard_kernel + IF (valid rows) rest.
@@ -3552,7 +3681,8 @@ static int run_md_loop(
         const Body step_body = [&](cudaGraph_t g) -> int {
             cudaGraphConditionalHandle c;
             CUDA_CHECK(cudaGraphConditionalHandleCreate(&c, g, 0, 0));
-            CUDA_CHECK(cudaStreamBeginCaptureToGraph(h->stream, g, nullptr, nullptr, 0, cudaStreamCaptureModeGlobal));
+            CaptureScope cap(h);
+            CUDA_CHECK(cap.begin_into(g));
             record_move();
             loup::guard_step_kernel<<<1, 1, 0, h->stream>>>(c, dev ? 1 : 0, h->d_need_rebuild, h->d_order_err,
                                                              h->d_pub_counter, h->d_pub);
@@ -3573,7 +3703,7 @@ static int run_md_loop(
             // After the SWITCH node, whichever body ran (or none): the results' copies and their publication.
             if (host_io && queue_results(h) != 0) return -1;
             cudaGraph_t captured = nullptr;
-            CUDA_CHECK(cudaStreamEndCapture(h->stream, &captured));
+            CUDA_CHECK(cap.end(&captured));
             if (rest_body(cp.conditional.phGraph_out[0]) != 0) return -1;
             if (dev && rebuild_body(cp.conditional.phGraph_out[1]) != 0) return -1;
             return 0;
@@ -3603,7 +3733,7 @@ static int run_md_loop(
 
     // One step: launch the step graph, read the guard's publication, and on a rebuild that the graph could not finish
     // on the GPU, finish it on the host and launch the checked rest.
-    auto one_step = [&](int step) -> int {
+    auto step_once = [&](int step) -> int {
         if (h->armed) {
             // queued ahead by the previous loup_evaluate, behind the wait on *h_go: the store lets it run
             __atomic_store_n(h->h_go, h->go_seq, __ATOMIC_SEQ_CST);
@@ -3683,6 +3813,13 @@ static int run_md_loop(
             if (queue_results(h) != 0 || wait_published(h, ++h->pub_count, fin) != 0) return -1;
             if (fin[0]) return order_error();
         }
+        return 0;
+    };
+    // The step, then the variants' timing of a system that has had no rebuild for kTuneEarlyPasses passes (excluded
+    // from step_ms with the rebuild's).
+    auto one_step = [&](int step) -> int {
+        if (step_once(step) != 0) return -1;
+        tune_ms += tune_early_variants(h);
         return 0;
     };
     if (ext) {
@@ -5463,7 +5600,10 @@ static bool pinned_take(LoupHandle* h, HostBufferGuard& g, size_t bytes, bool ma
 
 static void release_tiled_state(LoupHandle* h) {
     if (TiledState* st = h->tiled_state) {  // O32: its pinned buffers become the handle's spares
-        cudaDeviceSynchronize();             // no copy may still read or write them
+        {
+            const DeviceOrder order(true);  // a device-wide synchronisation (DeviceOrder)
+            cudaDeviceSynchronize();        // no copy may still read or write them
+        }
         auto keep = [&](HostBufferGuard& g) {
             if (g.p && g.n) {
                 h->pinned_spare.bufs.push_back({g.n, g.p});
@@ -8222,6 +8362,7 @@ int loup_set_dispersion(LoupHandle* h, const LoupD3Settings* settings, const Lou
 
 int loup_set_system(LoupHandle* h, int n_atoms, const int* atomic_numbers, const double* masses_amu, double skin) {
     return guarded(h, "loup_set_system", [&] {
+        const DeviceOrder order(true);  // the legacy stream's copies and the release of a tiled state (DeviceOrder)
         if (h) release_tiled_md(h);
         return set_system_impl(h, n_atoms, atomic_numbers, masses_amu, skin);
     });

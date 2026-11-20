@@ -27,7 +27,8 @@ typedef struct {
     int dangerous_builds;              // steps whose force pass ran on a list an atom had left by more than skin/2:
                                        // always 0 (every step checks its list before its force pass); kept for the
                                        // layout of LOUP_ABI_VERSION 1
-    double tune_ms;                    // one-time per-system kernel-variant timing at the first rebuild (not in step_ms)
+    double tune_ms;                    // one-time per-system kernel-variant timing at the first rebuild, or after 50
+                                       // force passes without one (not in step_ms)
     int pipelined_steps;               // steps of this call the GPU ran without waiting for the host: all but those
                                        // whose neighbour rebuild the host finished
 } LoupMDStats;
@@ -604,7 +605,8 @@ int loup_compute_device(LoupHandle* h, const LoupDeviceIO* io, const double* cel
 //   LOUP_SPECIES_TABLES=0|1  generic models (OMOL-0, MH-1): 0 keeps layer 0's species-only GEMMs instead of per-species
 //                   tables, 1 builds the tables on any GPU (testing; sm_120 and cc 8.0 build them by default).
 //   LOUP_CONV_TUNE=0|1  generic models: 0 keeps the default conv forward variant (no per-system timing at the first
-//                   rebuild); 1 times the variants on any GPU (testing; sm_120 times them by default).
+//                   rebuild, or after 50 force passes without one); 1 times the variants on any GPU (testing; sm_120
+//                   times them by default).
 //   LOUP_CONV_FWD_VARIANT=0|1|2  force a generic conv forward variant (testing; see tools/dev/test_gate.py).
 //   LOUP_CONV_PRUNE=0  generic models: keep every conv path of a layer whose l >= 1 projections are exactly zero
 //                   (MP-0 medium's second interaction), which by default runs only its output-degree-0 paths and a

@@ -4,6 +4,9 @@ Run: python -m pytest tests -v   (the gate itself: tests/test_gate_wrapper.py, s
 """
 from __future__ import annotations
 
+import threading
+import time
+
 import numpy as np
 import pytest
 from gpu_support import maxwell_velocities, srtio3
@@ -85,6 +88,88 @@ def test_tuning_time_reported_separately(sto_engine):
     assert st.rebuilds > 0 and st.tune_ms > 0.0
     st2 = eng.run_nve(200, 2.0)
     assert st2.tune_ms == 0.0  # timed once per system
+
+
+TIMING = "conv forward us"  # LOUP_DEBUG_SPLINE's line per timed layer
+
+
+def test_variants_timed_after_50_steps_without_a_rebuild(sto_bundle, monkeypatch, capfd):
+    """A cold crystal rebuilds no list, so the first rebuild's timing of the conv forward variants never comes: they
+    are timed after 50 force passes instead (tune_early_variants), once and outside step_ms, and the run's forces stay
+    those of a fresh engine. LOUP_CONV_TUNE=1 times them on any GPU; LOUP_DEBUG_SPLINE=1 prints each timing."""
+    monkeypatch.setenv("LOUP_CONV_TUNE", "1")
+    monkeypatch.setenv("LOUP_DEBUG_SPLINE", "1")
+    at = srtio3(4)
+    eng = LoupEngine(sto_bundle)
+    eng.set_system(at.get_atomic_numbers(), at.get_masses(), skin=0.5)
+    eng.set_state(at.positions, maxwell_velocities(at, 30.0, 4), at.cell.array)
+    capfd.readouterr()
+    st = eng.run_nve(40, 1.0)
+    assert st.rebuilds == 0 and st.tune_ms == 0.0
+    assert TIMING not in capfd.readouterr().err
+    st = eng.run_nve(20, 1.0)
+    assert st.rebuilds == 0 and st.tune_ms > 0.0
+    assert TIMING in capfd.readouterr().err
+    st = eng.run_nve(60, 1.0)
+    assert st.tune_ms == 0.0 and TIMING not in capfd.readouterr().err
+    pos, _, frc, e_md = eng.get_state()
+    fresh = LoupEngine(sto_bundle)
+    fresh.set_system(at.get_atomic_numbers(), at.get_masses())
+    e, f, _ = fresh.evaluate(pos, at.cell.array)
+    assert abs(e - e_md) / len(at) < 1e-6
+    assert np.abs(f - frc).max() < 1e-4
+
+
+def test_variants_timed_for_a_caller_that_changes_the_cell_at_every_call(sto_bundle, monkeypatch, capfd):
+    """Every evaluation on a new cell rebuilds on the host (as LAMMPS's pair style under fix npt), where no MD step's
+    rebuild times the variants: the 50th evaluation does, once, and the results stay a fresh engine's."""
+    monkeypatch.setenv("LOUP_CONV_TUNE", "1")
+    monkeypatch.setenv("LOUP_DEBUG_SPLINE", "1")
+    at = _rattled(srtio3(3), 0.02, 12)
+    eng = LoupEngine(sto_bundle)
+    eng.set_system(at.get_atomic_numbers(), at.get_masses())
+    capfd.readouterr()
+    for k in range(60):
+        s = 1.0 + 1e-4 * (k % 2)
+        eng.evaluate(at.positions * s, at.cell.array * s)
+        if k == 48:
+            assert TIMING not in capfd.readouterr().err
+    assert TIMING in capfd.readouterr().err
+    s = 1.0 + 1e-4
+    e, f, _ = eng.evaluate(at.positions * s, at.cell.array * s)
+    assert TIMING not in capfd.readouterr().err
+    fresh = LoupEngine(sto_bundle)
+    fresh.set_system(at.get_atomic_numbers(), at.get_masses())
+    e_ref, f_ref, _ = fresh.evaluate(at.positions * s, at.cell.array * s)
+    assert abs(e - e_ref) / len(at) < 1e-6
+    assert np.abs(f - f_ref).max() < 1e-4
+
+
+def test_an_engine_destroyed_in_another_thread_leaves_a_run_alone(sto_bundle):
+    """Python's garbage collector destroys an engine in whatever thread it runs in, e.g. one of the package's output
+    writer threads in the middle of another engine's run. That loup_destroy's cudaFree used to invalidate the running
+    engine's graph capture (CUDA's global capture mode): the run failed ("operation failed due to a previous error
+    during capture") or the process crashed. Each run here captures its step graphs while the other engine goes."""
+    small, big = srtio3(2), srtio3(4)
+    for k, delay in enumerate((0.0, 0.005, 0.01, 0.02, 0.04, 0.06)):
+        other = LoupEngine(sto_bundle)
+        other.set_system(small.get_atomic_numbers(), small.get_masses())
+        other.evaluate(small.positions, small.cell.array)
+        holder = [other]
+        del other
+
+        def destroy(wait=delay, refs=holder):
+            time.sleep(wait)
+            refs.clear()                      # the last reference: loup_destroy runs in this thread
+
+        eng = LoupEngine(sto_bundle)
+        eng.set_system(big.get_atomic_numbers(), big.get_masses(), skin=0.5)
+        eng.set_state(big.positions, maxwell_velocities(big, 300.0, k), big.cell.array)
+        worker = threading.Thread(target=destroy)
+        worker.start()
+        st = eng.run_nve(60, 1.0)
+        worker.join()
+        assert not holder and st.dangerous_builds == 0 and 100.0 < st.final_temperature_k < 400.0, (k, delay)
 
 
 def test_evaluate_after_md_matches_md_forces(sto_engine):

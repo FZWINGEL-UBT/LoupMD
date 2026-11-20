@@ -29,7 +29,9 @@ Several things happen once and are then cached or reused:
   with torch. The bundle is kept in `<cache root>/bundles/`; a new element set, head or charge gives a new bundle.
 - **GEMM plans.** The engine times its matrix products for each new shape on your GPU and stores the winners in
   `plans_*.bin` files, keyed by GPU, cuBLASLt version and library build.
-- **Per-system tuning.** Some kernel variants are timed at the first neighbour-list build of a system. The first
+- **Per-system tuning.** Some kernel variants are timed at the first neighbour-list rebuild of a system's MD, or
+  after 50 steps or evaluations without one (on compute capability 12.0 cards such as the RTX 50 series; about
+  0.03 s at 5,000 atoms). The first
   call of a tiled run builds the tiles' lists and tunes the GEMMs for the tile shapes: about 2 s at 135,000 atoms
   and more than a minute at ten million ([large cells](guide/large-cells.md)).
 - **Setup checks.** `capacity="auto"` probes one tile to plan the memory, and `dispersion="d3bj"` times its candidate
