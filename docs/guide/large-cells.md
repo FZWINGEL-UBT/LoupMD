@@ -59,8 +59,8 @@ Plan
 ```
 
 `capacity="whole"` forces the whole-cell call; a cell that does not fit then fails with the engine's out-of-memory
-error. `capacity="tiled"` forces tiles, and `lm.config.CapacityConfig(mode="tiled", receivers=8192)` also fixes
-their size. `memory_fraction` (default 0.9) is the share of the free GPU memory the plan may use. The planned figure
+error. `capacity="tiled"` forces tiles. `lm.md` and the command line take the mode only; `lm.Simulation` also takes
+`capacity=lm.config.CapacityConfig(mode="tiled", receivers=8192)`, which fixes their size. `memory_fraction` (default 0.9) is the share of the free GPU memory the plan may use. The planned figure
 is what the call will hold, within a few percent (`docs/validation/capacity.md` in the repository).
 
 ## The wavefront
