@@ -20,7 +20,26 @@ def _ssa(lines, i, op):
     sc_factored._emit_node(lines, i, op)
 
 
-def emit_product(sig, prog, feats, sh):
+def _half_variant(lines, stores, old_name, new_name):
+    """A copy of a kernel's lines named new_name whose dm stores write two binary16 panels (LOUP_W2T_HALF).
+
+    stores: (line index, l, index expression, value expression) of every dm{l} store in lines. The panels of degree
+    l's gradient take dm{l}'s own buffer: N (2l + 1) C halves of the rounded value, then as many of its amplified
+    correction (loup_store_h2 in the library's generated source, src/generated_generic.cu)."""
+    out = list(lines)
+    hits = [i for i, t in enumerate(out) if old_name + "(" in t]
+    assert len(hits) == 1, (old_name, hits)
+    out[hits[0]] = out[hits[0]].replace(old_name + "(", new_name + "(")
+    for i, l, idx, val in stores:
+        assert out[i].startswith(f"  dm{l}["), out[i]
+        out[i] = f"  loup_store_h2(dm{l}, {idx}, (int64_t)N * {2 * l + 1} * C, {val});"
+    return out
+
+
+def emit_product(sig, prog, feats, sh, dm_half=False):
+    """The product's kernels' source and lmax_out. dm_half (the library's build only, never a bundle's source): also
+    gprod_bwd_h2 and, for lmax_out 0, gprod_ro1_fused_h2, the same kernels storing the input gradients as the two
+    binary16 panels of the reverse W_2 GEMMs (src/hgemm2.cu)."""
     from loupmd.export._fastmace import sc_factored
 
     _expr, _literal = sc_factored._expr, sc_factored._literal
@@ -118,11 +137,13 @@ def emit_product(sig, prog, feats, sh):
                 add(a_, (da, _expr(b_)))
                 add(b_, (da, _expr(a_)))
     B.append("  float dot = 0.0f;")
+    b_stores = []
     for l in range(4):
         for m in range(2 * l + 1):
             i = l * l + m
             dx = adj.get(-1 - i, "0.0f")
             B.append(f"  dot = fmaf({dx}, x{i}, dot);")
+            b_stores.append((len(B), l, f"((int64_t)a * {2 * l + 1} + {m}) * C + c", f"{dx} * s"))
             B.append(f"  dm{l}[((int64_t)a * {2 * l + 1} + {m}) * C + c] = {dx} * s;")
     B += ["  if (dD) {",
           "    #pragma unroll",
@@ -353,11 +374,13 @@ def emit_product(sig, prog, feats, sh):
                     add_rf(a_, (da, _expr(b_)))
                     add_rf(b_, (da, _expr(a_)))
         RF.append("  float dot = 0.0f;")
+        rf_stores = []
         for l in range(4):
             for m in range(2 * l + 1):
                 i = l * l + m
                 dx = adj_rf.get(-1 - i, "0.0f")
                 RF.append(f"  dot = fmaf({dx}, x{i}, dot);")
+                rf_stores.append((len(RF), l, f"((int64_t)a * {2 * l + 1} + {m}) * C + c", f"{dx} * s"))
                 RF.append(f"  dm{l}[((int64_t)a * {2 * l + 1} + {m}) * C + c] = {dx} * s;")
         RF += [
             "  if (dD) {",
@@ -516,9 +539,17 @@ def emit_product(sig, prog, feats, sh):
             "  }",
             "}",
         ]
-        return ("\n".join(F) + "\n\n" + "\n".join(B) + "\n\n" + "\n".join(RF) + "\n\n" + "\n".join(RS) + "\n\n" +
-                "\n".join(RC) + "\n\n" + compact_src, lo)
-    return "\n".join(F) + "\n\n" + "\n".join(B) + "\n\n" + compact_src, lo
+        src = ("\n".join(F) + "\n\n" + "\n".join(B) + "\n\n" + "\n".join(RF) + "\n\n" + "\n".join(RS) + "\n\n" +
+               "\n".join(RC) + "\n\n" + compact_src)
+        if dm_half:
+            src += ("\n" + "\n".join(_half_variant(B, b_stores, f"gprod_bwd_{sig}", f"gprod_bwd_h2_{sig}")) + "\n\n" +
+                    "\n".join(_half_variant(RF, rf_stores, f"gprod_ro1_fused_{sig}", f"gprod_ro1_fused_h2_{sig}")) +
+                    "\n")
+        return src, lo
+    src = "\n".join(F) + "\n\n" + "\n".join(B) + "\n\n" + compact_src
+    if dm_half:
+        src += "\n" + "\n".join(_half_variant(B, b_stores, f"gprod_bwd_{sig}", f"gprod_bwd_h2_{sig}")) + "\n"
+    return src, lo
 
 
 def _scalar_prune(prog, feats):

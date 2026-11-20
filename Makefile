@@ -6,7 +6,7 @@ OBJDIR = build/$(CUDA_ARCH)
 NVCCFLAGS = -O3 -std=c++17 -arch=$(CUDA_ARCH) -Iinclude -Isrc -diag-suppress=1046 -Xcompiler -fPIC -MMD -MP
 LDFLAGS = -lcublas -lcublasLt -lcudart -ldl
 
-SRCS = src/bundle.cu src/generic.cu src/generated_generic.cu src/polar.cu src/neighbors.cu src/integrator.cu src/minimize.cu src/cell.cu src/thermo.cu src/sgemm.cu src/tile_plan.cu src/engine.cu \
+SRCS = src/bundle.cu src/generic.cu src/generated_generic.cu src/polar.cu src/neighbors.cu src/integrator.cu src/minimize.cu src/cell.cu src/thermo.cu src/sgemm.cu src/hgemm2.cu src/tile_plan.cu src/engine.cu \
        src/jit.cu src/kernel_ir.cu src/dispersion/d3_pair.cu
 OBJS = $(patsubst src/%.cu,$(OBJDIR)/%.o,$(SRCS))
 DEPS = $(OBJS:.o=.d)

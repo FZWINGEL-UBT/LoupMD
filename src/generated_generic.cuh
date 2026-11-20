@@ -6,12 +6,16 @@
 #include "generated_sh16.cuh"
 
 struct GProdKernels { const char* sig; int lmax_out; int segments_w; const void* fwd; const void* bwd; const void* ro1_128; const void* ro1_256; const void* ro1_512; const void* ro1s_128; const void* ro1s_256; const void* ro1s_512; const void* ro1c_128; const void* ro1c_256; const void* ro1c_512; const void* fwdc; const void* bwdc; };
+// LOUP_W2T_HALF (src/hgemm2.cu): the library's own product kernels that store the input gradients dm_l as two
+// binary16 panels (loup_store_h2), with the arguments of bwd / ro1_*; not part of the kernel plugins' ABI.
+struct GProdH2Kernels { const char* sig; const void* bwd; const void* ro1_128; const void* ro1_256; const void* ro1_512; };
 
 namespace loup {
 // JIT conv kernels of one layer (GenericModel::setup_jit): fwd[kernel][preloc], bwd[kernel][want_dx][preloc]; kernel
 // 0 / 1 = the layer's first / second launch (L2a / L2b, L2lp / L2); null: the built-in kernel
 struct ConvJit { const void* fwd[2][2] = {}; const void* bwd[2][2][2] = {}; };
 const GProdKernels* find_gprod(const char* sig);
+const GProdH2Kernels* find_gprod_h2(const char* sig);
 void launch_conv_fwd(int lx, cudaStream_t st, int N, int C, int S, int I, const SplineGrid& sg, int perm, int psym,
                      const int* rp, const int* snd, const float4* vl, const int* act_slab, const float2* act_t_sx,
                      bool preloc, const int* sp, const uint2* packed, const float4* dens, unsigned bias_shift,

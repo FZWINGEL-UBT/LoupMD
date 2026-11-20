@@ -9,6 +9,7 @@
 #include <cstddef>
 #include <cstdint>
 
+#include "gate_epilogue.cuh"
 #include "generic.hpp"
 
 namespace loup {
@@ -27,12 +28,6 @@ __device__ __forceinline__ void cp_async16(void* smem, const void* gmem, bool fu
 __device__ __forceinline__ void cp_async_commit() { asm volatile("cp.async.commit_group;"); }
 __device__ __forceinline__ void cp_async_wait_one_pending() { asm volatile("cp.async.wait_group %0;" ::"n"(kStages - 2)); }
 
-__device__ __forceinline__ float sigmoid_f(float x) { return 1.0f / (1.0f + expf(-x)); }
-__device__ __forceinline__ float dsilu_f(float x) {
-    const float s = sigmoid_f(x);
-    return s * (1.0f + x * (1.0f - s));
-}
-
 // Epilogue of sgemm128_kernel<8, true, true, DEG> for dgout_l = A @ W_2[l]^T (B: its [K, N] copy, N = g.C): degree
 // l's share of gate_bwd_kernel (generic.cu) instead of the dgout_l store. DEG = 2l + 1 rows per atom; the tile's
 // 128 rows start at atom a0, its first 128 / DEG * DEG rows (128 / 126 / 125 / 126) hold whole atoms and the rest (the
@@ -41,11 +36,11 @@ __device__ __forceinline__ float dsilu_f(float x) {
 // gate_bwd_kernel's arithmetic in its order (the dgout_l values are the plain GEMM's: each output is the same in-order
 // fmaf chain over k). Only the dD sum is reassociated: per atom over the degree's terms and the block's 128 columns
 // (warp shuffle, shared memory), then one atomic per atom and block. g.vform: as gate_bwd_kernel's vform degrees.
+// The per-atom arithmetic is gate_bwd_rows (gate_epilogue.cuh), shared with the two-half GEMM (hgemm2.cu).
 template <int DEG>
 __device__ __forceinline__ void gate_bwd_epilogue(const float (&acc)[8][8], float* smem, int a0, int n0,
                                                   const GateArgs& g) {
     constexpr int APT = 128 / DEG;
-    const int N = g.C;
     const int tid = threadIdx.x, tx = tid & 15, ty = tid >> 4, cl = tid & 63, grp = tid >> 6;
     float* sC = smem;                       // [128][64]: one half of the tile
     float* s_acc = smem + 128 * 64;         // [APT]: per-atom dD partials (factor -beta s^2)
@@ -61,72 +56,10 @@ __device__ __forceinline__ void gate_bwd_epilogue(const float (&acc)[8][8], floa
             *reinterpret_cast<float4*>(sC + ((i < 4 ? 0 : 60) + ty * 4 + i) * 64 + tx * 4) =
                 make_float4(acc[i][4 * hh], acc[i][4 * hh + 1], acc[i][4 * hh + 2], acc[i][4 * hh + 3]);
         __syncthreads();
-        const int c = n0 + hh * 64 + cl;
-        for (int ai = grp; ai < na; ai += 4) {
-            const int a = a0 + ai;
-            const float s = 1.0f / (g.D[a] * g.beta + g.alpha);
-            const int64_t r0 = (int64_t)a * 4 * N, q0 = g.res0_sp ? (int64_t)g.res0_sp[a] * 4 * N : r0;
-            auto pre0 = [&](int col) { return g.lin0[r0 + col] * s + (g.res0 ? g.res0[q0 + col] : 0.0f); };
-            const float* go = sC + ai * DEG * 64 + cl;
-            float part = 0.0f, partq = 0.0f;
-            if (DEG == 1) {
-                const float p = pre0(c);
-                const float d = go[0] * g.cs * dsilu_f(p);
-                if (g.dp0) g.dp0[r0 + c] = d;
-                g.dl0[r0 + c] = d * s;
-                part = fmaf(d, g.lin0[r0 + c], part);
-            } else {
-                constexpr int l = DEG / 2;
-                const float gp = pre0(l * N + c);
-                const float sg = sigmoid_f(gp);
-                const float gt = g.cg * sg;
-                float dgp;
-                if (g.vform) {  // lin_l holds v = gt (lin * s): d gp = (1 - sg) sum dgout v, dD += -beta s sum dgout v
-#pragma unroll
-                    for (int m = 0; m < DEG; ++m) {
-                        const int64_t idx = ((int64_t)a * DEG + m) * N + c;
-                        const float o = go[m * 64];
-                        partq = fmaf(o, g.lin_l[idx], partq);
-                        g.dl_l[idx] = o * gt * s;
-                    }
-                    dgp = (1.0f - sg) * partq;
-                } else {
-                    float dg = 0.0f;
-#pragma unroll
-                    for (int m = 0; m < DEG; ++m) {
-                        const int64_t idx = ((int64_t)a * DEG + m) * N + c;
-                        const float li = g.lin_l[idx];
-                        const float p = li * s + (g.res_l ? g.res_l[idx] : 0.0f);
-                        const float o = go[m * 64];
-                        dg = fmaf(o, p, dg);
-                        const float d = o * gt;
-                        if (g.dp_l) g.dp_l[idx] = d;
-                        g.dl_l[idx] = d * s;
-                        part = fmaf(d, li, part);
-                    }
-                    dgp = dg * g.cg * sg * (1.0f - sg);
-                }
-                if (g.dp0) g.dp0[r0 + l * N + c] = dgp;
-                g.dl0[r0 + l * N + c] = dgp * s;
-                part = fmaf(dgp, g.lin0[r0 + l * N + c], part);
-            }
-#pragma unroll
-            for (int off = 16; off > 0; off >>= 1) {
-                part += __shfl_xor_sync(0xffffffffu, part, off);
-                partq += __shfl_xor_sync(0xffffffffu, partq, off);
-            }
-            if ((tid & 31) == 0) {
-                atomicAdd(s_acc + ai, part);
-                if (DEG > 1 && g.vform) atomicAdd(s_accq + ai, partq);
-            }
-        }
+        gate_bwd_rows<DEG, 4, 64>(sC, s_acc, s_accq, a0, na, n0 + hh * 64 + cl, cl, grp, tid, g);
     }
     __syncthreads();
-    if (tid < na) {
-        const int a = a0 + tid;
-        const float s = 1.0f / (g.D[a] * g.beta + g.alpha);
-        atomicAdd(g.dD + a, -g.beta * s * s * s_acc[tid] - g.beta * s * s_accq[tid]);
-    }
+    gate_bwd_dD(s_acc, s_accq, a0, na, tid, g);
 }
 
 // Epilogue of sgemm128_kernel<8, true, true, DEG, true> for lin_l = A @ B (N = g.C) of a degree l >= 1 without

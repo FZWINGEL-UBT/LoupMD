@@ -2119,6 +2119,11 @@ static void record_force_pass(LoupHandle* h, int compute_stress, bool energy_onl
     if (h->gate_fuse_fwd)
         in.gemm_gate_fwd = [h](int l, int M, int Nc, int K, const float* A, const float* B,
                                const loup::GateArgs& g) { return gemm_gate(h, true, l, M, Nc, K, A, B, g); };
+    // LOUP_W2T_HALF (hgemm2.cu): used only by layers the model set up at load (GenericModel::w2t_half)
+    in.gemm_h2_gate = [h](int l, int M, int Nc, int K, const void* A, const void* B, float oscale,
+                          const loup::GateArgs& g) {
+        loup::hgemm2_gate(l, M, Nc, K, A, B, oscale, nullptr, g, h->gemm_stream ? h->gemm_stream : h->stream);
+    };
     h->gen->record(in);
     if (!sweep) record_dispersion(h, compute_stress, energy_only);
 }
@@ -2885,9 +2890,21 @@ static int set_fixed_impl(LoupHandle* h, const int* fixed) {
 // non-finite energy, force or stress with the hybrid loaded drops it for this engine: later GEMM plans are re-tuned
 // without it (disk plans that chose it are skipped while it is unloaded) and the captured graphs are re-recorded.
 // The notice goes to stderr: the call that triggered it goes on and can succeed, so it is not an error of the error
-// channel.
+// channel. LOUP_W2T_HALF's two-half W_2^T GEMMs are dropped the same way (their product kernels store NaN for a
+// gradient element out of binary16's range, so such a pass ends non-finite); both go at once.
 static bool drop_hybrid(LoupHandle* h) {
-    if (!h->hyb.loaded) return false;
+    bool dropped = false;
+    if (h->gen && h->gen->drop_w2t_half()) {
+        fprintf(stderr, "loupmd: non-finite energy / forces with LOUP_W2T_HALF: the two-half FP16 W_2^T GEMMs "
+                        "disabled for this engine (a gradient element beyond binary16's range at scale 2^12)\n");
+        h->invalidate_graphs();
+        // The FP32 W_2^T GEMMs this falls back to never ran, so their shapes have no plans: with the plans gone the
+        // next pass is the uncaptured tuning pass (lt_cache.empty()), not a capture that would meet untuned shapes.
+        // The stored plans stay valid (no hybrid change), so the re-tune reads them from the plan file.
+        h->clear_lt_cache();
+        dropped = true;
+    }
+    if (!h->hyb.loaded) return dropped;
     fprintf(stderr, "loupmd: non-finite energy / forces with the tensor-core GEMM cubin %s: disabled for this engine "
                     "(GEMMs re-tuned without it; the TF32+FP16 hybrid builds overflow at |operand| >= 32,752)\n",
             h->hyb.path_loaded.c_str());
@@ -3026,6 +3043,10 @@ static int evaluate_impl(
     if (h && h->probe) h->probe_t[0] = std::chrono::steady_clock::time_point{};
     int rc = evaluate_once(h, positions, cell, compute_stress, out_energy_ev, out_forces, out_stress, &finite,
                            &graph_step);
+    if (rc == 0 && h->gen && h->gen->w2t_half() && std::getenv("LOUP_DEBUG_W2T_HALF")) {
+        const DeviceOrder order(true);  // a device-wide synchronisation and plain copies (DeviceOrder)
+        h->gen->debug_w2t_half(h->N);
+    }
     if (rc == 0 && !finite && drop_hybrid(h)) {
         rc = evaluate_once(h, positions, cell, compute_stress, out_energy_ev, out_forces, out_stress, &finite,
                            &graph_step);

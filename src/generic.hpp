@@ -49,6 +49,16 @@ struct GateArgs {
 // false: nothing launched (the caller runs the plain GEMM and the gate kernel for l). Backward: dgout_l = A[M, K] @
 // B[N, K]^T; forward: lin_l = A[M, K] @ B[K, N]. A null: only reports whether it would run.
 using GemmGateFn = std::function<bool(int l, int M, int N, int K, const float* A, const float* B, const GateArgs& g)>;
+// LOUP_W2T_HALF (hgemm2.cu): dgout_l = A @ W_2[l]^T from the two binary16 panels of A (the product kernel's _h2
+// store) and of the weight (made at load), FP32 accumulation, degree l's gate backward in the epilogue, on the
+// current GEMM lane (M = natoms (2l + 1), N = C); oscale undoes the panels' scales.
+using GemmH2GateFn = std::function<void(int l, int M, int N, int K, const void* A, const void* B, float oscale,
+                                        const GateArgs& g)>;
+void hgemm2_init();
+int hgemm2_weight_exponent(const float* w, int64_t n);
+void hgemm2_split(int64_t n, const float* w, int e, void* out, cudaStream_t stream);
+void hgemm2_gate(int l, int M, int N, int K, const void* A, const void* B, float oscale, float* C, const GateArgs& g,
+                 cudaStream_t stream);
 
 struct GenericPassInputs {
     cudaStream_t stream;
@@ -103,6 +113,7 @@ struct GenericPassInputs {
     std::function<void()> gemm_join;
     GemmGateFn gemm_gate_bwd;  // empty: never fused (LOUP_GATE_FUSE=0)
     GemmGateFn gemm_gate_fwd;  // empty: never fused (LOUP_GATE_FUSE_FWD=0)
+    GemmH2GateFn gemm_h2_gate; // empty: the FP32 W_2^T path (the model also needs LOUP_W2T_HALF=1 at load)
 };
 
 struct GenericLayer;
@@ -147,6 +158,16 @@ public:
     // tile domains (which sweep) do not. Call with no system allocated (before alloc_system).
     void use_chain_fold(bool on);
     bool chain_fold_built() const { return chain_fold_built_; }
+    // LOUP_W2T_HALF=1 at load (hgemm2.cu; off by default): the kind-4 layers whose product has the library's own _h2
+    // kernels (find_gprod_h2) store dmsgf as two binary16 panels and run their W_2^T GEMMs as two FP16 tensor-core
+    // products with the gate in the epilogue. Not with the long range, compact layers or C_msg % 64 != 0. True while
+    // some layer runs it; drop_w2t_half() turns it off for good (the engine, after a non-finite result: an element
+    // overflowed binary16) and returns whether it was on (captured graphs must then be re-recorded).
+    bool w2t_half() const { return w2t_half_; }
+    bool drop_w2t_half();
+    // LOUP_DEBUG_W2T_HALF=1 (the engine, after an evaluate): each such layer's largest |dmsgf| over N atoms against
+    // binary16's range at loup_store_h2's scale, and the non-finite panel elements, on stderr. Synchronises the device.
+    void debug_w2t_half(int N) const;
     // The layers' own buffers of the systems allocated from now on in one shared arena (tile-shared-layers): a sweep
     // runs one layer and needs nothing of another layer but its output and that output's gradient, which stay
     // buffers of their own, so the arena is as large as the largest layer instead of all of them. Such a system runs
@@ -197,6 +218,8 @@ private:
     // S57 skip-chain fold (sm_120, cc 8.0; LOUP_CHAIN_FOLD=0 disables): see setup_chain_fold in generic.cu.
     void setup_chain_fold(const Bundle& b);
     bool chain_fold_ = false;        // the fold of the allocated system (use_chain_fold)
+    bool w2t_half_ = false;          // LOUP_W2T_HALF: some layer has its weight panels (setup_w2t_half)
+    void setup_w2t_half();
     bool chain_fold_built_ = false;  // setup_chain_fold composed the fold's weights
     bool share_layers_ = false;      // asked for the systems to come (share_layer_buffers)
     bool share_layers_env_ = true;   // LOUP_TILE_SHARE_LAYERS != 0, read at load

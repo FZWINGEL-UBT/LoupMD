@@ -2,7 +2,9 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <cstring>
+#include <cuda_fp16.h>
 #include <cstdlib>
 #include <map>
 #include <memory>
@@ -113,6 +115,15 @@ struct GenericLayer {
     bool jit_conv_on = false;
     float alpha = 1.0f, beta = 0.0f, gate_cs = 1.0f, gate_cg = 1.0f, ro_act_c = 1.0f;
     const GProdKernels* prod = nullptr;
+    // LOUP_W2T_HALF (setup_w2t_half, hgemm2.cu): the library's _h2 kernels of this product (null: none, or the product
+    // runs a plugin's or compiled-at-load kernels); for a layer that runs the path (h2), prod's table with bwd / ro1_*
+    // replaced by them, the W_2[l] panels ([2][C_msg][C_msg] halves at scale 2^w2h_exp[l]) and the output scales
+    const GProdH2Kernels* prod_h2src = nullptr;
+    GProdKernels prod_h2{};
+    void* w2h[4] = {};
+    int w2h_exp[4] = {};
+    float w2h_oscale[4] = {};
+    bool h2 = false;
     // weights (device)
     float4* table = nullptr;
     uint2* packed_table = nullptr;
@@ -946,8 +957,11 @@ void GenericModel::load(const Bundle& b) {
             if (b.meta_int(p + "gate_C") != L->C_msg) throw std::runtime_error("generic bundle: gate width");
             for (int l = 0; l <= L->lmax_x; ++l)
                 L->W_res[l] = upload(W, b.f32(p + "W_res_" + std::to_string(l), {L->C_x, L->lin_cols[l]}));
-            for (int l = 0; l < 4; ++l)
-                L->W_2[l] = upload(W, b.f32(p + "W_2_" + std::to_string(l), {L->C_msg, L->C_msg}));
+            for (int l = 0; l < 4; ++l) {
+                const std::vector<float> w2 = b.f32(p + "W_2_" + std::to_string(l), {L->C_msg, L->C_msg});
+                L->w2h_exp[l] = hgemm2_weight_exponent(w2.data(), (int64_t)w2.size());  // LOUP_W2T_HALF's scale
+                L->W_2[l] = upload(W, w2);
+            }
         }
         std::vector<float> h_wsc0;
         if (L->has_sc) {
@@ -1137,6 +1151,7 @@ void GenericModel::load(const Bundle& b) {
                                          ": this library was not built with this model's kernels, " + no_plugin +
                                          ", and the run-time compiler did not build them (" + why +
                                          "). `loupmd build-kernels MODEL` builds them (needs nvcc)");
+            if (L->prod == find_gprod(sig.c_str())) L->prod_h2src = find_gprod_h2(sig.c_str());
             if (L->prod->lmax_out != L->lmax_out) throw std::runtime_error("generic bundle: product degree mismatch");
             if (L->prod_segw != L->prod->segments_w) throw std::runtime_error("generic bundle: product segments mismatch");
             const int Sp = L->prod_species ? S_ : 1;
@@ -1272,6 +1287,7 @@ void GenericModel::load(const Bundle& b) {
     setup_chain_fold(b);
     setup_lr_fold(b);
     setup_jit();
+    setup_w2t_half();
     if (std::getenv("LOUP_SWEEP_REPLAY")) {
         if (lr_)
             throw std::runtime_error("LOUP_SWEEP_REPLAY: the sweep schedule is not available for long-range models");
@@ -1314,6 +1330,71 @@ void GenericModel::share_layer_buffers(bool on) {
 // sh_perm, pair_sym and the spline grid as constants, kernel_ir.cu), launched instead of the ahead-of-time ones with
 // the same arguments. Any failure (no NVRTC, a compile error, a cubin the driver refuses) keeps the ahead-of-time
 // kernels, with one message on stderr.
+// LOUP_W2T_HALF=1 (hgemm2.cu; generic.hpp): every kind-4 layer whose product has the library's own _h2 kernels, with
+// neither the compact layout nor the long range and C_msg % 64 == 0, gets its W_2[l] panels and the _h2 table; record
+// then stores its dmsgf as two binary16 panels and runs its W_2^T GEMMs through GenericPassInputs::gemm_h2_gate.
+void GenericModel::setup_w2t_half() {
+    w2t_half_ = false;
+    const char* e = std::getenv("LOUP_W2T_HALF");
+    if (!e || e[0] != '1' || lr_) return;
+    for (auto* L : layers_) {
+        const GProdH2Kernels* k = L->prod_h2src;
+        if (L->kind != 4 || !k || L->lin_compact || L->C_msg % 64 != 0 || (L->lmax_out == 0 && !k->ro1_128)) continue;
+        L->prod_h2 = *L->prod;
+        L->prod_h2.bwd = k->bwd;
+        L->prod_h2.ro1_128 = k->ro1_128;
+        L->prod_h2.ro1_256 = k->ro1_256;
+        L->prod_h2.ro1_512 = k->ro1_512;
+        const int64_t n = (int64_t)L->C_msg * L->C_msg;
+        for (int l = 0; l < 4; ++l) {
+            CUDA_CHECK_THROW(cudaMalloc(&L->w2h[l], 2 * n * sizeof(uint16_t)));
+            L->weights.push_back(L->w2h[l]);
+            hgemm2_split(n, L->W_2[l], L->w2h_exp[l], L->w2h[l], nullptr);
+            L->w2h_oscale[l] = std::ldexp(1.0f, -(12 + L->w2h_exp[l]));  // 2^12: loup_store_h2's scale of dmsgf
+        }
+        L->h2 = true;
+        w2t_half_ = true;
+    }
+    CUDA_CHECK_THROW(cudaGetLastError());
+    CUDA_CHECK_THROW(cudaStreamSynchronize(nullptr));
+    if (w2t_half_) hgemm2_init();
+}
+
+void GenericModel::debug_w2t_half(int N) const {
+    CUDA_CHECK_THROW(cudaDeviceSynchronize());
+    for (size_t t = 0; t < layers_.size(); ++t) {
+        const GenericLayer* L = layers_[t];
+        if (!L->h2) continue;
+        for (int l = 0; l < 4; ++l) {
+            const int64_t n = (int64_t)N * dimL(l) * L->C_msg;  // one panel; the second follows it
+            std::vector<__half> p((size_t)(2 * n));
+            CUDA_CHECK_THROW(cudaMemcpy(p.data(), L->dmsgf[l], (size_t)(2 * n) * sizeof(__half), cudaMemcpyDeviceToHost));
+            float mh = 0.0f, mv = 0.0f;
+            int64_t bad = 0;
+            for (int64_t i = 0; i < n; ++i) {
+                const float a = __half2float(p[(size_t)i]), b = __half2float(p[(size_t)(n + i)]);
+                if (!std::isfinite(a) || !std::isfinite(b)) {
+                    ++bad;
+                    continue;
+                }
+                mh = std::max(mh, std::fabs(a));
+                mv = std::max(mv, std::fabs(b));
+            }
+            std::fprintf(stderr,
+                         "loupmd: LOUP_W2T_HALF layer %zu degree %d: max|dmsgf| %.5g (binary16 limit %.5g at 2^12), "
+                         "largest panel element %.5g of 65504, %lld non-finite\n",
+                         t, l, mh / 4096.0f, 65504.0f / 4096.0f, std::max(mh, mv), (long long)bad);
+        }
+    }
+}
+
+bool GenericModel::drop_w2t_half() {
+    if (!w2t_half_) return false;
+    for (auto* L : layers_) L->h2 = false;
+    w2t_half_ = false;
+    return true;
+}
+
 void GenericModel::setup_jit() {
     if (jit::level() == 0) return;
     const bool dbg = [] {
@@ -2154,7 +2235,8 @@ void GenericModel::record(const GenericPassInputs& in) {
                                        L->sc_has[0] ? L->hid : nullptr, L->ro_W1, L->ro_b1, L->ro_W2, L->ro_act_c,
                                        L->dhid, energy, dm, dDp);
             else
-                launch_prod_ro1_fused(L->prod, st, N, Cm, L->msgf, Dp, L->prod_w,
+                launch_prod_ro1_fused(L->h2 && in.gemm_h2_gate ? &L->prod_h2 : L->prod, st, N, Cm, L->msgf, Dp,
+                                      L->prod_w,
                                       L->prod_species ? (int64_t)L->prod_segw * Cm : 0, in.species,
                                       L->sc_has[0] ? L->hid : nullptr, L->ro_W1, L->ro_b1, L->ro_W2, L->ro_act_c,
                                       L->dhid, energy, dm, dDp,
@@ -2380,7 +2462,7 @@ void GenericModel::record(const GenericPassInputs& in) {
                               L->prod_w, L->prod_species ? (int64_t)L->prod_segw * Cm : 0, in.species, L->dy, dm, dDp,
                               fused_readout(t));
             else
-                launch_prod(L->prod, true, st, N, Cm, L->msgf, Dp, L->prod_w,
+                launch_prod(L->h2 && in.gemm_h2_gate ? &L->prod_h2 : L->prod, true, st, N, Cm, L->msgf, Dp, L->prod_w,
                             L->prod_species ? (int64_t)L->prod_segw * Cm : 0, in.species, L->dy, dm, dDp,
                             fused_readout(t));
         }
@@ -2392,13 +2474,15 @@ void GenericModel::record(const GenericPassInputs& in) {
             const float* lins[4];
             for (int l = 0; l < 4; ++l) lins[l] = (vform >> l & 1u) ? L->gout[l] : L->lin[l];
             // dgout_l = dmsgf_l @ W_2[l]^T; degrees whose GEMM takes the gate backward into its epilogue never write
-            // dgout_l, gate_bwd_kernel does the others
+            // dgout_l, gate_bwd_kernel does the others. LOUP_W2T_HALF (L->h2): dmsgf_l holds the product kernel's two
+            // binary16 panels, the two-half tensor-core GEMM takes every degree's gate
+            const bool h2 = L->h2 && in.gemm_h2_gate;
             unsigned fused = 0;
             fork();
             for (int l = 0; l < 4; ++l) {
                 lane(l);
                 bool done = false;
-                if (in.gemm_gate_bwd) {
+                if (in.gemm_gate_bwd || h2) {
                     GateArgs g;
                     g.natoms = N;
                     g.C = Cm;
@@ -2418,7 +2502,12 @@ void GenericModel::record(const GenericPassInputs& in) {
                     g.dl_l = L->dlin[l];
                     g.dD = L->dD;
                     g.vform = vform >> l & 1u;
-                    done = in.gemm_gate_bwd(l, N * dimL(l), Cm, Cm, L->dmsgf[l], L->W_2[l], g);
+                    if (h2) {
+                        in.gemm_h2_gate(l, N * dimL(l), Cm, Cm, L->dmsgf[l], L->w2h[l], L->w2h_oscale[l], g);
+                        done = true;
+                    } else {
+                        done = in.gemm_gate_bwd(l, N * dimL(l), Cm, Cm, L->dmsgf[l], L->W_2[l], g);
+                    }
                 }
                 if (done) fused |= 1u << l;
                 else in.gemm(true, N * dimL(l), Cm, Cm, 1.0f, L->dmsgf[l], Cm, L->W_2[l], Cm, 0.0f, L->dgout[l], Cm);
