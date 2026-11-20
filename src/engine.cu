@@ -7968,15 +7968,17 @@ static int tiled_set_state_impl(LoupHandle* h, int n_atoms, const int* atomic_nu
         const size_t v3 = (size_t)n * 3 * sizeof(double), v1 = (size_t)n * sizeof(double);
         DeviceBufferGuard* vec3[] = {&md->pos, &md->vel, &md->forces, &md->rnd_vel, &md->rnd_pos};
         DeviceBufferGuard* vec1[] = {&md->masses, &md->inv_m, &md->sqrt_inv_m};
-        for (DeviceBufferGuard* g : vec3) CUDA_CHECK(cudaMalloc(&g->p, v3));
-        for (DeviceBufferGuard* g : vec1) CUDA_CHECK(cudaMalloc(&g->p, v1));
-        CUDA_CHECK(cudaMalloc(&md->com.p, 6 * sizeof(double)));
-        CUDA_CHECK(cudaMalloc(&md->target.p, 5 * sizeof(double)));
-        CUDA_CHECK(cudaMalloc(&md->step.p, sizeof(unsigned long long)));
-        CUDA_CHECK(cudaMalloc(&md->int_state.p, kIntStateSlots * sizeof(double)));
-        CUDA_CHECK(cudaMalloc(&md->int_work.p, kIntWorkSlots * sizeof(double)));
-        CUDA_CHECK(cudaMalloc(&md->disp.p, 2 * sizeof(unsigned int)));
-        CUDA_CHECK(cudaMalloc(&md->ke.p, sizeof(double)));
+        // through device_malloc, as every buffer that scales with the system: under WSL 2 a plain cudaMalloc past
+        // the free memory pages the card out instead of failing (LAMMPS_TILED_PLAN.md LT0)
+        for (DeviceBufferGuard* g : vec3) CUDA_CHECK(loup::device_malloc(&g->p, v3));
+        for (DeviceBufferGuard* g : vec1) CUDA_CHECK(loup::device_malloc(&g->p, v1));
+        CUDA_CHECK(loup::device_malloc(&md->com.p, 6 * sizeof(double)));
+        CUDA_CHECK(loup::device_malloc(&md->target.p, 5 * sizeof(double)));
+        CUDA_CHECK(loup::device_malloc(&md->step.p, sizeof(unsigned long long)));
+        CUDA_CHECK(loup::device_malloc(&md->int_state.p, kIntStateSlots * sizeof(double)));
+        CUDA_CHECK(loup::device_malloc(&md->int_work.p, kIntWorkSlots * sizeof(double)));
+        CUDA_CHECK(loup::device_malloc(&md->disp.p, 2 * sizeof(unsigned int)));
+        CUDA_CHECK(loup::device_malloc(&md->ke.p, sizeof(double)));
         md->n = n;
     }
     std::vector<double> m((size_t)n), im((size_t)n), sim((size_t)n), v(velocities, velocities + (size_t)n * 3);
@@ -8473,6 +8475,15 @@ int loup_debug_domain_edges(LoupHandle* h, const double* positions, const double
     return guarded(h, "loup_debug_domain_edges", [&] {
         return domain_edges_impl(h, positions, cell, capacity, out_receivers, out_senders, out_shifts, out_count,
                                  out_ghost_used);
+    });
+}
+
+int loup_evaluate_tiled(LoupHandle* h, int n_atoms, const int* atomic_numbers, const double* positions,
+                        const double* cell, int receivers, double skin, double* out_energy_ev, double* out_forces,
+                        double* out_stress, long long* out_tiles) {
+    return guarded(h, "loup_evaluate_tiled", [&] {
+        return evaluate_tiled_impl(h, n_atoms, atomic_numbers, positions, cell, receivers, skin, out_energy_ev,
+                                   out_forces, out_stress, out_tiles);
     });
 }
 

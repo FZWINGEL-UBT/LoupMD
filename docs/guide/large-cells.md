@@ -116,6 +116,26 @@ memory give other limits: the plan decides from what it measures on the machine.
 - **Restarts:** a restart records the mode, and a resume uses the same one. A whole-cell restart cannot be read by
   the tiled engine, and a tiled restart cannot be read by the whole-cell engine.
 
+## In LAMMPS
+
+The LAMMPS package (`lammps/README.md`, "Cells larger than the GPU") runs the same tiled mode, and `capacity auto` is
+its default as well. Its pair style takes the keywords `capacity auto|whole|tiled|wavefront`, `receivers N` and
+`memory F`, the counterparts of `capacity=`, `receivers=` and `memory_fraction=`:
+
+```
+pair_style loupmd capacity auto memory 0.9
+```
+
+- `pair_style loupmd` and `pair_style loupmd/kk` make one tiled call per step, with LAMMPS's integrator and fixes,
+  barostats included: a box that changes in every step plans its tiles and builds their lists in every step.
+- `run_style loupmd` runs the integrators listed above as the engine's tiled MD, with `fix setforce 0 0 0` as fixed
+  atoms and `fix momentum` as `fixcm`. A barostat is refused there, as here.
+- The log says at the first step whether the cell runs whole or in tiles, and why; at the end of a run it counts the
+  tiled calls, the tiled MD steps and the list builds.
+- Speed (RTX 5060 Ti, MACE-MH-1 on 50,820 and 98,415 atoms of SrTiO3, NVE): the pair style and the run style take
+  the Python package's step time to within 2%. In a tiled run each output step costs about one more force call.
+  The README has the table.
+
 ## Speed
 
 From the table above, per atom and force call (RTX 5060 Ti, OMAT-0 medium): 1.6 us for the whole cell, 1.8 us in

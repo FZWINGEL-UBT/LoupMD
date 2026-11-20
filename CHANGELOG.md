@@ -28,6 +28,18 @@
   engine's own step time (measured on an RTX 5060 Ti: within 1% of the Python package's loop; LAMMPS integrating
   itself takes 1.04 to 1.27 times as long with `fix nvt` and 1.16 to 1.65 times with `fix npt`). A fix the engine
   has no integrator for is refused by name.
+- LAMMPS, cells larger than the GPU: the three styles run them in tiles, as the Python package does. The pair
+  styles take `capacity auto|whole|tiled|wavefront`, `receivers N` and `memory F`; `capacity auto`, the default,
+  runs a cell whole when it fits and else in tiles, with the tile lists or the layer state in host memory and the
+  wavefront schedule where the plan needs them. `run_style loupmd` then runs the engine's tiled MD (`fix nve`,
+  `fix langevin`, `fix temp/csvr`, `fix temp/berendsen`, `fix nvt`, with `fix setforce 0 0 0` and `fix momentum`).
+  The log says at the first step which mode runs and why. Measured on an RTX 5060 Ti: MACE-MH-1 on 50,820 and
+  98,415 atoms of SrTiO3, which ran out of memory under LAMMPS before, now take 418 and 830 ms per step with the
+  pair style, 425 and 845 with `loupmd/kk`, and 423 and 838 with the run style (the Python package: 420 and 836). The cell stays fixed in tiled
+  MD: a barostat under `run_style loupmd` is refused in tiled mode; LAMMPS's own `fix npt` runs with the pair style
+  but builds the tile lists in every step.
+- The C interface gains `loup_evaluate_tiled`, the tiled force call. It is 0.0.1's `loup_debug_evaluate_tiled`
+  under its public name; the old name stays.
 - An evaluation between two blocks of a run (`loup_evaluate` after `loup_run`, as at every output step) no longer
   makes the engine capture its step graphs again: output every 10 steps cost 0.92 ms per step on a 320-atom cell
   and costs 0.73 now.

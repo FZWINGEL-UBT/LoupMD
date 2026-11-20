@@ -379,7 +379,7 @@ int loup_plan_memory(LoupHandle* h, int n_atoms, double edges_per_atom, LoupMemo
 // forces it (refused for models of other layer counts); under AUTO or TILED it is on from 2^20 atoms when the plan
 // has 12 or more layers of tiles along the first cell axis. The plan's tiled_global_bytes then counts the pool, and
 // its mode stays TILED. The environment variable LOUP_TILE_WAVEFRONT=1|0 overrides both (tests).
-// loup_get_execution: how the last tiled call (loup_debug_evaluate_tiled) ran; mode is LOUP_EXEC_WAVEFRONT when it
+// loup_get_execution: how the last tiled call (loup_evaluate_tiled or loup_tiled_run) ran; mode is LOUP_EXEC_WAVEFRONT when it
 // ran the wavefront, else LOUP_EXEC_TILED. budget_bytes is the device memory
 // free when it began plus the handle's own buffers; peak_bytes that budget less the least memory free during it.
 // A tiled call keeps the plan, the tile lists and the whole-system state of the previous one while the atomic
@@ -400,6 +400,27 @@ int loup_set_execution(LoupHandle* h, int mode, int receivers, double memory_fra
 int loup_plan_execution(LoupHandle* h, int n_atoms, const int* atomic_numbers, const double* positions,
                         const double* cell, double skin, LoupMemoryPlan* out);
 int loup_get_execution(LoupHandle* h, LoupExecution* out);
+
+// The tiled call (the capacity mode's force call; LAMMPS_TILED_PLAN.md LD2): energy (eV), forces [n_atoms, 3]
+// (eV/A) and stress [3, 3] (eV/A^3, the virial over the cell's volume, sign as loup_evaluate's) of the periodic
+// system `positions` [n_atoms, 3] (A) in `cell` (rows are the lattice vectors), evaluated tile by tile with the
+// per-layer sweeps, at most `receivers` local atoms per tile. out_stress NULL skips the virial (the cheaper call);
+// out_tiles (optional) receives the tile count. Bundles of the generic path without long range and without a
+// dispersion term, of two or more layers (LOUP_EXEC_WAVEFRONT: exactly two).
+// receivers: pass the cap of loup_plan_execution (LoupMemoryPlan.receivers) or a cap of the caller's. With 0 or less
+// the call keeps the cap of the previous tiled call on the same system, but on a changed one (another cell, skin,
+// atom count or atomic numbers) plans again, which sets up a probe tile and drops the kept tile lists and state.
+// What stays between calls: the tile plan, the tile lists and the whole-system layer state are kept while the
+// atomic numbers, the cell (bit for bit), the skin and the cap are the same and no atom has moved more than skin/2
+// since the lists were built, measured as the plain Cartesian difference of the positions passed (no minimum image:
+// pass unwrapped positions, or atoms that cross a face count as moved by a cell vector and the lists are built
+// again). The tiled MD calls below share that state, so an evaluation between two blocks of loup_tiled_run on the
+// same positions builds no lists. loup_get_execution afterwards: the cap, tiles, lists kept and list builds.
+// The handle then holds the last tile's domain: loup_evaluate, loup_run and the other whole-system calls refuse
+// until loup_set_system. loup_set_system drops the kept tiled state.
+int loup_evaluate_tiled(LoupHandle* h, int n_atoms, const int* atomic_numbers, const double* positions,
+                        const double* cell, int receivers, double skin, double* out_energy_ev, double* out_forces,
+                        double* out_stress, long long* out_tiles);
 
 // The tile planner of the tiled mode, on the host: no handle and no GPU. loup_tile_plan divides `n_atoms` atoms at
 // `positions` [n_atoms, 3] in `cell` (rows are the lattice vectors) into tiles of at most `receivers` local atoms
@@ -451,10 +472,7 @@ int loup_debug_evaluate_domain(LoupHandle* h, const double* positions, const dou
 int loup_debug_domain_edges(LoupHandle* h, const double* positions, const double* cell, long long capacity,
                             int* out_receivers, int* out_senders, double* out_shifts, long long* out_count,
                             unsigned char* out_ghost_used);
-// Testing only (plan task S5-T03, until S5-T12 makes it a mode of the public calls): energy, forces [n_atoms, 3]
-// and stress of the periodic system `positions` in `cell`, evaluated tile by tile with the per-layer sweeps, at most
-// `receivers` local atoms per tile (0 or less: the cap of loup_plan_execution). Bundles of the generic path without long range; the handle afterwards holds
-// the last tile's domain (call loup_set_system for an ordinary system again). *out_tiles (optional): the tiles.
+// The earlier name of loup_evaluate_tiled (plan task S5-T03), kept for callers of 0.0.1: the same call.
 int loup_debug_evaluate_tiled(LoupHandle* h, int n_atoms, const int* atomic_numbers, const double* positions,
                               const double* cell, int receivers, double skin, double* out_energy_ev, double* out_forces,
                               double* out_stress, long long* out_tiles);
@@ -463,7 +481,7 @@ int loup_debug_evaluate_tiled(LoupHandle* h, int n_atoms, const int* atomic_numb
 // forces kept on the GPU between steps, so a step costs one tiled force call and a few small kernels. Fixed cell.
 // loup_tiled_set_state: the system (n_atoms, atomic_numbers, masses in amu, positions and velocities in A and
 // A/(ASE time unit) [n_atoms, 3], cell rows), optional `fixed` flags [n_atoms] (velocities of fixed atoms are
-// zeroed), the receiver cap (0: the plan's) and skin as loup_debug_evaluate_tiled takes them, the noise step counter
+// zeroed), the receiver cap (pass the plan's; 0 as loup_evaluate_tiled takes it) and skin, the noise step counter
 // of the stochastic integrators, and optionally the integrator state block [64] with its kind (a restart; NULL: zero).
 // With positions and velocities both NULL on a handle that holds n_atoms atoms, the state stays and only the step
 // count of the thermo rows starts anew.

@@ -2515,3 +2515,105 @@ legacy stream) remain in other entry points: 24 calls in `src/engine.cu`, some o
 which holds the lock. One of them in one thread would invalidate a capture in the other. The package frees engines in
 other threads but drives them from one.
 
+### 6.40 The tiled mode in LAMMPS (20 November 2026, PLAN.md O42)
+
+The owner: "Ok can we now work on the tiled mode in lammps? I want the same functionalities as in loupmd engine".
+`LAMMPS_TILED_PLAN.md` stages LT0 to LT5; LT6 waits for the owner (below). RTX 5060 Ti in WSL 2 only; library
+`4684594842169024` (§6.39's `84d92d872ef41860` plus LT0).
+
+**What changed.**
+
+- *Engine (LT0).* `loup_evaluate_tiled` is the tiled call under a public name (`include/loupmd.h`);
+  `loup_debug_evaluate_tiled` stays as 0.0.1's name. The package's `evaluate_tiled` calls the new name when the
+  library has it. Tiled MD's state arrays are allocated through `loup::device_malloc`, which refuses a request beyond
+  NVML's free memory where WSL 2 would page the card out.
+- *Pair style (LT1).* The keywords `capacity auto|whole|tiled|wavefront` (default `auto`), `receivers N` and
+  `memory F` go to `loup_set_execution`. At each send of the system, any capacity but `whole` plans
+  (`loup_plan_execution` on the unwrapped positions). A TILED plan makes every force call `loup_evaluate_tiled` with
+  the plan's cap. After a box change the call keeps the cap; if it fails there, the pair style plans once more. The
+  log has the plan's line at the first step, a warning after three steps in a row with a changed box, and a run-end
+  line (tiled calls, tiled MD steps, list builds). Forced tiles with MACE-POLAR-1 and the wavefront with a model not
+  of two layers are refused with the reason.
+- *`loupmd/kk` (LT2).* In tiled mode it computes on LAMMPS's host arrays and syncs the forces back to the device
+  at once. VerletKokkos marks the forces as modified in the pair style's execution space after `compute()`, and
+  Kokkos aborts on a host copy marked modified ("Concurrent modification of host and device views in DualView
+  atom:f"): the first test run's abort.
+- *Run style (LT3).* On a tiled pair style it drives `loup_tiled_set_state`, `loup_tiled_run` and
+  `loup_tiled_get_state` with the pair style's cap and skin. The atoms held by `fix setforce 0 0 0` become the tiled
+  state's fixed atoms. The state is kept across runs on the pair style's serial and the held atoms. A barostat is
+  refused.
+
+**Tests.**
+
+- `tests/gpu/test_lammps_tiled.py` (new; 2 fast, 18 full; `LOUPMD_LMP`): 20 passed.
+  - Tiled against whole on 5,760 atoms, OMAT-0 medium in 12 tiles of 600, no hybrid GEMMs: dE at most 3.1e-9
+    eV/atom, dF at most 3.2e-6 eV/Å, dP at most 1.4e-3 bar. This holds for the plain and `kk` styles and for the
+    wavefront, host-list and host-state forms.
+  - The run style's tiled MD against the engine's own tiled MD from Python (NVE, NVT, Langevin, Langevin at zero
+    temperature, Berendsen) meets the bounds of the whole-mode tests.
+  - Output every 10 steps and two `run` commands keep the trajectory, and build as many lists as the engine's own
+    run (3 in 40 steps).
+  - NVE drifts 0.0005 meV/atom/ps over 500 steps.
+  - Sorting every step changes nothing: 7 list builds in 200 steps either way, which is LAMMPS's own 6 rebuilds
+    under the same half-skin rule plus the first.
+- `tests/gpu/test_tiled_md.py` gains two full tests:
+  - an evaluation between two tiled-run blocks keeps the lists and the trajectory;
+  - a passed cap survives a cell change, and 0 plans again.
+- The other suites:
+
+  | suite | result |
+  |---|---|
+  | LAMMPS whole files | 41 passed |
+  | fast tier | 381 passed, 50 skipped |
+  | full tier | 55 passed, 18 skipped (the LAMMPS files without `LOUPMD_LMP`) |
+  | `tests/cpu` | 496 passed, 5 skipped |
+
+The new file's first run had 7 failures. One was the `kk` abort. The other six were faults in the tests:
+
+- a 1e-6 eV/Å bound between two processes' whole calls, against 1.1e-6 from the GEMM plan picks;
+- list-build bounds that ignored the trajectory itself;
+- a warning line inside a thermo block, which the parser now skips;
+- a malformed `thermo_style` in the per-atom refusal case.
+
+**Measurements.** All runs are 100 warm-up plus 200 measured NVE steps from rest, with fresh GEMM plans per run and
+`capacity auto`. The cells are MH-1 on the benchmark's SrTiO3 structures. Figures are ms per step.
+
+| atoms | tiles | own loop | pair style | run style | `loupmd/kk` |
+|---:|---|---:|---:|---:|---:|
+| 50,820 | 8 of at most 12,288 | 420.4 | 417.2, 417.8 | 424.5, 422.0 | 425.0 |
+| 98,415 | 27 of at most 8,192 | 836.4 | 830.4 | 838.1 | 844.7 |
+
+`loupmd/kk` ran with `-pk kokkos newton on neigh half`, since the input sets `newton on` and LAMMPS-Kokkos's default
+full lists refuse it. The pair style and `loupmd/kk` are within 0.7% and 1.1% of the own loop; the run style is
+within 0.7% in these runs, which hold two outputs per block.
+
+- *Own loop.* `lm.Simulation`, as the benchmark's `run_md.py` runs it, on the same data files and library.
+- *The benchmark's harness.* `local_run/lmp_loupmd.sh`, 3 trials, in `~/loup_bench_runs/5060ti-20261120-v3-lt`,
+  where both cells ran out of memory whole this morning:
+
+  | atoms | pair style | run style |
+  |---:|---|---|
+  | 50,820 | 8.21 µs/atom (417.2 ms) | 8.27 µs/atom (420.5 ms) |
+  | 98,415 | 8.52 µs/atom (838.3 ms) | 8.67 µs/atom (853.4 ms; trials 8.56 to 8.69) |
+
+- *OMAT-0 medium on 320,000 atoms* (8 tiles of 65,536; 10 + 40 steps): 537.2 ms per step under the run style, 512.9
+  in the own loop.
+- *Output steps.* The run style's extra over the pair style comes from the output steps. In tiled mode an output's
+  evaluation is a full tiled call with the virial, since the engine's tiled MD forms no stress: 0.39 s on 50,820
+  atoms. Thermo every 10 steps took 458.2 ms per step, against 423.3 every 200 (18 more outputs). A measured block
+  of 200 steps holds two outputs (steps 200 and 300), which adds about 1%; the block of 40 at 320,000 atoms adds
+  about 5%.
+- *The probe.* `loup_plan_execution` took 26 to 122 ms (OMAT-0 medium and MH-1 at 5,000 and 53,240 atoms; the
+  first call in a process is the slowest). `loup_set_system` with the first evaluation took 0.13 to 2.3 s.
+  `capacity auto` costs the probe once per send of the system.
+- *`fix npt` through the pair style, tiled* (10 + 30 steps, two runs each, alternating): 490.3 and 491.2 ms. The
+  reference is `fix nve` with the virial in every step (`fix ave/time 1 1 1 c_thermo_press`): 427.0 and 420.8 ms.
+  The difference is +67 ms, or 16%; every call builds the tile lists (30 in 30 steps). By the plan's rule (LT6 (a)
+  only above about 10%), LT6 (a) qualifies. It waits for the owner.
+- *NVML peaks.* About 1.05 GiB of the card is held by other programs. The peaks were 6.9 GiB at 50,820 atoms and 6.4
+  GiB at 98,415; the plan counts 5.6 and 5.1 GB for the tiled state and workspace. OMAT-0 at 320,000 atoms peaked at
+  10.8 GiB, against 9.5 GB in the plan.
+
+**Not covered.** The `sm_89` workstations. A barostat in tiled MD (LT6 (a)). The whole-to-tiled fallback when a
+list outgrows its buffers in a run (LT6 (b)). An output step without the extra tiled call: the last MD step of a
+block would have to form the virial.

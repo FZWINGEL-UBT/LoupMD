@@ -9,7 +9,7 @@ import numpy as np
 import pytest
 from gpu_support import find_model, maxwell_velocities, srtio3, unfolded
 
-from loupmd import LoupEngine, capacity, ensure_loup_bundle
+from loupmd import LoupEngine, _core, capacity, ensure_loup_bundle
 from loupmd.config import CapacityConfig
 
 SKIN = 0.5
@@ -60,6 +60,83 @@ def test_kept_lists_give_the_whole_system_result_until_an_atom_moves_half_the_sk
         assert abs(e - e0) / n <= 1e-7
         assert np.abs(f - f0).max() <= 1e-5
         assert np.abs(s - s0).max() <= 1e-8
+
+
+def _tiled_md_engine(bundle, at, cap):
+    eng = LoupEngine(bundle)
+    eng.set_execution(_core.LOUP_EXEC_TILED, cap, 0.9)
+    eng.tiled_set_state(at.numbers, at.get_masses(), at.positions, at.get_velocities(), at.cell.array, receivers=cap,
+                        skin=SKIN)
+    return eng
+
+
+@pytest.mark.full
+def test_an_output_evaluation_between_tiled_run_blocks_keeps_the_lists_and_the_trajectory():
+    """LAMMPS's run style in tiled mode (LAMMPS_TILED_PLAN.md LD6) evaluates with stress at an output step between
+    two blocks of loup_tiled_run (loup_evaluate_tiled on the device's positions, with the run's cap) and sends the
+    state again at the next run command (loup_tiled_set_state, same positions): neither builds tile lists, the
+    evaluation gives the run's own energy and forces, and the trajectory is that of the unbroken run."""
+    at = srtio3(10)
+    at.set_velocities(maxwell_velocities(at, 300.0, seed=11))
+    bundle, cap, n = _bundle(), 2000, len(at)
+    csvr = _core.integrator(_core.LOUP_CSVR, 1.0, temp_k=300.0, tau_t_fs=50.0, seed=5)
+    eng = _tiled_md_engine(bundle, at, cap)
+    try:
+        eng.tiled_run(20, csvr)
+        x_ref = eng.tiled_get_state()[0]
+        builds_ref = eng.last_execution().list_builds
+    finally:
+        del eng
+        gc.collect()
+    eng = _tiled_md_engine(bundle, at, cap)
+    try:
+        eng.tiled_run(10, csvr)
+        builds = eng.last_execution().list_builds
+        pos, vel, frc, e_md, step, ist, kind = eng.tiled_get_state()
+        e, f, s, tiles = eng.evaluate_tiled(at.numbers, pos, at.cell.array, cap, skin=SKIN)
+        out = eng.last_execution()
+        eng.tiled_set_state(at.numbers, at.get_masses(), pos, vel, at.cell.array, receivers=cap, skin=SKIN,
+                            noise_step=step, int_state=ist, int_state_kind=kind)
+        eng.tiled_run(10, csvr)
+        x = eng.tiled_get_state()[0]
+        after = eng.last_execution()
+    finally:
+        del eng
+        gc.collect()
+    dx = np.abs(x - x_ref).max()
+    print(f"tiled CSVR, output evaluation and state sent again after 10 of 20 steps: {tiles} tiles, dx {dx:.2e} A, "
+          f"list builds {after.list_builds} (unbroken {builds_ref})")
+    assert tiles >= 3 and s is not None and out.receivers == cap
+    assert out.lists_kept and out.list_builds == builds
+    assert abs(e - e_md) / n <= 1e-7 and np.abs(f - frc).max() <= 1e-5
+    assert after.list_builds == builds_ref
+    assert dx <= 1e-6
+
+
+@pytest.mark.full
+def test_a_tiled_call_after_a_cell_change_keeps_a_passed_cap_and_plans_on_zero():
+    """receivers 0 takes the kept cap on the same system but plans again after a cell change (LAMMPS_TILED_PLAN.md
+    LD3), so a caller whose cell changes passes its cap."""
+    at = srtio3(10)
+    bundle, cap = _bundle(), 2000
+    z, cell = at.numbers, at.cell.array
+    eng = LoupEngine(bundle)
+    try:
+        eng.evaluate_tiled(z, at.positions, cell, cap, skin=SKIN)
+        first = eng.last_execution()
+        eng.evaluate_tiled(z, at.positions * 1.002, cell * 1.002, cap, skin=SKIN)
+        passed = eng.last_execution()
+        eng.evaluate_tiled(z, at.positions * 1.004, cell * 1.004, 0, skin=SKIN)
+        planned = eng.last_execution()
+        eng.evaluate_tiled(z, at.positions * 1.004 + 0.01, cell * 1.004, 0, skin=SKIN)
+        kept = eng.last_execution()
+    finally:
+        del eng
+        gc.collect()
+    print(f"caps: first {first.receivers}, after a cell change passed {passed.receivers}, zero {planned.receivers}")
+    assert first.receivers == passed.receivers == cap and passed.tiles >= 3 and not passed.lists_kept
+    assert planned.receivers >= 4096 and not planned.lists_kept
+    assert kept.lists_kept and kept.receivers == planned.receivers
 
 
 @pytest.mark.full

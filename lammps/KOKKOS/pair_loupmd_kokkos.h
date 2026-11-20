@@ -29,7 +29,9 @@ namespace LAMMPS_NS {
 // pair_style loupmd with the atoms kept on the GPU: positions are read from, and forces added to, LAMMPS's Kokkos
 // device views by the engine (loup_compute_device), behind the Kokkos execution space's stream. A step waits on the
 // host only for the engine's neighbour-list decision, and for the energy / virial on the steps that need them.
-// With a host execution space (loupmd/kk/host, or a Kokkos build without CUDA) it runs pair_style loupmd's compute.
+// With a host execution space (loupmd/kk/host, or a Kokkos build without CUDA), and in tiled mode (a cell that does
+// not fit the card whole, LAMMPS_TILED_PLAN.md LD5), it runs pair_style loupmd's compute on the host arrays: a tiled
+// step takes hundreds of milliseconds, the arrays' transfers a few.
 template<class DeviceType>
 class PairLoupMDKokkos : public PairLoupMD {
  public:
@@ -42,6 +44,7 @@ class PairLoupMDKokkos : public PairLoupMD {
 
  protected:
   int default_device() override;
+  void sync_host_positions() override;
 
   Kokkos::View<double*[3], Kokkos::LayoutRight, DeviceType> d_xu;    // unwrapped positions of the local rows
   Kokkos::View<int*, DeviceType> d_id;                               // atom ID - 1 of each local row

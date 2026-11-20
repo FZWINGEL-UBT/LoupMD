@@ -208,7 +208,8 @@ struct PeekMomentum : FixMomentum {
 
 IntegrateLoupMD::IntegrateLoupMD(LAMMPS *lmp, int narg, char **arg) :
     Integrate(lmp, narg, arg), from_fixes(0), move_groupbit(1), pair(nullptr), triclinic(0), varcell(false),
-    box_moved(false), fix_com(0), nfixed(0), snap_serial(-1), engine_current(false)
+    box_moved(false), fix_com(0), nfixed(0), snap_serial(-1), engine_current(false), tiled(false),
+    tiled_md_serial(-1)
 {
   memset(snap_cell, 0, sizeof(snap_cell));
   if (narg == 0) {
@@ -254,6 +255,13 @@ void IntegrateLoupMD::init()
 
   triclinic = domain->triclinic;
   if (from_fixes) read_fixes();
+  // capacity tiled or wavefront: the mode is known before the setup, so a barostat is refused here already
+  const int cap_mode = pair->capacity_mode();
+  if (varcell && (cap_mode == LOUP_EXEC_TILED || cap_mode == LOUP_EXEC_WAVEFRONT))
+    error->all(FLERR, "run_style loupmd: pair_style loupmd capacity {} runs the engine's tiled MD, which keeps the "
+                      "cell fixed: a barostat cannot be taken over there. Use the default run style with pair_style "
+                      "loupmd, which plans the tiles again in every step, or capacity whole / auto with a cell that "
+                      "fits the card", cap_mode == LOUP_EXEC_TILED ? "tiled" : "wavefront");
 }
 
 /* ----------------------------------------------------------------------
@@ -529,9 +537,37 @@ void IntegrateLoupMD::checks()
 void IntegrateLoupMD::describe()
 {
   for (const auto &line : lines) utils::print(screen, "  Ensemble      : {}\n", line);
-  utils::print(screen, "  Integrator    : the LoupMD engine's{}\n",
+  utils::print(screen, "  Integrator    : the LoupMD engine's{}{}\n", tiled ? " tiled MD" : "",
                fix_com ? "; centre of mass kept at rest (3N - 3 degrees of freedom)" : "");
+  if (tiled) {
+    LoupExecution ex{};
+    if (loup_get_execution(pair->engine(), &ex) == 0)
+      utils::print(screen, "  Capacity      : tiled{}, {} tiles of at most {} atoms{}\n",
+                   ex.mode == LOUP_EXEC_WAVEFRONT ? " (wavefront schedule)" : "", ex.tiles, ex.receivers,
+                   ex.host_state ? ", tile lists and layer state in host memory"
+                   : ex.host_lists ? ", tile lists in host memory" : "");
+  }
   if (nfixed) utils::print(screen, "  Held in place : {} atoms\n", nfixed);
+}
+
+/* ----------------------------------------------------------------------
+   The pair style plans whole or tiled when it sends the system, in the setup's force call: only then is the mode
+   known (LAMMPS_TILED_PLAN.md LD6). The engine's tiled MD runs NVE, Langevin, CSVR, the Nose-Hoover chain and
+   Berendsen NVT on a fixed cell.
+------------------------------------------------------------------------- */
+
+void IntegrateLoupMD::check_tiled()
+{
+  tiled = pair->tiled();
+  if (!tiled) return;
+  if (varcell)
+    error->all(FLERR, "run_style loupmd: the cell does not fit the card whole, so it runs in tiles, and the engine's "
+                      "tiled MD keeps the cell fixed: a barostat cannot be taken over there. Use the default run "
+                      "style with pair_style loupmd, which plans the tiles again in every step, or a smaller cell");
+  if (ens.kind != LOUP_NVE && ens.kind != LOUP_LANGEVIN && ens.kind != LOUP_CSVR && ens.kind != LOUP_NHC &&
+      ens.kind != LOUP_BERENDSEN_NVT)
+    error->all(FLERR, "run_style loupmd: the engine's tiled MD has no integrator of kind {} (it runs nve, langevin, "
+                      "temp/csvr, nvt and temp/berendsen). {}", ens.kind, kVerlet);
 }
 
 /* ---------------------------------------------------------------------- */
@@ -577,6 +613,7 @@ void IntegrateLoupMD::setup(int flag)
 
   force->setup();
   forces(update->ntimestep);
+  check_tiled();
   modify->setup_pre_reverse(eflag, vflag);
   if (force->newton) comm->reverse_comm();
 
@@ -617,6 +654,7 @@ void IntegrateLoupMD::setup_minimal(int flag)
   }
 
   forces(update->ntimestep);
+  check_tiled();
   modify->setup_pre_reverse(eflag, vflag);
   if (force->newton) comm->reverse_comm();
 
@@ -679,8 +717,14 @@ void IntegrateLoupMD::run(int n)
     timer->stamp();
     it.temp_k = ens.t_start + rate * (double) (update->ntimestep - update->beginstep);
     LoupMDStats stats;
-    if (loup_run(engine, &it, (int) nblock, &stats) != 0)
+    if (tiled) {
+      // the tiled MD (thermo_every 0: LAMMPS writes its own thermo at the output steps)
+      if (loup_tiled_run(engine, &it, (int) nblock, &stats, nullptr, 0, nullptr, nullptr) != 0)
+        error->one(FLERR, "run_style loupmd: the engine's tiled run failed: {}", loup_last_error(engine));
+      pair->note_tiled_md_steps(nblock);
+    } else if (loup_run(engine, &it, (int) nblock, &stats) != 0) {
       error->one(FLERR, "run_style loupmd: the engine's run failed: {}", loup_last_error(engine));
+    }
     timer->stamp(Timer::PAIR);
 
     update->ntimestep += nblock;
@@ -704,6 +748,7 @@ void IntegrateLoupMD::run(int n)
   gather(snap_x, snap_v, snap_cell);
   snap_key = ensemble_key();
   snap_serial = pair->system_serial();
+  snap_fixed = fixed;
   engine_current = true;
 }
 
@@ -832,6 +877,31 @@ void IntegrateLoupMD::push_state()
   bool unchanged = engine_current && pair->system_serial() == snap_serial && ensemble_key() == snap_key &&
       vbuf == snap_v && xbuf.size() == snap_x.size() && memcmp(cell, snap_cell, sizeof(snap_cell)) == 0;
   for (size_t k = 0; unchanged && k < xbuf.size(); k++) unchanged = fabs(xbuf[k] - snap_x[k]) <= 1.0e-9;
+
+  if (tiled) {
+    // The engine's tiled MD (LD6): the held atoms are part of its state. A new state continues the noise stream of
+    // the system the engine holds (its counter), and the thermostat's variables start from zero.
+    unchanged = unchanged && tiled_md_serial == pair->system_serial() && fixed == snap_fixed;
+    if (!unchanged) {
+      unsigned long long noise = 0;
+      if (tiled_md_serial == pair->system_serial() &&
+          loup_tiled_get_state(engine, nullptr, nullptr, nullptr, nullptr, &noise, nullptr, nullptr) != 0)
+        error->one(FLERR, "run_style loupmd: could not read the engine's tiled state: {}", loup_last_error(engine));
+      fixed_flags.assign(fixed.begin(), fixed.end());
+      const std::vector<int> &z = pair->sent_numbers();
+      const std::vector<double> &m = pair->sent_masses();
+      if ((int) z.size() != n)
+        error->one(FLERR, "run_style loupmd: the pair style holds {} atoms, LAMMPS {}", z.size(), n);
+      if (loup_tiled_set_state(engine, n, z.data(), m.data(), xbuf.data(), vbuf.data(), cell,
+                               nfixed ? fixed_flags.data() : nullptr, pair->cap(), pair->sent_skin(), noise, nullptr,
+                               -1) != 0)
+        error->one(FLERR, "run_style loupmd: the engine refused the tiled state: {}", loup_last_error(engine));
+      tiled_md_serial = pair->system_serial();
+    }
+    engine_current = false;
+    return;
+  }
+
   if (!unchanged && loup_set_state(engine, xbuf.data(), vbuf.data(), cell) != 0)
     error->one(FLERR, "run_style loupmd: the engine refused the state: {}", loup_last_error(engine));
   if (loup_set_fixed_atoms(engine, nfixed ? fixed.data() : nullptr) != 0)
@@ -889,8 +959,12 @@ void IntegrateLoupMD::pull_state()
 
   xbuf.resize(3 * (size_t) n);
   vbuf.resize(3 * (size_t) n);
-  if (loup_get_state(engine, xbuf.data(), vbuf.data(), nullptr, nullptr) != 0)
+  if (tiled) {
+    if (loup_tiled_get_state(engine, xbuf.data(), vbuf.data(), nullptr, nullptr, nullptr, nullptr, nullptr) != 0)
+      error->one(FLERR, "run_style loupmd: could not read the engine's tiled state: {}", loup_last_error(engine));
+  } else if (loup_get_state(engine, xbuf.data(), vbuf.data(), nullptr, nullptr) != 0) {
     error->one(FLERR, "run_style loupmd: could not read the engine's state: {}", loup_last_error(engine));
+  }
 
   // unwrapped positions with zero image flags, wrapped into the box by LAMMPS (which sets the flags). An atom held
   // in place keeps the position, the image flags and the velocity LAMMPS has for it.

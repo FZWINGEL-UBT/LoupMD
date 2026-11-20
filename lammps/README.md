@@ -8,6 +8,8 @@ MACE models in LAMMPS through the LoupMD engine, on one CUDA GPU. The package `M
 | `pair_style loupmd/kk` | LAMMPS-Kokkos integrates; positions and forces stay on the GPU | Kokkos CUDA builds that also run other Kokkos styles |
 | `run_style loupmd` | the engine integrates between LAMMPS's output steps, in the ensemble of the input's `fix nve`, `nvt`, `npt`, `langevin`, ... | the engine's own step time for NVE, NVT and NPT; a fix the engine has no integrator for is refused by name |
 
+All three run cells larger than the GPU in tiles, as the engine does (see Cells larger than the GPU).
+
 Design and measurements: `LAMMPS_KOKKOS_PLAN.md` in the repository root. The plan for the options of Symmetrix's
 pair styles (run modes, several processes, per-atom energies, open boundaries): `LAMMPS_SYMMETRIX_PARITY_PLAN.md`.
 
@@ -51,10 +53,16 @@ For `loupmd/kk`, build LAMMPS with `-D PKG_KOKKOS=ON -D Kokkos_ENABLE_CUDA=ON -D
 
 ```
 pair_style loupmd [device N] [skin S] [ghost yes|no] [ahead yes|no]
+                  [capacity auto|whole|tiled|wavefront] [receivers N] [memory F]
 pair_coeff * * model.loup El1 El2 ...
 ```
 
 - `device N`: the CUDA device (default 0; `loupmd/kk`: the device Kokkos uses).
+- `capacity`: how the engine evaluates the cell (see Cells larger than the GPU). `auto` (default): the whole cell
+  when it fits the card, else in tiles. `whole`: always the whole cell, with no plan. `tiled`: always in tiles.
+  `wavefront`: in tiles with the wavefront schedule (models of two layers).
+- `receivers N`: at most N atoms per tile (default 0: the plan's choice).
+- `memory F`: the share of the card's free memory the plan may use, above 0 and at most 1 (default 0.9).
 - `skin S`: the skin of the engine's own neighbour list in Å (default: LAMMPS's `neighbor` skin).
 - `ghost no`: tells LAMMPS a pair cutoff of zero, so it creates no ghost atoms. The engine does not need them; LAMMPS
   then warns that the communication cutoff is 0 and switches atom sorting off. Default `yes` (the model's cutoff).
@@ -62,7 +70,7 @@ pair_coeff * * model.loup El1 El2 ...
   on cells of a few hundred atoms, nothing at 5,000 atoms. Default `no`, because between two steps the engine's GPU
   stream then holds work that cannot run, and any other GPU library in the same process could wait for it forever.
   Use it only when LoupMD is the process's one GPU user. It is ignored with the KOKKOS or GPU package active, and
-  has no meaning for `loupmd/kk` and `run_style loupmd`.
+  has no meaning for `loupmd/kk`, `run_style loupmd` and the tiled mode.
 - `pair_coeff`: the bundle and one element symbol per atom type. Every element must be in the bundle. `NULL` is not
   supported, since the engine evaluates every atom.
 
@@ -113,6 +121,65 @@ run_style loupmd langevin T damp seed
   fix may act during the steps.
 - Run it without `-k on` / `-sf kk`.
 
+## Cells larger than the GPU (tiled mode)
+
+A cell whose whole evaluation does not fit the card runs in tiles, as in the Python package (`capacity="auto"`).
+The engine cuts the cell into tiles of at most `receivers` atoms, evaluates them one after another, each with the
+atoms around it, and sums energy, forces and stress. The results are those of the whole cell to float32 rounding:
+on 5,760 atoms of SrTiO3 with MACE-OMAT-0 medium in 12 tiles of 600 atoms, the energy was within 1e-8 eV/atom and
+the forces within 3.2e-6 eV/Å of the whole call over the test runs (both without the hybrid GEMMs).
+
+- **When it is decided.** At each send of the system to the engine: a run's setup after a change in the atom
+  count, a type, a mass, the skin or the capacity keywords. Under `capacity auto` the engine plans: the whole cell if
+  it fits in `memory` of the card's free memory, else tiles of the largest size that fits. A cell that fits in no
+  tile size is refused with the sizes.
+- **The log says what runs.** At the first step, and at the end of each run. MACE-MH-1 on 50,820 atoms of SrTiO3
+  under `run_style loupmd`, a run of 100 steps:
+  ```
+  LoupMD: 50820 atoms run tiled: 8 tiles of at most 12288 atoms, tile lists on the device; the whole cell would need 24.74 GiB, 12.16 GiB free
+  LoupMD: tiled mode in this run: 2 tiled force calls, 100 tiled MD steps, tile lists built 1 times; 8 tiles of at most 12288 atoms
+  ```
+  The force calls are the setup's and the output's; the steps between them are the engine's tiled MD. With the
+  pair style alone every step is a force call. A cell that fits:
+  `LoupMD: 5000 atoms run whole: the cell needs ... GiB, ... GiB free`.
+- **Host memory and the wavefront.** Where the tiles' neighbour lists, or also the layer state, do not fit on the
+  card, the plan puts them in pinned host memory (the log says "tile lists in host memory" or "tile lists and layer
+  state in host memory"). From 2^20 atoms (about a million), with 12 or more layers of tiles along the cell's first
+  axis, models of two layers run the wavefront schedule. The input does not choose among these; `capacity wavefront`
+  forces the schedule.
+- **The three styles.**
+  - `pair_style loupmd`: each step is one tiled call. The stress is formed only on steps that need the virial.
+  - `pair_style loupmd/kk`: in tiled mode it works on LAMMPS's host arrays. The transfers take milliseconds, a tiled
+    step hundreds of milliseconds on cells that need tiles.
+  - `run_style loupmd` runs the engine's tiled MD between the output steps: `fix nve`, `fix nve` with `fix langevin`,
+    `fix temp/csvr` or `fix temp/berendsen`, and `fix nvt`, with `fix setforce 0 0 0` and `fix momentum`, as in the
+    table above. The tile lists stay across output steps and from one `run` command to the next.
+- **The cell stays fixed in tiled MD.** `fix npt` and `fix press/berendsen` under `run_style loupmd` are refused
+  in tiled mode. With the pair style and LAMMPS's own `fix npt`, `fix deform` or `fix box/relax`, a tiled cell runs,
+  but its box changes in every step, so every step plans its tiles and builds their lists again; the log warns once.
+- **Kept lists.** The tile lists are kept from step to step until an atom has moved half the skin. LAMMPS's sorting
+  and re-wrapping do not break them: the pair style passes unwrapped positions by atom ID.
+- **Speed.** Measured on an RTX 5060 Ti under WSL 2 (20 November 2026): MACE-MH-1 on SrTiO3 from rest, 100 warm-up
+  and 200 measured NVE steps, `capacity auto`, milliseconds per step. Whole, the two cells need 24.7 and 47.8 GiB;
+  under LAMMPS they used to run out of memory.
+
+  | atoms | tiles | Python package | `pair_style loupmd` | `run_style loupmd` | `pair_style loupmd/kk` |
+  |---:|---|---:|---:|---:|---:|
+  | 50,820 | 8 of at most 12,288 | 420 | 418 | 423 | 425 |
+  | 98,415 | 27 of at most 8,192 | 836 | 830 | 838 | 845 |
+
+  (`loupmd/kk` with `-pk kokkos newton on neigh half`: LAMMPS-Kokkos's default full lists refuse `newton on`.)
+
+  MACE-OMAT-0 medium on 320,000 atoms (8 tiles of 65,536) took 537 ms per step under the run style and 513 in the
+  Python package, over 40 measured steps. The difference is the block's two output steps: in a tiled run an output
+  step costs about one tiled force call (0.39 s on the 50,820 atoms above), so thermo every 10 steps made the run
+  style 8% slower than every 200. Under `fix npt` through the pair style each step builds the tile lists again: 491
+  against 424 ms per step on the 50,820 atoms, against a fixed cell with the virial in every step (16% more).
+- **`ghost no`** is recommended for tiled cells: LAMMPS's ghost atoms of a 100,000-atom cell are host work the
+  engine never reads.
+- **Not tiled:** MACE-POLAR-1 (long range). `capacity tiled` is refused for it, and under `auto` a cell too large to
+  run whole is refused with that reason.
+
 ## Requirements and limits
 
 - `units metal`, three periodic dimensions (orthogonal or triclinic box), one MPI process, one GPU.
@@ -126,7 +193,7 @@ run_style loupmd langevin T damp seed
   `rigid/nvt/small`, `box/relax` with `minimize`, `hybrid/overlay`. `fix press/berendsen` needs the material's
   `modulus`: LAMMPS's default of 10 bar makes a solid's box explode.
 - With LAMMPS's own integrator a changing box (`fix npt`) rebuilds the engine's neighbour list in every step.
-  `run_style loupmd` runs `fix npt ... iso` at the engine's step time instead (see Speed).
+  `run_style loupmd` runs `fix npt ... iso` at the engine's step time instead (see Speed), on cells that fit whole.
 - An isolated molecule needs a periodic box with more than 2 (cutoff + skin) of vacuum.
 - MACE-POLAR-1 models run as in the engine: neutral, singlet, zero field.
 - `hybrid/overlay` with other pair styles works with the pair styles (forces are added), not with `run_style loupmd`.

@@ -56,6 +56,14 @@ int PairLoupMDKokkos<DeviceType>::default_device()
 #endif
 }
 
+/* ---------------------------------------------------------------------- */
+
+template<class DeviceType>
+void PairLoupMDKokkos<DeviceType>::sync_host_positions()
+{
+  atomKK->sync(Host, X_MASK | IMAGE_MASK | TAG_MASK);
+}
+
 /* ----------------------------------------------------------------------
    The engine needs no neighbour list. LAMMPS-Kokkos, though, keeps its own per-step work on the device (the
    displacement check that triggers reneighbouring, the bond topology) only when a list is requested there; without
@@ -83,10 +91,22 @@ void PairLoupMDKokkos<DeviceType>::compute(int eflag_in, int vflag_in)
     ev_init(eflag_in, vflag_in, 0);
     refuse_per_atom();
 
-    // The system (atom count, types by ID) is checked on the host when a run starts and on reneighbouring steps.
+    // The system (atom count, types by ID) is checked on the host when a run starts and on reneighbouring steps. A
+    // send under capacity auto, tiled or wavefront plans on the host positions (sync_host_positions).
     if (system_dirty || neighbor->ago == 0 || (int) z_sent.size() != atom->nlocal) {
       atomKK->sync(Host, TAG_MASK | TYPE_MASK | RMASS_MASK);
       ensure_system();
+    }
+
+    // Tiled mode: the host compute (LD5). The forces go back to the device at once: the integrator marks them as
+    // modified in the pair style's execution space after compute(), which Kokkos refuses while the host copy is the
+    // modified one.
+    if (tiled_mode) {
+      atomKK->sync(Host, datamask_read | RMASS_MASK);
+      PairLoupMD::compute(eflag_in, vflag_in);
+      atomKK->modified(Host, F_MASK);
+      atomKK->sync(execution_space, F_MASK);
+      return;
     }
 
     atomKK->sync(execution_space, X_MASK | F_MASK | TAG_MASK | IMAGE_MASK);

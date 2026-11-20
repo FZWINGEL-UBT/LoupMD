@@ -27,7 +27,9 @@ namespace LAMMPS_NS {
 
 // The LoupMD engine integrates: between the steps at which LAMMPS writes output (thermo, dump, restart) the engine
 // runs its own MD loop on the GPU, at the engine's own step time, and LAMMPS gets positions, velocities and the box
-// back at those steps only. Requires pair_style loupmd.
+// back at those steps only. Requires pair_style loupmd. A cell the pair style runs in tiles (capacity) runs in the
+// engine's tiled MD (loup_tiled_*; LAMMPS_TILED_PLAN.md LD6): NVE, Langevin, CSVR, Nose-Hoover chain and Berendsen
+// NVT on a fixed cell, with held atoms and the centre of mass at rest; a barostat is refused there.
 //
 //   run_style loupmd                            the ensemble is taken from the input's fixes (README.md has the table:
 //                                               fix nve, nvt, npt iso, langevin, temp/csvr, temp/berendsen,
@@ -84,11 +86,16 @@ class IntegrateLoupMD : public Integrate {
   double snap_cell[9];
   std::string snap_key;         // ensemble_key() of the run that left it
   bigint snap_serial;           // the pair style's system_serial() then
+  std::vector<int> snap_fixed;  // and the held atoms (tiled mode: they are part of the engine's state)
   bool engine_current;          // snap_* is what the engine holds (a run ended there)
+  bool tiled;                   // this run is in the engine's tiled MD (pair->tiled() after the setup's forces)
+  bigint tiled_md_serial;       // the system_serial() of the engine's tiled MD state (-1: none sent)
+  std::vector<unsigned char> fixed_flags;
 
   void read_fixes();            // the ensemble from the input's fixes (errors name the fix and say why)
   std::string ensemble_key() const;
   void checks();
+  void check_tiled();           // after the setup's forces: the mode is known; refuses what tiled MD cannot run
   void describe();
   void setup_fixes(int);        // Modify::setup() without the setup() of the fixes in stood_in
   void reneighbor();            // LAMMPS's own bookkeeping after the atoms moved: wrap, ghosts, lists

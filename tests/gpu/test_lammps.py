@@ -77,7 +77,7 @@ def _thermo(d, name):
             rows, on = [], True
         elif ln.startswith("Loop time"):
             on = False
-        elif on:
+        elif on and not ln.startswith("WARNING"):         # a warning printed during the run
             rows.append([float(x) for x in ln.split()])
     return rows
 
