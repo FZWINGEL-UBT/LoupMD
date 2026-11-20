@@ -1741,7 +1741,7 @@ void GenericModel::alloc_system(int N) {
     auto alloc = [&](size_t floats) -> float* {
         float* p = nullptr;
         sys_max_alloc_ = std::max(sys_max_alloc_, floats * sizeof(float));
-        CUDA_CHECK_THROW(cudaMalloc(&p, std::max<size_t>(floats, 1) * sizeof(float)));
+        CUDA_CHECK_THROW(device_malloc(&p, std::max<size_t>(floats, 1) * sizeof(float)));
         sys_bytes_ += std::max<size_t>(floats, 1) * sizeof(float);
         sys_allocs_.push_back(p);
         sys_alloc_bytes_.push_back(std::max<size_t>(floats, 1) * sizeof(float));
@@ -1760,7 +1760,7 @@ void GenericModel::alloc_system(int N) {
         if (L->kind >= 2) zbytes += align256(n * sizeof(float));
     }
     if (zbytes) {
-        CUDA_CHECK_THROW(cudaMalloc(&d_zero_slab_, zbytes));
+        CUDA_CHECK_THROW(device_malloc(&d_zero_slab_, zbytes));
         zero_slab_bytes_ = zbytes;
         sys_bytes_ += zbytes;
     }
@@ -1898,7 +1898,7 @@ void GenericModel::ensure_edges(int E_cap) {
     if (d_edge_dvec_) cudaFree(d_edge_dvec_);
     d_edge_dvec_ = nullptr;
     E_cap_ = 0;  // a failed allocation must not leave the old capacity on a null array
-    CUDA_CHECK_THROW(cudaMalloc(&d_edge_dvec_, (size_t)E_cap * 3 * sizeof(float)));
+    CUDA_CHECK_THROW(device_malloc(&d_edge_dvec_, (size_t)E_cap * 3 * sizeof(float)));
     E_cap_ = E_cap;
     edge_bytes_ = (size_t)E_cap * 3 * sizeof(float);
 }

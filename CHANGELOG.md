@@ -34,6 +34,13 @@
 - The C interface gains `loup_compute_device` (an evaluation on position and force arrays that stay on the GPU),
   `loup_cutoff`, `loup_species` and `loup_set_evaluate_ahead`; nothing else in it changed (interface version 1).
   `loup_evaluate` on an unchanged cell is one launch on the GPU, with no blocking transfer.
+- A system too large for the GPU now fails with "out of memory" under WSL 2 as well, where the driver used to
+  accept the allocations and page them out to system memory: a step then took minutes, and the card stayed full
+  until the run was stopped. Measured on an RTX 5060 Ti: MACE-MH-1 on 98,415 atoms, whole, used to fill the card;
+  now it is refused within about 2 s, and the caller can go on with `capacity="tiled"` (the MACE-POLAR-1 models,
+  which are not tiled, with a smaller system). This concerns `capacity="whole"`, the LAMMPS pair style and the
+  MACE-POLAR-1 models, which the capacity plan does not cover.
+  An allocation is refused when it is larger than the card's free memory as NVML reports it.
 - Every bundle is exported again on its first use (the cache key changed, and a bundle now carries the source of
   its product kernels). A kernel plugin built by 0.0.1's `loupmd build-kernels` is not loaded: build it again.
 

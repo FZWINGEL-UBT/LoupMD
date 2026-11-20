@@ -633,6 +633,10 @@ int loup_compute_device(LoupHandle* h, const LoupDeviceIO* io, const double* cel
 //   LOUP_DEBUG_ERRORS  print every failure's message (loup_last_error) to stderr as well.
 //   LOUP_DEBUG_GRAPHS  print a line to stderr for every capture of an MD step graph and for every force pass a run
 //                      call makes before its first step (tests/test_md_graph_reuse.py).
+//   LOUP_DEBUG_ALLOC_FREE=<MiB>  the allocations of a system's buffers count at most this much device memory as free
+//                   and are refused above it, as when the card is full (tests/gpu/test_engine.py). Without it, a
+//                   request of 4 MiB or more beyond the card's free memory (NVML's figure) fails with "out of
+//                   memory", also under WSL 2, where the driver would page it out to system memory instead.
 
 #ifdef __cplusplus
 }

@@ -1215,7 +1215,7 @@ struct PolarLR::Impl {
     size_t sys_bytes = 0;  // the per-system buffers of sys() (PolarLR::system_bytes)
     float* sys(size_t n) {
         float* d = nullptr;
-        CUDA_CHECK_THROW(cudaMalloc(&d, std::max<size_t>(n, 1) * sizeof(float)));
+        CUDA_CHECK_THROW(device_malloc(&d, std::max<size_t>(n, 1) * sizeof(float)));
         sys_bytes += std::max<size_t>(n, 1) * sizeof(float);
         s_.push_back(d);
         return d;
@@ -1610,7 +1610,7 @@ bool PolarLR::set_cell(const double* c) {
     if (K > P.K_cap) {
         if (P.kinfo) cudaFree(P.kinfo);
         P.K_cap = K + K / 4 + 64;
-        CUDA_CHECK_THROW(cudaMalloc(&P.kinfo, (size_t)P.K_cap * KI * sizeof(float)));
+        CUDA_CHECK_THROW(device_malloc(&P.kinfo, (size_t)P.K_cap * KI * sizeof(float)));
         if (P.SC) cudaFree(P.SC);
         if (P.SS) cudaFree(P.SS);
         if (P.dk) cudaFree(P.dk);
@@ -1622,12 +1622,12 @@ bool PolarLR::set_cell(const double* c) {
             s.AB = nullptr;
             s.SFq = nullptr;
         }
-        CUDA_CHECK_THROW(cudaMalloc(&P.SC, (size_t)P.K_cap * 16 * sizeof(double)));
-        CUDA_CHECK_THROW(cudaMalloc(&P.SS, (size_t)P.K_cap * 16 * sizeof(double)));
-        CUDA_CHECK_THROW(cudaMalloc(&P.dk, (size_t)P.K_cap * 16 * sizeof(float)));
+        CUDA_CHECK_THROW(device_malloc(&P.SC, (size_t)P.K_cap * 16 * sizeof(double)));
+        CUDA_CHECK_THROW(device_malloc(&P.SS, (size_t)P.K_cap * 16 * sizeof(double)));
+        CUDA_CHECK_THROW(device_malloc(&P.dk, (size_t)P.K_cap * 16 * sizeof(float)));
         for (Impl::Step& s : P.steps) {
-            CUDA_CHECK_THROW(cudaMalloc(&s.AB, (size_t)P.K_cap * 32 * sizeof(float)));
-            CUDA_CHECK_THROW(cudaMalloc(&s.SFq, (size_t)P.K_cap * 16 * sizeof(double)));
+            CUDA_CHECK_THROW(device_malloc(&s.AB, (size_t)P.K_cap * 32 * sizeof(float)));
+            CUDA_CHECK_THROW(device_malloc(&s.SFq, (size_t)P.K_cap * 16 * sizeof(double)));
         }
     }
     if (!P.minv) CUDA_CHECK_THROW(cudaMalloc(&P.minv, 9 * sizeof(double)));
@@ -1677,7 +1677,7 @@ void PolarLR::alloc_system(int N) {
     auto align256 = [](size_t b) { return (b + 255) & ~size_t(255); };
     size_t zbytes = align256(n * 8 * sizeof(float)) * 3 + align256(n * 16 * sizeof(float));
     for (int l = 0; l <= P.lmax; ++l) zbytes += align256(n * (2 * l + 1) * C * sizeof(float));
-    CUDA_CHECK_THROW(cudaMalloc(&P.bwd_zero_slab, zbytes));
+    CUDA_CHECK_THROW(device_malloc(&P.bwd_zero_slab, zbytes));
     P.bwd_zero_bytes = zbytes;
     char* zbase = static_cast<char*>(P.bwd_zero_slab);
     size_t zoff = 0;
@@ -1750,8 +1750,8 @@ void PolarLR::alloc_system(int N) {
         s.qnew = P.sys(n * 8);
         s.pot = P.sys(n * 16);
         if (P.K_cap) {
-            CUDA_CHECK_THROW(cudaMalloc(&s.AB, (size_t)P.K_cap * 32 * sizeof(float)));
-            CUDA_CHECK_THROW(cudaMalloc(&s.SFq, (size_t)P.K_cap * 16 * sizeof(double)));
+            CUDA_CHECK_THROW(device_malloc(&s.AB, (size_t)P.K_cap * 32 * sizeof(float)));
+            CUDA_CHECK_THROW(device_malloc(&s.SFq, (size_t)P.K_cap * 16 * sizeof(double)));
         }
         for (int l = 0; l <= P.lmax; ++l) {
             s.Z[l] = P.sys(n * (2 * l + 1) * C);

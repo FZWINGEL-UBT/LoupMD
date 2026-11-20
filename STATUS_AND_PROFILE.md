@@ -2403,3 +2403,41 @@ the force graph beside them. With that and with the pair style no longer sending
 **Tests.** Tests of `57bf988`. RTX 5060 Ti (`sm_120`, library `037b67e07ad2f5d2`): `tests/gpu/test_lammps_run_style.py` 31 passed and `tests/gpu/test_lammps.py` 10 passed against an `lmp` rebuilt on this library; `tests/gpu` fast 414 passed, 7 skipped for a wrong structure path in that run (they are in `tests/gpu/test_d3.py`, which passed whole, 53, with the right one); full 52 passed and 1 failed on a timing bound (`test_a_schedule_tracks_its_target_on_5000_atoms`: the ramp's step 3.5% above the hold's where 3% is allowed; four reruns, two on this library and two on the merge's, gave 0.1 to 1.0% and passed). RTX 4000 Ada (`sm_89`, library built on `leto` from `57bf988`): `tests/cpu` 500 passed, 1 skipped; fast 351 passed, 72 skipped (no `lmp` and no `dftd3` there), 2 failed, both the machine's: the kernel-plugin test (its `/usr/bin/nvcc` does not know `sm_89`) and the first device call after `loup_set_state`, whose child process crashed at `import torch` because that build exported its statically linked libstdc++ (linked again with those symbols hidden, `tests/gpu/test_device_io.py`, `test_engine.py` and `test_run_api.py`: 59 passed); full 52 passed, 1 skipped (`leeloo`).
 
 **Not done.** the acceptance tier (no kernel and no arithmetic changed); LAMMPS on the RTX 4000 Ada and on native Linux; `fix npt aniso` / `tri` and fixes that only read the state every N steps (refused today); the wheel; a push (O37).
+
+### 6.38 Systems too large for the card, and the first rebuild's timing (20 November 2026, PLAN.md O41)
+
+The new version of the benchmark (`MargrafGroup/Benchmark_loup`: the package's own loop, `pair_style loupmd` and
+LAMMPS with Symmetrix, 5k to 100k atoms of OMAT-0 small, MH-1, OFF24 medium and POLAR-1-S) ran on the RTX 5060 Ti
+in WSL 2 on 20 November and showed two things in the engine. RTX 5060 Ti only.
+
+**A whole system too large for the card.** Under WSL 2 a `cudaMalloc` beyond the free memory succeeds: Windows'
+video memory manager pages the allocations out to system memory and every kernel then runs at bus speed. MACE-MH-1
+on 98,415 atoms, whole, filled the card and took minutes per step; on 50,820 atoms the model's rows took the last
+14.3 GB and a later allocation failed after 34 s. The capacity plan does not see this, since a whole call
+(`capacity="whole"`, the benchmark's first rung, and the LAMMPS pair style) and a long-range model are not planned.
+The buffers that grow with the system are now allocated through `loup::device_malloc` (`src/model.hpp`, defined in
+`src/engine.cu`), which refuses a request of 4 MiB or more that is larger than NVML's free figure, as a native
+driver refuses it (CUDA's figure where NVML is missing: under WSL it falls 1.2 GiB too far above 10 GiB held, §6.35,
+and would refuse requests that fit). With the library `42425b8a699e8a90`: MH-1 50,820 atoms, whole, out of memory
+after about 4 s ("refused 297.8 MB with 230.2 MB free"); MH-1 98,415 atoms after 2.3 s ("refused 1345.5 MB with
+148.2 MB free"); POLAR-1-S 51,840 atoms after 2.1 s; OMAT-0 small on 98,415 atoms, whole, still runs (142.53 ms per
+step). In the benchmark the LAMMPS cells of MH-1 and POLAR-1-S at 100k atoms and the own loop's POLAR-1-S at 50k now
+end with out of memory, and the own loop's MH-1 at 98k goes on to the tiled call (8.17 to 8.27 µs/atom/step); a
+15,400 MiB watchdog over every such run never fired. `LOUP_DEBUG_ALLOC_FREE=<MiB>` caps the free figure for the test
+(`test_system_beyond_the_free_memory_refused_and_handle_takes_one_again`).
+
+**The first rebuild's timing.** The benchmark's own loop times 20 steps after 5 from rest; on the water cells its
+figure held a one-off cost of about 28 ms at 5k atoms and 0.5 s at 97k. That is the timing of the conv forward's
+variants (`tune_rebuild_variants`, `sm_120` only), which waits for the first host-driven rebuild (the ledger's
+`spl-multi-receiver`: timed on the set-up's lattice it picked wrongly for thermalised NbCl5) and which `step_ms`
+leaves out (`LoupMDStats::tune_ms`): 31.5 ms on 5,184 atoms and 590.6 ms on 97,200. Every model of the benchmark
+picks variant 2 (R5), 7 to 24% faster in the conv forward, so the timing pays for itself within about 50 to 100
+steps. The SrTiO3 cells do not rebuild within 25 steps and run untuned, as do the LAMMPS pair style and
+`loup_evaluate` (no host-driven MD rebuild). Nothing changed: a warm-up through the first rebuild is the benchmark's
+choice, and tuning in the evaluation path or at set-up as well is an optimisation with its own A B B A.
+
+**Tests** (library `42425b8a699e8a90`, RTX 5060 Ti): `tests/gpu/test_engine.py` and `test_memory_plan.py` 42
+passed; `test_lammps.py` and `test_lammps_run_style.py` 41 passed against an `lmp` on this library; fast tier 419
+passed, 7 skipped (the benchmark structures' folder unset; the skipping files again with it set and `LOUPMD_LMP`:
+103 passed); full tier 53 passed. Not run: the acceptance tier (no kernel and no arithmetic changed), the RTX 4000
+Ada, native Linux.

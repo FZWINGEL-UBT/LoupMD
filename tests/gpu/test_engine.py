@@ -139,6 +139,26 @@ def test_rejected_set_system_of_other_size_keeps_previous_system_usable(sto_engi
     assert pos.shape == vel.shape == frc.shape == (len(at), 3)
 
 
+def test_system_beyond_the_free_memory_refused_and_handle_takes_one_again(sto_bundle, monkeypatch):
+    """A system whose buffers do not fit the free device memory fails with out of memory, as on a native driver,
+    instead of being allocated: under WSL 2 the allocation succeeds and pages out to system memory, and every step
+    then runs at bus speed (src/model.hpp, device_malloc). LOUP_DEBUG_ALLOC_FREE caps the free memory the check
+    sees. The engine takes a system again once the memory is there, with the forces of a fresh engine."""
+    at = _rattled(srtio3(4), 0.02, 11)  # 320 atoms: the model's rows and the bin arrays are over 1 MiB each
+    fresh = LoupEngine(sto_bundle)
+    fresh.set_system(at.get_atomic_numbers(), at.get_masses())
+    e_ref, f_ref, _ = fresh.evaluate(at.positions, at.cell.array)
+    eng = LoupEngine(sto_bundle)
+    monkeypatch.setenv("LOUP_DEBUG_ALLOC_FREE", "1")
+    with pytest.raises(RuntimeError, match="out of memory"):
+        eng.set_system(at.get_atomic_numbers(), at.get_masses())
+    monkeypatch.delenv("LOUP_DEBUG_ALLOC_FREE")
+    eng.set_system(at.get_atomic_numbers(), at.get_masses())
+    e, f, _ = eng.evaluate(at.positions, at.cell.array)
+    assert abs(e - e_ref) / len(at) < 1e-6
+    assert np.abs(f - f_ref).max() < 1e-4
+
+
 @pytest.mark.parametrize("bad", ["short_positions", "flat_cell", "short_masses", "short_velocities"])
 def test_wrong_shaped_arrays_rejected_before_the_library_reads_them(sto_engine, bad):
     at = srtio3(2)

@@ -131,5 +131,6 @@ gates in that form. Most are read when an engine is made; the MD-loop switches a
 | `LOUP_NO_NVML` | `1` | the device's free memory from CUDA alone instead of the smaller of CUDA's and NVML's figures | `src/engine.cu` |
 | `LOUP_DEBUG_PLAN` | `1` | prints the free device memory at the steps of a system's set-up and first call, and the memory plan's counters | `src/engine.cu` |
 | `LOUP_DEBUG_PLAN_FREE` | MiB | the capacity plan counts at most this much device memory as free (tests of its thresholds) | `src/engine.cu` |
+| `LOUP_DEBUG_ALLOC_FREE` | MiB | the allocations of a system's buffers count at most this much device memory as free, and fail with "out of memory" above it (test of the refusal) | `src/engine.cu` |
 | `LOUP_DEBUG_EDGE_LIMIT` | integer | lowers the largest neighbour-edge count of a whole-system list, for the test of its refusal | `src/engine.cu` |
 | `LOUPMD_EXPORT_FASTMACE` | path to a FastMACE checkout | the exporter takes its names from that checkout instead of the vendored copy | `loupmd/export/_fastmace.py` |

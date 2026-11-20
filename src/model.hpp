@@ -52,6 +52,21 @@
     } while (0)
 
 namespace loup {
+// cudaMalloc for the buffers that grow with the system (a system's rows and neighbour edges, POLAR's per-atom and
+// k-space buffers, the GEMM timing's scratch, the tiled call's arenas, slots and kept layer-0 buffers): a request
+// larger than the card's free memory is refused with cudaErrorMemoryAllocation, as a native driver refuses it. Under
+// WSL 2 such a cudaMalloc can succeed: Windows' video memory manager pages allocations out to system memory, and every
+// kernel then runs at bus speed (20 November 2026, RTX 5060 Ti: MACE-MH-1 at 98,415 atoms, whole, filled the card and
+// ran for minutes per step; at 50,820 atoms the model's rows took the card's last 14.3 GB and a later allocation
+// failed after 34 s). The free figure is NVML's where libnvidia-ml loads (it follows each allocation exactly), else
+// CUDA's. Requests under 4 MiB are not checked. LOUP_DEBUG_ALLOC_FREE=<MiB> (tests): at most that much counts as free,
+// and every request is checked. Defined in engine.cu, beside the NVML reader.
+cudaError_t device_malloc(void** p, size_t bytes);
+template <class T>
+inline cudaError_t device_malloc(T** p, size_t bytes) {
+    return device_malloc(reinterpret_cast<void**>(p), bytes);
+}
+
 // Largest accepted error of the 8-byte cubic tables (CUBIC_PACKED8), per column relative to the column's largest
 // value or slope (d/dr) over all intervals and pairs. The bundles gated so far measure 2.7e-5 (POLAR-1-L) to 1.7e-4
 // (OFF23 medium); OMAT-0 small's 1.0e-4 costs about 1.2 of the gate's 3 units. A guard against tables far outside what

@@ -584,6 +584,31 @@ static cudaError_t device_memory(size_t* free_b, size_t* total_b) {
     return cudaSuccess;
 }
 
+// model.hpp. NVML's figure alone where it is there: CUDA's falls by 1.2 GiB more than allocated once a process holds
+// about 10 GiB (above), which would refuse requests that fit; where NVML is missing CUDA's figure is all there is.
+cudaError_t loup::device_malloc(void** p, size_t bytes) {
+    *p = nullptr;
+    const char* cap = std::getenv("LOUP_DEBUG_ALLOC_FREE");
+    if (bytes >= ((size_t)4 << 20) || cap) {
+        size_t free_b = 0, total_b = 0;
+        int dev = 0;
+        bool known = cudaGetDevice(&dev) == cudaSuccess && g_nvml.free_bytes(dev, &free_b);
+        if (!known) known = cudaMemGetInfo(&free_b, &total_b) == cudaSuccess;
+        if (cap) {
+            const size_t c = (size_t)std::max(0LL, std::atoll(cap)) << 20;
+            free_b = known ? std::min(free_b, c) : c;
+            known = true;
+        }
+        if (known && bytes > free_b) {
+            if (std::getenv("LOUP_DEBUG_PLAN"))
+                std::fprintf(stderr, "plan debug: refused %.1f MB with %.1f MB free\n", bytes / 1048576.0,
+                             free_b / 1048576.0);
+            return cudaErrorMemoryAllocation;
+        }
+    }
+    return cudaMalloc(p, bytes);
+}
+
 // FNV-1a over this library's own file: GEMM plans are keyed by it, so a rebuilt library (new kernels, other tile
 // code) never reuses plans timed against an older build.
 // Test overrides (LOUP_REORDER=0|1, LOUP_ROW_SORT=global, LOUP_MD_REBUILD=host|fallback): pin a path that a size
@@ -1303,8 +1328,8 @@ static inline void sgemm_rm(
             void* d_flush = nullptr;
             const size_t flush_bytes = (size_t)std::max(h->l2_bytes, 1 << 20) * 2;
             const bool cold = (size_t)M * K * sizeof(float) > (size_t)h->l2_bytes / 2;
-            if (cudaMalloc(&tmpC_buf.p, (size_t)M * N * sizeof(float)) == cudaSuccess &&
-                (!cold || cudaMalloc(&flush_buf.p, flush_bytes) == cudaSuccess)) {
+            if (loup::device_malloc(&tmpC_buf.p, (size_t)M * N * sizeof(float)) == cudaSuccess &&
+                (!cold || loup::device_malloc(&flush_buf.p, flush_bytes) == cudaSuccess)) {
                 d_tmpC = static_cast<float*>(tmpC_buf.p);
                 d_flush = flush_buf.p;
                 cudaMemsetAsync(d_tmpC, 0, (size_t)M * N * sizeof(float), strm);
@@ -1453,7 +1478,7 @@ static int ensure_edge_capacity(LoupHandle* h, int needed) {
         if (p) cudaFree(p);
         p = nullptr;
         h->sys_edge_bytes += (size_t)cap * elem_sz;
-        return cudaMalloc(&p, (size_t)cap * elem_sz);
+        return loup::device_malloc(&p, (size_t)cap * elem_sz);
     };
     CUDA_CHECK(reallocp(h->d_senders, sizeof(int)));
     CUDA_CHECK(reallocp(h->d_shift_cart, 3 * sizeof(double)));
@@ -1499,7 +1524,7 @@ static int ensure_cub_tmp(LoupHandle* h, size_t bytes) {
     if (h->d_cub_tmp) cudaFree(h->d_cub_tmp);
     h->d_cub_tmp = nullptr;
     h->cub_tmp_bytes = 0;
-    CUDA_CHECK(cudaMalloc(&h->d_cub_tmp, bytes));
+    CUDA_CHECK(loup::device_malloc(&h->d_cub_tmp, bytes));
     h->cub_tmp_bytes = bytes;
     h->invalidate_graphs();  // the force pass's scan bakes d_cub_tmp into the captured graph
     return 0;
@@ -2369,7 +2394,7 @@ void loup_destroy(LoupHandle* h) {
 // Every cudaMalloc inside set_system_impl is counted into the handle's sys_atom_bytes (for loup_plan_memory): the
 // macro spares its sixty allocation lines an edit each. It ends right after the function.
 static cudaError_t counted_malloc(size_t& counter, void** p, size_t bytes) {
-    const cudaError_t err = cudaMalloc(p, bytes);
+    const cudaError_t err = loup::device_malloc(p, bytes);
     if (err == cudaSuccess) counter += bytes;
     return err;
 }
@@ -5183,7 +5208,7 @@ struct DeviceArena {
         if (chunks.empty() || used + bytes > cap) {
             const size_t want = std::max<size_t>(bytes, chunk);
             auto g = std::make_unique<DeviceBufferGuard>();
-            if (cudaMalloc(&g->p, want) != cudaSuccess) {
+            if (loup::device_malloc(&g->p, want) != cudaSuccess) {
                 g->p = nullptr;
                 (void)cudaGetLastError();
                 return nullptr;
@@ -5209,7 +5234,7 @@ inline bool alloc_slot(DeviceBufferGuard& blk, std::initializer_list<std::pair<S
         base = static_cast<char*>(arena->get(total));
         if (!base) return false;
     } else {
-        if (cudaMalloc(&blk.p, total) != cudaSuccess) {
+        if (loup::device_malloc(&blk.p, total) != cudaSuccess) {
             blk.p = nullptr;
             return false;
         }
@@ -6807,7 +6832,7 @@ static int evaluate_tiled_impl(LoupHandle* h, int n_atoms, const int* atomic_num
                          cudaEventCreateWithFlags(&r.used[i], cudaEventDisableTiming) == cudaSuccess;
             }
             for (int i = 0; ok && i < 2; ++i)
-                if (cudaMalloc(&r.buf[i].p, stage_b) != cudaSuccess) { r.buf[i].p = nullptr; ok = false; }
+                if (loup::device_malloc(&r.buf[i].p, stage_b) != cudaSuccess) { r.buf[i].p = nullptr; ok = false; }
             if (on && !ok) {  // out of memory: the compaction reads the host lists over the bus
                 (void)cudaGetLastError();
                 for (DeviceBufferGuard& g : r.buf)
@@ -6916,7 +6941,7 @@ static int evaluate_tiled_impl(LoupHandle* h, int n_atoms, const int* atomic_num
             for (TileList& t : lists) {
                 if (!ok) break;
                 const size_t b = h->gen->sweep_keep_floats(t.n_local) * sizeof(float);
-                if (cudaMalloc(&t.keep0.p, std::max<size_t>(b, 1)) != cudaSuccess) { t.keep0.p = nullptr; ok = false; }
+                if (loup::device_malloc(&t.keep0.p, std::max<size_t>(b, 1)) != cudaSuccess) { t.keep0.p = nullptr; ok = false; }
             }
             if (on && !ok) {  // out of memory after all: the replay
                 (void)cudaGetLastError();
