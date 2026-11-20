@@ -661,6 +661,10 @@ int loup_compute_device(LoupHandle* h, const LoupDeviceIO* io, const double* cel
 //                   gate kernels instead of the gate backward in the W_2^T GEMMs' epilogue / layer 0's gated store in
 //                   its projections' epilogue (testing; both run where a GEMM's plan is the own N-fastest sgemm128,
 //                   i.e. on sm_120).
+//   LOUP_GATE_FWD_L1=0|1|2  the gated store of later kind-4 layers (MH-1, OMOL-0, POLAR-1-M / -L) in their
+//                   projections' epilogue: 0 off, 1 with the own sgemm128 forced for those GEMMs above 1,600 rows
+//                   (default on sm_120), 2 only where it is the tuned plan (testing; it needs the own-SGEMM
+//                   extensions, LOUP_OWN_EXT).
 //   LOUP_DEBUG_SPLINE, LOUP_DEBUG_GEMM, LOUP_DEBUG_COMPACT  print the variant / GEMM tuning decisions and the compacted
 //                   generic layers to stderr.
 //   LOUP_DEBUG_ERRORS  print every failure's message (loup_last_error) to stderr as well.

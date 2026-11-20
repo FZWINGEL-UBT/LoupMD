@@ -88,6 +88,7 @@ gates in that form. Most are read when an engine is made; the MD-loop switches a
 | `LOUP_LIN_COMPACT` | `0` | the dense projections and product kernels instead of a layer's live channels (MACE-MPtrj-2022.9, MACE-MP-0 medium's first layer) | `src/generic.cu` |
 | `LOUP_SENDER_BWD` | `0` | the receiver-owned backward of a pruned conv layer on whole systems too (tiles and open domains always run it) | `src/generated_generic.cu` |
 | `LOUP_GATE_FUSE`, `LOUP_GATE_FUSE_FWD` | `0` | the gate kernels of gated layers (MH-1, OMOL-0, POLAR-1) instead of the gate in the neighbouring GEMM's epilogue, backward / forward | `src/engine.cu` |
+| `LOUP_GATE_FWD_L1` | `0`, `1`, `2` | the gated store of later gated layers in their projections' epilogue: `0` off, `1` with the own SGEMM forced for those projections above 1,600 rows (the default on `sm_120`), `2` only where the autotune picked it; it needs the own-SGEMM extensions (`LOUP_OWN_EXT`) | `src/engine.cu` |
 | `LOUP_POLAR_HFOLD` | `0` to `3` | MACE-POLAR-1: the long-range hidden fold per degree (bit l - 1: degree l); `0`: every layer's output formed | `src/generic.cu` |
 | `LOUP_POLAR_ZBLK` | `0` | MACE-POLAR-1: runs the GEMMs of exactly-zero weight blocks, which are skipped by default | `src/polar.cu` |
 | `LOUP_JIT` | `0`, `1` | the run-time compiler: `0` off; unset: conv layers whose width the library has no instance for, and products it was not built with, are compiled when a bundle is loaded, where NVRTC (`libnvrtc.so`) is found (else the built-in kernels run); `1` also the first layer's kernels | `src/jit.cu` |

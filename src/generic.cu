@@ -2180,10 +2180,10 @@ void GenericModel::record(const GenericPassInputs& in) {
                                  (int64_t)L->n_l3[l] * Cx * Cm, 0.0f, L->msgf[l], 4 * l);
                 join();
             } else {
-                // LOUP_GATE_FWD_L1=1|2 (prototype, whole passes only): a later kind-4 layer's residual-free degrees
-                // l > lmax_x store gout_l from their lin_l GEMM's epilogue (gate_vform; 1: own sgemm128 forced, 2:
-                // where it is the plan), as layer 0 does; the l = 0 projection and residual, whose sum the epilogues'
-                // gate logits read, first.
+                // gemm_gate_fwd_l1 (LOUP_GATE_FWD_L1, default 1 on sm_120; whole passes only): a later kind-4
+                // layer's residual-free degrees l > lmax_x store gout_l from their lin_l GEMM's epilogue (gate_vform;
+                // 1: own sgemm128 forced above 1,600 rows, 2: where it is the plan), as layer 0 does; the l = 0
+                // projection and residual, whose sum the epilogues' gate logits read, first.
                 GateArgs gf;
                 gf.natoms = N;
                 gf.C = Cm;
