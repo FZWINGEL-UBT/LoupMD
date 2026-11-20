@@ -11,8 +11,9 @@ cd LoupMD
 ```
 
 The checkout holds the engine (`src/`, `include/`), the Python package (`loupmd/`), the kernel generators
-(`codegen/`), the tensor-core GEMM kernels (`cubins/`), the tests (`tests/`), this site (`docs/`) and the build
-and release scripts (`tools/`). The generated kernel sources (`src/generated_*`) are tracked, so a build does not
+(`codegen/`), the tensor-core GEMM kernels (`cubins/`), the LAMMPS package (`lammps/`, GPL-2.0, its own
+[guide](https://github.com/FZWINGEL-UBT/LoupMD/blob/release/v1/lammps/README.md)), the tests (`tests/`), this site
+(`docs/`) and the build and release scripts (`tools/`). The C interface is documented in `include/loupmd.h`. The generated kernel sources (`src/generated_*`) are tracked, so a build does not
 run the generators.
 
 ## Build the library
@@ -54,7 +55,8 @@ pytest -q tests/gpu -m acceptance         # the accuracy gate per model family, 
 
 `tests/cpu` runs the package on a stand-in engine. `tests/gpu` needs a GPU, `./libloupmd.so` (or `LOUP_LIB`), the
 export extra and the model files in the folder that `LOUPMD_MODELS` names; a test whose model file is not there is
-skipped.
+skipped. The LAMMPS tests (`tests/gpu/test_lammps*.py`) also need `LOUPMD_LMP`, the path of an `lmp` built with
+`lammps/install.sh` against the library under test; without it they are skipped.
 
 `loupmd validate --model LABEL` runs the accuracy gate for one model outside the test suite
 ([models](guide/models.md#the-accuracy-gate)).

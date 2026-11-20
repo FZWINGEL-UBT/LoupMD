@@ -84,14 +84,16 @@ def test_licence_and_the_files_that_ship(project):
     assert lgpl == rows("## Modules ported from ASE") and lgpl
     # The engine's integrators and its minimiser follow ASE and carry its licence (owner decision O35).
     assert {"src/integrator.cu", "src/cell.cu", "src/minimize.cu"} <= set(lgpl)
-    # A block under LGPL inside an MIT file is marked at both ends, and NOTICE.md names the file.
+    # A block under LGPL inside an MIT file is marked at both ends, and NOTICE.md names the file. A file may hold
+    # several such blocks (src/engine.cu: the whole loop's integrators and the tiled MD's barostats), each closed
+    # before the next opens.
     blocks = sorted(name for name, text in texts.items() if "SPDX-SnippetBegin" in text)
     assert blocks == rows("## Blocks that follow ASE inside MIT files") and blocks
     for name in blocks:
-        text = texts[name]
-        assert text.count("SPDX-SnippetBegin") == text.count("SPDX-SnippetEnd") == 1
-        block = text[text.index("SPDX-SnippetBegin"):text.index("SPDX-SnippetEnd")]
-        assert "SPDX-License-Identifier: LGPL-2.1-or-later" in block
+        marks = re.findall(r"SPDX-Snippet(Begin|End)", texts[name])
+        assert marks == ["Begin", "End"] * (len(marks) // 2) and marks, (name, marks)
+        for block in texts[name].split("SPDX-SnippetBegin")[1:]:
+            assert "SPDX-License-Identifier: LGPL-2.1-or-later" in block[:block.index("SPDX-SnippetEnd")], name
     data = project["tool"]["setuptools"]["package-data"]["loupmd"]
     assert {"_lib/*.so", "_lib/cubins/*", "bench/reference.json", "bench/structures/*"} <= set(data)
     assert (ROOT / "loupmd" / "bench" / "reference.json").is_file()

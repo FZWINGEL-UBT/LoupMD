@@ -37,6 +37,9 @@ version brought.
 - Cells too large for the GPU, split into tiles ([large cells](guide/large-cells.md)).
 - The D3 dispersion correction ([dispersion](guide/dispersion.md)).
 - An ASE calculator and drop-in ASE MD classes ([ASE](guide/ase.md)).
+- LAMMPS: `pair_style loupmd`, `pair_style loupmd/kk` and `run_style loupmd`, in the package ML-LOUPMD of the
+  repository's `lammps/` folder (GPL-2.0, built into LAMMPS, not in the wheel;
+  [its guide](https://github.com/FZWINGEL-UBT/LoupMD/blob/release/v1/lammps/README.md)).
 
 ## Accuracy
 

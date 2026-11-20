@@ -81,11 +81,11 @@ integers. The export folds them into the bundle, so each setting is its own bund
 
 The engine does not read PyTorch checkpoints. At the first evaluation or run, the model is exported to a `.loup`
 bundle for the structure's elements. The export runs in a process of its own and needs the export extra
-(`pip install 'loupmd[export]'`: torch, mace-torch, cuequivariance).
+(`pip install 'loupmd[export]'`: torch, mace-torch, cuequivariance, graph_longrange).
 
 Bundles are kept in `<cache root>/bundles/`. A bundle's file name carries a key over the model file's SHA-256, the
-elements, the head, the kernel path, charge and spin, and the exporter's own sources with the compiled kernels'
-signature. A changed exporter or regenerated kernels never find an old bundle. Two processes that need the same bundle export it once: the export runs under a file lock. A
+elements, the head, charge and spin, and the exporter's own sources, the product-kernel generator included. A
+changed exporter never finds an old bundle, and each bundle carries the source of its product kernels. Two processes that need the same bundle export it once: the export runs under a file lock. A
 structure with an element the model has no embedding for is refused (`ModelElementError`) before any export.
 
 `loupmd cache list --kind bundles` shows them; `loupmd cache prune --older-than DAYS` (or `--max-size SIZE`) removes

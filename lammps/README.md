@@ -18,7 +18,8 @@ pair styles (run modes, several processes, per-atom energies, open boundaries): 
 ```
 # 1. the engine library and a model bundle (.loup) for your elements
 make -j4 CUDA_ARCH=sm_120                      # in the LoupMD checkout: libloupmd.so
-python python/export.py --model mace-omat-0-medium.model --elements 8,22,38 --output omat_O_Ti_Sr.loup
+pip install "loupmd[export]"                  # the exporter (or pip install -e ".[export]" in the checkout)
+python -m loupmd.export --model mace-omat-0-medium.model --elements 8,22,38 --output omat_O_Ti_Sr.loup
 
 # 2. LAMMPS with the package
 lammps/install.sh /path/to/lammps

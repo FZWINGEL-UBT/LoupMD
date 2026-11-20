@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.0.2 (20 November 2026)
 
 - The export extra installs torch 2.15.0 and mace-torch 0.3.17 on Python 3.11 and newer. Python 3.10 keeps torch
   2.14.1 and mace-torch 0.3.16, the last versions that support it. With torch 2.15 the CUDA libraries are those of

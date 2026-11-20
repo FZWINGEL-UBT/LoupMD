@@ -93,6 +93,8 @@ gates in that form. Most are read when an engine is made; the MD-loop switches a
 | `LOUP_JIT` | `0`, `1` | the run-time compiler: `0` off; unset: conv layers whose width the library has no instance for, and products it was not built with, are compiled when a bundle is loaded, where NVRTC (`libnvrtc.so`) is found (else the built-in kernels run); `1` also the first layer's kernels | `src/jit.cu` |
 | `LOUP_NVRTC` | path | the NVRTC library the run-time compiler loads | `src/jit.cu` |
 | `LOUP_JIT_PRODUCTS`, `LOUP_CONV_GENERIC` | `1` | every product compiled from the bundle's source; every conv layer on the run-time-width kernels (tests of the run-time compiler) | `src/generic.cu`, `src/generated_generic.cu` |
+| `LOUP_JIT_PAIR`, `LOUP_JIT_BAKE_GRID` | `0`; `1` | the run-time compiler's first-layer kernels without the paired-edge decode; with the radial grid's numbers written into the kernel source (comparisons) | `src/generic.cu` |
+| `LOUP_POLAR_MONO` | `0` | MACE-POLAR-1 models of `lmax` 0 without the monopole shortcut: the dipole columns, which are exactly zero there, are computed (tests, A/B) | `src/polar.cu` |
 | `LOUP_EVAL_ARM` | `0`, `1` | `loup_set_evaluate_ahead` for every handle: `0` keeps it off, `1` switches it on. With it on, other GPU work of the process between two `loup_evaluate` calls can wait forever (`include/loupmd.h`) | `src/engine.cu` |
 | `LOUP_NO_HYBRID` | `1` | no tensor-core hybrid GEMM cubin | `src/engine.cu` |
 | `LOUP_HYBRID_CUBIN` | path | loads this GEMM cubin instead of the shipped one | `src/engine.cu` |

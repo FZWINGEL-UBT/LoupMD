@@ -115,14 +115,15 @@ memory give other limits: the plan decides from what it measures on the machine.
   rebuilt once an atom has moved, beyond what the strain and a uniform shift explain, more than
   (r<sub>list</sub> (1 − |F − I|) − r<sub>max</sub>) / 2, with F the cell's deformation since the build,
   r<sub>max</sub> the model's cutoff and r<sub>list</sub> = r<sub>max</sub> + skin.
-- **Models:** generic-path models with two or more interaction layers and no long-range terms. `MACE-POLAR-1` always
+- **Models:** models with two or more interaction layers and no long-range terms. `MACE-POLAR-1` always
   runs whole.
 - **Restarts:** a restart records the mode, and a resume uses the same one. A whole-cell restart cannot be read by
   the tiled engine, and a tiled restart cannot be read by the whole-cell engine.
 
 ## In LAMMPS
 
-The LAMMPS package (`lammps/README.md`, "Cells larger than the GPU") runs the same tiled mode, and `capacity auto` is
+The LAMMPS package ([`lammps/README.md`](https://github.com/FZWINGEL-UBT/LoupMD/blob/release/v1/lammps/README.md),
+"Cells larger than the GPU") runs the same tiled mode, and `capacity auto` is
 its default as well. Its pair style takes the keywords `capacity auto|whole|tiled|wavefront`, `receivers N` and
 `memory F`, the counterparts of `capacity=`, `receivers=` and `memory_fraction=`:
 

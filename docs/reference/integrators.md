@@ -26,9 +26,9 @@ temperature, friction and time constant have no defaults: physics is not chosen 
 
 The conserved quantity is listed where the record documents one.
 
-The tiled execution of cells that do not fit the GPU runs the fixed-cell records (`NVE`, `Langevin`, `CSVR`,
-`NoseHooverChain`, and `Berendsen` without barostat fields) on the device; with a dispersion term the integrator runs
-on the host, `NVE` and `Langevin` only. Barostats are refused there with `PlanRefused`
+The tiled execution of cells that do not fit the GPU runs every record on the device, the barostats
+(`LangevinBAOAB`, `MTK`, `Berendsen` with barostat fields) included. With a dispersion term the integrator runs on
+the host, `NVE` and `Langevin` only, and a barostat is refused there with `PlanRefused`
 ([Large cells](../guide/large-cells.md)). A long-range model (MACE-POLAR-1) with a barostat is refused.
 
 ## Selecting a record

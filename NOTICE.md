@@ -1,9 +1,11 @@
 # Third-party notices
 
-LoupMD is distributed under the MIT licence (`LICENSE`), with two exceptions this file lists. The code that
+LoupMD is distributed under the MIT licence (`LICENSE`), with the exceptions this file lists. The code that
 follows ASE is under LGPL-2.1-or-later (owner decisions O6 of 15 November 2026 and O35 of 18 November 2026,
 `PLAN.md` §1.1), and because the engine's integrators are part of it, the compiled library `libloupmd.so` is
-distributed under LGPL-2.1-or-later as a whole. The compiled GEMM kernels are BSD-3-Clause. The files below are binaries or generated sources; each
+distributed under LGPL-2.1-or-later as a whole. The compiled GEMM kernels are BSD-3-Clause. The LAMMPS package in
+`lammps/` is GPL-2.0, as LAMMPS is (`lammps/LICENSE`, the owner's decision of 19 November 2026): it is built into
+LAMMPS, reaches the engine only through `include/loupmd.h`, and is not in the wheel. The files below are binaries or generated sources; each
 is listed with what it was made from. `tests/test_notice.py` checks that every tracked binary and generated file
 appears here.
 
@@ -114,12 +116,12 @@ the library at run time; `LOUP_LIB` names another build to load in its place.
 
 ## Blocks that follow ASE inside MIT files (LGPL-2.1-or-later)
 
-Two blocks follow the same ASE classes inside files that are otherwise MIT. Each lies between an
+Three blocks in two files that are otherwise MIT follow the same ASE classes. Each lies between an
 `SPDX-SnippetBegin` and an `SPDX-SnippetEnd` comment and is under LGPL-2.1-or-later (O35).
 
 | File | Block | Follows (ASE 3.27) |
 | --- | --- | --- |
-| `src/engine.cu` | the integrators' coefficients and masses in the set-up of an MD call | the classes of `ase/md` named in "Integrators that follow ASE's conventions" |
+| `src/engine.cu` | two blocks: the integrators' coefficients and masses in the set-up of an MD call (`run_md_loop`), and the barostats' constants in the set-up of a tiled MD call (`tiled_run_impl`) | the classes of `ase/md` named in "Integrators that follow ASE's conventions" |
 | `loupmd/tiled_engine.py` | the Langevin and velocity-Verlet steps of the tiled mode's host loop | `ase/md/langevin.py`, `ase/md/verlet.py` |
 
 ## Structure files

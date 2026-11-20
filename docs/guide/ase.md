@@ -29,8 +29,7 @@ The calculator is `loupmd.ase.LoupCalculator`. Its properties are `energy`, `fre
 
 - The stress is computed only when ASE asks for it.
 - `atoms.get_potential_energies()` gives each atom's energy (its MACE node energy plus its E0; they sum to the
-  energy). It costs one more energy-only pass. It needs the generic kernels and a short-range model, so MACE-POLAR-1
-  has none.
+  energy). It costs one more energy-only pass. It needs a short-range model, so MACE-POLAR-1 has none.
 - The cell must be periodic in all three directions. A molecule or a slab goes into a box with vacuum and
   `pbc=True`; anything else is refused before the export.
 

@@ -299,8 +299,9 @@ def ff_npt(tmp_path):
 
 
 def test_a_barostat_runs_on_the_tiled_device_loop_and_its_cell_reaches_rows_atoms_and_restarts(ff_npt, tmp_path):
-    """LT6 (a): a tiled NPT run goes to the device loop; the device's cell is the run's (atoms, rows, restart), V0
-    follows every state sent, and a resumed run starts from the saved cell."""
+    """LT6 (a): a tiled NPT run goes to the device loop; the device's cell is the run's (atoms, rows, restart). V0 is
+    the volume of the state sent at a start (no set_reference_volume, as in the whole mode) and the first run's on a
+    resume, which starts from the saved cell."""
     npt = integrators.MTK(timestep_fs=1.0, temperature_K=300.0, pressure_GPa=0.0, tdamp_fs=100.0, pdamp_fs=900.0)
     at = _big()
     quick.draw_initial_velocities(at, 300.0, 1)
@@ -313,7 +314,8 @@ def test_a_barostat_runs_on_the_tiled_device_loop_and_its_cell_reaches_rows_atom
     grown = start * (1.0 + 1e-4) ** 90
     assert np.allclose(sim.atoms.cell.array, eng.tiled_get_cell(), rtol=0, atol=0)
     assert sim.atoms.get_volume() == pytest.approx(grown, rel=1e-12)
-    assert eng.log.count("tiled_set_state") == 1 and ("reference volume", pytest.approx(start)) in eng.log
+    assert eng.log.count("tiled_set_state") == 1
+    assert not [e for e in eng.log if isinstance(e, tuple) and e[0] == "reference volume"]   # V0: the state's own
     header, rows = output.read_thermo(tmp_path / "p")
     assert header == list(output.THERMO_HEADER + output.NPT_COLUMNS)
     volumes = [float(r[8]) * len(at) for r in rows]

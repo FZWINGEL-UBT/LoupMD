@@ -23,8 +23,8 @@ The second checks the GPU, the driver and the libraries. The rest of this page e
 The tensor-core GEMM kernels ship for compute capability 8.x, 9.x and 12.x. On a 10.x GPU the engine runs on its
 other GEMMs, somewhat slower, and `loupmd doctor` prints a warning.
 
-The 0.0.1 wheel has been run on one GPU only, an RTX 5060 Ti (compute capability 12.0); the
-[release record](https://github.com/FZWINGEL-UBT/LoupMD/blob/release/v1/docs/validation/release-0.0.1.md) in the
+The 0.0.2 wheel has been run on one GPU only, an RTX 5060 Ti (compute capability 12.0); the
+[release record](https://github.com/FZWINGEL-UBT/LoupMD/blob/release/v1/docs/validation/release-0.0.2.md) in the
 repository has the results. Its code for compute capability 8.0, 8.6,
 8.9, 9.0 and 10.0 is compiled from the same sources and has not been run from the wheel. On any GPU,
 `loupmd validate` compares a model with MACE float64 on that machine.
@@ -56,7 +56,7 @@ the dependencies still come from a package index:
 
 ```bash
 sha256sum -c --ignore-missing SHA256SUMS
-pip install "./loupmd-0.0.1-py3-none-manylinux_2_28_x86_64.whl[export]"
+pip install "./loupmd-0.0.2-py3-none-manylinux_2_28_x86_64.whl[export]"
 ```
 
 ### CUDA run-time libraries
