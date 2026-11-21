@@ -13,8 +13,8 @@ __device__ __forceinline__ void loup_store_h2(float* dm, int64_t i, int64_t plan
     const float a = x * 4096.0f;
     __half h = __float2half_rn(a);
     const float hf = __half2float(h);
-    __half v = __float2half_rn(fmaf(64.0f, a - hf, hf));
-    if (__hisinf(h) | __hisinf(v)) h = v = __ushort_as_half((unsigned short)0x7e00u);
+    __half v = __float2half_rn((a - hf) * 2048.0f);
+    if (__hisinf(h)) h = v = __ushort_as_half((unsigned short)0x7e00u);
     p[i] = h;
     p[plane + i] = v;
 }

@@ -1263,17 +1263,17 @@ def emit_conv_bwd(lx):
 
 
 # LOUP_W2T_HALF: the store of the _h2 product kernels (emit_product(dm_half=True)). The scaled value a = x 2^12 rounded
-# to binary16 (hi) and the amplified correction V = H(hi + 64 (a - hi)) (lo) go to the first and second half of
-# dm_l's buffer (plane = N (2l + 1) C elements each); hgemm2_gate (src/hgemm2.cu) multiplies both panels. An element
-# whose scaled value overflows either half is stored as NaN in both, so the force pass returns NaN, never a silently
-# clipped gradient (the engine then drops the path and evaluates again, drop_hybrid in src/engine.cu).
+# to binary16 (H) and its correction L = rn((a - H) 2^11), |L| <= |H|, go to the first and second half of dm_l's buffer
+# (plane = N (2l + 1) C elements each); hgemm2_gate (src/hgemm2.cu) multiplies them with explicit cross terms. An
+# element whose scaled value overflows binary16 is stored as NaN in both, so the force pass returns NaN, never a
+# silently clipped gradient (the engine then drops the path and evaluates again, drop_hybrid in src/engine.cu).
 _STORE_H2 = """__device__ __forceinline__ void loup_store_h2(float* dm, int64_t i, int64_t plane, float x) {
     __half* p = reinterpret_cast<__half*>(dm);
     const float a = x * 4096.0f;
     __half h = __float2half_rn(a);
     const float hf = __half2float(h);
-    __half v = __float2half_rn(fmaf(64.0f, a - hf, hf));
-    if (__hisinf(h) | __hisinf(v)) h = v = __ushort_as_half((unsigned short)0x7e00u);
+    __half v = __float2half_rn((a - hf) * 2048.0f);
+    if (__hisinf(h)) h = v = __ushort_as_half((unsigned short)0x7e00u);
     p[i] = h;
     p[plane + i] = v;
 }

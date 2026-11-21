@@ -2714,35 +2714,78 @@ measured steps from rest; fresh GEMM plans per run; two rounds). Figures are ms 
 cell fixed). LT6 (b). `fix npt` with `aniso` or `tri` under the run style, whole or tiled: the run style maps only
 `iso`.
 
-### 6.42 MH-1's reverse projections in two halves, and the 20 November research list (20 November 2026)
+### 6.42 MH-1's reverse projections in two halves, and the research lists of 20-21 November (20-21 November 2026)
 
 The MH-1 force audit's recommendation A1 and the ideas of the research list the owner pasted that evening, on the
 branch `mh1-two-half-adjoint`. The owner then let the RTX 5060 Ti in WSL 2 be used for timing while the PC was quiet;
-everything below was timed there only. The RTX 4000 Ada job is ready on `leto` / `leeloo` but has not run (both GPUs
-busy). Ledger entries: `gen-w2t-two-half`, `gen-gate-fwd-l1`, `ideas-20261120-not-built`, `meas-small-cell-idle`,
-`meas-mh1-conv-l2`.
+everything below was timed there only. The RTX 4000 Ada job is ready on `leto` but has not run (all four
+workstation GPUs busy). Ledger entries: `gen-w2t-two-half`, `gen-gate-fwd-l1`, `ideas-20261120-not-built`,
+`meas-small-cell-idle`, `meas-mh1-conv-l2`, `ideas-20261121-lists`, `ideas-20261121-list5`.
 
-**Two-half reverse projections (`LOUP_W2T_HALF=1`, off by default).** The eight `W_2^T` projections of MH-1's force
-backward run as two compensated binary16 tensor-core products with FP32 accumulation; the product kernels write the
-two panels themselves, and the gate backward runs in the GEMM's epilogue. Gates: MH-1 crystals 108 / 108 over three
-heads and both fuse settings (worst force 1.03, stress 0.89, limit 3); the audit's seven physics cases pass. One
-contact cell fails: a Ti-O pair at 1.2 A puts the stress at 1.39 of the 3x allowance (default 0.62). A pair at 0.5 A
-overflows binary16; that is caught, and the call is redone on the FP32 path. Against the release tree built locally
-(A B B A twice, fresh plans, 4 runs per side, 5,000-atom SrTiO3): 29.68 to 28.27 ms per call (0.952), with stress
-0.951; the `W_2^T` + gate kernels 7.36 to 5.68 ms (0.77 against the audit's 0.79 stop rule). Not adopted yet: it
-needs the RTX 4000 Ada timing and the owner's view of the contact result. OMOL-0 loads the path too and was not gated.
+**Two-half reverse projections (`LOUP_W2T_HALF=1`, off by default; rejected by the stop rule).** The eight `W_2^T`
+projections of MH-1's force backward run as binary16 tensor-core products, with the gate backward in the GEMM's
+epilogue; the product kernels write `dmsgf`'s two panels themselves. The first form (`P = H H` and `Q = V V`, both
+FP32-accumulated) took the `W_2^T` + gate kernels from 7.36 to 5.68 ms against the release tree (0.77, inside the
+audit's 0.79) and the whole call to 0.952, but its floor is 2^-16, and a Ti-O pair at 1.2 A put the stress at 1.39 of
+the 3x allowance. The second form adds the two cross products explicitly (binary16 accumulation at a fixed shift). Its
+first build failed a 0.8 A contact cell's force at 2.0x: the tensor cores' FP32 accumulation truncates, so one MMA
+chain over the whole K shrank the results coherently (mean signed error -5.5e-7 of the result, while the RMS, 1.6-1.7x
+FP32's, looked harmless). Restarting both MMA accumulators every 32 of K into an FP32 sum with round-to-nearest adds
+brought the error on the engine's own panels to 0.35-0.41x FP32's (bias -5.5e-8), and every gate passes: MH-1 crystals
+108 / 108, OMOL-0 organics 8 / 8, the seven physics cases, and the contact cells (1.2 A stress 0.66; a 0.5 A pair
+overflows binary16, which is caught and redone on the FP32 path). It is slower than the first form: 0.81-0.82 of the
+FP32 path's `W_2^T` + gate kernels and 0.964 of the whole call (3.6%), missing both the 0.79 and the 5% rule. The
+isolated product ties with the first form; the gated kernels run at the 5060 Ti's 180 W limit, where three products
+clock 3.5% lower than two (2.68 against 2.78 GHz) and take 4-6% longer. The switch stays, off by default. Not timed on
+the RTX 4000 Ada (the job waits on `leto`); there the three products take 1.5x the first form's tensor-core time by
+NVIDIA's tables, so that host cannot lift the verdict.
 
-**Layer 1's forward gate in its projections (`LOUP_GATE_FWD_L1=1`, off by default).** Layer 0's gated store
-(`gen-gate-fwd-store`) for MH-1's layer 1, degrees 2 and 3, with the own `sgemm128` forced (the autotune puts these
-GEMMs on cuBLASLt). MH-1 gates 54 / 54. Layer 1's projections + gate 3.40-3.66 to 2.80-3.01 ms; whole call 29.58 to
-29.07 ms (0.983), with stress 0.987. Respecting the tuned plans instead fuses nothing on most plan sets (1.017 slower).
-Before it is the default on `sm_120` it needs the OMOL-0 and POLAR-1 gates.
+**Later layers' forward gate in their projections (`LOUP_GATE_FWD_L1`, the `sm_120` default since 21 November).** Layer
+0's gated store (`gen-gate-fwd-store`) for the later kind-4 layers' residual-free degrees (MH-1's layer 1: degrees 2 and
+3), with the own `sgemm128` forced for those GEMMs above 1,600 rows (the autotune puts them on cuBLASLt). Gates pass:
+MH-1 crystals (three heads) and its `omol` head on organics, OMOL-0 XL organics, POLAR-1-M and POLAR-1-L crystals;
+POLAR-1-M's NaNbO3_c0 force row (2.10-2.33) stays inside its known spread. Whole call against the switch off: MH-1
+SrTiO3 0.983 (with stress 0.987), OMOL-0 XL water216 0.995, POLAR-1-M NbCl5 0.986, POLAR-1-L NbCl5 0.996. Forced at
+every size it cost MH-1 NaCl216 6.6% (its 1,080- and 1,512-row projections lost the narrow `sgemm64` / `sgemm32`), and
+fusing there only on the plan's own `sgemm128` still 5% (the fused path's order alone costs a latency-bound small cell),
+hence nothing fused at or below 1,600 rows; with it NaCl216 takes the switch-off path (measured 1.012, with stress
+1.001: plan-pick noise) and SrTiO3 reads 0.979 (with stress 0.981, faster in every pair). Respecting the tuned plans
+instead fuses nothing on most plan sets (1.017, slower). `sm_89` does not run it: the own-SGEMM extensions are off there
+by default.
 
 **Measured, not built.** A persistent megakernel for small cells can save at most 4.8-7.5% of MH-1's 1.27 ms NaCl216
 call (idle 2.6%, only under-filled kernels 2.2-4.9%), under the 15% asked. MH-1's layer-1 conv tables stay in the
 L2 on the 5060 Ti (hit 92.7% forward, 95.4-95.8% backward, DRAM throughput ~20%).
 
-**Rejected without building.** The f16-accumulated correction product (no saving on GeForce cards, a loss where f32
-accumulation runs at full rate), warp-pair same-slab decode in `gconv_bwd_L1` (the match rate was already measured at
+**Rejected without building.** The f16-accumulated correction product as a speed-up (no saving on GeForce cards, a
+loss where f32 accumulation runs at full rate; it was then built for accuracy, above), warp-pair same-slab decode in `gconv_bwd_L1` (the match rate was already measured at
 8-25%, and the exchange needs ~80 KB of shared memory per block) and the `U [W_lin^T, W_res^T]` epilogue (S54's bound
 is under its stop rule).
+
+**The research lists of 20 November late and 21 November** (ledger `ideas-20261121-lists`). Most claimed gains exceed
+bounds already measured: layer 0's column 65 about 1%, L2 strip-mining of `W_2 -> product -> W_2^T` about 1.5%, the
+six-byte quadratic table about 2% (and that format family failed the gate before), the layer-1 tables about 0.6 ms of
+an OMAT-0 call rather than the ~3.8 ms "wall" the fourth list assumed. Block-scaled INT8 GEMMs lose to the two-half
+FP16 path once the per-K32 dequantisation is counted. Measured on the 5060 Ti for the assessment: FP16 MMA with f16
+accumulation runs at 2.00x the f32-accumulated rate (105.3 against 52.7 TFLOP/s), and `HFMA2` at half `FFMA`'s
+instruction rate (26.3 against 26.1 TFLOP/s), so FP16 convolutions on the ordinary FMA pipe gain no throughput. The
+distilled model and the direct-force head change the model (the owner's decision), there is no multi-GPU host here,
+and r-RESPA was deferred.
+
+**CPU screens of the ideas worth a number** (float64 torch MACE; scratch scripts, not committed). The species-mean split
+of layer 1's conv input: the isolated atom's value is no baseline (OMAT-0 medium's is zero, MH-1's larger than the input
+itself), and the cell's per-species mean leaves 4-17% of the scalar input (`x_1`, with no baseline, is 11-41% of it),
+while the mean's own part of the conv needs a full-precision pass over every edge and channel: rejected. Temporal delta
+products: MH-1's GEMM operands move 1-2% per 1 fs step at 300 K (per atom up to 3.4%) and 8-15% over five steps, so a
+delta form beats the two-half floor only with a rebuild every one or two steps: rejected. Binary16-accumulated cross
+terms in the two-half reverse projections: emulated on the 1.2 A contact cell and a normal cell, the P / Q two-half has
+36-49x FP32's error in those GEMMs, the cross-term form with a fixed shift and a flush every 32 of K 1.6-1.7x (worst row
+about 2x), at the same tensor-core time on GeForce cards. It was built: the two-half paragraph above has the result.
+
+**The fifth research list of 21 November** (ledger `ideas-20261121-list5`; CPU screens, nothing built). Per pair, the
+radial weights' rank is 24-32 over 1.5-6 A (the packed tables' 5e-4 to FP32's level), but synthesis costs 8-11x the
+cubic decode's arithmetic against a table bound of about 0.6 ms per OMAT-0 call. MH-1's `W_2` spectra are flat
+(73-77% of the norm beyond rank 64), so an SVD heavy-hitter split leaves an FP16 remainder with 0.3-0.8x `W`'s own
+rounding error. Channel equilibration has nothing left to fix (the two-half's miss was truncation, not range). The
+dual-model and multi-fidelity schemes change the workflow, not the force; no family has a pair-independent radial
+table in Agnesi's u; there is no multi-GPU host here, and frozen-bulk caching has no fixed-atom path to attach to.
