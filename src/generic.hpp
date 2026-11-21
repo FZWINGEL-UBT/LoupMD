@@ -183,7 +183,7 @@ public:
     bool w2f_half() const { return w2f_half_; }
     // LOUP_DEBUG_GOUT=1 (the engine, after an evaluate): each kind-4 layer's largest |gout_l| over N atoms on stderr.
     void debug_gout(int N) const;
-    // LOUP_LIN_HALF=1 at load (setup_lin_half; off by default): the kind-4 conv layers' plain projections on the
+    // LOUP_LIN_HALF at load (setup_lin_half; default as LOUP_W2T_HALF): the kind-4 conv layers' plain projections on the
     // two-half product. drop_w2t_half() drops it too. LOUP_DEBUG_LIN_AMAX=1 (the engine, after an evaluate): the largest
     // |A| each such projection has read since load, on stderr.
     bool lin_half() const { return lin_half_; }

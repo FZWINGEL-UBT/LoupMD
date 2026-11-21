@@ -1422,7 +1422,8 @@ bool GenericModel::drop_w2t_half() {
     return true;
 }
 
-// LOUP_LIN_HALF (hgemm2.cu, hgemm2_f32a; ledger gen-lin-two-half; off by default): the conv layers' plain projections
+// LOUP_LIN_HALF (hgemm2.cu, hgemm2_f32a; ledger gen-lin-two-half; default as LOUP_W2T_HALF, on compute capability 12.0
+// since 21 November 2026, 0 / 1 force it): the conv layers' plain projections
 // of kind-4 layers (MH-1's and OMOL-0's later layers; neither compact, folded, pruned nor long-range) on the cross-term
 // two-half product of LOUP_W2F_HALF, A read as FP32 and split in the kernel at a fixed scale per projection kind
 // (kLinHalfExp: forward lin_l from mid_l, forward res_l from x_l, backward dmid_l from dlin_l; LOUP_LIN_HALF_EXP=a,b,c
@@ -1444,8 +1445,7 @@ void GenericModel::setup_lin_half() {
         CUDA_CHECK_THROW(cudaMalloc(&d_lin_amax_, kLinAmaxSlots * sizeof(unsigned)));
         CUDA_CHECK_THROW(cudaMemset(d_lin_amax_, 0, kLinAmaxSlots * sizeof(unsigned)));
     }
-    const char* e = std::getenv("LOUP_LIN_HALF");
-    if (lr_ || !(e && e[0] == '1')) return;
+    if (lr_ || !two_half_switch("LOUP_LIN_HALF")) return;
     int ex[3] = {kLinHalfExp[0], kLinHalfExp[1], kLinHalfExp[2]};
     if (const char* xe = std::getenv("LOUP_LIN_HALF_EXP"); xe && *xe) std::sscanf(xe, "%d,%d,%d", &ex[0], &ex[1], &ex[2]);
     auto make = [&](GenericLayer::H2Proj& p, const float* W, int Nc, int K, bool transpose, int ea) {

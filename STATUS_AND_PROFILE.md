@@ -2916,3 +2916,32 @@ above. Whole call, MH-1 SrTiO3, A B B A twice with fresh plans: the package take
 
 **Default.** The hold's condition is met, so the package is on by default on `sm_120` again (5060 Ti only).
 `LOUP_LIN_HALF` stays off by default until the owner decides.
+
+### 6.46 The plain projections on by default, and the eighth list (21 November 2026, evening)
+
+The owner's go: `LOUP_LIN_HALF` on by default, with the package (`sm_120`; `0` / `1` force it). Measured on the 5060 Ti
+with the default build. Ledger entries: `gen-lin-two-half`, `ideas-20261121-list8`.
+
+**Gates.** The default configuration against all three switches `0`:
+- the headroom set: 9 / 10 on both sides (Sr-scale0.80's energy fails on every path);
+- the seven: 7 / 7 on both;
+- MH-1 crystals over three heads, gate fusion on and off: 108 / 108;
+- MH-1's `omol` head: 24 / 24; OMOL-0 XL organics: 8 / 8;
+- all three switches `0`: 18 / 18;
+- the GPU fast tier: 381 passed, 51 skipped.
+
+Sr-contact0.8 over six fresh plan sets per conv variant reads 0.16-0.55 (mean 0.27), and the FP32 path 0.17-0.40
+(mean 0.25). Both sit in the FP32 path's levels.
+
+**Time.** `LOUP_LIN_HALF=0` against the default, A B B A twice with fresh plans:
+- MH-1 SrTiO3: 0.966 (27.38 -> 26.45 ms; with stress 0.972);
+- NaCl216: 0.973, a tie (pairs 0.93-1.04; with stress 0.992);
+- OMOL-0 XL water216: 0.941 (18.68 -> 17.57 ms; with stress 0.947).
+
+**The eighth list.** It was checked against the code; nothing was built from it at first. The order chosen:
+1. per-degree lane chains through the gate (exact, cheap);
+2. the R5 conv forward in 16 KB (exact, generator work);
+3. the CPU falsifier of the `lin` + `res` collapse;
+4. `C0` on the two-half kernel, the largest MH-1 lever (estimate 0.6-1.1 ms per SrTiO3 call).
+
+A per-MMA restart in `hgemm2_kernel` does not free registers: it took 255 before.
