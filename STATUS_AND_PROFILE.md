@@ -2995,3 +2995,156 @@ Each part alone on SrTiO3: layer 0's `dS0` 0.982, `W_res^T` 0.993, the gated sto
   - MACE-POLAR-1 on the two-half kernels waits for the owner's go;
   - species-segmented launches wait for OMAT-0 medium's projections on the two-half kernel (idle and under-filled time, 1.9% of its SrTiO3 call, bounds every launch merge);
   - multi-cell batches are an interface feature.
+
+### 6.48 The two-half epilogues, the 65th column, and lists 11 and 12 (21 November 2026, late night)
+
+Three changes from list 11 are in (732529c), all on `sm_120`, 5060 Ti only. Ledger entries: `ideas-20261121-list11` and
+`ideas-20261121-list12`.
+- `hgemm2f_kernel`'s gated store stages `s` per atom and `g = cg sigmoid(pre)` per (atom, column) in the pipeline's dead
+  shared memory. Before, every element reloaded `lin0` / `res0` and took the sigmoid. 1,595 -> 1,119 us per MH-1 SrTiO3 call.
+- `hgemm2_kernel` prefetches `gate_bwd_rows`' operands into L2 four K steps before its loop ends: 6,029 -> 5,227 us.
+  Streaming stores were measured and left out.
+- MH-1's layer 0 (J = 66) runs `first_bwd_edge_kernel<2, ZBL, STRESS, 66>`: columns 0..63 two per lane, column 64 on
+  half a warp. That is 80 registers instead of 112-118 for `COLS = 3`, and 500 -> 417 us. A tie per call: the 0.33% is
+  below the A / B's reach.
+
+**Gates.** The three MH-1 heads 18 / 18 each, `omat_pbe` with the gate fusion off 18 / 18, every two-half switch `0`
+18 / 18, the `omol` head 24 / 24, OMOL-0 XL 8 / 8; Sr-contact0.8 passes over two plan sets (0.17-0.55); the GPU fast
+tier 381 passed, 51 skipped.
+
+**Time.** Against 464ffd3, A B B A twice with fresh plans:
+- MH-1 SrTiO3 0.954 (forces) / 0.950 (with stress), every pair below 1;
+- OMOL-0 XL water216 0.983 / 0.985, every pair below 1;
+- MH-1 NaCl216 1.012 / 0.980, pairs mixed (a tie).
+
+On a Colab L4 (`sm_89`, the two-half paths forced on), the switches tie in a noisy A / B (0.988), and so does the
+column-65 kernel (0.998, 1,033 -> 801 us).
+
+**Not adopted from list 11.**
+- Small-M routing to the FP32 split-K plans helps NaCl216's span (-3.7%) and costs OMOL-0 XL's (+0.75%). It stays open
+  as a planner-timed choice.
+- Hoisting layer 1's residual projections to drop `gate_fwd_kernel` is bounded near 0.8% (estimate).
+- The channel-parallel and split-x `gconv_bwd_L1` variants are generator projects.
+
+**List 12** (paradigm ideas), screened mostly on Colab:
+- RESPA by layer depth is screened, not built (float64 Hessians on Colab).
+  - On SrTiO3, MH-1's layer 1 carries a third of the stiffest modes' curvature (16.3 of 25.6 THz), and OMAT-0
+    medium's carries 93% (24.8 of 25.7 THz).
+  - A pair term fitted to layer 1 and moved into the fast part (the list's V_2b) brings layer 1 to 12.8-16.0 THz on an
+    independent snapshot. That is an outer step of about two Verlet steps.
+  - The gain would be 0.95-1.25x per unit of simulated time (estimate), for a large feature: the owner's call.
+  - On 64 waters the O-H stretch sets the step, and the split looks better:
+    - MH-1's `omol` layer 1 is already soft (29-30 of 137-147 THz);
+    - OFF24 medium's needs a 2 A pair term, which takes 87% of its Hessian norm.
+  - In NVE on 64 waters (Colab L4), the layer split holds Verlet 0.5 fs's energy RMS at 0.5 x 2 inner steps: about
+    1.1x with a fast call at 35-45% of a full one (estimate). At a 2 fs outer step it only matches Verlet 1 fs, a loss.
+    V_2b made it blow up at 0.5 x 4. Not built.
+- Replica slab sharing is rejected. At bead spreads of 0.02-0.1 A, only 4-20% of (edge, bead) pairs stay in bead 0's
+  0.02 A spline interval.
+- A warp-specialised `hgemm2f` is bounded at 1-2.5% (estimate): `setmaxnreg` runs on `sm_120a`, but pre-split panels
+  beat the in-loop split by at most 10% of the kernel.
+- An L2-resident layer-1 DAG is bounded at about 5% (estimate): the GEMMs pay no DRAM penalty at 35,000 rows.
+- The list-free bin-streamed path and the two-pass `gconv_bwd_L1` are tiled-path and generator projects.
+
+### 6.49 The residual's backward in one product, kind 1 / 3 projections in two halves, and lists 13-18 (21-22 November 2026, night)
+
+Two changes are in (6823901), on `sm_120`, 5060 Ti only. Ledger entries: `ideas-20261121-list13`, `ideas-20261121-list14`,
+`ideas-20261121-list15`, `ideas-20261121-list16`, `ideas-20261121-list17` and `ideas-20261122-list18`.
+- `LOUP_RES_BWD` 3, the default. In later kind-4 layers, `dmid_l` and `dx_l` of a degree come from one product,
+  `dlin_l [W_lin[l] | W_res[l]]^T`. The epilogue writes the first `n_l3 Cx` columns to `dmid` and scales the rest's rows
+  by `D beta + alpha` into `dx`, so the gate backward no longer writes `dpre` (about 72 MB per MH-1 SrTiO3 call). This
+  epilogue is an `hgemm2f` instance of its own; the plain instance keeps c12's code (a tie against c12 in mode 0).
+- `LOUP_LIN_HALF_PARTS` bit 32, in the default 55. The later kind 1 / 3 layers' `W_lin` products run on `hgemm2f`, forward
+  (`lin_l = mid_l W_lin[l]`) and backward (`dmid_l = dlin_l W_lin[l]^T`). That covers OMAT-0, MP-0b3, MPA-0, MatPES and
+  the OFF families. The fixed scales are 2^7 for `mid` and 2^11 for `dlin`. A census of the gate sets and the physics
+  headroom cells found |mid| <= 131 (MPA-0) and |dlin| <= 10.3 (OMAT-0 small), which leaves at least 3x of binary16's range.
+
+**Gates (3x, every case PASS, no drop).**
+- Mode 3: MH-1 `omat_pbe` 18 / 18, also with the gate fusion off, in mode 2 and with every two-half switch `0`; `omol`
+  24 / 24; OMOL-0 XL 8 / 8, also with the switches `0`; Sr-contact0.8 under each forced conv variant.
+- Bit 32: OMAT-0 medium (oxide, crystals), OMAT-0 small, MP-0b3, MPA-0, MatPES PBE and r2SCAN, OFF23 S / M / L, OFF24 M
+  and OFF23b M. The physics headroom and seven-cell sets pass as many cases as before (OMAT-0 medium 7 / 10 and 6 / 7).
+- The final build: MH-1 `omat_pbe` 18 / 18, also with every two-half switch `0`; `omol` 24 / 24; OMOL-0 XL 8 / 8, also
+  with the switches `0`; OMAT-0 medium oxide 18 / 18, also with `LOUP_LIN_HALF=0`; MPA-0 18 / 18; OFF23 medium and OFF24
+  medium 24 / 24 each; Sr-contact0.8 under each forced conv variant (ratios at most 0.44). The GPU fast tier: 381 passed,
+  51 skipped.
+
+**Time.** A B B A twice with fresh plans:
+- c13d (mode 3) against c12: MH-1 SrTiO3 0.9927 / 0.9934 (forces / with stress); OMOL-0 XL water216 0.9883 / 0.9859;
+  MH-1 NaCl216 in the MD loop 1.0034, a tie.
+- Bit 32 on against off, two rounds: OMAT-0 medium SrTiO3 0.9968 / 0.9944 and 0.9739 / 0.9865; OFF24 medium water216
+  1.0109 / 0.9920 (pairs 0.96-1.07) and 0.9613 / 0.9316; OFF23 small water216 in the MD loop 0.9898. The projections of
+  an OMAT-0 medium SrTiO3 call fall from 1,434 to about 940 + 488 us.
+
+**Not adopted.**
+- `gconv_fwd_L1`'s R5 at TILE 16 (two blocks per SM) made the kernel slower: OMAT-0 medium SrTiO3 1,508 -> 1,535 us.
+- `hgemm2_kernel` with H H restarted at every MMA passed the gates but was slower: `<7>` 1,949 -> 2,018 us.
+- `gconv_bwd_L1` at C 128 with 512 threads: the kernel gets faster (2,838 -> 2,714 us per OMAT-0 medium SrTiO3 call),
+  and single calls tie, but that system's MD loop loses 0.17-0.53% at the three carveouts tried, with every pair above 1.
+- A 64 x 128 tile would stage 14% more per K step for the same MMAs. The per-tile amax and the plane-major store layout
+  are generator changes (open).
+- `__hisinf` in `loup_store_h2`: dropping it frees six registers in one kernel, with no occupancy step.
+- POLAR's Euler pencils are bounded at 1.5-2.5% of a POLAR-1-M NbCl5 step (estimate, from a SASS census).
+
+**Lists 13-15: new ways to run MD**, measured on the 5060 Ti in correctness-type MD, with costs from measured per-call
+times. Each is a feature for the owner's call.
+- Exact RESPA with a small foundation model as the fast force:
+  - 1.5-1.8x on SrTiO3 at equal energy RMS (MH-1 with OMAT-0 medium; MP-0 medium is no better);
+  - 1.3-1.7x on water216, where the O-H stretch caps the outer step near 2 fs.
+- An on-the-fly linear ACE as the fast force: fitted in about 2 minutes, at about twice OMAT-0 medium's force error. The
+  outer step holds like OMAT-0 medium's: 1.9-2.6x on SrTiO3 if an ACE call costs 5-20% of an MH-1 call (estimate), and
+  1.2-1.8x on water.
+- A distilled per-system student as the fast force (64x0e, trained on 300 MH-1 frames of the same SrTiO3 cell in about
+  2 hours on a Colab L4; forces 9.7 meV/A off MH-1): its call costs 0.094 of MH-1's, and the outer step holds to 8 fs.
+  That is 2.3-2.9x against Verlet 2 fs at equal energy RMS, the best of these lists for Newtonian dynamics; water was not
+  run. For configurations alone, BAOAB on MH-1 by itself holds that crystal at 10 fs (list 18).
+- Surrogate HMC is rejected:
+  - water accepts 0-13.5%;
+  - SrTiO3 at best needs 0.34 large calls per accepted fs, 0.73x against MD at 4 fs.
+- Parareal converges to 1e-5 A in one or two iterations. On one GPU it loses (0.4-0.65x, estimate): LoupMD's time per
+  atom is already flat at 320 atoms.
+- An `fp16-md` mode is bounded on paper. Its single-pass pieces failed the 3x gate before, by 3.2x (FP16 projections) up
+  to 5,100x (1xTF32). Even as a RESPA fast part it would gain at most about 1.25x (estimate).
+
+**List 16: table-free radial weights** (ledger `ideas-20261121-list16`). The ideas are a shared-denominator rational, a Prony basis, basis-space messages and a rank-R radial head. Each builds a layer's weight curves from a few functions they share.
+- A truncated SVD of the sampled curves bounds them all from below, measured on the tables' 5e-4 guard (value and slope) at r >= 1.6 A:
+  - rank 20-36 per SrTiO3 pair, OMAT-0 medium and MH-1, both layers;
+  - rank 36-44 for one basis across the nine pairs;
+  - at rank 8, 0.27-9.9 relative error;
+  - a set-valued AAA rational fit needs 24-36 support points per pair, never fewer than the SVD rank.
+- Cost of a basis that size: synthesis is that many FMAs per weight and edge against the cubic decode's 3, and basis-space accumulation is 20-40x (estimate). At most they save the table reads, about 8% of an OMAT-0 medium call.
+- A per-frame shell Taylor expansion is 2-26x (values) and 58-500x (slopes) off the guard at 0.025 A, and only 17.6% of 300 K SrTiO3 edges lie that close to a shell.
+- A model trained with a rank-4 radial head was training on Colab at this writing: at epoch 18 of 150 its validation force error (29.9 meV/A) is near the unfactorised student's at the same epoch (27.4). Even if it holds, it saves at most the table reads (about 8%, estimate).
+
+**List 17: a swarm's top ten** (ledger `ideas-20261121-list17`). Measured on the CPU (float64 torch MACE, the 3x gate's
+yardstick on 320-atom 300 K SrTiO3) unless noted:
+- Temporal-delta FP16 (one product on `x - x0` from an exact anchor): force ratio 0.46-0.94 one step after the anchor,
+  1.06-2.30 after two, 2.3-3.0 after five and 4.3-10 after ten (MH-1, OMAT-0 medium). Rejected: the anchor would be the
+  full GEMM every other step, and it holds `x0`, `Y0` per GEMM.
+- A 16-block Walsh-Hadamard rotation takes one-product FP16 from 129-131x to 70-95x. Rounding the weights alone costs
+  19x and the activations alone 117-143x, so an adaptive 1 / 2 / 3-product GEMM always picks two or three: the package
+  that is in. POLAR-1 stays on float32 SIMT.
+- l_max 1 beyond 4.8 A costs 1,736-4,253x (271-424x beyond 5.5 A), H-H pruning in water 472-4,394x. Rejected.
+- The slab-first l_out = 0 conv and the undirected conv are bounded by the measured table-read and atomic ablations
+  (at most 468 + 147 us and 159 us of an OMAT-0 medium call); ONIOM and Wyckoff reduction are workflows; the MD loop is
+  graph-captured with a SWITCH node already.
+- Rigid water (SHAKE / RATTLE, a host prototype) holds its energy at 3 fs, a third of flexible 1 fs's force calls; HMR allows 2 fs. Shell RESPA (the same model within 3.5 A as the fast force) loses to Verlet at 4 fs. POLAR-1's k-space is 5.8-9.3% of a call, which bounds a k-space RESPA. Tiled MH-1 on sm_89: one tile already costs 1.28x the whole call and 4-18 tiles 1.34-1.50x, so pipelining the tiles could remove at most 0.06-0.22 of it.
+
+**List 18: compression, integrators and features** (ledger `ideas-20261122-list18`). Measured on the CPU with the 3x
+gate's yardstick, in correctness-type MD on the 5060 Ti, and on sm_89 for the timings of ideas 8 and 10:
+- Channel PCA folded into the weights: half of MH-1's 512 channels keeps the force ratio at 1.24-1.93, but the
+  projections it shrinks are about 6% of MH-1's GEMM work (estimate); OMAT-0 medium needs more than seven eighths of its
+  128. Low-rank weights: every block is full rank, and a truncation that saves work costs 146-542x. Rejected.
+- Fixed-anchor FP16 for finite-difference phonons: the forces pass (0.04-0.73), Ti's force constants do not (4.9-6.8x).
+  Rejected.
+- Angular-order RESPA (l <= 1 fast): on SrTiO3 it needs twice Verlet 4 fs's cost for its RMS; on water its fast force
+  alone would cost more than Verlet at 1 fs (estimate). Rejected.
+- SIN(R), for configurations only: at 2 fs it keeps water's RDF and O-H bond where BAOAB at 2 fs falls apart, 2x against
+  BAOAB at 1 fs. On SrTiO3 BAOAB with MH-1 alone samples at 10 fs (100 calls per ps); SIN(R) with list 15's student as
+  the fast force reaches 40 fs outer steps at 70 calls per ps, 1.43x. Longer outer steps on water stretch the O-H bond.
+- The energy-only mode (built) costs 0.45-0.48 of a force call on sm_89. Two engines on two streams gain 1.00-1.01x on
+  5,000 atoms and 1.13x on 216. All heads of MH-1 from one pass would give 1.3-1.6x for two to six heads (estimate), and
+  local Monte Carlo updates pay only above about a thousand atoms (estimate): both are features. The POLAR long range
+  overlap is bounded by its 5.8-9.3% share.
+
+**sm_89 (RTX 4000 Ada, `leeloo`).** The two-half package with all three switches forced on (6823901) runs MH-1 SrTiO3 at 0.774 of the call (40.2 -> 31.1 ms), MH-1 NaCl216 and OMOL-0 XL water216 at 0.767-0.768 and OMAT-0 medium SrTiO3 at 0.968-0.970 (A B B A twice). The gates pass with it for 14 families, and Sr-contact0.8's force ratio stays at 0.72-0.90 of the allowance over 27 fresh plan sets and the three conv variants (0.22-0.40 without it). It stays off by default there: an `sm_89` default is the owner's call. 6823901 against 732529c at the defaults ties (MH-1 SrTiO3 0.995, OMOL-0 XL 1.003). `sm_86` was not run (`trillian` busy).
