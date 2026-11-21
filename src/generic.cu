@@ -2803,14 +2803,17 @@ void GenericModel::record(const GenericPassInputs& in) {
                     using EdgeBwd = void (*)(const int*, int, int, int, int, int, SplineGrid, int, int, const int*, const int*,
                                              const float4*, const int*, const float4*, const float*, const float*, const float*,
                                              const float*, const float*, const float*, ZblParams, double*, double*, double*);
-                    const EdgeBwd tbl[3][2][2] = {
+                    const EdgeBwd tbl[4][2][2] = {
                         {{first_bwd_edge_kernel<2, false, false>, first_bwd_edge_kernel<2, false, true>},
                          {first_bwd_edge_kernel<2, true, false>, first_bwd_edge_kernel<2, true, true>}},
                         {{first_bwd_edge_kernel<3, false, false>, first_bwd_edge_kernel<3, false, true>},
                          {first_bwd_edge_kernel<3, true, false>, first_bwd_edge_kernel<3, true, true>}},
                         {{first_bwd_edge_kernel<2, false, false, 65>, first_bwd_edge_kernel<2, false, true, 65>},
-                         {first_bwd_edge_kernel<2, true, false, 65>, first_bwd_edge_kernel<2, true, true, 65>}}};
-                    const int cols = L->J - 1 > 64 ? 1 : (L->J == 65 ? 2 : 0);  // 2: S142's fixed 64-column kernel
+                         {first_bwd_edge_kernel<2, true, false, 65>, first_bwd_edge_kernel<2, true, true, 65>}},
+                        {{first_bwd_edge_kernel<2, false, false, 66>, first_bwd_edge_kernel<2, false, true, 66>},
+                         {first_bwd_edge_kernel<2, true, false, 66>, first_bwd_edge_kernel<2, true, true, 66>}}};
+                    // 2: S142's fixed 64-column kernel; 3: list 11's 64 + 1 columns (J 66: MH-1)
+                    const int cols = L->J == 66 ? 3 : (L->J - 1 > 64 ? 1 : (L->J == 65 ? 2 : 0));
                     const EdgeBwd aot = tbl[cols][has_zbl_ ? 1 : 0][in.compute_stress ? 1 : 0];
                     const float* dD_arg = density ? L->dD : nullptr;
                     const unsigned nblk = (unsigned)((in.E_cap + 127) / 128);

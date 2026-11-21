@@ -105,6 +105,8 @@ __device__ __forceinline__ unsigned hmul2u(unsigned x, unsigned y) {
 // L 2^-c); out = (the running sum of P + X 2^(c - 11) over the K steps) oscale. DEG 0: C [M][N] row-major; DEG 2l + 1:
 // gate_bwd_rows on row tiles of whole atoms (C unused, M = g.natoms DEG, N = g.C). Requirements (checked by the host
 // side): N % 64 == 0, K % 32 == 0, A and B 16-byte aligned.
+__device__ __forceinline__ void prefetch_l2(const void* p) { asm volatile("prefetch.global.L2 [%0];" ::"l"(p)); }
+
 template <int DEG>
 __global__ void __launch_bounds__(128, 2) hgemm2_kernel(int M, int N, int K, const __half* __restrict__ A,
                                                         const __half* __restrict__ B, float oscale,
@@ -166,6 +168,25 @@ __global__ void __launch_bounds__(128, 2) hgemm2_kernel(int M, int N, int K, con
         asm volatile("cp.async.wait_group 0;");
         __syncthreads();  // stage kt landed for every thread; every warp is done with stage kt - 1
         if (kt + 1 < nk) issue(kt + 1);
+        if constexpr (DEG > 0) {
+            // list 11: gate_bwd_rows' operands (the tile's lin_l / res_l rows, its atoms' lin0 / res0 l-slices) are
+            // prefetched into L2 four K steps before the loop ends, so the epilogue's reads hit L2
+            if (kt == (nk > 4 ? nk - 4 : 0)) {
+                constexpr int l = DEG / 2;
+                const int a0 = m0 / DEG, na = min(MT / DEG, g.natoms - a0), rows = min(MT, M - m0);
+                if (DEG > 1)
+                    for (int li = tid; li < 2 * rows; li += 128) {
+                        const int64_t off = (int64_t)(m0 + (li >> 1)) * N + n0 + 32 * (li & 1);
+                        if (g.lin_l) prefetch_l2(g.lin_l + off);
+                        if (g.res_l) prefetch_l2(g.res_l + off);
+                    }
+                for (int li = tid; li < 2 * na; li += 128) {
+                    const int64_t off = (int64_t)(a0 + (li >> 1)) * 4 * N + l * N + n0 + 32 * (li & 1);
+                    prefetch_l2(g.lin0 + off);
+                    if (g.res0 && !g.res0_sp) prefetch_l2(g.res0 + off);
+                }
+            }
+        }
         const int st = kt & 1;
 #pragma unroll
         for (int kk = 0; kk < 2; ++kk) {
@@ -417,28 +438,41 @@ __global__ void __launch_bounds__(128, 2) hgemm2f_kernel(int M, int N, int K, co
 
     const int er = wm * 64 + g, ec = wn * 32 + 2 * t;
     if constexpr (DEG > 0) {
+        // list 11: g = cg sigmoid(pre) and s are formed once per (atom, column) of the tile and staged in the pipeline's
+        // dead shared memory (an atom's DEG rows share them), instead of per element: per row, the old store loaded
+        // lin0 / res0 and evaluated the sigmoid DEG times over (at most 128 atoms x 72 floats = 36 KB of kHSmem)
         constexpr int l = DEG / 2;
+        constexpr int SGS = kHN + 8;
+        float* sG = reinterpret_cast<float*>(hsm);
+        const int a0 = m0 / DEG, na = (min(m0 + kHM, M) - 1) / DEG - a0 + 1;
+        float* sS = sG + na * SGS;
+        __syncthreads();  // every warp is done with the pipeline buffers
+        for (int ai = tid; ai < na; ai += 128) sS[ai] = 1.0f / (ga.D[a0 + ai] * ga.beta + ga.alpha);
+        __syncthreads();
+        for (int idx = tid; idx < na * kHN; idx += 128) {
+            const int ai = idx / kHN, cl = idx % kHN, c = n0 + cl;
+            if (c >= N) continue;
+            const int a = a0 + ai;
+            const int64_t r0 = (int64_t)a * 4 * N, q0 = ga.res0_sp ? (int64_t)ga.res0_sp[a] * 4 * N : r0;
+            const float pre = ga.lin0[r0 + l * N + c] * sS[ai] + (ga.res0 ? ga.res0[q0 + l * N + c] : 0.0f);
+            sG[ai * SGS + cl] = ga.cg * sigmoid_f(pre);
+        }
+        __syncthreads();
 #pragma unroll
         for (int i = 0; i < 4; ++i)
 #pragma unroll
             for (int h = 0; h < 2; ++h) {
                 const int r = m0 + er + 16 * i + 8 * h;
                 if (r >= M) continue;
-                const int a = r / DEG;
-                const float s = 1.0f / (ga.D[a] * ga.beta + ga.alpha);
-                const int64_t r0 = (int64_t)a * 4 * N, q0 = ga.res0_sp ? (int64_t)ga.res0_sp[a] * 4 * N : r0;
+                const int ai = r / DEG - a0;
+                const float s = sS[ai];
 #pragma unroll
                 for (int j = 0; j < 4; ++j) {
                     if (j >= jn) continue;
-                    const int c = n0 + ec + 8 * j;
-                    float o[2];
-#pragma unroll
-                    for (int e = 0; e < 2; ++e) {
-                        const float pre =
-                            ga.lin0[r0 + l * N + c + e] * s + (ga.res0 ? ga.res0[q0 + l * N + c + e] : 0.0f);
-                        o[e] = (ga.cg * sigmoid_f(pre)) * ((acc[i][j][2 * h + e] * oscale) * s);
-                    }
-                    *reinterpret_cast<float2*>(ga.out + (int64_t)r * N + c) = make_float2(o[0], o[1]);
+                    const int cl = ec + 8 * j;
+                    const float2 gg = *reinterpret_cast<const float2*>(sG + ai * SGS + cl);
+                    *reinterpret_cast<float2*>(ga.out + (int64_t)r * N + n0 + cl) =
+                        make_float2(gg.x * ((acc[i][j][2 * h] * oscale) * s), gg.y * ((acc[i][j][2 * h + 1] * oscale) * s));
                 }
             }
     } else {

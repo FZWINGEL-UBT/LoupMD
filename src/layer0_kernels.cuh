@@ -173,6 +173,10 @@ __global__ void __launch_bounds__(256) first_fwd_kernel(
 // S142: J_FIX = 65 (64 radial columns, two per lane: OMAT-0 medium / small, ...) compiles the table width in, so the
 // column predicates, the even-width test and first_col_pos fold away (1,984 -> 1,568 static instructions, same 80
 // registers; OMAT-0 generic SrTiO3 424 -> 375 us per force call, 5060 Ti). J_FIX = 0 reads J at run time.
+// List 11 (ledger ideas-20261121-list11): J_FIX = 66 (65 radial columns: MH-1) runs columns 0..63 as J_FIX = 65 and
+// column 64 one harmonic per lane on lanes 0..15 (blk64), instead of COLS = 3 (112-118 registers): its share of
+// gy is added after the fold on lane d, its radial pull rides in slot 0. 80 registers (8 B of stack with ZBL);
+// MH-1 SrTiO3 500 -> 417 us per force call (5060 Ti only; the call itself a tie, 0.33% being below the A/B's reach).
 #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ == 1200
 #define LOUP_FIRST_BWD_EDGE_MINB2 6
 #else
@@ -187,7 +191,9 @@ __global__ void __launch_bounds__(128, COLS == 2 ? LOUP_FIRST_BWD_EDGE_MINB2 : 0
     const float* __restrict__ g0, const float* __restrict__ g1, const float* __restrict__ g2, const float* __restrict__ g3,
     const float* __restrict__ dD, const float* __restrict__ edge_dvec, ZblParams zbl,
     double* __restrict__ energy, double* __restrict__ forces, double* __restrict__ virial) {
-    static_assert(J_FIX == 0 || (COLS == 2 && J_FIX == 65), "fixed width: 64 columns, two per lane");
+    static_assert(J_FIX == 0 || (COLS == 2 && (J_FIX == 65 || J_FIX == 66)),
+                  "fixed width: 64 columns two per lane (+ column 64 one harmonic per lane at 66)");
+    constexpr bool C64 = J_FIX == 66;
     LOUP_L0_INTS;
 #ifdef LOUP_JIT_L0
     constexpr int J = LOUP_JIT_L0_J;
@@ -235,7 +241,7 @@ __global__ void __launch_bounds__(128, COLS == 2 ? LOUP_FIRST_BWD_EDGE_MINB2 : 0
         for (int c = 0; c < COLS; ++c)
             #pragma unroll
             for (int d = 0; d < 16; ++d) blk[c][d] = 0.0f;
-        float dD_r = 0.0f;
+        float dD_r = 0.0f, blk64 = 0.0f;  // blk64: column 64's harmonic `lane` (lanes 0..15; C64)
         int cur_rcv = -1, cur_snd_sp = -1;
 
         for (int k = 0; k < cnt; ++k) {
@@ -279,6 +285,13 @@ __global__ void __launch_bounds__(128, COLS == 2 ? LOUP_FIRST_BWD_EDGE_MINB2 : 0
                             for (int d = 0; d < 7; ++d) blk[c][9 + d] = __ldg(g3 + ((int64_t)rcv * 7 + d) * K0 + off);
                         }
                     }
+                }
+                if (C64 && lane < 16) {
+                    const float* base = lane == 0 ? g0 : (lane < 4 ? g1 : (lane < 9 ? g2 : g3));
+                    const int64_t row = lane == 0 ? (int64_t)rcv
+                                        : (lane < 4 ? (int64_t)rcv * 3 + lane - 1
+                                                    : (lane < 9 ? (int64_t)rcv * 5 + lane - 4 : (int64_t)rcv * 7 + lane - 9));
+                    blk64 = __ldg(base + row * K0 + snd_sp * Jp + 64);
                 }
                 if (dD) dD_r = __ldg(dD + rcv);
             }
@@ -324,6 +337,13 @@ __global__ void __launch_bounds__(128, COLS == 2 ? LOUP_FIRST_BWD_EDGE_MINB2 : 0
             float dr_p = 0.0f;
             #pragma unroll
             for (int c = 0; c < COLS; ++c) dr_p = fmaf(grad_a[c], pd[c], dr_p);
+            float pa64 = 0.0f;
+            if (C64) {  // column 64 (uniform table load); its radial pull rides in slot 0 of the fold
+                const float4 cf = __ldg(tb + first_col_pos(64, Jh));
+                pa64 = fmaf(t, fmaf(t, fmaf(t, cf.w, cf.z), cf.y), cf.x);
+                const float pd64 = fmaf(t, fmaf(t, 3.0f * cf.w, 2.0f * cf.z), cf.y) * sxi;
+                if (lane < 16) dr_p = fmaf(blk64 * s_edge[warp][k][lane], pd64, dr_p);
+            }
             gy[0] = dr_p;
 
             // 16-shuffle fold of gy[0..15] across 32 lanes -> lane 1..15 holds dsh[lane], lane 0 the radial pull
@@ -345,7 +365,7 @@ __global__ void __launch_bounds__(128, COLS == 2 ? LOUP_FIRST_BWD_EDGE_MINB2 : 0
             const bool h8 = (lane & 8) != 0;
             float g1 = (h8 ? g2[1] : g2[0]) + __shfl_xor_sync(0xffffffffu, h8 ? g2[0] : g2[1], 8);
             g1 += __shfl_xor_sync(0xffffffffu, g1, 16);
-            if (lane >= 1 && lane < 16) s_edge[warp][k][lane] = g1;
+            if (lane >= 1 && lane < 16) s_edge[warp][k][lane] = C64 ? fmaf(blk64, pa64, g1) : g1;
             if (lane == 0) {
                 float dr_v = g1;
                 if (dD && dD_r != 0.0f) {
