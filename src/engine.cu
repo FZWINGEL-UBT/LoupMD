@@ -2139,6 +2139,10 @@ static void record_force_pass(LoupHandle* h, int compute_stress, bool energy_onl
                           const loup::GateArgs& g) {
         loup::hgemm2_gate(l, M, Nc, K, A, B, oscale, nullptr, g, h->gemm_stream ? h->gemm_stream : h->stream);
     };
+    // LOUP_W2F_HALF (hgemm2.cu): used only by layers the model set up at load (GenericModel::w2f_half)
+    in.gemm_h2_fwd = [h](int M, int Nc, int K, const float* A, float sA, const void* B, float oscale, float* C) {
+        loup::hgemm2_f32a(M, Nc, K, A, sA, B, oscale, C, h->gemm_stream ? h->gemm_stream : h->stream);
+    };
     h->gen->record(in);
     if (!sweep) record_dispersion(h, compute_stress, energy_only);
 }
@@ -2913,8 +2917,9 @@ static int set_fixed_impl(LoupHandle* h, const int* fixed) {
 static bool drop_hybrid(LoupHandle* h) {
     bool dropped = false;
     if (h->gen && h->gen->drop_w2t_half()) {
-        fprintf(stderr, "loupmd: non-finite energy / forces with LOUP_W2T_HALF: the two-half FP16 W_2^T GEMMs "
-                        "disabled for this engine (a gradient element beyond binary16's range at scale 2^12)\n");
+        fprintf(stderr, "loupmd: non-finite energy / forces with LOUP_W2T_HALF / LOUP_W2F_HALF: the two-half FP16 "
+                        "W_2^T / W_2 GEMMs disabled for this engine (an operand element beyond binary16's range at "
+                        "its split scale)\n");
         h->invalidate_graphs();
         // The FP32 W_2^T GEMMs this falls back to never ran, so their shapes have no plans: with the plans gone the
         // next pass is the uncaptured tuning pass (lt_cache.empty()), not a capture that would meet untuned shapes.
@@ -3064,6 +3069,10 @@ static int evaluate_impl(
     if (rc == 0 && h->gen && h->gen->w2t_half() && std::getenv("LOUP_DEBUG_W2T_HALF")) {
         const DeviceOrder order(true);  // a device-wide synchronisation and plain copies (DeviceOrder)
         h->gen->debug_w2t_half(h->N);
+    }
+    if (rc == 0 && h->gen && std::getenv("LOUP_DEBUG_GOUT")) {
+        const DeviceOrder order(true);
+        h->gen->debug_gout(h->N);
     }
     if (rc == 0 && !finite && drop_hybrid(h)) {
         rc = evaluate_once(h, positions, cell, compute_stress, out_energy_ev, out_forces, out_stress, &finite,

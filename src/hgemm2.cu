@@ -235,6 +235,169 @@ __global__ void __launch_bounds__(128, 2) hgemm2_kernel(int M, int N, int K, con
     }
 }
 
+// hgemm2f (forward projections, ledger gen-w2-fwd-two-half): C = A B^T with A in FP32 [M][K], split at the fragment
+// loads into H = rn(a sA) and L' = rn(a sA - H) (the correction unscaled: L(A) 2^-11 of the panel form), so no
+// producer changes and nothing else reads a panel. The cross term L' H(B) takes H(B) 2^-11 (formed in registers), so
+// X keeps the panel form's scale and bound (|H(A)| <= 2^16, |H(B)| <= 2^15). A's tile goes to shared memory as FP32
+// (cp.async, 16-byte chunks XOR-swizzled by row % 8: the quarter-warp LDS.64 of a fragment are conflict-free), the
+// same 24 KB a stage as the panel kernel; each warp splits the rows it multiplies (the two warps of a row half both do).
+// Plain FP32 store. Requirements as hgemm2_kernel's.
+// Restart (RV): the forward's outputs cancel more than the reverse's (rms(result) 5-16% of sum |a b| on MH-1's contact
+// cells), so the tensor cores' truncation biases them more. Restarted every 32 of K (RV 0, as hgemm2_kernel), the mean
+// signed error on Sr-contact0.8's own gout was -1.3e-8 to -4.3e-8 of rms(result) against FP32's +-3e-9 (the
+// representation alone, in float64, unbiased), and that cell's force rule failed at 0.9-1.4x. H H restarted at every MMA
+// (RV 1, the default: each 16 of K from zero into the running sum with a round-to-nearest add; X every 32) brings it to
+// -0.9e-8 to -2.9e-8 (the truncation inside one 16-product MMA remains) and the cell passes (0.56); RV 2 (X every 16
+// too) adds nothing and costs 4%.
+__device__ __forceinline__ void split2f(float2 x, float s, unsigned& h, unsigned& l) {
+    const float a = x.x * s, b = x.y * s;
+    const __half2 hh = __floats2half2_rn(a, b);
+    const float2 hf = __half22float2(hh);
+    const __half2 ll = __floats2half2_rn(a - hf.x, b - hf.y);
+    h = *reinterpret_cast<const unsigned*>(&hh);
+    l = *reinterpret_cast<const unsigned*>(&ll);
+}
+
+constexpr unsigned kHB11 = 0x10001000u;  // 2^-11 in both halves
+constexpr int kHFwdVariant = 1;           // hgemm2_f32a's restart variant (hgemm2_f32a_variant)
+
+template <int RV>
+__global__ void __launch_bounds__(128, 2) hgemm2f_kernel(int M, int N, int K, const float* __restrict__ A, float sA,
+                                                         const __half* __restrict__ B, float oscale,
+                                                         float* __restrict__ C) {
+    extern __shared__ __align__(128) unsigned char hsm[];
+    const unsigned sbase = (unsigned)__cvta_generic_to_shared(hsm);
+    const int tid = threadIdx.x, lane = tid & 31, warp = tid >> 5, wm = warp >> 1, wn = warp & 1;
+    const int m0 = blockIdx.y * kHM, n0 = blockIdx.x * kHN;
+    const int64_t planeB = (int64_t)N * K;
+    const int fr = tid >> 3, fj = tid & 7;  // A copy roles: rows fr + 16 i (i = 0..7), 16-byte chunk fj
+    const int cr = tid >> 2, cj = tid & 3;  // B copy roles as hgemm2_kernel's
+    const __half* bg = B + (int64_t)(n0 + cr) * K + cj * 8;
+    auto stage_b = [&](int st, int p) { return sbase + (unsigned)((st * kHStage + 2 * kHTileA + p * kHTileB) * 2); };
+    auto issue = [&](int kt) {
+        const int st = kt & 1, k0 = kt * kHK;
+        const unsigned sa = sbase + (unsigned)(st * kHStage * 2);
+#pragma unroll
+        for (int i = 0; i < 8; ++i) {
+            const int r = fr + 16 * i;
+            const bool ok = m0 + r < M;
+            cp16(sa + r * 128 + ((fj ^ (r & 7)) << 4), A + (int64_t)(ok ? m0 + r : m0) * K + k0 + 4 * fj, ok);
+        }
+#pragma unroll
+        for (int p = 0; p < 2; ++p)
+#pragma unroll
+            for (int i = 0; i < 2; ++i)
+                cp16(stage_b(st, p) + swz(cr + 32 * i, cj), bg + p * planeB + (int64_t)32 * i * K + k0, true);
+        asm volatile("cp.async.commit_group;");
+    };
+
+    float acc[4][4][4], accP[4][4][4];
+    unsigned accX[4][4][2];
+#pragma unroll
+    for (int i = 0; i < 4; ++i)
+#pragma unroll
+        for (int j = 0; j < 4; ++j) {
+#pragma unroll
+            for (int e = 0; e < 4; ++e) acc[i][j][e] = accP[i][j][e] = 0.0f;
+            accX[i][j][0] = accX[i][j][1] = 0u;
+        }
+
+    const int g = lane >> 2, t = lane & 3;
+    const int b_row = wn * 32 + ((lane >> 4) << 3) + (lane & 7), b_kc = (lane >> 3) & 1;
+    const int nk = K / kHK;
+    issue(0);
+    for (int kt = 0; kt < nk; ++kt) {
+        asm volatile("cp.async.wait_group 0;");
+        __syncthreads();
+        if (kt + 1 < nk) issue(kt + 1);
+        const int st = kt & 1;
+        const unsigned char* sa = hsm + st * kHStage * 2 + (wm * 64 + g) * 128 + (t & 1) * 8;
+#pragma unroll
+        for (int kk = 0; kk < 2; ++kk) {
+            unsigned bh[2][4], bl[2][4], bc[2][4];
+#pragma unroll
+            for (int j = 0; j < 2; ++j) {
+                ldsm4(stage_b(st, 0) + swz(b_row + 16 * j, 2 * kk + b_kc), bh[j]);
+                ldsm4(stage_b(st, 1) + swz(b_row + 16 * j, 2 * kk + b_kc), bl[j]);
+#pragma unroll
+                for (int r = 0; r < 4; ++r) bc[j][r] = hmul2u(bh[j][r], kHB11);
+            }
+            const int ja = 4 * kk + (t >> 1);
+            const int o0 = (ja ^ g) << 4, o1 = ((ja + 2) ^ g) << 4;
+#pragma unroll
+            for (int i = 0; i < 4; ++i) {
+                const unsigned char* s = sa + 16 * i * 128;
+                unsigned ah[4], al[4];
+                split2f(*reinterpret_cast<const float2*>(s + o0), sA, ah[0], al[0]);
+                split2f(*reinterpret_cast<const float2*>(s + 8 * 128 + o0), sA, ah[1], al[1]);
+                split2f(*reinterpret_cast<const float2*>(s + o1), sA, ah[2], al[2]);
+                split2f(*reinterpret_cast<const float2*>(s + 8 * 128 + o1), sA, ah[3], al[3]);
+#pragma unroll
+                for (int j = 0; j < 4; ++j) {
+                    const int jp = j >> 1, jb = 2 * (j & 1);
+                    if constexpr (RV == 0) {
+                        mma16816(accP[i][j], ah, bh[jp][jb], bh[jp][jb + 1]);
+                    } else {  // H H of this 16 of K from zero, into the running sum with a round-to-nearest add
+                        float d[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+                        mma16816(d, ah, bh[jp][jb], bh[jp][jb + 1]);
+#pragma unroll
+                        for (int e = 0; e < 4; ++e) acc[i][j][e] += d[e];
+                    }
+                    mma16816h(accX[i][j], ah, bl[jp][jb], bl[jp][jb + 1]);
+                    mma16816h(accX[i][j], al, bc[jp][jb], bc[jp][jb + 1]);
+                }
+            }
+            if constexpr (RV == 2) {  // X restarted every 16 of K too
+#pragma unroll
+                for (int i = 0; i < 4; ++i)
+#pragma unroll
+                    for (int j = 0; j < 4; ++j) {
+#pragma unroll
+                        for (int h = 0; h < 2; ++h) {
+                            const float2 x = __half22float2(*reinterpret_cast<const __half2*>(&accX[i][j][h]));
+                            acc[i][j][2 * h] = fmaf(x.x, (float)(1 << (kHC - 11)), acc[i][j][2 * h]);
+                            acc[i][j][2 * h + 1] = fmaf(x.y, (float)(1 << (kHC - 11)), acc[i][j][2 * h + 1]);
+                        }
+                        accX[i][j][0] = accX[i][j][1] = 0u;
+                    }
+            }
+        }
+        if constexpr (RV != 2) {
+#pragma unroll
+            for (int i = 0; i < 4; ++i)
+#pragma unroll
+                for (int j = 0; j < 4; ++j) {
+#pragma unroll
+                    for (int h = 0; h < 2; ++h) {
+                        const float2 x = __half22float2(*reinterpret_cast<const __half2*>(&accX[i][j][h]));
+                        if constexpr (RV == 0) {
+                            acc[i][j][2 * h] += fmaf(x.x, (float)(1 << (kHC - 11)), accP[i][j][2 * h]);
+                            acc[i][j][2 * h + 1] += fmaf(x.y, (float)(1 << (kHC - 11)), accP[i][j][2 * h + 1]);
+                            accP[i][j][2 * h] = accP[i][j][2 * h + 1] = 0.0f;
+                        } else {
+                            acc[i][j][2 * h] = fmaf(x.x, (float)(1 << (kHC - 11)), acc[i][j][2 * h]);
+                            acc[i][j][2 * h + 1] = fmaf(x.y, (float)(1 << (kHC - 11)), acc[i][j][2 * h + 1]);
+                        }
+                    }
+                    accX[i][j][0] = accX[i][j][1] = 0u;
+                }
+        }
+    }
+
+    const int er = wm * 64 + g, ec = wn * 32 + 2 * t;
+#pragma unroll
+    for (int i = 0; i < 4; ++i)
+#pragma unroll
+        for (int h = 0; h < 2; ++h) {
+            const int r = m0 + er + 16 * i + 8 * h;
+            if (r >= M) continue;
+#pragma unroll
+            for (int j = 0; j < 4; ++j)
+                *reinterpret_cast<float2*>(C + (int64_t)r * N + n0 + ec + 8 * j) =
+                    make_float2(acc[i][j][2 * h] * oscale, acc[i][j][2 * h + 1] * oscale);
+        }
+}
+
 // The two panels of a weight: out[0 .. n) = H = rn(w scale), out[n .. 2n) = rn((w scale - H) 2^(11 - c)), the
 // correction already at the cross term's shift.
 __global__ void split_half_kernel(int64_t n, const float* __restrict__ w, float scale, __half* __restrict__ out) {
@@ -245,6 +408,17 @@ __global__ void split_half_kernel(int64_t n, const float* __restrict__ w, float 
     const float hf = __half2float(h);
     out[i] = h;
     out[n + i] = __float2half_rn((a - hf) * (1.0f / (float)(1 << (kHC - 11))));
+}
+
+// The panels of w^T for w [R][Cc] (out [2][Cc][R]): the forward projection's B (hgemm2_f32a takes B as [N][K]).
+__global__ void split_half_t_kernel(int R, int Cc, const float* __restrict__ w, float scale, __half* __restrict__ out) {
+    const int64_t n = (int64_t)R * Cc, i = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    const int64_t j = i / R, r = i % R;
+    const float a = w[r * Cc + j] * scale;
+    const __half h = __float2half_rn(a);
+    out[i] = h;
+    out[n + i] = __float2half_rn((a - __half2float(h)) * (1.0f / (float)(1 << (kHC - 11))));
 }
 
 template <int DEG>
@@ -264,6 +438,26 @@ void hgemm2_init() {
     cudaFuncSetAttribute(hgemm2_kernel<3>, cudaFuncAttributePreferredSharedMemoryCarveout, 100);
     cudaFuncSetAttribute(hgemm2_kernel<5>, cudaFuncAttributePreferredSharedMemoryCarveout, 100);
     cudaFuncSetAttribute(hgemm2_kernel<7>, cudaFuncAttributePreferredSharedMemoryCarveout, 100);
+    cudaFuncSetAttribute(hgemm2f_kernel<0>, cudaFuncAttributePreferredSharedMemoryCarveout, 100);
+    cudaFuncSetAttribute(hgemm2f_kernel<1>, cudaFuncAttributePreferredSharedMemoryCarveout, 100);
+    cudaFuncSetAttribute(hgemm2f_kernel<2>, cudaFuncAttributePreferredSharedMemoryCarveout, 100);
+}
+
+// C [M][N] = A B^T oscale: A FP32 [M][K] (split in the kernel at scale sA, a power of two with max |A| sA < 65,504 or
+// the result is not finite), B two panels [2][N][K] (hgemm2_split); oscale = 1 / (sA 2^e_B).
+// The restart variants (benches): 0 H H and X every 32 of K, 1 H H every MMA (16 of K) and X every 32, 2 both every 16.
+void hgemm2_f32a_variant(int v, int M, int N, int K, const float* A, float sA, const void* B, float oscale, float* C,
+                         cudaStream_t stream) {
+    const dim3 grid(N / kHN, (M + kHM - 1) / kHM);
+    const __half* b = static_cast<const __half*>(B);
+    if (v == 0) hgemm2f_kernel<0><<<grid, 128, kHSmem, stream>>>(M, N, K, A, sA, b, oscale, C);
+    else if (v == 1) hgemm2f_kernel<1><<<grid, 128, kHSmem, stream>>>(M, N, K, A, sA, b, oscale, C);
+    else hgemm2f_kernel<2><<<grid, 128, kHSmem, stream>>>(M, N, K, A, sA, b, oscale, C);
+}
+
+void hgemm2_f32a(int M, int N, int K, const float* A, float sA, const void* B, float oscale, float* C,
+                 cudaStream_t stream) {
+    hgemm2_f32a_variant(kHFwdVariant, M, N, K, A, sA, B, oscale, C, stream);
 }
 
 // The exponent e of the weight panels' scale 2^e: the largest with max |w| 2^e <= 2^15, so both panels stay finite
@@ -281,6 +475,13 @@ int hgemm2_weight_exponent(const float* w, int64_t n) {
 void hgemm2_split(int64_t n, const float* w, int e, void* out, cudaStream_t stream) {
     split_half_kernel<<<(unsigned)((n + 255) / 256), 256, 0, stream>>>(n, w, std::ldexp(1.0f, e),
                                                                        static_cast<__half*>(out));
+}
+
+// out [2 R Cc] halves: the panels of w^T, w [R][Cc], at scale 2^e.
+void hgemm2_split_t(int R, int Cc, const float* w, int e, void* out, cudaStream_t stream) {
+    const int64_t n = (int64_t)R * Cc;
+    split_half_t_kernel<<<(unsigned)((n + 255) / 256), 256, 0, stream>>>(R, Cc, w, std::ldexp(1.0f, e),
+                                                                         static_cast<__half*>(out));
 }
 
 // dgout_l = A B^T with degree l's gate backward (gate_bwd_rows) for M = g.natoms (2l + 1) rows; l = -1: the plain

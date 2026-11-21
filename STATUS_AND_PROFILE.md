@@ -2789,3 +2789,43 @@ cubic decode's arithmetic against a table bound of about 0.6 ms per OMAT-0 call.
 rounding error. Channel equilibration has nothing left to fix (the two-half's miss was truncation, not range). The
 dual-model and multi-fidelity schemes change the workflow, not the force; no family has a pair-independent radial
 table in Agnesi's u; there is no multi-GPU host here, and frozen-bulk caching has no fixed-atom path to attach to.
+
+### 6.43 MH-1's forward projections in two halves, and what waits for the workstations (21 November 2026)
+
+This section continues 6.42 on the same branch: the owner said to try locally what can be tried and to put the ideas
+for the workstation cards in the ledger for now. Everything was timed on the RTX 5060 Ti only. Ledger entries:
+`gen-w2-fwd-two-half`, `ideas-20261121-ws`.
+
+**Forward projections in two halves (`LOUP_W2F_HALF=1`, off by default; open).** The eight forward `W_2`
+projections (`msgf_l = gout_l W_2[l]`) run on the cross-term arithmetic of the reverse ones. `hgemm2f_kernel` reads
+`gout` as FP32 and splits each fragment into two binary16 halves in registers at a fixed scale of 2^10, so no producer
+changes. Binary16 then overflows at `|gout| >= 64`. The largest value in the headroom set and the physics cases is 32.2
+(layer 1, degree 1), and an overflow drops both two-half paths, as before. The forward's outputs cancel far more than
+the reverse's, so the tensor cores' truncating accumulation showed again. With both accumulators restarted every 32 of
+K, the 0.8 A contact cell failed its force rule (0.91-1.43 of the allowance). Restarting `H H` at every MMA brought the
+bias from -1.3e-8 to -4.3e-8 of the result's RMS down to -0.9e-8 to -2.9e-8, and the cell to 0.72 / 0.64 (force /
+stress) with both switches (FP32 path 0.18 / 0.38). With both switches every gate passes: MH-1 crystals (three heads,
+gate fusion on and off), its `omol` head on organics, OMOL-0 XL organics, the seven physics cases and the headroom
+set (as the FP32 path, Sr-scale0.80 fails its energy rule on both sides).
+
+Both switches against the FP32 path, A B B A twice with fresh plans: MH-1 SrTiO3 (5,000 atoms) 29.46 -> 27.15 ms
+(0.922, with stress 0.920), of which the forward's own share is 0.954. MH-1 NaCl216 reads 0.907 (with stress 0.972), so
+no row bound is needed. OMOL-0 XL water216 reads 0.885 (with stress 0.881). In `nsys` the forward GEMMs go from about
+5.4 ms (cuBLAS's SGEMM) to 4.0 ms per call. Power over whole SrTiO3 calls: 180.0 W on both sides, with the SM clock at
+2,565-2,572 MHz on the FP32 path and 2,595-2,602 MHz with the package. On this card every large GEMM, cuBLAS's
+included, runs at the power limit, so energy per product decides the GEMMs' speed. The package passes the 5% whole-call
+rule on the 5060 Ti. Adoption needs the RTX 4000 Ada, or the owner narrowing the bar to this card.
+
+**The other FP32 GEMMs (kernel screen only).** `hgemm2f_kernel` ran on random operands for ten of MH-1's other plain
+GEMM shapes (projections and their transposes: N a multiple of 64, K of 32). It took 0.63-0.82 of the times the
+shapes' tuned plans recorded, 2.45 against 3.34 ms per occurrence. Its mean signed error was -2e-8 of the result's RMS
+(cuBLAS +-2e-9). This is not built. It needs a range census per operand (these read conv outputs, not `gout`), the
+gated epilogues on the new kernel, and tails for the eight 208-wide C0 shapes (3.04 ms of plan time).
+
+**Waiting for a workstation GPU** (ledger `ideas-20261121-ws`; all four workstation GPUs were busy on 21 November):
+- The package on the RTX 4000 Ada and the RTX A4000. The job staged on `leto` holds the reverse form's first build
+  only and needs restaging.
+- The professional cards run FP16 MMA with FP32 accumulation at the full rate (NVIDIA's documents, not measured). So
+  the two cross products cost three units there against two on the 5060 Ti, and the host's own MMA rates should be
+  measured first.
+- On those cards the cross products could also take FP32 accumulation at no cost, for accuracy alone.

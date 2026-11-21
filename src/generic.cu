@@ -124,6 +124,12 @@ struct GenericLayer {
     int w2h_exp[4] = {};
     float w2h_oscale[4] = {};
     bool h2 = false;
+    // LOUP_W2F_HALF (setup_w2f_half): the panels of W_2[l]^T ([2][C_msg][C_msg] halves at 2^w2h_exp[l]), gout's split
+    // scale and the output scales
+    void* w2fh[4] = {};
+    float w2f_sA[4] = {};
+    float w2f_oscale[4] = {};
+    bool f2 = false;
     // weights (device)
     float4* table = nullptr;
     uint2* packed_table = nullptr;
@@ -1288,6 +1294,7 @@ void GenericModel::load(const Bundle& b) {
     setup_lr_fold(b);
     setup_jit();
     setup_w2t_half();
+    setup_w2f_half();
     if (std::getenv("LOUP_SWEEP_REPLAY")) {
         if (lr_)
             throw std::runtime_error("LOUP_SWEEP_REPLAY: the sweep schedule is not available for long-range models");
@@ -1389,10 +1396,68 @@ void GenericModel::debug_w2t_half(int N) const {
 }
 
 bool GenericModel::drop_w2t_half() {
-    if (!w2t_half_) return false;
-    for (auto* L : layers_) L->h2 = false;
-    w2t_half_ = false;
+    if (!w2t_half_ && !w2f_half_) return false;
+    for (auto* L : layers_) L->h2 = L->f2 = false;
+    w2t_half_ = w2f_half_ = false;
     return true;
+}
+
+// LOUP_W2F_HALF=1 (hgemm2.cu, hgemm2_f32a; ledger gen-w2-fwd-two-half; off by default): every kind-4 layer with neither
+// the compact layout nor the long range and C_msg % 64 == 0 runs its forward W_2 GEMMs (msgf_l = gout_l W_2[l]) as the
+// cross-term two-half product with gout_l read as FP32 and split in the kernel at the fixed scale 2^kW2fExp
+// (LOUP_W2F_HALF_EXP overrides), against the panels of W_2[l]^T made here. Nothing else changes: the producers of
+// gout and the gate backward, which reads it, keep FP32. An element with |gout| 2^e >= 65,520 makes the pass
+// non-finite, and the engine then drops the path with LOUP_W2T_HALF's (drop_w2t_half).
+static constexpr int kW2fExp = 10;
+void GenericModel::setup_w2f_half() {
+    w2f_half_ = false;
+    const char* e = std::getenv("LOUP_W2F_HALF");
+    if (!e || e[0] != '1' || lr_) return;
+    const char* xe = std::getenv("LOUP_W2F_HALF_EXP");
+    const int ea = xe && *xe ? std::atoi(xe) : kW2fExp;
+    for (auto* L : layers_) {
+        if (L->kind != 4 || L->lin_compact || L->C_msg % 64 != 0) continue;
+        const int64_t n = (int64_t)L->C_msg * L->C_msg;
+        for (int l = 0; l < 4; ++l) {
+            CUDA_CHECK_THROW(cudaMalloc(&L->w2fh[l], 2 * n * sizeof(uint16_t)));
+            L->weights.push_back(L->w2fh[l]);
+            hgemm2_split_t(L->C_msg, L->C_msg, L->W_2[l], L->w2h_exp[l], L->w2fh[l], nullptr);
+            L->w2f_sA[l] = std::ldexp(1.0f, ea);
+            L->w2f_oscale[l] = std::ldexp(1.0f, -(ea + L->w2h_exp[l]));
+        }
+        L->f2 = true;
+        w2f_half_ = true;
+    }
+    CUDA_CHECK_THROW(cudaGetLastError());
+    CUDA_CHECK_THROW(cudaStreamSynchronize(nullptr));
+    if (w2f_half_) hgemm2_init();
+}
+
+void GenericModel::debug_gout(int N) const {
+    CUDA_CHECK_THROW(cudaDeviceSynchronize());
+    for (size_t t = 0; t < layers_.size(); ++t) {
+        const GenericLayer* L = layers_[t];
+        if (L->kind != 4 || !L->gout[0]) continue;
+        for (int l = 0; l < 4; ++l) {
+            const int64_t n = (int64_t)N * dimL(l) * L->C_msg;
+            std::vector<float> p((size_t)n);
+            CUDA_CHECK_THROW(cudaMemcpy(p.data(), L->gout[l], (size_t)n * sizeof(float), cudaMemcpyDeviceToHost));
+            float mx = 0.0f;
+            double ss = 0.0;
+            int64_t bad = 0;
+            for (float x : p) {
+                if (!std::isfinite(x)) {
+                    ++bad;
+                    continue;
+                }
+                mx = std::max(mx, std::fabs(x));
+                ss += (double)x * x;
+            }
+            std::fprintf(stderr, "loupmd: gout layer %zu degree %d: max %.5g rms %.4g (%s), %lld non-finite\n", t, l, mx,
+                         std::sqrt(ss / std::max<int64_t>(n, 1)), L->f2 ? "two-half forward" : "FP32 forward",
+                         (long long)bad);
+        }
+    }
 }
 
 void GenericModel::setup_jit() {
@@ -2243,7 +2308,11 @@ void GenericModel::record(const GenericPassInputs& in) {
             fork();
             for (int l = 0; l < 4; ++l) {
                 lane(l);
-                in.gemm(false, N * dimL(l), Cm, Cm, 1.0f, L->gout[l], Cm, L->W_2[l], Cm, 0.0f, L->msgf[l], Cm);
+                if (L->f2 && in.gemm_h2_fwd)  // LOUP_W2F_HALF (setup_w2f_half)
+                    in.gemm_h2_fwd(N * dimL(l), Cm, Cm, L->gout[l], L->w2f_sA[l], L->w2fh[l], L->w2f_oscale[l],
+                                   L->msgf[l]);
+                else
+                    in.gemm(false, N * dimL(l), Cm, Cm, 1.0f, L->gout[l], Cm, L->W_2[l], Cm, 0.0f, L->msgf[l], Cm);
             }
             join();
         }

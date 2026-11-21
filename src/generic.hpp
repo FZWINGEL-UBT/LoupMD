@@ -59,6 +59,13 @@ int hgemm2_weight_exponent(const float* w, int64_t n);
 void hgemm2_split(int64_t n, const float* w, int e, void* out, cudaStream_t stream);
 void hgemm2_gate(int l, int M, int N, int K, const void* A, const void* B, float oscale, float* C, const GateArgs& g,
                  cudaStream_t stream);
+// LOUP_W2F_HALF (hgemm2.cu, hgemm2f_kernel): C = A B^T oscale with A in FP32, split in the kernel at scale sA; B the
+// panels of the transposed weight (hgemm2_split_t).
+void hgemm2_f32a(int M, int N, int K, const float* A, float sA, const void* B, float oscale, float* C,
+                 cudaStream_t stream);
+void hgemm2_split_t(int R, int Cc, const float* w, int e, void* out, cudaStream_t stream);
+using GemmH2FwdFn =
+    std::function<void(int M, int N, int K, const float* A, float sA, const void* B, float oscale, float* C)>;
 
 struct GenericPassInputs {
     cudaStream_t stream;
@@ -115,6 +122,7 @@ struct GenericPassInputs {
     GemmGateFn gemm_gate_fwd;  // empty: never fused (LOUP_GATE_FUSE_FWD=0)
     GemmGateFn gemm_gate_fwd_l1;  // empty: later layers' forward gate off (LOUP_GATE_FWD_L1=0)
     GemmH2GateFn gemm_h2_gate; // empty: the FP32 W_2^T path (the model also needs LOUP_W2T_HALF=1 at load)
+    GemmH2FwdFn gemm_h2_fwd;   // empty: the FP32 forward W_2 path (the model also needs LOUP_W2F_HALF=1 at load)
 };
 
 struct GenericLayer;
@@ -169,6 +177,11 @@ public:
     // LOUP_DEBUG_W2T_HALF=1 (the engine, after an evaluate): each such layer's largest |dmsgf| over N atoms against
     // binary16's range at loup_store_h2's scale, and the non-finite panel elements, on stderr. Synchronises the device.
     void debug_w2t_half(int N) const;
+    // LOUP_W2F_HALF=1 at load (hgemm2.cu, hgemm2_f32a; off by default): the kind-4 layers' forward W_2 GEMMs from FP32
+    // gout split in the kernel at a fixed scale (setup_w2f_half). drop_w2t_half() drops it too.
+    bool w2f_half() const { return w2f_half_; }
+    // LOUP_DEBUG_GOUT=1 (the engine, after an evaluate): each kind-4 layer's largest |gout_l| over N atoms on stderr.
+    void debug_gout(int N) const;
     // The layers' own buffers of the systems allocated from now on in one shared arena (tile-shared-layers): a sweep
     // runs one layer and needs nothing of another layer but its output and that output's gradient, which stay
     // buffers of their own, so the arena is as large as the largest layer instead of all of them. Such a system runs
@@ -221,6 +234,8 @@ private:
     bool chain_fold_ = false;        // the fold of the allocated system (use_chain_fold)
     bool w2t_half_ = false;          // LOUP_W2T_HALF: some layer has its weight panels (setup_w2t_half)
     void setup_w2t_half();
+    bool w2f_half_ = false;          // LOUP_W2F_HALF: some layer has its transposed weight panels (setup_w2f_half)
+    void setup_w2f_half();
     bool chain_fold_built_ = false;  // setup_chain_fold composed the fold's weights
     bool share_layers_ = false;      // asked for the systems to come (share_layer_buffers)
     bool share_layers_env_ = true;   // LOUP_TILE_SHARE_LAYERS != 0, read at load
