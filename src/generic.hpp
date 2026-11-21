@@ -61,11 +61,26 @@ void hgemm2_gate(int l, int M, int N, int K, const void* A, const void* B, float
                  cudaStream_t stream);
 // LOUP_W2F_HALF (hgemm2.cu, hgemm2f_kernel): C = A B^T oscale with A in FP32, split in the kernel at scale sA; B the
 // panels of the transposed weight (hgemm2_split_t).
+// beta != 0: C = beta C + A B^T oscale. N % 16 == 0 and K % 16 == 0 with B's panels from hgemm2_split_pad (padded to
+// [2][Np][Kp]); N % 64 == 0 and K % 32 == 0 need no padding (hgemm2_split, hgemm2_split_t give the same layout) and,
+// with beta 0, run the kernel's instance without tails.
 void hgemm2_f32a(int M, int N, int K, const float* A, float sA, const void* B, float oscale, float* C,
-                 cudaStream_t stream);
+                 cudaStream_t stream, float beta = 0.0f);
+void hgemm2_f32a_variant(int v, int M, int N, int K, const float* A, float sA, const void* B, float oscale, float* C,
+                         cudaStream_t stream, float beta = 0.0f);
 void hgemm2_split_t(int R, int Cc, const float* w, int e, void* out, cudaStream_t stream);
-using GemmH2FwdFn =
-    std::function<void(int M, int N, int K, const float* A, float sA, const void* B, float oscale, float* C)>;
+int64_t hgemm2_pad_elems(int Nr, int Kc);  // halves of one padded panel (two per weight)
+void hgemm2_split_pad(int Nr, int Kc, const float* w, bool trans, int e, void* out, cudaStream_t stream);
+using GemmH2FwdFn = std::function<void(int M, int N, int K, const float* A, float sA, const void* B, float oscale,
+                                       float* C, float beta)>;
+// The same product for a residual-free degree l >= 1 (M = g.natoms (2l + 1), N = g.C) with gate_fwd's gated store:
+// gout_l = g (lin_l s) to g.out instead of lin_l.
+void hgemm2_f32a_gate(int l, int M, int N, int K, const float* A, float sA, const void* B, float oscale,
+                      const GateArgs& g, cudaStream_t stream);
+// LOUP_LIN_HALF's projections keep the forward gate fusion (LOUP_GATE_FUSE_FWD; `later`: a later layer's, under
+// LOUP_GATE_FWD_L1 and its row rule). False: nothing launched. A null: only reports whether it would run.
+using GemmH2GateFwdFn = std::function<bool(int l, int M, int N, int K, const float* A, float sA, const void* B,
+                                           float oscale, const GateArgs& g, bool later)>;
 
 struct GenericPassInputs {
     cudaStream_t stream;
@@ -123,6 +138,7 @@ struct GenericPassInputs {
     GemmGateFn gemm_gate_fwd_l1;  // empty: later layers' forward gate off (LOUP_GATE_FWD_L1=0)
     GemmH2GateFn gemm_h2_gate; // empty: the FP32 W_2^T path (the model also needs LOUP_W2T_HALF at load)
     GemmH2FwdFn gemm_h2_fwd;   // empty: the FP32 forward W_2 path (the model also needs LOUP_W2F_HALF at load)
+    GemmH2GateFwdFn gemm_h2_gate_fwd;  // empty: LOUP_GATE_FUSE_FWD=0
 };
 
 struct GenericLayer;
@@ -243,8 +259,9 @@ private:
     bool w2f_half_ = false;          // LOUP_W2F_HALF: some layer has its transposed weight panels (setup_w2f_half)
     void setup_w2f_half();
     bool lin_half_ = false;          // LOUP_LIN_HALF: some conv layer's projection has its panels (setup_lin_half)
+    int lin_half_parts_ = 0;         // LOUP_LIN_HALF_PARTS (setup_lin_half)
     void setup_lin_half();
-    static constexpr int kLinAmaxSlots = 96;  // LOUP_DEBUG_LIN_AMAX: layer t, kind k, degree l at 12 t + 4 k + l
+    static constexpr int kLinAmaxSlots = 128;  // LOUP_DEBUG_LIN_AMAX: layer t, kind k, degree l at 16 t + 4 k + l
     unsigned* d_lin_amax_ = nullptr;
     void lin_amax_record(const float* A, int64_t n, int slot, cudaStream_t st) const;
     bool chain_fold_built_ = false;  // setup_chain_fold composed the fold's weights

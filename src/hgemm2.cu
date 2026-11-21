@@ -279,18 +279,26 @@ __device__ __forceinline__ void split2f(float2 x, float s, unsigned& h, unsigned
 constexpr unsigned kHB11 = 0x10001000u;  // 2^-11 in both halves
 constexpr int kHFwdVariant = 1;           // hgemm2_f32a's restart variant (hgemm2_f32a_variant)
 
-template <int RV>
+// TAIL (LOUP_LIN_HALF's C0 shapes and beta): K % 16 == 0 and N % 16 == 0 suffice. B's panels are [2][Np][Kp] with Np,
+// Kp rounded up to 64 / 32 and zeros in the padding (hgemm2_split_pad); A's chunks past K load as zeros; a warp computes
+// and stores only its columns below N; beta != 0: C = beta C + A B^T. Without TAIL (N % 64 == 0, K % 32 == 0, beta 0)
+// none of that is compiled in (the kernel as before the tails). DEG = 2l + 1 (l >= 1, residual-free): stores
+// gate_fwd_kernel's gout_l = g (lin_l s), g = cs_g sigmoid(pre0[l C + c]), to g.out instead of lin_l (M = natoms DEG,
+// N = g.C; C and beta unused), elementwise in the epilogue with the gate kernel's operations.
+template <int RV, int DEG, bool TAIL>
 __global__ void __launch_bounds__(128, 2) hgemm2f_kernel(int M, int N, int K, const float* __restrict__ A, float sA,
                                                          const __half* __restrict__ B, float oscale,
-                                                         float* __restrict__ C) {
+                                                         float* __restrict__ C, float beta, GateArgs ga) {
     extern __shared__ __align__(128) unsigned char hsm[];
     const unsigned sbase = (unsigned)__cvta_generic_to_shared(hsm);
     const int tid = threadIdx.x, lane = tid & 31, warp = tid >> 5, wm = warp >> 1, wn = warp & 1;
     const int m0 = blockIdx.y * kHM, n0 = blockIdx.x * kHN;
-    const int64_t planeB = (int64_t)N * K;
+    const int Kp = TAIL ? (K + kHK - 1) / kHK * kHK : K;
+    const int64_t planeB = TAIL ? (int64_t)((N + kHN - 1) / kHN * kHN) * Kp : (int64_t)N * K;
+    const int jn = TAIL ? min(4, max(0, (N - n0 - wn * 32) / 8)) : 4;  // this warp's 8-column groups below N
     const int fr = tid >> 3, fj = tid & 7;  // A copy roles: rows fr + 16 i (i = 0..7), 16-byte chunk fj
     const int cr = tid >> 2, cj = tid & 3;  // B copy roles as hgemm2_kernel's
-    const __half* bg = B + (int64_t)(n0 + cr) * K + cj * 8;
+    const __half* bg = B + (int64_t)(n0 + cr) * Kp + cj * 8;
     auto stage_b = [&](int st, int p) { return sbase + (unsigned)((st * kHStage + 2 * kHTileA + p * kHTileB) * 2); };
     auto issue = [&](int kt) {
         const int st = kt & 1, k0 = kt * kHK;
@@ -298,14 +306,15 @@ __global__ void __launch_bounds__(128, 2) hgemm2f_kernel(int M, int N, int K, co
 #pragma unroll
         for (int i = 0; i < 8; ++i) {
             const int r = fr + 16 * i;
-            const bool ok = m0 + r < M;
-            cp16(sa + r * 128 + ((fj ^ (r & 7)) << 4), A + (int64_t)(ok ? m0 + r : m0) * K + k0 + 4 * fj, ok);
+            const bool rok = m0 + r < M, kok = !TAIL || k0 + 4 * fj < K;
+            cp16(sa + r * 128 + ((fj ^ (r & 7)) << 4), A + (int64_t)(rok ? m0 + r : m0) * K + (kok ? k0 + 4 * fj : 0),
+                 rok && kok);
         }
 #pragma unroll
         for (int p = 0; p < 2; ++p)
 #pragma unroll
             for (int i = 0; i < 2; ++i)
-                cp16(stage_b(st, p) + swz(cr + 32 * i, cj), bg + p * planeB + (int64_t)32 * i * K + k0, true);
+                cp16(stage_b(st, p) + swz(cr + 32 * i, cj), bg + p * planeB + (int64_t)32 * i * Kp + k0, true);
         asm volatile("cp.async.commit_group;");
     };
 
@@ -322,12 +331,13 @@ __global__ void __launch_bounds__(128, 2) hgemm2f_kernel(int M, int N, int K, co
 
     const int g = lane >> 2, t = lane & 3;
     const int b_row = wn * 32 + ((lane >> 4) << 3) + (lane & 7), b_kc = (lane >> 3) & 1;
-    const int nk = K / kHK;
+    const int nk = Kp / kHK;
     issue(0);
     for (int kt = 0; kt < nk; ++kt) {
         asm volatile("cp.async.wait_group 0;");
         __syncthreads();
         if (kt + 1 < nk) issue(kt + 1);
+        if (TAIL && jn == 0) continue;  // a warp wholly past N (the last column tile) only copies
         const int st = kt & 1;
         const unsigned char* sa = hsm + st * kHStage * 2 + (wm * 64 + g) * 128 + (t & 1) * 8;
 #pragma unroll
@@ -352,6 +362,7 @@ __global__ void __launch_bounds__(128, 2) hgemm2f_kernel(int M, int N, int K, co
                 split2f(*reinterpret_cast<const float2*>(s + 8 * 128 + o1), sA, ah[3], al[3]);
 #pragma unroll
                 for (int j = 0; j < 4; ++j) {
+                    if (j >= jn) continue;
                     const int jp = j >> 1, jb = 2 * (j & 1);
                     if constexpr (RV == 0) {
                         mma16816(accP[i][j], ah, bh[jp][jb], bh[jp][jb + 1]);
@@ -405,17 +416,52 @@ __global__ void __launch_bounds__(128, 2) hgemm2f_kernel(int M, int N, int K, co
     }
 
     const int er = wm * 64 + g, ec = wn * 32 + 2 * t;
+    if constexpr (DEG > 0) {
+        constexpr int l = DEG / 2;
 #pragma unroll
-    for (int i = 0; i < 4; ++i)
+        for (int i = 0; i < 4; ++i)
 #pragma unroll
-        for (int h = 0; h < 2; ++h) {
-            const int r = m0 + er + 16 * i + 8 * h;
-            if (r >= M) continue;
+            for (int h = 0; h < 2; ++h) {
+                const int r = m0 + er + 16 * i + 8 * h;
+                if (r >= M) continue;
+                const int a = r / DEG;
+                const float s = 1.0f / (ga.D[a] * ga.beta + ga.alpha);
+                const int64_t r0 = (int64_t)a * 4 * N, q0 = ga.res0_sp ? (int64_t)ga.res0_sp[a] * 4 * N : r0;
 #pragma unroll
-            for (int j = 0; j < 4; ++j)
-                *reinterpret_cast<float2*>(C + (int64_t)r * N + n0 + ec + 8 * j) =
-                    make_float2(acc[i][j][2 * h] * oscale, acc[i][j][2 * h + 1] * oscale);
-        }
+                for (int j = 0; j < 4; ++j) {
+                    if (j >= jn) continue;
+                    const int c = n0 + ec + 8 * j;
+                    float o[2];
+#pragma unroll
+                    for (int e = 0; e < 2; ++e) {
+                        const float pre =
+                            ga.lin0[r0 + l * N + c + e] * s + (ga.res0 ? ga.res0[q0 + l * N + c + e] : 0.0f);
+                        o[e] = (ga.cg * sigmoid_f(pre)) * ((acc[i][j][2 * h + e] * oscale) * s);
+                    }
+                    *reinterpret_cast<float2*>(ga.out + (int64_t)r * N + c) = make_float2(o[0], o[1]);
+                }
+            }
+    } else {
+#pragma unroll
+        for (int i = 0; i < 4; ++i)
+#pragma unroll
+            for (int h = 0; h < 2; ++h) {
+                const int r = m0 + er + 16 * i + 8 * h;
+                if (r >= M) continue;
+#pragma unroll
+                for (int j = 0; j < 4; ++j) {
+                    if (j >= jn) continue;
+                    float2* o = reinterpret_cast<float2*>(C + (int64_t)r * N + n0 + ec + 8 * j);
+                    float2 v = make_float2(acc[i][j][2 * h] * oscale, acc[i][j][2 * h + 1] * oscale);
+                    if (TAIL && beta != 0.0f) {
+                        const float2 c = *o;
+                        v.x = fmaf(beta, c.x, v.x);
+                        v.y = fmaf(beta, c.y, v.y);
+                    }
+                    *o = v;
+                }
+            }
+    }
 }
 
 // The two panels of a weight: out[0 .. n) = H = rn(w scale), out[n .. 2n) = rn((w scale - H) 2^(11 - c)), the
@@ -441,6 +487,20 @@ __global__ void split_half_t_kernel(int R, int Cc, const float* __restrict__ w, 
     out[n + i] = __float2half_rn((a - __half2float(h)) * (1.0f / (float)(1 << (kHC - 11))));
 }
 
+// The panels of a weight padded to [2][Np][Kp] (Np = N rounded up to 64, Kp = K rounded up to 32; zeros in the padding)
+// for hgemm2f_kernel's tails: element (r, k) is w[r][k] (w [Nr][Kc]) or, with trans, w[k][r] (w [Kc][Nr]).
+__global__ void split_half_pad_kernel(int Nr, int Kc, int Np, int Kp, const float* __restrict__ w, int trans,
+                                      float scale, __half* __restrict__ out) {
+    const int64_t n = (int64_t)Np * Kp, i = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    const int r = (int)(i / Kp), k = (int)(i % Kp);
+    float a = 0.0f;
+    if (r < Nr && k < Kc) a = (trans ? w[(int64_t)k * Nr + r] : w[(int64_t)r * Kc + k]) * scale;
+    const __half h = __float2half_rn(a);
+    out[i] = h;
+    out[n + i] = __float2half_rn((a - __half2float(h)) * (1.0f / (float)(1 << (kHC - 11))));
+}
+
 template <int DEG>
 void launch_hgemm2(int M, int N, int K, const __half* A, const __half* B, float oscale, float* C, const GateArgs& g,
                    cudaStream_t stream) {
@@ -458,26 +518,69 @@ void hgemm2_init() {
     cudaFuncSetAttribute(hgemm2_kernel<3>, cudaFuncAttributePreferredSharedMemoryCarveout, 100);
     cudaFuncSetAttribute(hgemm2_kernel<5>, cudaFuncAttributePreferredSharedMemoryCarveout, 100);
     cudaFuncSetAttribute(hgemm2_kernel<7>, cudaFuncAttributePreferredSharedMemoryCarveout, 100);
-    cudaFuncSetAttribute(hgemm2f_kernel<0>, cudaFuncAttributePreferredSharedMemoryCarveout, 100);
-    cudaFuncSetAttribute(hgemm2f_kernel<1>, cudaFuncAttributePreferredSharedMemoryCarveout, 100);
-    cudaFuncSetAttribute(hgemm2f_kernel<2>, cudaFuncAttributePreferredSharedMemoryCarveout, 100);
+    cudaFuncSetAttribute(hgemm2f_kernel<0, 0, false>, cudaFuncAttributePreferredSharedMemoryCarveout, 100);
+    cudaFuncSetAttribute(hgemm2f_kernel<1, 0, false>, cudaFuncAttributePreferredSharedMemoryCarveout, 100);
+    cudaFuncSetAttribute(hgemm2f_kernel<1, 0, true>, cudaFuncAttributePreferredSharedMemoryCarveout, 100);
+    cudaFuncSetAttribute(hgemm2f_kernel<2, 0, false>, cudaFuncAttributePreferredSharedMemoryCarveout, 100);
+    cudaFuncSetAttribute(hgemm2f_kernel<kHFwdVariant, 3, false>, cudaFuncAttributePreferredSharedMemoryCarveout, 100);
+    cudaFuncSetAttribute(hgemm2f_kernel<kHFwdVariant, 5, false>, cudaFuncAttributePreferredSharedMemoryCarveout, 100);
+    cudaFuncSetAttribute(hgemm2f_kernel<kHFwdVariant, 7, false>, cudaFuncAttributePreferredSharedMemoryCarveout, 100);
+    cudaFuncSetAttribute(hgemm2f_kernel<kHFwdVariant, 3, true>, cudaFuncAttributePreferredSharedMemoryCarveout, 100);
+    cudaFuncSetAttribute(hgemm2f_kernel<kHFwdVariant, 5, true>, cudaFuncAttributePreferredSharedMemoryCarveout, 100);
+    cudaFuncSetAttribute(hgemm2f_kernel<kHFwdVariant, 7, true>, cudaFuncAttributePreferredSharedMemoryCarveout, 100);
 }
+
+namespace {
+bool h2_tail(int N, int K, float beta) { return N % kHN != 0 || K % kHK != 0 || beta != 0.0f; }
+}  // namespace
 
 // C [M][N] = A B^T oscale: A FP32 [M][K] (split in the kernel at scale sA, a power of two with max |A| sA < 65,504 or
 // the result is not finite), B two panels [2][N][K] (hgemm2_split); oscale = 1 / (sA 2^e_B).
-// The restart variants (benches): 0 H H and X every 32 of K, 1 H H every MMA (16 of K) and X every 32, 2 both every 16.
+// The restart variants (benches): 0 H H and X every 32 of K, 1 H H every MMA (16 of K) and X every 32, 2 both every 16;
+// 0 and 2 without tails or beta.
 void hgemm2_f32a_variant(int v, int M, int N, int K, const float* A, float sA, const void* B, float oscale, float* C,
-                         cudaStream_t stream) {
-    const dim3 grid(N / kHN, (M + kHM - 1) / kHM);
+                         cudaStream_t stream, float beta) {
+    const dim3 grid((N + kHN - 1) / kHN, (M + kHM - 1) / kHM);
     const __half* b = static_cast<const __half*>(B);
-    if (v == 0) hgemm2f_kernel<0><<<grid, 128, kHSmem, stream>>>(M, N, K, A, sA, b, oscale, C);
-    else if (v == 1) hgemm2f_kernel<1><<<grid, 128, kHSmem, stream>>>(M, N, K, A, sA, b, oscale, C);
-    else hgemm2f_kernel<2><<<grid, 128, kHSmem, stream>>>(M, N, K, A, sA, b, oscale, C);
+    const GateArgs ga{};
+    if (v == 1 && h2_tail(N, K, beta))
+        hgemm2f_kernel<1, 0, true><<<grid, 128, kHSmem, stream>>>(M, N, K, A, sA, b, oscale, C, beta, ga);
+    else if (v == 1) hgemm2f_kernel<1, 0, false><<<grid, 128, kHSmem, stream>>>(M, N, K, A, sA, b, oscale, C, 0.0f, ga);
+    else if (v == 0) hgemm2f_kernel<0, 0, false><<<grid, 128, kHSmem, stream>>>(M, N, K, A, sA, b, oscale, C, 0.0f, ga);
+    else hgemm2f_kernel<2, 0, false><<<grid, 128, kHSmem, stream>>>(M, N, K, A, sA, b, oscale, C, 0.0f, ga);
+}
+
+void hgemm2_f32a_gate(int l, int M, int N, int K, const float* A, float sA, const void* B, float oscale,
+                      const GateArgs& g, cudaStream_t stream) {
+    const dim3 grid((N + kHN - 1) / kHN, (M + kHM - 1) / kHM);
+    const __half* b = static_cast<const __half*>(B);
+    const auto go = [&](auto kernel) { kernel<<<grid, 128, kHSmem, stream>>>(M, N, K, A, sA, b, oscale, nullptr, 0.0f, g); };
+    if (h2_tail(N, K, 0.0f)) {
+        if (l == 1) go(hgemm2f_kernel<kHFwdVariant, 3, true>);
+        else if (l == 2) go(hgemm2f_kernel<kHFwdVariant, 5, true>);
+        else go(hgemm2f_kernel<kHFwdVariant, 7, true>);
+    } else {
+        if (l == 1) go(hgemm2f_kernel<kHFwdVariant, 3, false>);
+        else if (l == 2) go(hgemm2f_kernel<kHFwdVariant, 5, false>);
+        else go(hgemm2f_kernel<kHFwdVariant, 7, false>);
+    }
 }
 
 void hgemm2_f32a(int M, int N, int K, const float* A, float sA, const void* B, float oscale, float* C,
-                 cudaStream_t stream) {
-    hgemm2_f32a_variant(kHFwdVariant, M, N, K, A, sA, B, oscale, C, stream);
+                 cudaStream_t stream, float beta) {
+    hgemm2_f32a_variant(kHFwdVariant, M, N, K, A, sA, B, oscale, C, stream, beta);
+}
+
+int64_t hgemm2_pad_elems(int Nr, int Kc) {
+    return (int64_t)((Nr + kHN - 1) / kHN * kHN) * ((Kc + kHK - 1) / kHK * kHK);
+}
+
+void hgemm2_split_pad(int Nr, int Kc, const float* w, bool trans, int e, void* out, cudaStream_t stream) {
+    const int Np = (Nr + kHN - 1) / kHN * kHN, Kp = (Kc + kHK - 1) / kHK * kHK;
+    const int64_t n = (int64_t)Np * Kp;
+    split_half_pad_kernel<<<(unsigned)((n + 255) / 256), 256, 0, stream>>>(Nr, Kc, Np, Kp, w, trans ? 1 : 0,
+                                                                           std::ldexp(1.0f, e),
+                                                                           static_cast<__half*>(out));
 }
 
 // The exponent e of the weight panels' scale 2^e: the largest with max |w| 2^e <= 2^15, so both panels stay finite

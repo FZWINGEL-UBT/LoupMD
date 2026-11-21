@@ -2139,9 +2139,21 @@ static void record_force_pass(LoupHandle* h, int compute_stress, bool energy_onl
                           const loup::GateArgs& g) {
         loup::hgemm2_gate(l, M, Nc, K, A, B, oscale, nullptr, g, h->gemm_stream ? h->gemm_stream : h->stream);
     };
+    // LOUP_LIN_HALF with the forward gate fusion (hgemm2_f32a_gate): layer 0 as gemm_gate_fwd (no row bound), later
+    // layers as gemm_gate_fwd_l1 (mode 1: above 1,600 rows only)
+    if (h->gate_fuse_fwd)
+        in.gemm_h2_gate_fwd = [h](int l, int M, int Nc, int K, const float* A, float sA, const void* B, float oscale,
+                                  const loup::GateArgs& g, bool later) {
+            if (l < 1 || l > 3 || M != g.natoms * (2 * l + 1) || Nc != g.C || Nc % 16 != 0 || K % 16 != 0) return false;
+            if (later && (!h->gate_fwd_l1 || (h->gate_fwd_l1 == 1 && M <= 1600))) return false;
+            if (!A) return true;
+            loup::hgemm2_f32a_gate(l, M, Nc, K, A, sA, B, oscale, g, h->gemm_stream ? h->gemm_stream : h->stream);
+            return true;
+        };
     // LOUP_W2F_HALF (hgemm2.cu): used only by layers the model set up at load (GenericModel::w2f_half)
-    in.gemm_h2_fwd = [h](int M, int Nc, int K, const float* A, float sA, const void* B, float oscale, float* C) {
-        loup::hgemm2_f32a(M, Nc, K, A, sA, B, oscale, C, h->gemm_stream ? h->gemm_stream : h->stream);
+    in.gemm_h2_fwd = [h](int M, int Nc, int K, const float* A, float sA, const void* B, float oscale, float* C,
+                         float beta) {
+        loup::hgemm2_f32a(M, Nc, K, A, sA, B, oscale, C, h->gemm_stream ? h->gemm_stream : h->stream, beta);
     };
     h->gen->record(in);
     if (!sweep) record_dispersion(h, compute_stress, energy_only);
