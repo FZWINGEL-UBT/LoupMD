@@ -1841,15 +1841,42 @@ float* GenericModel::layer_out_grad(int t, int l) const { return layers_[t]->dho
 int GenericModel::out_width(int t) const { return layers_[t]->C_out; }
 int GenericModel::out_lmax(int t) const { return layers_[t]->lmax_out; }
 
+namespace {
+// O31 / list 19: the offsets (floats) of layer 0's kept forward results in GenericPassInputs::keep0 for N receivers:
+// off[0..3] msgf_l, off[4] D; for the gated layer 0 (kind 4) also off[5 + l] lin_l (gout_l for the degrees whose gated
+// store runs in the projection's epilogue, gate_vform) and off[9] res_0 without the S59 table (else 0); each slot from
+// a 256-byte boundary (the gated GEMMs' 16-byte operands). Returns the floats of the whole.
+size_t keep0_layout(const GenericLayer* L, int N, size_t off[10]) {
+    const size_t n = (size_t)N;
+    size_t o = 0;
+    auto put = [&](int i, size_t floats) {
+        off[i] = o;
+        o += (floats + 63) & ~size_t(63);
+    };
+    for (int i = 0; i < 10; ++i) off[i] = 0;
+    for (int l = 0; l < 4; ++l) put(l, n * (2 * l + 1) * L->C_msg);
+    put(4, n);
+    if (L->kind == 4) {
+        for (int l = 0; l < 4; ++l) put(5 + l, n * (2 * l + 1) * std::max(L->lin_cols[l], L->C_msg));
+        if (!L->res0_table) put(9, n * L->lin_cols[0]);
+    }
+    return o;
+}
+}  // namespace
+
 bool GenericModel::sweep_keep_layer0() const {
     if (layers_.empty() || chain_fold_ || lr_) return false;
     const GenericLayer* L = layers_[0];
-    return L->first_hidden && L->skip_folded && L->kind == 2 && L->readout == 0 && !L->ro_folded &&
-           L->lmax_x == 0 && !L->res0_table && !L->sc_has[0] && !L->sc_has[1] && !L->sc_has[2] && L->ro_w;
+    if (!L->first_hidden || L->readout != 0 || L->ro_folded || L->lmax_x != 0 || !L->ro_w) return false;
+    if (L->kind == 2)
+        return L->skip_folded && !L->res0_table && !L->sc_has[0] && !L->sc_has[1] && !L->sc_has[2];
+    // list 19: the gated layer 0 (MH-1, OMOL-0); its backward reads msgf, D, lin (or gout), res_0, never the skip
+    return L->kind == 4 && !L->skip_folded && !L->conv_prune && !L->lin_compact && !L->hfold[0];
 }
 
 size_t GenericModel::sweep_keep_floats(int N) const {
-    return layers_.empty() ? 0 : (size_t)N * (16 * (size_t)layers_[0]->C_msg + 1);  // msgf l = 0..3, then D
+    size_t off[10];
+    return layers_.empty() ? 0 : keep0_layout(layers_[0], N, off);
 }
 
 namespace {
@@ -2354,13 +2381,35 @@ void GenericModel::record(const GenericPassInputs& in) {
     }
     const bool runs_layer0 = sweep == GenericPassInputs::SweepAll ||
                              (sweep == GenericPassInputs::SweepLast ? n_layers_ == 1 : sweep_t == 0);
-    if (runs_layer0 && h0_read_)
+    // O31: layer 0's forward results kept in the domain's buffer (keep0) by its forward sweep for its backward sweep,
+    // which then neither replays the forward nor reads h_in
+    const bool keep0 = in.keep0 && sweep_t == 0 &&
+                       (sweep == GenericPassInputs::SweepForward || sweep == GenericPassInputs::SweepBackward);
+    if (runs_layer0 && h0_read_ && !(keep0 && sweep == GenericPassInputs::SweepBackward))
         gather_rows_kernel<<<(unsigned)(((int64_t)Nx * C0_ + 255) / 256), 256, 0, st>>>(Nx, C0_, in.species, d_embedding_, d_h0_);
 
     // ---------------- forward of layer t: everything from its linear_up to its readout. `energy` takes the
     // readout's energy (a sink when a backward sweep replays the layer).
     std::vector<const float*> written;  // S57 fold destinations already assigned in this pass
     std::vector<unsigned> gate_vform(n_layers_, 0u);  // per layer: degrees whose forward gate ran in the projection
+    // A hidden-table layer's projection l with the gated store in its epilogue (gf.out = gout_l): LOUP_LIN_HALF's
+    // panels on hgemm2f_kernel (gemm_h2_gate_fwd), else sgemm128_gate. A null: only asks whether it would run.
+    auto gate0_call = [&](GenericLayer* L, int t, int l, const float* A, const GateArgs& gf) -> bool {
+        const auto& p = L->hl_flin[l];
+        if (A && d_lin_amax_) lin_amax_record(A, (int64_t)N * dimL(l) * L->K0, 16 * t + l, st);
+        if (p.B)
+            return (lin_half_parts_ & 16) && in.gemm_h2_gate_fwd &&
+                   in.gemm_h2_gate_fwd(l, N * dimL(l), L->lin_cols[l], L->K0, A, p.sA, p.B, p.os, gf, false);
+        return in.gemm_gate_fwd(l, N * dimL(l), L->lin_cols[l], L->K0, A, L->C0[l], gf);
+    };
+    // the degrees of such a layer whose gated store would run in the projection (asks only; gf: natoms and C)
+    auto vform0_ask = [&](GenericLayer* L, int t, const GateArgs& gf) -> unsigned {
+        unsigned v = 0;
+        if (L->first_hidden && !L->skip_folded && L->kind == 4 && L->res0_table && in.gemm_gate_fwd)
+            for (int l = L->lmax_x + 1; l < 4; ++l)
+                if (gate0_call(L, t, l, nullptr, gf)) v |= 1u << l;
+        return v;
+    };
     auto forward_layer = [&](int t, double* energy) {
         GenericLayer* L = layers_[t];
         const int Cx = L->C_x, Cm = L->C_msg, Co = L->C_out;
@@ -2407,18 +2456,8 @@ void GenericModel::record(const GenericPassInputs& in) {
                 gf.lin0 = L->lin[0];
                 gf.res0 = L->res0_table;
                 gf.res0_sp = in.species;
-                // LOUP_LIN_HALF's panels: the gated store on hgemm2f_kernel (gemm_h2_gate_fwd), else sgemm128_gate
-                auto gate0 = [&](int l, const float* A) {
-                    const auto& p = L->hl_flin[l];
-                    if (A && d_lin_amax_) lin_amax_record(A, (int64_t)N * dimL(l) * Kh, 16 * t + l, st);
-                    if (p.B)
-                        return (lin_half_parts_ & 16) && in.gemm_h2_gate_fwd &&
-                               in.gemm_h2_gate_fwd(l, N * dimL(l), L->lin_cols[l], Kh, A, p.sA, p.B, p.os, gf, false);
-                    return in.gemm_gate_fwd(l, N * dimL(l), L->lin_cols[l], Kh, A, L->C0[l], gf);
-                };
-                if (L->kind == 4 && L->res0_table && in.gemm_gate_fwd)
-                    for (int l = L->lmax_x + 1; l < 4; ++l)  // A null: only asks
-                        if (gate0(l, nullptr)) gate_vform[t] |= 1u << l;
+                auto gate0 = [&](int l, const float* A) { return gate0_call(L, t, l, A, gf); };
+                gate_vform[t] = vform0_ask(L, t, gf);
                 if (gate_vform[t])
                     proj(L->hl_flin[0], 16 * t, false, N, L->lin_cols[0], Kh, L->S0[0], L->C0[0], L->lin[0]);
                 fork();
@@ -2997,36 +3036,71 @@ void GenericModel::record(const GenericPassInputs& in) {
     };
 
     // ---------------- one sweep of a domain (GenericPassInputs::Sweep)
-    // O31: layer 0's msgf and D in the domain's own buffer (keep0) for its forward and backward sweeps of layer 0;
-    // the layer's pointers are given back when the pass returns
-    const bool keep0 = in.keep0 && sweep_t == 0 &&
-                       (sweep == GenericPassInputs::SweepForward || sweep == GenericPassInputs::SweepBackward);
+    // O31: layer 0's msgf and D (list 19, the gated layer 0: also lin_l, or gout_l for its gate_vform degrees, and res_0)
+    // in the domain's own buffer (keep0, keep0_layout) for its forward and backward sweeps of layer 0; the layer's
+    // pointers are given back when the pass returns
     if (keep0 && !sweep_keep_layer0()) throw std::logic_error("generic: keep0 given for a layer 0 that cannot keep");
     struct Keep0 {
         GenericLayer* L = nullptr;
         float* msgf[4] = {};
+        float* lin[4] = {};
+        float* gout[4] = {};
         float* D = nullptr;
+        float* res0 = nullptr;
         ~Keep0() {
             if (!L) return;
-            for (int l = 0; l < 4; ++l) L->msgf[l] = msgf[l];
+            for (int l = 0; l < 4; ++l) {
+                L->msgf[l] = msgf[l];
+                L->lin[l] = lin[l];
+                L->gout[l] = gout[l];
+            }
             L->D = D;
+            L->res[0] = res0;
         }
     } keep0_guard;
+    unsigned keep0_vform = 0;  // the gated layer 0's gate_vform, as its forward asks (the backward runs no forward)
     if (keep0) {
         GenericLayer* L0 = layers_[0];
         keep0_guard.L = L0;
-        for (int l = 0; l < 4; ++l) keep0_guard.msgf[l] = L0->msgf[l];
-        keep0_guard.D = L0->D;
-        const size_t cm = (size_t)L0->C_msg;
-        size_t off = 0;
         for (int l = 0; l < 4; ++l) {
-            L0->msgf[l] = in.keep0 + off;
-            off += (size_t)N * (2 * l + 1) * cm;
+            keep0_guard.msgf[l] = L0->msgf[l];
+            keep0_guard.lin[l] = L0->lin[l];
+            keep0_guard.gout[l] = L0->gout[l];
         }
-        L0->D = in.keep0 + off;
+        keep0_guard.D = L0->D;
+        keep0_guard.res0 = L0->res[0];
+        size_t off[10];
+        keep0_layout(L0, N, off);
+        for (int l = 0; l < 4; ++l) L0->msgf[l] = in.keep0 + off[l];
+        L0->D = in.keep0 + off[4];
+        if (L0->kind == 4) {
+            // the forward sweep asks and leaves its answer for the domain's backward sweep, which must read the slots
+            // as they were written (a plan for the gated GEMM may be tuned in between, so an ask there may differ)
+            if (sweep == GenericPassInputs::SweepForward) {
+                GateArgs ga;
+                ga.natoms = N;
+                ga.C = L0->C_msg;
+                keep0_vform = vform0_ask(L0, 0, ga);
+                if (keep0_vform_.size() > (1u << 20)) keep0_vform_.clear();  // forward sweeps without their backward
+                keep0_vform_[in.keep0] = keep0_vform;
+            } else {
+                const auto it = keep0_vform_.find(in.keep0);
+                if (it == keep0_vform_.end())
+                    throw std::logic_error("generic: keep0's backward sweep before its forward sweep");
+                keep0_vform = it->second;
+                keep0_vform_.erase(it);
+            }
+            for (int l = 0; l < 4; ++l) {
+                if (keep0_vform >> l & 1u) L0->gout[l] = in.keep0 + off[5 + l];  // lin_l is never written
+                else L0->lin[l] = in.keep0 + off[5 + l];
+            }
+            if (!L0->res0_table) L0->res[0] = in.keep0 + off[9];
+        }
     }
     if (sweep == GenericPassInputs::SweepForward) {
         forward_layer(sweep_t, in.energy);
+        if (keep0 && gate_vform[0] != keep0_vform)  // a gated store declined after its ask: gout_l went to the arena
+            throw std::logic_error("generic: keep0's gated stores differ from their asks");
         return;
     }
     if (sweep == GenericPassInputs::SweepLast) {
@@ -3045,9 +3119,10 @@ void GenericModel::record(const GenericPassInputs& in) {
                                              (size_t)N * dimL(l) * L->C_out * sizeof(float),
                                              cudaMemcpyDeviceToDevice, st));
         }
-        if (keep0) {  // msgf and D kept from the forward sweep: only the readout's seed onto the adjoint
+        if (keep0) {  // layer 0's forward results kept from the forward sweep: only the readout's seed onto the adjoint
             add_row_vector_kernel<<<(unsigned)(((int64_t)N * L->C_out + 255) / 256), 256, 0, st>>>(
                 N, L->C_out, L->ro_w, L->dhout[0]);
+            gate_vform[0] = keep0_vform;
         } else {
             forward_layer(sweep_t, d_energy_sink_);  // adds the readout's seed onto the adjoint; energy already counted
         }

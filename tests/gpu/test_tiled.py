@@ -509,6 +509,42 @@ def test_kept_layer0_results_give_the_replay_result(monkeypatch, capfd):
         assert abs(e1 - e0) / len(at) <= 1e-8 and np.abs(f1 - f0).max() <= 1e-5 and np.abs(s1 - s0).max() <= 1e-8
 
 
+@pytest.mark.parametrize("tables", [None, "0"])
+def test_kept_gated_layer0_results_give_the_replay_result(monkeypatch, capfd, tables):
+    """List 19: the gated hidden-table layer 0 (MH-1; OMOL-0's layer 0 reads its charge / spin embedding, no hidden
+    table) also keeps its projections lin_l (gout_l for the degrees whose gate runs in the projection's epilogue:
+    with the species tables, where the gated store's GEMM is the plan) and res_0 (without the tables,
+    LOUP_SPECIES_TABLES=0), and its backward sweep reads them instead of the replay. The energy comes from the forward
+    sweeps alone; without the tables two replaying engines already differ by up to 9e-8 eV/atom and 1.5e-8 in stress
+    (22 November 2026), hence the bounds."""
+    at = _oxide(8)                                     # 2,560 atoms
+    moved = at.positions + np.random.default_rng(10).normal(scale=0.01, size=at.positions.shape)
+    bundle = ensure_loup_bundle(find_model("mace-mh-1.model"), [8, 22, 38], head="omat_pbe")
+    monkeypatch.setenv("LOUP_TILE_WAVEFRONT", "0")
+    monkeypatch.setenv("LOUP_DEBUG_TILE_TIMES", "1")
+    if tables is not None:
+        monkeypatch.setenv("LOUP_SPECIES_TABLES", tables)
+
+    def run(keep):
+        monkeypatch.setenv("LOUP_TILE_KEEP_L0", keep)
+        eng = LoupEngine(bundle)
+        try:
+            capfd.readouterr()
+            out = [eng.evaluate_tiled(at.numbers, x, at.cell.array, 300, skin=SKIN) for x in (at.positions, moved)]
+            said = [line for line in capfd.readouterr().err.splitlines() if line.startswith("tile layer 0 kept:")]
+            return out, said
+        finally:
+            del eng
+            gc.collect()
+
+    (replay, said0), (kept, said1) = run("0"), run("1")
+    assert said0 and said0[0].startswith("tile layer 0 kept: no")
+    assert said1 and said1[0].startswith("tile layer 0 kept: yes")
+    for (e0, f0, s0, t0), (e1, f1, s1, t1) in zip(replay, kept):
+        assert t0 == t1 >= 4
+        assert abs(e1 - e0) / len(at) <= 1e-6 and np.abs(f1 - f0).max() <= 1e-5 and np.abs(s1 - s0).max() <= 1e-7
+
+
 def test_the_plan_moves_the_tile_lists_to_host_memory_only_when_they_do_not_fit(monkeypatch):
     """O31 (S5-T07): the memory plan keeps the tile lists on the device while some cap fits; below the smallest
     memory fraction at which one does, it moves their edge arrays to host memory (host_lists, host_bytes) instead

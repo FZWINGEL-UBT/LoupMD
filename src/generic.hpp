@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <functional>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include <cuda_runtime.h>
@@ -227,8 +228,10 @@ public:
     void share_layer_buffers(bool on);
     bool layers_shared() const { return layers_shared_; }
     // O31: whether layer 0's backward sweep reads nothing of its forward but msgf[0..3] and D (the density layer 0
-    // with the hidden table, skip folded, linear readout: MACE-MP-0b3 / MPA-0 / OMAT-0 / MatPES), so a domain can
-    // keep them (GenericPassInputs::keep0) instead of the replay; and their floats for N receivers.
+    // with the hidden table, skip folded, linear readout: MACE-MP-0b3 / MPA-0 / OMAT-0 / MatPES) or, list 19, also
+    // the projections lin_l (gout_l where the gate ran in their epilogue) and res_0 (the gated layer 0 with a linear
+    // readout: MH-1, OMOL-0), so a domain can keep them (GenericPassInputs::keep0) instead of the replay; and their
+    // floats for N receivers (keep0_layout in generic.cu).
     bool sweep_keep_layer0() const;
     size_t sweep_keep_floats(int N) const;
     // The compiled product kernels this bundle uses, one signature per layer, joined by ';' (loup_get_info).
@@ -312,6 +315,9 @@ private:
     // whole system; see record(). sys_alloc_bytes_ parallels sys_allocs_.
     bool sweep_replay_ = false;
     double* d_energy_sink_ = nullptr;  // a replayed forward adds its readout's energy here: it is already counted
+    // list 19: per keep0 buffer, the gated layer 0's gate_vform of its forward sweep, which the backward sweep of that
+    // domain takes (an ask there may differ: a GEMM plan tuned in between); one entry per domain in flight
+    std::unordered_map<const float*, unsigned> keep0_vform_;
     std::vector<size_t> sys_alloc_bytes_;
     std::vector<void*> sys_allocs_;
     // The buffers whose zeros alloc_system writes once and every pass reads (a pruned conv layer's skipped
