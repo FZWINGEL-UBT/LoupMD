@@ -130,6 +130,14 @@ struct GenericLayer {
     float w2f_sA[4] = {};
     float w2f_oscale[4] = {};
     bool f2 = false;
+    // LOUP_LIN_HALF (setup_lin_half): a conv layer's plain projections on hgemm2f_kernel, forward lin_l = mid_l W_lin[l]
+    // and res_l = x_l W_res[l], backward dmid_l = dlin_l W_lin[l]^T: B's panels [2][N][K] (null: the FP32 GEMM), A's
+    // split scale and the output scale
+    struct H2Proj {
+        void* B = nullptr;
+        float sA = 0.0f, os = 0.0f;
+    };
+    H2Proj hl_flin[4], hl_fres[3], hl_blin[4];
     // weights (device)
     float4* table = nullptr;
     uint2* packed_table = nullptr;
@@ -805,6 +813,7 @@ void GenericModel::free_model() {
     freep(d_embedding_);
     freep(d_energy_sink_);
     freep(d_zbl_rc_);
+    freep(d_lin_amax_);
     freep(d_zbl_inv_a_);
     freep(d_zbl_pref_);
 }
@@ -1295,6 +1304,7 @@ void GenericModel::load(const Bundle& b) {
     setup_jit();
     setup_w2t_half();
     setup_w2f_half();
+    setup_lin_half();
     if (std::getenv("LOUP_SWEEP_REPLAY")) {
         if (lr_)
             throw std::runtime_error("LOUP_SWEEP_REPLAY: the sweep schedule is not available for long-range models");
@@ -1337,13 +1347,18 @@ void GenericModel::share_layer_buffers(bool on) {
 // sh_perm, pair_sym and the spline grid as constants, kernel_ir.cu), launched instead of the ahead-of-time ones with
 // the same arguments. Any failure (no NVRTC, a compile error, a cubin the driver refuses) keeps the ahead-of-time
 // kernels, with one message on stderr.
-// LOUP_W2T_HALF=1 (hgemm2.cu; generic.hpp): every kind-4 layer whose product has the library's own _h2 kernels, with
-// neither the compact layout nor the long range and C_msg % 64 == 0, gets its W_2[l] panels and the _h2 table; record
-// then stores its dmsgf as two binary16 panels and runs its W_2^T GEMMs through GenericPassInputs::gemm_h2_gate.
+// LOUP_W2T_HALF (hgemm2.cu; generic.hpp; default on compute capability 12.0, where it was measured, 0 / 1 force it):
+// every kind-4 layer whose product has the library's own _h2 kernels, with neither the compact layout nor the long
+// range and C_msg % 64 == 0, gets its W_2[l] panels and the _h2 table; record then stores its dmsgf as two binary16
+// panels and runs its W_2^T GEMMs through GenericPassInputs::gemm_h2_gate.
+static bool two_half_switch(const char* name) {
+    const char* e = std::getenv(name);
+    if (e && (e[0] == '0' || e[0] == '1')) return e[0] == '1';
+    return device_is_cc120();
+}
 void GenericModel::setup_w2t_half() {
     w2t_half_ = false;
-    const char* e = std::getenv("LOUP_W2T_HALF");
-    if (!e || e[0] != '1' || lr_) return;
+    if (lr_ || !two_half_switch("LOUP_W2T_HALF")) return;
     for (auto* L : layers_) {
         const GProdH2Kernels* k = L->prod_h2src;
         if (L->kind != 4 || !k || L->lin_compact || L->C_msg % 64 != 0 || (L->lmax_out == 0 && !k->ro1_128)) continue;
@@ -1396,23 +1411,109 @@ void GenericModel::debug_w2t_half(int N) const {
 }
 
 bool GenericModel::drop_w2t_half() {
-    if (!w2t_half_ && !w2f_half_) return false;
-    for (auto* L : layers_) L->h2 = L->f2 = false;
-    w2t_half_ = w2f_half_ = false;
+    if (!w2t_half_ && !w2f_half_ && !lin_half_) return false;
+    for (auto* L : layers_) {
+        L->h2 = L->f2 = false;
+        for (auto& p : L->hl_flin) p.B = nullptr;
+        for (auto& p : L->hl_fres) p.B = nullptr;
+        for (auto& p : L->hl_blin) p.B = nullptr;
+    }
+    w2t_half_ = w2f_half_ = lin_half_ = false;
     return true;
 }
 
-// LOUP_W2F_HALF=1 (hgemm2.cu, hgemm2_f32a; ledger gen-w2-fwd-two-half; off by default): every kind-4 layer with neither
-// the compact layout nor the long range and C_msg % 64 == 0 runs its forward W_2 GEMMs (msgf_l = gout_l W_2[l]) as the
-// cross-term two-half product with gout_l read as FP32 and split in the kernel at the fixed scale 2^kW2fExp
+// LOUP_LIN_HALF (hgemm2.cu, hgemm2_f32a; ledger gen-lin-two-half; off by default): the conv layers' plain projections
+// of kind-4 layers (MH-1's and OMOL-0's later layers; neither compact, folded, pruned nor long-range) on the cross-term
+// two-half product of LOUP_W2F_HALF, A read as FP32 and split in the kernel at a fixed scale per projection kind
+// (kLinHalfExp: forward lin_l from mid_l, forward res_l from x_l, backward dmid_l from dlin_l; LOUP_LIN_HALF_EXP=a,b,c
+// overrides), B's panels made here. Only shapes the kernel takes as they are (N % 64, K % 32). An element with
+// |A| 2^e >= 65,520 makes the pass non-finite, and the engine then drops every two-half path (drop_w2t_half).
+// LOUP_DEBUG_LIN_AMAX=1 records each such projection's largest |A| (lin_amax_record), FP32 path included.
+// The scales leave at least 2x headroom over the 21 November census (MH-1 physics headroom set with its contact cells,
+// the seven, the three heads' gate sets; OMOL-0 XL organics): largest |mid| 451 (overflow at 1,024), |x| 7.5 (16),
+// |dlin| 0.17 (0.5).
+static constexpr int kLinHalfExp[3] = {6, 12, 17};
+static int weight_exponent_dev(const float* w, int64_t n) {
+    std::vector<float> h((size_t)n);
+    CUDA_CHECK_THROW(cudaMemcpy(h.data(), w, (size_t)n * sizeof(float), cudaMemcpyDeviceToHost));
+    return hgemm2_weight_exponent(h.data(), n);
+}
+void GenericModel::setup_lin_half() {
+    lin_half_ = false;
+    if (std::getenv("LOUP_DEBUG_LIN_AMAX") && !d_lin_amax_) {
+        CUDA_CHECK_THROW(cudaMalloc(&d_lin_amax_, kLinAmaxSlots * sizeof(unsigned)));
+        CUDA_CHECK_THROW(cudaMemset(d_lin_amax_, 0, kLinAmaxSlots * sizeof(unsigned)));
+    }
+    const char* e = std::getenv("LOUP_LIN_HALF");
+    if (lr_ || !(e && e[0] == '1')) return;
+    int ex[3] = {kLinHalfExp[0], kLinHalfExp[1], kLinHalfExp[2]};
+    if (const char* xe = std::getenv("LOUP_LIN_HALF_EXP"); xe && *xe) std::sscanf(xe, "%d,%d,%d", &ex[0], &ex[1], &ex[2]);
+    auto make = [&](GenericLayer::H2Proj& p, const float* W, int Nc, int K, bool transpose, int ea) {
+        if (!W || Nc % 64 != 0 || K % 32 != 0) return;
+        const int ew = weight_exponent_dev(W, (int64_t)Nc * K);
+        CUDA_CHECK_THROW(cudaMalloc(&p.B, 2 * (int64_t)Nc * K * sizeof(uint16_t)));
+        if (transpose) hgemm2_split_t(K, Nc, W, ew, p.B, nullptr);  // W [K][Nc]: the panels of W^T
+        else hgemm2_split((int64_t)Nc * K, W, ew, p.B, nullptr);    // W [Nc][K] as it is
+        p.sA = std::ldexp(1.0f, ea);
+        p.os = std::ldexp(1.0f, -(ea + ew));
+        lin_half_ = true;
+    };
+    for (auto* L : layers_) {
+        if (L->kind != 4 || L->first_hidden || L->lin_compact || L->skip_folded || L->conv_prune) continue;
+        const int Cx = L->C_x;
+        for (int l = 0; l < 4; ++l) {
+            const int Kl = L->n_l3[l] * Cx;
+            make(L->hl_flin[l], L->W_lin[l], L->lin_cols[l], Kl, true, ex[0]);
+            make(L->hl_blin[l], L->W_lin[l], Kl, L->lin_cols[l], false, ex[2]);
+            if (l <= L->lmax_x && l < 3) make(L->hl_fres[l], L->W_res[l], L->lin_cols[l], Cx, true, ex[1]);
+        }
+    }
+    for (auto* L : layers_)
+        for (auto* ps : {&L->hl_flin[0], &L->hl_flin[1], &L->hl_flin[2], &L->hl_flin[3], &L->hl_blin[0],
+                         &L->hl_blin[1], &L->hl_blin[2], &L->hl_blin[3], &L->hl_fres[0], &L->hl_fres[1],
+                         &L->hl_fres[2]})
+            if (ps->B) L->weights.push_back(ps->B);
+    CUDA_CHECK_THROW(cudaGetLastError());
+    CUDA_CHECK_THROW(cudaStreamSynchronize(nullptr));
+    if (lin_half_) hgemm2_init();
+}
+
+__global__ void lin_amax_kernel(const float* __restrict__ a, int64_t n, unsigned* __restrict__ out) {
+    float m = 0.0f;
+    for (int64_t i = (int64_t)blockIdx.x * blockDim.x + threadIdx.x; i < n; i += (int64_t)gridDim.x * blockDim.x)
+        m = fmaxf(m, fabsf(a[i]));
+    for (int o = 16; o; o >>= 1) m = fmaxf(m, __shfl_xor_sync(0xffffffffu, m, o));
+    if ((threadIdx.x & 31) == 0) atomicMax(out, __float_as_uint(m));
+}
+
+void GenericModel::lin_amax_record(const float* A, int64_t n, int slot, cudaStream_t st) const {
+    if (d_lin_amax_ && slot >= 0 && slot < kLinAmaxSlots) lin_amax_kernel<<<128, 256, 0, st>>>(A, n, d_lin_amax_ + slot);
+}
+
+void GenericModel::debug_lin_amax() const {
+    if (!d_lin_amax_) return;
+    CUDA_CHECK_THROW(cudaDeviceSynchronize());
+    std::vector<unsigned> v(kLinAmaxSlots);
+    CUDA_CHECK_THROW(cudaMemcpy(v.data(), d_lin_amax_, kLinAmaxSlots * sizeof(unsigned), cudaMemcpyDeviceToHost));
+    static const char* kind[3] = {"forward lin (mid)", "forward res (x)", "backward dmid (dlin)"};
+    for (int s = 0; s < kLinAmaxSlots; ++s) {
+        if (!v[s]) continue;
+        float m;
+        std::memcpy(&m, &v[s], sizeof m);
+        std::fprintf(stderr, "loupmd: lin amax layer %d %s degree %d: %.5g\n", s / 12, kind[s % 12 / 4], s % 4, m);
+    }
+}
+
+// LOUP_W2F_HALF (hgemm2.cu, hgemm2_f32a; ledger gen-w2-fwd-two-half; default as LOUP_W2T_HALF): every kind-4 layer
+// with neither the compact layout nor the long range and C_msg % 64 == 0 runs its forward W_2 GEMMs
+// (msgf_l = gout_l W_2[l]) as the cross-term two-half product with gout_l read as FP32 and split in the kernel at the fixed scale 2^kW2fExp
 // (LOUP_W2F_HALF_EXP overrides), against the panels of W_2[l]^T made here. Nothing else changes: the producers of
 // gout and the gate backward, which reads it, keep FP32. An element with |gout| 2^e >= 65,520 makes the pass
 // non-finite, and the engine then drops the path with LOUP_W2T_HALF's (drop_w2t_half).
 static constexpr int kW2fExp = 10;
 void GenericModel::setup_w2f_half() {
     w2f_half_ = false;
-    const char* e = std::getenv("LOUP_W2F_HALF");
-    if (!e || e[0] != '1' || lr_) return;
+    if (lr_ || !two_half_switch("LOUP_W2F_HALF")) return;
     const char* xe = std::getenv("LOUP_W2F_HALF_EXP");
     const int ea = xe && *xe ? std::atoi(xe) : kW2fExp;
     for (auto* L : layers_) {
@@ -2084,6 +2185,16 @@ void GenericModel::record(const GenericPassInputs& in) {
     auto fork = [&] { if (in.gemm_fork) in.gemm_fork(); };
     auto lane = [&](int k) { if (in.gemm_lane) in.gemm_lane(k); };
     auto join = [&] { if (in.gemm_join) in.gemm_join(); };
+    // LOUP_LIN_HALF (setup_lin_half): C [M][Nc] = A W (transB false; W [K][Nc]) or A W^T (W [Nc][K]) on hgemm2f_kernel
+    // where the layer has the projection's panels, else the FP32 GEMM; slot: LOUP_DEBUG_LIN_AMAX's record
+    auto proj = [&](const GenericLayer::H2Proj& p, int slot, bool transB, int M, int Nc, int K, const float* A,
+                    const float* W, float* C) {
+        if (d_lin_amax_) lin_amax_record(A, (int64_t)M * K, slot, st);
+        if (p.B && in.gemm_h2_fwd)
+            in.gemm_h2_fwd(M, Nc, K, A, p.sA, p.B, p.os, C);
+        else
+            in.gemm(transB, M, Nc, K, 1.0f, A, K, W, transB ? K : Nc, 0.0f, C, Nc);
+    };
     // species-grouped GEMM: rows of degree l for each species with its own weight block
     auto species_gemm = [&](bool transB, int l, int K, int Nc, const float* A, const float* W, int64_t w_stride,
                             float beta, float* C, int lane_base = -1) {
@@ -2268,11 +2379,10 @@ void GenericModel::record(const GenericPassInputs& in) {
                 if (gate_vform[t]) {
                     fork();
                     lane(0);
-                    in.gemm(false, N, L->lin_cols[0], L->n_l3[0] * Cx, 1.0f, L->mid[0], L->n_l3[0] * Cx, L->W_lin[0],
-                            L->lin_cols[0], 0.0f, L->lin[0], L->lin_cols[0]);
+                    proj(L->hl_flin[0], 12 * t, false, N, L->lin_cols[0], L->n_l3[0] * Cx, L->mid[0], L->W_lin[0],
+                         L->lin[0]);
                     lane(4);
-                    in.gemm(false, N, L->lin_cols[0], Cx, 1.0f, L->x[0], Cx, L->W_res[0], L->lin_cols[0], 0.0f,
-                            L->res[0], L->lin_cols[0]);
+                    proj(L->hl_fres[0], 12 * t + 4, false, N, L->lin_cols[0], Cx, L->x[0], L->W_res[0], L->res[0]);
                     join();
                 }
                 fork();
@@ -2283,15 +2393,15 @@ void GenericModel::record(const GenericPassInputs& in) {
                         !in.gemm_gate_fwd_l1(l, N * dimL(l), L->lin_cols[l], L->n_l3[l] * Cx, L->mid[l], L->W_lin[l],
                                              gf)) {
                         gate_vform[t] &= ~(1u << l);
-                        in.gemm(false, N * dimL(l), L->lin_cols[l], L->n_l3[l] * Cx, 1.0f, L->mid[l], L->n_l3[l] * Cx,
-                                L->W_lin[l], L->lin_cols[l], 0.0f, L->lin[l], L->lin_cols[l]);
+                        proj(L->hl_flin[l], 12 * t + l, false, N * dimL(l), L->lin_cols[l], L->n_l3[l] * Cx,
+                             L->mid[l], L->W_lin[l], L->lin[l]);
                     }
                 }
                 if (L->kind == 4) {
                     for (int l = l_first; l <= L->lmax_x; ++l) {
                         lane(4 + l);
-                        in.gemm(false, N * dimL(l), L->lin_cols[l], Cx, 1.0f, L->x[l], Cx, L->W_res[l],
-                                L->lin_cols[l], 0.0f, L->res[l], L->lin_cols[l]);
+                        proj(L->hl_fres[l], 12 * t + 4 + l, false, N * dimL(l), L->lin_cols[l], Cx, L->x[l],
+                             L->W_res[l], L->res[l]);
                     }
                 }
                 join();
@@ -2709,8 +2819,8 @@ void GenericModel::record(const GenericPassInputs& in) {
             fork();
             for (int l = 0; l < n_proj; ++l) {
                 lane(l);
-                in.gemm(true, N * dimL(l), L->n_l3[l] * Cx, L->lin_cols[l], 1.0f, L->dlin[l], L->lin_cols[l],
-                        L->W_lin[l], L->lin_cols[l], 0.0f, L->mid[l], L->n_l3[l] * Cx);
+                proj(L->hl_blin[l], 12 * t + 8 + l, true, N * dimL(l), L->n_l3[l] * Cx, L->lin_cols[l], L->dlin[l],
+                     L->W_lin[l], L->mid[l]);
             }
             if (L->kind == 4 && t > 0) {
                 for (int l = 0; l <= L->lmax_x; ++l) {

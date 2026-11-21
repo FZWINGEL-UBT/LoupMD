@@ -14,7 +14,9 @@
 // after every 32 of K, and that step's P + X 2^(c - 11) goes into an FP32 running sum with round-to-nearest adds: the
 // tensor cores' FP32 accumulation truncates, so one MMA chain over the whole K shrank |result| coherently (MH-1's
 // Sr-contact0.8 cell: mean signed error -5.5e-7 of |result| against FP32's +-1e-8, rms 1.6-1.7x FP32's, and the force
-// gate failed at 2.0x its bound); restarted, -5.5e-8 and 0.35-0.41x (on the engine's own panels). The first form of
+// gate failed at 2.0x its bound); restarted, -5.5e-8 and 0.35-0.41x (on the engine's own panels). What remains is
+// the MMA's own final rounding toward zero (-0.8e-8 to -2.3e-8, emulated); P is jammed after each MMA (jam4), which
+// makes that rounding unbiased (+1.8e-9 to +5.8e-9, emulated; FP32 +-0.4e-9 to 2.7e-9). The first form of
 // this path (P and Q = V(A) V(B) with V = rn(H + 64 (x s - H)), both FP32-accumulated) had a 2^-16 floor, 36-49x
 // FP32's (emulated, .tmp_o/screen_w2t2.py of the branch). On GeForce cards the binary16-accumulated MMA runs at twice
 // the FP32-accumulated rate (5060 Ti: 105.3 / 52.7 TFLOP/s), so the three products take P and Q's tensor-core time,
@@ -81,6 +83,17 @@ __device__ __forceinline__ void mma16816h(unsigned (&d)[2], const unsigned (&a)[
         "mma.sync.aligned.m16n8k16.row.col.f16.f16.f16.f16 {%0, %1}, {%2, %3, %4, %5}, {%6, %7}, {%0, %1};"
         : "+r"(d[0]), "+r"(d[1])
         : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "r"(b0), "r"(b1));
+}
+
+// The jam: the lowest significand bit of an FP32-accumulated MMA's result set (one LOP3 per element). The MMA rounds
+// its sum toward zero (5060 Ti probe of 21 November 2026: the 16 products and c aligned to 2^(emax - 25), each
+// truncated, then the sum rounded toward zero to FP32), so every result is short by half an ulp on average and a sum
+// of many shrinks in one direction. Setting the bit makes the rounding unbiased (von Neumann rounding): the result moves
+// up by an ulp exactly when the dropped bits were at least as likely above half as below. Applied to d itself, before
+// it reaches the round-to-nearest running sum; a half-ulp correction added to that sum instead is rounded away.
+__device__ __forceinline__ void jam4(float (&d)[4]) {
+#pragma unroll
+    for (int e = 0; e < 4; ++e) d[e] = __int_as_float(__float_as_int(d[e]) | 1);
 }
 
 __device__ __forceinline__ unsigned hmul2u(unsigned x, unsigned y) {
@@ -174,6 +187,7 @@ __global__ void __launch_bounds__(128, 2) hgemm2_kernel(int M, int N, int K, con
                 for (int j = 0; j < 4; ++j) {
                     const int jp = j >> 1, jb = 2 * (j & 1);
                     mma16816(accP[i][j], ah, bh[jp][jb], bh[jp][jb + 1]);
+                    jam4(accP[i][j]);
                     mma16816h(accX[i][j], ah, bl[jp][jb], bl[jp][jb + 1]);
                     mma16816h(accX[i][j], al, bc[jp][jb], bc[jp][jb + 1]);
                 }
@@ -247,8 +261,12 @@ __global__ void __launch_bounds__(128, 2) hgemm2_kernel(int M, int N, int K, con
 // signed error on Sr-contact0.8's own gout was -1.3e-8 to -4.3e-8 of rms(result) against FP32's +-3e-9 (the
 // representation alone, in float64, unbiased), and that cell's force rule failed at 0.9-1.4x. H H restarted at every MMA
 // (RV 1, the default: each 16 of K from zero into the running sum with a round-to-nearest add; X every 32) brings it to
-// -0.9e-8 to -2.9e-8 (the truncation inside one 16-product MMA remains) and the cell passes (0.56); RV 2 (X every 16
-// too) adds nothing and costs 4%.
+// -0.9e-8 to -2.9e-8 (the MMA's final rounding toward zero remains) and the cell passes (0.56); RV 2 (X every 16
+// too) adds nothing and costs 4%. Still, with both kernels on, that cell's force ratio reached 0.51-1.10 over plan
+// sets (FP32 path 0.17-0.72). The jam (jam4) on every FP32-accumulated MMA result, here and in hgemm2_kernel, takes the
+// bias to +1e-9 to +5e-9 (emulated on the cell's own operands; FP32 +-0.4e-9 to 2.7e-9) and the cell to 0.16-0.38 over
+// 16 plan sets x conv variants; it costs nothing measurable here (5060 Ti kernel bench) and about 1% in hgemm2_kernel.
+// RV 0 with the jam (+4e-9 to +7e-9) is 3-5% slower than RV 1.
 __device__ __forceinline__ void split2f(float2 x, float s, unsigned& h, unsigned& l) {
     const float a = x.x * s, b = x.y * s;
     const __half2 hh = __floats2half2_rn(a, b);
@@ -337,9 +355,11 @@ __global__ void __launch_bounds__(128, 2) hgemm2f_kernel(int M, int N, int K, co
                     const int jp = j >> 1, jb = 2 * (j & 1);
                     if constexpr (RV == 0) {
                         mma16816(accP[i][j], ah, bh[jp][jb], bh[jp][jb + 1]);
-                    } else {  // H H of this 16 of K from zero, into the running sum with a round-to-nearest add
+                        jam4(accP[i][j]);
+                    } else {  // H H of this 16 of K from zero, jammed, into the running sum (round-to-nearest add)
                         float d[4] = {0.0f, 0.0f, 0.0f, 0.0f};
                         mma16816(d, ah, bh[jp][jb], bh[jp][jb + 1]);
+                        jam4(d);
 #pragma unroll
                         for (int e = 0; e < 4; ++e) acc[i][j][e] += d[e];
                     }

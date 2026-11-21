@@ -2829,3 +2829,90 @@ gated epilogues on the new kernel, and tails for the eight 208-wide C0 shapes (3
   the two cross products cost three units there against two on the 5060 Ti, and the host's own MMA rates should be
   measured first.
 - On those cards the cross products could also take FP32 accumulation at no cost, for accuracy alone.
+
+### 6.44 The package's default, a contact-cell spread, and the plain projections in two halves (21 November 2026)
+
+The owner said to put both two-half switches on by default on `sm_120`, with the bar narrowed to the 5060 Ti. They
+also asked for the other FP32 GEMMs on the new kernel, the workstation timing (or Google Colab), and the push. The
+branch went to GitHub as it stood (9b03443, the package off by default). Everything below was measured on the 5060 Ti
+unless it says otherwise. Ledger entries: `gen-lin-two-half`, the spread in `gen-w2-fwd-two-half`,
+`ideas-20261121-list6`.
+
+**Default on `sm_120` (committed with 6.45).** `LOUP_W2T_HALF` and `LOUP_W2F_HALF` now default to on on compute capability
+12.0 and off elsewhere. `0` / `1` force either switch. With that build the GPU fast tier passed (381 passed, 51
+skipped). So did the tiled, sweep and open-domain tests that load MH-1 or OMOL-0 (7 passed).
+
+**The 0.8 A contact cell depends on the plan set.** Repeating the headroom set showed that the 0.72 recorded in 6.43
+came from one plan set. With a fresh plan directory per run, Sr-contact0.8's force ratio is:
+- FP32 path: 0.17-0.55.
+- Reverse switch alone: 0.17-0.54.
+- Forward switch alone: 0.55-0.90.
+- Both switches: 0.34-1.10, failing the rule in 10 of 37 runs (1.06-1.10).
+
+The tested build and the committed one give the same levels. The standard gate sets pass on every plan set seen. The
+owner held the default until the forward switch's bias had been tried; 6.45 removes it, and the default is on.
+
+**The plain projections in two halves (`LOUP_LIN_HALF=1`, off by default).** The kind-4 layers' forward `lin` and
+`res` projections and backward `dmid` projections run on `hgemm2f_kernel`. A is split at fixed scales per kind, 2^6 /
+2^12 / 2^17, chosen from a range census with at least 2x headroom (largest values `|mid|` 451, `|x|` 7.5, `|dlin|` 0.17).
+Every gate passes: MH-1 crystals 108 / 108, the `omol` head 24 / 24, OMOL-0 XL organics 8 / 8, the switch without the
+package 18 / 18, and the physics seven. It does not widen the contact cell's spread (paired over eight plan sets).
+Against the package alone, A B B A twice with fresh plans:
+- MH-1 SrTiO3: 27.19 -> 26.46 ms (0.973; with stress 0.974).
+- NaCl216: a tie (1.003; with stress 0.979).
+- OMOL-0 XL water216: 18.56 -> 17.50 ms (0.943; with stress 0.955).
+
+**Workstations and Colab.** All four workstation GPUs stayed busy, and the job waits on each of them. The same job, with
+a SrTiO3 A / B of `LOUP_LIN_HALF` added, runs on a Colab L4 (`sm_89`, 72 W, a data-centre card, not the RTX 4000 Ada).
+Its first try failed at the bundle export (Colab's MACE needed cuequivariance). The restart failed at the export
+too, after the CLI lost its connection to the runtime, which was then gone (no units in use). Not retried; the
+workstation waiters remain.
+
+### 6.45 The tensor cores' final rounding, and the jam (21 November 2026, late afternoon)
+
+The owner held the package's default until the forward switch's bias had been tried. Everything here was measured on
+the 5060 Ti unless it says otherwise. Ledger entries: `gen-two-half-jam`, the status lines of `gen-w2t-two-half`,
+`gen-w2-fwd-two-half` and `gen-lin-two-half`, and `ideas-20261121-list7` (the owner's seventh list, which proposed the
+one-instruction form).
+
+**Where the bias comes from.** A probe with crafted operands showed what `mma.sync m16n8k16` with FP32 accumulation
+does. It aligns the 16 products and `c` to 2^(emax - 25) of the largest and truncates each, which is nearly unbiased.
+Then it rounds the sum toward zero to FP32, which is about 95% of the bias. A CPU emulator of that model reproduces the
+GPU's bias and RMS on the contact cell's own operands. The binary16-accumulating MMA behaves as round-to-nearest. Both
+kernels carry the bias: the forward's restart at every MMA and the reverse's every 32 of K shorten the chains but keep
+each MMA's own rounding.
+
+**The fix.** A correction added to the running sum is rounded away there. What works is a change to each MMA's result
+before the round-to-nearest add: its lowest significand bit set (`d | 1`, von Neumann rounding, one `LOP3`). On the
+cell's operands (emulated) the bias, relative to `rms(result)`, goes:
+- forward, from -8.2e-9 … -2.9e-8 to +2.1e-9 … +5.3e-9;
+- reverse, from -8.3e-9 … -2.25e-8 to +1.8e-9 … +5.8e-9.
+
+FP32 sits at ±0.4e-9 … 2.7e-9. Short-head splits, k = 8 MMAs, FP32-accumulated cross terms and fixed-point heads were
+tried first and did not do it.
+
+**The contact cell.** Sr-contact0.8's force ratio, conv tuning off and each conv variant forced, over fresh plan sets:
+- the shipped package: 0.51-1.06 over 48 runs, failing twice;
+- the jam in both kernels: 0.16-0.38 over 16;
+- the jam in the forward only: 0.16-0.54 over 16;
+- the FP32 path: 0.17-0.72 over 16.
+
+On the final build, over six more plan sets per conv variant, the package reads 0.16-0.54 over 24 runs (mean 0.28), with
+`LOUP_LIN_HALF=1` 0.16-0.38 over 11, and the FP32 path 0.16-0.72 over 12 (mean 0.35). The levels near 0.17, 0.36, 0.54
+and 0.72 are the FP32 path's own, so the package now sits inside its distribution.
+
+**Cost and gates.** In kernel benches the forward jam ties, and the reverse costs about 1% (5060 Ti only). The final
+build's reverse kernel takes 224-226 registers (236-238 before), with no stack. With the package on, every gate passes:
+- MH-1 crystals over three heads, gate fusion on and off: 108 / 108 (worst force 0.85, stress 0.31);
+- its `omol` head: 24 / 24;
+- OMOL-0 XL organics: 8 / 8 (worst force 0.85, stress 0.54);
+- the seven physics cases: 7 / 7;
+- the headroom set: 9 / 10, as the FP32 path (Sr-scale0.80's energy fails on both);
+- with both switches `0`: 18 / 18.
+
+`LOUP_LIN_HALF=1` on the same build also passes: MH-1 crystals 18 / 18, OMOL-0 XL 8 / 8, and the headroom set as
+above. Whole call, MH-1 SrTiO3, A B B A twice with fresh plans: the package takes 0.920 of the FP32 path's time (29.65 ->
+27.27 ms, with stress also 0.920), against 0.922 before the jam.
+
+**Default.** The hold's condition is met, so the package is on by default on `sm_120` again (5060 Ti only).
+`LOUP_LIN_HALF` stays off by default until the owner decides.

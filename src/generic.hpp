@@ -121,8 +121,8 @@ struct GenericPassInputs {
     GemmGateFn gemm_gate_bwd;  // empty: never fused (LOUP_GATE_FUSE=0)
     GemmGateFn gemm_gate_fwd;  // empty: never fused (LOUP_GATE_FUSE_FWD=0)
     GemmGateFn gemm_gate_fwd_l1;  // empty: later layers' forward gate off (LOUP_GATE_FWD_L1=0)
-    GemmH2GateFn gemm_h2_gate; // empty: the FP32 W_2^T path (the model also needs LOUP_W2T_HALF=1 at load)
-    GemmH2FwdFn gemm_h2_fwd;   // empty: the FP32 forward W_2 path (the model also needs LOUP_W2F_HALF=1 at load)
+    GemmH2GateFn gemm_h2_gate; // empty: the FP32 W_2^T path (the model also needs LOUP_W2T_HALF at load)
+    GemmH2FwdFn gemm_h2_fwd;   // empty: the FP32 forward W_2 path (the model also needs LOUP_W2F_HALF at load)
 };
 
 struct GenericLayer;
@@ -167,9 +167,10 @@ public:
     // tile domains (which sweep) do not. Call with no system allocated (before alloc_system).
     void use_chain_fold(bool on);
     bool chain_fold_built() const { return chain_fold_built_; }
-    // LOUP_W2T_HALF=1 at load (hgemm2.cu; off by default): the kind-4 layers whose product has the library's own _h2
-    // kernels (find_gprod_h2) store dmsgf as two binary16 panels and run their W_2^T GEMMs as two FP16 tensor-core
-    // products with the gate in the epilogue. Not with the long range, compact layers or C_msg % 64 != 0. True while
+    // LOUP_W2T_HALF at load (hgemm2.cu; default on compute capability 12.0, 0 / 1 force it): the kind-4 layers whose
+    // product has the library's own _h2 kernels (find_gprod_h2) store dmsgf as two binary16 panels and run their W_2^T
+    // GEMMs as FP16 tensor-core products with the gate in the epilogue. Not with the long range, compact layers or
+    // C_msg % 64 != 0. True while
     // some layer runs it; drop_w2t_half() turns it off for good (the engine, after a non-finite result: an element
     // overflowed binary16) and returns whether it was on (captured graphs must then be re-recorded).
     bool w2t_half() const { return w2t_half_; }
@@ -177,11 +178,16 @@ public:
     // LOUP_DEBUG_W2T_HALF=1 (the engine, after an evaluate): each such layer's largest |dmsgf| over N atoms against
     // binary16's range at loup_store_h2's scale, and the non-finite panel elements, on stderr. Synchronises the device.
     void debug_w2t_half(int N) const;
-    // LOUP_W2F_HALF=1 at load (hgemm2.cu, hgemm2_f32a; off by default): the kind-4 layers' forward W_2 GEMMs from FP32
-    // gout split in the kernel at a fixed scale (setup_w2f_half). drop_w2t_half() drops it too.
+    // LOUP_W2F_HALF at load (hgemm2.cu, hgemm2_f32a; default as LOUP_W2T_HALF): the kind-4 layers' forward W_2 GEMMs
+    // from FP32 gout split in the kernel at a fixed scale (setup_w2f_half). drop_w2t_half() drops it too.
     bool w2f_half() const { return w2f_half_; }
     // LOUP_DEBUG_GOUT=1 (the engine, after an evaluate): each kind-4 layer's largest |gout_l| over N atoms on stderr.
     void debug_gout(int N) const;
+    // LOUP_LIN_HALF=1 at load (setup_lin_half; off by default): the kind-4 conv layers' plain projections on the
+    // two-half product. drop_w2t_half() drops it too. LOUP_DEBUG_LIN_AMAX=1 (the engine, after an evaluate): the largest
+    // |A| each such projection has read since load, on stderr.
+    bool lin_half() const { return lin_half_; }
+    void debug_lin_amax() const;
     // The layers' own buffers of the systems allocated from now on in one shared arena (tile-shared-layers): a sweep
     // runs one layer and needs nothing of another layer but its output and that output's gradient, which stay
     // buffers of their own, so the arena is as large as the largest layer instead of all of them. Such a system runs
@@ -236,6 +242,11 @@ private:
     void setup_w2t_half();
     bool w2f_half_ = false;          // LOUP_W2F_HALF: some layer has its transposed weight panels (setup_w2f_half)
     void setup_w2f_half();
+    bool lin_half_ = false;          // LOUP_LIN_HALF: some conv layer's projection has its panels (setup_lin_half)
+    void setup_lin_half();
+    static constexpr int kLinAmaxSlots = 96;  // LOUP_DEBUG_LIN_AMAX: layer t, kind k, degree l at 12 t + 4 k + l
+    unsigned* d_lin_amax_ = nullptr;
+    void lin_amax_record(const float* A, int64_t n, int slot, cudaStream_t st) const;
     bool chain_fold_built_ = false;  // setup_chain_fold composed the fold's weights
     bool share_layers_ = false;      // asked for the systems to come (share_layer_buffers)
     bool share_layers_env_ = true;   // LOUP_TILE_SHARE_LAYERS != 0, read at load
