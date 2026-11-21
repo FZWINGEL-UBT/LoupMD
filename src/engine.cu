@@ -671,8 +671,9 @@ struct LoupHandle {
     bool gate_fuse = true, gate_fuse_fwd = true;
     // The forward gate of later kind-4 layers' residual-free degrees in their lin_l GEMMs' epilogue too (ledger
     // gen-gate-fwd-l1; on sm_120 by default, where own_ext is): 1: with the own sgemm128 forced for those GEMMs
-    // above 1,600 rows whatever their plan, 2: only where the tuned plan is the own sgemm128 (as layer 0);
-    // LOUP_GATE_FWD_L1=0|1|2 forces it (tests; it needs own_ext, so elsewhere also LOUP_OWN_EXT=1).
+    // above 1,600 rows whatever their plan (none fused at or below), 2: only where the tuned plan is the own
+    // sgemm128 (as layer 0); LOUP_GATE_FWD_L1=0|1|2 forces it (tests; it needs own_ext, so elsewhere also
+    // LOUP_OWN_EXT=1).
     int gate_fwd_l1 = 0;
     cudaStream_t stream = nullptr;
     cublasHandle_t cublas = nullptr;
@@ -1463,16 +1464,17 @@ static inline void sgemm_rm(
 // forward lin_l = A @ B (B [K, N]), when sgemm_rm's plan for that GEMM is the own sgemm128 with N tiles fastest (whose
 // tiles and arithmetic the fused kernel shares) and the shape fits it. False: nothing launched (no plan yet, as in the
 // uncaptured autotune pass, or another implementation won). A null: only reports whether it would run. force_own
-// (LOUP_GATE_FWD_L1=1): runs whatever the plan picked, once the shape has one, where M > 1600; at or below that the
-// narrow sgemm64 / sgemm32 are candidates for these N (gen-gate-fwd-l1: forcing there cost MH-1 NaCl216 6.6%), so the
-// plan decides, as without the force.
+// (LOUP_GATE_FWD_L1=1): runs whatever the plan picked, once the shape has one, where M > 1600, and never at or below
+// that: there the narrow sgemm64 / sgemm32 compete, and a small cell's call is bound by latency, where the fused
+// path's order (lin_0 and res_0 first) cost MH-1 NaCl216 5% even with the plan's own sgemm128 kept
+// (gen-gate-fwd-l1; forcing the kernel there as well, 6.6%).
 static bool gemm_gate(LoupHandle* h, bool fwd, int l, int M, int N, int K, const float* A, const float* B,
                       const loup::GateArgs& g, bool force_own = false) {
     if (!h->own_ext || l < (fwd ? 1 : 0) || l > 3 || M != g.natoms * (2 * l + 1) || N != g.C || (N % 128) != 0 ||
         (K % 16) != 0 || ((((uintptr_t)A | (uintptr_t)B) & 15) != 0))
         return false;
     const auto it = h->lt_cache.find(std::make_tuple(M, N, K, !fwd, false));
-    if (it == h->lt_cache.end() || (it->second.own_mode != 1 && !(force_own && M > 1600))) return false;
+    if (it == h->lt_cache.end() || (force_own ? M <= 1600 : it->second.own_mode != 1)) return false;
     if (!A) return true;
     cudaStream_t strm = h->gemm_stream ? h->gemm_stream : h->stream;
     loup::sgemm128_gate(fwd, l, M, N, K, A, fwd ? B : weight_kn(h, B, N, K, strm), g, strm);
