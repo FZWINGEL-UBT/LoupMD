@@ -2945,3 +2945,53 @@ Sr-contact0.8 over six fresh plan sets per conv variant reads 0.16-0.55 (mean 0.
 4. `C0` on the two-half kernel, the largest MH-1 lever (estimate 0.6-1.1 ms per SrTiO3 call).
 
 A per-MMA restart in `hgemm2_kernel` does not free registers: it took 255 before.
+
+### 6.47 Layer 0 and the residual GEMMs in two halves, the tails' cost, and lists 9 and 10 (21 November 2026, night)
+
+`LOUP_LIN_HALF` now also covers layer 0's backward `dS0 = dlin C0^T`, the later layers' backward `dx += dpre W_res^T`
+(beta 1) and the residual-free degrees' gated store, which now runs in `hgemm2f_kernel`'s epilogue. The 21 November
+default had silently lost layer 1's gated `sgemm128` store for `lin_2` / `lin_3`. Layer 0's forward `S0 C0` was built
+but lost 1.4% on MH-1 SrTiO3, so it stays off (`LOUP_LIN_HALF_PARTS`, default 23). All on `sm_120`, 5060 Ti only.
+Ledger entries: `gen-lin-two-half`, `gen-gate-chain`, `ideas-20261121-list8`, `ideas-20261121-list9`,
+`ideas-20261121-list10`.
+
+**The tails' cost.** `C0`'s 208 columns needed tails in `hgemm2f_kernel` (N % 16, K % 16, padded panels). The first
+build put every launch on that code and lost against the previous default: MH-1 SrTiO3 1.020, NaCl216 1.072. A kernel
+bench on the old aligned shapes found the tail code 5-11% slower with bit-identical outputs (216 registers instead of
+254, a different schedule). A `TAIL` template flag now keeps aligned beta-0 shapes on the old code; with it, the
+projections c6 had run tie c6 (0.995).
+
+**Gates.** Every part on (no switch set):
+- the headroom set 9 / 10 on both sides (Sr-scale0.80's energy fails on every path); the seven 7 / 7;
+- MH-1 crystals over three heads, gate fusion on and off: 108 / 108; its `omol` head 24 / 24; OMOL-0 XL organics 8 / 8;
+  all three switches `0`: 18 / 18;
+- Sr-contact0.8 over twelve fresh plan sets: 0.20-0.56 (mean 0.32), the FP32 path 0.19-0.59 (mean 0.33);
+- the GPU fast tier: 381 passed, 51 skipped.
+
+At the default (parts 23): three heads with fusion on 54 / 54, `omat_pbe` with fusion off 18 / 18, all three switches `0` 18 / 18, the `omol` head 24 / 24, OMOL-0 XL 8 / 8, the GPU fast tier 381 passed / 51 skipped; Sr-contact0.8 over
+eight plan sets 0.17-0.37 (mean 0.24), the FP32 path 0.17-0.40 (mean 0.29).
+
+**Time.** The default (parts 23) against the previous default, A B B A twice with fresh plans:
+- MH-1 SrTiO3: 0.979 (26.39 -> 25.84 ms; with stress 0.977);
+- NaCl216: 0.973, a tie (pairs 0.88-1.02; with stress 0.989);
+- OMOL-0 XL water216: 0.981 (17.63 -> 17.29 ms; with stress 0.982).
+
+Each part alone on SrTiO3: layer 0's `dS0` 0.982, `W_res^T` 0.993, the gated store 1.002 (a tie), layer 0's forward 1.014 (left off).
+
+**Lists 9 and 10.** Mostly falsifiers:
+- list 9: a functional SVD of layer 0's radial chain, direct MMA accumulation and an outer-shell float4 table are
+  rejected by their CPU checks; weight panels at 2^(e_B - 11) are exact but a kernel-bench tie; programmatic dependent
+  launch is bounded by 0.5-1.5% idle GPU time on MH-1 SrTiO3; per-degree lane chains through the gate were built and
+  rejected (the lanes already hide the gate kernel).
+- list 10: the rejections were decided by a check or a lab:
+  - an outer `Quad8F` radial table fails its slope screen (1.75e-4 to 9.8e-4, against `packed8`'s 2.4e-5 at most);
+  - a SASS census bounds 2D TMA: `cp.async` is 1.4% of `hgemm2f_kernel`'s K loop;
+  - the half-warp `first_bwd_edge_kernel` ties at best (380 against 375-379 us on OMAT-0 medium SrTiO3): 64 registers of `blk` hold it at 4 blocks per SM;
+  - the tensor / SIMT overlap cannot co-reside: the R5 forward holds 61,440 registers per SM.
+
+  Split-plane BFP24 `msgf` passes its CPU screen: 1.3-1.6e-7 of the row RMS, 3-25x below the two-half `W_2`'s own error. Its estimated bound is 1.2-1.6% of an MH-1 SrTiO3 call. It is a large build (a `W_2` epilogue, product-kernel read paths, run-time selection), not started.
+
+  Still open:
+  - MACE-POLAR-1 on the two-half kernels waits for the owner's go;
+  - species-segmented launches wait for OMAT-0 medium's projections on the two-half kernel (idle and under-filled time, 1.9% of its SrTiO3 call, bounds every launch merge);
+  - multi-cell batches are an interface feature.
