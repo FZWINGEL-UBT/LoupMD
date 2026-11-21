@@ -2155,6 +2155,10 @@ static void record_force_pass(LoupHandle* h, int compute_stress, bool energy_onl
                          float beta) {
         loup::hgemm2_f32a(M, Nc, K, A, sA, B, oscale, C, h->gemm_stream ? h->gemm_stream : h->stream, beta);
     };
+    in.gemm_h2_rows = [h](int M, int Nc, int K, const float* A, float sA, const void* B, float oscale, float* C,
+                          const loup::GateArgs& rs) {
+        loup::hgemm2_f32a_rows(M, Nc, K, A, sA, B, oscale, C, rs, h->gemm_stream ? h->gemm_stream : h->stream);
+    };
     h->gen->record(in);
     if (!sweep) record_dispersion(h, compute_stress, energy_only);
 }

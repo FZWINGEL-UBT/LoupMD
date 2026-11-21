@@ -44,6 +44,13 @@ struct GateArgs {
     float* dD = nullptr;  // += the degree's terms of dE/dD, atomically
     float* out = nullptr;
     int vform = 0;
+    // hgemm2_f32a_rows (list 13): rows of rdeg per atom; the plain product's row r scaled by D[r / rdeg] beta + alpha.
+    // With c2 (LOUP_RES_BWD 3, n1 % 64 == 0): columns n1 .. N - 1 go to c2 (row length N - n1) at os2, scaled so;
+    // columns below n1 to C (row length n1) at oscale, unscaled.
+    int rdeg = 0;
+    float* c2 = nullptr;
+    int n1 = 0;
+    float os2 = 1.0f;
 };
 // Runs the projection fused with degree l's gate (M = natoms (2l + 1), N = C) when the GEMM's plan and shape allow;
 // false: nothing launched (the caller runs the plain GEMM and the gate kernel for l). Backward: dgout_l = A[M, K] @
@@ -73,6 +80,12 @@ int64_t hgemm2_pad_elems(int Nr, int Kc);  // halves of one padded panel (two pe
 void hgemm2_split_pad(int Nr, int Kc, const float* w, bool trans, int e, void* out, cudaStream_t stream);
 using GemmH2FwdFn = std::function<void(int M, int N, int K, const float* A, float sA, const void* B, float oscale,
                                        float* C, float beta)>;
+// The same product (beta 0) with row r scaled by rs.D[r / rs.rdeg] rs.beta + rs.alpha (list 13, LOUP_RES_BWD 2: the
+// backward dx_l = dpre_l W_res[l]^T from dlin_l, dpre = dlin (D beta + alpha) per atom).
+void hgemm2_f32a_rows(int M, int N, int K, const float* A, float sA, const void* B, float oscale, float* C,
+                      const GateArgs& rs, cudaStream_t stream);
+using GemmH2RowsFn = std::function<void(int M, int N, int K, const float* A, float sA, const void* B, float oscale,
+                                        float* C, const GateArgs& rs)>;
 // The same product for a residual-free degree l >= 1 (M = g.natoms (2l + 1), N = g.C) with gate_fwd's gated store:
 // gout_l = g (lin_l s) to g.out instead of lin_l.
 void hgemm2_f32a_gate(int l, int M, int N, int K, const float* A, float sA, const void* B, float oscale,
@@ -138,6 +151,7 @@ struct GenericPassInputs {
     GemmGateFn gemm_gate_fwd_l1;  // empty: later layers' forward gate off (LOUP_GATE_FWD_L1=0)
     GemmH2GateFn gemm_h2_gate; // empty: the FP32 W_2^T path (the model also needs LOUP_W2T_HALF at load)
     GemmH2FwdFn gemm_h2_fwd;   // empty: the FP32 forward W_2 path (the model also needs LOUP_W2F_HALF at load)
+    GemmH2RowsFn gemm_h2_rows; // empty: W_res^T from dpre (LOUP_RES_BWD 1)
     GemmH2GateFwdFn gemm_h2_gate_fwd;  // empty: LOUP_GATE_FUSE_FWD=0
 };
 
@@ -260,6 +274,7 @@ private:
     void setup_w2f_half();
     bool lin_half_ = false;          // LOUP_LIN_HALF: some conv layer's projection has its panels (setup_lin_half)
     int lin_half_parts_ = 0;         // LOUP_LIN_HALF_PARTS (setup_lin_half)
+    int res_bwd_ = 3;                // LOUP_RES_BWD (setup_lin_half; generic.cu's backward W_res^T)
     void setup_lin_half();
     static constexpr int kLinAmaxSlots = 128;  // LOUP_DEBUG_LIN_AMAX: layer t, kind k, degree l at 16 t + 4 k + l
     unsigned* d_lin_amax_ = nullptr;

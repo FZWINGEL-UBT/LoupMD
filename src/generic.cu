@@ -139,6 +139,7 @@ struct GenericLayer {
         float sA = 0.0f, os = 0.0f;
     };
     H2Proj hl_flin[4], hl_fres[3], hl_blin[4], hl_bres[3];
+    H2Proj hl_bcat[3];  // LOUP_RES_BWD 3: hl_blin's and hl_bres's panels stacked, [2][n_l3 Cx + Cx][lin_cols]
     // weights (device)
     float4* table = nullptr;
     uint2* packed_table = nullptr;
@@ -1419,26 +1420,32 @@ bool GenericModel::drop_w2t_half() {
         for (auto& p : L->hl_fres) p.B = nullptr;
         for (auto& p : L->hl_blin) p.B = nullptr;
         for (auto& p : L->hl_bres) p.B = nullptr;
+        for (auto& p : L->hl_bcat) p.B = nullptr;
     }
     w2t_half_ = w2f_half_ = lin_half_ = false;
     return true;
 }
 
 // LOUP_LIN_HALF (hgemm2.cu, hgemm2_f32a; ledger gen-lin-two-half; default as LOUP_W2T_HALF, on compute capability 12.0
-// since 21 November 2026, 0 / 1 force it): the conv layers' plain projections
-// of kind-4 layers (MH-1's and OMOL-0's later layers; neither compact, folded, pruned nor long-range) on the cross-term
+// since 21 November 2026, 0 / 1 force it): the conv layers' plain projections of kind-4 layers (MH-1's and OMOL-0's
+// later layers; neither compact, folded, pruned nor long-range) and of later kind 1 / 3 layers on the cross-term
 // two-half product of LOUP_W2F_HALF, A read as FP32 and split in the kernel at a fixed scale per projection kind
 // (kLinHalfExp: forward lin_l from mid_l, forward res_l from x_l, backward dmid_l from dlin_l, then layer 0's S0,
-// dpre and layer 0's dlin; LOUP_LIN_HALF_EXP=a,b,c,d,e,f overrides a prefix), B's panels made here. Layer 0 (first
-// hidden, kind 4, not folded): forward lin_l = S0_l C0_l and backward dS0_l = dlin_l C0_l^T (K0 and N0 = K0 need the
-// kernel's tails: N % 16, K % 16, padded panels), with their own scales (kLinHalfExp[3] forward, [5] backward); later
-// layers also the backward dx_l += dpre_l W_res[l]^T (beta 1, kLinHalfExp[4]). An element with |A| 2^e >= 65,520
+// dpre, layer 0's dlin, kind 1 / 3 layers' mid and dlin; LOUP_LIN_HALF_EXP=a,b,c,d,e,f,g,h overrides a prefix), B's
+// panels made here. Layer 0 (first hidden, kind 4, not folded): forward lin_l = S0_l C0_l and backward dS0_l = dlin_l
+// C0_l^T (K0 and N0 = K0 need the kernel's tails: N % 16, K % 16, padded panels), with their own scales
+// (kLinHalfExp[3] forward, [5] backward); later kind-4 layers also the backward dx_l = dpre_l W_res[l]^T (kLinHalfExp[4];
+// LOUP_RES_BWD in setup_lin_half: by default from dlin_l instead). An element with |A| 2^e >= 65,520
 // makes the pass non-finite, and the engine then drops every two-half path (drop_w2t_half).
 // LOUP_DEBUG_LIN_AMAX=1 records each such projection's largest |A| (lin_amax_record), FP32 path included.
 // The scales leave at least 2x headroom over the 21 November census (MH-1 physics headroom set with its contact cells,
 // the seven, the three heads' gate sets; OMOL-0 XL organics): largest |mid| 451 (overflow at 1,024), |x| 7.5 (16),
 // |dlin| 0.17 (0.5); layer 0 |S0| 62 (1,024) and |dlin| 0.33 (1.0); |dpre| 3.5 (16).
-static constexpr int kLinHalfExp[6] = {6, 12, 17, 6, 12, 16};  // mid, x, dlin, S0, dpre, layer 0 dlin
+// Later kind 1 / 3 layers (list 13 idea 4; OMAT-0, MP-0b3, MPA-0, MatPES, the OFF families: neither compact, pruned
+// nor first hidden), forward lin_l and backward dmid_l only, at scales of their own (kLinHalfExp[6], [7]) from the
+// census of their gate sets and of the physics headroom cells (OMAT-0 medium / small, MPA-0, MatPES): |mid| 29.7 / 131
+// (MPA-0; overflow at 512), |dlin| 1.56 / 10.3 (OMAT-0 small; overflow at 32).
+static constexpr int kLinHalfExp[8] = {6, 12, 17, 6, 12, 16, 7, 11};  // mid x dlin S0 dpre, layer 0 dlin; kind 1/3 mid dlin
 static int weight_exponent_dev(const float* w, int64_t n) {
     std::vector<float> h((size_t)n);
     CUDA_CHECK_THROW(cudaMemcpy(h.data(), w, (size_t)n * sizeof(float), cudaMemcpyDeviceToHost));
@@ -1446,19 +1453,28 @@ static int weight_exponent_dev(const float* w, int64_t n) {
 }
 void GenericModel::setup_lin_half() {
     lin_half_ = false;
+    // LOUP_RES_BWD (list 13 idea 1; tests, benches): the backward dx_l of a later kind-4 layer's residual. 0: the
+    // forward conv kernel zeroes dx's rows and W_res^T adds dpre_l W_res[l]^T to them (beta 1); 1: W_res^T assigns
+    // (beta 0) and the forward leaves dx alone; 2: as 1, and where every degree's W_res^T has its two-half panels,
+    // from dlin_l (dpre = dlin (D beta + alpha) per atom, in the product's epilogue), so the gate backward writes no
+    // dpre; 3 (default): as 2, with dmid_l and dx_l of a degree in one product dlin_l [W_lin[l] | W_res[l]]^T
+    // (hl_bcat, aligned shapes).
+    if (const char* rb = std::getenv("LOUP_RES_BWD"); rb && *rb) res_bwd_ = std::atoi(rb);
     if (std::getenv("LOUP_DEBUG_LIN_AMAX") && !d_lin_amax_) {
         CUDA_CHECK_THROW(cudaMalloc(&d_lin_amax_, kLinAmaxSlots * sizeof(unsigned)));
         CUDA_CHECK_THROW(cudaMemset(d_lin_amax_, 0, kLinAmaxSlots * sizeof(unsigned)));
     }
     if (lr_ || !two_half_switch("LOUP_LIN_HALF")) return;
-    int ex[6] = {kLinHalfExp[0], kLinHalfExp[1], kLinHalfExp[2], kLinHalfExp[3], kLinHalfExp[4], kLinHalfExp[5]};
+    int ex[8];
+    for (int i = 0; i < 8; ++i) ex[i] = kLinHalfExp[i];
     if (const char* xe = std::getenv("LOUP_LIN_HALF_EXP"); xe && *xe)
-        std::sscanf(xe, "%d,%d,%d,%d,%d,%d", &ex[0], &ex[1], &ex[2], &ex[3], &ex[4], &ex[5]);
+        std::sscanf(xe, "%d,%d,%d,%d,%d,%d,%d,%d", &ex[0], &ex[1], &ex[2], &ex[3], &ex[4], &ex[5], &ex[6], &ex[7]);
     // LOUP_LIN_HALF_PARTS (tests, benches): bit 0 the later layers' projections, bit 1 layer 0's backward dS0, bit 2
     // the backward W_res^T, bit 3 layer 0's forward S0 C0, bit 4 the gated store on hgemm2f_kernel (without it a
-    // degree with panels runs the plain product and gate_fwd_kernel). Default 23, all but bit 3: layer 0's forward on
-    // the kernel's tails cost MH-1 SrTiO3 1.4% against sgemm128's gated store (ledger gen-lin-two-half; 5060 Ti only)
-    int parts = 23;
+    // degree with panels runs the plain product and gate_fwd_kernel), bit 5 the kind 1 / 3 layers' projections.
+    // Default 55, all but bit 3: layer 0's forward on the kernel's tails cost MH-1 SrTiO3 1.4% against sgemm128's
+    // gated store (ledger gen-lin-two-half; 5060 Ti only; a tie, 0.997, after list 11's staged store)
+    int parts = 55;
     if (const char* pe = std::getenv("LOUP_LIN_HALF_PARTS"); pe && *pe) parts = std::atoi(pe);
     lin_half_parts_ = parts;
     auto make = [&](GenericLayer::H2Proj& p, const float* W, int Nc, int K, bool transpose, int ea) {
@@ -1471,7 +1487,18 @@ void GenericModel::setup_lin_half() {
         lin_half_ = true;
     };
     for (auto* L : layers_) {
-        if (L->kind != 4 || L->lin_compact || L->skip_folded || L->conv_prune) continue;
+        if (L->lin_compact || L->skip_folded || L->conv_prune) continue;
+        if (L->kind != 4) {
+            // bit 5 (list 13 idea 4): a kind 1 / 3 layer's lin_l = mid_l W_lin[l] (msgf_l) and dmid_l = dlin_l
+            // W_lin[l]^T; these layers have no gate and no W_res
+            if ((parts & 32) && !L->first_hidden && (L->kind == 1 || L->kind == 3))
+                for (int l = 0; l < 4; ++l) {
+                    const int Kl = L->n_l3[l] * L->C_x;
+                    make(L->hl_flin[l], L->W_lin[l], L->lin_cols[l], Kl, true, ex[6]);
+                    make(L->hl_blin[l], L->W_lin[l], Kl, L->lin_cols[l], false, ex[7]);
+                }
+            continue;
+        }
         const int Cx = L->C_x;
         if (L->first_hidden) {
             for (int l = 0; l < 4; ++l) {
@@ -1488,12 +1515,32 @@ void GenericModel::setup_lin_half() {
                 if (l <= L->lmax_x && l < 3) make(L->hl_fres[l], L->W_res[l], L->lin_cols[l], Cx, true, ex[1]);
             }
             if ((parts & 4) && l <= L->lmax_x && l < 3) make(L->hl_bres[l], L->W_res[l], Cx, L->lin_cols[l], false, ex[4]);
+            // LOUP_RES_BWD 3: one product dlin_l [W_lin[l] | W_res[l]]^T for dmid_l and dx_l, from the two panel sets
+            // (shapes without the kernel's tails only: the panels are unpadded, so they stack row-wise)
+            const int Kc = L->lin_cols[l];
+            if (res_bwd_ >= 3 && l <= L->lmax_x && l < 3 && L->hl_blin[l].B && L->hl_bres[l].B && Kl % 64 == 0 &&
+                Cx % 64 == 0 && Kc % 32 == 0) {
+                GenericLayer::H2Proj& c = L->hl_bcat[l];
+                const size_t pl = (size_t)Kl * Kc, pr = (size_t)Cx * Kc, h = sizeof(uint16_t);
+                CUDA_CHECK_THROW(cudaMalloc(&c.B, 2 * (pl + pr) * h));
+                auto* d = static_cast<char*>(c.B);
+                const auto* bl = static_cast<const char*>(L->hl_blin[l].B);
+                const auto* br = static_cast<const char*>(L->hl_bres[l].B);
+                for (int q = 0; q < 2; ++q) {
+                    CUDA_CHECK_THROW(cudaMemcpy(d + q * (pl + pr) * h, bl + q * pl * h, pl * h, cudaMemcpyDeviceToDevice));
+                    CUDA_CHECK_THROW(cudaMemcpy(d + (q * (pl + pr) + pl) * h, br + q * pr * h, pr * h,
+                                                cudaMemcpyDeviceToDevice));
+                }
+                c.sA = L->hl_blin[l].sA;
+                c.os = L->hl_blin[l].os;
+            }
         }
     }
     for (auto* L : layers_)
         for (auto* ps : {&L->hl_flin[0], &L->hl_flin[1], &L->hl_flin[2], &L->hl_flin[3], &L->hl_blin[0],
                          &L->hl_blin[1], &L->hl_blin[2], &L->hl_blin[3], &L->hl_fres[0], &L->hl_fres[1],
-                         &L->hl_fres[2], &L->hl_bres[0], &L->hl_bres[1], &L->hl_bres[2]})
+                         &L->hl_fres[2], &L->hl_bres[0], &L->hl_bres[1], &L->hl_bres[2], &L->hl_bcat[0],
+                         &L->hl_bcat[1], &L->hl_bcat[2]})
             if (ps->B) L->weights.push_back(ps->B);
     CUDA_CHECK_THROW(cudaGetLastError());
     CUDA_CHECK_THROW(cudaStreamSynchronize(nullptr));
@@ -2218,6 +2265,30 @@ void GenericModel::record(const GenericPassInputs& in) {
         else
             in.gemm(transB, M, Nc, K, 1.0f, A, K, W, transB ? K : Nc, beta, C, Nc);
     };
+    // LOUP_RES_BWD (setup_lin_half): layer t's backward W_res^T assigns dx (the forward conv kernel leaves dx's rows
+    // alone), and also reads dlin instead of dpre (the gate backward writes no dpre)
+    auto res_assigns = [&](const GenericLayer* L, int t) {
+        return res_bwd_ >= 1 && L->kind == 4 && t > 0 && !L->first_hidden && !L->skip_folded;
+    };
+    auto res_from_dlin = [&](const GenericLayer* L, int t) {
+        if (res_bwd_ < 2 || !res_assigns(L, t) || !in.gemm_h2_rows || L->lmax_x > 2) return false;
+        for (int l = 0; l <= L->lmax_x; ++l)
+            if (!L->hl_bres[l].B || !L->hl_blin[l].B) return false;
+        return true;
+    };
+    // LOUP_RES_BWD 3: degree l's dmid and dx in one product from dlin (hl_bcat)
+    auto res_fused = [&](const GenericLayer* L, int t, int l) {
+        return res_bwd_ >= 3 && l <= L->lmax_x && l < 3 && L->hl_bcat[l].B && res_from_dlin(L, t);
+    };
+    // the row scale D beta + alpha of dpre = dlin (D beta + alpha), degree l
+    auto res_rows = [&](const GenericLayer* L, int l) {
+        GateArgs rs;
+        rs.D = L->D;
+        rs.alpha = L->alpha;
+        rs.beta = L->beta;
+        rs.rdeg = dimL(l);
+        return rs;
+    };
     // species-grouped GEMM: rows of degree l for each species with its own weight block
     auto species_gemm = [&](bool transB, int l, int K, int Nc, const float* A, const float* W, int64_t w_stride,
                             float beta, float* C, int lane_base = -1) {
@@ -2375,8 +2446,8 @@ void GenericModel::record(const GenericPassInputs& in) {
                                 ? conv_var_override_ : L->fwd_var;
             launch_conv_fwd(L->lmax_x, st, N, Cx, S, L->intervals, L->grid, sh_perm_, L->pair_sym, in.act_row_ptr,
                             in.act_senders, in.act_vec_len, in.act_slab, in.act_t_sx, L->last_preloc, in.species,
-                            L->packed_table, L->density_table, L->cubic_bias_shift, L->x, L->mid, L->D, var, L->dx,
-                            L->conv_prune, L->jit_conv_on ? &L->jit_conv : nullptr);
+                            L->packed_table, L->density_table, L->cubic_bias_shift, L->x, L->mid, L->D, var,
+                            res_assigns(L, t) ? nullptr : L->dx, L->conv_prune, L->jit_conv_on ? &L->jit_conv : nullptr);
             const int n_proj = L->conv_prune ? 1 : 4;  // S125: lin_1..3 stay zero (W_lin_1..3 = 0)
             if (L->skip_folded) {
                 fork();
@@ -2719,7 +2790,8 @@ void GenericModel::record(const GenericPassInputs& in) {
         if (L->kind == 4) {
             const float* res0 = L->res0_table ? L->res0_table : L->res[0];
             const int* res0_sp = L->res0_table ? in.species : nullptr;
-            float* dpre0 = t > 0 ? L->dpre[0] : nullptr;
+            const bool rdl = res_from_dlin(L, t);  // LOUP_RES_BWD 2: no dpre
+            float* dpre0 = t > 0 && !rdl ? L->dpre[0] : nullptr;
             const unsigned vform = gate_vform[t];  // these degrees saved gout_l instead of lin_l
             const float* lins[4];
             for (int l = 0; l < 4; ++l) lins[l] = (vform >> l & 1u) ? L->gout[l] : L->lin[l];
@@ -2747,7 +2819,7 @@ void GenericModel::record(const GenericPassInputs& in) {
                     g.res0_sp = res0_sp;
                     g.res_l = (l >= 1 && l <= L->lmax_x && l <= 2) ? L->res[l] : nullptr;
                     g.dp0 = dpre0;
-                    g.dp_l = (l >= 1 && t > 0 && l <= L->lmax_x && l <= 2) ? L->dpre[l] : nullptr;
+                    g.dp_l = (l >= 1 && t > 0 && !rdl && l <= L->lmax_x && l <= 2) ? L->dpre[l] : nullptr;
                     g.dl0 = L->dlin[0];
                     g.dl_l = L->dlin[l];
                     g.dD = L->dD;
@@ -2769,8 +2841,8 @@ void GenericModel::record(const GenericPassInputs& in) {
                                                   L->lmax_x >= 1 ? L->res[1] : nullptr,
                                                   L->lmax_x >= 2 ? L->res[2] : nullptr, L->dgout[0], L->dgout[1],
                                                   L->dgout[2], L->dgout[3], dpre0,
-                                                  (t > 0 && L->lmax_x >= 1) ? L->dpre[1] : nullptr,
-                                                  (t > 0 && L->lmax_x >= 2) ? L->dpre[2] : nullptr, L->dlin[0],
+                                                  (t > 0 && !rdl && L->lmax_x >= 1) ? L->dpre[1] : nullptr,
+                                                  (t > 0 && !rdl && L->lmax_x >= 2) ? L->dpre[2] : nullptr, L->dlin[0],
                                                   L->dlin[1], L->dlin[2], L->dlin[3], L->dD, fused, vform);
         }
         const bool density = L->kind >= 2;
@@ -2857,14 +2929,41 @@ void GenericModel::record(const GenericPassInputs& in) {
             fork();
             for (int l = 0; l < n_proj; ++l) {
                 lane(l);
+                if (res_fused(L, t, l)) {
+                    const GenericLayer::H2Proj &c = L->hl_bcat[l], &r = L->hl_bres[l];
+                    GateArgs rs = res_rows(L, l);
+                    rs.c2 = L->dx[l];
+                    rs.n1 = L->n_l3[l] * Cx;
+                    rs.os2 = r.os * (r.sA / c.sA);
+                    if (d_lin_amax_)
+                        lin_amax_record(L->dlin[l], (int64_t)N * dimL(l) * L->lin_cols[l], 16 * t + 8 + l, st);
+                    in.gemm_h2_rows(N * dimL(l), rs.n1 + Cx, L->lin_cols[l], L->dlin[l], c.sA, c.B, c.os, L->mid[l],
+                                    rs);
+                    continue;
+                }
                 proj(L->hl_blin[l], 16 * t + 8 + l, true, N * dimL(l), L->n_l3[l] * Cx, L->lin_cols[l], L->dlin[l],
                      L->W_lin[l], L->mid[l]);
             }
             if (L->kind == 4 && t > 0) {
+                // LOUP_RES_BWD: dx_l = dpre_l W_res[l]^T assigned (1) and from dlin_l (2), else added to the rows the
+                // forward conv kernel zeroed
+                const bool rdl = res_from_dlin(L, t);
+                const float rbeta = res_assigns(L, t) ? 0.0f : 1.0f;
                 for (int l = 0; l <= L->lmax_x; ++l) {
+                    if (res_fused(L, t, l)) continue;  // ran with dmid_l
                     lane(4 + l);
-                    proj(L->hl_bres[l], 16 * t + 12 + l, true, N * dimL(l), Cx, L->lin_cols[l], L->dpre[l],
-                         L->W_res[l], L->dx[l], 1.0f);
+                    if (rdl) {
+                        const GenericLayer::H2Proj& p = L->hl_bres[l];
+                        const float sA = L->hl_blin[l].sA;  // dlin's scale; the panels' 2^-e_B kept
+                        const GateArgs rs = res_rows(L, l);
+                        if (d_lin_amax_)
+                            lin_amax_record(L->dlin[l], (int64_t)N * dimL(l) * L->lin_cols[l], 16 * t + 12 + l, st);
+                        in.gemm_h2_rows(N * dimL(l), Cx, L->lin_cols[l], L->dlin[l], sA, p.B, p.os * (p.sA / sA),
+                                        L->dx[l], rs);
+                    } else {
+                        proj(L->hl_bres[l], 16 * t + 12 + l, true, N * dimL(l), Cx, L->lin_cols[l], L->dpre[l],
+                             L->W_res[l], L->dx[l], rbeta);
+                    }
                 }
             }
             join();

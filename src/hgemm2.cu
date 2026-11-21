@@ -475,6 +475,28 @@ __global__ void __launch_bounds__(128, 2) hgemm2f_kernel(int M, int N, int K, co
                         make_float2(gg.x * ((acc[i][j][2 * h] * oscale) * s), gg.y * ((acc[i][j][2 * h + 1] * oscale) * s));
                 }
             }
+    } else if constexpr (DEG < 0) {
+        // hgemm2_f32a_rows (list 13; beta 0): the row scale, and with c2 the column split (a 64-wide tile lies in one
+        // part). An instance of its own, so the plain one below keeps its code.
+        const bool part2 = ga.c2 && n0 >= ga.n1;
+        const bool scaled = ga.rdeg && (!ga.c2 || part2);
+        const int ldc = !ga.c2 ? N : (part2 ? N - ga.n1 : ga.n1);
+        float* const Cb = part2 ? ga.c2 + (n0 - ga.n1) : C + n0;
+        const float os = part2 ? ga.os2 : oscale;
+#pragma unroll
+        for (int i = 0; i < 4; ++i)
+#pragma unroll
+            for (int h = 0; h < 2; ++h) {
+                const int r = m0 + er + 16 * i + 8 * h;
+                if (r >= M) continue;
+                const float rs = scaled ? fmaf(ga.D[r / ga.rdeg], ga.beta, ga.alpha) * os : os;
+#pragma unroll
+                for (int j = 0; j < 4; ++j) {
+                    if (j >= jn) continue;
+                    *reinterpret_cast<float2*>(Cb + (int64_t)r * ldc + ec + 8 * j) =
+                        make_float2(acc[i][j][2 * h] * rs, acc[i][j][2 * h + 1] * rs);
+                }
+            }
     } else {
 #pragma unroll
         for (int i = 0; i < 4; ++i)
@@ -562,6 +584,8 @@ void hgemm2_init() {
     cudaFuncSetAttribute(hgemm2f_kernel<kHFwdVariant, 3, true>, cudaFuncAttributePreferredSharedMemoryCarveout, 100);
     cudaFuncSetAttribute(hgemm2f_kernel<kHFwdVariant, 5, true>, cudaFuncAttributePreferredSharedMemoryCarveout, 100);
     cudaFuncSetAttribute(hgemm2f_kernel<kHFwdVariant, 7, true>, cudaFuncAttributePreferredSharedMemoryCarveout, 100);
+    cudaFuncSetAttribute(hgemm2f_kernel<kHFwdVariant, -1, false>, cudaFuncAttributePreferredSharedMemoryCarveout, 100);
+    cudaFuncSetAttribute(hgemm2f_kernel<kHFwdVariant, -1, true>, cudaFuncAttributePreferredSharedMemoryCarveout, 100);
 }
 
 namespace {
@@ -582,6 +606,16 @@ void hgemm2_f32a_variant(int v, int M, int N, int K, const float* A, float sA, c
     else if (v == 1) hgemm2f_kernel<1, 0, false><<<grid, 128, kHSmem, stream>>>(M, N, K, A, sA, b, oscale, C, 0.0f, ga);
     else if (v == 0) hgemm2f_kernel<0, 0, false><<<grid, 128, kHSmem, stream>>>(M, N, K, A, sA, b, oscale, C, 0.0f, ga);
     else hgemm2f_kernel<2, 0, false><<<grid, 128, kHSmem, stream>>>(M, N, K, A, sA, b, oscale, C, 0.0f, ga);
+}
+
+void hgemm2_f32a_rows(int M, int N, int K, const float* A, float sA, const void* B, float oscale, float* C,
+                      const GateArgs& rs, cudaStream_t stream) {
+    const dim3 grid((N + kHN - 1) / kHN, (M + kHM - 1) / kHM);
+    const __half* b = static_cast<const __half*>(B);
+    if (h2_tail(N, K, 0.0f))
+        hgemm2f_kernel<kHFwdVariant, -1, true><<<grid, 128, kHSmem, stream>>>(M, N, K, A, sA, b, oscale, C, 0.0f, rs);
+    else
+        hgemm2f_kernel<kHFwdVariant, -1, false><<<grid, 128, kHSmem, stream>>>(M, N, K, A, sA, b, oscale, C, 0.0f, rs);
 }
 
 void hgemm2_f32a_gate(int l, int M, int N, int K, const float* A, float sA, const void* B, float oscale,
