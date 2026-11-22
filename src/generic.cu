@@ -1336,9 +1336,11 @@ void GenericModel::update_h0_read() {
     }
 }
 
-void GenericModel::use_chain_fold(bool on) {
+void GenericModel::use_chain_fold(bool on, bool sweeps) {
     if (N_ > 0) throw std::logic_error("generic: use_chain_fold with a system allocated");
-    chain_fold_ = on && chain_fold_built_;
+    // list 20: a domain folds only with two layers, whose sweeps then hand layer 1's x and the readout hidden over
+    chain_fold_ = on && chain_fold_built_ && (!sweeps || n_layers_ == 2);
+    fold_sweeps_ = sweeps && chain_fold_;
     update_h0_read();
 }
 
@@ -1867,7 +1869,9 @@ size_t keep0_layout(const GenericLayer* L, int N, size_t off[10]) {
 }  // namespace
 
 bool GenericModel::sweep_keep_layer0() const {
-    if (layers_.empty() || chain_fold_ || lr_) return false;
+    // list 20: with the fold in sweeps the backward forms dy from the fold targets' gradients, and the kept forward
+    // results are the same
+    if (layers_.empty() || (chain_fold_ && !fold_sweeps_) || lr_) return false;
     const GenericLayer* L = layers_[0];
     if (!L->first_hidden || L->readout != 0 || L->ro_folded || L->lmax_x != 0 || !L->ro_w) return false;
     if (L->kind == 2)
@@ -2060,6 +2064,7 @@ void GenericModel::free_system() {
     sys_allocs_.clear();
     sys_alloc_bytes_.clear();
     sys_zero_once_.clear();
+    hand_.clear();
     layers_shared_ = false;
     sys_bytes_unshared_ = 0;
     sys_max_alloc_ = 0;
@@ -2122,7 +2127,10 @@ void GenericModel::alloc_system(int N) {
     // LOUP_SWEEP_REPLAY) they are carved from one arena, each layer from its start: a sweep runs one layer, and of
     // another layer it reads and writes only the output (hout) and its gradient (dhout, in the zero slab), which
     // keep buffers of their own. A first walk of the layers sizes the arena (the largest layer), a second assigns.
-    layers_shared_ = (share_layers_ || sweep_replay_) && share_layers_env_ && n_layers_ >= 2 && !lr_ && !chain_fold_;
+    // list 20: with the fold in sweeps the fold's targets (the last layer's x, dx, hid, dhid) are what crosses between
+    // the layers' sweeps, so they keep buffers of their own (hand_buf) and the rest shares the arena
+    layers_shared_ = (share_layers_ || sweep_replay_) && share_layers_env_ && n_layers_ >= 2 && !lr_ &&
+                     (!chain_fold_ || fold_sweeps_);
     char* arena = nullptr;
     size_t arena_off = 0, arena_bytes = 0, layers_sum = 0;
     bool sizing = false;
@@ -2142,11 +2150,19 @@ void GenericModel::alloc_system(int N) {
         sys_zero_once_.push_back(p);
         return p;
     };
+    // list 20: the fold's targets in a folding domain (the last layer's x and dx of the degrees layer 0 hands on, its
+    // hid and dhid): outside the arena, which layer 0's sweeps overwrite
+    auto hand_buf = [&](size_t floats, bool hand) -> float* {
+        if (!hand || !layers_shared_) return own(floats);
+        return sizing ? nullptr : alloc(floats);
+    };
     auto layout_layer = [&](int t) {
         GenericLayer* L = layers_[t];
+        const bool hand_t = fold_sweeps_ && t == n_layers_ - 1;
         for (int l = 0; l <= L->lmax_x; ++l) {
-            L->x[l] = own(n * dimL(l) * L->C_x);
-            L->dx[l] = (t > 0) ? own(n * dimL(l) * L->C_x) : nullptr;
+            const bool hl = hand_t && l <= layers_[0]->lmax_out;
+            L->x[l] = hand_buf(n * dimL(l) * L->C_x, hl);
+            L->dx[l] = (t > 0) ? hand_buf(n * dimL(l) * L->C_x, hl) : nullptr;
         }
         if (L->first_hidden)
             for (int l = 0; l < 4; ++l) L->S0[l] = own(n * dimL(l) * (size_t)L->K0);
@@ -2186,17 +2202,19 @@ void GenericModel::alloc_system(int N) {
             L->dy[l] = L->hfold[l] ? nullptr : own(n * dimL(l) * L->C_out);  // folded: in the zero slab (below)
         }
         if (L->ro_H) {
-            L->hid = own(n * L->ro_H);
+            L->hid = hand_buf(n * L->ro_H, hand_t);
             L->hid2 = own(n * L->ro_H);
-            L->dhid = own(n * L->ro_H);
+            L->dhid = hand_buf(n * L->ro_H, hand_t);
             L->dhid2 = own(n * L->ro_H);
         }
     };
+    std::vector<size_t> arena_layer((size_t)n_layers_, 0);  // list 20: each layer's part of the arena (fold_delta_)
     if (layers_shared_) {
         sizing = true;
         for (int t = 0; t < n_layers_; ++t) {
             arena_off = 0;
             layout_layer(t);
+            arena_layer[(size_t)t] = arena_off;
             arena_bytes = std::max(arena_bytes, arena_off);
             layers_sum += arena_off;
         }
@@ -2235,6 +2253,53 @@ void GenericModel::alloc_system(int N) {
         }
     }
     sys_bytes_unshared_ = sys_bytes_ + (layers_shared_ ? layers_sum - arena_bytes : 0);
+    // list 20: what each layer's sweeps hand on (hand_count): its output, or with the fold in sweeps (two layers)
+    // the fold's targets, layer 1's x[l] and the last layer's readout hidden
+    hand_.assign((size_t)n_layers_, {});
+    for (int t = 0; t + 1 < n_layers_; ++t) {
+        const GenericLayer* L = layers_[t];
+        if (fold_sweeps_) {
+            const GenericLayer* Ln = layers_[t + 1];
+            const GenericLayer* La = layers_.back();
+            bool hid = false;
+            for (int l = 0; l <= L->lmax_out; ++l) {
+                hand_[(size_t)t].push_back({Ln->x[l], Ln->dx[l], dimL(l) * Ln->C_x, false});
+                for (const auto& ft : L->fold[l]) hid = hid || ft.dest_layer == -1;
+            }
+            if (hid) hand_[(size_t)t].push_back({La->hid, La->dhid, La->ro_H, true});
+        } else {
+            for (int l = 0; l <= L->lmax_out; ++l)
+                hand_[(size_t)t].push_back({L->hout[l], L->dhout[l], dimL(l) * L->C_out, false});
+        }
+    }
+    // list 20 (the memory plan, which sizes a folding plain order from an unfolded probe): what this unfolded
+    // two-layer system would hold with the fold in its sweeps beyond what it holds. Less layer 0's hout and dhout (its
+    // own buffer and the zero slab's); with the shared arena the fold's targets leave the last layer's part of it and
+    // take buffers of their own. Unshared (system_bytes_unshared's count) the targets are counted either way.
+    fold_delta_[0] = fold_delta_[1] = 0.0;
+    fold_hand_w_.clear();
+    if (!chain_fold_ && chain_fold_built_ && n_layers_ == 2 && !lr_) {
+        const GenericLayer* L0 = layers_[0];
+        const GenericLayer* L1 = layers_[1];
+        double hout_b = 0.0, H = 0.0;
+        bool hid = false;
+        for (int l = 0; l <= L0->lmax_out; ++l) {
+            const size_t fo = n * dimL(l) * L0->C_out, fx = n * dimL(l) * L1->C_x;
+            hout_b += (double)(std::max<size_t>(fo, 1) * sizeof(float)) + (double)align256(fo * sizeof(float));
+            H += 2.0 * (double)align256(std::max<size_t>(fx, 1) * sizeof(float));
+            fold_hand_w_.push_back(dimL(l) * L1->C_x);
+            for (const auto& ft : L0->fold[l]) hid = hid || ft.dest_layer == -1;
+        }
+        if (hid) {
+            H += 2.0 * (double)align256(std::max<size_t>(n * L1->ro_H, 1) * sizeof(float));
+            fold_hand_w_.push_back(L1->ro_H);
+        }
+        fold_delta_[0] = fold_delta_[1] = -hout_b;
+        if (layers_shared_) {
+            const double a0 = (double)arena_layer[0], a1 = (double)arena_layer[1];
+            fold_delta_[1] += std::max(a0, a1 - H) + H - std::max(a0, a1);
+        }
+    }
     if (lr_) lr_->alloc_system(N);
     N_ = N;
 }
@@ -2418,6 +2483,10 @@ void GenericModel::record(const GenericPassInputs& in) {
     // ---------------- forward of layer t: everything from its linear_up to its readout. `energy` takes the
     // readout's energy (a sink when a backward sweep replays the layer).
     std::vector<const float*> written;  // S57 fold destinations already assigned in this pass
+    // list 20: in a folding domain's last-layer sweep the fold's targets came in from layer 0's sweeps (hand), so the
+    // last layer's accumulations onto them (the readout hidden) add instead of assigning
+    if (fold_sweeps_ && sweep == GenericPassInputs::SweepLast)
+        for (const Hand& e : hand_[(size_t)n_layers_ - 2]) written.push_back(e.p);
     std::vector<unsigned> gate_vform(n_layers_, 0u);  // per layer: degrees whose forward gate ran in the projection
     // A hidden-table layer's projection l with the gated store in its epilogue (gf.out = gout_l): LOUP_LIN_HALF's
     // panels on hgemm2f_kernel (gemm_h2_gate_fwd), else sgemm128_gate. A null: only asks whether it would run.
@@ -3143,16 +3212,26 @@ void GenericModel::record(const GenericPassInputs& in) {
         }
         // a single layer: its sweep is the whole pass, and the final assembly below applies
     } else if (sweep == GenericPassInputs::SweepBackward) {
-        const GenericLayer* L = layers_[sweep_t];
-        for (int l = 0; l <= L->lmax_out; ++l) {
-            if (!in.adjoint_in[l]) throw std::logic_error("generic: a backward sweep needs adjoint_in");
-            CUDA_CHECK_THROW(cudaMemcpyAsync(L->dhout[l], in.adjoint_in[l],
-                                             (size_t)N * dimL(l) * L->C_out * sizeof(float),
+        GenericLayer* L = layers_[sweep_t];
+        const auto& hd = hand_[(size_t)sweep_t];  // list 20: the output's gradient, or the fold targets' (hand)
+        if (hd.size() > 4) throw std::logic_error("generic: more than four hand-over arrays");
+        for (size_t i = 0; i < hd.size(); ++i) {
+            if (!in.adjoint_in[i]) throw std::logic_error("generic: a backward sweep needs adjoint_in");
+            CUDA_CHECK_THROW(cudaMemcpyAsync(hd[i].g, in.adjoint_in[i], (size_t)N * hd[i].w * sizeof(float),
                                              cudaMemcpyDeviceToDevice, st));
         }
         if (keep0) {  // layer 0's forward results kept from the forward sweep: only the readout's seed onto the adjoint
-            add_row_vector_kernel<<<(unsigned)(((int64_t)N * L->C_out + 255) / 256), 256, 0, st>>>(
-                N, L->C_out, L->ro_w, L->dhout[0]);
+            if (!fold_sweeps_) {
+                add_row_vector_kernel<<<(unsigned)(((int64_t)N * L->C_out + 255) / 256), 256, 0, st>>>(
+                    N, L->C_out, L->ro_w, L->dhout[0]);
+            } else if (!fused_readout(0)) {  // list 20: the folded linear readout's seed, which its forward assigns
+                for (const auto& ft : L->fold[0])
+                    if (ft.dest_layer == -2) {
+                        CUDA_CHECK_THROW(cudaMemsetAsync(L->dy[0], 0, (size_t)N * L->C_out * sizeof(float), st));
+                        add_row_vector_kernel<<<(unsigned)(((int64_t)N * L->C_out + 255) / 256), 256, 0, st>>>(
+                            N, L->C_out, ft.Wy, L->dy[0]);
+                    }
+            }
             gate_vform[0] = keep0_vform;
         } else {
             forward_layer(sweep_t, d_energy_sink_);  // adds the readout's seed onto the adjoint; energy already counted

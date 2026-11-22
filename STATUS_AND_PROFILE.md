@@ -3196,3 +3196,23 @@ tiled tests pass (88). Without `own_ext` (`sm_89`) the switch does nothing.
 (2.0 ms). `LOUP_LIN_HALF_PARTS` bit 8 at 20,000 atoms is a tie (whole 0.998, tiled 0.997) and stays off. The chain fold in
 tiled calls is being built. Layer 0 would hand layer 1 528 floats per row instead of 2,048, and skip `y W_p`. The
 estimated saving is 8-10% of the tiled call.
+
+### 6.52 The skip-chain fold in tiled calls (22 November 2026, early morning)
+
+`LOUP_TILE_FOLD` (default on wherever the skip-chain fold is built; ledger `tile-chain-fold`, 5060 Ti only). Tiled
+systems never folded before. A two-layer model's tiles now fold in the plain order on the device; the host state and
+the wavefront still do not:
+
+- Layer 0's sweeps hand on layer 1's `x` and the readout hidden, 528 floats per row for MH-1, instead of `hout` (2,048).
+- The last-layer sweep skips `linear_up`, the skip GEMM and `dh_in`, as a folded whole pass does.
+- The memory plan counts the smaller rows. MH-1's per-atom state goes from 16 KB to 4.2 KB.
+
+Results:
+
+- MH-1 SrTiO3 at 20,000 atoms and 8,192 receivers (5060 Ti only): 118.8 -> 103.2 ms per tiled call (0.869, every pair
+  0.866-0.869). The estimate had been 8-10%.
+- The folded tiles give the folded whole system's numbers: MH-1 dF 1.0e-6 eV/A at 5,000 atoms, with keep0, species
+  tables and the shared arena each on and off; OMAT-0 medium the same.
+- Tests that compare a folding side with one that never folds (host state, wavefront, unfolded references) now pin
+  `LOUP_TILE_FOLD=0`, or take the default whole system as the two-layer reference.
+- `sm_89` does not build the fold by default, so it is unchanged there.

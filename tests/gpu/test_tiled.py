@@ -6,6 +6,7 @@ from __future__ import annotations
 import ctypes
 import gc
 import re
+from contextlib import nullcontext
 
 import numpy as np
 import pytest
@@ -83,14 +84,16 @@ IDS = [c[0].split(".model")[0] for c in CASES]
 @pytest.mark.parametrize("model,structure,receivers,layers", CASES, ids=IDS)
 @pytest.mark.full
 def test_the_tiled_call_gives_the_whole_system_result(model, structure, receivers, layers, monkeypatch):
-    monkeypatch.delenv("LOUP_CHAIN_FOLD", raising=False)   # the tiled engines are default ones: the fold built, off
+    monkeypatch.delenv("LOUP_CHAIN_FOLD", raising=False)   # the tiled engines are default ones
     at = structure()
     n = len(at)
     zs = sorted(set(at.get_atomic_numbers().tolist()))
     bundle = ensure_loup_bundle(find_model(model), zs)
-    # The whole-system references run without the skip-chain fold, the operations the tiles run
-    # (gpu_support.unfolded): the bounds below are those of the same operations on other GEMM row counts.
-    with unfolded():
+    # The whole-system references run the operations the tiles run: a two-layer model's tiles fold the skip chain
+    # where its whole system does (ledger tile-chain-fold), a deeper model's never (gpu_support.unfolded). The bounds
+    # below are those of the same operations on other GEMM row counts.
+    reference = nullcontext if layers == 2 else unfolded
+    with reference():
         e_a, f_a, s_a = _whole(bundle, at)
     e_t, f_t, s_t, tiles = _tiled(bundle, at, receivers)
     assert tiles >= 2
@@ -98,7 +101,7 @@ def test_the_tiled_call_gives_the_whole_system_result(model, structure, receiver
     # whole system's: where one side gets a hybrid kernel and the other a float32 one, the energies differ by the
     # hybrid's rounding (PLAN.md D16). Without hybrids on either side the plan's bounds apply.
     monkeypatch.setenv("LOUP_NO_HYBRID", "1")
-    with unfolded():
+    with reference():
         e_c, f_c, s_c = _whole(bundle, at)
     e_n, f_n, s_n, _ = _tiled(bundle, at, receivers)
     monkeypatch.delenv("LOUP_NO_HYBRID")
@@ -119,6 +122,56 @@ def test_the_tiled_call_gives_the_whole_system_result(model, structure, receiver
         assert d <= bound, f"{name}, no hybrids: the tiled call differs by {d:.3e}"
     for name, d, bound in zip(("energy", "forces", "stress"), default, (2e-6, 1e-5, 2e-7)):
         assert d <= bound, f"{name}, default GEMMs: the tiled call differs by {d:.3e}"
+
+
+def test_the_tiled_skip_chain_fold_gives_the_folded_whole_system_result(monkeypatch, capfd):
+    """List 20 (ledger tile-chain-fold): in the plain order on the device a two-layer model's tiles fold the skip
+    chain where its whole system does. Layer 0's sweeps hand layer 1's x (the degrees layer 0 forms) and the readout
+    hidden on instead of layer 0's output: 528 floats per row against 2,048 for MH-1. Without hybrids the folded tiled
+    call gives the folded whole system's numbers, and LOUP_TILE_FOLD=0 the unfolded one's, at the plan's bounds. The
+    plan's global figure loses at least the per-atom state's difference (16,384 against 4,224 bytes per atom; the
+    adjoint rows shrink too) and its workspace the hand-over's."""
+    at = _oxide(10)                                    # 5,000 atoms
+    n = len(at)
+    bundle = ensure_loup_bundle(find_model("mace-mh-1.model"), [8, 22, 38], head="omat_pbe")
+    monkeypatch.delenv("LOUP_CHAIN_FOLD", raising=False)
+    monkeypatch.setenv("LOUP_NO_HYBRID", "1")
+    monkeypatch.setenv("LOUP_TILE_WAVEFRONT", "0")
+    monkeypatch.setenv("LOUP_TILE_HOST_STATE", "0")
+
+    def tiled(fold):
+        if fold is None:
+            monkeypatch.delenv("LOUP_TILE_FOLD", raising=False)
+        else:
+            monkeypatch.setenv("LOUP_TILE_FOLD", fold)
+        eng = LoupEngine(bundle)
+        try:
+            eng.set_execution(_core.LOUP_EXEC_TILED, 2048, 0.9)
+            plan = eng.plan_execution(at.numbers, at.positions, at.cell.array, skin=SKIN)
+            monkeypatch.setenv("LOUP_DEBUG_TILE_TIMES", "1")
+            capfd.readouterr()
+            out = eng.evaluate_tiled(at.numbers, at.positions, at.cell.array, 2048, skin=SKIN)
+            said = [x for x in capfd.readouterr().err.splitlines() if x.startswith("tile workspace:")]
+            monkeypatch.delenv("LOUP_DEBUG_TILE_TIMES")
+            return plan, out, said
+        finally:
+            del eng
+            gc.collect()
+
+    folded = _whole(bundle, at)
+    with unfolded():
+        plain = _whole(bundle, at)
+    (plan_f, out_f, said_f), (plan_p, out_p, said_p) = tiled(None), tiled("0")
+    assert said_f and said_f[0].endswith("skip-chain fold on"), said_f
+    assert said_p and said_p[0].endswith("skip-chain fold off"), said_p
+    assert out_f[3] == out_p[3] >= 2
+    for (e, f, s, _), (e0, f0, s0), side in ((out_f, folded, "folded"), (out_p, plain, "unfolded")):
+        print(f"{side}: dE {abs(e - e0) / n:.2e} eV/atom, dF {np.abs(f - f0).max():.2e} eV/A, "
+              f"dS {np.abs(s - s0).max():.2e} eV/A^3")
+        assert abs(e - e0) / n <= 1e-7 and np.abs(f - f0).max() <= 1e-5 and np.abs(s - s0).max() <= 1e-8, side
+    assert plan_f.receivers == plan_p.receivers
+    assert plan_p.tiled_global_bytes - plan_f.tiled_global_bytes >= n * (16384 - 4224)
+    assert plan_f.tile_workspace_bytes < plan_p.tile_workspace_bytes
 
 
 def test_a_tiled_call_on_a_kept_workspace_gives_a_fresh_engines_result():
@@ -167,6 +220,7 @@ def test_the_wavefront_gives_the_plain_tiled_result_from_a_smaller_row_pool(monk
     n = len(at)
     bundle = ensure_loup_bundle(find_model("mace-omat-0-medium.model"), [8, 22, 38])
     monkeypatch.setenv("LOUP_NO_HYBRID", "1")
+    monkeypatch.setenv("LOUP_TILE_FOLD", "0")          # the wavefront never folds: the plain call's same operations
     monkeypatch.setenv("LOUP_TILE_WAVEFRONT", "0")
     e_p, f_p, s_p, tiles_p = _tiled(bundle, at, 600)
     monkeypatch.setenv("LOUP_TILE_WAVEFRONT", "1")
@@ -332,6 +386,7 @@ def test_layer_state_in_host_memory_gives_the_device_state_result(model, host_li
     moved = at.positions + np.random.default_rng(12).normal(scale=0.01, size=at.positions.shape)
     bundle = ensure_loup_bundle(find_model(model), [8, 22, 38])
     monkeypatch.setenv("LOUP_NO_HYBRID", "1")         # two engines: no hybrid-or-not plan pick between them (D16)
+    monkeypatch.setenv("LOUP_TILE_FOLD", "0")         # the host state never folds: the device state's same operations
     monkeypatch.setenv("LOUP_TILE_WAVEFRONT", "0")
     monkeypatch.setenv("LOUP_TILE_HOST_LISTS", host_lists)
     monkeypatch.setenv("LOUP_TILE_HOST_PIPE", "0" if pipe == "0" else "1")
@@ -365,6 +420,7 @@ def test_host_state_tiles_with_their_own_rows_on_the_device_give_the_device_stat
     moved = at.positions + np.random.default_rng(14).normal(scale=0.01, size=at.positions.shape)
     bundle = ensure_loup_bundle(find_model("mace-omat-0-small.model"), [8, 22, 38])
     monkeypatch.setenv("LOUP_NO_HYBRID", "1")
+    monkeypatch.setenv("LOUP_TILE_FOLD", "0")          # the host state never folds: the device state's same operations
     monkeypatch.setenv("LOUP_TILE_WAVEFRONT", "0")
     monkeypatch.setenv("LOUP_TILE_HOST_ALIAS", alias)
     monkeypatch.setenv("LOUP_DEBUG_TILE_TIMES", "1")
@@ -632,6 +688,7 @@ def test_the_plan_moves_the_layer_state_to_host_memory_only_when_the_lists_there
         del eng
         gc.collect()
     monkeypatch.setenv("LOUP_TILE_HOST_STATE", "0")
+    monkeypatch.setenv("LOUP_TILE_FOLD", "0")          # the host state never folds: the device state's same operations
     ref = LoupEngine(bundle)
     try:
         ref.set_execution(_core.LOUP_EXEC_TILED, below.receivers, 0.9)

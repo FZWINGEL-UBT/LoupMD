@@ -35,8 +35,10 @@ def find_model(name: str) -> str:
 def unfolded():
     """Engines created inside run without the skip-chain fold (``LOUP_CHAIN_FOLD=0``, read when the engine loads the
     bundle): the whole-system reference for a tiled, domain or sweep result at float32-rounding bounds. Whole systems
-    fold by default since the merge of round6-hardening ``13d6337``; a tiled or domain system never does (a sweep
-    hands on the layer outputs the fold never forms). The fold is another order of float32 operations: on SrTiO3
+    fold by default since the merge of round6-hardening ``13d6337``; a domain system never does (a sweep hands on the
+    layer outputs the fold never forms), nor does a tiled one except a two-layer model's plain order on the device,
+    whose sweeps hand on the fold's targets instead (ledger tile-chain-fold; LOUP_TILE_FOLD=0 turns that off: its
+    reference is the default whole system). The fold is another order of float32 operations: on SrTiO3
     3x3x3 it moves the energy by 2-5e-8 eV/atom, forces by 1.8-2.5e-6 eV/A and stress by 0.6-2e-8 eV/A^3 (OMAT-0 small
     and medium, 17 November 2026), against 1e-6 eV/A and 6e-9 eV/A^3 between a domain and the unfolded call."""
     old = os.environ.get("LOUP_CHAIN_FOLD")

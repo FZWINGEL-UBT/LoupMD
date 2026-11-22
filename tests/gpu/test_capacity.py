@@ -8,7 +8,7 @@ import gc
 
 import numpy as np
 import pytest
-from gpu_support import find_model, srtio3, unfolded
+from gpu_support import find_model, srtio3
 
 from loupmd import LoupEngine, PlanRefused, capacity, ensure_loup_bundle
 from loupmd.config import CapacityConfig
@@ -58,8 +58,8 @@ def test_tiled_with_a_set_receiver_cap_keeps_it(monkeypatch):
     at = srtio3(10)
     at.positions += np.random.default_rng(4).normal(scale=0.03, size=at.positions.shape)
     bundle = _bundle()
-    with unfolded():                              # the tiles run without the skip-chain fold (gpu_support.unfolded)
-        e0, f0, _ = _whole(bundle, at)
+    # a two-layer model's tiles fold the skip chain where its whole system does (ledger tile-chain-fold)
+    e0, f0, _ = _whole(bundle, at)
     eng = LoupEngine(bundle)
     try:
         res = capacity.evaluate(eng, at, CapacityConfig(mode="tiled", receivers=2000), skin=SKIN)
@@ -111,6 +111,7 @@ def test_the_wavefront_mode_plans_a_smaller_state_and_gives_the_tiled_result(mon
     """S5-T08: capacity mode 'wavefront' runs the tiled call in the wavefront order; the plan counts the row pool
     instead of the whole system's layer outputs. Without hybrids the plain tiled call's bounds apply."""
     monkeypatch.setenv("LOUP_NO_HYBRID", "1")
+    monkeypatch.setenv("LOUP_TILE_FOLD", "0")          # the wavefront never folds: the plain call's same operations
     at = srtio3(1).repeat((64, 6, 6))                  # 11,520 atoms in a rod: 13 layers of tiles at 600
     at.positions += np.random.default_rng(7).normal(scale=0.04, size=at.positions.shape)
     bundle = _bundle()

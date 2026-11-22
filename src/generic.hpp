@@ -189,15 +189,34 @@ public:
     float* layer_out_grad(int t, int l) const;
     int out_width(int t) const;
     int out_lmax(int t) const;
-    // Sweeps need every layer's output to exist: not with the long range, nor with the skip-chain fold.
-    bool sweeps_available() const { return lr_ == nullptr && !chain_fold_; }
+    // For a sweep driver: what layer t's sweeps hand to layer t + 1's, entries i < hand_count(t): rows of
+    // hand_width(t, i) floats in hand(t, i), their gradient in hand_grad(t, i). Without the fold these are layer t's
+    // output rows (layer_out(t, l), i = l <= out_lmax(t), (2l + 1) out_width(t) floats); with the fold in sweeps (list
+    // 20: two-layer models) layer 1's x[l] ((2l + 1) C_x floats, l <= layer 0's lmax_out) and, last, the last layer's
+    // readout hidden hid (ro_H floats), of which only the receivers' rows count (hand_locals). Set by alloc_system.
+    int hand_count(int t) const { return (int)hand_[(size_t)t].size(); }
+    float* hand(int t, int i) const { return hand_[(size_t)t][(size_t)i].p; }
+    float* hand_grad(int t, int i) const { return hand_[(size_t)t][(size_t)i].g; }
+    int hand_width(int t, int i) const { return hand_[(size_t)t][(size_t)i].w; }
+    bool hand_locals(int t, int i) const { return hand_[(size_t)t][(size_t)i].locals; }
+    // Sweeps need every layer's output to exist (not with the long range) or, with the skip-chain fold, the fold's
+    // hand-over (use_chain_fold(on, true)).
+    bool sweeps_available() const { return lr_ == nullptr && (!chain_fold_ || fold_sweeps_); }
     // Whether the model can sweep once the fold is off (use_chain_fold(false)): every model without long range.
     bool sweeps_possible() const { return lr_ == nullptr; }
     // The skip-chain fold (S57, S73) of the systems allocated from now on: on only where setup_chain_fold built it.
     // The fold's composed weights sit beside the plain ones, so a handle switches per system: whole systems fold,
-    // tile domains (which sweep) do not. Call with no system allocated (before alloc_system).
-    void use_chain_fold(bool on);
+    // tile domains (which sweep) only with `sweeps` (list 20: two-layer models, whose sweeps then hand on the fold's
+    // targets, hand_count). Call with no system allocated (before alloc_system).
+    void use_chain_fold(bool on, bool sweeps = false);
     bool chain_fold_built() const { return chain_fold_built_; }
+    bool chain_fold_on() const { return chain_fold_; }
+    // list 20 (the engine's memory plan): for an unfolded two-layer system whose model folds, the bytes its system
+    // would differ by with the fold in its sweeps (shared: with its layers' arena as allocated; else the count of
+    // system_bytes_unshared), and the widths of the fold's hand-over rows (hand_width's, by entry); 0 and empty for
+    // any other system
+    double fold_delta_bytes(bool shared) const { return fold_delta_[shared ? 1 : 0]; }
+    const std::vector<int>& fold_hand_widths() const { return fold_hand_w_; }
     // LOUP_W2T_HALF at load (hgemm2.cu; default on compute capability 12.0, 0 / 1 force it): the kind-4 layers whose
     // product has the library's own _h2 kernels (find_gprod_h2) store dmsgf as two binary16 panels and run their W_2^T
     // GEMMs as FP16 tensor-core products with the gate in the epilogue. Not with the long range, compact layers or
@@ -316,6 +335,16 @@ private:
     bool sweep_replay_ = false;
     bool sweep_zero_ = true;  // list 19: a sweep zeroes only its accumulators (LOUP_SWEEP_ZERO=0: the whole slab)
     bool gate_fwd_tiled_ = true;  // list 20: LOUP_GATE_FWD_L1's store in the last-layer sweep (LOUP_GATE_FWD_TILED=0)
+    bool fold_sweeps_ = false;    // list 20: chain_fold_ in a domain's sweeps (use_chain_fold(on, true))
+    struct Hand {
+        float* p;
+        float* g;
+        int w;
+        bool locals;
+    };
+    std::vector<std::vector<Hand>> hand_;  // list 20: per layer, what its sweeps hand on (hand_count)
+    double fold_delta_[2] = {0.0, 0.0};    // list 20: fold_delta_bytes (unshared, shared)
+    std::vector<int> fold_hand_w_;         // list 20: fold_hand_widths
     double* d_energy_sink_ = nullptr;  // a replayed forward adds its readout's energy here: it is already counted
     // list 19: per keep0 buffer, the gated layer 0's gate_vform of its forward sweep, which the backward sweep of that
     // domain takes (an ask there may differ: a GEMM plan tuned in between); one entry per domain in flight

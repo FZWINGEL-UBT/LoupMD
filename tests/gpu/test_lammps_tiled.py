@@ -2,9 +2,11 @@
 and run_style loupmd on the engine's tiled MD.
 
 The cell is the rod of tests/gpu/test_tiled.py, SrTiO3 32 x 6 x 6 (5,760 atoms), lightly sheared, with caps of 600
-receivers so that tiles form in several layers; MACE-OMAT-0 medium (two layers). Whole-system references run
-without the skip-chain fold (LOUP_CHAIN_FOLD=0), which is what the tiles run, and both sides without the hybrid
-GEMMs (LOUP_NO_HYBRID=1) for the bounds of test_tiled.py. The run style is compared with the engine's tiled MD
+receivers so that tiles form in several layers; MACE-OMAT-0 medium (two layers). Whole-system references are default
+calls: a two-layer model's tiles fold the skip chain where its whole system does (ledger tile-chain-fold), and the
+wavefront and host forms, which never fold, are compared with the plain tiled call at LOUP_TILE_FOLD=0. Both sides
+run without the hybrid GEMMs (LOUP_NO_HYBRID=1) for the bounds of test_tiled.py. The run style is compared with the
+engine's tiled MD
 driven from Python (loup_tiled_*) with the integrator the run style is to pick, as test_lammps_run_style.py does
 for whole cells.
 
@@ -98,7 +100,6 @@ def test_the_tiled_pair_style_matches_the_whole_call(rod, style, monkeypatch):
     args = _style_args(style)
     monkeypatch.setenv("LOUP_NO_HYBRID", "1")
     tiled = _run0(d, f"t0_{style}", bundle, TILED, args)
-    monkeypatch.setenv("LOUP_CHAIN_FOLD", "0")
     whole = _run0(d, f"w0_{style}", bundle, "loupmd capacity whole", args)
     said = _tiled_line(tiled[0])
     assert said is not None, tiled[0][-1500:]
@@ -148,7 +149,6 @@ def test_auto_tiles_when_the_card_is_too_small(big, monkeypatch):
     assert said is not None, tiled[0][-1500:]
     print(f"whole needs {need} GiB; at memory {fraction:.4f} of 8000 MiB: {said[2]}")
     assert said[0] >= 2 and said[1] >= 4096
-    monkeypatch.setenv("LOUP_CHAIN_FOLD", "0")
     whole = _run0(d, "big_whole", bundle, "loupmd capacity whole")
     _compare(tiled, whole, len(at))
 
@@ -336,6 +336,7 @@ def test_tiled_nve_conserves_energy(rod):
 def test_wavefront_and_host_forms_give_the_plain_tiled_result(rod, form, monkeypatch):
     d, at, bundle = rod
     monkeypatch.setenv("LOUP_NO_HYBRID", "1")
+    monkeypatch.setenv("LOUP_TILE_FOLD", "0")          # neither form folds: the plain call's same operations
     plain = _run0(d, f"form_plain_{form}", bundle, TILED)
     style = TILED
     if form == "wavefront":
