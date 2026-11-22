@@ -3148,3 +3148,37 @@ gate's yardstick, in correctness-type MD on the 5060 Ti, and on sm_89 for the ti
   overlap is bounded by its 5.8-9.3% share.
 
 **sm_89 (RTX 4000 Ada, `leeloo`).** The two-half package with all three switches forced on (6823901) runs MH-1 SrTiO3 at 0.774 of the call (40.2 -> 31.1 ms), MH-1 NaCl216 and OMOL-0 XL water216 at 0.767-0.768 and OMAT-0 medium SrTiO3 at 0.968-0.970 (A B B A twice). The gates pass with it for 14 families, and Sr-contact0.8's force ratio stays at 0.72-0.90 of the allowance over 27 fresh plan sets and the three conv variants (0.22-0.40 without it). It stays off by default there: an `sm_89` default is the owner's call. 6823901 against 732529c at the defaults ties (MH-1 SrTiO3 0.995, OMOL-0 XL 1.003). `sm_86` was not run (`trillian` busy).
+
+### 6.50 The gated layer 0 kept in tiled calls, sweeps that zero only their accumulators, and list 19 (22 November 2026, early morning)
+
+Three changes are in, on branch `mh1-two-half-adjoint` (5da0838, 060c645). Ledger entries: `tile-keep-layer0-gated`, `gen-gate-fwd-l0`,
+`tile-sweep-zero` and `ideas-20261122-list19`.
+- `LOUP_TILE_KEEP_L0` for MH-1's gated layer 0. A tiled call's backward sweep of layer 0 replayed that layer's forward,
+  because MH-1's layer 0 (kind 4, gated) was not a keep model. Each tile now keeps `msgf`, `D`, `lin_l` (`gout_l` for the
+  degrees whose gated store ran in the projection) and `res_0` without the species table. The forward sweep hands its
+  gated-store mask to the backward sweep per buffer: a GEMM plan tuned in between changes the ask, and a first build
+  failed the forces by 2.3 eV/A that way. MH-1 SrTiO3 tiled calls, b / a: 0.852 (20,000 atoms, one tile) and 0.840
+  (8,192 receivers) on `sm_89`, 0.841 at 40,000 atoms (20,000 receivers); 0.847 on the 5060 Ti (20,000 atoms, 8,192
+  receivers, 142.9 -> 121.0 ms).
+- `LOUP_GATE_FWD_L0`, default 1 on `sm_120` (5060 Ti only). At 20,000 atoms the tuned plan of layer 0's l = 2 projection
+  was cuBLAS, so `gate_fwd_kernel` did that degree (1.47 ms). Mode 1 forces the own `sgemm128` with the gated store above
+  1,600 rows, as for the later layers: MH-1 SrTiO3 20,000 atoms 98.11 -> 96.88 ms (0.9875), 5,000 atoms a tie. The MH-1
+  gate passes (18 / 18).
+- `LOUP_SWEEP_ZERO`: every sweep zeroed the whole zero slab (MH-1: layer 0's `dhout`, about 8 KB per row); now each sweep
+  zeroes only the arrays it accumulates into. MH-1 SrTiO3 20,000 atoms at 8,192 receivers: 5060 Ti 122.8 -> 121.0 ms
+  (0.984), `sm_89` 177.5 -> 175.8 ms (0.990), every pair below 1 on both.
+
+**Tests.** `tests/cpu` on `leto` (497 passed, 5 skipped); the GPU fast tier on the 5060 Ti (383 passed, 51 skipped);
+`tests/gpu/test_tiled.py`, `test_sweeps.py` and `test_tiled_md.py` on the 5060 Ti (88 passed) and on `sm_89` (87 passed,
+1 skipped: a host-memory case that needs a smaller host).
+
+**List 19's other ideas** (ledger `ideas-20261122-list19`). Faster gate kernels on `sm_89` were dropped: they already run at
+250-270 GB/s of 360. Padding `dS0`'s 208 columns was dropped too: the TAIL instance computes only the columns below 208.
+Two ideas are open, not built:
+- layer 1's degree-0 and degree-1 gate in the residual projection's epilogue, about 0.6% (estimate);
+- layer 0's degree-0 gate in an epilogue, about 0.1% (estimate).
+
+**sm_86 (RTX A4000, `trillian`).** The two-switch package of 9b03443 (`LOUP_W2T_HALF=1 LOUP_W2F_HALF=1`) against both off,
+A B B A twice: MH-1 SrTiO3 0.869 (52.0 -> 45.2 ms), MH-1 NaCl216 0.848, OMOL-0 XL water216 0.890. Its MMA rate bench reads
+92.9 TFLOP/s for FP16 with either accumulation, and the two-half kernels run at 0.54-0.67 of cuBLAS's SGEMM time on
+MH-1's shapes. 6823901's three switches were not run there.
