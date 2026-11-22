@@ -3182,3 +3182,17 @@ Two ideas are open, not built:
 A B B A twice: MH-1 SrTiO3 0.869 (52.0 -> 45.2 ms), MH-1 NaCl216 0.848, OMOL-0 XL water216 0.890. Its MMA rate bench reads
 92.9 TFLOP/s for FP16 with either accumulation, and the two-half kernels run at 0.54-0.67 of cuBLAS's SGEMM time on
 MH-1's shapes. 6823901's three switches were not run there.
+
+### 6.51 The later layers' gated store in tiled calls, and list 20 (22 November 2026, early morning)
+
+`LOUP_GATE_FWD_TILED` (default on; ledger `gen-gate-fwd-tiled`, 5060 Ti only). The gated store of `LOUP_GATE_FWD_L1` ran in
+whole passes only, so a tiled call's layer 1 sent its degrees 2-3 through `gate_fwd_kernel`. The last-layer sweep records
+that layer's forward and backward together, as a whole pass does, so the store now runs there too. MH-1 SrTiO3, 20,000
+atoms at 8,192 receivers: 120.9 -> 118.9 ms (0.9842, every pair below 1); `gate_fwd_kernel` 4.91 -> 1.84 ms per call. The
+tiled tests pass (88). Without `own_ext` (`sm_89`) the switch does nothing.
+
+**List 20** (ledger `ideas-20261122-list20`) compares the tiled call's census with the whole call's at 20,000 atoms
+(5060 Ti): 116.1 against 97.1 ms of kernels. The gap is mostly row moves (6.7 ms), extra SIMT GEMMs (9.5 ms) and memsets
+(2.0 ms). `LOUP_LIN_HALF_PARTS` bit 8 at 20,000 atoms is a tie (whole 0.998, tiled 0.997) and stays off. The chain fold in
+tiled calls is being built. Layer 0 would hand layer 1 528 floats per row instead of 2,048, and skip `y W_p`. The
+estimated saving is 8-10% of the tiled call.

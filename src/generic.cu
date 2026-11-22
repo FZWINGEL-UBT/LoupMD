@@ -1317,6 +1317,7 @@ void GenericModel::load(const Bundle& b) {
     share_layers_env_ = true;
     if (const char* e = std::getenv("LOUP_TILE_SHARE_LAYERS"); e && e[0] == '0') share_layers_env_ = false;
     if (const char* e = std::getenv("LOUP_SWEEP_ZERO"); e && e[0] == '0') sweep_zero_ = false;
+    if (const char* e = std::getenv("LOUP_GATE_FWD_TILED"); e && e[0] == '0') gate_fwd_tiled_ = false;
     CUDA_CHECK_THROW(cudaMalloc(&d_energy_sink_, sizeof(double)));
     update_h0_read();
 }
@@ -2545,7 +2546,11 @@ void GenericModel::record(const GenericPassInputs& in) {
                                in.gemm_h2_gate_fwd(l, M, L->lin_cols[l], K, A, p.sA, p.B, p.os, gf, true);
                     return in.gemm_gate_fwd_l1(l, M, L->lin_cols[l], K, A, L->W_lin[l], gf);
                 };
-                if (L->kind == 4 && in.gemm_gate_fwd_l1 && n_proj == 4 && sweep == GenericPassInputs::SweepAll)
+                // whole passes, and the tiled call's last-layer sweep, which runs the layer's forward and backward
+                // in one recording (list 20, gen-gate-fwd-tiled; LOUP_GATE_FWD_TILED=0: whole passes only)
+                const bool gate1_sweep = sweep == GenericPassInputs::SweepAll ||
+                                         (gate_fwd_tiled_ && sweep == GenericPassInputs::SweepLast && t == n_layers_ - 1);
+                if (L->kind == 4 && in.gemm_gate_fwd_l1 && n_proj == 4 && gate1_sweep)
                     for (int l = L->lmax_x + 1; l < 4; ++l)  // A null: only asks
                         if (gate1(l, nullptr)) gate_vform[t] |= 1u << l;
                 const int l_first = gate_vform[t] ? 1 : 0;
