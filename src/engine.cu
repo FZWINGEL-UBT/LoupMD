@@ -136,6 +136,48 @@ __global__ void publish_kernel(const int* __restrict__ a, const int* __restrict_
     publish3(counter, pub, a ? *a : 0, b ? *b : 0, c ? *c : 0);
 }
 
+// loup_evaluate's results without a copy node (list 24, LOUP_EVAL_MAPPED): the SMs store the zeroed slab (energy,
+// forces, virial) straight into the mapped staging, and the last block to finish publishes the rows' order flag as
+// publish_kernel does. Under WSL 2 the host copy node of 120 KB (5,000 atoms) left the GPU idle for 0.1-0.25 ms on
+// each side of it, the hand-offs between the compute and the copy engine (a 16 KB one did not). counter[1] is the
+// blocks' ticket, back at 0 once the last one has taken it.
+__global__ void results_out_kernel(const double* __restrict__ src, double* __restrict__ dst, int n,
+                                   const int* __restrict__ order_err, unsigned int* __restrict__ counter,
+                                   int* __restrict__ pub) {
+    for (int i = blockIdx.x * blockDim.x + threadIdx.x; i < n; i += gridDim.x * blockDim.x) dst[i] = src[i];
+    __threadfence_system();
+    __syncthreads();
+    if (threadIdx.x == 0 && atomicAdd(counter + 1, 1u) == gridDim.x - 1) {
+        counter[1] = 0u;
+        __threadfence();
+        publish3(counter, pub, *order_err, 0, 0);
+    }
+}
+
+// The host step's upload and skin check in one kernel (LOUP_EVAL_MAPPED): a block's 256 atoms' positions read from the
+// mapped staging in order (through shared memory), stored to pos64 and checked as check_skin_kernel does.
+__global__ void __launch_bounds__(256) load_check_skin_kernel(int N, double half_skin, const double* __restrict__ stage,
+                                                              double* __restrict__ pos64,
+                                                              const double* __restrict__ ref_pos64,
+                                                              int* __restrict__ need_rebuild) {
+    __shared__ double s[3 * 256];
+    const int a0 = blockIdx.x * 256;
+    const int n = 3 * min(256, N - a0);
+    for (int k = threadIdx.x; k < n; k += 256) {
+        const double v = stage[(size_t)a0 * 3 + k];
+        s[k] = v;
+        pos64[(size_t)a0 * 3 + k] = v;
+    }
+    __syncthreads();
+    const int i = a0 + threadIdx.x;
+    if (i >= N) return;
+    double dx = s[3 * threadIdx.x + 0] - ref_pos64[i * 3 + 0];
+    double dy = s[3 * threadIdx.x + 1] - ref_pos64[i * 3 + 1];
+    double dz = s[3 * threadIdx.x + 2] - ref_pos64[i * 3 + 2];
+    const double d2 = dx * dx + dy * dy + dz * dz;
+    if (half_skin <= 0.0 || d2 > half_skin * half_skin) *need_rebuild = 1;
+}
+
 // The MD step's hinge (run_md_loop): publishes the skin-check flag and the last rebuild's row-order flag, and picks the
 // body of the step graph's SWITCH node: 0 the rest (force pass + second half) when no rebuild is needed, 1 the rebuild
 // branch (has_rebuild) when one is, none when the rows are invalid or the host rebuilds. The host queues the next step
@@ -683,6 +725,9 @@ struct LoupHandle {
     // list 22 (ledger gen-h2-splitk): split-K for the two-half kernel's small-M, long-K products (hgemm2_split_k: MH-1's
     // degree-0 backward projections with K = 2,048 on small cells) into the lane's workspace; LOUP_H2_SPLITK=0 never
     bool h2_splitk = true;
+    // LOUP_EVAL_MAPPED (list 24; read at engine creation): loup_evaluate's staging mapped into the device, the host
+    // step's upload and results written by kernels (load_check_skin_kernel, results_out_kernel) instead of copy nodes
+    bool eval_mapped = false;
     cudaStream_t stream = nullptr;
     cublasHandle_t cublas = nullptr;
     cublasLtHandle_t cublas_lt = nullptr;
@@ -1045,8 +1090,10 @@ struct LoupHandle {
     // loup_evaluate's host I/O: page-locked staging [3N positions | 3N forces | energy | 6 virial], so the uploads and
     // downloads are asynchronous copies and the host learns that the results have landed from one publication instead
     // of blocking transfers and a stream synchronisation (a host round trip each, 100-200 us under WSL 2). A whole
-    // system has it; an open domain (n_ghost > 0, a tile) does not.
+    // system has it; an open domain (n_ghost > 0, a tile) does not. With eval_mapped it is mapped into the device and
+    // the host step's kernels read and write it (load_check_skin_kernel, results_out_kernel): no copy nodes.
     double* h_stage = nullptr;    // [3N positions | a copy of the zeroed slab: energy, forces, virial]
+    double* d_stage = nullptr;    // h_stage's device address where it is mapped (eval_mapped), else null
     size_t stage_off_f = 0, stage_off_v = 0;  // doubles from the slab copy's start to the forces / the virial
     double* stage_pos() const { return h_stage; }
     double* stage_out() const { return h_stage + (size_t)3 * N; }  // [0] the energy
@@ -1140,6 +1187,7 @@ struct LoupHandle {
         thermo_pending = 0;
         freep(d_inv_perm); freep(d_io_bad); inv_perm_epoch = -1;
         if (h_stage) { cudaFreeHost(h_stage); h_stage = nullptr; }
+        d_stage = nullptr;
         freep(d_pos_wrapped); freep(d_atom_wrap); freep(d_atom_bin);
         freep(d_ro_keys); freep(d_ro_vals); freep(d_ro_tmp); freep(d_order_err); freep(d_max_deg);
         freep(d_bin_counts); freep(d_bin_offsets); freep(d_bin_cursor);
@@ -2495,6 +2543,9 @@ LoupHandle* loup_create(const char* loup_path, int device_id) {
             if (const char* e = std::getenv("LOUP_GATE_FWD_L0"); e && e[0] >= '1' && e[0] <= '2')
                 h->gate_fwd_l0 = e[0] - '0';
             if (const char* e = std::getenv("LOUP_H2_SPLITK"); e && e[0] == '0') h->h2_splitk = false;
+            h->eval_mapped = h->is_sm120;
+            if (const char* e = std::getenv("LOUP_EVAL_MAPPED"); e && (e[0] == '0' || e[0] == '1'))
+                h->eval_mapped = e[0] == '1';
             if (const char* e = std::getenv("LOUP_DEBUG_EVAL_TIMES"); e && e[0] == '1') h->probe = true;
             if (const char* e = std::getenv("LOUP_EVAL_ARM"); e && e[0] == '1') h->arm_enabled = true;
             else if (e && e[0] == '0') h->arm_state = -1;
@@ -2508,8 +2559,9 @@ LoupHandle* loup_create(const char* loup_path, int device_id) {
         CUDA_CHECK_THROW(cudaHostAlloc(&h->h_pub, 16 * sizeof(int), cudaHostAllocMapped));
         memset(h->h_pub, 0, 16 * sizeof(int));
         CUDA_CHECK_THROW(cudaHostGetDevicePointer(reinterpret_cast<void**>(&h->d_pub), h->h_pub, 0));
-        CUDA_CHECK_THROW(cudaMalloc(&h->d_pub_counter, sizeof(unsigned int)));
-        CUDA_CHECK_THROW(cudaMemset(h->d_pub_counter, 0, sizeof(unsigned int)));
+        // [0] the publications' counter, [1] results_out_kernel's block ticket
+        CUDA_CHECK_THROW(cudaMalloc(&h->d_pub_counter, 2 * sizeof(unsigned int)));
+        CUDA_CHECK_THROW(cudaMemset(h->d_pub_counter, 0, 2 * sizeof(unsigned int)));
         CUDA_CHECK_THROW(cudaEventCreateWithFlags(&h->ev_fork, cudaEventDisableTiming));
         for (int i = 0; i < LoupHandle::kSide; ++i) {
             CUDA_CHECK_THROW(cudaStreamCreateWithFlags(&h->side[i], cudaStreamNonBlocking));
@@ -2768,8 +2820,20 @@ static int set_system_impl(LoupHandle* h, int n_atoms, const int* atomic_numbers
     h->stage_off_f = off_f64 / sizeof(double);
     h->stage_off_v = off_v64 / sizeof(double);
     // loup_evaluate's staging: a whole system only (a domain's rows come and go through its driver's own buffers)
-    if (n_ghost == 0)
-        CUDA_CHECK(cudaHostAlloc(&h->h_stage, (size_t)3 * n_atoms * sizeof(double) + h->zero_slab_bytes, cudaHostAllocDefault));
+    if (n_ghost == 0) {
+        const size_t stage_bytes = (size_t)3 * n_atoms * sizeof(double) + h->zero_slab_bytes;
+        h->d_stage = nullptr;
+        if (h->eval_mapped && cudaHostAlloc(&h->h_stage, stage_bytes, cudaHostAllocMapped) == cudaSuccess) {
+            if (cudaHostGetDevicePointer(reinterpret_cast<void**>(&h->d_stage), h->h_stage, 0) != cudaSuccess) {
+                cudaGetLastError();
+                h->d_stage = nullptr;  // the copy nodes then, from the same page-locked staging
+            }
+        } else {
+            if (h->eval_mapped) cudaGetLastError();
+            h->h_stage = nullptr;
+            CUDA_CHECK(cudaHostAlloc(&h->h_stage, stage_bytes, cudaHostAllocDefault));
+        }
+    }
     h->N = n_local;
     h->n_ghost = n_ghost;
     h->atom_cap = n_atoms;
@@ -2875,6 +2939,15 @@ static bool has_system(const LoupHandle* h) {
 // device (zeroed by every force pass), so it is one copy: under WSL 2 each host copy in the step costs about 10 us at
 // 648 atoms and 50 us at 5,000 (S145, three copies before).
 static int queue_results(LoupHandle* h) {
+    if (h->d_stage) {  // LOUP_EVAL_MAPPED: one kernel, no copy node (results_out_kernel)
+        const int n = (int)(h->zero_slab_bytes / sizeof(double));
+        const int blocks = std::max(1, std::min((n + 1023) / 1024, 64));
+        loup::results_out_kernel<<<blocks, 256, 0, h->stream>>>(static_cast<const double*>(h->d_zero_slab),
+                                                                h->d_stage + (size_t)3 * h->N, n, h->d_order_err,
+                                                                h->d_pub_counter, h->d_pub);
+        CUDA_CHECK(cudaGetLastError());
+        return 0;
+    }
     CUDA_CHECK(cudaMemcpyAsync(h->stage_out(), h->d_zero_slab, h->zero_slab_bytes, cudaMemcpyDeviceToHost, h->stream));
     loup::publish_kernel<<<1, 1, 0, h->stream>>>(h->d_order_err, nullptr, nullptr, h->d_pub_counter, h->d_pub);
     return 0;
@@ -3285,7 +3358,8 @@ static int run_md_loop(
     // and host fallback as an MD step. It queues the step and returns: nothing below waits for the forces.
     // kStepHost, the step of loup_evaluate: the same, with the positions' upload from the page-locked staging at the
     // head of the step graph and the results' copy and its publication (queue_results) at its end, so a call is one
-    // graph launch. The host reads the guard's publication and then that last one.
+    // graph launch (with eval_mapped, kernels on the mapped staging instead of the two copy nodes). The host reads the
+    // guard's publication and then that last one.
     // Both are fixed-cell steps without thermo rows, and neither counts as an MD step (md_steps, the step
     // displacement's windows). Their callers rebuild the list first where a variable-cell run left its reference
     // stale, and make the uncaptured tuning pass first where the GEMM plans are gone (lt_cache).
@@ -3601,6 +3675,11 @@ static int run_md_loop(
             loup::cell_derive_kernel<<<1, 1, 0, h->stream>>>(h->d_celldev, h->d_need_rebuild);
             loup::check_skin_cell_kernel<<<gridN, 256, 0, h->stream>>>(
                 N, h->d_pos64, h->d_ref_pos64, h->d_celldev, h->d_need_rebuild);
+            return;
+        }
+        if (host_io && h->d_stage) {  // LOUP_EVAL_MAPPED: the upload and the check in one kernel, no copy node
+            loup::load_check_skin_kernel<<<gridN, 256, 0, h->stream>>>(N, half_skin, h->d_stage, h->d_pos64,
+                                                                       h->d_ref_pos64, h->d_need_rebuild);
             return;
         }
         if (host_io)

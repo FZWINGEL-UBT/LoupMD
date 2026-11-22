@@ -3279,3 +3279,20 @@ the column-65 extraction (about 1%), the fold GEMMs on `hgemm2f` (0.5%), packing
   1.0023, a tie.
 - Gates with it: MH-1 crystals (fusion on, off, `LOUP_RES_BWD=2`), the omol head, OMOL-0 XL organics, Sr-contact0.8
   for each conv variant over two plan sets: all pass.
+
+Item 2, the residual degrees' gate in their `W_res` projection's epilogue (`res_l` never stored), passed every gate
+but tied: MH-1 SrTiO3 1.0010, OMOL-0 XL water216 1.0003. Its build lost 0.5% in the MD loop on NaCl216, where the
+new path never runs. It was reverted. The estimate of 0.7-1.3% had counted the saved traffic at DRAM bandwidth, but
+those arrays (2-8 MB) stay in the 32 MB L2. Items 3 (OMOL-0's fold GEMMs on `hgemm2f`) and 4 (`gate_fwd_kernel`) are
+bounded below 1% and not built.
+
+### 6.56 `loup_evaluate` without copy nodes (list 24, 22 November 2026, night)
+
+The idle gaps of whole traced calls showed the evaluate path's two copy nodes costing far more than their transfers
+under WSL 2. At 5,000 atoms the GPU sat idle 0.1-0.25 ms on each side of the 120 KB results copy, and up to 0.13 ms
+after the 120 KB position upload; with 16 KB copies (648 atoms) the hand-offs took 3-5 us. `LOUP_EVAL_MAPPED` (default
+on `sm_120`, ledger `eval-mapped-staging`, 5060 Ti only) maps the staging into the device and lets two kernels do the
+upload (with the skin check) and the results (with the publication). Idle time inside an OMAT-0 SrTiO3 call fell from
+300 to 44 us. Synchronous evaluate, A B B A twice against the copy nodes: OMAT-0 medium SrTiO3 0.9814 (stress 0.9859),
+MH-1 SrTiO3 0.9949 (0.9902), OMOL-0 XL water216 0.9973 (0.9968), MH-1 NaCl216 0.9389 (0.9666, noisy). The MD loop and
+`loup_compute_device` never had these copies.
