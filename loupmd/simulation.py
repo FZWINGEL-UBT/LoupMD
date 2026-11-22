@@ -96,7 +96,8 @@ class Simulation:
       ``"auto"`` plans the execution before the first step and runs a system that does not fit the GPU whole in
       tiles of at most ``receivers`` atoms (``Simulation.execution`` says which); from 2^20 atoms in a cell long
       enough for 12 layers of tiles it uses the wavefront schedule, which ``"wavefront"`` forces (two-layer models;
-      S5-T08). The tiled modes run every integrator on the device (PLAN.md O31), the barostats too (Langevin
+      S5-T08), unless the model's tiles fold their skip chain and that state fits on the GPU (faster; the plan then
+      keeps it there). The tiled modes run every integrator on the device (PLAN.md O31), the barostats too (Langevin
       BAOAB, MTK and Berendsen NPT; LAMMPS_TILED_PLAN.md LT6 (a)). With a dispersion term the integrator runs on
       the host, NVE and Langevin only.
 

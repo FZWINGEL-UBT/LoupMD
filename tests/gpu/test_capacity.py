@@ -10,7 +10,7 @@ import numpy as np
 import pytest
 from gpu_support import find_model, srtio3
 
-from loupmd import LoupEngine, PlanRefused, capacity, ensure_loup_bundle
+from loupmd import LoupEngine, PlanRefused, _core, capacity, ensure_loup_bundle
 from loupmd.config import CapacityConfig
 
 SKIN = 0.5
@@ -132,6 +132,70 @@ def test_the_wavefront_mode_plans_a_smaller_state_and_gives_the_tiled_result(mon
     assert wave.plan.tiled_global_bytes < 0.7 * tiled.plan.tiled_global_bytes
     assert abs(wave.energy - tiled.energy) <= 1e-9 * abs(tiled.energy)
     assert np.abs(wave.forces - tiled.forces).max() <= 1e-5
+
+
+@pytest.mark.full
+def test_from_2_20_atoms_a_folding_model_keeps_its_plain_order_on_the_device(monkeypatch):
+    """List 21 (ledger tile-fold-plan): from 2^20 atoms the wavefront and the two host-state rules apply by default,
+    but a two-layer model whose tiles fold the skip chain plans the folded plain order on the device wherever it fits
+    (the plan of LOUP_TILE_WAVEFRONT=0 LOUP_TILE_HOST_STATE=0), and the tiled call runs that order. Where it fits
+    nowhere the plan falls back to the wavefront (the plan of LOUP_TILE_FOLD=0 with the host state off). MH-1 on
+    1,050,000 atoms in a rod, so that the wavefront applies at every cap."""
+    at = srtio3(1).repeat((210, 40, 25))
+    bundle = ensure_loup_bundle(find_model("mace-mh-1.model"), [8, 22, 38], head="omat_pbe")
+    for k in ("LOUP_TILE_FOLD", "LOUP_TILE_WAVEFRONT", "LOUP_TILE_HOST_STATE", "LOUP_TILE_HOST_LISTS",
+              "LOUP_CHAIN_FOLD", "LOUP_DEBUG_PLAN_FREE"):
+        monkeypatch.delenv(k, raising=False)
+    probe = LoupEngine(bundle)
+    cc = probe.info().compute_capability
+    del probe
+    gc.collect()
+    if cc not in (80, 120):
+        pytest.skip("the skip-chain fold is built by default on sm_120 and cc 8.0 only")
+
+    def plan(call=False, **env):
+        for k, v in env.items():
+            monkeypatch.setenv(k, v)
+        eng = LoupEngine(bundle)
+        try:
+            eng.set_execution(_core.LOUP_EXEC_AUTO, 0, 0.9)
+            p = eng.plan_execution(at.numbers, at.positions, at.cell.array, skin=SKIN)
+            ex = None
+            if call:
+                eng.evaluate_tiled(at.numbers, at.positions, at.cell.array, 0, SKIN)
+                ex = eng.last_execution()
+            return p, ex
+        finally:
+            for k in env:
+                monkeypatch.delenv(k)
+            del eng
+            gc.collect()
+
+    def show(name, p):
+        print(f"{name}: mode {p.mode}, cap {p.receivers}, host state {p.host_state}, host lists {p.host_lists}, "
+              f"global {p.tiled_global_bytes / 2**30:.3f} GiB, workspace {p.tile_workspace_bytes / 2**30:.3f} GiB")
+
+    default, ex = plan(call=True)
+    plain, _ = plan(LOUP_TILE_WAVEFRONT="0", LOUP_TILE_HOST_STATE="0")
+    old, _ = plan(LOUP_TILE_FOLD="0")
+    for name, p in (("default", default), ("plain", plain), ("unfolded", old)):
+        show(name, p)
+    assert default.mode == _core.LOUP_EXEC_TILED and not default.host_state
+    assert (default.receivers, default.host_lists) == (plain.receivers, plain.host_lists)
+    assert abs(default.tiled_global_bytes - plain.tiled_global_bytes) <= 0.02 * plain.tiled_global_bytes
+    # unfolded, the plain order's state does not fit: the host state or the wavefront, which hold far less there
+    assert old.tiled_global_bytes < 0.8 * default.tiled_global_bytes
+    assert ex.mode == _core.LOUP_EXEC_TILED and ex.receivers == default.receivers
+    # a card that holds the wavefront's pool but not the folded state: the wavefront, as without the fold (on the
+    # 5060 Ti at 8,000 MiB the folded order still fits at cap 4,096 with host lists, 9.26 GiB planned against the
+    # wavefront's 7.15 GiB there)
+    fb, _ = plan(LOUP_DEBUG_PLAN_FREE="6700", LOUP_TILE_HOST_STATE="0")
+    ref, _ = plan(LOUP_DEBUG_PLAN_FREE="6700", LOUP_TILE_HOST_STATE="0", LOUP_TILE_FOLD="0")
+    for name, p in (("fallback", fb), ("fallback unfolded", ref)):
+        show(name, p)
+    assert fb.receivers == ref.receivers > 0 and fb.host_lists == ref.host_lists
+    assert abs(fb.tiled_global_bytes - ref.tiled_global_bytes) <= 0.02 * ref.tiled_global_bytes
+    assert fb.tiled_global_bytes < 0.8 * plain.tiled_global_bytes
 
 
 def test_the_wavefront_mode_refuses_a_three_layer_model(monkeypatch):

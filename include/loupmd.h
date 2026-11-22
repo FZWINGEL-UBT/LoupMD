@@ -378,7 +378,11 @@ int loup_plan_memory(LoupHandle* h, int n_atoms, double edges_per_atom, LoupMemo
 // and keeps the layer outputs and their gradients in a row pool instead of whole-system arrays. LOUP_EXEC_WAVEFRONT
 // forces it (refused for models of other layer counts); under AUTO or TILED it is on from 2^20 atoms when the plan
 // has 12 or more layers of tiles along the first cell axis. The plan's tiled_global_bytes then counts the pool, and
-// its mode stays TILED. The environment variable LOUP_TILE_WAVEFRONT=1|0 overrides both (tests).
+// its mode stays TILED. Not where the model's plain order folds its skip chain in tiles (two-layer models on GPUs
+// that build the fold) and that order fits on the device, with its tile lists there or in host memory: the plan then
+// keeps the plain order on the device, also against the host state (MH-1 13% and OMAT-0 medium 5% faster at about a
+// million atoms on an RTX 5060 Ti), and the tiled call follows it. The environment variable LOUP_TILE_WAVEFRONT=1|0
+// overrides both (tests).
 // loup_get_execution: how the last tiled call (loup_evaluate_tiled or loup_tiled_run) ran; mode is LOUP_EXEC_WAVEFRONT when it
 // ran the wavefront, else LOUP_EXEC_TILED. budget_bytes is the device memory
 // free when it began plus the handle's own buffers; peak_bytes that budget less the least memory free during it.

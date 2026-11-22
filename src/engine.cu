@@ -845,6 +845,8 @@ struct LoupHandle {
     long long tile_list_builds = 0;     // tiled calls that built their lists, since the handle was created
     int tile_host_lists = 0;            // the last loup_plan_execution put the tile lists' edges in host memory (O31)
     int tile_host_state = 0;            // ... and the layer state (O32): 1 plain order, 2 the wavefront's row pool
+    bool tile_wave_off = false;         // ... kept a folding plain order on the device where the wavefront would apply
+                                        // by default (list 21, ledger tile-fold-plan): the call then runs the plain order
     double skin = 0.5;
     double e0_total = 0.0;
     std::vector<int> perm;          // device (species-grouped, spatially ordered) index -> caller index
@@ -6126,7 +6128,8 @@ static bool tile_fold_enabled() {
 // loup_plan_execution (see the header).
 // The wavefront (S5-T08) for a tiled call of n atoms: LOUP_TILE_WAVEFRONT=1|0 forces it on or off, else the
 // wavefront mode asks for it, else it is on from 2^20 atoms (with 12 layers of tiles along the first axis, which only
-// the plan can tell: wave_pool_rows). Two-layer models only.
+// the plan can tell: wave_pool_rows). Two-layer models only. Where the plain order folds, the plan keeps it on the
+// device wherever it fits and the call follows (tile_wave_off; list 21, ledger tile-fold-plan).
 static bool wave_try(const LoupHandle* h, int64_t n_atoms, bool* forced) {
     const char* env = std::getenv("LOUP_TILE_WAVEFRONT");
     const int ask = (env && env[0]) ? std::atoi(env) : (h->exec_mode == LOUP_EXEC_WAVEFRONT ? 1 : -1);
@@ -6381,6 +6384,13 @@ static int plan_execution_impl(LoupHandle* h, int n_atoms, const int* atomic_num
     // O32: the device lists' edge arrays per edge: 8 B compact (10% over, as the host lists'), else kTileFullEdgeB
     const double dev_edge_b = device_compact() ? 8.0 * 1.1 : (double)kTileFullEdgeB;
     double hstate_host = 0.0;  // the host memory of the layer state and its staging at the last cap tried
+    // list 21 (ledger tile-fold-plan): a model whose plain order folds tries that order on the device first (passes 0
+    // and 1, or the set cap) where the wavefront would apply by default, and the wavefront only where it fits nowhere:
+    // MH-1 SrTiO3 at 80,000 atoms and cap 8,192 563.4 ms per call in the wavefront, 407.6 ms in the folded plain order;
+    // at 1,050,000 atoms the folded plain order at cap 8,192 (lists in host memory) 6.35 s, the default's host state at
+    // 12,288 7.25 s and its wavefront at 8,192 7.33 s (5060 Ti only)
+    const bool fold_first = fold_dev && wave && !wave_forced;
+    bool plain_only = false;  // tiled_at: the plain order at every cap (no wavefront pool)
     auto tiled_at = [&](double c, bool host, double& global, double& ws, int hstate = 0) -> int {
         c = std::min(c, n);
         const double rows = c + ghost0 * std::pow(c / c0, 2.0 / 3.0), T = std::ceil(n / c);
@@ -6416,7 +6426,7 @@ static int plan_execution_impl(LoupHandle* h, int n_atoms, const int* atomic_num
         // with host lists (O31) the edges' arrays leave the device
         double kept = 32.0 * (n + T * (rows - c)) + 4.0 * (n + T) + (host ? 0.0 : dev_edge_b * n * epl);
         double layer_rows = n;
-        if (wave) {
+        if (wave && !plain_only) {
             int64_t pool = -1;
             try {
                 pool = wave_pool_rows(positions, n_atoms, cell, (int)c, r_list + 1e-3, wave_forced);
@@ -6490,10 +6500,16 @@ static int plan_execution_impl(LoupHandle* h, int n_atoms, const int* atomic_num
     };
     if (h->exec_receivers > 0) {
         cap = h->exec_receivers;
-        if (tiled_at(cap, host, global, ws, hstate) != 0) return -1;
-        if (!host && !fits(cap) && host_ok && host_force != 0) {
-            host = true;
+        // list 21: a folding plain order first (fold_first), the wavefront where that does not fit at this cap
+        for (int attempt = fold_first && hstate == 0 ? 0 : 1; attempt < 2; ++attempt) {
+            plain_only = attempt == 0;
+            host = host_force == 1;
             if (tiled_at(cap, host, global, ws, hstate) != 0) return -1;
+            if (!host && !fits(cap) && host_ok && host_force != 0) {
+                host = true;
+                if (tiled_at(cap, host, global, ws, hstate) != 0) return -1;
+            }
+            if (hstate || fits(cap)) break;
         }
         if (!hstate && !fits(cap) && hs_force != 0)
             for (int form = hs_first; form <= (wave ? 2 : 1); ++form) {
@@ -6511,7 +6527,11 @@ static int plan_execution_impl(LoupHandle* h, int n_atoms, const int* atomic_num
         // pass 0: everything on the device; 1: the lists in host memory; 2: the lists and the layer state there
         // (plain order); 3: the lists and the wavefront's row pool there
         const int first = hstate ? hstate + 1 : host ? 1 : 0;
+        // list 21: a folding plain order first, passes 0 and 1 without the wavefront (fold_first); then all passes
+        for (int attempt = fold_first && hstate == 0 ? 0 : 1; attempt < 2 && cap == 0; ++attempt)
         for (int pass = first; pass < 4 && cap == 0; ++pass) {
+            plain_only = attempt == 0;
+            if (plain_only && pass >= 2) break;  // the host state never folds
             if (pass == 1 && !(host_ok && host_force != 0)) continue;
             if (pass >= 2 && hs_force == 0) break;
             if (pass == 2 && hs_first == 2) continue;
@@ -6537,11 +6557,13 @@ static int plan_execution_impl(LoupHandle* h, int n_atoms, const int* atomic_num
             if (pick && tiled_at(pick, host, global, ws, hstate) != 0) return -1;
             cap = pick;
         }
+        // list 21 (ledger tile-fold-plan): the device plan is the folded plain order (the host state never folds)
+        const bool dev_folds = fold_dev && hstate == 0 && (!wave || plain_only);
         // O32: a device plan in small tiles loses to the plain host state in tiles four times larger or more with
         // room for the slots (2,560,000 atoms: cap 4,096 on the device 5.73-5.75 s, the host state at 49,152 5.23 s;
         // at 65,536 without slot room 6.49 s; status §6.34), measured with 625 tiles and more only: few tiles keep the
-        // device plan
-        if (cap > 0 && cap < 16384 && n >= 256.0 * cap && hstate == 0 && hs_force != 0 && hs_first == 1) {
+        // device plan. Not where the device plan folds (dev_folds)
+        if (cap > 0 && cap < 16384 && n >= 256.0 * cap && hstate == 0 && hs_force != 0 && hs_first == 1 && !dev_folds) {
             // at most 8x: at 65,536 the call found no memory left for any slot although the plan's estimate left
             // 4 GB (54 tiles, 6.50 s; the grid fit's split blocks, fixed since by tile-grid-rows: 64 tiles, 5.23 s);
             // 49,152 and 32,768 ran with 64 / 125 slots (5.24 / 5.26 s), 32,768 at the lower peak. Down to 2.5x where
@@ -6568,8 +6590,10 @@ static int plan_execution_impl(LoupHandle* h, int n_atoms, const int* atomic_num
         // tiles) 2.285 / 2.271 s, peak 11.6-11.9 GiB, the host state at 65,536 (27 tiles) 2.196 / 2.195 s, 10.56 GiB;
         // at 0.75 / 0.5 -2.7% / -4.7%; 8,008,065 at 0.75 6,144 -> 16,384 17.51 -> 16.68 s. From 2^20 atoms only: below,
         // the host copies cost more than the larger tiles save (320,000 at 0.5 / 0.35 +4.2% / +2.9%, 135,000 at 0.25
-        // +10%; at the same cap 320,000 at 0.9: 0.613 against 0.593 s): tile-host-state-larger-cap
-        if (cap > 0 && cap < kCaps[0] && n >= 1048576.0 && hstate == 0 && hs_force != 0 && hs_first == 1) {
+        // +10%; at the same cap 320,000 at 0.9: 0.613 against 0.593 s): tile-host-state-larger-cap. Not where the device
+        // plan folds (dev_folds; list 21, ledger tile-fold-plan): MH-1 SrTiO3 at 1,050,000 atoms, the folded device plan
+        // at cap 8,192 (lists in host memory) 6.35 s per call, the host state at 12,288 7.25 s (5060 Ti only)
+        if (cap > 0 && cap < kCaps[0] && n >= 1048576.0 && hstate == 0 && hs_force != 0 && hs_first == 1 && !dev_folds) {
             int any = 0, with_slots = 0;
             double g = 0.0, w = 0.0;
             for (int c : kCaps) {
@@ -6596,6 +6620,7 @@ static int plan_execution_impl(LoupHandle* h, int n_atoms, const int* atomic_num
     }
     h->tile_host_lists = (cap > 0 && host) ? 1 : 0;
     h->tile_host_state = (cap > 0 && hstate) ? hstate : 0;  // 2: the wavefront's row pool (the call's rule)
+    h->tile_wave_off = cap > 0 && hstate == 0 && wave && plain_only;  // list 21: the call runs the plain order
     plan.host_lists = h->tile_host_lists;
     plan.host_state = h->tile_host_state ? 1 : 0;
     if (h->tile_host_state) {
@@ -6611,7 +6636,7 @@ static int plan_execution_impl(LoupHandle* h, int n_atoms, const int* atomic_num
     bool exact_fits = true;
     for (int cap_i = 0; cap > 0;) {
         TileShape shape;
-        const bool wave_on = wave && (hstate == 0 || wave_forced || hstate == 2);
+        const bool wave_on = wave && !h->tile_wave_off && (hstate == 0 || wave_forced || hstate == 2);
         if (tile_shape(positions, n_atoms, cell, cap, r_list + 1e-3, wave_on, wave_forced, hstate == 1 && alias_plan,
                        &shape) != 0)
             return -1;
@@ -6692,6 +6717,7 @@ static int plan_execution_impl(LoupHandle* h, int n_atoms, const int* atomic_num
     }
     if (cap == 0) {  // nothing fits by the exact figures: no tiled plan (the refusal below, or the whole system)
         h->tile_host_lists = h->tile_host_state = 0;
+        h->tile_wave_off = false;
         plan.host_lists = plan.host_state = 0;
     }
     plan.host_bytes = (size_t)((h->tile_host_lists ? host_lists_b : 0.0) + (h->tile_host_state ? hstate_host : 0.0));
@@ -6866,7 +6892,8 @@ static int evaluate_tiled_impl(LoupHandle* h, int n_atoms, const int* atomic_num
         // wavefront forced) its row pool. LOUP_TILE_HOST_STATE=1|0 forces it.
         bool host_state = h->tile_host_state != 0;
         if (const char* e = std::getenv("LOUP_TILE_HOST_STATE")) host_state = std::atoi(e) != 0;
-        const bool wave_ok = wave_try(h, n_atoms, &wave_forced);
+        // list 21 (ledger tile-fold-plan): not where the plan kept a folding plain order on the device (tile_wave_off)
+        const bool wave_ok = wave_try(h, n_atoms, &wave_forced) && (wave_forced || !h->tile_wave_off);
         const bool wave_on = wave_ok && (!host_state || wave_forced || h->tile_host_state == 2);
         loup::TilePlan plan;
         try {

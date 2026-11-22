@@ -22,6 +22,10 @@ plans the run:
    at most two thirds of it). The report names what was moved on its memory line.
 5. From 2^20 atoms, when the layers' state fits neither the GPU nor that share of the host, two-layer models run the
    tiles in [the wavefront order](#the-wavefront), which holds the state of a moving band of tiles only.
+   Two-layer models whose tiles fold the skip chain (on GPUs that build the fold, such as the RTX 5060 Ti) keep their
+   state on the GPU wherever it fits there, with the lists on the GPU or in host memory: folded, the state is smaller
+   and the call does less work, so this beats both the host state and the wavefront (MH-1 by 13% and OMAT-0 medium by
+   5% at about a million atoms on an RTX 5060 Ti).
 6. A cell that fits in none of these ways at 4,096-atom tiles is refused before anything runs, with the memory it
    would need.
 
@@ -52,10 +56,9 @@ and 1,080,000 atoms on the same card:
 
 ```
 Plan
-  27 tiles of at most 65,536 atoms on GPU 0 (NVIDIA GeForce RTX 5060 Ti, ...) (the cell does not fit the card
+  27 tiles of at most 49,152 atoms on GPU 0 (NVIDIA GeForce RTX 5060 Ti, ...) (the cell does not fit the card
   whole); the integrator runs on the device
-  memory: the whole system would need 98.63 GiB; tiled 8.43 GiB planned, 11.73 GiB free on the card; the tile
-  lists' edges and the layer state in pinned host memory (5.70 GiB)
+  memory: the whole system would need 98.55 GiB; tiled 12.23 GiB planned, 13.65 GiB free on the card
 ```
 
 `capacity="whole"` forces the whole-cell call; a cell that does not fit then fails with the engine's out-of-memory
@@ -73,7 +76,8 @@ before the first tile that needs its output. Its last pass runs just after the l
 moving band of tiles is held, in a pool of rows on the GPU.
 
 `capacity="auto"` uses the wavefront from 2^20 atoms when the plan has 12 or more layers of tiles along the first
-axis and the layers' state is not kept in host memory. `capacity="wavefront"` forces it. A model with three layers
+axis and the layers' state is not kept in host memory, unless the tiles fold and their state fits on the GPU (step 5
+above). `capacity="wavefront"` forces it. A model with three layers
 (OMOL-0) is refused in that mode and uses the plain tiled call. The forces are those of the plain tiled call to
 float32 rounding. The report then adds "the tiles run in the wavefront order".
 
@@ -88,11 +92,16 @@ repository has the full record):
 | 121,945 | whole cell | 1 | 11.2 GiB (planned) | none | 0.197 |
 | 135,000 | tiles | 8 (65,536) | 4.05 GiB | none | 0.246 |
 | 320,000 | tiles | 8 (65,536) | 9.03 GiB | none | 0.580 |
-| 1,080,000 | tiles, lists and layer state in host memory | 27 (65,536) | 8.34 GiB | 5.58 GiB | 2.164 |
+| 1,080,000 | tiles | 27 (49,152) | 11.87 GiB | none | 1.985 |
 | 2,560,000 | tiles, lists and layer state in host memory | 64 (49,152) | 11.65 GiB | 12.33 GiB | 5.142 |
 | 5,000,000 | tiles, lists and layer state in host memory | 216 (32,768) | 11.33 GiB | 22.07 GiB | 10.105 |
 | 8,008,065 | wavefront, lists in host memory | 2,016 (6,144) | 11.62 GiB | 5.94 GiB | 16.906 |
 | 10,985,000 | wavefront, lists in host memory | 3,825 (4,096) | 11.58 GiB | 8.15 GiB | 24.206 |
+
+The 1,080,000-atom row is from 22 November 2026, when the tiles' folded state began to stay on the GPU. Before
+that, `auto` put the lists and the layer state in host memory there: 27 tiles of 65,536, 8.34 GiB, 5.58 GiB pinned,
+2.164 s. The other rows are older than the tiles' skip-chain fold, which takes about 5% off OMAT-0 medium's tiled
+calls on this card.
 
 121,945 atoms is the largest cube that runs whole there, and 10,985,000 the largest the plan accepts; 12,301,875
 atoms are refused. With OMAT-0 small, 20,480,000 atoms ran (24.5 s per force call). Other models, cards and host
@@ -149,4 +158,5 @@ order. A tiled step therefore costs 1.1 to 1.4 times the whole-cell call per ato
 the integrator on the GPU: a short Langevin run took 585 ms per step at 320,000 atoms and 2.16 s at 1,080,000.
 
 The first call of a run builds the tiles' neighbour lists and tunes the GEMMs for the tile shapes: 1.8 s at 135,000
-atoms, 7.9 s at 1,080,000 and 79 s at 10,985,000. At 10,985,000 atoms the plan itself took 21 s.
+atoms, about 4 s at 1,080,000 (7.9 s before the tiles' folded state stayed on the GPU) and 79 s at 10,985,000. At
+10,985,000 atoms the plan itself took 21 s.

@@ -160,8 +160,8 @@ def md(structure, *, model, head=None, charge=None, spin_multiplicity=None, sha2
       step (``loupmd.skin``). It decides speed only;
     - ``capacity``: ``"auto"`` (default): the whole system when it fits the GPU, else tiles of up to 65,536 atoms
       (PLAN.md D65; barostats on the device loop, LAMMPS_TILED_PLAN.md LT6 (a)), from 2^20 atoms with the
-      wavefront schedule where the cell is long
-      enough; ``"whole"``, ``"tiled"`` or ``"wavefront"`` force one;
+      wavefront schedule where the cell is long enough and the tiles' folded state does not fit the GPU (two-layer
+      models whose tiles fold keep it there: faster); ``"whole"``, ``"tiled"`` or ``"wavefront"`` force one;
     - ``device``: the GPU index.
     """
     # ---- everything below up to "load" needs no model file ----

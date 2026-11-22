@@ -146,8 +146,9 @@ the forces within 3.2e-6 eV/Å of the whole call over the test runs (both withou
 - **Host memory and the wavefront.** Where the tiles' neighbour lists, or also the layer state, do not fit on the
   card, the plan puts them in pinned host memory (the log says "tile lists in host memory" or "tile lists and layer
   state in host memory"). From 2^20 atoms (about a million), with 12 or more layers of tiles along the cell's first
-  axis, models of two layers run the wavefront schedule. The input does not choose among these; `capacity wavefront`
-  forces the schedule.
+  axis, models of two layers run the wavefront schedule, unless their tiles fold the skip chain (on GPUs that build
+  the fold) and that smaller state fits on the card: then the plain order stays on the card, which is faster. The
+  input does not choose among these; `capacity wavefront` forces the schedule.
 - **The three styles.**
   - `pair_style loupmd`: each step is one tiled call. The stress is formed only on steps that need the virial.
   - `pair_style loupmd/kk`: in tiled mode it works on LAMMPS's host arrays. The transfers take milliseconds, a tiled

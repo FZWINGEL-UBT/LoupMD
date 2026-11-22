@@ -33,6 +33,12 @@ GEMM timing. Host memory: the plan's `host_bytes` against the bytes the call pin
 | 8,008,065 | wavefront, lists in host memory | 2,016 (6,144) | 11.65 / 11.62 / 11.92 | 6.54 / 5.94 | 16.906 s (2.11 us/atom) | 50.9 s | -7.961207 | 7.681 |
 | 10,985,000 | wavefront, lists in host memory | 3,825 (4,096) | 11.67 / 11.58 / 11.92 | 8.41 / 8.15 | 24.206 s (2.20 us/atom) | 79.1 s | -7.961204 | 7.937 |
 
+Since 22 November 2026 (the tiles fold the skip chain, and the plan keeps their folded state on the device: ledger
+`tile-fold-plan`) the plan at 1,080,000 atoms is 27 tiles of 49,152 with everything on the device: 12.23 GiB planned
+at 13.65 GiB free, a call peak of 11.87 GiB, no host memory. In an A/B on a rattled cell (5060 Ti) the kept call took
+1.985 s against 2.091 s for the plan in the row above (`0.950`), and the building call 3.6-3.9 s against 7.0-7.1 s.
+The other rows were measured before the fold.
+
 121,945 atoms (29 cells a side) is the largest cube the plan runs whole; 135,000 (30 a side) runs in tiles.
 10,985,000 atoms (130 a side) is the largest cube the plan accepts at fraction 0.9; for 12,301,875 (135 a side) it
 refuses: 11.9 GiB of state and workspace against 11.8 GiB allowed. The 10,985,000-atom plan itself took 21.5 s

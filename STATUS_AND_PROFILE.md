@@ -3216,3 +3216,30 @@ Results:
 - Tests that compare a folding side with one that never folds (host state, wavefront, unfolded references) now pin
   `LOUP_TILE_FOLD=0`, or take the default whole system as the two-layer reference.
 - `sm_89` does not build the fold by default, so it is unchanged there.
+
+### 6.53 The tiled fold on other families and from 2^20 atoms, and list 21 (22 November 2026, night)
+
+**List 21** (ledger `ideas-20261122-list21`) asks where the tiled fold holds, where the plan keeps it from running,
+and what the folded tiled call still loses to the whole call. All figures are 5060 Ti only, A B B A with fresh plan
+directories:
+
+- **Other families**, 20,000 atoms at 8,192 receivers, `LOUP_TILE_FOLD=0` against the default: OMAT-0 medium 0.943,
+  OMAT-0 small 0.973, MP-0b3 medium 0.964, OFF23 medium 0.964. MH-1 at 45,000 atoms on the plan's own cap: 0.876.
+- **From 2^20 atoms** (`tile-fold-plan`, the new default). The plan sent MH-1 to the host state or the wavefront
+  there, and neither folds: `wave_try` turns the wavefront on from 2^20 atoms, and `tile-host-state-larger-cap`
+  then took the host state at a larger cap. Now a folding model's plain order stays on the device wherever it fits,
+  with the lists there or in host memory, and the call follows the plan (`tile_wave_off`):
+
+  | Model and cell | Before | Now | B/A |
+  |---|---|---|---|
+  | MH-1, 1,050,000 atoms (rod) | 7.25-7.33 s (host state at 12,288 or wavefront at 8,192) | 6.35 / 6.39 s (cap 8,192 host lists / 6,144) | 0.871 / 0.872 |
+  | OMAT-0 medium, 1,080,000 atoms (cubic) | 2.091 s (host state at 65,536) | 1.985 s (cap 49,152) | 0.950 |
+
+  The folded plan holds 2.1-3.6 GB more of the card and pins no layer state on the host. At 2,100,000 MH-1 atoms
+  the folded state does not fit, and the plan still takes the wavefront (cap 4,096, 15.07 s per call). At the same
+  cap the wavefront runs 563 ms per call against 407 ms for the folded plain order (MH-1, 80,000 atoms).
+- **The remaining gap**: the folded tiled call holds 99.07 ms of kernels against the whole call's 95.20 at 20,000
+  atoms (unfolded 115.89). It is spread over the ghost rows' tensor-core GEMMs (1.5 ms), row moves (1.3 ms), the
+  edge decode, force assembly, memsets and copies (1.5 ms). No piece is above 1.5% of the call.
+- **The students**: the rank-4 radial head (`s64r4`, list 16 idea 5) reaches 13.9 meV/A on validation and 10.9 on
+  the 300 K test set, against s64l0's 14.6 and 9.7. Under RESPA (list 15 idea 3) s64l0 stays the better fast model.
