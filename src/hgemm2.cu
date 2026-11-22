@@ -30,9 +30,10 @@
 // Kernel: 128 x 64 block tiles, 4 warps of 64 x 32, K steps of 32 halves through a two-stage cp.async pipeline in
 // XOR-swizzled shared memory (24 KB a stage, 48 KB: two blocks per SM), ldmatrix + mma.sync.m16n8k16 (f32 += f16 f16
 // for P, f16 += f16 f16 for X) into an FP32 and a binary16 accumulator set, restarted every K step, and an FP32
-// running sum (236-238 registers, two blocks per SM; restarting every 16 of K took 255 and gained little). With the
-// gate (DEG = 2l + 1), row tile t starts at atom t (128 / DEG), as sgemm128_gate's (sgemm.cu), so no per-atom sum
-// crosses tiles; the combined tile is staged in shared memory and gate_bwd_rows (gate_epilogue.cuh) runs
+// running sum (236-238 registers, two blocks per SM; restarting every 16 of K took 255 and gained little; list 26
+// restarted H H alone at every MMA, as hgemm2f_kernel's RV 1: 255 registers and 2.8% slower, ledger
+// ideas-20261122-list26). With the gate (DEG = 2l + 1), row tile t starts at atom t (128 / DEG), as sgemm128_gate's
+// (sgemm.cu), so no per-atom sum crosses tiles; the combined tile is staged in shared memory and gate_bwd_tile runs
 // gate_bwd_kernel's arithmetic on it. DEG = 0: the plain FP32 store of the combined product (tests and timing only).
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
@@ -54,7 +55,7 @@ constexpr int kHSmem = 2 * kHStage * 2;                  // bytes, two stages: 4
 constexpr int kHSRow = 72;                               // staged epilogue tile: floats per row (64 + 8 padding)
 constexpr int kHC = 22;                                  // the cross term's shift c (see the top)
 constexpr unsigned kHCScale2 = 0x00040004u;              // 2^-22 = 4 x 2^-24 (a binary16 subnormal) in both halves
-static_assert(kHM * kHSRow * 4 + 2 * kHM * 4 <= kHSmem, "the staged tile and dD partials fit the pipeline buffers");
+static_assert(kHM * kHSRow * 4 + 2 * kHM * 4 <= kHSmem, "the staged tile and the atoms' s / res0 rows fit");
 
 // Byte offset of 16-byte chunk j (0..3) of row r in a tile of 64-byte rows: the chunk index XORed with (r / 2) % 4,
 // so the 8 rows an ldmatrix reads cover the 32 banks once.
@@ -100,6 +101,118 @@ __device__ __forceinline__ void jam4(float (&d)[4]) {
 __device__ __forceinline__ unsigned hmul2u(unsigned x, unsigned y) {
     const __half2 r = __hmul2(*reinterpret_cast<const __half2*>(&x), *reinterpret_cast<const __half2*>(&y));
     return *reinterpret_cast<const unsigned*>(&r);
+}
+
+// hgemm2_kernel's gate backward (list 26 item 2, ledger gen-h2-gate-tile): gate_bwd_rows' per-element arithmetic in
+// its order, with (a) the tile's per-atom scale s = 1 / (D beta + alpha) and res0 row staged once in shared memory
+// (sS, sQ) instead of per thread and atom; (b) B atoms' operand loads issued before their arithmetic (DEG 1: 8 atoms,
+// DEG 3: 2; DEG >= 5's lin_l / res_l rows already give a dozen independent loads an atom), since one atom at a time
+// left DEG 1's epilogue waiting on its two loads (ncu: long_scoreboard 2.7 per issued instruction, the kernel 3x
+// hgemm2f's time on the same grid); (c) each thread's dD partial of an (atom, column) stored in that atom's first
+// staged row (and the vform partial in its second), which only this thread reads, and one thread per atom sums the
+// 64 columns, instead of a 32-lane shuffle tree and a shared atomic per warp and atom. sgemm128's gate (sgemm.cu)
+// keeps gate_bwd_rows, so only the order of dD's sum differs between the two.
+template <int DEG, int SROW>
+__device__ __forceinline__ void gate_bwd_tile(float* sC, const float* sS, const int* sQ, int a0, int na, int n0,
+                                              int tid, const GateArgs& g) {
+    const int N = g.C;
+    const int cl = tid & 63, grp = tid >> 6, c = n0 + cl;
+    constexpr int B = DEG == 1 ? 8 : (DEG == 3 ? 2 : 1);
+    constexpr int l = DEG / 2;
+    for (int ai0 = grp; ai0 < na; ai0 += 2 * B) {
+        float l0[B], r0[B], li[B][DEG], rl[B][DEG];
+#pragma unroll
+        for (int j = 0; j < B; ++j) {
+            const int ai = ai0 + 2 * j;
+            const bool ok = ai < na;
+            const int aj = ok ? ai : 0;
+            const int64_t ro = (int64_t)(a0 + aj) * 4 * N + l * N + c;
+            l0[j] = ok ? g.lin0[ro] : 0.0f;
+            r0[j] = ok && g.res0 ? g.res0[(int64_t)sQ[aj] * 4 * N + l * N + c] : 0.0f;
+            if constexpr (DEG > 1) {
+#pragma unroll
+                for (int m = 0; m < DEG; ++m) {
+                    const int64_t idx = ((int64_t)(a0 + aj) * DEG + m) * N + c;
+                    li[j][m] = ok ? g.lin_l[idx] : 0.0f;
+                    rl[j][m] = ok && !g.vform && g.res_l ? g.res_l[idx] : 0.0f;
+                }
+            }
+        }
+#pragma unroll
+        for (int j = 0; j < B; ++j) {
+            const int ai = ai0 + 2 * j;
+            if (ai >= na) break;
+            const int a = a0 + ai;
+            const float s = sS[ai];
+            const int64_t ro = (int64_t)a * 4 * N + l * N + c;
+            float* go = sC + ai * DEG * SROW + cl;
+            float part = 0.0f, partq = 0.0f;
+            if constexpr (DEG == 1) {
+                const float p = l0[j] * s + r0[j];
+                const float d = go[0] * g.cs * dsilu_f(p);
+                if (g.dp0) g.dp0[ro] = d;
+                g.dl0[ro] = d * s;
+                part = fmaf(d, l0[j], part);
+            } else {
+                const float gp = l0[j] * s + r0[j];
+                const float sg = sigmoid_f(gp);
+                const float gt = g.cg * sg;
+                float dgp;
+                if (g.vform) {
+#pragma unroll
+                    for (int m = 0; m < DEG; ++m) {
+                        const int64_t idx = ((int64_t)a * DEG + m) * N + c;
+                        const float o = go[m * SROW];
+                        partq = fmaf(o, li[j][m], partq);
+                        g.dl_l[idx] = o * gt * s;
+                    }
+                    dgp = (1.0f - sg) * partq;
+                } else {
+                    float dg = 0.0f;
+#pragma unroll
+                    for (int m = 0; m < DEG; ++m) {
+                        const int64_t idx = ((int64_t)a * DEG + m) * N + c;
+                        const float p = li[j][m] * s + rl[j][m];
+                        const float o = go[m * SROW];
+                        dg = fmaf(o, p, dg);
+                        const float d = o * gt;
+                        if (g.dp_l) g.dp_l[idx] = d;
+                        g.dl_l[idx] = d * s;
+                        part = fmaf(d, li[j][m], part);
+                    }
+                    dgp = dg * g.cg * sg * (1.0f - sg);
+                }
+                if (g.dp0) g.dp0[ro] = dgp;
+                g.dl0[ro] = dgp * s;
+                part = fmaf(dgp, l0[j], part);
+                go[SROW] = partq;  // the atom's second staged row, read above by this thread only
+            }
+            go[0] = part;
+        }
+    }
+}
+
+// The tile's dD after gate_bwd_tile: thread ai < na sums atom ai's 64 column partials (rotated by 4 every 4 threads,
+// so a quarter warp's 16-byte reads cover the banks once) and adds -beta s^2 part - beta s partq, one global atomic.
+template <int DEG, int SROW>
+__device__ __forceinline__ void gate_bwd_tile_dD(const float* sC, const float* sS, int a0, int na, int tid,
+                                                 const GateArgs& g) {
+    if (tid >= na) return;
+    const float* row = sC + tid * DEG * SROW;
+    float p = 0.0f, q = 0.0f;
+    const bool vq = DEG > 1 && g.vform;
+#pragma unroll
+    for (int k = 0; k < 64; k += 4) {
+        const int kk = (k + 4 * (tid >> 2)) & 63;
+        const float4 v = *reinterpret_cast<const float4*>(row + kk);
+        p += (v.x + v.y) + (v.z + v.w);
+        if (vq) {
+            const float4 w = *reinterpret_cast<const float4*>(row + SROW + kk);
+            q += (w.x + w.y) + (w.z + w.w);
+        }
+    }
+    const float s = sS[tid];
+    atomicAdd(g.dD + a0 + tid, -g.beta * s * s * p - g.beta * s * q);
 }
 
 // C = A B^T from two-half panels: A [2][M][K] (H then L), B [2][N][K] (the weight W_2[l] as stored, [N][K]: H, then
@@ -251,8 +364,8 @@ __global__ void __launch_bounds__(128, 2) hgemm2_kernel(int M, int N, int K, con
     } else {
         constexpr int APT = kHM / DEG;
         float* sC = reinterpret_cast<float*>(hsm);
-        float* s_acc = sC + kHM * kHSRow;
-        float* s_accq = s_acc + kHM;
+        float* sS = sC + kHM * kHSRow;                    // the atoms' s
+        int* sQ = reinterpret_cast<int*>(sS + kHM);  // and res0 rows
         __syncthreads();  // every warp is done with the pipeline buffers (no copy in flight: the last wait was 0)
 #pragma unroll
         for (int i = 0; i < 4; ++i)
@@ -262,12 +375,16 @@ __global__ void __launch_bounds__(128, 2) hgemm2_kernel(int M, int N, int K, con
                 for (int j = 0; j < 4; ++j)
                     *reinterpret_cast<float2*>(sC + (er + 16 * i + 8 * h) * kHSRow + ec + 8 * j) =
                         make_float2(comb(acc[i][j][2 * h]), comb(acc[i][j][2 * h + 1]));
-        if (tid < APT) s_acc[tid] = s_accq[tid] = 0.0f;
         const int a0 = m0 / DEG, na = min(APT, g.natoms - a0);
+        if (tid < na) {
+            const int a = a0 + tid;
+            sS[tid] = 1.0f / (g.D[a] * g.beta + g.alpha);
+            sQ[tid] = g.res0_sp ? g.res0_sp[a] : a;
+        }
         __syncthreads();
-        gate_bwd_rows<DEG, 2, kHSRow>(sC, s_acc, s_accq, a0, na, n0 + (tid & 63), tid & 63, tid >> 6, tid, g);
+        gate_bwd_tile<DEG, kHSRow>(sC, sS, sQ, a0, na, n0, tid, g);
         __syncthreads();
-        gate_bwd_dD(s_acc, s_accq, a0, na, tid, g);
+        gate_bwd_tile_dD<DEG, kHSRow>(sC, sS, a0, na, tid, g);
     }
 }
 
@@ -474,16 +591,36 @@ __global__ void __launch_bounds__(128, 2) hgemm2f_kernel(int M, int N, int K, co
         float* sG = reinterpret_cast<float*>(hsm);
         const int a0 = m0 / DEG, na = (min(m0 + kHM, M) - 1) / DEG - a0 + 1;
         float* sS = sG + na * SGS;
+        int* sQ = reinterpret_cast<int*>(sS + na);  // list 26 item 3: the atoms' res0 rows
         __syncthreads();  // every warp is done with the pipeline buffers
-        for (int ai = tid; ai < na; ai += 128) sS[ai] = 1.0f / (ga.D[a0 + ai] * ga.beta + ga.alpha);
-        __syncthreads();
-        for (int idx = tid; idx < na * kHN; idx += 128) {
-            const int ai = idx / kHN, cl = idx % kHN, c = n0 + cl;
-            if (c >= N) continue;
+        for (int ai = tid; ai < na; ai += 128) {
             const int a = a0 + ai;
-            const int64_t r0 = (int64_t)a * 4 * N, q0 = ga.res0_sp ? (int64_t)ga.res0_sp[a] * 4 * N : r0;
-            const float pre = ga.lin0[r0 + l * N + c] * sS[ai] + (ga.res0 ? ga.res0[q0 + l * N + c] : 0.0f);
-            sG[ai * SGS + cl] = ga.cg * sigmoid_f(pre);
+            sS[ai] = 1.0f / (ga.D[a] * ga.beta + ga.alpha);
+            sQ[ai] = ga.res0_sp ? ga.res0_sp[a] : a;
+        }
+        __syncthreads();
+        {
+            // list 26 item 3: thread (tid / 64, tid % 64) takes atoms tid / 64 + 2 j at column tid % 64, as the loop
+            // over idx = tid + 128 k did, but four atoms' operand loads are issued before their sigmoids (one at a
+            // time, the epilogue waited on each: ncu long_scoreboard 1.4-2.6 per issued instruction)
+            constexpr int B = 4;
+            const int cl = tid & 63, c = n0 + cl;
+            for (int ai0 = tid >> 6; ai0 < na; ai0 += 2 * B) {
+                float lv[B], rv[B];
+#pragma unroll
+                for (int j = 0; j < B; ++j) {
+                    const int ai = ai0 + 2 * j;
+                    const bool ok = ai < na && c < N;
+                    const int aj = ok ? ai : 0;
+                    lv[j] = ok ? ga.lin0[(int64_t)(a0 + aj) * 4 * N + l * N + c] : 0.0f;
+                    rv[j] = ok && ga.res0 ? ga.res0[(int64_t)sQ[aj] * 4 * N + l * N + c] : 0.0f;
+                }
+#pragma unroll
+                for (int j = 0; j < B; ++j) {
+                    const int ai = ai0 + 2 * j;
+                    if (ai < na && c < N) sG[ai * SGS + cl] = ga.cg * sigmoid_f(lv[j] * sS[ai] + rv[j]);
+                }
+            }
         }
         __syncthreads();
 #pragma unroll

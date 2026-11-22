@@ -1,6 +1,8 @@
 // The kind-4 gate's backward for the atoms of one staged output tile: the share of gate_bwd_kernel (generic.cu) that
-// the W_2^T GEMMs take into their epilogue (gen-gate-bwd-epilogue). Shared by the own SIMT sgemm128 (sgemm.cu) and the
-// two-half FP16 tensor-core GEMM (hgemm2.cu, LOUP_W2T_HALF), so both run the same arithmetic in the same order.
+// the W_2^T GEMMs take into their epilogue (gen-gate-bwd-epilogue), for the own SIMT sgemm128 (sgemm.cu). The two-half
+// FP16 tensor-core GEMM (hgemm2.cu, LOUP_W2T_HALF) runs the same per-element arithmetic in the same order in its own
+// gate_bwd_tile (list 26, ledger gen-h2-gate-tile: batched loads, dD summed per atom from shared memory), so the two
+// differ only in the order of dD's sum.
 #pragma once
 #include <cuda_runtime.h>
 #include <cstdint>

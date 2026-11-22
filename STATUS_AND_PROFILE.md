@@ -3332,3 +3332,24 @@ been about 7 ms of SIMT GEMMs per 5,184-atom call (ledger `gen-lin-half-fold`, 5
 - List 23's rform, re-screened at 5,184 atoms where the residuals no longer fit in L2, was rejected again: it removes
   3.0 ms of `gate_fwd_kernel` from an OMOL-0 XL call, but the residual products' gated epilogue adds 2.2 ms, a tie
   (0.998).
+
+### 6.59 The two-half kernel's gate epilogues as batched tiles (list 26, 22 November 2026, morning)
+
+An ncu census of MH-1 SrTiO3 (5,000 atoms) found the two-half kernels' gated instances far below the plain
+`hgemm2f_kernel`'s 84% of the tensor pipe: the reverse `W_2^T` with the gate backward in its epilogue
+(`hgemm2_kernel<1 / 3 / 5 / 7>`) at 36-73%, and the gated forward instances of `hgemm2f_kernel` at 38-71%. Both
+epilogues waited on one operand load after another (long_scoreboard 1.3-2.9 per issued instruction). Neither change has
+a switch; both are the same arithmetic in the same order (ledger `ideas-20261122-list26`, 5060 Ti only).
+
+- `hgemm2_kernel`'s gate backward (`gate_bwd_tile`, ledger `gen-h2-gate-tile`): each atom's s and res0 row are staged
+  once per tile, the operand loads of several atoms go out before their arithmetic, and one thread per atom sums dD's
+  columns. The four instances went from 5,337 to 4,560 us per call, with the tensor pipe at 66-80%. Evaluate MH-1
+  SrTiO3 0.9725 (stress 0.9697), OMOL-0 XL water (5,184 atoms) 0.9885 (0.9897); MD loop, 16 runs, MH-1 NaCl216 0.9389,
+  OMOL-0 XL water216 0.9885, every pair below 1.
+- `hgemm2f_kernel`'s gated forward store (ledger `gen-h2f-gate-batch`): the epilogue stages the atoms' res0 rows and
+  loads four atoms' gate logits before their sigmoids. The five gated instances lost 211 us per call. Evaluate MH-1
+  SrTiO3 0.9903 (stress 0.9914), OMOL-0 XL water 0.9968 (0.9971); MD loop MH-1 NaCl216 0.9966 (7 of 8 pairs), OMOL-0
+  XL water216 0.9970 (8 of 8).
+- Sr-contact0.8 over four fresh plan sets per conv variant keeps its force ratios (0.20-0.72), as do the gates.
+- Rejected: restarting `hgemm2_kernel`'s `H H` accumulator at every MMA, a repeat of list 14 item 4 (ncu slower, a
+  tie).
