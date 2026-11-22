@@ -34,32 +34,44 @@ __device__ __forceinline__ void cp_async_wait_one_pending() { asm volatile("cp.a
 // next tile's) were computed and are dropped. The tile is staged in shared memory one 64-column half at a time;
 // thread (grp, cl) = (tid >> 6, tid & 63) then runs the tile's atoms grp, grp + 4, .. for column cl of the half with
 // gate_bwd_kernel's arithmetic in its order (the dgout_l values are the plain GEMM's: each output is the same in-order
-// fmaf chain over k). Only the dD sum is reassociated: per atom over the degree's terms and the block's 128 columns
-// (warp shuffle, shared memory), then one atomic per atom and block. g.vform: as gate_bwd_kernel's vform degrees.
-// The per-atom arithmetic is gate_bwd_rows (gate_epilogue.cuh), shared with the two-half GEMM (hgemm2.cu).
+// fmaf chain over k). Only the dD sum is reassociated: per atom over the degree's terms and the block's 128 columns,
+// then one atomic per atom and block. g.vform: as gate_bwd_kernel's vform degrees. The per-atom arithmetic is
+// gate_bwd_tile (gate_epilogue.cuh), shared with the two-half GEMM (hgemm2.cu): since list 27 item 2 with the atoms'
+// s and res0 rows staged once (sS, sQ), batched operand loads, and each atom's column partials summed by one thread
+// per half (its running sums in registers) instead of gate_bwd_rows' warp shuffles and shared atomics (ncu, POLAR-1-M
+// NbCl5: the gated instances ran the FMA pipe at 47-65% against the plain instance's 71-74%).
 template <int DEG>
 __device__ __forceinline__ void gate_bwd_epilogue(const float (&acc)[8][8], float* smem, int a0, int n0,
                                                   const GateArgs& g) {
     constexpr int APT = 128 / DEG;
-    const int tid = threadIdx.x, tx = tid & 15, ty = tid >> 4, cl = tid & 63, grp = tid >> 6;
-    float* sC = smem;                       // [128][64]: one half of the tile
-    float* s_acc = smem + 128 * 64;         // [APT]: per-atom dD partials (factor -beta s^2)
-    float* s_accq = smem + 128 * 64 + 128;  // [APT]: per-atom dD partials of vform degrees (factor -beta s)
+    const int tid = threadIdx.x, tx = tid & 15, ty = tid >> 4;
+    float* sC = smem;                                         // [128][64]: one half of the tile
+    float* sS = smem + 128 * 64;                              // [APT]: s of the tile's atoms
+    int* sQ = reinterpret_cast<int*>(smem + 128 * 64 + 128);  // [APT]: their res0 rows
     const int na = min(APT, g.natoms - a0);
     __syncthreads();  // every warp is done with the pipeline buffers
-    if (tid < APT) s_acc[tid] = s_accq[tid] = 0.0f;
+    if (tid < na) {
+        const int a = a0 + tid;
+        sS[tid] = 1.0f / (g.D[a] * g.beta + g.alpha);
+        sQ[tid] = g.res0_sp ? g.res0_sp[a] : a;
+    }
+    float p = 0.0f, q = 0.0f;  // thread tid < na: atom tid's dD partials over the halves
 #pragma unroll
     for (int hh = 0; hh < 2; ++hh) {
-        if (hh) __syncthreads();  // the first half is consumed
+        if (hh) __syncthreads();  // the first half's partials are summed
 #pragma unroll
         for (int i = 0; i < 8; ++i)
             *reinterpret_cast<float4*>(sC + ((i < 4 ? 0 : 60) + ty * 4 + i) * 64 + tx * 4) =
                 make_float4(acc[i][4 * hh], acc[i][4 * hh + 1], acc[i][4 * hh + 2], acc[i][4 * hh + 3]);
         __syncthreads();
-        gate_bwd_rows<DEG, 4, 64>(sC, s_acc, s_accq, a0, na, n0 + hh * 64 + cl, cl, grp, tid, g);
+        gate_bwd_tile<DEG, 64, 4>(sC, sS, sQ, a0, na, n0 + hh * 64, tid, g);
+        __syncthreads();
+        if (tid < na) gate_bwd_tile_sum<DEG, 64>(sC, tid, g, p, q);
     }
-    __syncthreads();
-    gate_bwd_dD(s_acc, s_accq, a0, na, tid, g);
+    if (tid < na) {
+        const float s = sS[tid];
+        atomicAdd(g.dD + a0 + tid, -g.beta * s * s * p - g.beta * s * q);
+    }
 }
 
 // Epilogue of sgemm128_kernel<8, true, true, DEG, true> for lin_l = A @ B (N = g.C) of a degree l >= 1 without

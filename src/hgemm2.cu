@@ -103,121 +103,22 @@ __device__ __forceinline__ unsigned hmul2u(unsigned x, unsigned y) {
     return *reinterpret_cast<const unsigned*>(&r);
 }
 
-// hgemm2_kernel's gate backward (list 26 item 2, ledger gen-h2-gate-tile): gate_bwd_rows' per-element arithmetic in
-// its order, with (a) the tile's per-atom scale s = 1 / (D beta + alpha) and res0 row staged once in shared memory
-// (sS, sQ) instead of per thread and atom; (b) B atoms' operand loads issued before their arithmetic (DEG 1: 8 atoms,
-// DEG 3: 2; DEG >= 5's lin_l / res_l rows already give a dozen independent loads an atom), since one atom at a time
-// left DEG 1's epilogue waiting on its two loads (ncu: long_scoreboard 2.7 per issued instruction, the kernel 3x
-// hgemm2f's time on the same grid); (c) each thread's dD partial of an (atom, column) stored in that atom's first
-// staged row (and the vform partial in its second), which only this thread reads, and one thread per atom sums the
-// 64 columns, instead of a 32-lane shuffle tree and a shared atomic per warp and atom. sgemm128's gate (sgemm.cu)
-// keeps gate_bwd_rows, so only the order of dD's sum differs between the two.
-template <int DEG, int SROW>
-__device__ __forceinline__ void gate_bwd_tile(float* sC, const float* sS, const int* sQ, int a0, int na, int n0,
-                                              int tid, const GateArgs& g) {
-    const int N = g.C;
-    const int cl = tid & 63, grp = tid >> 6, c = n0 + cl;
-    constexpr int B = DEG == 1 ? 8 : (DEG == 3 ? 2 : 1);
-    constexpr int l = DEG / 2;
-    for (int ai0 = grp; ai0 < na; ai0 += 2 * B) {
-        float l0[B], r0[B], li[B][DEG], rl[B][DEG];
-#pragma unroll
-        for (int j = 0; j < B; ++j) {
-            const int ai = ai0 + 2 * j;
-            const bool ok = ai < na;
-            const int aj = ok ? ai : 0;
-            const int64_t ro = (int64_t)(a0 + aj) * 4 * N + l * N + c;
-            l0[j] = ok ? g.lin0[ro] : 0.0f;
-            r0[j] = ok && g.res0 ? g.res0[(int64_t)sQ[aj] * 4 * N + l * N + c] : 0.0f;
-            if constexpr (DEG > 1) {
-#pragma unroll
-                for (int m = 0; m < DEG; ++m) {
-                    const int64_t idx = ((int64_t)(a0 + aj) * DEG + m) * N + c;
-                    li[j][m] = ok ? g.lin_l[idx] : 0.0f;
-                    rl[j][m] = ok && !g.vform && g.res_l ? g.res_l[idx] : 0.0f;
-                }
-            }
-        }
-#pragma unroll
-        for (int j = 0; j < B; ++j) {
-            const int ai = ai0 + 2 * j;
-            if (ai >= na) break;
-            const int a = a0 + ai;
-            const float s = sS[ai];
-            const int64_t ro = (int64_t)a * 4 * N + l * N + c;
-            float* go = sC + ai * DEG * SROW + cl;
-            float part = 0.0f, partq = 0.0f;
-            if constexpr (DEG == 1) {
-                const float p = l0[j] * s + r0[j];
-                const float d = go[0] * g.cs * dsilu_f(p);
-                if (g.dp0) g.dp0[ro] = d;
-                g.dl0[ro] = d * s;
-                part = fmaf(d, l0[j], part);
-            } else {
-                const float gp = l0[j] * s + r0[j];
-                const float sg = sigmoid_f(gp);
-                const float gt = g.cg * sg;
-                float dgp;
-                if (g.vform) {
-#pragma unroll
-                    for (int m = 0; m < DEG; ++m) {
-                        const int64_t idx = ((int64_t)a * DEG + m) * N + c;
-                        const float o = go[m * SROW];
-                        partq = fmaf(o, li[j][m], partq);
-                        g.dl_l[idx] = o * gt * s;
-                    }
-                    dgp = (1.0f - sg) * partq;
-                } else {
-                    float dg = 0.0f;
-#pragma unroll
-                    for (int m = 0; m < DEG; ++m) {
-                        const int64_t idx = ((int64_t)a * DEG + m) * N + c;
-                        const float p = li[j][m] * s + rl[j][m];
-                        const float o = go[m * SROW];
-                        dg = fmaf(o, p, dg);
-                        const float d = o * gt;
-                        if (g.dp_l) g.dp_l[idx] = d;
-                        g.dl_l[idx] = d * s;
-                        part = fmaf(d, li[j][m], part);
-                    }
-                    dgp = dg * g.cg * sg * (1.0f - sg);
-                }
-                if (g.dp0) g.dp0[ro] = dgp;
-                g.dl0[ro] = dgp * s;
-                part = fmaf(dgp, l0[j], part);
-                go[SROW] = partq;  // the atom's second staged row, read above by this thread only
-            }
-            go[0] = part;
-        }
-    }
-}
-
-// The tile's dD after gate_bwd_tile: thread ai < na sums atom ai's 64 column partials (rotated by 4 every 4 threads,
-// so a quarter warp's 16-byte reads cover the banks once) and adds -beta s^2 part - beta s partq, one global atomic.
+// hgemm2_kernel's gate backward is gate_bwd_tile (gate_epilogue.cuh; list 26 item 2, ledger gen-h2-gate-tile). The
+// tile's dD after it: thread ai < na sums atom ai's 64 column partials (gate_bwd_tile_sum) and adds -beta s^2 part -
+// beta s partq, one global atomic.
 template <int DEG, int SROW>
 __device__ __forceinline__ void gate_bwd_tile_dD(const float* sC, const float* sS, int a0, int na, int tid,
                                                  const GateArgs& g) {
     if (tid >= na) return;
-    const float* row = sC + tid * DEG * SROW;
     float p = 0.0f, q = 0.0f;
-    const bool vq = DEG > 1 && g.vform;
-#pragma unroll
-    for (int k = 0; k < 64; k += 4) {
-        const int kk = (k + 4 * (tid >> 2)) & 63;
-        const float4 v = *reinterpret_cast<const float4*>(row + kk);
-        p += (v.x + v.y) + (v.z + v.w);
-        if (vq) {
-            const float4 w = *reinterpret_cast<const float4*>(row + SROW + kk);
-            q += (w.x + w.y) + (w.z + w.w);
-        }
-    }
+    gate_bwd_tile_sum<DEG, SROW>(sC, tid, g, p, q);
     const float s = sS[tid];
     atomicAdd(g.dD + a0 + tid, -g.beta * s * s * p - g.beta * s * q);
 }
 
 // C = A B^T from two-half panels: A [2][M][K] (H then L), B [2][N][K] (the weight W_2[l] as stored, [N][K]: H, then
 // L 2^-c); out = (the running sum of P + X 2^(c - 11) over the K steps) oscale. DEG 0: C [M][N] row-major; DEG 2l + 1:
-// gate_bwd_rows on row tiles of whole atoms (C unused, M = g.natoms DEG, N = g.C). Requirements (checked by the host
+// gate_bwd_tile on row tiles of whole atoms (C unused, M = g.natoms DEG, N = g.C). Requirements (checked by the host
 // side): N % 64 == 0, K % 32 == 0, A and B 16-byte aligned.
 __device__ __forceinline__ void prefetch_l2(const void* p) { asm volatile("prefetch.global.L2 [%0];" ::"l"(p)); }
 
@@ -283,7 +184,7 @@ __global__ void __launch_bounds__(128, 2) hgemm2_kernel(int M, int N, int K, con
         __syncthreads();  // stage kt landed for every thread; every warp is done with stage kt - 1
         if (kt + 1 < nk) issue(kt + 1);
         if constexpr (DEG > 0) {
-            // list 11: gate_bwd_rows' operands (the tile's lin_l / res_l rows, its atoms' lin0 / res0 l-slices) are
+            // list 11: the gate backward's operands (the tile's lin_l / res_l rows, its atoms' lin0 / res0 l-slices) are
             // prefetched into L2 four K steps before the loop ends, so the epilogue's reads hit L2
             if (kt == (nk > 4 ? nk - 4 : 0)) {
                 constexpr int l = DEG / 2;
@@ -382,7 +283,7 @@ __global__ void __launch_bounds__(128, 2) hgemm2_kernel(int M, int N, int K, con
             sQ[tid] = g.res0_sp ? g.res0_sp[a] : a;
         }
         __syncthreads();
-        gate_bwd_tile<DEG, kHSRow>(sC, sS, sQ, a0, na, n0, tid, g);
+        gate_bwd_tile<DEG, kHSRow, 2>(sC, sS, sQ, a0, na, n0, tid, g);
         __syncthreads();
         gate_bwd_tile_dD<DEG, kHSRow>(sC, sS, a0, na, tid, g);
     }
@@ -927,7 +828,7 @@ void hgemm2_split_t(int R, int Cc, const float* w, int e, void* out, cudaStream_
                                                                          static_cast<__half*>(out));
 }
 
-// dgout_l = A B^T with degree l's gate backward (gate_bwd_rows) for M = g.natoms (2l + 1) rows; l = -1: the plain
+// dgout_l = A B^T with degree l's gate backward (gate_bwd_tile) for M = g.natoms (2l + 1) rows; l = -1: the plain
 // product into C (tests). A: two panels [2][M][K] at scale 2^12 (loup_store_h2), B: two panels [2][N][K] at 2^e_B;
 // oscale = 2^-(12 + e_B).
 void hgemm2_gate(int l, int M, int N, int K, const void* A, const void* B, float oscale, float* C, const GateArgs& g,

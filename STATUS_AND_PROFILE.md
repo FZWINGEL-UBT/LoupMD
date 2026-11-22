@@ -3353,3 +3353,23 @@ a switch; both are the same arithmetic in the same order (ledger `ideas-20261122
 - Sr-contact0.8 over four fresh plan sets per conv variant keeps its force ratios (0.20-0.72), as do the gates.
 - Rejected: restarting `hgemm2_kernel`'s `H H` accumulator at every MMA, a repeat of list 14 item 4 (ncu slower, a
   tie).
+
+### 6.60 `sgemm128`'s gate backward as batched tiles (list 27, 22 November 2026, late morning)
+
+A census of POLAR-1 (5060 Ti, one traced `loup_evaluate` call per model) puts 39-45% of the NbCl5 call in the own
+`sgemm128` and 26-30% in cuBLAS's kernels. On POLAR-1-M NbCl5, ncu ran the plain `sgemm128` instances at 71% of the FMA
+pipe and the instances with the gate backward in their epilogue at 47-65%, as `hgemm2_kernel` was before list 26: one
+atom's operand loads at a time (long_scoreboard 1.5-2.0 per issued instruction at degrees 1 and 3). Ledger
+`ideas-20261122-list27`, 5060 Ti only.
+
+- `sgemm128`'s gate backward now runs list 26's `gate_bwd_tile` (moved to `gate_epilogue.cuh`, ledger
+  `gen-sg-gate-tile`): s and the res0 row staged once per atom, the operand loads of several atoms issued before their
+  arithmetic, and one thread per atom summing dD's 128 columns before a single atomic. Same arithmetic in the same order
+  apart from that sum; no switch. The four gated instances went from 3,099 to 2,700 us per call (FMA pipe 63-69%).
+  Evaluate POLAR-1-M NbCl5 0.9838 (stress 0.9847), POLAR-1-S NbCl5 0.9723 (0.9816). The POLAR-1-M NaCl216 MD loop is a
+  tie (1.0041): its `W_2^T` plans are not `sgemm128`, so the change does not run there.
+- Rejected: `hgemm2f_kernel`'s TAIL main loop without its per-step column test, in three forms. With no test the plain
+  TAIL instance lost 42 us; two forms of the loop changed the aligned instances' code (6,034 -> 6,095 us); a test of the
+  last two steps only kept the aligned instances' SASS and saved 41 us in ncu, but measured 0.9965 on MH-1 SrTiO3 and
+  1.0078 on OMOL-0 XL water (every pair above 1).
+- Not run: packed FP32 FMA (`FFMA2`) for POLAR-1's SIMT GEMMs, which compiles for `sm_100a` only.
