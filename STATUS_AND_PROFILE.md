@@ -3268,3 +3268,14 @@ dropped four forms (padding, `lin` + `res` in one product, `W_2` in the product 
 the column-65 extraction (about 1%), the fold GEMMs on `hgemm2f` (0.5%), packing NaCl216's four-degree `W_2` groups
 (at most 2%: 114 us against 108 us for four full waves), and longest-first launch order at 5,000 atoms (0.3%). At
 5,000 atoms the two-half GEMMs take about 13.4 of 24.1 ms, near the tensor pipe's rate at the card's power limit.
+
+### 6.55 Layer 0's forward on the two-half kernel, and list 23 (22 November 2026, night)
+
+`LOUP_LIN_HALF_PARTS` now defaults to 63: bit 8 puts layer 0's forward `S0 C0` on `hgemm2f` with its gated store
+(ledger `ideas-20261122-list23` item 1, 5060 Ti only). It had lost 1.4% at 5,000 atoms on an older build and tied at
+20,000; after list 19's layer-0 gated store and list 22 it wins a little (A B B A twice, fresh plans, one library):
+
+- MH-1 SrTiO3 at 5,000 atoms 0.9973 (stress 0.9953); OMOL-0 XL water216 0.9974 (0.9972); MH-1 NaCl216 in the MD loop
+  1.0023, a tie.
+- Gates with it: MH-1 crystals (fusion on, off, `LOUP_RES_BWD=2`), the omol head, OMOL-0 XL organics, Sr-contact0.8
+  for each conv variant over two plan sets: all pass.

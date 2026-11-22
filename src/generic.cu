@@ -1476,9 +1476,10 @@ void GenericModel::setup_lin_half() {
     // LOUP_LIN_HALF_PARTS (tests, benches): bit 0 the later layers' projections, bit 1 layer 0's backward dS0, bit 2
     // the backward W_res^T, bit 3 layer 0's forward S0 C0, bit 4 the gated store on hgemm2f_kernel (without it a
     // degree with panels runs the plain product and gate_fwd_kernel), bit 5 the kind 1 / 3 layers' projections.
-    // Default 55, all but bit 3: layer 0's forward on the kernel's tails cost MH-1 SrTiO3 1.4% against sgemm128's
-    // gated store (ledger gen-lin-two-half; 5060 Ti only; a tie, 0.997, after list 11's staged store)
-    int parts = 55;
+    // Default 63, every bit, since list 23 (5060 Ti only: MH-1 SrTiO3 0.997, OMOL-0 XL 0.997, NaCl216's MD loop a
+    // tie); until then 55, without bit 3, whose tails had cost MH-1 SrTiO3 1.4% against sgemm128's gated store
+    // (ledger gen-lin-two-half)
+    int parts = 63;
     if (const char* pe = std::getenv("LOUP_LIN_HALF_PARTS"); pe && *pe) parts = std::atoi(pe);
     lin_half_parts_ = parts;
     auto make = [&](GenericLayer::H2Proj& p, const float* W, int Nc, int K, bool transpose, int ea) {
