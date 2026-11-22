@@ -140,6 +140,9 @@ struct GenericLayer {
     };
     H2Proj hl_flin[4], hl_fres[3], hl_blin[4], hl_bres[3];
     H2Proj hl_bcat[3];  // LOUP_RES_BWD 3: hl_blin's and hl_bres's panels stacked, [2][n_l3 Cx + Cx][lin_cols]
+    // list 24 item 4 (LOUP_LIN_HALF_PARTS bit 128): a skip-folded kind 1 / 3 layer 0's species-grouped projections per
+    // degree and species, forward msgf_l = S0_l C0_l[s] and backward dS0_l = dmsgf_l C0_l[s]^T (empty: FP32 GEMMs)
+    std::vector<H2Proj> hs_flin[4], hs_blin[4];
     // weights (device)
     float4* table = nullptr;
     uint2* packed_table = nullptr;
@@ -1425,6 +1428,8 @@ bool GenericModel::drop_w2t_half() {
         for (auto& p : L->hl_blin) p.B = nullptr;
         for (auto& p : L->hl_bres) p.B = nullptr;
         for (auto& p : L->hl_bcat) p.B = nullptr;
+        for (auto& v : L->hs_flin) v.clear();
+        for (auto& v : L->hs_blin) v.clear();
     }
     w2t_half_ = w2f_half_ = lin_half_ = false;
     return true;
@@ -1449,7 +1454,14 @@ bool GenericModel::drop_w2t_half() {
 // nor first hidden), forward lin_l and backward dmid_l only, at scales of their own (kLinHalfExp[6], [7]) from the
 // census of their gate sets and of the physics headroom cells (OMAT-0 medium / small, MPA-0, MatPES): |mid| 29.7 / 131
 // (MPA-0; overflow at 512), |dlin| 1.56 / 10.3 (OMAT-0 small; overflow at 32).
-static constexpr int kLinHalfExp[8] = {6, 12, 17, 6, 12, 16, 7, 11};  // mid x dlin S0 dpre, layer 0 dlin; kind 1/3 mid dlin
+// A skip-folded kind 1 / 3 layer 0's species-grouped S0 C0 and dS0 (list 24 item 4, bit 128): kLinHalfExp[8] (S0) and
+// [9] (dmsgf), from list 24's census (the kind 1 / 3 families' gate sets, the crystal families' physics headroom cells
+// and the seven): largest |S0| 126 (OMAT-0 medium headroom; overflow at 1,024), |dmsgf| 47 (OMAT-0 small headroom;
+// overflow at 128); the OFF families' gate sets 18 and 3.8.
+static constexpr int kLinHalfExp[10] = {6, 12, 17, 6, 12, 16, 7, 11, 6, 9};  // mid x dlin S0 dpre, layer 0 dlin; kind 1/3 mid dlin; folded layer 0 S0 dmsgf
+// Bit 128's fewest rows (atoms of the species x (2l + 1)) on hgemm2f_kernel: one 128-row tile. Fewer keep the FP32
+// GEMM (OMAT-0 medium NaCl216 in the MD loop, 16 runs: 0 rows 1.009 by medians, 128 rows 0.993, the null A / B 0.989).
+static constexpr int kLinHalfSpeciesRows = 128;
 static int weight_exponent_dev(const float* w, int64_t n) {
     std::vector<float> h((size_t)n);
     CUDA_CHECK_THROW(cudaMemcpy(h.data(), w, (size_t)n * sizeof(float), cudaMemcpyDeviceToHost));
@@ -1469,19 +1481,26 @@ void GenericModel::setup_lin_half() {
         CUDA_CHECK_THROW(cudaMemset(d_lin_amax_, 0, kLinAmaxSlots * sizeof(unsigned)));
     }
     if (lr_ || !two_half_switch("LOUP_LIN_HALF")) return;
-    int ex[8];
-    for (int i = 0; i < 8; ++i) ex[i] = kLinHalfExp[i];
+    int ex[10];
+    for (int i = 0; i < 10; ++i) ex[i] = kLinHalfExp[i];
     if (const char* xe = std::getenv("LOUP_LIN_HALF_EXP"); xe && *xe)
-        std::sscanf(xe, "%d,%d,%d,%d,%d,%d,%d,%d", &ex[0], &ex[1], &ex[2], &ex[3], &ex[4], &ex[5], &ex[6], &ex[7]);
+        std::sscanf(xe, "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d", &ex[0], &ex[1], &ex[2], &ex[3], &ex[4], &ex[5], &ex[6], &ex[7],
+                    &ex[8], &ex[9]);
     // LOUP_LIN_HALF_PARTS (tests, benches): bit 0 the later layers' projections, bit 1 layer 0's backward dS0, bit 2
     // the backward W_res^T, bit 3 layer 0's forward S0 C0, bit 4 the gated store on hgemm2f_kernel (without it a
-    // degree with panels runs the plain product and gate_fwd_kernel), bit 5 the kind 1 / 3 layers' projections.
-    // Default 63, every bit, since list 23 (5060 Ti only: MH-1 SrTiO3 0.997, OMOL-0 XL 0.997, NaCl216's MD loop a
-    // tie); until then 55, without bit 3, whose tails had cost MH-1 SrTiO3 1.4% against sgemm128's gated store
-    // (ledger gen-lin-two-half)
-    int parts = 63;
+    // degree with panels runs the plain product and gate_fwd_kernel), bit 5 the kind 1 / 3 layers' projections, bit 7
+    // a skip-folded kind 1 / 3 layer 0's species-grouped S0 C0 and dS0 (ledger gen-lin-half-l0-species).
+    // Default 191, every bit, since list 24 (5060 Ti only: the MD loop of OMAT-0 medium NbCl5 0.963, NaCl 0.971,
+    // SrTiO3 0.993, OFF23-M / -S water216 0.977 / 0.976); 63 in list 23 (MH-1 SrTiO3 0.997, OMOL-0 XL 0.997,
+    // NaCl216's MD loop a tie); until then 55, without bit 3, whose tails had cost MH-1 SrTiO3 1.4% against sgemm128's
+    // gated store (ledger gen-lin-two-half)
+    int parts = 191;
     if (const char* pe = std::getenv("LOUP_LIN_HALF_PARTS"); pe && *pe) parts = std::atoi(pe);
     lin_half_parts_ = parts;
+    // bit 128 runs a species' rows of a degree on hgemm2f_kernel only from this many rows; fewer keep the FP32 GEMM
+    // (LOUP_LIN_HALF_SPECIES_ROWS overrides)
+    lin_half_srows_ = kLinHalfSpeciesRows;
+    if (const char* se = std::getenv("LOUP_LIN_HALF_SPECIES_ROWS"); se && *se) lin_half_srows_ = std::atoi(se);
     auto make = [&](GenericLayer::H2Proj& p, const float* W, int Nc, int K, bool transpose, int ea) {
         if (!W || Nc % 16 != 0 || K % 16 != 0) return;
         const int ew = weight_exponent_dev(W, (int64_t)Nc * K);
@@ -1492,6 +1511,25 @@ void GenericModel::setup_lin_half() {
         lin_half_ = true;
     };
     for (auto* L : layers_) {
+        // bit 7 (128, list 24 item 4): a skip-folded kind 1 / 3 layer 0 (OMAT-0 and the other per-species-skip
+        // families), its species-grouped S0_l C0_l[s] and dS0_l = dmsgf_l C0_l[s]^T, one panel set per species
+        if ((parts & 128) && L->skip_folded && L->first_hidden && !L->lin_compact && L->kind != 4) {
+            const int Kh = L->K0, Cm = L->C_msg;
+            for (int l = 0; l < 4; ++l) {
+                if (!L->C0[l]) continue;
+                L->hs_flin[l].assign(S_, GenericLayer::H2Proj{});
+                L->hs_blin[l].assign(S_, GenericLayer::H2Proj{});
+                for (int s = 0; s < S_; ++s) {
+                    const float* W = L->C0[l] + (size_t)s * Kh * Cm;
+                    make(L->hs_flin[l][s], W, Cm, Kh, true, ex[8]);
+                    make(L->hs_blin[l][s], W, Kh, Cm, false, ex[9]);
+                }
+            }
+            if (d_lin_amax_)
+                std::fprintf(stderr, "loupmd: lin half: layer 0's species-grouped projections (bit 128), K0 %d, C %d, "
+                                     "%d species\n", Kh, Cm, S_);
+            continue;
+        }
         if (L->lin_compact || L->skip_folded || L->conv_prune) continue;
         if (L->kind != 4) {
             // bit 5 (list 13 idea 4): a kind 1 / 3 layer's lin_l = mid_l W_lin[l] (msgf_l) and dmid_l = dlin_l
@@ -1547,6 +1585,11 @@ void GenericModel::setup_lin_half() {
                          &L->hl_fres[2], &L->hl_bres[0], &L->hl_bres[1], &L->hl_bres[2], &L->hl_bcat[0],
                          &L->hl_bcat[1], &L->hl_bcat[2]})
             if (ps->B) L->weights.push_back(ps->B);
+    for (auto* L : layers_)
+        for (int l = 0; l < 4; ++l)
+            for (auto* v : {&L->hs_flin[l], &L->hs_blin[l]})
+                for (const auto& p : *v)
+                    if (p.B) L->weights.push_back(p.B);
     CUDA_CHECK_THROW(cudaGetLastError());
     CUDA_CHECK_THROW(cudaStreamSynchronize(nullptr));
     if (lin_half_) hgemm2_init();
@@ -2396,6 +2439,24 @@ void GenericModel::record(const GenericPassInputs& in) {
                     transB ? K : Nc, beta, C + row0 * Nc, Nc);
         }
     };
+    // list 24 item 4: species_gemm (beta 0) on hgemm2f_kernel for each species with panels in ps (LOUP_LIN_HALF_PARTS
+    // bit 128), else the FP32 GEMM; slot: LOUP_DEBUG_LIN_AMAX's record of A over every row of the degree
+    auto species_proj = [&](const std::vector<GenericLayer::H2Proj>& ps, int slot, bool transB, int l, int K, int Nc,
+                            const float* A, const float* W, int64_t w_stride, float* C, int lane_base) {
+        const int d = dimL(l);
+        if (d_lin_amax_) lin_amax_record(A, (int64_t)N * d * K, slot, st);
+        for (int s = 0; s < S; ++s) {
+            if (count[s] == 0) continue;
+            if (lane_base >= 0) lane(lane_base + s);
+            const int64_t row0 = (int64_t)start[s] * d;
+            const GenericLayer::H2Proj* p = (size_t)s < ps.size() ? &ps[s] : nullptr;
+            if (p && p->B && in.gemm_h2_fwd && (int64_t)count[s] * d >= lin_half_srows_)
+                in.gemm_h2_fwd(count[s] * d, Nc, K, A + row0 * K, p->sA, p->B, p->os, C + row0 * Nc, 0.0f);
+            else
+                in.gemm(transB, count[s] * d, Nc, K, 1.0f, A + row0 * K, K, W + (w_stride ? s * w_stride : 0),
+                        transB ? K : Nc, 0.0f, C + row0 * Nc, Nc);
+        }
+    };
     // S100: a folded linear readout of y_t[0] (the S73 energy target) runs in the layer's product forward (E +=
     // y_t[0] . Wy) and its gradient seed Wy is added in the product backward, when some other fold target's GEMM is
     // the first write of dy_t[0] (else ro_linear_kernel assigns the seed as before). Not in a per-atom energy pass:
@@ -2537,7 +2598,8 @@ void GenericModel::record(const GenericPassInputs& in) {
             if (L->skip_folded) {
                 fork();
                 for (int l = 0; l < 4; ++l)
-                    species_gemm(false, l, Kh, Cm, L->S0[l], L->C0[l], (int64_t)Kh * Cm, 0.0f, L->msgf[l], 4 * l);
+                    species_proj(L->hs_flin[l], 16 * t + l, false, l, Kh, Cm, L->S0[l], L->C0[l], (int64_t)Kh * Cm,
+                                 L->msgf[l], 4 * l);
                 join();
             } else {
                 // Residual-free degrees l >= 1 (l > lmax_x; res0 from the S59 table) whose projection can take the gate
@@ -2992,7 +3054,8 @@ void GenericModel::record(const GenericPassInputs& in) {
             if (L->skip_folded) {
                 fork();
                 for (int l = 0; l < 4; ++l)
-                    species_gemm(true, l, Cm, Kh, L->dmsgf[l], L->C0[l], (int64_t)Kh * Cm, 0.0f, L->S0[l], 4 * l);
+                    species_proj(L->hs_blin[l], 16 * t + 8 + l, true, l, Cm, Kh, L->dmsgf[l], L->C0[l],
+                                 (int64_t)Kh * Cm, L->S0[l], 4 * l);
                 join();
             } else {
                 fork();

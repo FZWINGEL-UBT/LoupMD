@@ -3296,3 +3296,20 @@ upload (with the skin check) and the results (with the publication). Idle time i
 300 to 44 us. Synchronous evaluate, A B B A twice against the copy nodes: OMAT-0 medium SrTiO3 0.9814 (stress 0.9859),
 MH-1 SrTiO3 0.9949 (0.9902), OMOL-0 XL water216 0.9973 (0.9968), MH-1 NaCl216 0.9389 (0.9666, noisy). The MD loop and
 `loup_compute_device` never had these copies.
+
+### 6.57 The kind 1 / 3 families' layer 0 on the two-half kernel (list 24, 22 November 2026, early morning)
+
+`LOUP_LIN_HALF_PARTS` now defaults to 191. Its new bit 128 runs the species-grouped projections of a skip-folded
+kind 1 / 3 layer 0 on `hgemm2f`: forward `S0_l C0_l[s]` and backward `dS0_l = dmsgf_l C0_l[s]^T`. These are the OMAT-0,
+MP-0b3, MPA-0, MatPES and OFF families; at 5,000 atoms on OMAT-0 medium SrTiO3 they had been about 1 ms of small SIMT
+GEMMs per call (ledger `gen-lin-half-l0-species`, 5060 Ti only).
+
+- A range census set the scales: largest `|S0|` 126 and `|dmsgf|` 47 over the ten families' gate sets and the crystal
+  families' physics headroom cells, scales 2^6 and 2^9.
+- Twelve gate sets pass with every species on the kernel, and the physics headroom and seven keep the default's pass
+  counts.
+- MD loop, A B B A twice: OMAT-0 medium NbCl5 0.963, NaCl (1,728 atoms) 0.971, SrTiO3 0.993; OFF23-S and OFF23-M water216
+  0.976 and 0.977, OFF23-M water (5,184) 0.995. Evaluate: OMAT-0 small SrTiO3 0.985, OMAT-0 medium 0.992.
+- A species and degree with fewer than 128 rows (one tile) keeps the FP32 GEMM (`LOUP_LIN_HALF_SPECIES_ROWS`).
+  OMAT-0 medium NaCl216 (108 atoms per species) first read 1.016, but over sixteen runs it ties at any threshold.
+  The null A / B of that cell spreads 1%.

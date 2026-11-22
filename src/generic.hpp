@@ -298,6 +298,7 @@ private:
     void setup_w2f_half();
     bool lin_half_ = false;          // LOUP_LIN_HALF: some conv layer's projection has its panels (setup_lin_half)
     int lin_half_parts_ = 0;         // LOUP_LIN_HALF_PARTS (setup_lin_half)
+    int lin_half_srows_ = 0;         // LOUP_LIN_HALF_SPECIES_ROWS: bit 128's fewest rows per species and degree
     int res_bwd_ = 3;                // LOUP_RES_BWD (setup_lin_half; generic.cu's backward W_res^T)
     void setup_lin_half();
     static constexpr int kLinAmaxSlots = 128;  // LOUP_DEBUG_LIN_AMAX: layer t, kind k, degree l at 16 t + 4 k + l
