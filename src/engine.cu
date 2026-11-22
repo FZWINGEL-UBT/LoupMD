@@ -675,6 +675,11 @@ struct LoupHandle {
     // sgemm128 (as layer 0); LOUP_GATE_FWD_L1=0|1|2 forces it (tests; it needs own_ext, so elsewhere also
     // LOUP_OWN_EXT=1).
     int gate_fwd_l1 = 0;
+    // ledger gen-gate-fwd-l0: layer 0's gated store (gemm_gate_fwd) by the same rule: 1 (default on sm_120) with the own
+    // sgemm128 forced above 1,600 rows (MH-1 SrTiO3 20,000 atoms: its l = 2 projection's plan was cuBLAS, so
+    // gate_fwd_kernel did that degree), 2 only where the tuned plan is the own sgemm128 (at or below 1,600 rows also
+    // under 1); LOUP_GATE_FWD_L0=1|2
+    int gate_fwd_l0 = 2;
     cudaStream_t stream = nullptr;
     cublasHandle_t cublas = nullptr;
     cublasLtHandle_t cublas_lt = nullptr;
@@ -2128,7 +2133,9 @@ static void record_force_pass(LoupHandle* h, int compute_stress, bool energy_onl
                                const loup::GateArgs& g) { return gemm_gate(h, false, l, M, Nc, K, A, B, g); };
     if (h->gate_fuse_fwd)
         in.gemm_gate_fwd = [h](int l, int M, int Nc, int K, const float* A, const float* B,
-                               const loup::GateArgs& g) { return gemm_gate(h, true, l, M, Nc, K, A, B, g); };
+                               const loup::GateArgs& g) {
+            return gemm_gate(h, true, l, M, Nc, K, A, B, g, h->gate_fwd_l0 == 1 && M > 1600);
+        };
     if (h->gate_fwd_l1 && h->gate_fuse_fwd)
         in.gemm_gate_fwd_l1 = [h](int l, int M, int Nc, int K, const float* A, const float* B,
                                   const loup::GateArgs& g) {
@@ -2474,6 +2481,9 @@ LoupHandle* loup_create(const char* loup_path, int device_id) {
             h->gate_fwd_l1 = h->is_sm120 ? 1 : 0;
             if (const char* e = std::getenv("LOUP_GATE_FWD_L1"); e && e[0] >= '0' && e[0] <= '2')
                 h->gate_fwd_l1 = e[0] - '0';
+            h->gate_fwd_l0 = h->is_sm120 ? 1 : 2;
+            if (const char* e = std::getenv("LOUP_GATE_FWD_L0"); e && e[0] >= '1' && e[0] <= '2')
+                h->gate_fwd_l0 = e[0] - '0';
             if (const char* e = std::getenv("LOUP_DEBUG_EVAL_TIMES"); e && e[0] == '1') h->probe = true;
             if (const char* e = std::getenv("LOUP_EVAL_ARM"); e && e[0] == '1') h->arm_enabled = true;
             else if (e && e[0] == '0') h->arm_state = -1;

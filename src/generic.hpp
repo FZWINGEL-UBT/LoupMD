@@ -314,6 +314,7 @@ private:
     // LOUP_SWEEP_REPLAY=1 (testing): record() runs the per-layer sweep schedule of a domain with ghost atoms on the
     // whole system; see record(). sys_alloc_bytes_ parallels sys_allocs_.
     bool sweep_replay_ = false;
+    bool sweep_zero_ = true;  // list 19: a sweep zeroes only its accumulators (LOUP_SWEEP_ZERO=0: the whole slab)
     double* d_energy_sink_ = nullptr;  // a replayed forward adds its readout's energy here: it is already counted
     // list 19: per keep0 buffer, the gated layer 0's gate_vform of its forward sweep, which the backward sweep of that
     // domain takes (an ask there may differ: a GEMM plan tuned in between); one entry per domain in flight

@@ -1316,6 +1316,7 @@ void GenericModel::load(const Bundle& b) {
     // tile-shared-layers (alloc_system): LOUP_TILE_SHARE_LAYERS=0 keeps every layer's buffers its own (tests, A/B)
     share_layers_env_ = true;
     if (const char* e = std::getenv("LOUP_TILE_SHARE_LAYERS"); e && e[0] == '0') share_layers_env_ = false;
+    if (const char* e = std::getenv("LOUP_SWEEP_ZERO"); e && e[0] == '0') sweep_zero_ = false;
     CUDA_CHECK_THROW(cudaMalloc(&d_energy_sink_, sizeof(double)));
     update_h0_read();
 }
@@ -2358,7 +2359,32 @@ void GenericModel::record(const GenericPassInputs& in) {
     // sweep, whose first conv backward is a lower layer's.
     if (has_edges && (layers_.back()->first_hidden || sweep == GenericPassInputs::SweepBackward))
         zero_edge_kernel<<<(3 * in.E_cap + 255) / 256, 256, 0, st>>>(in.E_dev, d_edge_dvec_);
-    if (zero_slab_bytes_) CUDA_CHECK_THROW(cudaMemsetAsync(d_zero_slab_, 0, zero_slab_bytes_, st));
+    if (zero_slab_bytes_ && (sweep == GenericPassInputs::SweepAll || !sweep_zero_)) {
+        CUDA_CHECK_THROW(cudaMemsetAsync(d_zero_slab_, 0, zero_slab_bytes_, st));
+    } else if (zero_slab_bytes_) {
+        // list 19 (LOUP_SWEEP_ZERO=0: the whole slab): a sweep zeroes only the accumulators it adds into and hands on
+        // or reads: a forward sweep's layer t none it keeps (dD for a fused readout's backward only), the last layer's
+        // sweep its dD, dhout and the layer below's dhout (dh_in), a backward sweep of layer t its dD and layer t - 1's
+        // dhout (its own dhout is the adjoint, copied in)
+        auto zero_layer = [&](int t, bool dD, bool dhout) {
+            const GenericLayer* K = layers_[t];
+            if (dD && K->dD) CUDA_CHECK_THROW(cudaMemsetAsync(K->dD, 0, (size_t)N_ * sizeof(float), st));
+            if (dhout)
+                for (int l = 0; l <= K->lmax_out; ++l)
+                    if (K->dhout[l])
+                        CUDA_CHECK_THROW(cudaMemsetAsync(K->dhout[l], 0,
+                                                         (size_t)N_ * dimL(l) * K->C_out * sizeof(float), st));
+        };
+        if (sweep == GenericPassInputs::SweepForward) {
+            zero_layer(sweep_t, true, false);
+        } else if (sweep == GenericPassInputs::SweepLast) {
+            zero_layer(n_layers_ - 1, true, true);
+            if (n_layers_ > 1) zero_layer(n_layers_ - 2, false, true);
+        } else {
+            zero_layer(sweep_t, true, false);
+            if (sweep_t > 0) zero_layer(sweep_t - 1, false, true);
+        }
+    }
     // S99: a conv layer's forward kernel zeroes its dx rows per receiver; the ghost rows of a domain (senders only,
     // which the backward accumulates into) are zeroed here.
     if (in.n_ghost > 0)
