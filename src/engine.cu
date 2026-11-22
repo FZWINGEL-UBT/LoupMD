@@ -2530,7 +2530,9 @@ LoupHandle* loup_create(const char* loup_path, int device_id) {
             CUDA_CHECK_THROW(cudaDeviceGetAttribute(&cc_min, cudaDevAttrComputeCapabilityMinor, device_id));
             h->is_sm120 = (cc_maj == 12 && cc_min == 0);
             cc80 = cc_maj == 8 && cc_min == 0;
-            h->own_ext = h->is_sm120;
+            const bool cc89 = (cc_maj == 8 && cc_min == 9);
+            const bool tuned_cc = h->is_sm120 || cc89;
+            h->own_ext = tuned_cc;
             if (const char* e = std::getenv("LOUP_OWN_EXT"); e && (e[0] == '0' || e[0] == '1')) {
                 h->own_ext = e[0] == '1';
                 own_ext_env = true;
@@ -2540,10 +2542,10 @@ LoupHandle* loup_create(const char* loup_path, int device_id) {
             if (const char* e = std::getenv("LOUP_FORCE_TC"); e && e[0] == '1') h->force_tc = true;
             if (const char* e = std::getenv("LOUP_GATE_FUSE"); e && e[0] == '0') h->gate_fuse = false;
             if (const char* e = std::getenv("LOUP_GATE_FUSE_FWD"); e && e[0] == '0') h->gate_fuse_fwd = false;
-            h->gate_fwd_l1 = h->is_sm120 ? 1 : 0;
+            h->gate_fwd_l1 = tuned_cc ? 1 : 0;
             if (const char* e = std::getenv("LOUP_GATE_FWD_L1"); e && e[0] >= '0' && e[0] <= '2')
                 h->gate_fwd_l1 = e[0] - '0';
-            h->gate_fwd_l0 = h->is_sm120 ? 1 : 2;
+            h->gate_fwd_l0 = tuned_cc ? 1 : 2;
             if (const char* e = std::getenv("LOUP_GATE_FWD_L0"); e && e[0] >= '1' && e[0] <= '2')
                 h->gate_fwd_l0 = e[0] - '0';
             if (const char* e = std::getenv("LOUP_H2_SPLITK"); e && e[0] == '0') h->h2_splitk = false;

@@ -726,23 +726,25 @@ struct DevCompose {
     }
 };
 
-// The load-time folds (S57, S59, S73) were measured on compute capability 12.0 (5060 Ti) and 8.0 (A100, S74a: faster on
-// every family, gated in S75g); other GPUs keep the plain path.
+// The load-time folds (S57, S59, S73) were measured on compute capability 12.0 (5060 Ti), 8.0 (A100, S74a: faster on
+// every family, gated in S75g) and 8.9 (RTX 4000 Ada, List 30: 1.14-1.84x across families, gated on leto/leeloo);
+// other GPUs keep the plain path.
 bool folds_measured_here() {
     int dev = 0, major = 0, minor = 0;
     CUDA_CHECK_THROW(cudaGetDevice(&dev));
     CUDA_CHECK_THROW(cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor, dev));
     CUDA_CHECK_THROW(cudaDeviceGetAttribute(&minor, cudaDevAttrComputeCapabilityMinor, dev));
-    return (major == 12 && minor == 0) || (major == 8 && minor == 0);
+    return (major == 12 && minor == 0) || (major == 8 && (minor == 0 || minor == 9));
 }
 
-// The per-system conv forward variant timing (S64) was measured on compute capability 12.0 only.
-bool device_is_cc120() {
+// Compute capabilities where the two-half paths, POLAR species tables / hidden fold, and per-system conv timing
+// were measured and gated (5060 Ti sm_120 and RTX 4000 Ada sm_89).
+bool device_is_tuned_cc() {
     int dev = 0, major = 0, minor = 0;
     CUDA_CHECK_THROW(cudaGetDevice(&dev));
     CUDA_CHECK_THROW(cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor, dev));
     CUDA_CHECK_THROW(cudaDeviceGetAttribute(&minor, cudaDevAttrComputeCapabilityMinor, dev));
-    return major == 12 && minor == 0;
+    return (major == 12 && minor == 0) || (major == 8 && minor == 9);
 }
 
 // S130 / S132: compact live channels of a kind-1 layer (the projections feed the product directly), certified from exact
@@ -1367,7 +1369,7 @@ void GenericModel::share_layer_buffers(bool on) {
 static bool two_half_switch(const char* name) {
     const char* e = std::getenv(name);
     if (e && (e[0] == '0' || e[0] == '1')) return e[0] == '1';
-    return device_is_cc120();
+    return device_is_tuned_cc();
 }
 void GenericModel::setup_w2t_half() {
     w2t_half_ = false;
@@ -1830,7 +1832,7 @@ void GenericModel::setup_species_tables(const Bundle& b) {
     if (!L || !L->first_hidden || L->kind != 4 || L->skip_folded || L->lmax_x != 0) return;
     const char* env = std::getenv("LOUP_SPECIES_TABLES");
     if (env && env[0] == '0') return;
-    if (!(lr_ ? device_is_cc120() : folds_measured_here()) && !(env && env[0] == '1')) return;
+    if (!(lr_ ? device_is_tuned_cc() : folds_measured_here()) && !(env && env[0] == '1')) return;
     DevCompose dc;
     const double* E = dc.dup(b.f32("embedding", {S_, C0_}));
     const double* Wup = dc.dup(b.f32("L0.W_up_0", {L->C_in, L->C_x}));
@@ -2018,7 +2020,7 @@ std::string GenericModel::kernel_signature() const {
 // by default; LOUP_POLAR_HFOLD=0 disables it, 1 / 2 / 3 (bit l - 1: degree l) choose the folded degrees on any GPU.
 void GenericModel::setup_lr_fold(const Bundle& b) {
     if (!lr_) return;
-    int mask = device_is_cc120() ? 3 : 0;
+    int mask = device_is_tuned_cc() ? 3 : 0;
     if (const char* e = std::getenv("LOUP_POLAR_HFOLD"); e && e[0] >= '0' && e[0] <= '3') mask = e[0] - '0';
     const int nL = n_layers_, C = layers_[0]->C_out, le_l = lr_->le_lmax();
     for (int l = 1; l <= std::min(layers_[0]->lmax_out, 2); ++l) {
@@ -2107,7 +2109,7 @@ bool GenericModel::set_cell(const double* cell) { return lr_ ? lr_->set_cell(cel
 // nothing changed, 1 if a variant changed.
 int GenericModel::tune_conv_variants(cudaStream_t st) {
     if (conv_tune_env_ == 0) return 0;
-    if (!device_is_cc120() && conv_tune_env_ != 1) return 0;
+    if (!device_is_tuned_cc() && conv_tune_env_ != 1) return 0;
     if (conv_var_override_ >= 0) return 0;  // forced variant: nothing to time
     if (!conv_args_.valid) return -1;
     const ConvTuneArgs& a = conv_args_;

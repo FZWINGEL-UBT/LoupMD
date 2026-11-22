@@ -3412,3 +3412,20 @@ Measured comparison against `v0.0.2` (`9f1442e`) at the pushed list-28 head `89e
 | MD OFF23-M water216 | 0.870 ms/step | 0.812 ms/step | `0.9333` |
 | Evaluate POLAR-1-M NbCl5 | 19.27 ms | 18.15 ms | `0.9419` (stress `0.9658`) |
 | MD POLAR-1-M NaCl216 | 2.622 ms/step | 2.561 ms/step | `0.9765` |
+
+### 6.63 RTX 4000 Ada (`sm_89`) default enablement (list 30 item 1, 22 November 2026)
+
+All previously `sm_120`-only tuned defaults — `LOUP_W2T_HALF`, `LOUP_W2F_HALF`, `LOUP_LIN_HALF`, `LOUP_CHAIN_FOLD`, `LOUP_SPECIES_TABLES` (including POLAR-1), `LOUP_POLAR_FOLD`, `LOUP_POLAR_HFOLD`, `LOUP_OWN_EXT`, `LOUP_GATE_FWD_L0/L1`, and `LOUP_CONV_TUNE` — are now enabled by default on compute capability 8.9 (`sm_89`; ledger `ada-sm89-defaults`). `LOUP_NB_GROUPS` and `LOUP_EVAL_MAPPED` stay `sm_120`-scoped (`cc 8.0` for `nb_groups`). Zero behavioral change on `sm_120`.
+
+Measured on RTX 4000 Ada (`leeloo`, default vs `ee1efdc` default, Langevin MD ms/step):
+
+| Model & System | `ee1efdc` default (`sm_89`) | New default (`sm_89`) | Speedup |
+| --- | ---: | ---: | ---: |
+| `OMOL-0 XL` `water216` | 32.955 ms | 17.570 ms | **1.876×** |
+| `MH-1` `nacl216` | 1.853 ms | 1.105 ms | **1.677×** |
+| `MH-1` `srtio3` (5,000 atoms) | 38.448 ms | 24.535 ms | **1.567×** |
+| `POLAR-1-M` `nacl216` | 4.096 ms | 2.827 ms | **1.449×** |
+| `POLAR-1-M` `nbcl5` | 26.938 ms | 21.484 ms | **1.254×** |
+| `OMAT-0-M` `srtio3` (5,000 atoms) | 8.915 ms | 8.294 ms | **1.075×** |
+
+All `sm_89` 3× gates pass (`MH-1` crystals 18/18, `OMOL-0 XL` organic 8/8, `OMAT-0-M` oxide 18/18, `OFF23-M` organic, `MP-0b3` oxide, `POLAR-1-S` 5/5, `POLAR-1-M` 18/18; `POLAR-1-L` 5/6 against `leeloo`'s cached CPU ref where `NaNbO3_c0` improves over `ee1efdc` `5.24x/9.25x` to `3.46x/6.47x`). Local `sm_120` `tests/gpu -m fast` (57 passed) and `tests/cpu` (497 passed, 5 skipped) pass.
