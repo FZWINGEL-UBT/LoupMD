@@ -3373,3 +3373,19 @@ atom's operand loads at a time (long_scoreboard 1.5-2.0 per issued instruction a
   last two steps only kept the aligned instances' SASS and saved 41 us in ncu, but measured 0.9965 on MH-1 SrTiO3 and
   1.0078 on OMOL-0 XL water (every pair above 1).
 - Not run: packed FP32 FMA (`FFMA2`) for POLAR-1's SIMT GEMMs, which compiles for `sm_100a` only.
+
+### 6.61 The species tables for POLAR-1 (list 28, 22 November 2026, late morning)
+
+On POLAR-1-M NbCl5, `gate_fwd_kernel` took 475 us per call over two launches, bandwidth-bound (DRAM busy 87-95%). Layer
+1 already stores its residual-free degrees from its projections' epilogues; layer 0 could not, because its gated store
+needs S59's per-species residual table, which S59 left out for the long-range models (POLAR-1-L measured no win in one
+build order then). Ledger `ideas-20261122-list28`, 5060 Ti only.
+
+- `setup_species_tables` now builds the table for POLAR-1 on `sm_120` (ledger `gen-polar-species-tables`).
+  Layer 0 drops its `W_up` and `W_res` GEMMs and stores degrees 1-3 from its projections' epilogues. The traced call went
+  from 18.73 to 18.12 ms. Evaluate NbCl5: POLAR-1-M 0.9705 (stress 0.9721), POLAR-1-S 0.9141 (0.9143), POLAR-1-L 0.9839
+  (0.9829). MD loop, 16 runs: POLAR-1-M NaCl216 0.9889 (7 of 8 pairs), POLAR-1-S NaCl216 0.9651 (8 of 8).
+- Forces move by up to 7.4e-3 eV/A on POLAR-1-L (|F| up to 411 eV/A): the residual is now one table composed in double
+  instead of two float32 GEMMs. The gates pass on all three models, POLAR-1-M by default, with the gate fusion off, with
+  `LOUP_SPECIES_TABLES=0` and with `LOUP_POLAR_HFOLD=0`.
+- Other GPUs keep the GEMMs for POLAR-1; `LOUP_SPECIES_TABLES=1` builds the tables there.

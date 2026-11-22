@@ -1815,16 +1815,17 @@ static void launch_jit_as(void (*aot)(P...), const void* k, dim3 grid, dim3 bloc
 // else in the hidden-table layer) and, under the S57 fold, the skip terms h_in[0] Wh. They become [S, cols] tables
 // composed in double at load: the gate kernels read the residual row of each atom's species directly and the skip
 // tables are gathered per atom: no x / res GEMMs in layer 0 and no Wh GEMMs. Layer 0 takes no
-// gradient into h_in, so the backward is unchanged. Not with the long-range block: POLAR-1-L measured no win in the
-// tables-first order (three ABBA pairs), so the POLAR models keep the GEMMs. sm_120 and cc 8.0 by default;
+// gradient into h_in, so the backward is unchanged. The long-range models (POLAR-1) on cc 12.0 only (list 28, 5060 Ti
+// only): S59 kept them on the GEMMs (POLAR-1-L measured no win in the tables-first order) before layer 0's gated store
+// (vform0_ask), which runs only with the table. sm_120 and cc 8.0 by default (the long-range models sm_120);
 // LOUP_SPECIES_TABLES=0 keeps the GEMMs, =1 builds the tables on any GPU (tests, A/B on other GPUs).
 void GenericModel::setup_species_tables(const Bundle& b) {
     species_tables_ = false;
     GenericLayer* L = layers_.empty() ? nullptr : layers_[0];
-    if (lr_ || !L || !L->first_hidden || L->kind != 4 || L->skip_folded || L->lmax_x != 0) return;
+    if (!L || !L->first_hidden || L->kind != 4 || L->skip_folded || L->lmax_x != 0) return;
     const char* env = std::getenv("LOUP_SPECIES_TABLES");
     if (env && env[0] == '0') return;
-    if (!folds_measured_here() && !(env && env[0] == '1')) return;
+    if (!(lr_ ? device_is_cc120() : folds_measured_here()) && !(env && env[0] == '1')) return;
     DevCompose dc;
     const double* E = dc.dup(b.f32("embedding", {S_, C0_}));
     const double* Wup = dc.dup(b.f32("L0.W_up_0", {L->C_in, L->C_x}));
