@@ -299,9 +299,11 @@ private:
     bool lin_half_ = false;          // LOUP_LIN_HALF: some conv layer's projection has its panels (setup_lin_half)
     int lin_half_parts_ = 0;         // LOUP_LIN_HALF_PARTS (setup_lin_half)
     int lin_half_srows_ = 0;         // LOUP_LIN_HALF_SPECIES_ROWS: bit 128's fewest rows per species and degree
+    int lin_half_fold_tiles_ = 0;    // LOUP_LIN_HALF_FOLD_TILES: bit 256's fewest 128 x 64 tiles per product (SMs)
     int res_bwd_ = 3;                // LOUP_RES_BWD (setup_lin_half; generic.cu's backward W_res^T)
     void setup_lin_half();
-    static constexpr int kLinAmaxSlots = 128;  // LOUP_DEBUG_LIN_AMAX: layer t, kind k, degree l at 16 t + 4 k + l
+    static constexpr int kLinAmaxSlots = 256;  // LOUP_DEBUG_LIN_AMAX: layer t, kind k, degree l at 16 t + 4 k + l;
+                                               // the chain fold's at 128 + 16 t + l (y) and 128 + 16 t + 8 + l (dx)
     unsigned* d_lin_amax_ = nullptr;
     void lin_amax_record(const float* A, int64_t n, int slot, cudaStream_t st) const;
     bool chain_fold_built_ = false;  // setup_chain_fold composed the fold's weights

@@ -169,6 +169,7 @@ struct GenericLayer {
     // write) or, for the energy, added per atom.
     struct FoldTarget {
         int dest_layer = 0, cols = 0, ns = 1, ns_h = 1;
+        H2Proj hf, hb;        // LOUP_LIN_HALF_PARTS bit 256 (list 25 item 1): panels of Wy (y Wy) and of Wy^T (dsrc Wy^T)
         float* Wy = nullptr;  // [ns, C_out, cols]
         float* Wh = nullptr;  // [ns_h, C_in, cols] or nullptr
         float* Th = nullptr;  // [S, cols] or nullptr
@@ -1430,6 +1431,8 @@ bool GenericModel::drop_w2t_half() {
         for (auto& p : L->hl_bcat) p.B = nullptr;
         for (auto& v : L->hs_flin) v.clear();
         for (auto& v : L->hs_blin) v.clear();
+        for (auto& v : L->fold)
+            for (auto& ft : v) ft.hf.B = ft.hb.B = nullptr;
     }
     w2t_half_ = w2f_half_ = lin_half_ = false;
     return true;
@@ -1458,7 +1461,11 @@ bool GenericModel::drop_w2t_half() {
 // [9] (dmsgf), from list 24's census (the kind 1 / 3 families' gate sets, the crystal families' physics headroom cells
 // and the seven): largest |S0| 126 (OMAT-0 medium headroom; overflow at 1,024), |dmsgf| 47 (OMAT-0 small headroom;
 // overflow at 128); the OFF families' gate sets 18 and 3.8.
-static constexpr int kLinHalfExp[10] = {6, 12, 17, 6, 12, 16, 7, 11, 6, 9};  // mid x dlin S0 dpre, layer 0 dlin; kind 1/3 mid dlin; folded layer 0 S0 dmsgf
+// The chain fold's composed products (list 25 item 1, bit 256): kLinHalfExp[10] (y_t, forward) and [11] (the targets'
+// gradients dx, backward), from list 25's census (every chain-folded family's gate sets; the physics headroom cells and
+// the seven of MH-1, OMAT-0 medium / small, MPA-0, MatPES): largest |y| 83 (MH-1 headroom; overflow at 256), |dx| 402
+// (OMAT-0 small headroom; overflow at 1,024); the gate sets 14 and 2.8.
+static constexpr int kLinHalfExp[12] = {6, 12, 17, 6, 12, 16, 7, 11, 6, 9, 8, 6};  // mid x dlin S0 dpre, layer 0 dlin; kind 1/3 mid dlin; folded layer 0 S0 dmsgf; fold y, dx
 // Bit 128's fewest rows (atoms of the species x (2l + 1)) on hgemm2f_kernel: one 128-row tile. Fewer keep the FP32
 // GEMM (OMAT-0 medium NaCl216 in the MD loop, 16 runs: 0 rows 1.009 by medians, 128 rows 0.993, the null A / B 0.989).
 static constexpr int kLinHalfSpeciesRows = 128;
@@ -1481,20 +1488,22 @@ void GenericModel::setup_lin_half() {
         CUDA_CHECK_THROW(cudaMemset(d_lin_amax_, 0, kLinAmaxSlots * sizeof(unsigned)));
     }
     if (lr_ || !two_half_switch("LOUP_LIN_HALF")) return;
-    int ex[10];
-    for (int i = 0; i < 10; ++i) ex[i] = kLinHalfExp[i];
+    int ex[12];
+    for (int i = 0; i < 12; ++i) ex[i] = kLinHalfExp[i];
     if (const char* xe = std::getenv("LOUP_LIN_HALF_EXP"); xe && *xe)
-        std::sscanf(xe, "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d", &ex[0], &ex[1], &ex[2], &ex[3], &ex[4], &ex[5], &ex[6], &ex[7],
-                    &ex[8], &ex[9]);
+        std::sscanf(xe, "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d", &ex[0], &ex[1], &ex[2], &ex[3], &ex[4], &ex[5], &ex[6],
+                    &ex[7], &ex[8], &ex[9], &ex[10], &ex[11]);
     // LOUP_LIN_HALF_PARTS (tests, benches): bit 0 the later layers' projections, bit 1 layer 0's backward dS0, bit 2
     // the backward W_res^T, bit 3 layer 0's forward S0 C0, bit 4 the gated store on hgemm2f_kernel (without it a
     // degree with panels runs the plain product and gate_fwd_kernel), bit 5 the kind 1 / 3 layers' projections, bit 7
-    // a skip-folded kind 1 / 3 layer 0's species-grouped S0 C0 and dS0 (ledger gen-lin-half-l0-species).
-    // Default 191, every bit, since list 24 (5060 Ti only: the MD loop of OMAT-0 medium NbCl5 0.963, NaCl 0.971,
-    // SrTiO3 0.993, OFF23-M / -S water216 0.977 / 0.976); 63 in list 23 (MH-1 SrTiO3 0.997, OMOL-0 XL 0.997,
-    // NaCl216's MD loop a tie); until then 55, without bit 3, whose tails had cost MH-1 SrTiO3 1.4% against sgemm128's
-    // gated store (ledger gen-lin-two-half)
-    int parts = 191;
+    // a skip-folded kind 1 / 3 layer 0's species-grouped S0 C0 and dS0 (ledger gen-lin-half-l0-species), bit 8 (256,
+    // list 25) the chain fold's composed products (ledger gen-lin-half-fold); bit 6 (64) was lists 23 / 25's rejected
+    // rform (ledger ideas-20261122-list23 item 2, ideas-20261122-list25 item 2). Default 447, every bit but 6, since
+    // list 25 (5060 Ti only: OMAT-0 medium SrTiO3 0.989, OMOL-0 XL water216's MD loop 0.995, MH-1 NaCl216's a tie with
+    // the tile floor); 191 in list 24 (the MD loop of OMAT-0 medium NbCl5 0.963, NaCl 0.971, SrTiO3 0.993, OFF23-M / -S
+    // water216 0.977 / 0.976); 63 in list 23 (MH-1 SrTiO3 0.997, OMOL-0 XL 0.997, NaCl216's MD loop a tie); until then
+    // 55, without bit 3, whose tails had cost MH-1 SrTiO3 1.4% against sgemm128's gated store (ledger gen-lin-two-half)
+    int parts = 447;
     if (const char* pe = std::getenv("LOUP_LIN_HALF_PARTS"); pe && *pe) parts = std::atoi(pe);
     lin_half_parts_ = parts;
     // bit 128 runs a species' rows of a degree on hgemm2f_kernel only from this many rows; fewer keep the FP32 GEMM
@@ -1585,11 +1594,46 @@ void GenericModel::setup_lin_half() {
                          &L->hl_fres[2], &L->hl_bres[0], &L->hl_bres[1], &L->hl_bres[2], &L->hl_bcat[0],
                          &L->hl_bcat[1], &L->hl_bcat[2]})
             if (ps->B) L->weights.push_back(ps->B);
-    for (auto* L : layers_)
+    // bit 8 (256, list 25 item 1): the chain fold's composed products (S57) of every folded layer, forward dst +=
+    // y_t[l] Wy and backward dy_t[l] += dsrc Wy^T, for each target with one weight (ns 1) and at least 64 columns (the
+    // readout hidden's 16 stay FP32)
+    if (parts & 256) {
+        // a product goes to the kernel only from LOUP_LIN_HALF_FOLD_TILES of its 128 x 64 tiles (default the SM count:
+        // MH-1 NaCl216's fold products, 216-648 rows, lost 1% in the MD loop on a few tiles); fewer keep the FP32 GEMM
+        int dev = 0, sms = 0;
+        if (cudaGetDevice(&dev) != cudaSuccess ||
+            cudaDeviceGetAttribute(&sms, cudaDevAttrMultiProcessorCount, dev) != cudaSuccess)
+            sms = 0;
+        lin_half_fold_tiles_ = sms;
+        if (const char* te = std::getenv("LOUP_LIN_HALF_FOLD_TILES"); te && *te) lin_half_fold_tiles_ = std::atoi(te);
+        int nf = 0;
+        for (int t = 0; t < (int)layers_.size(); ++t) {
+            GenericLayer* L = layers_[t];
+            for (int l = 0; l < 3; ++l)
+                for (auto& ft : L->fold[l]) {
+                    if (ft.dest_layer == -2 || ft.ns != 1 || !ft.Wy || ft.cols < 64) continue;
+                    make(ft.hf, ft.Wy, ft.cols, L->C_out, true, ex[10]);
+                    make(ft.hb, ft.Wy, L->C_out, ft.cols, false, ex[11]);
+                    nf += ft.hf.B != nullptr;
+                    if (d_lin_amax_ && ft.hf.B)
+                        std::fprintf(stderr, "loupmd: lin half: fold layer %d degree %d -> %d: %d columns, C_out %d\n",
+                                     t, l, ft.dest_layer, ft.cols, L->C_out);
+                }
+        }
+        if (d_lin_amax_)
+            std::fprintf(stderr, "loupmd: lin half: %d chain-fold products (bit 256), from %d tiles\n", nf,
+                         lin_half_fold_tiles_);
+    }
+    for (auto* L : layers_) {
         for (int l = 0; l < 4; ++l)
             for (auto* v : {&L->hs_flin[l], &L->hs_blin[l]})
                 for (const auto& p : *v)
                     if (p.B) L->weights.push_back(p.B);
+        for (const auto& v : L->fold)
+            for (const auto& ft : v)
+                for (const auto* p : {&ft.hf, &ft.hb})
+                    if (p->B) L->weights.push_back(p->B);
+    }
     CUDA_CHECK_THROW(cudaGetLastError());
     CUDA_CHECK_THROW(cudaStreamSynchronize(nullptr));
     if (lin_half_) hgemm2_init();
@@ -1618,7 +1662,11 @@ void GenericModel::debug_lin_amax() const {
         if (!v[s]) continue;
         float m;
         std::memcpy(&m, &v[s], sizeof m);
-        std::fprintf(stderr, "loupmd: lin amax layer %d %s degree %d: %.5g\n", s / 16, kind[s % 16 / 4], s % 4, m);
+        if (s >= 128)  // list 25 item 1: the chain fold's products, 128 + 16 t + l (y_t) and + 8 (dsrc)
+            std::fprintf(stderr, "loupmd: lin amax layer %d fold %s degree %d: %.5g\n", (s - 128) / 16,
+                         s % 16 < 8 ? "forward (y)" : "backward (dx)", s % 8, m);
+        else
+            std::fprintf(stderr, "loupmd: lin amax layer %d %s degree %d: %.5g\n", s / 16, kind[s % 16 / 4], s % 4, m);
     }
 }
 
@@ -2550,6 +2598,10 @@ void GenericModel::record(const GenericPassInputs& in) {
     if (fold_sweeps_ && sweep == GenericPassInputs::SweepLast)
         for (const Hand& e : hand_[(size_t)n_layers_ - 2]) written.push_back(e.p);
     std::vector<unsigned> gate_vform(n_layers_, 0u);  // per layer: degrees whose forward gate ran in the projection
+    // bit 256's floor: an M x Nc fold product on hgemm2f_kernel only from lin_half_fold_tiles_ of its 128 x 64 tiles
+    auto fold_h2_fills = [&](int M, int Nc) {
+        return (int64_t)((M + 127) / 128) * ((Nc + 63) / 64) >= (int64_t)lin_half_fold_tiles_;
+    };
     // A hidden-table layer's projection l with the gated store in its epilogue (gf.out = gout_l): LOUP_LIN_HALF's
     // panels on hgemm2f_kernel (gemm_h2_gate_fwd), else sgemm128_gate. A null: only asks whether it would run.
     auto gate0_call = [&](GenericLayer* L, int t, int l, const float* A, const GateArgs& gf) -> bool {
@@ -2818,10 +2870,17 @@ void GenericModel::record(const GenericPassInputs& in) {
                                     beta, dst, ft.cols);
                         beta = 1.0f;
                     }
-                    if (ft.ns > 1)
+                    if (ft.ns > 1) {
                         species_gemm(false, l, Co, ft.cols, L->y[l], ft.Wy, (int64_t)Co * ft.cols, beta, dst);
-                    else
-                        in.gemm(false, N * dimL(l), ft.cols, Co, 1.0f, L->y[l], Co, ft.Wy, ft.cols, beta, dst, ft.cols);
+                    } else {
+                        // list 25 item 1 (LOUP_LIN_HALF_PARTS bit 256): on hgemm2f_kernel where the target has panels
+                        if (d_lin_amax_) lin_amax_record(L->y[l], (int64_t)N * dimL(l) * Co, 128 + 16 * t + l, st);
+                        if (ft.hf.B && in.gemm_h2_fwd && fold_h2_fills(N * dimL(l), ft.cols))
+                            in.gemm_h2_fwd(N * dimL(l), ft.cols, Co, L->y[l], ft.hf.sA, ft.hf.B, ft.hf.os, dst, beta);
+                        else
+                            in.gemm(false, N * dimL(l), ft.cols, Co, 1.0f, L->y[l], Co, ft.Wy, ft.cols, beta, dst,
+                                    ft.cols);
+                    }
                     written.push_back(dst);
                 }
             join();
@@ -2942,11 +3001,19 @@ void GenericModel::record(const GenericPassInputs& in) {
                     for (const auto& ft : L->fold[l]) {
                         if (ft.dest_layer == -2) continue;
                         const float* dsrc = ft.dest_layer >= 0 ? layers_[ft.dest_layer]->dx[l] : layers_.back()->dhid;
-                        if (ft.ns > 1)
+                        if (ft.ns > 1) {
                             species_gemm(true, l, ft.cols, Co, dsrc, ft.Wy, (int64_t)Co * ft.cols, beta, L->dy[l]);
-                        else
-                            in.gemm(true, N * dimL(l), Co, ft.cols, 1.0f, dsrc, ft.cols, ft.Wy, ft.cols, beta, L->dy[l],
-                                    Co);
+                        } else {
+                            // list 25 item 1 (bit 256): dy_t[l] += dsrc Wy^T on hgemm2f_kernel
+                            if (d_lin_amax_)
+                                lin_amax_record(dsrc, (int64_t)N * dimL(l) * ft.cols, 128 + 16 * t + 8 + l, st);
+                            if (ft.hb.B && in.gemm_h2_fwd && fold_h2_fills(N * dimL(l), Co))
+                                in.gemm_h2_fwd(N * dimL(l), Co, ft.cols, dsrc, ft.hb.sA, ft.hb.B, ft.hb.os, L->dy[l],
+                                               beta);
+                            else
+                                in.gemm(true, N * dimL(l), Co, ft.cols, 1.0f, dsrc, ft.cols, ft.Wy, ft.cols, beta,
+                                        L->dy[l], Co);
+                        }
                         beta = 1.0f;
                     }
                 }

@@ -3313,3 +3313,22 @@ GEMMs per call (ledger `gen-lin-half-l0-species`, 5060 Ti only).
 - A species and degree with fewer than 128 rows (one tile) keeps the FP32 GEMM (`LOUP_LIN_HALF_SPECIES_ROWS`).
   OMAT-0 medium NaCl216 (108 atoms per species) first read 1.016, but over sixteen runs it ties at any threshold.
   The null A / B of that cell spreads 1%.
+
+### 6.58 The skip-chain fold's products on the two-half kernel (list 25, 22 November 2026, morning)
+
+`LOUP_LIN_HALF_PARTS` now defaults to 447. Its new bit 256 runs the skip-chain fold's composed products on `hgemm2f`:
+forward `dst += y_t[l] Wy` and backward `dy_t[l] += dsrc Wy^T`, for every fold target with one weight and at least 64
+columns. These are two products on MH-1 and on most OMAT-0 / MP-0 / OFF families, and nine on OMOL-0 XL, where they had
+been about 7 ms of SIMT GEMMs per 5,184-atom call (ledger `gen-lin-half-fold`, 5060 Ti only).
+
+- A range census set the scales: largest `|y|` 83 (MH-1 headroom) and `|dx|` 402 (OMAT-0 small headroom), scales 2^8
+  and 2^6.
+- The gate sets of all 19 chain-folded family runs pass with every product on the kernel; the physics headroom and seven
+  keep the default's pass counts.
+- Evaluate, A B B A twice: OMAT-0 medium SrTiO3 0.989; OFF23-M water, MH-1 SrTiO3 and OMOL-0 XL water (5,000-5,184
+  atoms) 0.997-0.999. MD loop, 16 runs: OMOL-0 XL water216 0.995 (every pair below 1), OMAT-0 medium NaCl216 0.993.
+- A product with fewer 128 x 64 tiles than SMs keeps the FP32 GEMM (`LOUP_LIN_HALF_FOLD_TILES`): without that floor
+  MH-1 NaCl216 lost 1.0% in the MD loop (products of 4 and 12 tiles), with it 0.996.
+- List 23's rform, re-screened at 5,184 atoms where the residuals no longer fit in L2, was rejected again: it removes
+  3.0 ms of `gate_fwd_kernel` from an OMOL-0 XL call, but the residual products' gated epilogue adds 2.2 ms, a tie
+  (0.998).
