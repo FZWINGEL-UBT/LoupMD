@@ -72,10 +72,12 @@ void hgemm2_gate(int l, int M, int N, int K, const void* A, const void* B, float
 // beta != 0: C = beta C + A B^T oscale. N % 16 == 0 and K % 16 == 0 with B's panels from hgemm2_split_pad (padded to
 // [2][Np][Kp]); N % 64 == 0 and K % 32 == 0 need no padding (hgemm2_split, hgemm2_split_t give the same layout) and,
 // with beta 0, run the kernel's instance without tails.
+// ws (ws_bytes): a workspace on the launch's stream for list 22's split-K, which runs where M is small and K >= 1,024
+// (hgemm2_split_k); null: never split.
 void hgemm2_f32a(int M, int N, int K, const float* A, float sA, const void* B, float oscale, float* C,
-                 cudaStream_t stream, float beta = 0.0f);
+                 cudaStream_t stream, float beta = 0.0f, float* ws = nullptr, size_t ws_bytes = 0);
 void hgemm2_f32a_variant(int v, int M, int N, int K, const float* A, float sA, const void* B, float oscale, float* C,
-                         cudaStream_t stream, float beta = 0.0f);
+                         cudaStream_t stream, float beta = 0.0f, float* ws = nullptr, size_t ws_bytes = 0);
 void hgemm2_split_t(int R, int Cc, const float* w, int e, void* out, cudaStream_t stream);
 int64_t hgemm2_pad_elems(int Nr, int Kc);  // halves of one padded panel (two per weight)
 void hgemm2_split_pad(int Nr, int Kc, const float* w, bool trans, int e, void* out, cudaStream_t stream);
@@ -84,7 +86,7 @@ using GemmH2FwdFn = std::function<void(int M, int N, int K, const float* A, floa
 // The same product (beta 0) with row r scaled by rs.D[r / rs.rdeg] rs.beta + rs.alpha (list 13, LOUP_RES_BWD 2: the
 // backward dx_l = dpre_l W_res[l]^T from dlin_l, dpre = dlin (D beta + alpha) per atom).
 void hgemm2_f32a_rows(int M, int N, int K, const float* A, float sA, const void* B, float oscale, float* C,
-                      const GateArgs& rs, cudaStream_t stream);
+                      const GateArgs& rs, cudaStream_t stream, float* ws = nullptr, size_t ws_bytes = 0);
 using GemmH2RowsFn = std::function<void(int M, int N, int K, const float* A, float sA, const void* B, float oscale,
                                         float* C, const GateArgs& rs)>;
 // The same product for a residual-free degree l >= 1 (M = g.natoms (2l + 1), N = g.C) with gate_fwd's gated store:

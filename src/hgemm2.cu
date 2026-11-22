@@ -36,6 +36,7 @@
 // gate_bwd_kernel's arithmetic on it. DEG = 0: the plain FP32 store of the combined product (tests and timing only).
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 
@@ -305,11 +306,15 @@ constexpr int kHFwdVariant = 1;           // hgemm2_f32a's restart variant (hgem
 // and stores only its columns below N; beta != 0: C = beta C + A B^T. Without TAIL (N % 64 == 0, K % 32 == 0, beta 0)
 // none of that is compiled in (the kernel as before the tails). DEG = 2l + 1 (l >= 1, residual-free): stores
 // gate_fwd_kernel's gout_l = g (lin_l s), g = cs_g sigmoid(pre0[l C + c]), to g.out instead of lin_l (M = natoms DEG,
-// N = g.C; C and beta unused), elementwise in the epilogue with the gate kernel's operations.
-template <int RV, int DEG, bool TAIL>
+// N = g.C; C and beta unused), elementwise in the epilogue with the gate kernel's operations. SPLIT (list 22, DEG <= 0
+// only): block z of gridDim.z takes its share of the 32-of-K steps and stores the raw sum into slice z of C (the
+// workspace), for hgemm2_splitk_reduce; its own instances, so the unsplit ones keep their code (f7, with the split
+// inside them, lost 1.5-1.9% on MH-1 SrTiO3, where nothing splits).
+template <int RV, int DEG, bool TAIL, bool SPLIT = false>
 __global__ void __launch_bounds__(128, 2) hgemm2f_kernel(int M, int N, int K, const float* __restrict__ A, float sA,
                                                          const __half* __restrict__ B, float oscale,
                                                          float* __restrict__ C, float beta, GateArgs ga) {
+    static_assert(!SPLIT || DEG <= 0, "only the plain and rows instances split");
     extern __shared__ __align__(128) unsigned char hsm[];
     const unsigned sbase = (unsigned)__cvta_generic_to_shared(hsm);
     const int tid = threadIdx.x, lane = tid & 31, warp = tid >> 5, wm = warp >> 1, wn = warp & 1;
@@ -353,11 +358,17 @@ __global__ void __launch_bounds__(128, 2) hgemm2f_kernel(int M, int N, int K, co
     const int g = lane >> 2, t = lane & 3;
     const int b_row = wn * 32 + ((lane >> 4) << 3) + (lane & 7), b_kc = (lane >> 3) & 1;
     const int nk = Kp / kHK;
-    issue(0);
-    for (int kt = 0; kt < nk; ++kt) {
+    int kt0 = 0, kt1 = nk;
+    if constexpr (SPLIT) {  // list 22: this block's 32-of-K steps; the host leaves no slice empty
+        const int nks = (nk + (int)gridDim.z - 1) / (int)gridDim.z;
+        kt0 = (int)blockIdx.z * nks;
+        kt1 = min(nk, kt0 + nks);
+    }
+    issue(kt0);
+    for (int kt = kt0; kt < kt1; ++kt) {
         asm volatile("cp.async.wait_group 0;");
         __syncthreads();
-        if (kt + 1 < nk) issue(kt + 1);
+        if (kt + 1 < kt1) issue(kt + 1);
         if (TAIL && jn == 0) continue;  // a warp wholly past N (the last column tile) only copies
         const int st = kt & 1;
         const unsigned char* sa = hsm + st * kHStage * 2 + (wm * 64 + g) * 128 + (t & 1) * 8;
@@ -437,6 +448,23 @@ __global__ void __launch_bounds__(128, 2) hgemm2f_kernel(int M, int N, int K, co
     }
 
     const int er = wm * 64 + g, ec = wn * 32 + 2 * t;
+    if constexpr (SPLIT) {  // list 22: the raw sum into slice z of the workspace C; hgemm2_splitk_reduce does the rest
+        float* const W = C + (int64_t)blockIdx.z * M * N;
+#pragma unroll
+        for (int i = 0; i < 4; ++i)
+#pragma unroll
+            for (int h = 0; h < 2; ++h) {
+                const int r = m0 + er + 16 * i + 8 * h;
+                if (r >= M) continue;
+#pragma unroll
+                for (int j = 0; j < 4; ++j) {
+                    if (j >= jn) continue;
+                    *reinterpret_cast<float2*>(W + (int64_t)r * N + n0 + ec + 8 * j) =
+                        make_float2(acc[i][j][2 * h], acc[i][j][2 * h + 1]);
+                }
+            }
+        return;
+    }
     if constexpr (DEG > 0) {
         // list 11: g = cg sigmoid(pre) and s are formed once per (atom, column) of the tile and staged in the pipeline's
         // dead shared memory (an atom's DEG rows share them), instead of per element: per row, the old store loaded
@@ -557,6 +585,68 @@ __global__ void split_half_pad_kernel(int Nr, int Kc, int Np, int Kp, const floa
     out[n + i] = __float2half_rn((a - __half2float(h)) * (1.0f / (float)(1 << (kHC - 11))));
 }
 
+// list 22: hgemm2f_kernel's split-K reduction. ws holds S slices [S][M][N] of raw sums; C = their sum in the order
+// z = 0 .. S - 1, through the epilogue the split skipped: with `rows`, hgemm2_f32a_rows' row scale and column split
+// (n1 a multiple of 64, so an element pair lies in one part), else the plain store (oscale, beta). One thread per pair.
+__global__ void hgemm2_splitk_reduce_kernel(int M, int N, int S, const float* __restrict__ ws, float oscale,
+                                            float* __restrict__ C, float beta, GateArgs ga, bool rows) {
+    const int64_t i = (int64_t)blockIdx.x * blockDim.x + threadIdx.x, mn = (int64_t)M * N;
+    if (2 * i >= mn) return;
+    float2 s = reinterpret_cast<const float2*>(ws)[i];
+    for (int z = 1; z < S; ++z) {
+        const float2 p = reinterpret_cast<const float2*>(ws + z * mn)[i];
+        s.x += p.x;
+        s.y += p.y;
+    }
+    const int r = (int)(2 * i / N), c = (int)(2 * i % N);
+    if (rows) {
+        const bool part2 = ga.c2 && c >= ga.n1;
+        const bool scaled = ga.rdeg && (!ga.c2 || part2);
+        const int ldc = !ga.c2 ? N : (part2 ? N - ga.n1 : ga.n1);
+        float* const Cb = part2 ? ga.c2 + (c - ga.n1) : C + c;
+        const float os = part2 ? ga.os2 : oscale;
+        const float rs = scaled ? fmaf(ga.D[r / ga.rdeg], ga.beta, ga.alpha) * os : os;
+        *reinterpret_cast<float2*>(Cb + (int64_t)r * ldc) = make_float2(s.x * rs, s.y * rs);
+    } else {
+        float2* o = reinterpret_cast<float2*>(C + 2 * i);
+        float2 v = make_float2(s.x * oscale, s.y * oscale);
+        if (beta != 0.0f) {
+            const float2 cv = *o;
+            v.x = fmaf(beta, cv.x, v.x);
+            v.y = fmaf(beta, cv.y, v.y);
+        }
+        *o = v;
+    }
+}
+
+// list 22: the K slices for hgemm2f_kernel at M x N x K, 1 = no split. Split only where K >= 1,024 and there are at
+// most as many tiles as SMs (half a wave at two blocks per SM; MH-1's degree-0 products with K = 2,048 on small cells:
+// 6 and 12 tiles on NaCl216), up to the slots the tiles leave free, each slice at least 8 steps of 32, the slices
+// within the workspace, none empty.
+int hgemm2_split_k(int M, int N, int K, size_t ws_bytes) {
+    const int nk = (K + kHK - 1) / kHK;
+    if (nk < 32 || ws_bytes == 0 || N % 2 != 0) return 1;
+    int dev = 0, sms = 0;
+    if (cudaGetDevice(&dev) != cudaSuccess || cudaDeviceGetAttribute(&sms, cudaDevAttrMultiProcessorCount, dev) !=
+                                                 cudaSuccess || sms <= 0)
+        return 1;
+    const int64_t tiles = (int64_t)((N + kHN - 1) / kHN) * ((M + kHM - 1) / kHM);
+    const int64_t slots = 2 * (int64_t)sms;
+    if (2 * tiles > slots) return 1;
+    int64_t s = std::min<int64_t>(nk / 8, slots / tiles);
+    s = std::min<int64_t>(s, (int64_t)(ws_bytes / ((size_t)M * N * sizeof(float))));
+    if (s < 2) return 1;
+    const int nks = (nk + (int)s - 1) / (int)s;
+    return (nk + nks - 1) / nks;
+}
+
+void hgemm2_splitk_reduce(int M, int N, int S, const float* ws, float oscale, float* C, float beta, const GateArgs& ga,
+                          bool rows, cudaStream_t stream) {
+    const int64_t pairs = (int64_t)M * N / 2;
+    hgemm2_splitk_reduce_kernel<<<(unsigned)((pairs + 255) / 256), 256, 0, stream>>>(M, N, S, ws, oscale, C, beta, ga,
+                                                                                     rows);
+}
+
 template <int DEG>
 void launch_hgemm2(int M, int N, int K, const __half* A, const __half* B, float oscale, float* C, const GateArgs& g,
                    cudaStream_t stream) {
@@ -586,6 +676,8 @@ void hgemm2_init() {
     cudaFuncSetAttribute(hgemm2f_kernel<kHFwdVariant, 7, true>, cudaFuncAttributePreferredSharedMemoryCarveout, 100);
     cudaFuncSetAttribute(hgemm2f_kernel<kHFwdVariant, -1, false>, cudaFuncAttributePreferredSharedMemoryCarveout, 100);
     cudaFuncSetAttribute(hgemm2f_kernel<kHFwdVariant, -1, true>, cudaFuncAttributePreferredSharedMemoryCarveout, 100);
+    cudaFuncSetAttribute(hgemm2f_kernel<1, 0, false, true>, cudaFuncAttributePreferredSharedMemoryCarveout, 100);
+    cudaFuncSetAttribute(hgemm2f_kernel<1, 0, true, true>, cudaFuncAttributePreferredSharedMemoryCarveout, 100);
 }
 
 namespace {
@@ -597,10 +689,20 @@ bool h2_tail(int N, int K, float beta) { return N % kHN != 0 || K % kHK != 0 || 
 // The restart variants (benches): 0 H H and X every 32 of K, 1 H H every MMA (16 of K) and X every 32, 2 both every 16;
 // 0 and 2 without tails or beta.
 void hgemm2_f32a_variant(int v, int M, int N, int K, const float* A, float sA, const void* B, float oscale, float* C,
-                         cudaStream_t stream, float beta) {
-    const dim3 grid((N + kHN - 1) / kHN, (M + kHM - 1) / kHM);
+                         cudaStream_t stream, float beta, float* ws, size_t ws_bytes) {
     const __half* b = static_cast<const __half*>(B);
     const GateArgs ga{};
+    // list 22: split-K into ws for small M and long K (variant 1 only), then the reduction's plain store
+    if (const int S = v == 1 && ws ? hgemm2_split_k(M, N, K, ws_bytes) : 1; S > 1) {
+        const dim3 gs((N + kHN - 1) / kHN, (M + kHM - 1) / kHM, S);
+        if (h2_tail(N, K, 0.0f))
+            hgemm2f_kernel<1, 0, true, true><<<gs, 128, kHSmem, stream>>>(M, N, K, A, sA, b, oscale, ws, 0.0f, ga);
+        else
+            hgemm2f_kernel<1, 0, false, true><<<gs, 128, kHSmem, stream>>>(M, N, K, A, sA, b, oscale, ws, 0.0f, ga);
+        hgemm2_splitk_reduce(M, N, S, ws, oscale, C, beta, ga, false, stream);
+        return;
+    }
+    const dim3 grid((N + kHN - 1) / kHN, (M + kHM - 1) / kHM);
     if (v == 1 && h2_tail(N, K, beta))
         hgemm2f_kernel<1, 0, true><<<grid, 128, kHSmem, stream>>>(M, N, K, A, sA, b, oscale, C, beta, ga);
     else if (v == 1) hgemm2f_kernel<1, 0, false><<<grid, 128, kHSmem, stream>>>(M, N, K, A, sA, b, oscale, C, 0.0f, ga);
@@ -609,9 +711,22 @@ void hgemm2_f32a_variant(int v, int M, int N, int K, const float* A, float sA, c
 }
 
 void hgemm2_f32a_rows(int M, int N, int K, const float* A, float sA, const void* B, float oscale, float* C,
-                      const GateArgs& rs, cudaStream_t stream) {
-    const dim3 grid((N + kHN - 1) / kHN, (M + kHM - 1) / kHM);
+                      const GateArgs& rs, cudaStream_t stream, float* ws, size_t ws_bytes) {
     const __half* b = static_cast<const __half*>(B);
+    // list 22: split-K as hgemm2_f32a (the split instances end before the DEG-specific epilogue, so the plain ones serve);
+    // the reduction takes the row scale and the column split
+    if (const int S = ws ? hgemm2_split_k(M, N, K, ws_bytes) : 1; S > 1) {
+        const dim3 gs((N + kHN - 1) / kHN, (M + kHM - 1) / kHM, S);
+        if (h2_tail(N, K, 0.0f))
+            hgemm2f_kernel<kHFwdVariant, 0, true, true><<<gs, 128, kHSmem, stream>>>(M, N, K, A, sA, b, oscale, ws, 0.0f,
+                                                                                    rs);
+        else
+            hgemm2f_kernel<kHFwdVariant, 0, false, true><<<gs, 128, kHSmem, stream>>>(M, N, K, A, sA, b, oscale, ws, 0.0f,
+                                                                                     rs);
+        hgemm2_splitk_reduce(M, N, S, ws, oscale, C, 0.0f, rs, true, stream);
+        return;
+    }
+    const dim3 grid((N + kHN - 1) / kHN, (M + kHM - 1) / kHM);
     if (h2_tail(N, K, 0.0f))
         hgemm2f_kernel<kHFwdVariant, -1, true><<<grid, 128, kHSmem, stream>>>(M, N, K, A, sA, b, oscale, C, 0.0f, rs);
     else
@@ -635,8 +750,8 @@ void hgemm2_f32a_gate(int l, int M, int N, int K, const float* A, float sA, cons
 }
 
 void hgemm2_f32a(int M, int N, int K, const float* A, float sA, const void* B, float oscale, float* C,
-                 cudaStream_t stream, float beta) {
-    hgemm2_f32a_variant(kHFwdVariant, M, N, K, A, sA, B, oscale, C, stream, beta);
+                 cudaStream_t stream, float beta, float* ws, size_t ws_bytes) {
+    hgemm2_f32a_variant(kHFwdVariant, M, N, K, A, sA, B, oscale, C, stream, beta, ws, ws_bytes);
 }
 
 int64_t hgemm2_pad_elems(int Nr, int Kc) {

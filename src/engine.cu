@@ -680,6 +680,9 @@ struct LoupHandle {
     // gate_fwd_kernel did that degree), 2 only where the tuned plan is the own sgemm128 (at or below 1,600 rows also
     // under 1); LOUP_GATE_FWD_L0=1|2
     int gate_fwd_l0 = 2;
+    // list 22 (ledger gen-h2-splitk): split-K for the two-half kernel's small-M, long-K products (hgemm2_split_k: MH-1's
+    // degree-0 backward projections with K = 2,048 on small cells) into the lane's workspace; LOUP_H2_SPLITK=0 never
+    bool h2_splitk = true;
     cudaStream_t stream = nullptr;
     cublasHandle_t cublas = nullptr;
     cublasLtHandle_t cublas_lt = nullptr;
@@ -2161,13 +2164,17 @@ static void record_force_pass(LoupHandle* h, int compute_stress, bool energy_onl
             return true;
         };
     // LOUP_W2F_HALF (hgemm2.cu): used only by layers the model set up at load (GenericModel::w2f_half)
-    in.gemm_h2_fwd = [h](int M, int Nc, int K, const float* A, float sA, const void* B, float oscale, float* C,
-                         float beta) {
-        loup::hgemm2_f32a(M, Nc, K, A, sA, B, oscale, C, h->gemm_stream ? h->gemm_stream : h->stream, beta);
+    // list 22: the launch's own lane workspace (that stream's cuBLAS workspace) for the split-K slices
+    auto h2_ws = [h]() { return h->h2_splitk ? static_cast<float*>(h->gemm_ws ? h->gemm_ws : h->d_cublas_ws) : nullptr; };
+    in.gemm_h2_fwd = [h, h2_ws](int M, int Nc, int K, const float* A, float sA, const void* B, float oscale, float* C,
+                                float beta) {
+        loup::hgemm2_f32a(M, Nc, K, A, sA, B, oscale, C, h->gemm_stream ? h->gemm_stream : h->stream, beta, h2_ws(),
+                          h->cublas_ws_bytes);
     };
-    in.gemm_h2_rows = [h](int M, int Nc, int K, const float* A, float sA, const void* B, float oscale, float* C,
-                          const loup::GateArgs& rs) {
-        loup::hgemm2_f32a_rows(M, Nc, K, A, sA, B, oscale, C, rs, h->gemm_stream ? h->gemm_stream : h->stream);
+    in.gemm_h2_rows = [h, h2_ws](int M, int Nc, int K, const float* A, float sA, const void* B, float oscale, float* C,
+                                 const loup::GateArgs& rs) {
+        loup::hgemm2_f32a_rows(M, Nc, K, A, sA, B, oscale, C, rs, h->gemm_stream ? h->gemm_stream : h->stream, h2_ws(),
+                               h->cublas_ws_bytes);
     };
     h->gen->record(in);
     if (!sweep) record_dispersion(h, compute_stress, energy_only);
@@ -2487,6 +2494,7 @@ LoupHandle* loup_create(const char* loup_path, int device_id) {
             h->gate_fwd_l0 = h->is_sm120 ? 1 : 2;
             if (const char* e = std::getenv("LOUP_GATE_FWD_L0"); e && e[0] >= '1' && e[0] <= '2')
                 h->gate_fwd_l0 = e[0] - '0';
+            if (const char* e = std::getenv("LOUP_H2_SPLITK"); e && e[0] == '0') h->h2_splitk = false;
             if (const char* e = std::getenv("LOUP_DEBUG_EVAL_TIMES"); e && e[0] == '1') h->probe = true;
             if (const char* e = std::getenv("LOUP_EVAL_ARM"); e && e[0] == '1') h->arm_enabled = true;
             else if (e && e[0] == '0') h->arm_state = -1;

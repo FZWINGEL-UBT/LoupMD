@@ -3243,3 +3243,28 @@ directories:
   edge decode, force assembly, memsets and copies (1.5 ms). No piece is above 1.5% of the call.
 - **The students**: the rank-4 radial head (`s64r4`, list 16 idea 5) reaches 13.9 meV/A on validation and 10.9 on
   the 300 K test set, against s64l0's 14.6 and 9.7. Under RESPA (list 15 idea 3) s64l0 stays the better fast model.
+  The rank-8 head (`s64r8`) reaches 11.8 and 9.2: eight radial functions per weight lose nothing against the full
+  radial MLP here (one seed each). Only models trained that way could use it, and the saving is bounded by the table
+  reads (about 8% of an OMAT-0 medium call, estimate).
+
+### 6.54 Split-K for the small two-half products, and list 22 (22 November 2026, night)
+
+`LOUP_H2_SPLITK` (default on where the two-half paths run; ledger `gen-h2-splitk`, 5060 Ti only). On MH-1 NaCl216 two
+degree-0 products with K = 2,048 had 6 and 12 tiles for 36 SMs and sat on the critical path: layer 0's `dS0` (86 us)
+and layer 1's backward mode-3 rows product (78 us). Such products (K >= 1,024, at most one tile per SM) now run in
+slices of K on two `hgemm2f` instances of their own, into the lane's GEMM workspace, and a reduction applies the
+epilogue: 17 + 4 us and 39 + 4 us. Results (A B B A twice, fresh plans):
+
+- MH-1 NaCl216 in the MD loop: 1.164 -> 1.093 ms per step (0.939, every pair 0.928-0.947); per force call 0.979
+  (stress 0.937).
+- MH-1 SrTiO3 at 5,000 atoms, where nothing splits: a tie (0.998). The unsplit instances' SASS is the previous
+  build's. A first form with the split inside every instance lost 1.5-1.9% there and was replaced.
+- OMOL-0 XL water216: a tie.
+- Forces against `LOUP_H2_SPLITK=0` at the noise floor; the gates pass (MH-1 four ways, the omol head, OMOL-0 XL with
+  the two-half switches on and off, OMAT-0 medium, Sr-contact0.8 for each conv variant); GPU fast tier 384 passed.
+
+**List 22** (ledger `ideas-20261122-list22`) came from per-launch timelines of the whole call. Besides split-K it
+dropped four forms (padding, `lin` + `res` in one product, `W_2` in the product kernel, FP8 / INT8) and bounded four:
+the column-65 extraction (about 1%), the fold GEMMs on `hgemm2f` (0.5%), packing NaCl216's four-degree `W_2` groups
+(at most 2%: 114 us against 108 us for four full waves), and longest-first launch order at 5,000 atoms (0.3%). At
+5,000 atoms the two-half GEMMs take about 13.4 of 24.1 ms, near the tensor pipe's rate at the card's power limit.
