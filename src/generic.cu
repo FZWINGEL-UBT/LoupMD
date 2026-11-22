@@ -298,7 +298,9 @@ __global__ void gate_fwd_kernel(int N, int C, int lx, const float* __restrict__ 
 // dD += sum dpre . lin * (-beta s^2) (one atomic per warp). res0 / res0_sp as in gate_fwd. Degrees l with bit l of
 // `fused` set are skipped (their W_2^T GEMM ran sgemm128_gate, which did their share). Degrees with bit l of `vform`
 // (residual-free, their forward fused: lin_l is never stored) pass the saved out_l = v as lin_l: with q = sum dgout v,
-// d pre_0[l C + c] = (1 - sigmoid) q and dD += -beta s q (the same terms; v = g (lin s)).
+// d pre_0[l C + c] = (1 - sigmoid) q and dD += -beta s q (the same terms; v = g (lin s)). Degrees with bit l of `rform`
+// (list 27 item 3: a residual degree whose forward gate ran in W_res's epilogue) pass the saved out_l = g pre_l as
+// res_l: d pre_0[l C + c] = (1 - sigmoid) sum dgout out_l; lin_l as usual.
 __global__ void gate_bwd_kernel(int N, int C, int lx, const float* __restrict__ D, float alpha, float beta, float cs,
                                 float cg, const float* __restrict__ lin0, const float* __restrict__ lin1,
                                 const float* __restrict__ lin2, const float* __restrict__ lin3,
@@ -308,7 +310,7 @@ __global__ void gate_bwd_kernel(int N, int C, int lx, const float* __restrict__ 
                                 const float* __restrict__ g3, float* __restrict__ dp0, float* __restrict__ dp1,
                                 float* __restrict__ dp2, float* __restrict__ dl0, float* __restrict__ dl1,
                                 float* __restrict__ dl2, float* __restrict__ dl3, float* __restrict__ dD,
-                                unsigned fused, unsigned vform) {
+                                unsigned fused, unsigned vform, unsigned rform) {
     const int a = blockIdx.x, c = threadIdx.x;
     if (a >= N) return;
     const float s = 1.0f / (D[a] * beta + alpha);
@@ -348,10 +350,11 @@ __global__ void gate_bwd_kernel(int N, int C, int lx, const float* __restrict__ 
             dgp = (1.0f - sg) * q;
             accq += q;
         } else {
+            const bool rf = rform >> l & 1u;  // re holds out_l = g pre_l
             float dg = 0.0f;
             for (int m = 0; m < 2 * l + 1; ++m) {
                 const int64_t idx = ((int64_t)a * (2 * l + 1) + m) * C + c;
-                const float p = li[idx] * s + (re ? re[idx] : 0.0f);
+                const float p = rf ? re[idx] : li[idx] * s + (re ? re[idx] : 0.0f);
                 const float go = gs[l - 1][idx];
                 dg = fmaf(go, p, dg);
                 const float d = go * g;
@@ -359,7 +362,7 @@ __global__ void gate_bwd_kernel(int N, int C, int lx, const float* __restrict__ 
                 dls[l - 1][idx] = d * s;
                 acc = fmaf(d, li[idx], acc);
             }
-            dgp = dg * cg * sg * (1.0f - sg);
+            dgp = rf ? (1.0f - sg) * dg : dg * cg * sg * (1.0f - sg);
         }
         if (dp0) dp0[r0 + l * C + c] = dgp;
         dl0[r0 + l * C + c] = dgp * s;
@@ -1497,13 +1500,15 @@ void GenericModel::setup_lin_half() {
     // the backward W_res^T, bit 3 layer 0's forward S0 C0, bit 4 the gated store on hgemm2f_kernel (without it a
     // degree with panels runs the plain product and gate_fwd_kernel), bit 5 the kind 1 / 3 layers' projections, bit 7
     // a skip-folded kind 1 / 3 layer 0's species-grouped S0 C0 and dS0 (ledger gen-lin-half-l0-species), bit 8 (256,
-    // list 25) the chain fold's composed products (ledger gen-lin-half-fold); bit 6 (64) was lists 23 / 25's rejected
-    // rform (ledger ideas-20261122-list23 item 2, ideas-20261122-list25 item 2). Default 447, every bit but 6, since
-    // list 25 (5060 Ti only: OMAT-0 medium SrTiO3 0.989, OMOL-0 XL water216's MD loop 0.995, MH-1 NaCl216's a tie with
-    // the tile floor); 191 in list 24 (the MD loop of OMAT-0 medium NbCl5 0.963, NaCl 0.971, SrTiO3 0.993, OFF23-M / -S
-    // water216 0.977 / 0.976); 63 in list 23 (MH-1 SrTiO3 0.997, OMOL-0 XL 0.997, NaCl216's MD loop a tie); until then
-    // 55, without bit 3, whose tails had cost MH-1 SrTiO3 1.4% against sgemm128's gated store (ledger gen-lin-two-half)
-    int parts = 447;
+    // list 25) the chain fold's composed products (ledger gen-lin-half-fold); bit 6 (64, list 27 item 3, rform v3:
+    // batched lin_l loads + L2 prefetch in W_res's gated epilogue, replacing lists 23 / 25's rejected scalar loads).
+    // Default 511 (every bit) since list 27 item 3 (5060 Ti only: MH-1 SrTiO3 0.9924, OMOL-0 XL water216 MD 0.9899,
+    // MH-1 NaCl216 MD 0.9995); 447 in list 25 (OMAT-0 medium SrTiO3 0.989, OMOL-0 XL water216's MD loop 0.995, MH-1
+    // NaCl216's a tie with the tile floor); 191 in list 24 (the MD loop of OMAT-0 medium NbCl5 0.963, NaCl 0.971,
+    // SrTiO3 0.993, OFF23-M / -S water216 0.977 / 0.976); 63 in list 23 (MH-1 SrTiO3 0.997, OMOL-0 XL 0.997, NaCl216's
+    // MD loop a tie); until then 55, without bit 3, whose tails had cost MH-1 SrTiO3 1.4% against sgemm128's gated
+    // store (ledger gen-lin-two-half)
+    int parts = 511;
     if (const char* pe = std::getenv("LOUP_LIN_HALF_PARTS"); pe && *pe) parts = std::atoi(pe);
     lin_half_parts_ = parts;
     // bit 128 runs a species' rows of a degree on hgemm2f_kernel only from this many rows; fewer keep the FP32 GEMM
@@ -2599,6 +2604,7 @@ void GenericModel::record(const GenericPassInputs& in) {
     if (fold_sweeps_ && sweep == GenericPassInputs::SweepLast)
         for (const Hand& e : hand_[(size_t)n_layers_ - 2]) written.push_back(e.p);
     std::vector<unsigned> gate_vform(n_layers_, 0u);  // per layer: degrees whose forward gate ran in the projection
+    std::vector<unsigned> gate_rform(n_layers_, 0u);  // per layer: residual degrees whose gate ran in W_res's (list 27)
     // bit 256's floor: an M x Nc fold product on hgemm2f_kernel only from lin_half_fold_tiles_ of its 128 x 64 tiles
     auto fold_h2_fills = [&](int M, int Nc) {
         return (int64_t)((M + 127) / 128) * ((Nc + 63) / 64) >= (int64_t)lin_half_fold_tiles_;
@@ -2735,11 +2741,26 @@ void GenericModel::record(const GenericPassInputs& in) {
                 // in one recording (list 20, gen-gate-fwd-tiled; LOUP_GATE_FWD_TILED=0: whole passes only)
                 const bool gate1_sweep = sweep == GenericPassInputs::SweepAll ||
                                          (gate_fwd_tiled_ && sweep == GenericPassInputs::SweepLast && t == n_layers_ - 1);
-                if (L->kind == 4 && in.gemm_gate_fwd_l1 && n_proj == 4 && gate1_sweep)
+                // list 27 item 3 (LOUP_LIN_HALF_PARTS bit 64): a residual degree l = 1 .. min(lmax_x, 2) stores gout_l
+                // = g (lin_l s + res_l) from its W_res projection's epilogue (gate_rform), which reads lin_l: lin_l runs
+                // first on the same lane, and res_l is never stored (the backward reads gout_l in its place)
+                auto gater = [&](int l, const float* A) {
+                    const auto& p = L->hl_fres[l];
+                    if (!p.B || !(lin_half_parts_ & 64) || !in.gemm_h2_gate_fwd) return false;
+                    const int M = N * dimL(l);
+                    if (A && d_lin_amax_) lin_amax_record(A, (int64_t)M * Cx, 16 * t + 4 + l, st);
+                    GateArgs gr = gf;
+                    gr.lin_l = L->lin[l];
+                    return in.gemm_h2_gate_fwd(l, M, L->lin_cols[l], Cx, A, p.sA, p.B, p.os, gr, true);
+                };
+                if (L->kind == 4 && in.gemm_gate_fwd_l1 && n_proj == 4 && gate1_sweep) {
                     for (int l = L->lmax_x + 1; l < 4; ++l)  // A null: only asks
                         if (gate1(l, nullptr)) gate_vform[t] |= 1u << l;
-                const int l_first = gate_vform[t] ? 1 : 0;
-                if (gate_vform[t]) {
+                    for (int l = 1; l <= std::min(L->lmax_x, 2); ++l)
+                        if (gater(l, nullptr)) gate_rform[t] |= 1u << l;
+                }
+                const int l_first = (gate_vform[t] | gate_rform[t]) ? 1 : 0;
+                if (gate_vform[t] | gate_rform[t]) {
                     fork();
                     lane(0);
                     proj(L->hl_flin[0], 16 * t, false, N, L->lin_cols[0], L->n_l3[0] * Cx, L->mid[0], L->W_lin[0],
@@ -2757,9 +2778,12 @@ void GenericModel::record(const GenericPassInputs& in) {
                         proj(L->hl_flin[l], 16 * t + l, false, N * dimL(l), L->lin_cols[l], L->n_l3[l] * Cx,
                              L->mid[l], L->W_lin[l], L->lin[l]);
                     }
+                    if ((gate_rform[t] >> l & 1u) && !gater(l, L->x[l]))  // declined: res_l on its own lane below
+                        gate_rform[t] &= ~(1u << l);
                 }
                 if (L->kind == 4) {
                     for (int l = l_first; l <= L->lmax_x; ++l) {
+                        if (gate_rform[t] >> l & 1u) continue;
                         lane(4 + l);
                         proj(L->hl_fres[l], 16 * t + 4 + l, false, N * dimL(l), L->lin_cols[l], Cx, L->x[l],
                              L->W_res[l], L->res[l]);
@@ -2775,7 +2799,7 @@ void GenericModel::record(const GenericPassInputs& in) {
                                               L->lin[0], L->lin[1], L->lin[2], L->lin[3], res0, res0_sp,
                                               L->lmax_x >= 1 ? L->res[1] : nullptr,
                                               L->lmax_x >= 2 ? L->res[2] : nullptr, L->gout[0], L->gout[1],
-                                              L->gout[2], L->gout[3], gate_vform[t]);
+                                              L->gout[2], L->gout[3], gate_vform[t] | gate_rform[t]);
             fork();
             for (int l = 0; l < 4; ++l) {
                 lane(l);
@@ -3063,8 +3087,11 @@ void GenericModel::record(const GenericPassInputs& in) {
             const bool rdl = res_from_dlin(L, t);  // LOUP_RES_BWD 2: no dpre
             float* dpre0 = t > 0 && !rdl ? L->dpre[0] : nullptr;
             const unsigned vform = gate_vform[t];  // these degrees saved gout_l instead of lin_l
+            const unsigned rform = gate_rform[t];  // these saved gout_l instead of res_l (list 27 item 3)
             const float* lins[4];
+            const float* ress[3] = {nullptr, nullptr, nullptr};
             for (int l = 0; l < 4; ++l) lins[l] = (vform >> l & 1u) ? L->gout[l] : L->lin[l];
+            for (int l = 1; l <= std::min(L->lmax_x, 2); ++l) ress[l] = (rform >> l & 1u) ? L->gout[l] : L->res[l];
             // dgout_l = dmsgf_l @ W_2[l]^T; degrees whose GEMM takes the gate backward into its epilogue never write
             // dgout_l, gate_bwd_kernel does the others. LOUP_W2T_HALF (L->h2): dmsgf_l holds the product kernel's two
             // binary16 panels, the two-half tensor-core GEMM takes every degree's gate
@@ -3087,13 +3114,14 @@ void GenericModel::record(const GenericPassInputs& in) {
                     g.lin_l = lins[l];
                     g.res0 = res0;
                     g.res0_sp = res0_sp;
-                    g.res_l = (l >= 1 && l <= L->lmax_x && l <= 2) ? L->res[l] : nullptr;
+                    g.res_l = (l >= 1 && l <= 2) ? ress[l] : nullptr;
                     g.dp0 = dpre0;
                     g.dp_l = (l >= 1 && t > 0 && !rdl && l <= L->lmax_x && l <= 2) ? L->dpre[l] : nullptr;
                     g.dl0 = L->dlin[0];
                     g.dl_l = L->dlin[l];
                     g.dD = L->dD;
                     g.vform = vform >> l & 1u;
+                    g.rform = rform >> l & 1u;
                     if (h2) {
                         in.gemm_h2_gate(l, N * dimL(l), Cm, Cm, L->dmsgf[l], L->w2h[l], L->w2h_oscale[l], g);
                         done = true;
@@ -3107,13 +3135,11 @@ void GenericModel::record(const GenericPassInputs& in) {
             join();
             if (fused != 15u)
                 gate_bwd_kernel<<<N, Cm, 0, st>>>(N, Cm, L->lmax_x, L->D, L->alpha, L->beta, L->gate_cs, L->gate_cg,
-                                                  L->lin[0], lins[1], lins[2], lins[3], res0, res0_sp,
-                                                  L->lmax_x >= 1 ? L->res[1] : nullptr,
-                                                  L->lmax_x >= 2 ? L->res[2] : nullptr, L->dgout[0], L->dgout[1],
-                                                  L->dgout[2], L->dgout[3], dpre0,
+                                                  L->lin[0], lins[1], lins[2], lins[3], res0, res0_sp, ress[1],
+                                                  ress[2], L->dgout[0], L->dgout[1], L->dgout[2], L->dgout[3], dpre0,
                                                   (t > 0 && !rdl && L->lmax_x >= 1) ? L->dpre[1] : nullptr,
                                                   (t > 0 && !rdl && L->lmax_x >= 2) ? L->dpre[2] : nullptr, L->dlin[0],
-                                                  L->dlin[1], L->dlin[2], L->dlin[3], L->dD, fused, vform);
+                                                  L->dlin[1], L->dlin[2], L->dlin[3], L->dD, fused, vform, rform);
         }
         const bool density = L->kind >= 2;
         if (L->first_hidden) {

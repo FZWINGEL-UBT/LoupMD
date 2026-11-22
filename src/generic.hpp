@@ -52,6 +52,11 @@ struct GateArgs {
     float* c2 = nullptr;
     int n1 = 0;
     float os2 = 1.0f;
+    // rform (list 27 item 3, LOUP_LIN_HALF_PARTS bit 64; last, so the other fields keep their offsets in the kernels'
+    // parameters): a degree l in 1 .. 2 with a residual whose forward gate ran in its W_res projection's epilogue
+    // (hgemm2_f32a_gate with lin_l), so res_l is never stored: res_l holds the saved gout_l = g (lin_l s + res_l), the
+    // gate logit's reverse taken through it (d gp = (1 - sg) sum dgout gout_l)
+    int rform = 0;
 };
 // Runs the projection fused with degree l's gate (M = natoms (2l + 1), N = C) when the GEMM's plan and shape allow;
 // false: nothing launched (the caller runs the plain GEMM and the gate kernel for l). Backward: dgout_l = A[M, K] @
@@ -90,7 +95,8 @@ void hgemm2_f32a_rows(int M, int N, int K, const float* A, float sA, const void*
 using GemmH2RowsFn = std::function<void(int M, int N, int K, const float* A, float sA, const void* B, float oscale,
                                         float* C, const GateArgs& rs)>;
 // The same product for a residual-free degree l >= 1 (M = g.natoms (2l + 1), N = g.C) with gate_fwd's gated store:
-// gout_l = g (lin_l s) to g.out instead of lin_l.
+// gout_l = g (lin_l s) to g.out instead of lin_l. With g.lin_l (list 27 item 3, l = 1, 2 only): the product is degree
+// l's residual res_l, and the store is gout_l = g (lin_l s + res_l), lin_l read from g.lin_l; res_l is not stored.
 void hgemm2_f32a_gate(int l, int M, int N, int K, const float* A, float sA, const void* B, float oscale,
                       const GateArgs& g, cudaStream_t stream);
 // LOUP_LIN_HALF's projections keep the forward gate fusion (LOUP_GATE_FUSE_FWD; `later`: a later layer's, under

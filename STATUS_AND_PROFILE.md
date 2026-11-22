@@ -3389,3 +3389,26 @@ build order then). Ledger `ideas-20261122-list28`, 5060 Ti only.
   instead of two float32 GEMMs. The gates pass on all three models, POLAR-1-M by default, with the gate fusion off, with
   `LOUP_SPECIES_TABLES=0` and with `LOUP_POLAR_HFOLD=0`.
 - Other GPUs keep the GEMMs for POLAR-1; `LOUP_SPECIES_TABLES=1` builds the tables there.
+
+### 6.62 POLAR-1 k-space / readout / contiguous blocks, `rform v3`, and measured comparison against `v0.0.2` (list 29, 22 November 2026)
+
+Four POLAR-1 / small-cell items (`ideas-20261122-list29`) and list 27's `rform v3` (`gen-rform-v3`), all 5060 Ti only:
+
+- **POLAR-1 k-space splits (`LOUP_POLAR_KSPLIT`, default `2 -> 4`):** `grad_pass` + `feat_pass` dropped from 743 to 467-524 us on POLAR-1-M and 391 to 264-300 us on POLAR-1-S. Evaluate NbCl5 (A B B A twice, fresh plans): k4 against k2 POLAR-1-M `0.9892` (stress `0.9908`, 4/4 pairs < 1), POLAR-1-S `0.9777` (stress `0.9835`, 4/4 EF and 3/4 EFS < 1). Default set to `4`.
+- **POLAR-1 `ro_bwd_kernel` transposed weights (no switch):** `ro_Wm0T` / `ro_Wm1T` / `ro_W2T` took `ro_bwd_kernel` from 142 to 25 us per call on POLAR-1-M NbCl5. Evaluate NbCl5: POLAR-1-M `0.9878` (stress `0.9897`, 4/4 < 1), POLAR-1-S `0.9891` (stress `0.9881`).
+- **POLAR-1 contiguous weight blocks (`LOUP_POLAR_WBLK`, default on):** copying strided (`ld = R`) SCF and electron-energy weight slices into contiguous blocks eliminates all 96 legacy `cublasSgemm` calls per POLAR-1-M pass (both fold settings). Evaluate POLAR-1-M NbCl5 `0.9849` (stress `0.9800`, 4/4 < 1 each), NaCl216 `0.9845` (stress `0.9773`); MD loop POLAR-1-M NaCl216 `0.9799` (4/4 < 1), POLAR-1-S NaCl216 `0.9809` (3/4 < 1).
+- **Rejected (reverted):** split-K `sgemm64` autotune candidates (`LOUP_SGEMM64_SPLIT`) tied or lost (`0.9990`-`1.0308` across POLAR-1-M/-S and MH-1 NaCl216). `LOUP_DEBUG_GEMM`'s legacy `cublasSgemm` print in `src/engine.cu` is kept.
+- **`rform v3` (list 27 item 3, `gen-rform-v3`, `LOUP_LIN_HALF_PARTS` bit 64, default `447 -> 511`):** residual degrees 1 and 2 run their forward gate in `W_res`'s `hgemm2f_kernel` epilogue with `lin_l` L2-prefetched four K steps ahead and loaded before the epilogue barrier (`gate_bwd_tile<..., RF>` in both `hgemm2_kernel` and `sgemm128_gate`). Measured on `f25` (parts 447 vs 511): evaluate MH-1 SrTiO3 `0.9924` (stress `0.9951`, 4/4 < 1), MD OMOL-0 XL water216 `0.9899` (4/4 < 1), MD MH-1 NaCl216 `0.9995` (tie).
+- **Gates (5060 Ti):** POLAR-1-S (5/5), POLAR-1-M (18/18), POLAR-1-L (6/6, `--ref-device cpu`) pass by default and with `LOUP_POLAR_FOLD=0`; MH-1 (`omat_pbe` crystals 18/18 default, `LOUP_GATE_FWD_L1=2`, `LOUP_W2T_HALF=0 LOUP_GATE_FWD_L1=2`, and all two-half `0`; `omol` organics 24/24) and OMOL-0 XL (8/8 default and all two-half `0`, `--ref-device cpu`) pass; Sr-contact0.8 passes 6/6 over fresh plan sets across conv variants 0-2 (`LOUP_GATE_FWD_L1=2`, force ratios 0.19-0.72).
+
+Measured comparison against `v0.0.2` (`9f1442e`) at the pushed list-28 head `89e308b` (5060 Ti only, A B B A, two runs per side, fresh plans per run, each side using its own Python package, default settings; `.tmp_o/relcmp.out`, does not yet include list 29 / `rform v3`):
+
+| Case | `v0.0.2` | List 28 (`89e308b`) | `now / v0.0.2` |
+| --- | --- | --- | --- |
+| Evaluate MH-1 SrTiO3 (5,000 atoms) | 30.57 ms | 23.35 ms | `0.7640` (stress `0.7594`) |
+| MD MH-1 NaCl216 | 1.333 ms/step | 1.027 ms/step | `0.7707` |
+| MD OMOL-0 XL water216 | 21.34 ms/step | 16.61 ms/step | `0.7784` |
+| Evaluate OMAT-0 medium SrTiO3 | 7.65 ms | 7.23 ms | `0.9447` (stress `0.9314`) |
+| MD OFF23-M water216 | 0.870 ms/step | 0.812 ms/step | `0.9333` |
+| Evaluate POLAR-1-M NbCl5 | 19.27 ms | 18.15 ms | `0.9419` (stress `0.9658`) |
+| MD POLAR-1-M NaCl216 | 2.622 ms/step | 2.561 ms/step | `0.9765` |

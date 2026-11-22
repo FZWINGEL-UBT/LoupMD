@@ -122,7 +122,7 @@ __device__ __forceinline__ void gate_bwd_tile_dD(const float* sC, const float* s
 // side): N % 64 == 0, K % 32 == 0, A and B 16-byte aligned.
 __device__ __forceinline__ void prefetch_l2(const void* p) { asm volatile("prefetch.global.L2 [%0];" ::"l"(p)); }
 
-template <int DEG>
+template <int DEG, bool RF = false>
 __global__ void __launch_bounds__(128, 2) hgemm2_kernel(int M, int N, int K, const __half* __restrict__ A,
                                                         const __half* __restrict__ B, float oscale,
                                                         float* __restrict__ C, GateArgs g) {
@@ -283,7 +283,7 @@ __global__ void __launch_bounds__(128, 2) hgemm2_kernel(int M, int N, int K, con
             sQ[tid] = g.res0_sp ? g.res0_sp[a] : a;
         }
         __syncthreads();
-        gate_bwd_tile<DEG, kHSRow, 2>(sC, sS, sQ, a0, na, n0, tid, g);
+        gate_bwd_tile<DEG, kHSRow, 2, RF>(sC, sS, sQ, a0, na, n0, tid, g);
         __syncthreads();
         gate_bwd_tile_dD<DEG, kHSRow>(sC, sS, a0, na, tid, g);
     }
@@ -327,12 +327,17 @@ constexpr int kHFwdVariant = 1;           // hgemm2_f32a's restart variant (hgem
 // N = g.C; C and beta unused), elementwise in the epilogue with the gate kernel's operations. SPLIT (list 22, DEG <= 0
 // only): block z of gridDim.z takes its share of the 32-of-K steps and stores the raw sum into slice z of C (the
 // workspace), for hgemm2_splitk_reduce; its own instances, so the unsplit ones keep their code (f7, with the split
-// inside them, lost 1.5-1.9% on MH-1 SrTiO3, where nothing splits).
-template <int RV, int DEG, bool TAIL, bool SPLIT = false>
+// inside them, lost 1.5-1.9% on MH-1 SrTiO3, where nothing splits). RESID (list 27 item 3, LOUP_LIN_HALF_PARTS bit 64;
+// DEG 3 and 5 only): the product is degree l's residual res_l, and the gated store adds it to lin_l s, lin_l read from
+// ga.lin_l: gout_l = g (lin_l s + res_l), res_l never stored; the tile's lin_l rows are prefetched into L2 four K steps
+// before the loop ends and each thread's 32 lin_l pairs are loaded before its first store (lists 23 and 25 read them
+// one store at a time: the epilogue added 2.2 ms to OMOL-0 XL water 5,184, about what the gate kernel saved).
+template <int RV, int DEG, bool TAIL, bool SPLIT = false, bool RESID = false>
 __global__ void __launch_bounds__(128, 2) hgemm2f_kernel(int M, int N, int K, const float* __restrict__ A, float sA,
                                                          const __half* __restrict__ B, float oscale,
                                                          float* __restrict__ C, float beta, GateArgs ga) {
     static_assert(!SPLIT || DEG <= 0, "only the plain and rows instances split");
+    static_assert(!RESID || DEG == 3 || DEG == 5, "only degrees 1 and 2 have a residual");
     extern __shared__ __align__(128) unsigned char hsm[];
     const unsigned sbase = (unsigned)__cvta_generic_to_shared(hsm);
     const int tid = threadIdx.x, lane = tid & 31, warp = tid >> 5, wm = warp >> 1, wn = warp & 1;
@@ -387,6 +392,15 @@ __global__ void __launch_bounds__(128, 2) hgemm2f_kernel(int M, int N, int K, co
         asm volatile("cp.async.wait_group 0;");
         __syncthreads();
         if (kt + 1 < kt1) issue(kt + 1);
+        if constexpr (RESID) {  // list 27 item 3: the tile's lin_l rows into L2 for the epilogue, as hgemm2_kernel's
+            if (kt == (kt1 > 4 ? kt1 - 4 : 0)) {
+                const int r = m0 + tid;
+                if (r < M) {
+                    prefetch_l2(ga.lin_l + (int64_t)r * N + n0);
+                    if (n0 + 32 < N) prefetch_l2(ga.lin_l + (int64_t)r * N + n0 + 32);
+                }
+            }
+        }
         if (TAIL && jn == 0) continue;  // a warp wholly past N (the last column tile) only copies
         const int st = kt & 1;
         const unsigned char* sa = hsm + st * kHStage * 2 + (wm * 64 + g) * 128 + (t & 1) * 8;
@@ -493,6 +507,22 @@ __global__ void __launch_bounds__(128, 2) hgemm2f_kernel(int M, int N, int K, co
         const int a0 = m0 / DEG, na = (min(m0 + kHM, M) - 1) / DEG - a0 + 1;
         float* sS = sG + na * SGS;
         int* sQ = reinterpret_cast<int*>(sS + na);  // list 26 item 3: the atoms' res0 rows
+        // RESID (list 27 item 3): every lin_l pair this thread stores, loaded before the gate's staging (ga's pointers
+        // are not restrict, so loads placed among the stores would each wait on the store before them)
+        float2 lv[RESID ? 4 : 1][2][4];
+        if constexpr (RESID) {
+#pragma unroll
+            for (int i = 0; i < 4; ++i)
+#pragma unroll
+                for (int h = 0; h < 2; ++h) {
+                    const int r = m0 + er + 16 * i + 8 * h;
+#pragma unroll
+                    for (int j = 0; j < 4; ++j)
+                        lv[i][h][j] = r < M && j < jn
+                                          ? *reinterpret_cast<const float2*>(ga.lin_l + (int64_t)r * N + n0 + ec + 8 * j)
+                                          : make_float2(0.0f, 0.0f);
+                }
+        }
         __syncthreads();  // every warp is done with the pipeline buffers
         for (int ai = tid; ai < na; ai += 128) {
             const int a = a0 + ai;
@@ -537,8 +567,15 @@ __global__ void __launch_bounds__(128, 2) hgemm2f_kernel(int M, int N, int K, co
                     if (j >= jn) continue;
                     const int cl = ec + 8 * j;
                     const float2 gg = *reinterpret_cast<const float2*>(sG + ai * SGS + cl);
-                    *reinterpret_cast<float2*>(ga.out + (int64_t)r * N + n0 + cl) =
-                        make_float2(gg.x * ((acc[i][j][2 * h] * oscale) * s), gg.y * ((acc[i][j][2 * h + 1] * oscale) * s));
+                    if constexpr (RESID) {  // gate_fwd_kernel's p = lin_l s + res_l, res_l the product
+                        const float2 v = lv[RESID ? i : 0][h][j];
+                        *reinterpret_cast<float2*>(ga.out + (int64_t)r * N + n0 + cl) =
+                            make_float2(gg.x * fmaf(v.x, s, acc[i][j][2 * h] * oscale),
+                                        gg.y * fmaf(v.y, s, acc[i][j][2 * h + 1] * oscale));
+                    } else {
+                        *reinterpret_cast<float2*>(ga.out + (int64_t)r * N + n0 + cl) = make_float2(
+                            gg.x * ((acc[i][j][2 * h] * oscale) * s), gg.y * ((acc[i][j][2 * h + 1] * oscale) * s));
+                    }
                 }
             }
     } else if constexpr (DEG < 0) {
@@ -685,12 +722,12 @@ void hgemm2_splitk_reduce(int M, int N, int S, const float* ws, float oscale, fl
                                                                                      rows);
 }
 
-template <int DEG>
+template <int DEG, bool RF = false>
 void launch_hgemm2(int M, int N, int K, const __half* A, const __half* B, float oscale, float* C, const GateArgs& g,
                    cudaStream_t stream) {
     const int rows = DEG ? kHM / DEG * DEG : kHM;
     const dim3 grid(N / kHN, (M + rows - 1) / rows);
-    hgemm2_kernel<DEG><<<grid, 128, kHSmem, stream>>>(M, N, K, A, B, oscale, C, g);
+    hgemm2_kernel<DEG, RF><<<grid, 128, kHSmem, stream>>>(M, N, K, A, B, oscale, C, g);
 }
 
 }  // namespace
@@ -716,6 +753,16 @@ void hgemm2_init() {
     cudaFuncSetAttribute(hgemm2f_kernel<kHFwdVariant, -1, true>, cudaFuncAttributePreferredSharedMemoryCarveout, 100);
     cudaFuncSetAttribute(hgemm2f_kernel<1, 0, false, true>, cudaFuncAttributePreferredSharedMemoryCarveout, 100);
     cudaFuncSetAttribute(hgemm2f_kernel<1, 0, true, true>, cudaFuncAttributePreferredSharedMemoryCarveout, 100);
+    cudaFuncSetAttribute(hgemm2_kernel<3, true>, cudaFuncAttributePreferredSharedMemoryCarveout, 100);
+    cudaFuncSetAttribute(hgemm2_kernel<5, true>, cudaFuncAttributePreferredSharedMemoryCarveout, 100);
+    cudaFuncSetAttribute(hgemm2f_kernel<kHFwdVariant, 3, false, false, true>,
+                         cudaFuncAttributePreferredSharedMemoryCarveout, 100);
+    cudaFuncSetAttribute(hgemm2f_kernel<kHFwdVariant, 5, false, false, true>,
+                         cudaFuncAttributePreferredSharedMemoryCarveout, 100);
+    cudaFuncSetAttribute(hgemm2f_kernel<kHFwdVariant, 3, true, false, true>,
+                         cudaFuncAttributePreferredSharedMemoryCarveout, 100);
+    cudaFuncSetAttribute(hgemm2f_kernel<kHFwdVariant, 5, true, false, true>,
+                         cudaFuncAttributePreferredSharedMemoryCarveout, 100);
 }
 
 namespace {
@@ -776,6 +823,16 @@ void hgemm2_f32a_gate(int l, int M, int N, int K, const float* A, float sA, cons
     const dim3 grid((N + kHN - 1) / kHN, (M + kHM - 1) / kHM);
     const __half* b = static_cast<const __half*>(B);
     const auto go = [&](auto kernel) { kernel<<<grid, 128, kHSmem, stream>>>(M, N, K, A, sA, b, oscale, nullptr, 0.0f, g); };
+    if (g.lin_l) {  // list 27 item 3: the residual degrees' form (l = 1, 2; the caller checks)
+        if (h2_tail(N, K, 0.0f)) {
+            if (l == 1) go(hgemm2f_kernel<kHFwdVariant, 3, true, false, true>);
+            else go(hgemm2f_kernel<kHFwdVariant, 5, true, false, true>);
+        } else {
+            if (l == 1) go(hgemm2f_kernel<kHFwdVariant, 3, false, false, true>);
+            else go(hgemm2f_kernel<kHFwdVariant, 5, false, false, true>);
+        }
+        return;
+    }
     if (h2_tail(N, K, 0.0f)) {
         if (l == 1) go(hgemm2f_kernel<kHFwdVariant, 3, true>);
         else if (l == 2) go(hgemm2f_kernel<kHFwdVariant, 5, true>);
@@ -838,8 +895,14 @@ void hgemm2_gate(int l, int M, int N, int K, const void* A, const void* B, float
     switch (l) {
         case -1: launch_hgemm2<0>(M, N, K, a, b, oscale, C, g, stream); break;
         case 0: launch_hgemm2<1>(M, N, K, a, b, oscale, C, g, stream); break;
-        case 1: launch_hgemm2<3>(M, N, K, a, b, oscale, C, g, stream); break;
-        case 2: launch_hgemm2<5>(M, N, K, a, b, oscale, C, g, stream); break;
+        case 1:  // list 27 item 3: a residual degree whose forward gate ran in W_res's epilogue has its own instance
+            if (g.rform) launch_hgemm2<3, true>(M, N, K, a, b, oscale, C, g, stream);
+            else launch_hgemm2<3>(M, N, K, a, b, oscale, C, g, stream);
+            break;
+        case 2:
+            if (g.rform) launch_hgemm2<5, true>(M, N, K, a, b, oscale, C, g, stream);
+            else launch_hgemm2<5>(M, N, K, a, b, oscale, C, g, stream);
+            break;
         default: launch_hgemm2<7>(M, N, K, a, b, oscale, C, g, stream); break;
     }
 }

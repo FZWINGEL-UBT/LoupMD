@@ -40,7 +40,7 @@ __device__ __forceinline__ void cp_async_wait_one_pending() { asm volatile("cp.a
 // s and res0 rows staged once (sS, sQ), batched operand loads, and each atom's column partials summed by one thread
 // per half (its running sums in registers) instead of gate_bwd_rows' warp shuffles and shared atomics (ncu, POLAR-1-M
 // NbCl5: the gated instances ran the FMA pipe at 47-65% against the plain instance's 71-74%).
-template <int DEG>
+template <int DEG, bool RF = false>
 __device__ __forceinline__ void gate_bwd_epilogue(const float (&acc)[8][8], float* smem, int a0, int n0,
                                                   const GateArgs& g) {
     constexpr int APT = 128 / DEG;
@@ -64,7 +64,7 @@ __device__ __forceinline__ void gate_bwd_epilogue(const float (&acc)[8][8], floa
             *reinterpret_cast<float4*>(sC + ((i < 4 ? 0 : 60) + ty * 4 + i) * 64 + tx * 4) =
                 make_float4(acc[i][4 * hh], acc[i][4 * hh + 1], acc[i][4 * hh + 2], acc[i][4 * hh + 3]);
         __syncthreads();
-        gate_bwd_tile<DEG, 64, 4>(sC, sS, sQ, a0, na, n0 + hh * 64, tid, g);
+        gate_bwd_tile<DEG, 64, 4, RF>(sC, sS, sQ, a0, na, n0 + hh * 64, tid, g);
         __syncthreads();
         if (tid < na) gate_bwd_tile_sum<DEG, 64>(sC, tid, g, p, q);
     }
@@ -119,7 +119,7 @@ __device__ __forceinline__ void gate_fwd_epilogue(const float (&acc)[8][8], floa
 // column guards. GATE_DEG 0: the plain store of C (g unused); 1 / 3 / 5 / 7 (with TN 8, FULL_N, N_FASTEST): row tiles
 // of 128 / GATE_DEG whole atoms and gate_bwd_epilogue<GATE_DEG> (gate_fwd_epilogue with GATE_FWD) instead of the store
 // (C, beta unused).
-template <int TN, bool FULL_N, bool N_FASTEST, int GATE_DEG = 0, bool GATE_FWD = false>
+template <int TN, bool FULL_N, bool N_FASTEST, int GATE_DEG = 0, bool GATE_FWD = false, bool RF = false>
 __global__ void __launch_bounds__(256, 2) sgemm128_kernel(int M, int N, int K, const float* __restrict__ A,
                                                           const float* __restrict__ B, float* __restrict__ C,
                                                           float beta, GateArgs g) {
@@ -196,7 +196,7 @@ __global__ void __launch_bounds__(256, 2) sgemm128_kernel(int M, int N, int K, c
     if constexpr (GATE_DEG != 0) {
         static_assert(TN == 8 && FULL_N, "gate epilogue: 128 x 128 tiles, N % 128 == 0");
         if constexpr (GATE_FWD) gate_fwd_epilogue<GATE_DEG>(acc, smem, m0 / GATE_DEG, n0, g);
-        else gate_bwd_epilogue<GATE_DEG>(acc, smem, m0 / GATE_DEG, n0, g);
+        else gate_bwd_epilogue<GATE_DEG, RF>(acc, smem, m0 / GATE_DEG, n0, g);
     } else {
 #pragma unroll
         for (int i = 0; i < 8; ++i) {
@@ -531,6 +531,8 @@ void sgemm128_init() {
     cudaFuncSetAttribute(sgemm128_kernel<8, true, true, 3>, cudaFuncAttributePreferredSharedMemoryCarveout, 100);
     cudaFuncSetAttribute(sgemm128_kernel<8, true, true, 5>, cudaFuncAttributePreferredSharedMemoryCarveout, 100);
     cudaFuncSetAttribute(sgemm128_kernel<8, true, true, 7>, cudaFuncAttributePreferredSharedMemoryCarveout, 100);
+    cudaFuncSetAttribute(sgemm128_kernel<8, true, true, 3, false, true>, cudaFuncAttributePreferredSharedMemoryCarveout, 100);
+    cudaFuncSetAttribute(sgemm128_kernel<8, true, true, 5, false, true>, cudaFuncAttributePreferredSharedMemoryCarveout, 100);
     cudaFuncSetAttribute(sgemm128_kernel<8, true, true, 3, true>, cudaFuncAttributePreferredSharedMemoryCarveout, 100);
     cudaFuncSetAttribute(sgemm128_kernel<8, true, true, 5, true>, cudaFuncAttributePreferredSharedMemoryCarveout, 100);
     cudaFuncSetAttribute(sgemm128_kernel<8, true, true, 7, true>, cudaFuncAttributePreferredSharedMemoryCarveout, 100);
@@ -580,8 +582,10 @@ void sgemm128_gate(bool fwd, int l, int M, int N, int K, const float* A, const f
                      : l == 2 ? sgemm128_kernel<8, true, true, 5, true>
                               : sgemm128_kernel<8, true, true, 7, true>)
                     : (l == 0 ? sgemm128_kernel<8, true, true, 1>
-                     : l == 1 ? sgemm128_kernel<8, true, true, 3>
-                     : l == 2 ? sgemm128_kernel<8, true, true, 5>
+                     : l == 1 ? (g.rform ? sgemm128_kernel<8, true, true, 3, false, true>
+                                         : sgemm128_kernel<8, true, true, 3>)
+                     : l == 2 ? (g.rform ? sgemm128_kernel<8, true, true, 5, false, true>
+                                         : sgemm128_kernel<8, true, true, 5>)
                               : sgemm128_kernel<8, true, true, 7>);
     kern<<<grid, 256, smem_bytes<128>(), stream>>>(M, N, K, A, B, nullptr, 0.0f, g);
 }

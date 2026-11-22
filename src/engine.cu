@@ -1290,6 +1290,10 @@ static inline void sgemm_rm(
     cublasLtHandle_t lt_h = h->cublas_lt;
     void* ws_p = h->gemm_ws ? h->gemm_ws : h->d_cublas_ws;
     if (transA || lda != K || ldc != N || ldb != (transB ? K : N)) {
+        static const bool dbg_legacy = std::getenv("LOUP_DEBUG_GEMM") != nullptr;
+        if (dbg_legacy)
+            fprintf(stderr, "gemm legacy M=%d N=%d K=%d transA=%d transB=%d lda=%d ldb=%d ldc=%d beta=%g\n", M, N, K,
+                    (int)transA, (int)transB, lda, ldb, ldc, beta);
         cublasOperation_t opB = transB ? CUBLAS_OP_T : CUBLAS_OP_N;
         cublasOperation_t opA = transA ? CUBLAS_OP_T : CUBLAS_OP_N;
         cublas_bind(h, strm, ws_p);

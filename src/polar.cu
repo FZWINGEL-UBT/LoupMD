@@ -841,9 +841,11 @@ __global__ void ro_fwd_kernel(int N, RoConsts rc, int has_v, const float* __rest
     }
 }
 
+// The weights come transposed (list 29 item 3, Update::ro_Wm0T / ro_Wm1T / ro_W2T): lane h reads consecutive floats
+// instead of one cache line per lane (rows of 64 / 32 / 10 floats); the sums keep their order.
 __global__ void ro_bwd_kernel(int N, RoConsts rc, int has_v, const float* __restrict__ s0,
-                              const float* __restrict__ v1, const float* __restrict__ Wm0,
-                              const float* __restrict__ Wm1, const float* __restrict__ W2,
+                              const float* __restrict__ v1, const float* __restrict__ Wm0T,
+                              const float* __restrict__ Wm1T, const float* __restrict__ W2T,
                               const float* __restrict__ smid, const float* __restrict__ vmid,
                               const float* __restrict__ dout, float* __restrict__ ds0, float* __restrict__ dv1) {
     const int a = blockIdx.x * (blockDim.x >> 5) + (threadIdx.x >> 5), h = threadIdx.x & 31;
@@ -856,19 +858,19 @@ __global__ void ro_bwd_kernel(int N, RoConsts rc, int has_v, const float* __rest
     const float* d = sdo[threadIdx.x >> 5];
     if (!has_v) {  // S124: the scalar path alone (see ro_fwd_kernel)
         float db0 = 0.0f;
-        for (int k = 0; k < 10; ++k) db0 = fmaf(d[k], W2[h * 10 + k], db0);
+        for (int k = 0; k < 10; ++k) db0 = fmaf(d[k], W2T[k * 128 + h], db0);
         S[0][h] = db0 * rc.cs * dsilu_f(smid[(int64_t)a * 64 + h]);
         __syncwarp();
         float da0 = 0.0f;
-        for (int o = 0; o < 32; ++o) da0 = fmaf(S[0][o], Wm0[h * 64 + o], da0);
+        for (int o = 0; o < 32; ++o) da0 = fmaf(S[0][o], Wm0T[o * 32 + h], da0);
         ds0[(int64_t)a * 64 + h] = da0 * rc.cs * dsilu_f(s0[(int64_t)a * 64 + h]);
         return;
     }
     // gradient of the second gate outputs b0[h], b1[m][h]
     float db0 = 0.0f, db1[3] = {0.0f, 0.0f, 0.0f};
     for (int k = 0; k < 10; ++k) {
-        db0 = fmaf(d[k], W2[h * 10 + k], db0);
-        for (int m = 0; m < 3; ++m) db1[m] = fmaf(d[k], W2[(32 + h * 3 + m) * 10 + k], db1[m]);
+        db0 = fmaf(d[k], W2T[k * 128 + h], db0);
+        for (int m = 0; m < 3; ++m) db1[m] = fmaf(d[k], W2T[k * 128 + 32 + m * 32 + h], db1[m]);
     }
     const float sm0 = smid[(int64_t)a * 64 + h], sm1 = smid[(int64_t)a * 64 + 32 + h];
     const float sg2 = sig_f(sm1), g2 = rc.cg * sg2;
@@ -884,7 +886,7 @@ __global__ void ro_bwd_kernel(int N, RoConsts rc, int has_v, const float* __rest
     S[1][h] = dsm1;
     __syncwarp();
     float da0 = 0.0f;
-    for (int o = 0; o < 32; ++o) da0 = fmaf(S[0][o], Wm0[h * 64 + o], fmaf(S[1][o], Wm0[h * 64 + 32 + o], da0));
+    for (int o = 0; o < 32; ++o) da0 = fmaf(S[0][o], Wm0T[o * 32 + h], fmaf(S[1][o], Wm0T[(32 + o) * 32 + h], da0));
     __syncwarp();
     float dvm[3];
     for (int m = 0; m < 3; ++m) dvm[m] = db1[m] * g2;
@@ -894,7 +896,7 @@ __global__ void ro_bwd_kernel(int N, RoConsts rc, int has_v, const float* __rest
         S[0][h] = dvm[m];
         __syncwarp();
         float acc = 0.0f;
-        for (int o = 0; o < 32; ++o) acc = fmaf(S[0][o], Wm1[h * 32 + o], acc);
+        for (int o = 0; o < 32; ++o) acc = fmaf(S[0][o], Wm1T[o * 32 + h], acc);
         da1[m] = acc;
     }
     // first gate
@@ -1078,12 +1080,13 @@ __global__ void spin_grad_kernel(int N, const float* __restrict__ g, float* __re
 
 inline unsigned blocks_for(int64_t n, int b = 256) { return (unsigned)((n + b - 1) / b); }
 
-// k chunks for the per-atom k passes: enough blocks for ~2 per SM (at most k_splits_max(N) chunks), chunks a
-// multiple of 64 (both tiles).
+// k chunks for the per-atom k passes: enough blocks for ~4 per SM (at most k_splits_max(N) chunks), chunks a
+// multiple of 64 (both tiles). LOUP_POLAR_KSPLIT=b (list 29 item 1, tests) aims at b blocks per SM instead.
 inline int k_splits_max(int N) {
     static int sms = [] { int d = 0, s = 0; cudaGetDevice(&d); cudaDeviceGetAttribute(&s, cudaDevAttrMultiProcessorCount, d); return s > 0 ? s : 1; }();
+    static int per_sm = [] { const char* e = std::getenv("LOUP_POLAR_KSPLIT"); const int v = e ? std::atoi(e) : 4; return v > 0 ? v : 4; }();
     const int atom_blocks = (int)blocks_for(N, 128);
-    return (2 * sms + atom_blocks - 1) / atom_blocks;
+    return (per_sm * sms + atom_blocks - 1) / atom_blocks;
 }
 inline int k_chunk(int N, int K) {
     int ks = k_splits_max(N);
@@ -1144,6 +1147,8 @@ struct PolarLR::Impl {
         Mlp mlp;
         float *ro_W1[2] = {}, *ro_Wm0 = nullptr, *ro_bm = nullptr, *ro_Wm1 = nullptr, *ro_W2 = nullptr,
               *ro_b2 = nullptr;
+        // ro_bwd_kernel's lane-contiguous copies (list 29 item 3): Wm0T [64][32], Wm1T [32][32], W2T [10][128]
+        float *ro_Wm0T = nullptr, *ro_Wm1T = nullptr, *ro_W2T = nullptr;
         RoConsts rc{1.0f, 1.0f};
     };
     struct Step {  // saved forward state of one SCF step
@@ -1163,6 +1168,33 @@ struct PolarLR::Impl {
     // fold; not with LOUP_POLAR_ZBLK=0): its source GEMMs are skipped (POLAR-1-L's l = 2 blocks)
     std::vector<std::vector<char>> src_zero;
     bool zblk = true;
+    // List 29 item 4 (LOUP_POLAR_WBLK=0 turns it off, tests / A/B): the [rows, R] pot / q weights (Wpot, Wq, le_Wq,
+    // le_Wv, folded or not) also as block-major copies, degree l's [rows, (2l + 1) C] block contiguous at rows off[l],
+    // so the degree-l GEMMs have the natural strides and go through the GEMM autotune instead of cuBLAS's legacy path.
+    bool wblk = true;
+    std::vector<std::pair<const float*, float*>> wblk_of;
+    void add_blocks(const float* W, int rw) {
+        if (!wblk || !W) return;
+        float* out = nullptr;
+        CUDA_CHECK_THROW(cudaMalloc(&out, (size_t)rw * rows * sizeof(float)));
+        w_.push_back(out);
+        for (int l = 0; l <= lmax; ++l) {
+            const size_t w = (size_t)(2 * l + 1) * C * sizeof(float);
+            CUDA_CHECK_THROW(cudaMemcpy2D(out + (size_t)rw * off[l], w, W + off[l], (size_t)rows * sizeof(float), w, rw,
+                                          cudaMemcpyDeviceToDevice));
+        }
+        wblk_of.emplace_back(W, out);
+    }
+    struct WRef {
+        const float* p;
+        int ld;
+    };
+    // degree l's block of a [rw, R] weight: the contiguous copy, else the strided block
+    WRef wref(const float* W, int rw, int l) const {
+        for (const auto& e : wblk_of)
+            if (e.first == W) return {e.second + (size_t)rw * off[l], (2 * l + 1) * C};
+        return {W + off[l], rows};
+    }
     std::vector<std::vector<const float*>> mix;  // a hidden fold's composed mixer belongs to the generic layer
     float *fk_W1 = nullptr, *fk_Wm = nullptr, *fk_bm = nullptr, *fk_W2 = nullptr, *fk_b2 = nullptr;
     float fk_act = 1.0f;
@@ -1311,6 +1343,8 @@ void PolarLR::load(const Bundle& b, int S, int n_layers) {
     {
         const char* zb_env = std::getenv("LOUP_POLAR_ZBLK");
         P.zblk = !(zb_env && zb_env[0] == '0');
+        const char* wb_env = std::getenv("LOUP_POLAR_WBLK");
+        P.wblk = !(wb_env && wb_env[0] == '0');
     }
     for (int t = 0; t < n_layers; ++t) {
         const std::vector<float> src = b.f32("LR.src_" + std::to_string(t), {R, 8});
@@ -1404,6 +1438,8 @@ void PolarLR::load(const Bundle& b, int S, int n_layers) {
             U.Wpot = P.up(Wpot);
             U.Wq = P.up(Wq);
         }
+        P.add_blocks(P.fold ? U.Wpot_dot : U.Wpot, 16);
+        P.add_blocks(P.fold ? U.Wq_dot : U.Wq, 8);
         for (int l = 0; l <= P.lmax; ++l) {
             if (P.fold) {
                 U.Wnf_dot[l] = P.up_fold(b.f32(p + "Wnf_" + std::to_string(l), {C, C}), C, C, {{0, C, &dot[l]}});
@@ -1432,10 +1468,26 @@ void PolarLR::load(const Bundle& b, int S, int n_layers) {
         const auto gt = b.f64(p + "ro_gate", {2});
         U.rc.cs = (float)gt[0];
         U.rc.cg = (float)gt[1];
-        U.ro_Wm0 = P.up(b.f32(p + "ro_Wm_0", {32, 64}));
+        const std::vector<float> wm0 = b.f32(p + "ro_Wm_0", {32, 64}), wm1 = b.f32(p + "ro_Wm_1", {32, 32}),
+                                 w2 = b.f32(p + "ro_W2", {128, 10});
+        U.ro_Wm0 = P.up(wm0);
         U.ro_bm = P.up(b.f32(p + "ro_bm", {64}));
-        U.ro_Wm1 = P.up(b.f32(p + "ro_Wm_1", {32, 32}));
-        U.ro_W2 = P.up(b.f32(p + "ro_W2", {128, 10}));
+        U.ro_Wm1 = P.up(wm1);
+        U.ro_W2 = P.up(w2);
+        {  // ro_bwd_kernel reads these with lane h on consecutive floats
+            std::vector<float> t0(64 * 32), t1(32 * 32), t2(10 * 128);
+            for (int h = 0; h < 32; ++h) {
+                for (int o = 0; o < 64; ++o) t0[o * 32 + h] = wm0[h * 64 + o];
+                for (int o = 0; o < 32; ++o) t1[o * 32 + h] = wm1[h * 32 + o];
+                for (int k = 0; k < 10; ++k) {
+                    t2[k * 128 + h] = w2[h * 10 + k];
+                    for (int m = 0; m < 3; ++m) t2[k * 128 + 32 + m * 32 + h] = w2[(32 + h * 3 + m) * 10 + k];
+                }
+            }
+            U.ro_Wm0T = P.up(t0);
+            U.ro_Wm1T = P.up(t1);
+            U.ro_W2T = P.up(t2);
+        }
         U.ro_b2 = P.up(b.f32(p + "ro_b2", {10}));
         P.upd.push_back(U);
     }
@@ -1466,6 +1518,8 @@ void PolarLR::load(const Bundle& b, int S, int n_layers) {
                 P.le_dotv[l] = P.up(dotv[l]);
             }
         }
+        P.add_blocks(P.fold ? P.le_Wq_dot : P.le_Wq, 8);
+        P.add_blocks(P.fold ? P.le_Wv_dot : P.le_Wv, 16);
     }
     P.load_mlp(b, "LR.le_mlp_", b.meta_int("LR.le_mlp_n"), P.le_mlp);
     if (P.le_mlp.in[0] != 2 * C || P.le_mlp.out.back() != 1) throw std::runtime_error("polar bundle: electron MLP shape");
@@ -1898,13 +1952,13 @@ void PolarLR::record(cudaStream_t st, int N, const GemmFn& gemm,
             float* sum = P.fold ? s.Z[l] : s.mixed[l];
             float b0 = 0.0f;
             if (!U.zpot[l]) {
-                gemm(false, N, dimL(l) * C, 16, 1.0f, s.pot, 16, (P.fold ? U.Wpot_dot : U.Wpot) + P.off[l], R, 0.0f,
-                     sum, dimL(l) * C);
+                const auto w = P.wref(P.fold ? U.Wpot_dot : U.Wpot, 16, l);
+                gemm(false, N, dimL(l) * C, 16, 1.0f, s.pot, 16, w.p, w.ld, 0.0f, sum, dimL(l) * C);
                 b0 = 1.0f;
             }
             if (!U.zq[l]) {
-                gemm(false, N, dimL(l) * C, 8, 1.0f, s.qin, 8, (P.fold ? U.Wq_dot : U.Wq) + P.off[l], R, b0, sum,
-                     dimL(l) * C);
+                const auto w = P.wref(P.fold ? U.Wq_dot : U.Wq, 8, l);
+                gemm(false, N, dimL(l) * C, 8, 1.0f, s.qin, 8, w.p, w.ld, b0, sum, dimL(l) * C);
                 b0 = 1.0f;
             }
             gemm(false, N * dimL(l), C, C, 1.0f, P.fm[l], C, P.fold ? U.Wnf_dot[l] : U.Wnf[l], C, b0, sum, C);
@@ -1962,13 +2016,15 @@ void PolarLR::record(cudaStream_t st, int N, const GemmFn& gemm,
             fork();
             for (int l = 0; l <= lm; ++l) {  // S123: Zq_l (Zv_l) for l <= le_lq (le_lv) only, the others are zero
                 lane(2 * l);
-                if (l <= P.le_lq)
-                    gemm(false, N, dimL(l) * C, 8, 1.0f, P.qin_le, 8, P.le_Wq_dot + P.off[l], R, 0.0f, P.Zq[l],
-                         dimL(l) * C);
+                if (l <= P.le_lq) {
+                    const auto w = P.wref(P.le_Wq_dot, 8, l);
+                    gemm(false, N, dimL(l) * C, 8, 1.0f, P.qin_le, 8, w.p, w.ld, 0.0f, P.Zq[l], dimL(l) * C);
+                }
                 lane(2 * l + 1);
-                if (l <= P.le_lv)
-                    gemm(false, N, dimL(l) * C, 16, 1.0f, pot_last, 16, P.le_Wv_dot + P.off[l], R, 0.0f, P.Zv[l],
-                         dimL(l) * C);
+                if (l <= P.le_lv) {
+                    const auto w = P.wref(P.le_Wv_dot, 16, l);
+                    gemm(false, N, dimL(l) * C, 16, 1.0f, pot_last, 16, w.p, w.ld, 0.0f, P.Zv[l], dimL(l) * C);
+                }
             }
             join();
             add_bias_kernel<<<blocks_for((int64_t)N * C), 256, 0, st>>>(N, C, P.le_bq_dot, P.Zq[0], C);
@@ -1977,13 +2033,15 @@ void PolarLR::record(cudaStream_t st, int N, const GemmFn& gemm,
             fork();
             for (int l = 0; l <= lm; ++l) {
                 lane(2 * l);
-                if (l <= P.le_lq)
-                    gemm(false, N, dimL(l) * C, 8, 1.0f, P.qin_le, 8, P.le_Wq + P.off[l], R, 0.0f, P.qu[l],
-                         dimL(l) * C);
+                if (l <= P.le_lq) {
+                    const auto w = P.wref(P.le_Wq, 8, l);
+                    gemm(false, N, dimL(l) * C, 8, 1.0f, P.qin_le, 8, w.p, w.ld, 0.0f, P.qu[l], dimL(l) * C);
+                }
                 lane(2 * l + 1);
-                if (l <= P.le_lv)
-                    gemm(false, N, dimL(l) * C, 16, 1.0f, pot_last, 16, P.le_Wv + P.off[l], R, 0.0f, P.vu[l],
-                         dimL(l) * C);
+                if (l <= P.le_lv) {
+                    const auto w = P.wref(P.le_Wv, 16, l);
+                    gemm(false, N, dimL(l) * C, 16, 1.0f, pot_last, 16, w.p, w.ld, 0.0f, P.vu[l], dimL(l) * C);
+                }
             }
             join();
             add_bias_kernel<<<blocks_for((int64_t)N * C), 256, 0, st>>>(N, C, P.le_bq, P.qu[0], C);
@@ -2035,24 +2093,24 @@ void PolarLR::record(cudaStream_t st, int N, const GemmFn& gemm,
                 inv_bwd_kernel<<<blocks_for((int64_t)N * dimL(l) * C), 256, 0, st>>>(
                     (int64_t)N * dimL(l) * C, C, dimL(l), P.dx0, 2 * C, hL[l], P.Zq[l], dh[P.L - 1][l], P.dZ[l]);
                 if (P.fold) {
-                    gemm(true, N, 8, dimL(l) * C, 1.0f, P.dZ[l], dimL(l) * C, P.le_Wq_dot + P.off[l], R, 1.0f, P.dq0,
-                         8);
+                    const auto w = P.wref(P.le_Wq_dot, 8, l);
+                    gemm(true, N, 8, dimL(l) * C, 1.0f, P.dZ[l], dimL(l) * C, w.p, w.ld, 1.0f, P.dq0, 8);
                 } else {
                     gemm(false, N * dimL(l), C, C, 1.0f, P.dZ[l], C, P.le_dotq[l], C, 0.0f, P.dmix[l], C);
-                    gemm(true, N, 8, dimL(l) * C, 1.0f, P.dmix[l], dimL(l) * C, P.le_Wq + P.off[l], R, 1.0f, P.dq0,
-                         8);
+                    const auto w = P.wref(P.le_Wq, 8, l);
+                    gemm(true, N, 8, dimL(l) * C, 1.0f, P.dmix[l], dimL(l) * C, w.p, w.ld, 1.0f, P.dq0, 8);
                 }
             }
             if (l <= P.le_lv) {
                 inv_bwd_kernel<<<blocks_for((int64_t)N * dimL(l) * C), 256, 0, st>>>(
                     (int64_t)N * dimL(l) * C, C, dimL(l), P.dx0 + C, 2 * C, hL[l], P.Zv[l], dh[P.L - 1][l], P.dZ[l]);
                 if (P.fold) {
-                    gemm(true, N, 16, dimL(l) * C, 1.0f, P.dZ[l], dimL(l) * C, P.le_Wv_dot + P.off[l], R, 1.0f,
-                         P.dpot, 16);
+                    const auto w = P.wref(P.le_Wv_dot, 16, l);
+                    gemm(true, N, 16, dimL(l) * C, 1.0f, P.dZ[l], dimL(l) * C, w.p, w.ld, 1.0f, P.dpot, 16);
                 } else {
                     gemm(false, N * dimL(l), C, C, 1.0f, P.dZ[l], C, P.le_dotv[l], C, 0.0f, P.dmix[l], C);
-                    gemm(true, N, 16, dimL(l) * C, 1.0f, P.dmix[l], dimL(l) * C, P.le_Wv + P.off[l], R, 1.0f, P.dpot,
-                         16);
+                    const auto w = P.wref(P.le_Wv, 16, l);
+                    gemm(true, N, 16, dimL(l) * C, 1.0f, P.dmix[l], dimL(l) * C, w.p, w.ld, 1.0f, P.dpot, 16);
                 }
             }
         }
@@ -2070,8 +2128,8 @@ void PolarLR::record(cudaStream_t st, int N, const GemmFn& gemm,
         // q_new = q_in + out[:8]: dout[:8] = dqnew (assigned directly; fukui_bwd already set dout[8..9])
         add8_kernel<<<blocks_for((int64_t)N * 8), 256, 0, st>>>(N, P.dq2, 8, P.dout, 10, 1);
         // readout reverse -> dnew
-        ro_bwd_kernel<<<blocks_for(N, 4), 128, 0, st>>>(N, U.rc, lm >= 1, s.s0, s.v1, U.ro_Wm0, U.ro_Wm1, U.ro_W2,
-                                                        s.smid, s.vmid, P.dout, P.ds0, P.dv1);
+        ro_bwd_kernel<<<blocks_for(N, 4), 128, 0, st>>>(N, U.rc, lm >= 1, s.s0, s.v1, U.ro_Wm0T, U.ro_Wm1T,
+                                                        U.ro_W2T, s.smid, s.vmid, P.dout, P.ds0, P.dv1);
         if (lm >= 1) fork();
         if (lm >= 1) lane(0);
         gemm(true, N, C, lm >= 1 ? 64 : 32, 1.0f, P.ds0, 64, U.ro_W1[0], 64, 0.0f, P.dnw[0], C);  // S124: scalar half
@@ -2112,13 +2170,16 @@ void PolarLR::record(cudaStream_t st, int N, const GemmFn& gemm,
             }
             lane(lm + 1);
             for (int l = 0; l <= lm; ++l)  // S123: not the zero blocks
-                if (!U.zpot[l])
-                    gemm(true, N, 16, dimL(l) * C, 1.0f, P.dZ[l], dimL(l) * C, U.Wpot_dot + P.off[l], R, 1.0f, P.dpot,
-                         16);
+                if (!U.zpot[l]) {
+                    const auto w = P.wref(U.Wpot_dot, 16, l);
+                    gemm(true, N, 16, dimL(l) * C, 1.0f, P.dZ[l], dimL(l) * C, w.p, w.ld, 1.0f, P.dpot, 16);
+                }
             lane(lm + 2);
             for (int l = 0; l <= lm; ++l)
-                if (!U.zq[l])
-                    gemm(true, N, 8, dimL(l) * C, 1.0f, P.dZ[l], dimL(l) * C, U.Wq_dot + P.off[l], R, 1.0f, P.dq2, 8);
+                if (!U.zq[l]) {
+                    const auto w = P.wref(U.Wq_dot, 8, l);
+                    gemm(true, N, 8, dimL(l) * C, 1.0f, P.dZ[l], dimL(l) * C, w.p, w.ld, 1.0f, P.dq2, 8);
+                }
             join();
         } else {
             if (lm > 0) fork();
@@ -2131,12 +2192,15 @@ void PolarLR::record(cudaStream_t st, int N, const GemmFn& gemm,
             fork();
             for (int l = 0; l <= lm; ++l) {  // S123: not the zero blocks
                 lane(0);
-                if (!U.zpot[l])
-                    gemm(true, N, 16, dimL(l) * C, 1.0f, P.dmix[l], dimL(l) * C, U.Wpot + P.off[l], R, 1.0f, P.dpot,
-                         16);
+                if (!U.zpot[l]) {
+                    const auto w = P.wref(U.Wpot, 16, l);
+                    gemm(true, N, 16, dimL(l) * C, 1.0f, P.dmix[l], dimL(l) * C, w.p, w.ld, 1.0f, P.dpot, 16);
+                }
                 lane(1);
-                if (!U.zq[l])
-                    gemm(true, N, 8, dimL(l) * C, 1.0f, P.dmix[l], dimL(l) * C, U.Wq + P.off[l], R, 1.0f, P.dq2, 8);
+                if (!U.zq[l]) {
+                    const auto w = P.wref(U.Wq, 8, l);
+                    gemm(true, N, 8, dimL(l) * C, 1.0f, P.dmix[l], dimL(l) * C, w.p, w.ld, 1.0f, P.dq2, 8);
+                }
             }
             join();
         }

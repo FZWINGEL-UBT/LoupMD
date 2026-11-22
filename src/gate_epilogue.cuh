@@ -29,9 +29,12 @@ __device__ __forceinline__ float dsilu_f(float x) {
 // staged row (and the vform partial in its second), which only this thread reads, and one thread per atom sums the
 // 64 columns (gate_bwd_tile_sum), instead of a 32-lane shuffle tree and a shared atomic per warp and atom. Thread
 // (grp, cl) = (tid / 64, tid % 64) of NGRP groups takes the atoms grp, grp + NGRP, .. at column n0 + cl.
-template <int DEG, int SROW, int NGRP>
+// RF (list 27 item 3, LOUP_LIN_HALF_PARTS bit 64, DEG 3 and 5): the degree's forward gate ran in its W_res
+// projection's epilogue, so res_l holds the saved gout_l = g pre_l and d gp = (1 - sg) sum dgout gout_l.
+template <int DEG, int SROW, int NGRP, bool RF = false>
 __device__ __forceinline__ void gate_bwd_tile(float* sC, const float* sS, const int* sQ, int a0, int na, int n0,
                                               int tid, const GateArgs& g) {
+    static_assert(!RF || DEG == 3 || DEG == 5, "only degrees 1 and 2 have a residual");
     const int N = g.C;
     const int cl = tid & 63, grp = tid >> 6, c = n0 + cl;
     constexpr int B = DEG == 1 ? 8 : (DEG == 3 ? 2 : 1);
@@ -89,7 +92,7 @@ __device__ __forceinline__ void gate_bwd_tile(float* sC, const float* sS, const 
 #pragma unroll
                     for (int m = 0; m < DEG; ++m) {
                         const int64_t idx = ((int64_t)a * DEG + m) * N + c;
-                        const float p = li[j][m] * s + rl[j][m];
+                        const float p = RF ? rl[j][m] : li[j][m] * s + rl[j][m];  // RF: res_l holds gout_l
                         const float o = go[m * SROW];
                         dg = fmaf(o, p, dg);
                         const float d = o * gt;
@@ -97,7 +100,7 @@ __device__ __forceinline__ void gate_bwd_tile(float* sC, const float* sS, const 
                         g.dl_l[idx] = d * s;
                         part = fmaf(d, li[j][m], part);
                     }
-                    dgp = dg * g.cg * sg * (1.0f - sg);
+                    dgp = RF ? (1.0f - sg) * dg : dg * g.cg * sg * (1.0f - sg);
                 }
                 if (g.dp0) g.dp0[ro] = dgp;
                 g.dl0[ro] = dgp * s;
