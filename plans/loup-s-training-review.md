@@ -17,6 +17,8 @@ All 30 validation volume-equivalent cell edges lie **inside** the full training 
 
 There are 16 harmonic values and 48 Cartesian partials per edge. Add 8 radial values, 8 radial derivatives and two 3-vectors: **86 scalars × 8 bytes**. Even the 3,000-frame full payload alone exceeds the [24 GB L4](https://www.nvidia.com/en-us/data-center/l4/), before graph indices, model, saved activations, optimizer and workspace. FP32 halves payload, not necessarily epoch time. Coordinates/labels alone, integer graph connectivity, and an all-derivatives cache are three different proposals. Batch 4 already has about 62k directed edges on the base data; a 32k–64k edge budget fits roughly 2–4 frames, **not 16–32**. A prepacked GPU dataset still needs gathers/reindexing to construct shuffled batches. Host staging, a bounded device working set, and compute-on-demand are valid comparators.
 
+In that layout the two vectors are the unit direction and the Cartesian displacement for strain. If the latter is reconstructed from a stored **scalar length** instead, the count is 84 rather than 86: 2.91/27.83 GiB at 300/3,000 frames. Neither count adds separate cutoff scalars to the cutoff-applied radial basis.
+
 ## Cheap experiments, in decision order
 
 | Priority | Single change | Qualification or stop condition |
