@@ -1419,7 +1419,7 @@ void PolarLR::load(const Bundle& b, int S, int n_layers) {
         CUDA_CHECK_THROW(cudaGetDevice(&dev));
         CUDA_CHECK_THROW(cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor, dev));
         CUDA_CHECK_THROW(cudaDeviceGetAttribute(&minor, cudaDevAttrComputeCapabilityMinor, dev));
-        P.fold = (major == 12 && minor == 0) || (major == 8 && (minor == 0 || minor == 9));
+        P.fold = (major == 12 && minor == 0) || (major == 8 && (minor == 0 || minor == 6 || minor == 9));
         if (const char* e = std::getenv("LOUP_POLAR_FOLD"); e && (e[0] == '0' || e[0] == '1'))
             P.fold = e[0] == '1';  // tests: the unfolded path here, the fold elsewhere
     }

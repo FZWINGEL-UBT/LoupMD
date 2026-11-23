@@ -2548,8 +2548,8 @@ LoupHandle* loup_create(const char* loup_path, int device_id) {
             CUDA_CHECK_THROW(cudaDeviceGetAttribute(&cc_min, cudaDevAttrComputeCapabilityMinor, device_id));
             h->is_sm120 = (cc_maj == 12 && cc_min == 0);
             cc80 = cc_maj == 8 && cc_min == 0;
-            const bool cc89 = (cc_maj == 8 && cc_min == 9);
-            const bool tuned_cc = h->is_sm120 || cc89;
+            const bool cc89 = (cc_maj == 8 && cc_min == 9), cc86 = (cc_maj == 8 && cc_min == 6);
+            const bool tuned_cc = h->is_sm120 || cc89 || cc86;
             h->own_ext = tuned_cc;
             if (const char* e = std::getenv("LOUP_OWN_EXT"); e && (e[0] == '0' || e[0] == '1')) {
                 h->own_ext = e[0] == '1';

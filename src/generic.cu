@@ -727,14 +727,15 @@ struct DevCompose {
 };
 
 // The load-time folds (S57, S59, S73) were measured on compute capability 12.0 (5060 Ti), 8.0 (A100, S74a: faster on
-// every family, gated in S75g) and 8.9 (RTX 4000 Ada, List 30: 1.14-1.84x across families, gated on leto/leeloo);
-// other GPUs keep the plain path.
+// every family, gated in S75g), 8.9 (RTX 4000 Ada, List 30: 1.14-1.84x across families, gated on leto/leeloo) and
+// 8.6 (RTX A4000, List 33: 0.60-0.92 of the plain path's step with the rest of the tuned set, gated on
+// trillian/coraline); other GPUs keep the plain path.
 bool folds_measured_here() {
     int dev = 0, major = 0, minor = 0;
     CUDA_CHECK_THROW(cudaGetDevice(&dev));
     CUDA_CHECK_THROW(cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor, dev));
     CUDA_CHECK_THROW(cudaDeviceGetAttribute(&minor, cudaDevAttrComputeCapabilityMinor, dev));
-    return (major == 12 && minor == 0) || (major == 8 && (minor == 0 || minor == 9));
+    return (major == 12 && minor == 0) || (major == 8 && (minor == 0 || minor == 6 || minor == 9));
 }
 
 // Compute capabilities where the two-half paths, POLAR species tables / hidden fold, and per-system conv timing
@@ -744,7 +745,7 @@ bool device_is_tuned_cc() {
     CUDA_CHECK_THROW(cudaGetDevice(&dev));
     CUDA_CHECK_THROW(cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor, dev));
     CUDA_CHECK_THROW(cudaDeviceGetAttribute(&minor, cudaDevAttrComputeCapabilityMinor, dev));
-    return (major == 12 && minor == 0) || (major == 8 && minor == 9);
+    return (major == 12 && minor == 0) || (major == 8 && (minor == 6 || minor == 9));
 }
 
 // S130 / S132: compact live channels of a kind-1 layer (the projections feed the product directly), certified from exact
