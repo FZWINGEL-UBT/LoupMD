@@ -3027,6 +3027,8 @@ Each entry has the same fields. Unless stated, the system is OMAT-0 medium on th
 
 **Colab L4 only — matched training precision, interim.** Corrected `s64l0` seed 1, 300 frames, batch 4 with stress. Median wall interval between successive validation log entries for epochs ending at 6–13: **17.4 s centered FP32 vs 48.2 s FP64 (2.76×)**. Same schedule, separate L4s. Not a phase-two, full-run, or inference speedup; no precision adoption on this evidence alone.
 
+Colab L4 only, same validation split at epoch 30: force RMSE **21.93 / 20.90 meV/Å** (FP32 / FP64); energy and stress in STATUS §6.70. Interim single-seed comparison, not the acceptance test.
+
 **5060 Ti only — repeated-cell neighbor rebuild, correctness (`048489b907`).** The CUDA step graph's optional rebuild captured the periodic cell in its bin/count/fill calls. A host rebuild on the first frame in a new cell was not enough: a subsequent on-device rebuild could overwrite its list with shifts from the old cell. Include the captured cell in the step-graph key only when that branch exists. Native MH-1 regression: before the fix the reused and fresh evaluations differed by 1.7412 eV on 135 atoms; after the fix evaluation at both cells with forced rebuilds and the unchanged-cell graph-reuse control passed. No timing or adoption claim.
 
 **Corrected MH-1 label gate, 5060 Ti only.** Reused/fresh 3× E/F/stress: validation 30/30 each (stored 13/30); teacher-test 60/60 each (stored 60/60). Original bytes unchanged; max validation force delta reused vs fresh 8.27e−7 eV/Å. **RTX 4000 Ada and RTX A4000 separately:** same native changed-cell regression passed on leeloo and Coraline before either generated new shards; no timing.
