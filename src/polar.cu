@@ -6,6 +6,7 @@
 #include <cstdlib>
 #include <stdexcept>
 #include <string>
+#include <unordered_map>
 
 #include "bundle.hpp"
 #include "model.hpp"
@@ -723,62 +724,119 @@ __global__ void ln_silu_bwd_kernel(int N, int H, const float* __restrict__ z, co
     }
 }
 
-// inv[a][u] = sum_l sum_m fm_l[a][m][u] Z_l[a][m][u]; x0 = [inv, emb[sp[a]]]
+// 2D float4 zero-division inv / bcast_mul / bcast_mul_bwd / inv_bwd kernels (C % 4 == 0 always in MACE-POLAR)
 __global__ void inv_kernel(int N, int C, int lmax, const float* __restrict__ f0, const float* __restrict__ f1,
                            const float* __restrict__ f2, const float* __restrict__ z0, const float* __restrict__ z1,
                            const float* __restrict__ z2, const float* __restrict__ emb, const int* __restrict__ sp,
                            float* __restrict__ x0) {
-    const int64_t i = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
-    if (i >= (int64_t)N * C) return;
-    const int a = (int)(i / C), u = (int)(i % C);
-    float s = f0[(int64_t)a * C + u] * z0[(int64_t)a * C + u];
-    if (lmax >= 1)
-        for (int m = 0; m < 3; ++m) s += f1[((int64_t)a * 3 + m) * C + u] * z1[((int64_t)a * 3 + m) * C + u];
-    if (lmax >= 2)
-        for (int m = 0; m < 5; ++m) s += f2[((int64_t)a * 5 + m) * C + u] * z2[((int64_t)a * 5 + m) * C + u];
-    x0[(int64_t)a * 2 * C + u] = s;
-    if (emb) x0[(int64_t)a * 2 * C + C + u] = emb[(int64_t)sp[a] * C + u];
+    const int C4 = C >> 2;
+    const int a = blockIdx.x;
+    if (a >= N) return;
+    const int sp_a = emb ? sp[a] : 0;
+    for (int u = threadIdx.x; u < C4; u += blockDim.x) {
+        const float4 a0 = reinterpret_cast<const float4*>(f0)[(int64_t)a * C4 + u];
+        const float4 b0 = reinterpret_cast<const float4*>(z0)[(int64_t)a * C4 + u];
+        float sx = a0.x * b0.x, sy = a0.y * b0.y, sz = a0.z * b0.z, sw = a0.w * b0.w;
+        if (lmax >= 1) {
+            const float4* f14 = reinterpret_cast<const float4*>(f1) + (int64_t)a * 3 * C4 + u;
+            const float4* z14 = reinterpret_cast<const float4*>(z1) + (int64_t)a * 3 * C4 + u;
+            #pragma unroll
+            for (int m = 0; m < 3; ++m) {
+                const float4 fv = f14[(int64_t)m * C4], zv = z14[(int64_t)m * C4];
+                sx = fmaf(fv.x, zv.x, sx); sy = fmaf(fv.y, zv.y, sy);
+                sz = fmaf(fv.z, zv.z, sz); sw = fmaf(fv.w, zv.w, sw);
+            }
+        }
+        if (lmax >= 2) {
+            const float4* f24 = reinterpret_cast<const float4*>(f2) + (int64_t)a * 5 * C4 + u;
+            const float4* z24 = reinterpret_cast<const float4*>(z2) + (int64_t)a * 5 * C4 + u;
+            #pragma unroll
+            for (int m = 0; m < 5; ++m) {
+                const float4 fv = f24[(int64_t)m * C4], zv = z24[(int64_t)m * C4];
+                sx = fmaf(fv.x, zv.x, sx); sy = fmaf(fv.y, zv.y, sy);
+                sz = fmaf(fv.z, zv.z, sz); sw = fmaf(fv.w, zv.w, sw);
+            }
+        }
+        reinterpret_cast<float4*>(x0)[(int64_t)a * 2 * C4 + u] = make_float4(sx, sy, sz, sw);
+        if (emb) reinterpret_cast<float4*>(x0)[(int64_t)a * 2 * C4 + C4 + u] =
+                     reinterpret_cast<const float4*>(emb)[(int64_t)sp_a * C4 + u];
+    }
 }
 
-// out_l[a][m][u] = x_l[a][m][u] * (P[a][u] + pb[u])  (mode "l x 0 -> l"; pb: the folded update's bias, or nullptr)
-__global__ void bcast_mul_kernel(int64_t n, int C, int d, const float* __restrict__ x, const float* __restrict__ P,
+__global__ void bcast_mul_kernel(int N, int C, int d, const float* __restrict__ x, const float* __restrict__ P,
                                  const float* __restrict__ pb, float* __restrict__ out) {
-    const int64_t i = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
-    if (i >= n) return;
-    const int64_t a = i / ((int64_t)d * C);
-    const int u = (int)(i % C);
-    const float p = pb ? P[a * C + u] + pb[u] : P[a * C + u];
-    out[i] = x[i] * p;
+    const int C4 = C >> 2;
+    const int a = blockIdx.x;
+    if (a >= N) return;
+    for (int u = threadIdx.x; u < C4; u += blockDim.x) {
+        float4 p = reinterpret_cast<const float4*>(P)[(int64_t)a * C4 + u];
+        if (pb) {
+            const float4 b = reinterpret_cast<const float4*>(pb)[u];
+            p.x += b.x; p.y += b.y; p.z += b.z; p.w += b.w;
+        }
+        const float4* x4 = reinterpret_cast<const float4*>(x) + (int64_t)a * d * C4 + u;
+        float4* o4 = reinterpret_cast<float4*>(out) + (int64_t)a * d * C4 + u;
+        for (int m = 0; m < d; ++m) {
+            const float4 xv = x4[(int64_t)m * C4];
+            o4[(int64_t)m * C4] = make_float4(xv.x * p.x, xv.y * p.y, xv.z * p.z, xv.w * p.w);
+        }
+    }
 }
 
-// reverse of bcast_mul and of the inv contraction for one degree: dx += dout * (P + pb) (bcast),
-// dP[a][u] += sum_m dout x
 __global__ void bcast_mul_bwd_kernel(int N, int C, int d, const float* __restrict__ x, const float* __restrict__ P,
                                      const float* __restrict__ pb, const float* __restrict__ dout,
                                      float* __restrict__ dx, float* __restrict__ dP, int dP_ld) {
-    const int64_t i = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
-    if (i >= (int64_t)N * C) return;
-    const int a = (int)(i / C), u = (int)(i % C);
-    const float p = pb ? P[(int64_t)a * dP_ld + u] + pb[u] : P[(int64_t)a * dP_ld + u];
-    float acc = 0.0f;
-    for (int m = 0; m < d; ++m) {
-        const int64_t idx = ((int64_t)a * d + m) * C + u;
-        if (dx) dx[idx] += dout[idx] * p;
-        acc += dout[idx] * x[idx];
+    const int C4 = C >> 2, ld4 = dP_ld >> 2;
+    const int a = blockIdx.x;
+    if (a >= N) return;
+    for (int u = threadIdx.x; u < C4; u += blockDim.x) {
+        float4 p = reinterpret_cast<const float4*>(P)[(int64_t)a * ld4 + u];
+        if (pb) {
+            const float4 b = reinterpret_cast<const float4*>(pb)[u];
+            p.x += b.x; p.y += b.y; p.z += b.z; p.w += b.w;
+        }
+        float ax = 0.0f, ay = 0.0f, az = 0.0f, aw = 0.0f;
+        const float4* x4 = reinterpret_cast<const float4*>(x) + (int64_t)a * d * C4 + u;
+        const float4* do4 = reinterpret_cast<const float4*>(dout) + (int64_t)a * d * C4 + u;
+        float4* dx4 = dx ? reinterpret_cast<float4*>(dx) + (int64_t)a * d * C4 + u : nullptr;
+        for (int m = 0; m < d; ++m) {
+            const float4 dv = do4[(int64_t)m * C4];
+            const float4 xv = x4[(int64_t)m * C4];
+            if (dx4) {
+                float4 cur = dx4[(int64_t)m * C4];
+                cur.x = fmaf(dv.x, p.x, cur.x); cur.y = fmaf(dv.y, p.y, cur.y);
+                cur.z = fmaf(dv.z, p.z, cur.z); cur.w = fmaf(dv.w, p.w, cur.w);
+                dx4[(int64_t)m * C4] = cur;
+            }
+            ax = fmaf(dv.x, xv.x, ax); ay = fmaf(dv.y, xv.y, ay);
+            az = fmaf(dv.z, xv.z, az); aw = fmaf(dv.w, xv.w, aw);
+        }
+        if (dP) reinterpret_cast<float4*>(dP)[(int64_t)a * ld4 + u] = make_float4(ax, ay, az, aw);
     }
-    if (dP) dP[(int64_t)a * dP_ld + u] = acc;
 }
 
-// inv contraction backward for one degree: dfm += dinv * Z (bcast), dZ = dinv * fm
-__global__ void inv_bwd_kernel(int64_t n, int C, int d, const float* __restrict__ dinv, int dinv_ld,
+__global__ void inv_bwd_kernel(int N, int C, int d, const float* __restrict__ dinv, int dinv_ld,
                                const float* __restrict__ fm, const float* __restrict__ Z, float* __restrict__ dfm,
                                float* __restrict__ dZ) {
-    const int64_t i = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
-    if (i >= n) return;
-    const int64_t a = i / ((int64_t)d * C);
-    const float g = dinv[a * dinv_ld + i % C];
-    dfm[i] += g * Z[i];
-    dZ[i] = g * fm[i];
+    const int C4 = C >> 2, ld4 = dinv_ld >> 2;
+    const int a = blockIdx.x;
+    if (a >= N) return;
+    for (int u = threadIdx.x; u < C4; u += blockDim.x) {
+        const float4 g = reinterpret_cast<const float4*>(dinv)[(int64_t)a * ld4 + u];
+        const float4* fm4 = reinterpret_cast<const float4*>(fm) + (int64_t)a * d * C4 + u;
+        const float4* z4  = reinterpret_cast<const float4*>(Z)  + (int64_t)a * d * C4 + u;
+        float4* dfm4      = reinterpret_cast<float4*>(dfm)      + (int64_t)a * d * C4 + u;
+        float4* dz4       = reinterpret_cast<float4*>(dZ)       + (int64_t)a * d * C4 + u;
+        for (int m = 0; m < d; ++m) {
+            const float4 fv = fm4[(int64_t)m * C4];
+            const float4 zv = z4[(int64_t)m * C4];
+            float4 df = dfm4[(int64_t)m * C4];
+            df.x = fmaf(g.x, zv.x, df.x); df.y = fmaf(g.y, zv.y, df.y);
+            df.z = fmaf(g.z, zv.z, df.z); df.w = fmaf(g.w, zv.w, df.w);
+            dfm4[(int64_t)m * C4] = df;
+            dz4[(int64_t)m * C4] = make_float4(g.x * fv.x, g.y * fv.y, g.z * fv.z, g.w * fv.w);
+        }
+    }
 }
 
 // Gated readout of the SCF update (H = 32 scalars, 32 gates, 32 vectors), one warp per atom. S124: without vectors
@@ -1168,6 +1226,30 @@ struct PolarLR::Impl {
     // fold; not with LOUP_POLAR_ZBLK=0): its source GEMMs are skipped (POLAR-1-L's l = 2 blocks)
     std::vector<std::vector<char>> src_zero;
     bool zblk = true;
+    struct H2RowW {
+        void* B = nullptr;    float* pB = nullptr;
+        void* BT = nullptr;   float* pBT = nullptr;
+        int rows = 0, cols = 0;
+    };
+    bool h2_row = false;
+    int h2_min_m = 128;
+    std::unordered_map<const float*, H2RowW> h2_map;
+    int8_t* h2_eA_buf = nullptr;
+    size_t h2_eA_cap = 0;
+    void add_h2(const float* W, int rows_w, int cols_w) {
+        if (!h2_row || !W || rows_w < 32 || cols_w < 32 || rows_w % 16 != 0 || cols_w % 16 != 0) return;
+        if (h2_map.count(W)) return;
+        H2RowW hw; hw.rows = rows_w; hw.cols = cols_w;
+        CUDA_CHECK_THROW(cudaMalloc(&hw.B, 2 * hgemm2_pad_elems(cols_w, rows_w) * 2));
+        CUDA_CHECK_THROW(cudaMalloc(&hw.pB, (size_t)cols_w * sizeof(float)));
+        hgemm2_pack_b_col(cols_w, rows_w, W, true, hw.B, hw.pB, nullptr);
+        w_.push_back(hw.B); w_.push_back(hw.pB);
+        CUDA_CHECK_THROW(cudaMalloc(&hw.BT, 2 * hgemm2_pad_elems(rows_w, cols_w) * 2));
+        CUDA_CHECK_THROW(cudaMalloc(&hw.pBT, (size_t)rows_w * sizeof(float)));
+        hgemm2_pack_b_col(rows_w, cols_w, W, false, hw.BT, hw.pBT, nullptr);
+        w_.push_back(hw.BT); w_.push_back(hw.pBT);
+        h2_map[W] = hw;
+    }
     // List 29 item 4 (LOUP_POLAR_WBLK=0 turns it off, tests / A/B): the [rows, R] pot / q weights (Wpot, Wq, le_Wq,
     // le_Wv, folded or not) also as block-major copies, degree l's [rows, (2l + 1) C] block contiguous at rows off[l],
     // so the degree-l GEMMs have the natural strides and go through the GEMM autotune instead of cuBLAS's legacy path.
@@ -1295,6 +1377,7 @@ struct PolarLR::Impl {
             m.in.push_back(in);
             m.out.push_back(out);
             m.W.push_back(up(b.f32(p + "W" + std::to_string(k), {in, out})));
+            add_h2(m.W.back(), in, out);
             m.b.push_back(up(b.f32(p + "b" + std::to_string(k), {out})));
             if (k < n - 1) {
                 m.g.push_back(up(b.f32(p + "g" + std::to_string(k), {out})));
@@ -1343,6 +1426,18 @@ void PolarLR::load(const Bundle& b, int S, int n_layers) {
     {
         const char* zb_env = std::getenv("LOUP_POLAR_ZBLK");
         P.zblk = !(zb_env && zb_env[0] == '0');
+        const char* e_h2 = std::getenv("LOUP_POLAR_H2");
+        if (e_h2 && (e_h2[0] == '0' || e_h2[0] == '1')) {
+            P.h2_row = e_h2[0] == '1';
+        } else {
+            int dev = 0, maj = 0, min = 0;
+            if (cudaGetDevice(&dev) == cudaSuccess) {
+                cudaDeviceGetAttribute(&maj, cudaDevAttrComputeCapabilityMajor, dev);
+                cudaDeviceGetAttribute(&min, cudaDevAttrComputeCapabilityMinor, dev);
+            }
+            P.h2_row = (maj == 12 && min == 0) || (maj == 8 && min == 9);
+        }
+        if (const char* mm_env = std::getenv("LOUP_POLAR_H2_MINM"); mm_env && *mm_env) P.h2_min_m = std::atoi(mm_env);
         const char* wb_env = std::getenv("LOUP_POLAR_WBLK");
         P.wblk = !(wb_env && wb_env[0] == '0');
     }
@@ -1557,6 +1652,29 @@ void PolarLR::load(const Bundle& b, int S, int n_layers) {
         if (P.mono && P.add_le && !dead_rows_zero(b.f32("LR.le_Wv", {16, R}))) P.mono = false;
         if (const char* e = std::getenv("LOUP_POLAR_MONO"); e && e[0] == '0') P.mono = false;
     }
+    if (P.h2_row) {
+        for (int t = 0; t < n_layers; ++t)
+            for (int l = 0; l <= P.lmax; ++l) P.add_h2(P.mix[t][l], C, C);
+        for (const auto& U : P.upd) {
+            for (int l = 0; l <= P.lmax; ++l) {
+                P.add_h2(U.Wnf_dot[l], C, C);
+                P.add_h2(U.Wnf[l], C, C);
+                P.add_h2(U.dot[l], C, C);
+            }
+            for (int l = 0; l <= std::min(P.lmax, 1); ++l) {
+                if (U.tpo_fold) P.add_h2(U.tpo_W[l], U.mlp.in[U.mlp.n - 1], C);
+                else P.add_h2(U.tpo[l], C, C);
+            }
+            P.add_h2(U.ro_W1[0], C, 64);
+            if (P.lmax >= 1) P.add_h2(U.ro_W1[1], C, 32);
+        }
+        for (int l = 0; l <= P.lmax; ++l) {
+            P.add_h2(P.le_dotq[l], C, C);
+            P.add_h2(P.le_dotv[l], C, C);
+        }
+        CUDA_CHECK_THROW(cudaStreamSynchronize(nullptr));
+        hgemm2_row_init();
+    }
 }
 
 void PolarLR::set_hidden_fold(int t, int l, const float* mix, const float* src_block) {
@@ -1576,9 +1694,14 @@ void PolarLR::set_hidden_fold(int t, int l, const float* mix, const float* src_b
             break;
         }
     P.mix[t][l] = mix;
+    if (P.h2_row) {
+        P.add_h2(mix, P.C, P.C);
+        CUDA_CHECK_THROW(cudaStreamSynchronize(nullptr));
+    }
 }
 
 int PolarLR::le_lmax() const { return p_->add_le ? std::max(p_->le_lq, p_->le_lv) : -1; }
+void PolarLR::disable_h2_row() { p_->h2_row = false; }
 
 // k-vectors as graph_longrange.compute_k_vectors_flat (rcell = 2 pi inv(cell^T)), with the GTO basis per k
 bool PolarLR::set_cell(const double* c) {
@@ -1721,6 +1844,8 @@ void PolarLR::free_system() {
         if (s.SFq) cudaFree(s.SFq);
     }
     P.steps.clear();
+    P.h2_eA_buf = nullptr;
+    P.h2_eA_cap = 0;
     P.N = 0;
 }
 
@@ -1790,6 +1915,13 @@ void PolarLR::alloc_system(int N) {
         P.le_act.push_back(k < P.le_mlp.n - 1 ? P.sys(n * P.le_mlp.out[k]) : nullptr);
     }
     P.le_stat = P.sys(n * 2 * P.le_mlp.n);
+    if (P.h2_row && P.C != 128) {
+        size_t need = 0;
+        for (int l = 0; l <= P.lmax; ++l)
+            need += (size_t)(P.L + 2) * align256(n * (size_t)(2 * l + 1));
+        P.h2_eA_buf = reinterpret_cast<int8_t*>(P.sys((need + 3u) / 4u));
+        P.h2_eA_cap = need;
+    }
     {
         double* r = nullptr;
         CUDA_CHECK_THROW(cudaMalloc(&r, 8 * (2 * P.n_rec + 4) * sizeof(double)));
@@ -1833,14 +1965,64 @@ void PolarLR::alloc_system(int N) {
     P.N = N;
 }
 
-void PolarLR::record(cudaStream_t st, int N, const GemmFn& gemm,
+void PolarLR::record(cudaStream_t st, int N, const GemmFn& gemm_f32,
                      const std::function<void()>& fork_fn, const std::function<void(int)>& lane_fn,
                      const std::function<void()>& join_fn, const int* species, const double* pos64,
                      const std::vector<std::vector<float*>>& h, const std::vector<std::vector<float*>>& dh,
-                     double* energy, double* forces, int compute_stress, double* virial) {
+                     double* energy, double* forces, int compute_stress, double* virial,
+                     const GemmH2RowFn& gemm_h2_row) {
     Impl& P = *p_;
+    std::unordered_map<const float*, const int8_t*> h_eA;
+    int8_t* fm_eA[3] = {nullptr, nullptr, nullptr};
+    int8_t* dfm_eA[3] = {nullptr, nullptr, nullptr};
+    if (P.h2_row && gemm_h2_row && P.C != 128 && P.h2_eA_buf) {
+        size_t off = 0;
+        for (size_t t = 0; t < h.size(); ++t) {
+            for (int l = 0; l < (int)h[t].size() && l <= P.lmax; ++l) {
+                const float* hp = h[t][l];
+                if (!hp || h_eA.count(hp)) continue;
+                const int M = N * (2 * l + 1);
+                if (M < P.h2_min_m) continue;
+                const size_t sz = ((size_t)M + 255u) & ~255u;
+                if (off + sz > P.h2_eA_cap) continue;
+                int8_t* dst = P.h2_eA_buf + off;
+                hgemm2_row_exp(M, P.C, hp, dst, st);
+                h_eA[hp] = dst;
+                off += sz;
+            }
+        }
+        for (int l = 0; l <= P.lmax; ++l) {
+            const size_t sz = ((size_t)(N * (2 * l + 1)) + 255u) & ~255u;
+            if (off + 2 * sz <= P.h2_eA_cap) {
+                fm_eA[l] = P.h2_eA_buf + off; off += sz;
+                dfm_eA[l] = P.h2_eA_buf + off; off += sz;
+            }
+        }
+    }
+    auto gemm = [&](bool transB, int M, int Nc, int Kc, float alpha, const float* A, int lda,
+                    const float* B, int ldb, float beta, float* C_out, int ldc) {
+        if (P.h2_row && gemm_h2_row && alpha == 1.0f && lda == Kc && ldc == Nc &&
+            (transB ? ldb == Kc : ldb == Nc) && M >= P.h2_min_m && Nc >= 64 && Kc >= 64) {
+            auto it = P.h2_map.find(B);
+            if (it != P.h2_map.end()) {
+                const auto& hw = it->second;
+                void* panel = transB ? hw.BT : hw.B;
+                float* pb = transB ? hw.pBT : hw.pB;
+                if (panel && (transB ? (hw.rows == Nc && hw.cols == Kc) : (hw.rows == Kc && hw.cols == Nc))) {
+                    const int8_t* cached = nullptr;
+                    if (Kc == P.C) {
+                        auto eit = h_eA.find(A);
+                        if (eit != h_eA.end()) cached = eit->second;
+                    }
+                    gemm_h2_row(M, Nc, Kc, A, panel, pb, C_out, beta, cached);
+                    return;
+                }
+            }
+        }
+        gemm_f32(transB, M, Nc, Kc, alpha, A, lda, B, ldb, beta, C_out, ldc);
+    };
     if (!P.have_cell) throw std::runtime_error("polar: no cell set");
-    const int C = P.C, lm = P.lmax, K = P.K, R = P.rows;
+    const int C = P.C, lm = P.lmax, K = P.K;
     const float alpha = (float)(std::pow(TWO_PI, 3) / P.vol);
     const float beta = (float)(2.0 / std::pow(TWO_PI, 3));
     const float e_scale = (float)(P.vol / std::pow(TWO_PI, 6));
@@ -1935,6 +2117,15 @@ void PolarLR::record(cudaStream_t st, int N, const GemmFn& gemm,
         }
     };
 
+    if (P.h2_row && gemm_h2_row && P.C != 128) {
+        for (int l = 0; l <= lm; ++l) {
+            const int M = N * dimL(l);
+            if (M >= P.h2_min_m && fm_eA[l]) {
+                hgemm2_row_exp(M, C, P.fm[l], fm_eA[l], st);
+                h_eA[P.fm[l]] = fm_eA[l];
+            }
+        }
+    }
     // ---------------- SCF
     const float* qcur = P.q0;
     float* pot_last = nullptr;
@@ -1965,7 +2156,7 @@ void PolarLR::record(cudaStream_t st, int N, const GemmFn& gemm,
             if (!P.fold) gemm(true, N * dimL(l), C, C, 1.0f, s.mixed[l], C, U.dot[l], C, 0.0f, s.Z[l], C);
         }
         if (lm > 0) join();
-        inv_kernel<<<blocks_for((int64_t)N * C), 256, 0, st>>>(N, C, lm, P.fm[0], P.fm[1], P.fm[2], s.Z[0], s.Z[1],
+        inv_kernel<<<N, std::min(256, std::max(32, C / 4)), 0, st>>>(N, C, lm, P.fm[0], P.fm[1], P.fm[2], s.Z[0], s.Z[1],
                                                                 s.Z[2], U.emb, species, s.x0);
         // P_l = nl tpo_l^T for l <= 1 (the readout reads nw_0 and nw_1 only), nl the MLP's output
         const int lp = std::min(lm, 1);
@@ -1989,8 +2180,8 @@ void PolarLR::record(cudaStream_t st, int N, const GemmFn& gemm,
             if (lp > 0) join();
         }
         for (int l = 0; l <= lp; ++l)
-            bcast_mul_kernel<<<blocks_for((int64_t)N * dimL(l) * C), 256, 0, st>>>(
-                (int64_t)N * dimL(l) * C, C, dimL(l), P.fm[l], s.P[l], U.tpo_fold ? U.tpo_b[l] : nullptr, s.nw[l]);
+            bcast_mul_kernel<<<N, std::min(256, std::max(32, C / 4)), 0, st>>>(
+                N, C, dimL(l), P.fm[l], s.P[l], U.tpo_fold ? U.tpo_b[l] : nullptr, s.nw[l]);
         if (lm >= 1) fork();
         if (lm >= 1) lane(0);
         gemm(false, N, lm >= 1 ? 64 : 32, C, 1.0f, s.nw[0], C, U.ro_W1[0], 64, 0.0f, s.s0, 64);  // S124: scalar half
@@ -2055,10 +2246,10 @@ void PolarLR::record(cudaStream_t st, int N, const GemmFn& gemm,
             }
             join();
         }
-        inv_kernel<<<blocks_for((int64_t)N * C), 256, 0, st>>>(N, C, P.le_lq, hL[0], P.le_lq >= 1 ? hL[1] : nullptr,
+        inv_kernel<<<N, std::min(256, std::max(32, C / 4)), 0, st>>>(N, C, P.le_lq, hL[0], P.le_lq >= 1 ? hL[1] : nullptr,
                                                                 P.le_lq >= 2 ? hL[2] : nullptr, P.Zq[0], P.Zq[1],
                                                                 P.Zq[2], nullptr, species, P.lex0);
-        inv_kernel<<<blocks_for((int64_t)N * C), 256, 0, st>>>(N, C, P.le_lv, hL[0], P.le_lv >= 1 ? hL[1] : nullptr,
+        inv_kernel<<<N, std::min(256, std::max(32, C / 4)), 0, st>>>(N, C, P.le_lv, hL[0], P.le_lv >= 1 ? hL[1] : nullptr,
                                                                 P.le_lv >= 2 ? hL[2] : nullptr, P.Zv[0], P.Zv[1],
                                                                 P.Zv[2], nullptr, species, P.lex0 + C);
         mlp_fwd(P.le_mlp, P.le_mlp.n, P.lex0, P.le_z, P.le_act, P.le_stat);
@@ -2090,8 +2281,8 @@ void PolarLR::record(cudaStream_t st, int N, const GemmFn& gemm,
         for (int l = 0; l <= lm; ++l) {
             // lex0 = [sum_m hL . Zq, sum_m hL . Zv]: dhL += dZ-weighted, dZq = dlex . hL (S123: l <= le_lq / le_lv)
             if (l <= P.le_lq) {
-                inv_bwd_kernel<<<blocks_for((int64_t)N * dimL(l) * C), 256, 0, st>>>(
-                    (int64_t)N * dimL(l) * C, C, dimL(l), P.dx0, 2 * C, hL[l], P.Zq[l], dh[P.L - 1][l], P.dZ[l]);
+                inv_bwd_kernel<<<N, std::min(256, std::max(32, C / 4)), 0, st>>>(
+                    N, C, dimL(l), P.dx0, 2 * C, hL[l], P.Zq[l], dh[P.L - 1][l], P.dZ[l]);
                 if (P.fold) {
                     const auto w = P.wref(P.le_Wq_dot, 8, l);
                     gemm(true, N, 8, dimL(l) * C, 1.0f, P.dZ[l], dimL(l) * C, w.p, w.ld, 1.0f, P.dq0, 8);
@@ -2102,8 +2293,8 @@ void PolarLR::record(cudaStream_t st, int N, const GemmFn& gemm,
                 }
             }
             if (l <= P.le_lv) {
-                inv_bwd_kernel<<<blocks_for((int64_t)N * dimL(l) * C), 256, 0, st>>>(
-                    (int64_t)N * dimL(l) * C, C, dimL(l), P.dx0 + C, 2 * C, hL[l], P.Zv[l], dh[P.L - 1][l], P.dZ[l]);
+                inv_bwd_kernel<<<N, std::min(256, std::max(32, C / 4)), 0, st>>>(
+                    N, C, dimL(l), P.dx0 + C, 2 * C, hL[l], P.Zv[l], dh[P.L - 1][l], P.dZ[l]);
                 if (P.fold) {
                     const auto w = P.wref(P.le_Wv_dot, 16, l);
                     gemm(true, N, 16, dimL(l) * C, 1.0f, P.dZ[l], dimL(l) * C, w.p, w.ld, 1.0f, P.dpot, 16);
@@ -2143,7 +2334,7 @@ void PolarLR::record(cudaStream_t st, int N, const GemmFn& gemm,
         float* dhid = P.mlp_d1;
         const int kh = U.mlp.n - 2, Hh = U.tpo_fold ? U.mlp.out[kh] : 0;
         for (int l = 0; l <= std::min(lm, 1); ++l) {
-            bcast_mul_bwd_kernel<<<blocks_for((int64_t)N * C), 256, 0, st>>>(
+            bcast_mul_bwd_kernel<<<N, std::min(256, std::max(32, C / 4)), 0, st>>>(
                 N, C, dimL(l), P.fm[l], s.P[l], U.tpo_fold ? U.tpo_b[l] : nullptr, P.dnw[l], P.dfm[l], P.dP, C);
             if (U.tpo_fold)
                 gemm(true, N, Hh, C, 1.0f, P.dP, C, U.tpo_W[l], C, l == 0 ? 0.0f : 1.0f, dhid, Hh);
@@ -2159,8 +2350,8 @@ void PolarLR::record(cudaStream_t st, int N, const GemmFn& gemm,
         }
         // inv = sum fm . Z
         for (int l = 0; l <= lm; ++l)
-            inv_bwd_kernel<<<blocks_for((int64_t)N * dimL(l) * C), 256, 0, st>>>(
-                (int64_t)N * dimL(l) * C, C, dimL(l), P.dx0, 2 * C, P.fm[l], s.Z[l], P.dfm[l], P.dZ[l]);
+            inv_bwd_kernel<<<N, std::min(256, std::max(32, C / 4)), 0, st>>>(
+                N, C, dimL(l), P.dx0, 2 * C, P.fm[l], s.Z[l], P.dfm[l], P.dZ[l]);
         if (P.fold) {
             // dfm += dZ Wnf_dot^T per l; dpot / dq2 from every l on one lane each (they accumulate across l)
             fork();
@@ -2229,6 +2420,15 @@ void PolarLR::record(cudaStream_t st, int N, const GemmFn& gemm,
     fukui_bwd_sums_kernel<<<blocks_for(N), 256, 0, st>>>(N, P.dq, P.fk, 2, red_f0);
     fukui_bwd_kernel<<<blocks_for((int64_t)N * 8), 256, 0, st>>>(N, P.dq, P.fk, 2, red_f0, P.dq2, P.dfk);
     fk_bwd_kernel<<<blocks_for(N, 4), 128, 0, st>>>(N, P.fk_act, P.fx1, P.fk_Wm, P.fk_W2, P.fz2, P.dfk, P.dfx);
+    if (P.h2_row && gemm_h2_row && P.C != 128 && P.L > 1) {
+        for (int l = 0; l <= lm; ++l) {
+            const int M = N * dimL(l);
+            if (M >= P.h2_min_m && dfm_eA[l]) {
+                hgemm2_row_exp(M, C, P.dfm[l], dfm_eA[l], st);
+                h_eA[P.dfm[l]] = dfm_eA[l];
+            }
+        }
+    }
     // sources and mixer backward (+ fk_W1^T on the same lane as (L - 1, 0))
     fork();
     for (int t = 0; t < P.L; ++t)

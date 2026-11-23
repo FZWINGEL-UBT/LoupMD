@@ -807,7 +807,59 @@ bool compact_layout(int C, const std::vector<float>* proj, const int* K, const s
 }  // namespace
 
 // ------------------------------------------------------------------------------------------------- load
+void GenericModel::setup_polar_h2() {
+    polar_h2_ = false;
+    if (!lr_) return;
+    const char* e = std::getenv("LOUP_POLAR_H2");
+    if (e && (e[0] == '0' || e[0] == '1')) {
+        if (e[0] == '0') return;
+    } else if (!device_is_tuned_cc()) {
+        return;
+    }
+    if (const char* mm = std::getenv("LOUP_POLAR_H2_MINM"); mm && *mm) polar_h2_min_m_ = std::atoi(mm);
+    auto reg = [&](const float* W, int rows_w, int cols_w) {
+        if (!W || rows_w < 32 || cols_w < 32 || rows_w % 16 != 0 || cols_w % 16 != 0) return;
+        if (ph2_map_.count(W)) return;
+        H2RowW hw; hw.rows = rows_w; hw.cols = cols_w;
+        CUDA_CHECK_THROW(cudaMalloc(&hw.B, 2 * hgemm2_pad_elems(cols_w, rows_w) * 2));
+        CUDA_CHECK_THROW(cudaMalloc(&hw.pB, (size_t)cols_w * sizeof(float)));
+        hgemm2_pack_b_col(cols_w, rows_w, W, true, hw.B, hw.pB, nullptr);
+        ph2_allocs_.push_back(hw.B); ph2_allocs_.push_back(hw.pB);
+        CUDA_CHECK_THROW(cudaMalloc(&hw.BT, 2 * hgemm2_pad_elems(rows_w, cols_w) * 2));
+        CUDA_CHECK_THROW(cudaMalloc(&hw.pBT, (size_t)rows_w * sizeof(float)));
+        hgemm2_pack_b_col(rows_w, cols_w, W, false, hw.BT, hw.pBT, nullptr);
+        ph2_allocs_.push_back(hw.BT); ph2_allocs_.push_back(hw.pBT);
+        ph2_map_[W] = hw;
+    };
+    for (auto* L : layers_) {
+        const int Cx = L->C_x, Cm = L->C_msg, Co = L->C_out;
+        for (int l = 0; l < 4; ++l) {
+            if (l <= L->lmax_x) {
+                reg(L->W_up[l], L->C_in, Cx);
+                reg(L->W_res[l], Cx, L->lin_cols[l]);
+                for (const auto& ex : L->x_extra[l]) reg(ex.W, L->C_in, Cx);
+            }
+            if (l < 3) {
+                reg(L->W_p[l], Co, Co);
+                if (L->sc_has[l] && !L->sc_species) reg(L->W_sc[l], L->C_in, Co);
+                for (const auto& ex : L->sc_extra[l]) reg(ex.W, L->C_in, Co);
+            }
+            if (L->first_hidden && !L->skip_folded) reg(L->C0[l], L->K0, L->lin_cols[l]);
+            else if (!L->first_hidden) reg(L->W_lin[l], L->n_l3[l] * Cx, L->lin_cols[l]);
+            if (L->kind == 4) reg(L->W_2[l], Cm, Cm);
+        }
+    }
+    if (!ph2_map_.empty()) {
+        CUDA_CHECK_THROW(cudaStreamSynchronize(nullptr));
+        hgemm2_row_init();
+        polar_h2_ = true;
+    }
+}
+
 GenericModel::~GenericModel() {
+    for (void* p : ph2_allocs_) cudaFree(p);
+    ph2_allocs_.clear();
+    ph2_map_.clear();
     free_system();
     free_model();
 }
@@ -1313,6 +1365,7 @@ void GenericModel::load(const Bundle& b) {
     setup_chain_fold(b);
     setup_lr_fold(b);
     setup_jit();
+    setup_polar_h2();
     setup_w2t_half();
     setup_w2f_half();
     setup_lin_half();
@@ -1373,7 +1426,7 @@ static bool two_half_switch(const char* name) {
 }
 void GenericModel::setup_w2t_half() {
     w2t_half_ = false;
-    if (lr_ || !two_half_switch("LOUP_W2T_HALF")) return;
+    if ((lr_ && !polar_h2_) || !two_half_switch("LOUP_W2T_HALF")) return;
     for (auto* L : layers_) {
         const GProdH2Kernels* k = L->prod_h2src;
         if (L->kind != 4 || !k || L->lin_compact || L->C_msg % 64 != 0 || (L->lmax_out == 0 && !k->ro1_128)) continue;
@@ -1426,7 +1479,7 @@ void GenericModel::debug_w2t_half(int N) const {
 }
 
 bool GenericModel::drop_w2t_half() {
-    if (!w2t_half_ && !w2f_half_ && !lin_half_) return false;
+    if (!w2t_half_ && !w2f_half_ && !lin_half_ && !polar_h2_) return false;
     for (auto* L : layers_) {
         L->h2 = L->f2 = false;
         for (auto& p : L->hl_flin) p.B = nullptr;
@@ -1439,7 +1492,8 @@ bool GenericModel::drop_w2t_half() {
         for (auto& v : L->fold)
             for (auto& ft : v) ft.hf.B = ft.hb.B = nullptr;
     }
-    w2t_half_ = w2f_half_ = lin_half_ = false;
+    w2t_half_ = w2f_half_ = lin_half_ = polar_h2_ = false;
+    if (lr_) lr_->disable_h2_row();
     return true;
 }
 
@@ -1686,7 +1740,7 @@ void GenericModel::debug_lin_amax() const {
 static constexpr int kW2fExp = 10;
 void GenericModel::setup_w2f_half() {
     w2f_half_ = false;
-    if (lr_ || !two_half_switch("LOUP_W2F_HALF")) return;
+    if ((lr_ && !polar_h2_) || !two_half_switch("LOUP_W2F_HALF")) return;
     const char* xe = std::getenv("LOUP_W2F_HALF_EXP");
     const int ea = xe && *xe ? std::atoi(xe) : kW2fExp;
     for (auto* L : layers_) {
@@ -2451,13 +2505,30 @@ void GenericModel::record(const GenericPassInputs& in) {
     auto join = [&] { if (in.gemm_join) in.gemm_join(); };
     // LOUP_LIN_HALF (setup_lin_half): C [M][Nc] = A W (transB false; W [K][Nc]) or A W^T (W [Nc][K]) on hgemm2f_kernel
     // where the layer has the projection's panels, else the FP32 GEMM; slot: LOUP_DEBUG_LIN_AMAX's record
+    auto run_gemm = [&](bool transB, int M, int Nc, int Kc, float alpha, const float* A, int lda,
+                        const float* W, int ldb, float beta, float* C, int ldc) {
+        if (polar_h2_ && in.gemm_h2_row && alpha == 1.0f && lda == Kc && ldc == Nc &&
+            (transB ? ldb == Kc : ldb == Nc) && M >= polar_h2_min_m_ && Nc >= 64 && Kc >= 64) {
+            auto it = ph2_map_.find(W);
+            if (it != ph2_map_.end()) {
+                const auto& hw = it->second;
+                void* panel = transB ? hw.BT : hw.B;
+                float* pb = transB ? hw.pBT : hw.pB;
+                if (panel && (transB ? (hw.rows == Nc && hw.cols == Kc) : (hw.rows == Kc && hw.cols == Nc))) {
+                    in.gemm_h2_row(M, Nc, Kc, A, panel, pb, C, beta, nullptr);
+                    return;
+                }
+            }
+        }
+        in.gemm(transB, M, Nc, Kc, alpha, A, lda, W, ldb, beta, C, ldc);
+    };
     auto proj = [&](const GenericLayer::H2Proj& p, int slot, bool transB, int M, int Nc, int K, const float* A,
                     const float* W, float* C, float beta = 0.0f) {
         if (d_lin_amax_) lin_amax_record(A, (int64_t)M * K, slot, st);
         if (p.B && in.gemm_h2_fwd)
             in.gemm_h2_fwd(M, Nc, K, A, p.sA, p.B, p.os, C, beta);
         else
-            in.gemm(transB, M, Nc, K, 1.0f, A, K, W, transB ? K : Nc, beta, C, Nc);
+            run_gemm(transB, M, Nc, K, 1.0f, A, K, W, transB ? K : Nc, beta, C, Nc);
     };
     // LOUP_RES_BWD (setup_lin_half): layer t's backward W_res^T assigns dx (the forward conv kernel leaves dx's rows
     // alone), and also reads dlin instead of dpre (the gate backward writes no dpre)
@@ -2491,7 +2562,7 @@ void GenericModel::record(const GenericPassInputs& in) {
             if (count[s] == 0) continue;
             if (lane_base >= 0) lane(lane_base + s);
             const int64_t row0 = (int64_t)start[s] * d;
-            in.gemm(transB, count[s] * d, Nc, K, 1.0f, A + row0 * K, K, W + (w_stride ? s * w_stride : 0),
+            run_gemm(transB, count[s] * d, Nc, K, 1.0f, A + row0 * K, K, W + (w_stride ? s * w_stride : 0),
                     transB ? K : Nc, beta, C + row0 * Nc, Nc);
         }
     };
@@ -2509,7 +2580,7 @@ void GenericModel::record(const GenericPassInputs& in) {
             if (p && p->B && in.gemm_h2_fwd && (int64_t)count[s] * d >= lin_half_srows_)
                 in.gemm_h2_fwd(count[s] * d, Nc, K, A + row0 * K, p->sA, p->B, p->os, C + row0 * Nc, 0.0f);
             else
-                in.gemm(transB, count[s] * d, Nc, K, 1.0f, A + row0 * K, K, W + (w_stride ? s * w_stride : 0),
+                run_gemm(transB, count[s] * d, Nc, K, 1.0f, A + row0 * K, K, W + (w_stride ? s * w_stride : 0),
                         transB ? K : Nc, 0.0f, C + row0 * Nc, Nc);
         }
     };
@@ -2619,6 +2690,14 @@ void GenericModel::record(const GenericPassInputs& in) {
         if (p.B)
             return (lin_half_parts_ & 16) && in.gemm_h2_gate_fwd &&
                    in.gemm_h2_gate_fwd(l, N * dimL(l), L->lin_cols[l], L->K0, A, p.sA, p.B, p.os, gf, false);
+        if (polar_h2_ && in.gemm_h2_row_gate_fwd && L->lin_cols[l] >= 64 && L->K0 >= 64 &&
+            N * dimL(l) >= polar_h2_min_m_) {
+            auto it = ph2_map_.find(L->C0[l]);
+            if (it != ph2_map_.end() && it->second.B) {
+                if (A) in.gemm_h2_row_gate_fwd(l, N * dimL(l), L->lin_cols[l], L->K0, A, it->second.B, it->second.pB, gf, nullptr);
+                return true;
+            }
+        }
         return in.gemm_gate_fwd(l, N * dimL(l), L->lin_cols[l], L->K0, A, L->C0[l], gf);
     };
     // the degrees of such a layer whose gated store would run in the projection (asks only; gf: natoms and C)
@@ -2638,9 +2717,9 @@ void GenericModel::record(const GenericPassInputs& in) {
             if (L->lmax_x > 0) fork();
             for (int l = 0; l <= L->lmax_x; ++l) {
                 if (L->lmax_x > 0) lane(l);
-                in.gemm(false, Nx * dimL(l), Cx, L->C_in, 1.0f, L->h_in[l], L->C_in, L->W_up[l], Cx, 0.0f, L->x[l], Cx);
+                run_gemm(false, Nx * dimL(l), Cx, L->C_in, 1.0f, L->h_in[l], L->C_in, L->W_up[l], Cx, 0.0f, L->x[l], Cx);
                 for (const auto& e : L->x_extra[l])  // long-range hidden fold: earlier layers' y terms
-                    in.gemm(false, Nx * dimL(l), Cx, L->C_in, 1.0f, layers_[e.src]->y[l], L->C_in, e.W, Cx, 1.0f,
+                    run_gemm(false, Nx * dimL(l), Cx, L->C_in, 1.0f, layers_[e.src]->y[l], L->C_in, e.W, Cx, 1.0f,
                             L->x[l], Cx);
             }
             if (L->lmax_x > 0) join();
@@ -2693,7 +2772,7 @@ void GenericModel::record(const GenericPassInputs& in) {
                 if (L->kind == 4 && !L->res0_table) {
                     for (int l = 0; l <= L->lmax_x; ++l) {
                         lane(4 + l);
-                        in.gemm(false, N * dimL(l), L->lin_cols[l], Cx, 1.0f, L->x[l], Cx, L->W_res[l],
+                        run_gemm(false, N * dimL(l), L->lin_cols[l], Cx, 1.0f, L->x[l], Cx, L->W_res[l],
                                 L->lin_cols[l], 0.0f, L->res[l], L->lin_cols[l]);
                     }
                 }
@@ -2737,6 +2816,14 @@ void GenericModel::record(const GenericPassInputs& in) {
                     if (p.B)
                         return (lin_half_parts_ & 16) && in.gemm_h2_gate_fwd &&
                                in.gemm_h2_gate_fwd(l, M, L->lin_cols[l], K, A, p.sA, p.B, p.os, gf, true);
+                    if (polar_h2_ && in.gemm_h2_row_gate_fwd && L->lin_cols[l] >= 64 && K >= 64 &&
+                        M >= polar_h2_min_m_) {
+                        auto it = ph2_map_.find(L->W_lin[l]);
+                        if (it != ph2_map_.end() && it->second.B) {
+                            if (A) in.gemm_h2_row_gate_fwd(l, M, L->lin_cols[l], K, A, it->second.B, it->second.pB, gf, nullptr);
+                            return true;
+                        }
+                    }
                     return in.gemm_gate_fwd_l1(l, M, L->lin_cols[l], K, A, L->W_lin[l], gf);
                 };
                 // whole passes, and the tiled call's last-layer sweep, which runs the layer's forward and backward
@@ -2809,7 +2896,7 @@ void GenericModel::record(const GenericPassInputs& in) {
                     in.gemm_h2_fwd(N * dimL(l), Cm, Cm, L->gout[l], L->w2f_sA[l], L->w2fh[l], L->w2f_oscale[l],
                                    L->msgf[l], 0.0f);
                 else
-                    in.gemm(false, N * dimL(l), Cm, Cm, 1.0f, L->gout[l], Cm, L->W_2[l], Cm, 0.0f, L->msgf[l], Cm);
+                    run_gemm(false, N * dimL(l), Cm, Cm, 1.0f, L->gout[l], Cm, L->W_2[l], Cm, 0.0f, L->msgf[l], Cm);
             }
             join();
         }
@@ -2824,7 +2911,7 @@ void GenericModel::record(const GenericPassInputs& in) {
                     species_gemm(false, 0, L->C_in, 16, L->h_in[0], L->ro_W1_sc, (int64_t)L->C_in * 16, 0.0f, L->hid, 0);
                     join();
                 } else {
-                    in.gemm(false, N, 16, L->C_in, 1.0f, L->h_in[0], L->C_in, L->ro_W1_sc, 16, 0.0f, L->hid, 16);
+                    run_gemm(false, N, 16, L->C_in, 1.0f, L->h_in[0], L->C_in, L->ro_W1_sc, 16, 0.0f, L->hid, 16);
                 }
             }
             float* dm[4];
@@ -2893,7 +2980,7 @@ void GenericModel::record(const GenericPassInputs& in) {
                             species_gemm(false, l, L->C_in, ft.cols, L->h_in[l], ft.Wh, (int64_t)L->C_in * ft.cols,
                                          beta, dst);
                         else
-                            in.gemm(false, N * dimL(l), ft.cols, L->C_in, 1.0f, L->h_in[l], L->C_in, ft.Wh, ft.cols,
+                            run_gemm(false, N * dimL(l), ft.cols, L->C_in, 1.0f, L->h_in[l], L->C_in, ft.Wh, ft.cols,
                                     beta, dst, ft.cols);
                         beta = 1.0f;
                     }
@@ -2905,7 +2992,7 @@ void GenericModel::record(const GenericPassInputs& in) {
                         if (ft.hf.B && in.gemm_h2_fwd && fold_h2_fills(N * dimL(l), ft.cols))
                             in.gemm_h2_fwd(N * dimL(l), ft.cols, Co, L->y[l], ft.hf.sA, ft.hf.B, ft.hf.os, dst, beta);
                         else
-                            in.gemm(false, N * dimL(l), ft.cols, Co, 1.0f, L->y[l], Co, ft.Wy, ft.cols, beta, dst,
+                            run_gemm(false, N * dimL(l), ft.cols, Co, 1.0f, L->y[l], Co, ft.Wy, ft.cols, beta, dst,
                                     ft.cols);
                     }
                     written.push_back(dst);
@@ -2916,16 +3003,16 @@ void GenericModel::record(const GenericPassInputs& in) {
             for (int l = 0; l <= L->lmax_out; ++l) {
                 if (L->hfold[l]) continue;  // long-range hidden fold: hout[l] is y[l], its consumers composed
                 if (L->lmax_out > 0) lane(l);
-                in.gemm(false, N * dimL(l), Co, Co, 1.0f, L->y[l], Co, L->W_p[l], Co, 0.0f, L->hout[l], Co);
+                run_gemm(false, N * dimL(l), Co, Co, 1.0f, L->y[l], Co, L->W_p[l], Co, 0.0f, L->hout[l], Co);
                 if (L->sc_has[l]) {
                     if (L->sc_species)
                         species_gemm(false, l, L->C_in, Co, L->h_in[l], L->W_sc[l], (int64_t)L->C_in * Co, 1.0f,
                                      L->hout[l]);
                     else
-                        in.gemm(false, N * dimL(l), Co, L->C_in, 1.0f, L->h_in[l], L->C_in, L->W_sc[l], Co, 1.0f,
+                        run_gemm(false, N * dimL(l), Co, L->C_in, 1.0f, L->h_in[l], L->C_in, L->W_sc[l], Co, 1.0f,
                                 L->hout[l], Co);
                     for (const auto& e : L->sc_extra[l])
-                        in.gemm(false, N * dimL(l), Co, L->C_in, 1.0f, layers_[e.src]->y[l], L->C_in, e.W, Co, 1.0f,
+                        run_gemm(false, N * dimL(l), Co, L->C_in, 1.0f, layers_[e.src]->y[l], L->C_in, e.W, Co, 1.0f,
                                 L->hout[l], Co);
                 }
             }
@@ -2943,7 +3030,7 @@ void GenericModel::record(const GenericPassInputs& in) {
             if (L->ro_folded) {
                 const bool hid_folded = chain_fold_ &&
                                         std::find(written.begin(), written.end(), L->hid) != written.end();
-                in.gemm(false, N, H, Co, 1.0f, L->y[0], Co, L->ro_W1, H, hid_folded ? 1.0f : 0.0f, L->hid, H);
+                run_gemm(false, N, H, Co, 1.0f, L->y[0], Co, L->ro_W1, H, hid_folded ? 1.0f : 0.0f, L->hid, H);
                 if (L->sc_has[0] && !chain_fold_) {
                     if (L->sc_species) {
                         fork();
@@ -2951,11 +3038,11 @@ void GenericModel::record(const GenericPassInputs& in) {
                                      L->hid, 0);
                         join();
                     } else {
-                        in.gemm(false, N, H, L->C_in, 1.0f, L->h_in[0], L->C_in, L->ro_W1_sc, H, 1.0f, L->hid, H);
+                        run_gemm(false, N, H, L->C_in, 1.0f, L->h_in[0], L->C_in, L->ro_W1_sc, H, 1.0f, L->hid, H);
                     }
                 }
             } else {
-                in.gemm(false, N, H, Co, 1.0f, L->hout[0], Co, L->ro_W1, H, 0.0f, L->hid, H);
+                run_gemm(false, N, H, Co, 1.0f, L->hout[0], Co, L->ro_W1, H, 0.0f, L->hid, H);
             }
             if (L->readout == 1) {
                 ro_mlp_kernel<<<gH, 256, 0, st>>>(N, H, L->ro_act_c, L->hid, L->ro_b1, L->ro_W2, nullptr, L->dhid,
@@ -2964,17 +3051,17 @@ void GenericModel::record(const GenericPassInputs& in) {
                 // stage 1: hid -> act1 (pre kept in dhid2 as scratch), stage 2 on hid2 = act1 @ Wm
                 ro_mlp_kernel<<<gH, 256, 0, st>>>(N, H, L->ro_act_c, L->hid, L->ro_b1, nullptr, L->dhid2, nullptr,
                                                   nullptr, 0);
-                in.gemm(false, N, H, H, 1.0f, L->hid, H, L->ro_Wm, H, 0.0f, L->hid2, H);
+                run_gemm(false, N, H, H, 1.0f, L->hid, H, L->ro_Wm, H, 0.0f, L->hid2, H);
                 ro_mlp_kernel<<<gH, 256, 0, st>>>(N, H, L->ro_act_c, L->hid2, L->ro_bm, L->ro_W2, nullptr, L->dhid,
                                                   energy, 1, in.atom_energy);
                 // dhid = (dhid @ Wm^T) * c silu'(pre1)
-                in.gemm(true, N, H, H, 1.0f, L->dhid, H, L->ro_Wm, H, 0.0f, L->hid2, H);
+                run_gemm(true, N, H, H, 1.0f, L->dhid, H, L->ro_Wm, H, 0.0f, L->hid2, H);
                 ro_act_bwd_kernel<<<gH, 256, 0, st>>>((int64_t)N * H, L->ro_act_c, L->dhid2, L->hid2);
                 CUDA_CHECK_THROW(cudaMemcpyAsync(L->dhid, L->hid2, (size_t)N * H * sizeof(float),
                                                  cudaMemcpyDeviceToDevice, st));
             }
             if (!L->ro_folded)
-                in.gemm(true, N, Co, H, 1.0f, L->dhid, H, L->ro_W1, H, 1.0f, L->dhout[0], Co);
+                run_gemm(true, N, Co, H, 1.0f, L->dhid, H, L->ro_W1, H, 1.0f, L->dhout[0], Co);
         }
     };
 
@@ -2993,7 +3080,7 @@ void GenericModel::record(const GenericPassInputs& in) {
                                  L->dh_in[0], 0);
                     join();
                 } else {
-                    in.gemm(true, N, L->C_in, 16, 1.0f, L->dhid, 16, L->ro_W1_sc, 16, 1.0f, L->dh_in[0], L->C_in);
+                    run_gemm(true, N, L->C_in, 16, 1.0f, L->dhid, 16, L->ro_W1_sc, 16, 1.0f, L->dh_in[0], L->C_in);
                 }
             }
         } else {
@@ -3002,14 +3089,14 @@ void GenericModel::record(const GenericPassInputs& in) {
                 const bool fork_sc = L->sc_has[0] && t > 0 && !chain_fold_;
                 if (fork_sc) fork();
                 if (fork_sc) lane(0);
-                in.gemm(true, N, Co, H, 1.0f, L->dhid, H, L->ro_W1, H, 0.0f, L->dy[0], Co);
+                run_gemm(true, N, Co, H, 1.0f, L->dhid, H, L->ro_W1, H, 0.0f, L->dy[0], Co);
                 if (fork_sc) {
                     if (L->sc_species)
                         species_gemm(true, 0, H, L->C_in, L->dhid, L->ro_W1_sc, (int64_t)L->C_in * H, 1.0f,
                                      L->dh_in[0], 1);
                     else {
                         lane(1);
-                        in.gemm(true, N, L->C_in, H, 1.0f, L->dhid, H, L->ro_W1_sc, H, 1.0f, L->dh_in[0], L->C_in);
+                        run_gemm(true, N, L->C_in, H, 1.0f, L->dhid, H, L->ro_W1_sc, H, 1.0f, L->dh_in[0], L->C_in);
                     }
                     join();
                 }
@@ -3038,7 +3125,7 @@ void GenericModel::record(const GenericPassInputs& in) {
                                 in.gemm_h2_fwd(N * dimL(l), Co, ft.cols, dsrc, ft.hb.sA, ft.hb.B, ft.hb.os, L->dy[l],
                                                beta);
                             else
-                                in.gemm(true, N * dimL(l), Co, ft.cols, 1.0f, dsrc, ft.cols, ft.Wy, ft.cols, beta,
+                                run_gemm(true, N * dimL(l), Co, ft.cols, 1.0f, dsrc, ft.cols, ft.Wy, ft.cols, beta,
                                         L->dy[l], Co);
                         }
                         beta = 1.0f;
@@ -3051,17 +3138,17 @@ void GenericModel::record(const GenericPassInputs& in) {
                 for (int l = 0; l <= L->lmax_out; ++l) {
                     if (L->hfold[l]) continue;  // long-range hidden fold: dy[l] (= dhout[l]) accumulated in place
                     if (fork_p) lane(l);
-                    in.gemm(true, N * dimL(l), Co, Co, 1.0f, L->dhout[l], Co, L->W_p[l], Co, 0.0f, L->dy[l], Co);
+                    run_gemm(true, N * dimL(l), Co, Co, 1.0f, L->dhout[l], Co, L->W_p[l], Co, 0.0f, L->dy[l], Co);
                     if (L->sc_has[l] && t > 0) {
                         if (L->sc_species)
                             species_gemm(true, l, Co, L->C_in, L->dhout[l], L->W_sc[l], (int64_t)L->C_in * Co, 1.0f,
                                          L->dh_in[l], 4);
                         else {
                             lane(4 + l);
-                            in.gemm(true, N * dimL(l), L->C_in, Co, 1.0f, L->dhout[l], Co, L->W_sc[l], Co, 1.0f,
+                            run_gemm(true, N * dimL(l), L->C_in, Co, 1.0f, L->dhout[l], Co, L->W_sc[l], Co, 1.0f,
                                     L->dh_in[l], L->C_in);
                             for (const auto& e : L->sc_extra[l])
-                                in.gemm(true, N * dimL(l), L->C_in, Co, 1.0f, L->dhout[l], Co, e.W, Co, 1.0f,
+                                run_gemm(true, N * dimL(l), L->C_in, Co, 1.0f, L->dhout[l], Co, e.W, Co, 1.0f,
                                         layers_[e.src]->dy[l], L->C_in);
                         }
                     }
@@ -3127,12 +3214,21 @@ void GenericModel::record(const GenericPassInputs& in) {
                     if (h2) {
                         in.gemm_h2_gate(l, N * dimL(l), Cm, Cm, L->dmsgf[l], L->w2h[l], L->w2h_oscale[l], g);
                         done = true;
+                    } else if (polar_h2_ && in.gemm_h2_row_gate_bwd && Cm >= 64 && Cm % 64 == 0 &&
+                               N * dimL(l) >= polar_h2_min_m_) {
+                        auto it = ph2_map_.find(L->W_2[l]);
+                        if (it != ph2_map_.end() && it->second.BT) {
+                            in.gemm_h2_row_gate_bwd(l, N * dimL(l), Cm, Cm, L->dmsgf[l], it->second.BT, it->second.pBT, g, nullptr);
+                            done = true;
+                        } else {
+                            done = in.gemm_gate_bwd(l, N * dimL(l), Cm, Cm, L->dmsgf[l], L->W_2[l], g);
+                        }
                     } else {
                         done = in.gemm_gate_bwd(l, N * dimL(l), Cm, Cm, L->dmsgf[l], L->W_2[l], g);
                     }
                 }
                 if (done) fused |= 1u << l;
-                else in.gemm(true, N * dimL(l), Cm, Cm, 1.0f, L->dmsgf[l], Cm, L->W_2[l], Cm, 0.0f, L->dgout[l], Cm);
+                else run_gemm(true, N * dimL(l), Cm, Cm, 1.0f, L->dmsgf[l], Cm, L->W_2[l], Cm, 0.0f, L->dgout[l], Cm);
             }
             join();
             if (fused != 15u)
@@ -3163,7 +3259,7 @@ void GenericModel::record(const GenericPassInputs& in) {
                 if (L->kind == 4 && t > 0) {
                     for (int l = 0; l <= L->lmax_x; ++l) {
                         lane(4 + l);
-                        in.gemm(true, N * dimL(l), Cx, L->lin_cols[l], 1.0f, L->dpre[l], L->lin_cols[l], L->W_res[l],
+                        run_gemm(true, N * dimL(l), Cx, L->lin_cols[l], 1.0f, L->dpre[l], L->lin_cols[l], L->W_res[l],
                                 L->lin_cols[l], 1.0f, L->dx[l], Cx);
                     }
                 }
@@ -3276,9 +3372,9 @@ void GenericModel::record(const GenericPassInputs& in) {
             if (L->lmax_x > 0) fork();
             for (int l = 0; l <= L->lmax_x; ++l) {
                 if (L->lmax_x > 0) lane(l);
-                in.gemm(true, Nx * dimL(l), L->C_in, Cx, 1.0f, L->dx[l], Cx, L->W_up[l], Cx, 1.0f, L->dh_in[l], L->C_in);
+                run_gemm(true, Nx * dimL(l), L->C_in, Cx, 1.0f, L->dx[l], Cx, L->W_up[l], Cx, 1.0f, L->dh_in[l], L->C_in);
                 for (const auto& e : L->x_extra[l])
-                    in.gemm(true, Nx * dimL(l), L->C_in, Cx, 1.0f, L->dx[l], Cx, e.W, Cx, 1.0f, layers_[e.src]->dy[l],
+                    run_gemm(true, Nx * dimL(l), L->C_in, Cx, 1.0f, L->dx[l], Cx, e.W, Cx, 1.0f, layers_[e.src]->dy[l],
                             L->C_in);
             }
             if (L->lmax_x > 0) join();
@@ -3417,7 +3513,7 @@ void GenericModel::record(const GenericPassInputs& in) {
                 dhs.emplace_back(L->dhout, L->dhout + L->lmax_out + 1);
             }
             lr_->record(st, N, in.gemm, in.gemm_fork, in.gemm_lane, in.gemm_join, in.species, in.pos64, hs, dhs,
-                        in.energy, in.forces, 0, in.virial);
+                        in.energy, in.forces, 0, in.virial, in.gemm_h2_row);
         }
         if (has_edges && has_zbl_)
             zbl_energy_kernel<<<(in.E_cap + 255) / 256, 256, 0, st>>>(in.E_dev, S, in.act_vec_len, in.act_senders,
@@ -3439,7 +3535,7 @@ void GenericModel::record(const GenericPassInputs& in) {
                 dhs.emplace_back(L->dhout, L->dhout + L->lmax_out + 1);
             }
             lr_->record(st, N, in.gemm, in.gemm_fork, in.gemm_lane, in.gemm_join, in.species, in.pos64, hs, dhs,
-                        in.energy, in.forces, in.compute_stress, in.virial);
+                        in.energy, in.forces, in.compute_stress, in.virial, in.gemm_h2_row);
         }
         for (int t = n_layers_ - 1; t >= 0; --t) backward_layer(t);
     } else {

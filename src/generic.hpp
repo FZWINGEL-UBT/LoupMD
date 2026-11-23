@@ -8,6 +8,7 @@
 #include <functional>
 #include <string>
 #include <unordered_map>
+#include <unordered_map>
 #include <vector>
 
 #include <cuda_runtime.h>
@@ -86,6 +87,21 @@ void hgemm2_f32a_variant(int v, int M, int N, int K, const float* A, float sA, c
 void hgemm2_split_t(int R, int Cc, const float* w, int e, void* out, cudaStream_t stream);
 int64_t hgemm2_pad_elems(int Nr, int Kc);  // halves of one padded panel (two per weight)
 void hgemm2_split_pad(int Nr, int Kc, const float* w, bool trans, int e, void* out, cudaStream_t stream);
+void hgemm2_row_init();
+void hgemm2_row_exp(int M, int K, const float* A, int8_t* eA, cudaStream_t stream);
+void hgemm2_pack_b_col(int Nr, int Kc, const float* w, bool trans, void* out_panel, float* out_inv_sB,
+                       cudaStream_t stream);
+void hgemm2_f32a_row(int M, int N, int K, const float* A, const void* B_panel, const float* inv_sB,
+                     float* C, float beta, void* ws, size_t ws_bytes, cudaStream_t stream,
+                     const int8_t* eA_cached = nullptr);
+void hgemm2_f32a_row_gate_bwd(int l, int M, int N, int K, const float* A, const void* B_panel, const float* inv_sB,
+                              const GateArgs& g, void* ws, cudaStream_t stream, const int8_t* eA_cached = nullptr);
+void hgemm2_f32a_row_gate_fwd(int l, int M, int N, int K, const float* A, const void* B_panel, const float* inv_sB,
+                              const GateArgs& g, void* ws, cudaStream_t stream, const int8_t* eA_cached = nullptr);
+using GemmH2RowFn = std::function<void(int M, int N, int K, const float* A, const void* B_panel,
+                                       const float* inv_sB, float* C, float beta, const int8_t* eA_cached)>;
+using GemmH2RowGateFn = std::function<void(int l, int M, int N, int K, const float* A, const void* B_panel,
+                                           const float* inv_sB, const GateArgs& g, const int8_t* eA_cached)>;
 using GemmH2FwdFn = std::function<void(int M, int N, int K, const float* A, float sA, const void* B, float oscale,
                                        float* C, float beta)>;
 // The same product (beta 0) with row r scaled by rs.D[r / rs.rdeg] rs.beta + rs.alpha (list 13, LOUP_RES_BWD 2: the
@@ -159,7 +175,10 @@ struct GenericPassInputs {
     GemmGateFn gemm_gate_fwd;  // empty: never fused (LOUP_GATE_FUSE_FWD=0)
     GemmGateFn gemm_gate_fwd_l1;  // empty: later layers' forward gate off (LOUP_GATE_FWD_L1=0)
     GemmH2GateFn gemm_h2_gate; // empty: the FP32 W_2^T path (the model also needs LOUP_W2T_HALF at load)
-    GemmH2FwdFn gemm_h2_fwd;   // empty: the FP32 forward W_2 path (the model also needs LOUP_W2F_HALF at load)
+    GemmH2FwdFn gemm_h2_fwd;
+    GemmH2RowFn gemm_h2_row;
+    GemmH2RowGateFn gemm_h2_row_gate_bwd;
+    GemmH2RowGateFn gemm_h2_row_gate_fwd;   // empty: the FP32 forward W_2 path (the model also needs LOUP_W2F_HALF at load)
     GemmH2RowsFn gemm_h2_rows; // empty: W_res^T from dpre (LOUP_RES_BWD 1)
     GemmH2GateFwdFn gemm_h2_gate_fwd;  // empty: LOUP_GATE_FUSE_FWD=0
 };
@@ -302,7 +321,17 @@ private:
     void setup_w2t_half();
     bool w2f_half_ = false;          // LOUP_W2F_HALF: some layer has its transposed weight panels (setup_w2f_half)
     void setup_w2f_half();
-    bool lin_half_ = false;          // LOUP_LIN_HALF: some conv layer's projection has its panels (setup_lin_half)
+    bool lin_half_ = false;
+    bool polar_h2_ = false;
+    int polar_h2_min_m_ = 128;
+    struct H2RowW {
+        void* B = nullptr;    float* pB = nullptr;
+        void* BT = nullptr;   float* pBT = nullptr;
+        int rows = 0, cols = 0;
+    };
+    std::unordered_map<const float*, H2RowW> ph2_map_;
+    std::vector<void*> ph2_allocs_;
+    void setup_polar_h2();          // LOUP_LIN_HALF: some conv layer's projection has its panels (setup_lin_half)
     int lin_half_parts_ = 0;         // LOUP_LIN_HALF_PARTS (setup_lin_half)
     int lin_half_srows_ = 0;         // LOUP_LIN_HALF_SPECIES_ROWS: bit 128's fewest rows per species and degree
     int lin_half_fold_tiles_ = 0;    // LOUP_LIN_HALF_FOLD_TILES: bit 256's fewest 128 x 64 tiles per product (SMs)

@@ -2223,6 +2223,24 @@ static void record_force_pass(LoupHandle* h, int compute_stress, bool energy_onl
         loup::hgemm2_f32a(M, Nc, K, A, sA, B, oscale, C, h->gemm_stream ? h->gemm_stream : h->stream, beta, h2_ws(),
                           h->cublas_ws_bytes);
     };
+    in.gemm_h2_row = [h](int M, int Nc, int K, const float* A, const void* B, const float* inv_sB, float* C,
+                         float beta, const int8_t* eA_cached) {
+        void* ws = h->gemm_ws ? h->gemm_ws : h->d_cublas_ws;
+        loup::hgemm2_f32a_row(M, Nc, K, A, B, inv_sB, C, beta, ws, h->cublas_ws_bytes,
+                              h->gemm_stream ? h->gemm_stream : h->stream, eA_cached);
+    };
+    in.gemm_h2_row_gate_bwd = [h](int l, int M, int Nc, int K, const float* A, const void* B, const float* inv_sB,
+                                  const loup::GateArgs& g, const int8_t* eA_cached) {
+        void* ws = h->gemm_ws ? h->gemm_ws : h->d_cublas_ws;
+        loup::hgemm2_f32a_row_gate_bwd(l, M, Nc, K, A, B, inv_sB, g, ws,
+                                       h->gemm_stream ? h->gemm_stream : h->stream, eA_cached);
+    };
+    in.gemm_h2_row_gate_fwd = [h](int l, int M, int Nc, int K, const float* A, const void* B, const float* inv_sB,
+                                  const loup::GateArgs& g, const int8_t* eA_cached) {
+        void* ws = h->gemm_ws ? h->gemm_ws : h->d_cublas_ws;
+        loup::hgemm2_f32a_row_gate_fwd(l, M, Nc, K, A, B, inv_sB, g, ws,
+                                       h->gemm_stream ? h->gemm_stream : h->stream, eA_cached);
+    };
     in.gemm_h2_rows = [h, h2_ws](int M, int Nc, int K, const float* A, float sA, const void* B, float oscale, float* C,
                                  const loup::GateArgs& rs) {
         loup::hgemm2_f32a_rows(M, Nc, K, A, sA, B, oscale, C, rs, h->gemm_stream ? h->gemm_stream : h->stream, h2_ws(),

@@ -907,4 +907,673 @@ void hgemm2_gate(int l, int M, int N, int K, const void* A, const void* B, float
     }
 }
 
+
+// ===================== Universal Per-Row Two-Half FP16 GEMM v2 (Plain + 64x128 + K128-Fused + Gate Bwd/Fwd) =====================
+namespace {
+__device__ __forceinline__ float h2r_pow2_f(int e) {
+    return __uint_as_float(static_cast<uint32_t>(e + 127) << 23);
+}
+__device__ __forceinline__ int h2r_exp_ceil(float am) {
+    const uint32_t u = __float_as_uint(am);
+    int e = (int)((u >> 23) & 0xff) - 127 + 1;
+    if (e < -108) e = -108;
+    if (e > 108) e = 108;
+    return e;
+}
+
+template <int TPR>
+__global__ void h2r_row_exp_kernel(int M, int K, const float* __restrict__ A, int8_t* __restrict__ eA) {
+    const int r = blockIdx.x * (blockDim.x / TPR) + (threadIdx.x / TPR);
+    if (r >= M) return;
+    const int lane = threadIdx.x & (TPR - 1), K4 = K >> 2;
+    const float4* row4 = reinterpret_cast<const float4*>(A + (int64_t)r * K);
+    float am = 0.0f;
+    for (int k = lane; k < K4; k += TPR) {
+        const float4 v = row4[k];
+        am = fmaxf(am, fmaxf(fmaxf(fabsf(v.x), fabsf(v.y)), fmaxf(fabsf(v.z), fabsf(v.w))));
+    }
+    if constexpr (TPR >= 32) am = fmaxf(am, __shfl_xor_sync(0xffffffffu, am, 16));
+    if constexpr (TPR >= 16) am = fmaxf(am, __shfl_xor_sync(0xffffffffu, am, 8));
+    am = fmaxf(am, __shfl_xor_sync(0xffffffffu, am, 4));
+    am = fmaxf(am, __shfl_xor_sync(0xffffffffu, am, 2));
+    am = fmaxf(am, __shfl_xor_sync(0xffffffffu, am, 1));
+    if (lane == 0) eA[r] = (int8_t)((am > 0.0f && isfinite(am)) ? h2r_exp_ceil(am) : -127);
+}
+
+__global__ void h2r_pack_b_col_kernel(int Nr, int Kc, int Np, int Kp, const float* __restrict__ w, int trans,
+                                      __half* __restrict__ out, float* __restrict__ out_inv_sB) {
+    const int r = blockIdx.x;
+    if (r >= Np) return;
+    const int tid = threadIdx.x;
+    float am = 0.0f;
+    if (r < Nr) {
+        for (int k = tid; k < Kc; k += blockDim.x) {
+            const float v = trans ? w[(int64_t)k * Nr + r] : w[(int64_t)r * Kc + k];
+            am = fmaxf(am, fabsf(v));
+        }
+    }
+    for (int o = 16; o > 0; o >>= 1) am = fmaxf(am, __shfl_xor_sync(0xffffffffu, am, o));
+    __shared__ float s_am[4];
+    if ((tid & 31) == 0) s_am[tid >> 5] = am;
+    __syncthreads();
+    if (tid == 0) {
+        float m = 0.0f;
+        for (int i = 0; i < 4; ++i) m = fmaxf(m, s_am[i]);
+        s_am[0] = m;
+    }
+    __syncthreads();
+    const float m = s_am[0];
+    const int e = (m > 0.0f && isfinite(m)) ? h2r_exp_ceil(m) : -127;
+    const float sB = (e > -127) ? h2r_pow2_f(12 - e) : 0.0f;
+    if (tid == 0 && r < Nr) out_inv_sB[r] = (e > -127) ? h2r_pow2_f(e - 12) : 0.0f;
+    const int64_t plane = (int64_t)Np * Kp;
+    for (int k = tid; k < Kp; k += blockDim.x) {
+        float a = 0.0f;
+        if (r < Nr && k < Kc) a = (trans ? w[(int64_t)k * Nr + r] : w[(int64_t)r * Kc + k]) * sB;
+        const __half h = __float2half_rn(a);
+        const int64_t idx = (int64_t)r * Kp + k;
+        out[idx] = h;
+        out[plane + idx] = __float2half_rn((a - __half2float(h)) * (1.0f / (float)(1 << (kHC - 11))));
+    }
+}
+
+// Plain, Split-K, Gate-Bwd (DEG=1,3,5,7, GATE_FWD=false), and Gate-Fwd (DEG=3,5,7, GATE_FWD=true)
+template <int BM_T, bool TAIL, bool SPLIT, int DEG = 0, bool GATE_FWD = false>
+__global__ void __launch_bounds__(128, BM_T == 64 ? 3 : 2)
+hgemm2f_row_kernel(int M, int N, int K, const float* __restrict__ A, const int8_t* __restrict__ eA,
+                   const __half* __restrict__ B, const float* __restrict__ inv_sB,
+                   float* __restrict__ C, float beta, GateArgs ga) {
+    constexpr int NI = BM_T / 32;
+    constexpr int MT = (DEG > 0 && !GATE_FWD) ? (BM_T / DEG * DEG) : BM_T;
+    constexpr int kTileA = BM_T * kHK;
+    constexpr int kStageH = 2 * kTileA + 2 * kHTileB;
+    extern __shared__ __align__(128) unsigned char hsm[];
+    const unsigned sbase = (unsigned)__cvta_generic_to_shared(hsm);
+    const int tid = threadIdx.x, lane = tid & 31, warp = tid >> 5, wm = warp >> 1, wn = warp & 1;
+    const int m0 = blockIdx.y * MT, n0 = blockIdx.x * kHN;
+    const int Kp = TAIL ? (K + kHK - 1) / kHK * kHK : K;
+    const int64_t planeB = TAIL ? (int64_t)((N + kHN - 1) / kHN * kHN) * Kp : (int64_t)N * K;
+    const int jn = TAIL ? min(4, max(0, (N - n0 - wn * 32) / 8)) : 4;
+    const int fr = tid >> 3, fj = tid & 7;
+    const int cr = tid >> 2, cj = tid & 3;
+    const __half* bg = B + (int64_t)(n0 + cr) * Kp + cj * 8;
+    const int g = lane >> 2, t = lane & 3;
+    const int er = wm * (BM_T / 2) + g, ec = wn * 32 + 2 * t;
+
+    __shared__ float s_sA[BM_T];
+    if (tid < BM_T) {
+        const int r = m0 + tid;
+        const int e = (tid < MT && r < M) ? (int)eA[r] : -127;
+        s_sA[tid] = (e > -127) ? h2r_pow2_f(12 - e) : 0.0f;
+    }
+
+    auto stage_b = [&](int st, int p) { return sbase + (unsigned)((st * kStageH + 2 * kTileA + p * kHTileB) * 2); };
+    auto issue = [&](int kt) {
+        const int st = kt & 1, k0 = kt * kHK;
+        const unsigned sa = sbase + (unsigned)(st * kStageH * 2);
+#pragma unroll
+        for (int i = 0; i < (BM_T / 16); ++i) {
+            const int r = fr + 16 * i;
+            const bool rok = (r < MT) && (m0 + r < M), kok = !TAIL || k0 + 4 * fj < K;
+            cp16(sa + r * 128 + ((fj ^ (r & 7)) << 4), A + (int64_t)(rok ? m0 + r : m0) * K + (kok ? k0 + 4 * fj : 0),
+                 rok && kok);
+        }
+#pragma unroll
+        for (int p = 0; p < 2; ++p)
+#pragma unroll
+            for (int i = 0; i < 2; ++i)
+                cp16(stage_b(st, p) + swz(cr + 32 * i, cj), bg + p * planeB + (int64_t)32 * i * Kp + k0, true);
+        asm volatile("cp.async.commit_group;");
+    };
+
+    float acc[NI][4][4];
+    unsigned accX[NI][4][2];
+#pragma unroll
+    for (int i = 0; i < NI; ++i)
+#pragma unroll
+        for (int j = 0; j < 4; ++j) {
+#pragma unroll
+            for (int e = 0; e < 4; ++e) acc[i][j][e] = 0.0f;
+            accX[i][j][0] = accX[i][j][1] = 0u;
+        }
+
+    const int b_row = wn * 32 + ((lane >> 4) << 3) + (lane & 7), b_kc = (lane >> 3) & 1;
+    const int nk = Kp / kHK;
+    int kt0 = 0, kt1 = nk;
+    if constexpr (SPLIT) {
+        const int nks = (nk + (int)gridDim.z - 1) / (int)gridDim.z;
+        kt0 = (int)blockIdx.z * nks;
+        kt1 = min(nk, kt0 + nks);
+    }
+    issue(kt0);
+    for (int kt = kt0; kt < kt1; ++kt) {
+        asm volatile("cp.async.wait_group 0;");
+        __syncthreads();
+        if (kt + 1 < kt1) issue(kt + 1);
+        if constexpr (DEG > 0 && !GATE_FWD) {
+            if (kt == (kt1 > 4 ? kt1 - 4 : 0)) {
+                constexpr int l = DEG / 2;
+                const int a0 = m0 / DEG, na = min(MT / DEG, ga.natoms - a0), rows = min(MT, M - m0);
+                if (DEG > 1)
+                    for (int li = tid; li < 2 * rows; li += 128) {
+                        const int64_t off = (int64_t)(m0 + (li >> 1)) * N + n0 + 32 * (li & 1);
+                        if (ga.lin_l) prefetch_l2(ga.lin_l + off);
+                        if (ga.res_l) prefetch_l2(ga.res_l + off);
+                    }
+                for (int li = tid; li < 2 * na; li += 128) {
+                    const int64_t off = (int64_t)(a0 + (li >> 1)) * 4 * N + l * N + n0 + 32 * (li & 1);
+                    prefetch_l2(ga.lin0 + off);
+                    if (ga.res0 && !ga.res0_sp) prefetch_l2(ga.res0 + off);
+                }
+            }
+        }
+        if (TAIL && jn == 0) continue;
+        const int st = kt & 1;
+        const unsigned char* sa = hsm + st * kStageH * 2 + er * 128 + (t & 1) * 8;
+#pragma unroll
+        for (int kk = 0; kk < 2; ++kk) {
+            unsigned bh[2][4], bl[2][4], bc[2][4];
+#pragma unroll
+            for (int j = 0; j < 2; ++j) {
+                ldsm4(stage_b(st, 0) + swz(b_row + 16 * j, 2 * kk + b_kc), bh[j]);
+                ldsm4(stage_b(st, 1) + swz(b_row + 16 * j, 2 * kk + b_kc), bl[j]);
+#pragma unroll
+                for (int r = 0; r < 4; ++r) bc[j][r] = hmul2u(bh[j][r], kHB11);
+            }
+            const int ja = 4 * kk + (t >> 1);
+            const int o0 = (ja ^ g) << 4, o1 = ((ja + 2) ^ g) << 4;
+#pragma unroll
+            for (int i = 0; i < NI; ++i) {
+                const unsigned char* s = sa + 16 * i * 128;
+                unsigned ah[4], al[4];
+                const float sc0 = s_sA[er + 16 * i], sc1 = s_sA[er + 16 * i + 8];
+                split2f(*reinterpret_cast<const float2*>(s + o0), sc0, ah[0], al[0]);
+                split2f(*reinterpret_cast<const float2*>(s + 8 * 128 + o0), sc1, ah[1], al[1]);
+                split2f(*reinterpret_cast<const float2*>(s + o1), sc0, ah[2], al[2]);
+                split2f(*reinterpret_cast<const float2*>(s + 8 * 128 + o1), sc1, ah[3], al[3]);
+#pragma unroll
+                for (int j = 0; j < 4; ++j) {
+                    if (j >= jn) continue;
+                    const int jp = j >> 1, jb = 2 * (j & 1);
+                    float d[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+                    mma16816(d, ah, bh[jp][jb], bh[jp][jb + 1]);
+                    jam4(d);
+#pragma unroll
+                    for (int e = 0; e < 4; ++e) acc[i][j][e] += d[e];
+                    mma16816h(accX[i][j], ah, bl[jp][jb], bl[jp][jb + 1]);
+                    mma16816h(accX[i][j], al, bc[jp][jb], bc[jp][jb + 1]);
+                }
+            }
+        }
+#pragma unroll
+        for (int i = 0; i < NI; ++i)
+#pragma unroll
+            for (int j = 0; j < 4; ++j) {
+#pragma unroll
+                for (int h = 0; h < 2; ++h) {
+                    const float2 x = __half22float2(*reinterpret_cast<const __half2*>(&accX[i][j][h]));
+                    acc[i][j][2 * h] = fmaf(x.x, (float)(1 << (kHC - 11)), acc[i][j][2 * h]);
+                    acc[i][j][2 * h + 1] = fmaf(x.y, (float)(1 << (kHC - 11)), acc[i][j][2 * h + 1]);
+                }
+                accX[i][j][0] = accX[i][j][1] = 0u;
+            }
+    }
+
+    if constexpr (SPLIT) {
+        float* const W = C + (int64_t)blockIdx.z * M * N;
+#pragma unroll
+        for (int i = 0; i < NI; ++i)
+#pragma unroll
+            for (int h = 0; h < 2; ++h) {
+                const int r = m0 + er + 16 * i + 8 * h;
+                if (r >= M) continue;
+#pragma unroll
+                for (int j = 0; j < 4; ++j) {
+                    if (j >= jn) continue;
+                    *reinterpret_cast<float2*>(W + (int64_t)r * N + n0 + ec + 8 * j) =
+                        make_float2(acc[i][j][2 * h], acc[i][j][2 * h + 1]);
+                }
+            }
+        return;
+    } else if constexpr (DEG == 0) {
+#pragma unroll
+        for (int i = 0; i < NI; ++i)
+#pragma unroll
+            for (int h = 0; h < 2; ++h) {
+                const int r = m0 + er + 16 * i + 8 * h;
+                if (r >= M) continue;
+                const int e = (int)eA[r];
+                const float pa = (e > -127) ? h2r_pow2_f(e - 12) : 0.0f;
+#pragma unroll
+                for (int j = 0; j < 4; ++j) {
+                    if (j >= jn) continue;
+                    const int c0 = n0 + ec + 8 * j;
+                    const float2 pb = *reinterpret_cast<const float2*>(inv_sB + c0);
+                    float2* o = reinterpret_cast<float2*>(C + (int64_t)r * N + c0);
+                    float2 v = make_float2((acc[i][j][2 * h] * pa) * pb.x, (acc[i][j][2 * h + 1] * pa) * pb.y);
+                    if (beta != 0.0f) {
+                        const float2 cv = *o;
+                        v.x = fmaf(beta, cv.x, v.x);
+                        v.y = fmaf(beta, cv.y, v.y);
+                    }
+                    *o = v;
+                }
+            }
+    } else if constexpr (!GATE_FWD) {
+        constexpr int APT = BM_T / DEG;
+        float* sC = reinterpret_cast<float*>(hsm);
+        float* sS = sC + BM_T * kHSRow;
+        int* sQ = reinterpret_cast<int*>(sS + BM_T);
+        __syncthreads();
+#pragma unroll
+        for (int i = 0; i < NI; ++i)
+#pragma unroll
+            for (int h = 0; h < 2; ++h) {
+                const int lr = er + 16 * i + 8 * h, r = m0 + lr;
+                const int e = (lr < MT && r < M) ? (int)eA[r] : -127;
+                const float pa = (e > -127) ? h2r_pow2_f(e - 12) : 0.0f;
+#pragma unroll
+                for (int j = 0; j < 4; ++j) {
+                    const int lc = ec + 8 * j, c0 = n0 + lc;
+                    const float2 pb = *reinterpret_cast<const float2*>(inv_sB + c0);
+                    *reinterpret_cast<float2*>(sC + lr * kHSRow + lc) =
+                        make_float2((acc[i][j][2 * h] * pa) * pb.x, (acc[i][j][2 * h + 1] * pa) * pb.y);
+                }
+            }
+        const int a0 = m0 / DEG, na = min(APT, ga.natoms - a0);
+        if (tid < na) {
+            const int a = a0 + tid;
+            sS[tid] = 1.0f / (ga.D[a] * ga.beta + ga.alpha);
+            sQ[tid] = ga.res0_sp ? ga.res0_sp[a] : a;
+        }
+        __syncthreads();
+        gate_bwd_tile<DEG, kHSRow, 2, false>(sC, sS, sQ, a0, na, n0, tid, ga);
+        __syncthreads();
+        gate_bwd_tile_dD<DEG, kHSRow>(sC, sS, a0, na, tid, ga);
+    } else {
+        constexpr int l = DEG / 2;
+        constexpr int SGS = kHN + 8;
+        float* sG = reinterpret_cast<float*>(hsm);
+        const int a0 = m0 / DEG, na = (min(m0 + BM_T, M) - 1) / DEG - a0 + 1;
+        float* sS = sG + na * SGS;
+        int* sQ = reinterpret_cast<int*>(sS + na);
+        __syncthreads();
+        for (int ai = tid; ai < na; ai += 128) {
+            const int a = a0 + ai;
+            sS[ai] = 1.0f / (ga.D[a] * ga.beta + ga.alpha);
+            sQ[ai] = ga.res0_sp ? ga.res0_sp[a] : a;
+        }
+        __syncthreads();
+        {
+            constexpr int B = 4;
+            const int cl = tid & 63, c = n0 + cl;
+            for (int ai0 = tid >> 6; ai0 < na; ai0 += 2 * B) {
+                float lv[B], rv[B];
+#pragma unroll
+                for (int j = 0; j < B; ++j) {
+                    const int ai = ai0 + 2 * j;
+                    const bool ok = ai < na && c < N;
+                    const int aj = ok ? ai : 0;
+                    lv[j] = ok ? ga.lin0[(int64_t)(a0 + aj) * 4 * N + l * N + c] : 0.0f;
+                    rv[j] = ok && ga.res0 ? ga.res0[(int64_t)sQ[aj] * 4 * N + l * N + c] : 0.0f;
+                }
+#pragma unroll
+                for (int j = 0; j < B; ++j) {
+                    const int ai = ai0 + 2 * j;
+                    if (ai < na && c < N) sG[ai * SGS + cl] = ga.cg * sigmoid_f(lv[j] * sS[ai] + rv[j]);
+                }
+            }
+        }
+        __syncthreads();
+#pragma unroll
+        for (int i = 0; i < NI; ++i)
+#pragma unroll
+            for (int h = 0; h < 2; ++h) {
+                const int r = m0 + er + 16 * i + 8 * h;
+                if (r >= M) continue;
+                const int ai = r / DEG - a0;
+                const float s = sS[ai];
+                const int e = (int)eA[r];
+                const float pa = (e > -127) ? h2r_pow2_f(e - 12) : 0.0f;
+#pragma unroll
+                for (int j = 0; j < 4; ++j) {
+                    if (j >= jn) continue;
+                    const int cl = ec + 8 * j, c0 = n0 + cl;
+                    const float2 pb = *reinterpret_cast<const float2*>(inv_sB + c0);
+                    const float2 gg = *reinterpret_cast<const float2*>(sG + ai * SGS + cl);
+                    *reinterpret_cast<float2*>(ga.out + (int64_t)r * N + c0) =
+                        make_float2(gg.x * (((acc[i][j][2 * h] * pa) * pb.x) * s),
+                                    gg.y * (((acc[i][j][2 * h + 1] * pa) * pb.y) * s));
+                }
+            }
+    }
+}
+
+// Fused K=128 64x128 kernel (ZERO row_exp launch, 1x A DRAM read!)
+__global__ void __launch_bounds__(256, 2)
+h2f_64x128_k128_fused(int M, int N, const float* __restrict__ A, const __half* __restrict__ B,
+                      const float* __restrict__ inv_sB, float* __restrict__ C, float beta) {
+    constexpr int kStageB = 24576;
+    extern __shared__ __align__(128) unsigned char sm[];
+    const unsigned sbase = (unsigned)__cvta_generic_to_shared(sm);
+    const int tid = threadIdx.x, lane = tid & 31, warp = tid >> 5;
+    const int wm = warp >> 2, wn = warp & 3;
+    const int m0 = blockIdx.y * 64, n0 = blockIdx.x * 128;
+    const int64_t planeB = (int64_t)N * 128;
+
+    const int my_r = tid >> 2, my_g = tid & 3;
+    const bool rok = (m0 + my_r) < M;
+    const float4* arow = reinterpret_cast<const float4*>(A + (int64_t)(rok ? m0 + my_r : m0) * 128);
+    float am = 0.0f;
+#pragma unroll
+    for (int s = 0; s < 8; ++s) {
+        const float4 v = rok ? __ldg(arow + s * 4 + my_g) : make_float4(0.0f, 0.0f, 0.0f, 0.0f);
+        am = fmaxf(am, fmaxf(fmaxf(fabsf(v.x), fabsf(v.y)), fmaxf(fabsf(v.z), fabsf(v.w))));
+    }
+    am = fmaxf(am, __shfl_xor_sync(0xffffffffu, am, 2));
+    am = fmaxf(am, __shfl_xor_sync(0xffffffffu, am, 1));
+    const int my_e = (am > 0.0f && isfinite(am)) ? h2r_exp_ceil(am) : -127;
+    const float my_sA = (my_e > -127) ? h2r_pow2_f(12 - my_e) : 0.0f;
+
+    __shared__ float s_pa[64];
+    if (my_g == 0) s_pa[my_r] = (my_e > -127) ? h2r_pow2_f(my_e - 12) : 0.0f;
+
+    const int br = tid >> 2, bj = tid & 3;
+    const __half* bg = B + (int64_t)(n0 + br) * 128 + bj * 8;
+    auto sAH = [&](int st) { return sbase + (unsigned)(st * kStageB); };
+    auto sAL = [&](int st) { return sbase + (unsigned)(st * kStageB + 4096); };
+    auto sBH = [&](int st) { return sbase + (unsigned)(st * kStageB + 8192); };
+    auto sBL = [&](int st) { return sbase + (unsigned)(st * kStageB + 16384); };
+
+    auto issue_B = [&](int st, int kt) {
+        const int k0 = kt * 32;
+#pragma unroll
+        for (int i = 0; i < 2; ++i) {
+            cp16(sBH(st) + swz(br + 64 * i, bj), bg + (int64_t)64 * i * 128 + k0, true);
+            cp16(sBL(st) + swz(br + 64 * i, bj), bg + planeB + (int64_t)64 * i * 128 + k0, true);
+        }
+        asm volatile("cp.async.commit_group;");
+    };
+    auto split_A_stage = [&](int st, int kt) {
+        unsigned char* pAH = sm + st * kStageB;
+        unsigned char* pAL = pAH + 4096;
+#pragma unroll
+        for (int c = 0; c < 2; ++c) {
+            const float4 v = rok ? __ldg(arow + (2 * kt + c) * 4 + my_g) : make_float4(0.0f, 0.0f, 0.0f, 0.0f);
+            const int aj4 = c * 4 + my_g;
+            unsigned h0, l0, h1, l1;
+            split2f(make_float2(v.x, v.y), my_sA, h0, l0);
+            split2f(make_float2(v.z, v.w), my_sA, h1, l1);
+            const int off = swz(my_r, aj4 >> 1) + ((aj4 & 1) << 3);
+            *reinterpret_cast<uint2*>(pAH + off) = make_uint2(h0, h1);
+            *reinterpret_cast<uint2*>(pAL + off) = make_uint2(l0, l1);
+        }
+    };
+
+    float acc[2][4][4] = {};
+    unsigned accX[2][4][2] = {};
+    const int a_row = wm * 32 + (lane & 15), a_kc = lane >> 4;
+    const int b_row = wn * 32 + ((lane >> 4) << 3) + (lane & 7), b_kc = (lane >> 3) & 1;
+
+    issue_B(0, 0);
+    split_A_stage(0, 0);
+#pragma unroll
+    for (int kt = 0; kt < 4; ++kt) {
+        const int st = kt & 1, nxt = st ^ 1;
+        asm volatile("cp.async.wait_group 0;");
+        __syncthreads();
+        if (kt + 1 < 4) issue_B(nxt, kt + 1);
+#pragma unroll
+        for (int kk = 0; kk < 2; ++kk) {
+            unsigned ah[2][4], al[2][4], bh[2][4], bl[2][4], bc[2][4];
+#pragma unroll
+            for (int i = 0; i < 2; ++i) {
+                ldsm4(sAH(st) + swz(a_row + 16 * i, 2 * kk + a_kc), ah[i]);
+                ldsm4(sAL(st) + swz(a_row + 16 * i, 2 * kk + a_kc), al[i]);
+            }
+#pragma unroll
+            for (int j = 0; j < 2; ++j) {
+                ldsm4(sBH(st) + swz(b_row + 16 * j, 2 * kk + b_kc), bh[j]);
+                ldsm4(sBL(st) + swz(b_row + 16 * j, 2 * kk + b_kc), bl[j]);
+#pragma unroll
+                for (int r = 0; r < 4; ++r) bc[j][r] = hmul2u(bh[j][r], kHB11);
+            }
+#pragma unroll
+            for (int i = 0; i < 2; ++i)
+#pragma unroll
+                for (int j = 0; j < 4; ++j) {
+                    const int jp = j >> 1, jb = 2 * (j & 1);
+                    float d[4] = {};
+                    mma16816(d, ah[i], bh[jp][jb], bh[jp][jb + 1]);
+                    jam4(d);
+#pragma unroll
+                    for (int e = 0; e < 4; ++e) acc[i][j][e] += d[e];
+                    mma16816h(accX[i][j], ah[i], bl[jp][jb], bl[jp][jb + 1]);
+                    mma16816h(accX[i][j], al[i], bc[jp][jb], bc[jp][jb + 1]);
+                }
+        }
+#pragma unroll
+        for (int i = 0; i < 2; ++i)
+#pragma unroll
+            for (int j = 0; j < 4; ++j) {
+#pragma unroll
+                for (int h = 0; h < 2; ++h) {
+                    const float2 x = __half22float2(*reinterpret_cast<const __half2*>(&accX[i][j][h]));
+                    acc[i][j][2 * h] = fmaf(x.x, (float)(1 << (kHC - 11)), acc[i][j][2 * h]);
+                    acc[i][j][2 * h + 1] = fmaf(x.y, (float)(1 << (kHC - 11)), acc[i][j][2 * h + 1]);
+                }
+                accX[i][j][0] = accX[i][j][1] = 0u;
+            }
+        if (kt + 1 < 4) split_A_stage(nxt, kt + 1);
+    }
+
+    const int g = lane >> 2, t = lane & 3;
+    const int er = wm * 32 + g, ec = wn * 32 + 2 * t;
+#pragma unroll
+    for (int i = 0; i < 2; ++i)
+#pragma unroll
+        for (int h = 0; h < 2; ++h) {
+            const int lr = er + 16 * i + 8 * h, r = m0 + lr;
+            if (r >= M) continue;
+            const float pa = s_pa[lr];
+#pragma unroll
+            for (int j = 0; j < 4; ++j) {
+                const int c0 = n0 + ec + 8 * j;
+                const float2 pb = *reinterpret_cast<const float2*>(inv_sB + c0);
+                float2* o = reinterpret_cast<float2*>(C + (int64_t)r * N + c0);
+                float2 v = make_float2((acc[i][j][2 * h] * pa) * pb.x, (acc[i][j][2 * h + 1] * pa) * pb.y);
+                if (beta != 0.0f) {
+                    const float2 cv = *o;
+                    v.x = fmaf(beta, cv.x, v.x);
+                    v.y = fmaf(beta, cv.y, v.y);
+                }
+                *o = v;
+            }
+        }
+}
+
+__global__ void h2r_splitk_reduce_kernel(int M, int N, int S, const float* __restrict__ ws,
+                                         const int8_t* __restrict__ eA, const float* __restrict__ inv_sB,
+                                         float* __restrict__ C, float beta) {
+    const int64_t i = (int64_t)blockIdx.x * blockDim.x + threadIdx.x, mn = (int64_t)M * N;
+    if (2 * i >= mn) return;
+    float2 s = reinterpret_cast<const float2*>(ws)[i];
+    for (int z = 1; z < S; ++z) {
+        const float2 p = reinterpret_cast<const float2*>(ws + z * mn)[i];
+        s.x += p.x;
+        s.y += p.y;
+    }
+    const int r = (int)(2 * i / N), c = (int)(2 * i % N);
+    const int e = (int)eA[r];
+    const float pa = (e > -127) ? h2r_pow2_f(e - 12) : 0.0f;
+    const float2 pb = *reinterpret_cast<const float2*>(inv_sB + c);
+    float2* o = reinterpret_cast<float2*>(C + 2 * i);
+    float2 v = make_float2((s.x * pa) * pb.x, (s.y * pa) * pb.y);
+    if (beta != 0.0f) {
+        const float2 cv = *o;
+        v.x = fmaf(beta, cv.x, v.x);
+        v.y = fmaf(beta, cv.y, v.y);
+    }
+    *o = v;
+}
+
+inline void launch_h2r_row_exp(int M, int K, const float* A, int8_t* eA, cudaStream_t stream) {
+    if (K <= 256)
+        h2r_row_exp_kernel<8><<<(M + 31) / 32, 256, 0, stream>>>(M, K, A, eA);
+    else if (K <= 512)
+        h2r_row_exp_kernel<16><<<(M + 15) / 16, 256, 0, stream>>>(M, K, A, eA);
+    else
+        h2r_row_exp_kernel<32><<<(M + 7) / 8, 256, 0, stream>>>(M, K, A, eA);
+}
+
+int h2r_split_k(int M, int N, int K, int bm_t, size_t ws_bytes) {
+    const int nk = (K + kHK - 1) / kHK;
+    if (nk < 8 || ws_bytes == 0 || N % 2 != 0) return 1;
+    int dev = 0, sms = 0;
+    if (cudaGetDevice(&dev) != cudaSuccess ||
+        cudaDeviceGetAttribute(&sms, cudaDevAttrMultiProcessorCount, dev) != cudaSuccess || sms <= 0)
+        return 1;
+    const int64_t tiles = (int64_t)((N + kHN - 1) / kHN) * ((M + bm_t - 1) / bm_t);
+    const int64_t slots = (bm_t == 64 ? 3 : 2) * (int64_t)sms;
+    if (2 * tiles > slots) return 1;
+    int64_t s = std::min<int64_t>(nk / 4, slots / tiles);
+    s = std::min<int64_t>(s, (int64_t)(ws_bytes / ((size_t)M * N * sizeof(float))));
+    if (s < 2) return 1;
+    const int nks = (nk + (int)s - 1) / (int)s;
+    return (nk + nks - 1) / nks;
+}
+}  // namespace
+
+void hgemm2_row_init() {
+    auto cfg = [](auto k, int smem) {
+        if (smem >= 49152) cudaFuncSetAttribute(k, cudaFuncAttributeMaxDynamicSharedMemorySize, smem);
+        cudaFuncSetAttribute(k, cudaFuncAttributePreferredSharedMemoryCarveout, 100);
+    };
+    cfg(hgemm2f_row_kernel<128, false, false, 0, false>, kHSmem);
+    cfg(hgemm2f_row_kernel<128, true,  false, 0, false>, kHSmem);
+    cfg(hgemm2f_row_kernel<128, false, true,  0, false>, kHSmem);
+    cfg(hgemm2f_row_kernel<128, true,  true,  0, false>, kHSmem);
+    cfg(hgemm2f_row_kernel<64,  false, false, 0, false>, 32768);
+    cfg(hgemm2f_row_kernel<64,  true,  false, 0, false>, 32768);
+    cfg(hgemm2f_row_kernel<64,  false, true,  0, false>, 32768);
+    cfg(hgemm2f_row_kernel<64,  true,  true,  0, false>, 32768);
+    cfg(hgemm2f_row_kernel<128, false, false, 1, false>, kHSmem);
+    cfg(hgemm2f_row_kernel<128, false, false, 3, false>, kHSmem);
+    cfg(hgemm2f_row_kernel<128, false, false, 5, false>, kHSmem);
+    cfg(hgemm2f_row_kernel<128, false, false, 7, false>, kHSmem);
+    cfg(hgemm2f_row_kernel<128, false, false, 3, true>,  kHSmem);
+    cfg(hgemm2f_row_kernel<128, false, false, 5, true>,  kHSmem);
+    cfg(hgemm2f_row_kernel<128, false, false, 7, true>,  kHSmem);
+    cfg(hgemm2f_row_kernel<128, true,  false, 3, true>,  kHSmem);
+    cfg(hgemm2f_row_kernel<128, true,  false, 5, true>,  kHSmem);
+    cfg(hgemm2f_row_kernel<128, true,  false, 7, true>,  kHSmem);
+    cfg(h2f_64x128_k128_fused, 65536);
+}
+
+void hgemm2_row_exp(int M, int K, const float* A, int8_t* eA, cudaStream_t stream) {
+    launch_h2r_row_exp(M, K, A, eA, stream);
+}
+
+void hgemm2_pack_b_col(int Nr, int Kc, const float* w, bool trans, void* out_panel, float* out_inv_sB,
+                       cudaStream_t stream) {
+    const int Np = (Nr + kHN - 1) / kHN * kHN, Kp = (Kc + kHK - 1) / kHK * kHK;
+    h2r_pack_b_col_kernel<<<Np, 128, 0, stream>>>(Nr, Kc, Np, Kp, w, trans ? 1 : 0,
+                                                  static_cast<__half*>(out_panel), out_inv_sB);
+}
+
+void hgemm2_f32a_row(int M, int N, int K, const float* A, const void* B_panel, const float* inv_sB,
+                     float* C, float beta, void* ws, size_t ws_bytes, cudaStream_t stream,
+                     const int8_t* eA_cached) {
+    const __half* b = static_cast<const __half*>(B_panel);
+    // Fast path: K == 128 && N % 128 == 0 -> fused in-kernel eA, ZERO row_exp launch, 1x A DRAM read!
+    if (K == 128 && (N % 128) == 0 && M >= 128) {
+        const dim3 grid(N / 128, (M + 63) / 64);
+        h2f_64x128_k128_fused<<<grid, 256, 49152, stream>>>(M, N, A, b, inv_sB, C, beta);
+        return;
+    }
+    constexpr size_t kEAOff = 256u << 10;
+    const int8_t* eA = eA_cached;
+    float* sk_ws = static_cast<float*>(ws);
+    size_t sk_bytes = ws_bytes;
+    if (!eA) {
+        int8_t* eA_w = static_cast<int8_t*>(ws);
+        launch_h2r_row_exp(M, K, A, eA_w, stream);
+        eA = eA_w;
+        if (ws && ws_bytes > kEAOff) {
+            sk_ws = reinterpret_cast<float*>(static_cast<uint8_t*>(ws) + kEAOff);
+            sk_bytes = ws_bytes - kEAOff;
+        } else {
+            sk_ws = nullptr;
+            sk_bytes = 0;
+        }
+    }
+    const bool use64 = (M <= 1600);
+    const int bm_t = use64 ? 64 : 128;
+    const int smem = use64 ? 32768 : kHSmem;
+    const GateArgs ga{};
+    const int S = sk_ws ? h2r_split_k(M, N, K, bm_t, sk_bytes) : 1;
+    if (S > 1) {
+        const dim3 gs((N + kHN - 1) / kHN, (M + bm_t - 1) / bm_t, S);
+        const bool tail = h2_tail(N, K, 0.0f);
+        if (use64) {
+            if (tail) hgemm2f_row_kernel<64,  true,  true, 0, false><<<gs, 128, smem, stream>>>(M, N, K, A, eA, b, inv_sB, sk_ws, 0.0f, ga);
+            else      hgemm2f_row_kernel<64,  false, true, 0, false><<<gs, 128, smem, stream>>>(M, N, K, A, eA, b, inv_sB, sk_ws, 0.0f, ga);
+        } else {
+            if (tail) hgemm2f_row_kernel<128, true,  true, 0, false><<<gs, 128, smem, stream>>>(M, N, K, A, eA, b, inv_sB, sk_ws, 0.0f, ga);
+            else      hgemm2f_row_kernel<128, false, true, 0, false><<<gs, 128, smem, stream>>>(M, N, K, A, eA, b, inv_sB, sk_ws, 0.0f, ga);
+        }
+        const int64_t pairs = (int64_t)M * N / 2;
+        h2r_splitk_reduce_kernel<<<(unsigned)((pairs + 255) / 256), 256, 0, stream>>>(M, N, S, sk_ws, eA, inv_sB, C, beta);
+        return;
+    }
+    const dim3 grid((N + kHN - 1) / kHN, (M + bm_t - 1) / bm_t);
+    const bool tail = (N % kHN != 0) || (K % kHK != 0);
+    if (use64) {
+        if (tail) hgemm2f_row_kernel<64,  true,  false, 0, false><<<grid, 128, smem, stream>>>(M, N, K, A, eA, b, inv_sB, C, beta, ga);
+        else      hgemm2f_row_kernel<64,  false, false, 0, false><<<grid, 128, smem, stream>>>(M, N, K, A, eA, b, inv_sB, C, beta, ga);
+    } else {
+        if (tail) hgemm2f_row_kernel<128, true,  false, 0, false><<<grid, 128, smem, stream>>>(M, N, K, A, eA, b, inv_sB, C, beta, ga);
+        else      hgemm2f_row_kernel<128, false, false, 0, false><<<grid, 128, smem, stream>>>(M, N, K, A, eA, b, inv_sB, C, beta, ga);
+    }
+}
+
+void hgemm2_f32a_row_gate_bwd(int l, int M, int N, int K, const float* A, const void* B_panel, const float* inv_sB,
+                              const GateArgs& g, void* ws, cudaStream_t stream, const int8_t* eA_cached) {
+    const int8_t* eA = eA_cached;
+    if (!eA) {
+        int8_t* eA_w = static_cast<int8_t*>(ws);
+        launch_h2r_row_exp(M, K, A, eA_w, stream);
+        eA = eA_w;
+    }
+    const int deg = 2 * l + 1, mt = kHM / deg * deg;
+    const dim3 grid((N + kHN - 1) / kHN, (M + mt - 1) / mt);
+    const __half* b = static_cast<const __half*>(B_panel);
+    if (l == 0)      hgemm2f_row_kernel<128, false, false, 1, false><<<grid, 128, kHSmem, stream>>>(M, N, K, A, eA, b, inv_sB, nullptr, 0.0f, g);
+    else if (l == 1) hgemm2f_row_kernel<128, false, false, 3, false><<<grid, 128, kHSmem, stream>>>(M, N, K, A, eA, b, inv_sB, nullptr, 0.0f, g);
+    else if (l == 2) hgemm2f_row_kernel<128, false, false, 5, false><<<grid, 128, kHSmem, stream>>>(M, N, K, A, eA, b, inv_sB, nullptr, 0.0f, g);
+    else             hgemm2f_row_kernel<128, false, false, 7, false><<<grid, 128, kHSmem, stream>>>(M, N, K, A, eA, b, inv_sB, nullptr, 0.0f, g);
+}
+
+void hgemm2_f32a_row_gate_fwd(int l, int M, int N, int K, const float* A, const void* B_panel, const float* inv_sB,
+                              const GateArgs& g, void* ws, cudaStream_t stream, const int8_t* eA_cached) {
+    const int8_t* eA = eA_cached;
+    if (!eA) {
+        int8_t* eA_w = static_cast<int8_t*>(ws);
+        launch_h2r_row_exp(M, K, A, eA_w, stream);
+        eA = eA_w;
+    }
+    const dim3 grid((N + kHN - 1) / kHN, (M + kHM - 1) / kHM);
+    const __half* b = static_cast<const __half*>(B_panel);
+    const bool tail = h2_tail(N, K, 0.0f);
+    if (tail) {
+        if (l == 1)      hgemm2f_row_kernel<128, true, false, 3, true><<<grid, 128, kHSmem, stream>>>(M, N, K, A, eA, b, inv_sB, nullptr, 0.0f, g);
+        else if (l == 2) hgemm2f_row_kernel<128, true, false, 5, true><<<grid, 128, kHSmem, stream>>>(M, N, K, A, eA, b, inv_sB, nullptr, 0.0f, g);
+        else             hgemm2f_row_kernel<128, true, false, 7, true><<<grid, 128, kHSmem, stream>>>(M, N, K, A, eA, b, inv_sB, nullptr, 0.0f, g);
+    } else {
+        if (l == 1)      hgemm2f_row_kernel<128, false, false, 3, true><<<grid, 128, kHSmem, stream>>>(M, N, K, A, eA, b, inv_sB, nullptr, 0.0f, g);
+        else if (l == 2) hgemm2f_row_kernel<128, false, false, 5, true><<<grid, 128, kHSmem, stream>>>(M, N, K, A, eA, b, inv_sB, nullptr, 0.0f, g);
+        else             hgemm2f_row_kernel<128, false, false, 7, true><<<grid, 128, kHSmem, stream>>>(M, N, K, A, eA, b, inv_sB, nullptr, 0.0f, g);
+    }
+}
+
 }  // namespace loup

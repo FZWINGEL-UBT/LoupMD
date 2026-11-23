@@ -34,13 +34,16 @@ public:
                 const std::function<void()>& fork, const std::function<void(int)>& lane,
                 const std::function<void()>& join, const int* species, const double* pos64,
                 const std::vector<std::vector<float*>>& h, const std::vector<std::vector<float*>>& dh, double* energy,
-                double* forces, int compute_stress, double* virial);
+                double* forces, int compute_stress, double* virial,
+                const GemmH2RowFn& gemm_h2_row = nullptr);
     // Hidden fold (GenericModel::setup_lr_fold): layer t's degree-l mixer weight and source block replaced by weights
     // the caller composed with the hidden chain (float32 device arrays [C, C] and [(2l + 1) C, 8]; the mixer array
     // stays the caller's). Source blocks certified exactly zero are skipped (with LOUP_POLAR_ZBLK). Call after load.
     void set_hidden_fold(int t, int l, const float* mix, const float* src_block);
     // the highest degree of the last layer's features that the electron energy reads (-1 without it)
     int le_lmax() const;
+    // disable per-row two-half GEMMs on non-finite fallback (GenericModel::drop_w2t_half)
+    void disable_h2_row();
 
 private:
     struct Impl;

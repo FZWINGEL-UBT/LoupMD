@@ -3429,3 +3429,20 @@ Measured on RTX 4000 Ada (`leeloo`, default vs `ee1efdc` default, Langevin MD ms
 | `OMAT-0-M` `srtio3` (5,000 atoms) | 8.915 ms | 8.294 ms | **1.075×** |
 
 All `sm_89` 3× gates pass (`MH-1` crystals 18/18, `OMOL-0 XL` organic 8/8, `OMAT-0-M` oxide 18/18, `OFF23-M` organic, `MP-0b3` oxide, `POLAR-1-S` 5/5, `POLAR-1-M` 18/18; `POLAR-1-L` 5/6 against `leeloo`'s cached CPU ref where `NaNbO3_c0` improves over `ee1efdc` `5.24x/9.25x` to `3.46x/6.47x`). Local `sm_120` `tests/gpu -m fast` (57 passed) and `tests/cpu` (497 passed, 5 skipped) pass.
+
+### 6.64 Universal per-row two-half tensor-core `MACE-POLAR-1-S/M/L` (`polar-two-half`, 23 November 2026)
+
+`LOUP_POLAR_H2` (default on `sm_120` and `sm_89`, `0`/`1` force) brings universal per-row exponent two-half FP16 tensor-core GEMMs (`hgemm2f_row_kernel` + `h2f_64x128_k128_fused` in `src/hgemm2.cu`, `REG:255 STACK:0`, unpredicated `!TAIL` K-loop for aligned `beta=1`, fused `gate_fwd`/`gate_bwd`, cached `eA` in `PolarLR::alloc_system()`) plus `LOUP_W2T_HALF`/`LOUP_W2F_HALF` (with `LOUP_LIN_HALF` kept off on `lr_` and full `drop_w2t_half()` fallback) and 2D `float4` zero-division `inv`/`inv_bwd`/`bcast_mul`/`bcast_mul_bwd` kernels (`src/polar.cu`) to `MACE-POLAR-1-S/M/L`.
+
+Measured vs `04b6364` (NVE MD ms/step):
+
+| Model & System | `sm_120` `04b6364` | `sm_120` `polar-two-half` | `sm_120` Speedup | `sm_89` `04b6364` | `sm_89` `polar-two-half` | `sm_89` Speedup |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| `POLAR-1-S` `nbcl5` | 6.193 ms | 5.382 ms | **1.151×** | 7.619 ms | 5.954 ms | **1.280×** |
+| `POLAR-1-S` `nacl216` | 1.049 ms | 0.930 ms | **1.128×** | 1.162 ms | 1.025 ms | **1.134×** |
+| `POLAR-1-M` `nbcl5` | 17.163 ms | 15.111 ms | **1.136×** | 21.543 ms | 17.169 ms | **1.255×** |
+| `POLAR-1-M` `nacl216` | 2.423 ms | 2.064 ms | **1.174×** | 2.879 ms | 2.255 ms | **1.277×** |
+| `POLAR-1-L` `nacl216` | 4.477 ms | 3.674 ms | **1.219×** | 5.399 ms | 4.138 ms | **1.305×** |
+| `POLAR-1-L` `nbcl5` | 35.031 ms | 30.768 ms | **1.139×** | 43.342 ms | 34.834 ms | **1.244×** |
+
+All `sm_120` and `sm_89` 3× gates pass (`POLAR-1-S` oxide 6/6 & crystals `--include-unstable` 6/6, `POLAR-1-M` oxide 18/18 on both GPUs, `POLAR-1-L` oxide 6/6 `sm_120` and `NaCl`/`NbCl5` 4/4 `sm_89` with pure-FP32 fallback via `drop_w2t_half()` on `SrTiO3` blowups, `MH-1` 18/18, `OMAT-0-M` 18/18, `tests/cpu` 497 passed, `tests/gpu -m fast` 57 passed).
