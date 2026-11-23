@@ -2567,7 +2567,7 @@ LoupHandle* loup_create(const char* loup_path, int device_id) {
             if (const char* e = std::getenv("LOUP_GATE_FWD_L0"); e && e[0] >= '1' && e[0] <= '2')
                 h->gate_fwd_l0 = e[0] - '0';
             if (const char* e = std::getenv("LOUP_H2_SPLITK"); e && e[0] == '0') h->h2_splitk = false;
-            h->eval_mapped = h->is_sm120;
+            h->eval_mapped = tuned_cc;  // 8.9 and 8.6: list 35 (0.97-1.00 of an evaluate, native Linux)
             if (const char* e = std::getenv("LOUP_EVAL_MAPPED"); e && (e[0] == '0' || e[0] == '1'))
                 h->eval_mapped = e[0] == '1';
             if (const char* e = std::getenv("LOUP_DEBUG_EVAL_TIMES"); e && e[0] == '1') h->probe = true;

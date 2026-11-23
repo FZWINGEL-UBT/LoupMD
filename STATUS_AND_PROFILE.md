@@ -3513,3 +3513,7 @@ List 34 went through the device tests that still named single GPUs (ledger `idea
 - **Lane-group neighbour-list kernels on the Ada and the A4000** (default on the 5060 Ti and the A100 until now). Small cells gain on both GPUs: OFF23-S water216 `0.895`, OFF23-M `0.956` / `0.955`, MP-0 medium NaCl216 `0.956` / `0.962`, OMAT-0 medium NaCl216 `0.977` / `0.983`; larger cells tie. Gates with the kernels on pass on both (110 lines each).
 - **Every switch against the tuned defaults on the A4000**: no other default flips. The split-K thresholds of both rules, tried as lab variables on the Ada, win nothing.
 - Not measured: the A100 and compute capability 9.0 / 10.0, which have neither the two-half package nor these defaults.
+
+### 6.68 List 35: the evaluate path's mapped staging on the Ada and the A4000 (23 November 2026)
+
+`loup_evaluate`'s upload and results by kernels on a mapped staging area (list 24, a default on the 5060 Ti only) is now the default on compute capability 8.9 and 8.6 too (ledger `ideas-20261123-list35`). On native Linux the two copy nodes cost 3-6 us a call: OFF23-S water216 `0.972` (Ada) / `0.982` (A4000) of a synchronous evaluate, OMAT-0 medium NaCl216 `0.984` / `0.980`, large cells unchanged, none slower. Gates with it on pass on both GPUs. POLAR-1's own switches, screened against the new A4000 defaults, show no flip. No default of the tuned set names the 5060 Ti alone any more, except the pruned R5 forward's carveout (MP-0 medium, 18 us).
