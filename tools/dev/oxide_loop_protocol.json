@@ -1,0 +1,11 @@
+{
+  "schema": "loupmd.oxide-loop/1",
+  "parent": "Corrected base-labels-v2 s64l0 FP64 seed 1, epoch 149. Centered FP32 seed 1 is rehearsal only; never train its children.",
+  "restart": "Always restart epoch-110 pre_stage_two.pt, preserving seed, architecture, offsets, neighbors and two-phase schedule. Original 300 training frames plus every selected harvest set through this round. Never include validation or test frames.",
+  "trajectory": {"source": "SrTiO3-4x4x4", "target_K": 300, "burn_in": 1000, "stride": 50, "rattle_A": 0.03, "timestep_fs": 1.0, "friction_per_fs": 0.01, "strain": 0, "shear": 0},
+  "fixed-student-test": {"seed": 3101, "replicas": 2, "target_frames": 30, "hot_frames": 0},
+  "test_rule": "Each gated student runs its own fixed-student-test MD from the common seed/replicas, never a previous student's coordinates. Compare with the identical corrected 60-frame MH-1 teacher-test rescored by this same model. Common random starts allowed only between different models' fixed-student-test sets, never across roles.",
+  "harvest": {"seeds_by_child_round": [57101, 57102, 57103], "hot_K_by_child_round": [600, 600, 900], "replicas": 4, "target_frames": 15, "hot_frames": 10, "select": 30},
+  "selection_rule": "Out of each parent's 100 new teacher-labelled, student-visited harvest frames, select the 30 largest absolute per-frame force-component RMSE, breaking ties by ascending frame_id. Both target and hot candidates eligible; never consult a test score to rank harvest frames.",
+  "decision_rule": "Always run two FP64 restarts. After each score pooled force-component RMSE on own target frames divided by that on fixed teacher target frames; report energy, per-species, tail and stress separately. After round 2 only, if own > 1.5 times teacher repeat once with 900 K hot harvest; after round 3 stop regardless. This relative falsifier is not absolute label or full MD acceptance."
+}
