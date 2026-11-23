@@ -2555,7 +2555,7 @@ LoupHandle* loup_create(const char* loup_path, int device_id) {
                 h->own_ext = e[0] == '1';
                 own_ext_env = true;
             }
-            h->nb_groups_ok = h->is_sm120 || cc80;
+            h->nb_groups_ok = h->is_sm120 || cc80 || cc89 || cc86;  // 8.9 and 8.6: list 34 (small cells 0.90-0.98)
             if (const char* e = std::getenv("LOUP_NB_GROUPS"); e && (e[0] == '0' || e[0] == '1')) h->nb_groups_ok = e[0] == '1';
             if (const char* e = std::getenv("LOUP_FORCE_TC"); e && e[0] == '1') h->force_tc = true;
             if (const char* e = std::getenv("LOUP_GATE_FUSE"); e && e[0] == '0') h->gate_fuse = false;

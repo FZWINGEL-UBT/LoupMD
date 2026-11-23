@@ -3504,3 +3504,12 @@ List 33 was this session's own, all measurements (ledger `ideas-20261123-list33`
 - For scale, sibling foundation models differ by 33-53 meV/A on the same frames.
 
 Nothing is adopted. A lossy reduced model would be a different product from the engine's 3x contract.
+
+### 6.67 List 34: the remaining single-GPU defaults (23 November 2026)
+
+List 34 went through the device tests that still named single GPUs (ledger `ideas-20261123-list34`).
+
+- **POLAR-1's row path on the RTX A4000.** List 33's change missed a fifth device test (`P.h2_row` in `src/polar.cu`). With compute capability 8.6 in it POLAR-1-M runs at `0.950` (NbCl5) and `0.975` (NaCl216) of list 33's defaults, POLAR-1-L NaCl216 at `0.947`, POLAR-1-S NaCl216 at `0.989`: POLAR-1 on the A4000 is now at `0.63-0.67` of the morning's step. Gates pass (52 lines, worst force 1.64x; POLAR-1-L's two SrTiO3 cells fail on every library alike).
+- **Lane-group neighbour-list kernels on the Ada and the A4000** (default on the 5060 Ti and the A100 until now). Small cells gain on both GPUs: OFF23-S water216 `0.895`, OFF23-M `0.956` / `0.955`, MP-0 medium NaCl216 `0.956` / `0.962`, OMAT-0 medium NaCl216 `0.977` / `0.983`; larger cells tie. Gates with the kernels on pass on both (110 lines each).
+- **Every switch against the tuned defaults on the A4000**: no other default flips. The split-K thresholds of both rules, tried as lab variables on the Ada, win nothing.
+- Not measured: the A100 and compute capability 9.0 / 10.0, which have neither the two-half package nor these defaults.

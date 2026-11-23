@@ -1435,7 +1435,7 @@ void PolarLR::load(const Bundle& b, int S, int n_layers) {
                 cudaDeviceGetAttribute(&maj, cudaDevAttrComputeCapabilityMajor, dev);
                 cudaDeviceGetAttribute(&min, cudaDevAttrComputeCapabilityMinor, dev);
             }
-            P.h2_row = (maj == 12 && min == 0) || (maj == 8 && min == 9);
+            P.h2_row = (maj == 12 && min == 0) || (maj == 8 && (min == 6 || min == 9));
         }
         if (const char* mm_env = std::getenv("LOUP_POLAR_H2_MINM"); mm_env && *mm_env) P.h2_min_m = std::atoi(mm_env);
         const char* wb_env = std::getenv("LOUP_POLAR_WBLK");
