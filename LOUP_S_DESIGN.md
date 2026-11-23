@@ -1,7 +1,7 @@
 # Loup-S: a per-system student architecture built from the engine's own measurements
 
 Stage 0 implementation status: engine sampling, two-phase stress training, gated export and the label report have run end to end on SrTiO3. Both FP64 seed-1 students passed the 3× engine gate; round-0 force errors on their own trajectories were 13.18% (`s64l0`) and 12.65% (`s64r8`) against the original labels, versus the 2% target. These are not closed-loop results. **§6.5 now reports the two measured RTX 4000 Ada baselines**, not 5060 Ti timings; generic/fused targets remain estimates. See STATUS §6.70 and `plans/loup-s-stage0.md`.
-Label-integrity hold: a sequence-dependent native teacher discrepancy was reproduced on frozen validation data. The first-seed scores are not certified teacher accuracy. The timing measurements describe the archived bundles, not an adoption. Fidelity thresholds are unchanged.
+Label-integrity update: the stale cell in a captured neighbor rebuild was fixed (`048489b907`). The **versioned 300/30/60 SrTiO3 base splits** passed the full 3× teacher gate and direct fresh-vs-reused agreement on every frame. The original labels, students and scores remain historical; the Ada measurements describe those archived bundles, not an adoption. Fidelity thresholds are unchanged.
 Training backend decision: Stage 0 stays on mace-torch. Section 10 links the proposed pre-Stage-1 backend, its reference update and its adoption criteria; no training speedup is claimed.
 
 Original design status (23 November 2026, before implementation): the owner approved the direction and the outline of sections 4 to 10 on
