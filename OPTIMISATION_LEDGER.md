@@ -3031,6 +3031,7 @@ Each entry has the same fields. Unless stated, the system is OMAT-0 medium on th
 - **5060 Ti only, teacher NVE.** Matched 5 ps MH-1 energy RMS 0.002650 / 0.000622 meV/atom at 1 / 0.5 fs. Retain both steps for SrTiO3 comparisons. No time or memory measured.
 - **5060 Ti only, oxide teacher calibration.** Two 30 ps NPT seeds: density spread 0.000333 g/cm³; zero-pressure mean box edge is outside the baseline training range. Tightening the relaxation changes lengths by ≤0.00953%; halving the finite displacement changes the 960 supercell frequencies by ≤0.00502 THz. Keep the oxide deterministic tolerances. Full protocols and uncertainties: STATUS §6.70.
 - **5060 Ti only, trigger workflow smoke.** Thirty variants scored on disjoint splits. The undertrained smoke student has 2,559/2,560 test atoms above 0.1 eV/Å; do not choose a trigger from these scores.
+- **Ada only (leeloo), teacher labelling preflight.** On a frozen 5060 Ti baseline geometry, Ada vs stored 5060 Ti MH-1 `omat_pbe` labels differed by 9.90e−9 eV/atom, at most 2.24e−6 eV/Å per force component and 3.94e−9 eV/Å³ per stress component. First 25 independent training trajectories validated and published; no timing taken. STATUS §6.70.
 
 <a id="ideas-20261123-list36"></a>
 #### ideas-20261123-list36: the thirty-sixth list (small cells: what a rebuild costs after list 34, and the two-half switches on products of a few hundred rows)
