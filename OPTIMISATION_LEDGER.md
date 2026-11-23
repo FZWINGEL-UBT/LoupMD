@@ -3026,6 +3026,7 @@ Each entry has the same fields. Unless stated, the system is OMAT-0 medium on th
 #### loup-s-stage0: student baseline and workflow
 
 - **5060 Ti only, historical s64l0 preflight.** `0b1107b` engine, list 15 checkpoint `8cae906ea0db6da0…`; first test configuration, two independent 0.05 Å rattles. The unmodified `loupmd validate` 3× rule passed both: worst engine deviations from the student's float64 reference were 0.00009 meV/atom, 8.753e-6 eV/Å and 2.856e-8 eV/Å³. Not teacher fidelity, not a stress-trained checkpoint, no timing. See STATUS §6.70.
+- **5060 Ti only, teacher labels.** Fresh engine Langevin frames include stress: 300 train, 30 validation, 60 teacher-test. The held-out 300 K teacher RMS force is 0.56025 eV/Å per component (species values in STATUS §6.70). Not a fidelity or timing result.
 
 <a id="ideas-20261123-list36"></a>
 #### ideas-20261123-list36: the thirty-sixth list (small cells: what a rebuild costs after list 34, and the two-half switches on products of a few hundred rows)

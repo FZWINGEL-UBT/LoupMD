@@ -1,5 +1,7 @@
 # Loup-S: a per-system student architecture built from the engine's own measurements
 
+Stage 0 implementation status: the approved text below is preserved as the design baseline. The engine sampler, two-phase stress-training recipe and label report are in the tree. SrTiO3 teacher labels exist; the gate of the historical `s64l0` is a workflow preflight only (STATUS §6.70). No §6.5 timing estimate has yet been replaced. Run record: `plans/loup-s-stage0.md`.
+
 Status (23 November 2026): design only. The owner approved the direction and the outline of sections 4 to 10 on
 23 November 2026; nothing here is built. Every figure is either quoted from `OPTIMISATION_LEDGER.md` or
 `STATUS_AND_PROFILE.md` (entry or section named), marked as an estimate or a target, or cited from a named paper

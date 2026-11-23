@@ -3525,3 +3525,5 @@ A 300 K census of water216 and NaCl216 on the Ada with the lane-group kernels on
 ### 6.70 Loup-S Stage 0: student baseline and workflow
 
 **5060 Ti only — export/gate preflight, not a fidelity result.** List 15 `s64l0.model` on the first 320-atom `test.xyz` frame, two 0.05 Å rattles, default engine at `0b1107b`. `python -m loupmd validate --model … --sha256 … --structure sto320.xyz --ref-device cuda --json gate.json`: **2/2 pass**. Worst ratios to the student's own float32–float64 deviation: E 0.01, F 0.41, S 0.40. No teacher comparison, local time or memory figure. Record: WSL `~/loup-s-stage0/preflight/gate.json`.
+
+**5060 Ti only — fresh teacher labels.** MH-1 `omat_pbe`, SrTiO3 320, 300 train / 30 validation / 60 independent teacher-test frames with all nine potential stress entries, total energy and atomic forces. On the two unstrained 300 K teacher-test trajectories the RMS Cartesian force is 0.56025 eV/Å pooled; O 0.53729, Sr 0.41718, Ti 0.72754. This sets the scale of the teacher-test errors, **not** the student's own-MD bar. Split digests and sampling protocol: `plans/loup-s-stage0.md`.
