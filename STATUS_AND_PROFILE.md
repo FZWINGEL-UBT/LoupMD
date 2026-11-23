@@ -3611,3 +3611,12 @@ The teacher-test gate passed **60/60** for all three sets of values (fresh, reus
 Round-0 student/teacher force-RMSE ratio 1.0068. `v2-l4-s64l0-fp32-seed1-r2/{release/gate.json,teacher-score.json,fidelity.json}` under the WSL campaign root. No claim for later closed-loop rounds, MD observables, or the two-FP64-seed spread.
 
 **5060 Ti only — corrected FP32 oxide static fidelity.** Relaxed lattice axes pass the 0.2% tolerance (largest deviation 0.09301%). At both 0.010 and 0.005 Å central displacements, **8 of 960** sorted phonon frequencies exceeded `max(3%, 0.1 THz)`; worst error was 1.73 times its limit. Thus the force/energy label pass does **not** qualify the full §4 fidelity bar. Compare with matched FP64 students before attributing this to dtype. Reports: `~/loup-s-stage0/sto320/observables-v2-fp32-r2/static{.01,.005}.json`.
+
+**Ada only — launch grouping at 320 atoms.** Compare 20 separate projection launches with two grouped launches at identical GEMM tiles, weights, geometry and integrator seeds. Four adjacent arms per model (A B B A), 24,576 steps/arm, 4.14–4.63 s/arm; latter halves timed at 2,385 MHz. A→B differences in the forward and reverse order:
+
+| Model | Launches/step A→B | AB (µs/step A→B) | BA (µs/step A→B) | Saving AB / BA |
+|---|---:|---:|---:|---:|
+| `s64l0` | 57→39 | 188.14→176.48 | 188.80→176.47 | 6.20% / 6.53% |
+| `s64r8` | 56.5→38.5 | 176.53→168.70 | 176.93→168.77 | 4.44% / 4.61% |
+
+Median board power: wide 98–100→103–104 W; narrow 86–87→89 W. Separate profiles leave projection block counts unchanged (8,320 / 5,504). Three displaced geometries per student: inter-arm max |ΔE| 5.23e−8 eV, |ΔF| 3.88e−7 eV/Å, |Δσ| 1.72e−9 eV/Å³. Falsifier 6: retain the 320-atom target on the strength of the wide student's reproducible ≥5% reduction. The intervention also changes scheduling, so it does not isolate a pure launch cost or show majority launch overhead. No default change. Evidence: `/mnt/homes/zwingel/loup-s-stage0/launch-discriminator-v1/` (build SHA `397d1f35…`, `run.exit=0`).

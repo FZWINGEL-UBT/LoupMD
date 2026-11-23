@@ -3,6 +3,7 @@
 Stage 0 implementation status: engine sampling, two-phase stress training, gated export and the label report have run end to end on SrTiO3. Both FP64 seed-1 students passed the 3× engine gate; round-0 force errors on their own trajectories were 13.18% (`s64l0`) and 12.65% (`s64r8`) against the original labels, versus the 2% target. These are not closed-loop results. **§6.5 now reports the two measured RTX 4000 Ada baselines**, not 5060 Ti timings; generic/fused targets remain estimates. See STATUS §6.70 and `plans/loup-s-stage0.md`.
 Label-integrity update: the stale cell in a captured neighbor rebuild was fixed (`048489b907`). The **versioned 300/30/60 SrTiO3 base splits** passed the full 3× teacher gate and direct fresh-vs-reused agreement on every frame. The original labels, students and scores remain historical; the Ada measurements describe those archived bundles, not an adoption. Fidelity thresholds are unchanged.
 Training backend decision: Stage 0 stays on mace-torch. Corrected centered-FP32 `s64l0` ran all 150 epochs, passed its 3× export gate and the 300 K label bar on its own trajectories (1.579% force RMSE). L4 medians were 17.47 s/epoch in both phases, versus 48.18 s/epoch so far for the matched FP64 first phase. This is a precision comparison, not a custom-engine speedup or a Stage 0 exit. See STATUS §6.70. Section 10's training-engine plan starts only after Stage 0.
+Stage 0 physics and timing update: centered FP32 passed relaxed lattice but missed 8/960 phonon frequencies at both displacement sizes; it is not qualified for adoption. The 320-atom grouping experiment in §6.5 retained a small-cell fusion target on Ada, not a new production default.
 
 Original design status (23 November 2026, before implementation): the owner approved the direction and the outline of sections 4 to 10 on
 23 November 2026. At approval, nothing here had been built. Every original figure is either quoted from `OPTIMISATION_LEDGER.md` or
@@ -436,6 +437,8 @@ SrTiO3, 5,000 atoms, 5 Å; ms per MD step. **Measured, RTX 4000 Ada only:** unpr
 | Remaining kernels (compaction, rebuild, integrator and support) | 0.095 | 0.094 |
 | Kernel union (overlap counted once) | 2.196 | 1.668 |
 | **Unprofiled step** | **2.298 (0.460 µs/atom)** | **1.770 (0.354 µs/atom)** |
+
+**320 atoms, Ada only — §9 falsifier 6.** In an unprofiled `A B B A` comparison, grouping 20 existing layer-0 projection launches into two saved 6.20% and 6.53% of the `s64l0` step in the two orders; `s64r8` saved 4.44% and 4.61%. Separate Nsight traces verified 18 fewer launches and unchanged projection block counts. Keep the small-cell fusion target: the wide model cleared the preregistered 5% materiality threshold; the narrow model did not. This does not establish that most of either step is launch overhead, and is not a cross-GPU adoption.
 
 **Estimates only, 5060 Ti design model:** §3 rates from different builds, cards and temperatures; FP32 GEMMs at 12 TFLOP/s. The design comparison below uses its original **estimated** `s64r8` baseline of 1.5 ms, **not** the measured Ada time. No local timing or cross-card speedup is implied.
 
