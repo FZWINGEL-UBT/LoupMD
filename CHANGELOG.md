@@ -3,6 +3,7 @@
 ## Unreleased
 
 - Fixed history-dependent energies, forces and stress when reusing an evaluator across periodic cell changes. The graph that rebuilds the neighbor list on the GPU now uses the current cell instead of replaying a previous cell's periodic images.
+- `make CUDA_ARCH=sm_89 label-lib` builds `build/sm_89-label/libloupmd.so` without replacing the MD library. Set `LOUP_LIB` to that absolute path when qualifying teacher labels sensitive to convolution-table packing. This keeps the exported FP32 coefficients, not an FP64 model, and still requires the ordinary reference gate.
 - Per-system MACE distillation: periodic engine labels with stress, two-phase training, gated bundle export and student-trajectory fidelity reports. The [Stage 0 run record](plans/loup-s-stage0.md) distinguishes workflow checks from trained baselines.
 - A timeout while checking detached Colab training no longer discards the run: the controller retries the read-only status check within the original job deadline.
 - `loupmd.distill.curve` publishes nested 1,000-, 3,000- and 10,000-frame training sets with pinned inputs, teacher-label and split-isolation checks. A finite shared-filesystem queue assigns shards to available labelling GPUs.

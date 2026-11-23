@@ -1122,6 +1122,14 @@ void GenericModel::load(const Bundle& b) {
                     for (size_t pi = 0; pi < PI; ++pi) dens[pi] = src[pi * L->Q1 + Q];
                     L->density_table = upload(W, dens);
                 }
+#ifdef LOUP_CONV_TABLE_FP32
+                std::vector<float4> raw(sp_n);
+                for (size_t pi = 0; pi < PI; ++pi)
+                    std::copy_n(src + pi * L->Q1, Q, raw.data() + pi * Q);
+                // The launch ABI passes one pointer in either build. conv_table()
+                // recovers the true element type before ANY row/column indexing.
+                L->packed_table = reinterpret_cast<uint2*>(upload(W, raw));
+#else
                 int emin = 1000, emax = -1000;
                 std::vector<int> exps(sp_n, 0);
                 for (size_t pi = 0; pi < PI; ++pi) {
@@ -1202,6 +1210,7 @@ void GenericModel::load(const Bundle& b) {
                                              std::to_string(rel) + " of the column maximum exceeds " +
                                              std::to_string(loup::kPackedTableMaxRelErr));
                 L->packed_table = upload(W, host_cubic);
+#endif
             }
         }
         // product

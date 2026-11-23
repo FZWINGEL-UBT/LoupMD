@@ -3,7 +3,7 @@ CUDA_ARCH ?= sm_120
 # One object directory per target architecture. Objects of another -arch link and load without complaint, and every
 # kernel launch then fails with an invalid device function, which once looked like a physics bug.
 OBJDIR = build/$(CUDA_ARCH)
-NVCCFLAGS = -O3 -std=c++17 -arch=$(CUDA_ARCH) -Iinclude -Isrc -diag-suppress=1046 -Xcompiler -fPIC -MMD -MP
+NVCCFLAGS = -O3 -std=c++17 -arch=$(CUDA_ARCH) -Iinclude -Isrc -diag-suppress=1046 -Xcompiler -fPIC -MMD -MP $(CPPFLAGS)
 LDFLAGS = -lcublas -lcublasLt -lcudart -ldl
 
 SRCS = src/bundle.cu src/generic.cu src/generated_generic.cu src/polar.cu src/neighbors.cu src/integrator.cu src/minimize.cu src/cell.cu src/thermo.cu src/sgemm.cu src/hgemm2.cu src/tile_plan.cu src/engine.cu \
@@ -19,6 +19,11 @@ all: $(OBJDIR)/libloupmd.so
 	cp $(OBJDIR)/libloupmd.so libloupmd.so
 
 objects: $(OBJS)
+
+# Strict teacher library: independent objects and artifact; never installs over the MD library.
+.PHONY: label-lib
+label-lib:
+	$(MAKE) OBJDIR=build/$(CUDA_ARCH)-label CPPFLAGS="$(CPPFLAGS) -DLOUP_CONV_TABLE_FP32=1" build/$(CUDA_ARCH)-label/libloupmd.so
 
 $(OBJDIR)/%.o: src/%.cu | $(OBJDIR)
 	@mkdir -p $(dir $@)

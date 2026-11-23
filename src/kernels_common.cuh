@@ -38,6 +38,30 @@ __device__ __forceinline__ void locate_spline(const SplineGrid& grid, float r, i
 
 namespace loup {
 
+// Convolution table entries. MD uses the centered 8-byte representation. The
+// separate labelling build evaluates the bundle's original FP32 polynomial:
+// no packing floor in its derivative, and no per-edge precision-mode branch.
+#ifdef LOUP_CONV_TABLE_FP32
+__device__ __forceinline__ const float4* conv_table(const uint2* table) {
+    return reinterpret_cast<const float4*>(table);
+}
+__device__ __forceinline__ float4 conv_basis(float t) { return make_float4(t, 0, 0, 0); }
+__device__ __forceinline__ float4 conv_slope_basis(float t) { return conv_basis(t); }
+constexpr float kConvSlopeScale = 1.0f;
+struct ConvCubic {
+    float4 c;
+    __device__ __forceinline__ float value(float4 p) const {
+        return fmaf(p.x, fmaf(p.x, fmaf(p.x, c.w, c.z), c.y), c.x);
+    }
+    __device__ __forceinline__ float slope(float4 p) const {
+        return fmaf(p.x, fmaf(3.0f * c.w, p.x, 2.0f * c.z), c.y);
+    }
+};
+__device__ __forceinline__ ConvCubic conv_cubic(const float4* p, unsigned) { return {__ldg(p)}; }
+#else
+constexpr float kConvSlopeScale = 0x1.0p-8f;
+#endif
+
 constexpr float EPS_SH = 1e-12f;
 // Neighbour-list build: lanes per atom in count_neighbors_kernel / fill_neighbors_kernel (a power of two <= 32).
 constexpr int kNeighborLanes = 8;

@@ -62,10 +62,15 @@ __global__ void __launch_bounds__(MAX_T) gconv_fwd_L0(
           locate_spline(grid, vl.w, iv, t, sxi);
           slab = (int64_t)pr * I + iv;
         }
+#ifdef LOUP_CONV_TABLE_FP32
+        s_snd[ch] = snd;
+        s_pw[ch] = loup::conv_basis(t);
+#else
         const float s = t - 0.5f, s_sq = s * s;
         const float s1 = s * 0x1.0p-8f, s2 = s_sq * 0x1.0p-14f, s3 = s * s_sq * 0x1.0p-19f;
         s_snd[ch] = snd;
         s_pw[ch] = make_float4(s1, s2, s3, -1.5f * (1.0f + s1 + s2 + s3));
+#endif
         s_tq[ch] = slab * (4 * (int64_t)C);
         if (density_table) {
           const float4 dc = __ldg(density_table + slab);
@@ -88,12 +93,21 @@ __global__ void __launch_bounds__(MAX_T) gconv_fwd_L0(
       const int snd = s_snd[k];
       const float4 pw = s_pw[k];
       const float* she = s_sh + k * ED;
+#ifdef LOUP_CONV_TABLE_FP32
+      const auto* tq = loup::conv_table(packed_table) + s_tq[k];
+#else
       const uint2* tq = packed_table + s_tq[k];
+#endif
       if (PAIR && k + 1 < cnt && s_tq[k + 1] == s_tq[k]) {
         const int sndB = s_snd[k + 1];
         const float4 pwB = s_pw[k + 1];
         const float* sheB = she + ED;
       { // path 0 (0,0,0) pair
+#ifdef LOUP_CONV_TABLE_FP32
+        const auto cubic = loup::conv_cubic(tq + 0 * C + ch, bias_shift);
+        const float w = cubic.value(pw);
+        const float wB = cubic.value(pwB);
+#else
         const uint2 c = __ldg(tq + 0 * C + ch);
         const unsigned eb0 = (c.y & 0x0F800000u) + bias_shift;
         const float eb_f = __uint_as_float(eb0);
@@ -103,12 +117,18 @@ __global__ void __launch_bounds__(MAX_T) gconv_fwd_L0(
         const float r3 = __uint_as_float((__funnelshift_l(c.y, c.y, 19) & 0x7F8000u) | eb0);
         const float w = fmaf(pw.z, r3, fmaf(pw.y, r2, fmaf(pw.x, r1, fmaf(pw.w, eb_f, r0))));
         const float wB = fmaf(pwB.z, r3, fmaf(pwB.y, r2, fmaf(pwB.x, r1, fmaf(pwB.w, eb_f, r0))));
+#endif
         const float xi_0 = __ldg(x0 + ((int64_t)snd * 1 + 0) * C + ch);
         const float xiB_0 = __ldg(x0 + ((int64_t)sndB * 1 + 0) * C + ch);
         acc[0] = fmaf(w * xi_0, she[0], acc[0]);
         acc[0] = fmaf(wB * xiB_0, sheB[0], acc[0]);
       }
       { // path 1 (0,1,1) pair
+#ifdef LOUP_CONV_TABLE_FP32
+        const auto cubic = loup::conv_cubic(tq + 1 * C + ch, bias_shift);
+        const float w = cubic.value(pw);
+        const float wB = cubic.value(pwB);
+#else
         const uint2 c = __ldg(tq + 1 * C + ch);
         const unsigned eb0 = (c.y & 0x0F800000u) + bias_shift;
         const float eb_f = __uint_as_float(eb0);
@@ -118,6 +138,7 @@ __global__ void __launch_bounds__(MAX_T) gconv_fwd_L0(
         const float r3 = __uint_as_float((__funnelshift_l(c.y, c.y, 19) & 0x7F8000u) | eb0);
         const float w = fmaf(pw.z, r3, fmaf(pw.y, r2, fmaf(pw.x, r1, fmaf(pw.w, eb_f, r0))));
         const float wB = fmaf(pwB.z, r3, fmaf(pwB.y, r2, fmaf(pwB.x, r1, fmaf(pwB.w, eb_f, r0))));
+#endif
         const float xi_0 = __ldg(x0 + ((int64_t)snd * 1 + 0) * C + ch);
         const float xiB_0 = __ldg(x0 + ((int64_t)sndB * 1 + 0) * C + ch);
         acc[1] = fmaf(w * xi_0, she[1], acc[1]);
@@ -128,6 +149,11 @@ __global__ void __launch_bounds__(MAX_T) gconv_fwd_L0(
         acc[3] = fmaf(wB * xiB_0, sheB[3], acc[3]);
       }
       { // path 2 (0,2,2) pair
+#ifdef LOUP_CONV_TABLE_FP32
+        const auto cubic = loup::conv_cubic(tq + 2 * C + ch, bias_shift);
+        const float w = cubic.value(pw);
+        const float wB = cubic.value(pwB);
+#else
         const uint2 c = __ldg(tq + 2 * C + ch);
         const unsigned eb0 = (c.y & 0x0F800000u) + bias_shift;
         const float eb_f = __uint_as_float(eb0);
@@ -137,6 +163,7 @@ __global__ void __launch_bounds__(MAX_T) gconv_fwd_L0(
         const float r3 = __uint_as_float((__funnelshift_l(c.y, c.y, 19) & 0x7F8000u) | eb0);
         const float w = fmaf(pw.z, r3, fmaf(pw.y, r2, fmaf(pw.x, r1, fmaf(pw.w, eb_f, r0))));
         const float wB = fmaf(pwB.z, r3, fmaf(pwB.y, r2, fmaf(pwB.x, r1, fmaf(pwB.w, eb_f, r0))));
+#endif
         const float xi_0 = __ldg(x0 + ((int64_t)snd * 1 + 0) * C + ch);
         const float xiB_0 = __ldg(x0 + ((int64_t)sndB * 1 + 0) * C + ch);
         acc[4] = fmaf(w * xi_0, she[4], acc[4]);
@@ -151,6 +178,11 @@ __global__ void __launch_bounds__(MAX_T) gconv_fwd_L0(
         acc[8] = fmaf(wB * xiB_0, sheB[8], acc[8]);
       }
       { // path 3 (0,3,3) pair
+#ifdef LOUP_CONV_TABLE_FP32
+        const auto cubic = loup::conv_cubic(tq + 3 * C + ch, bias_shift);
+        const float w = cubic.value(pw);
+        const float wB = cubic.value(pwB);
+#else
         const uint2 c = __ldg(tq + 3 * C + ch);
         const unsigned eb0 = (c.y & 0x0F800000u) + bias_shift;
         const float eb_f = __uint_as_float(eb0);
@@ -160,6 +192,7 @@ __global__ void __launch_bounds__(MAX_T) gconv_fwd_L0(
         const float r3 = __uint_as_float((__funnelshift_l(c.y, c.y, 19) & 0x7F8000u) | eb0);
         const float w = fmaf(pw.z, r3, fmaf(pw.y, r2, fmaf(pw.x, r1, fmaf(pw.w, eb_f, r0))));
         const float wB = fmaf(pwB.z, r3, fmaf(pwB.y, r2, fmaf(pwB.x, r1, fmaf(pwB.w, eb_f, r0))));
+#endif
         const float xi_0 = __ldg(x0 + ((int64_t)snd * 1 + 0) * C + ch);
         const float xiB_0 = __ldg(x0 + ((int64_t)sndB * 1 + 0) * C + ch);
         acc[9] = fmaf(w * xi_0, she[9], acc[9]);
@@ -180,6 +213,10 @@ __global__ void __launch_bounds__(MAX_T) gconv_fwd_L0(
         k += 2;
       } else {
       { // path 0 (0,0,0)
+#ifdef LOUP_CONV_TABLE_FP32
+        const auto cubic = loup::conv_cubic(tq + 0 * C + ch, bias_shift);
+        const float w = cubic.value(pw);
+#else
         const uint2 c = __ldg(tq + 0 * C + ch);
         const unsigned eb0 = (c.y & 0x0F800000u) + bias_shift;
         const float eb_f = __uint_as_float(eb0);
@@ -188,10 +225,15 @@ __global__ void __launch_bounds__(MAX_T) gconv_fwd_L0(
         const float r2 = __uint_as_float((__funnelshift_l(c.x, c.x, 20) & 0x7FF800u) | eb0);
         const float r3 = __uint_as_float((__funnelshift_l(c.y, c.y, 19) & 0x7F8000u) | eb0);
         const float w = fmaf(pw.z, r3, fmaf(pw.y, r2, fmaf(pw.x, r1, fmaf(pw.w, eb_f, r0))));
+#endif
         const float xi_0 = __ldg(x0 + ((int64_t)snd * 1 + 0) * C + ch);
         acc[0] = fmaf(w * xi_0, she[0], acc[0]);
       }
       { // path 1 (0,1,1)
+#ifdef LOUP_CONV_TABLE_FP32
+        const auto cubic = loup::conv_cubic(tq + 1 * C + ch, bias_shift);
+        const float w = cubic.value(pw);
+#else
         const uint2 c = __ldg(tq + 1 * C + ch);
         const unsigned eb0 = (c.y & 0x0F800000u) + bias_shift;
         const float eb_f = __uint_as_float(eb0);
@@ -200,12 +242,17 @@ __global__ void __launch_bounds__(MAX_T) gconv_fwd_L0(
         const float r2 = __uint_as_float((__funnelshift_l(c.x, c.x, 20) & 0x7FF800u) | eb0);
         const float r3 = __uint_as_float((__funnelshift_l(c.y, c.y, 19) & 0x7F8000u) | eb0);
         const float w = fmaf(pw.z, r3, fmaf(pw.y, r2, fmaf(pw.x, r1, fmaf(pw.w, eb_f, r0))));
+#endif
         const float xi_0 = __ldg(x0 + ((int64_t)snd * 1 + 0) * C + ch);
         acc[1] = fmaf(w * xi_0, she[1], acc[1]);
         acc[2] = fmaf(w * xi_0, she[2], acc[2]);
         acc[3] = fmaf(w * xi_0, she[3], acc[3]);
       }
       { // path 2 (0,2,2)
+#ifdef LOUP_CONV_TABLE_FP32
+        const auto cubic = loup::conv_cubic(tq + 2 * C + ch, bias_shift);
+        const float w = cubic.value(pw);
+#else
         const uint2 c = __ldg(tq + 2 * C + ch);
         const unsigned eb0 = (c.y & 0x0F800000u) + bias_shift;
         const float eb_f = __uint_as_float(eb0);
@@ -214,6 +261,7 @@ __global__ void __launch_bounds__(MAX_T) gconv_fwd_L0(
         const float r2 = __uint_as_float((__funnelshift_l(c.x, c.x, 20) & 0x7FF800u) | eb0);
         const float r3 = __uint_as_float((__funnelshift_l(c.y, c.y, 19) & 0x7F8000u) | eb0);
         const float w = fmaf(pw.z, r3, fmaf(pw.y, r2, fmaf(pw.x, r1, fmaf(pw.w, eb_f, r0))));
+#endif
         const float xi_0 = __ldg(x0 + ((int64_t)snd * 1 + 0) * C + ch);
         acc[4] = fmaf(w * xi_0, she[4], acc[4]);
         acc[5] = fmaf(w * xi_0, she[5], acc[5]);
@@ -222,6 +270,10 @@ __global__ void __launch_bounds__(MAX_T) gconv_fwd_L0(
         acc[8] = fmaf(w * xi_0, she[8], acc[8]);
       }
       { // path 3 (0,3,3)
+#ifdef LOUP_CONV_TABLE_FP32
+        const auto cubic = loup::conv_cubic(tq + 3 * C + ch, bias_shift);
+        const float w = cubic.value(pw);
+#else
         const uint2 c = __ldg(tq + 3 * C + ch);
         const unsigned eb0 = (c.y & 0x0F800000u) + bias_shift;
         const float eb_f = __uint_as_float(eb0);
@@ -230,6 +282,7 @@ __global__ void __launch_bounds__(MAX_T) gconv_fwd_L0(
         const float r2 = __uint_as_float((__funnelshift_l(c.x, c.x, 20) & 0x7FF800u) | eb0);
         const float r3 = __uint_as_float((__funnelshift_l(c.y, c.y, 19) & 0x7F8000u) | eb0);
         const float w = fmaf(pw.z, r3, fmaf(pw.y, r2, fmaf(pw.x, r1, fmaf(pw.w, eb_f, r0))));
+#endif
         const float xi_0 = __ldg(x0 + ((int64_t)snd * 1 + 0) * C + ch);
         acc[9] = fmaf(w * xi_0, she[9], acc[9]);
         acc[10] = fmaf(w * xi_0, she[10], acc[10]);
@@ -333,11 +386,16 @@ __global__ void __launch_bounds__(512) gconv_bwd_L0(
       const int pr = loup::table_pair(pair_sym, species[snd], sa, S);
       slab = (int64_t)pr * I + iv;
     }
+#ifdef LOUP_CONV_TABLE_FP32
+    const float4 pw = loup::conv_basis(t), dp = loup::conv_slope_basis(t);
+    const auto* tq = loup::conv_table(packed_table) + slab * (4 * (int64_t)C);
+#else
     const float s = t - 0.5f, s_sq = s * s;
     const float s1 = s * 0x1.0p-8f, s2 = s_sq * 0x1.0p-14f, s3 = s * s_sq * 0x1.0p-19f;
     const float ds2 = (2.0f * s) * 0x1.0p-6f, ds3 = (3.0f * s_sq) * 0x1.0p-11f;
     const float nw_hb = -1.5f * (1.0f + s1 + s2 + s3), ndt_hb = -1.5f * (1.0f + ds2 + ds3);
     const uint2* tq = packed_table + slab * (4 * (int64_t)C);
+#endif
     float pull_Gx = 0.0f, pull_Gy = 0.0f, pull_Gz = 0.0f, pull_R = 0.0f;
     for (int ch = lane; ch < C; ch += 32) {
       const float4* sq4 = reinterpret_cast<const float4*>(s_q + ch * 20);
@@ -349,6 +407,11 @@ __global__ void __launch_bounds__(512) gconv_bwd_L0(
       const float x0 = __ldg(x0_p + (int64_t)snd * C + ch);
       float dx0_acc = 0.0f;
       { // path 0 (0,0,0) scalar
+#ifdef LOUP_CONV_TABLE_FP32
+        const auto cubic = loup::conv_cubic(tq + 0 * C + ch, bias_shift);
+        const float w = cubic.value(pw);
+        const float dw = cubic.slope(dp);
+#else
         const uint2 c = __ldg(tq + 0 * C + ch);
         const unsigned eb0 = (c.y & 0x0F800000u) + bias_shift;
         const float eb_f = __uint_as_float(eb0);
@@ -358,10 +421,16 @@ __global__ void __launch_bounds__(512) gconv_bwd_L0(
         const float r3 = __uint_as_float((__funnelshift_l(c.y, c.y, 19) & 0x7F8000u) | eb0);
         const float w = fmaf(s3, r3, fmaf(s2, r2, fmaf(s1, r1, fmaf(nw_hb, eb_f, r0))));
         const float dw = fmaf(ds3, r3, fmaf(ds2, r2, fmaf(ndt_hb, eb_f, r1)));
+#endif
         if (WANT_DX) dx0_acc = fmaf(w, Q0.x, dx0_acc);
         pull_R = fmaf(dw, x0 * Q0.x, pull_R);
       }
       { // path 1 (0,1,1) scalar
+#ifdef LOUP_CONV_TABLE_FP32
+        const auto cubic = loup::conv_cubic(tq + 1 * C + ch, bias_shift);
+        const float w = cubic.value(pw);
+        const float dw = cubic.slope(dp);
+#else
         const uint2 c = __ldg(tq + 1 * C + ch);
         const unsigned eb0 = (c.y & 0x0F800000u) + bias_shift;
         const float eb_f = __uint_as_float(eb0);
@@ -371,6 +440,7 @@ __global__ void __launch_bounds__(512) gconv_bwd_L0(
         const float r3 = __uint_as_float((__funnelshift_l(c.y, c.y, 19) & 0x7F8000u) | eb0);
         const float w = fmaf(s3, r3, fmaf(s2, r2, fmaf(s1, r1, fmaf(nw_hb, eb_f, r0))));
         const float dw = fmaf(ds3, r3, fmaf(ds2, r2, fmaf(ndt_hb, eb_f, r1)));
+#endif
         const float h = Q0.y * nx + Q0.z * ny + Q0.w * nz;
         const float wx = w * x0;
         pull_Gx = fmaf(wx, Q0.y, pull_Gx); pull_Gy = fmaf(wx, Q0.z, pull_Gy); pull_Gz = fmaf(wx, Q0.w, pull_Gz);
@@ -378,6 +448,11 @@ __global__ void __launch_bounds__(512) gconv_bwd_L0(
         pull_R = fmaf(dw, x0 * h, pull_R);
       }
       { // path 2 (0,2,2) scalar
+#ifdef LOUP_CONV_TABLE_FP32
+        const auto cubic = loup::conv_cubic(tq + 2 * C + ch, bias_shift);
+        const float w = cubic.value(pw);
+        const float dw = cubic.slope(dp);
+#else
         const uint2 c = __ldg(tq + 2 * C + ch);
         const unsigned eb0 = (c.y & 0x0F800000u) + bias_shift;
         const float eb_f = __uint_as_float(eb0);
@@ -387,6 +462,7 @@ __global__ void __launch_bounds__(512) gconv_bwd_L0(
         const float r3 = __uint_as_float((__funnelshift_l(c.y, c.y, 19) & 0x7F8000u) | eb0);
         const float w = fmaf(s3, r3, fmaf(s2, r2, fmaf(s1, r1, fmaf(nw_hb, eb_f, r0))));
         const float dw = fmaf(ds3, r3, fmaf(ds2, r2, fmaf(ndt_hb, eb_f, r1)));
+#endif
         const float qzz = -Q1.x - Q1.w;
         const float vx = Q1.x * nx + Q1.y * ny + Q1.z * nz;
         const float vy = Q1.y * nx + Q1.w * ny + Q2.x * nz;
@@ -398,6 +474,11 @@ __global__ void __launch_bounds__(512) gconv_bwd_L0(
         pull_R = fmaf(dw, x0 * h, pull_R);
       }
       { // path 3 (0,3,3) scalar
+#ifdef LOUP_CONV_TABLE_FP32
+        const auto cubic = loup::conv_cubic(tq + 3 * C + ch, bias_shift);
+        const float w = cubic.value(pw);
+        const float dw = cubic.slope(dp);
+#else
         const uint2 c = __ldg(tq + 3 * C + ch);
         const unsigned eb0 = (c.y & 0x0F800000u) + bias_shift;
         const float eb_f = __uint_as_float(eb0);
@@ -407,6 +488,7 @@ __global__ void __launch_bounds__(512) gconv_bwd_L0(
         const float r3 = __uint_as_float((__funnelshift_l(c.y, c.y, 19) & 0x7F8000u) | eb0);
         const float w = fmaf(s3, r3, fmaf(s2, r2, fmaf(s1, r1, fmaf(nw_hb, eb_f, r0))));
         const float dw = fmaf(ds3, r3, fmaf(ds2, r2, fmaf(ndt_hb, eb_f, r1)));
+#endif
         const float q7 = -Q2.y - Q3.x, q8 = -Q2.z - Q3.z;
         const float Qxx = Q2.y * nx + Q2.z * ny + Q2.w * nz;
         const float Qxy = Q2.z * nx + Q3.x * ny + Q3.y * nz;
@@ -447,7 +529,7 @@ __global__ void __launch_bounds__(512) gconv_bwd_L0(
         ddens = fmaf(t, fmaf(3.0f * dc.w, t, 2.0f * dc.z), dc.y) * sxi;
       }
       const float fn = pull_Gx * nx + pull_Gy * ny + pull_Gz * nz;
-      const float rad = fmaf(pull_R, sxi * 0x1.0p-8f, dD1_r * ddens);
+      const float rad = fmaf(pull_R, sxi * loup::kConvSlopeScale, dD1_r * ddens);
       float fx = fmaf(nx, rad - fn * inv_d, pull_Gx * inv_d);
       float fy = fmaf(ny, rad - fn * inv_d, pull_Gy * inv_d);
       float fz = fmaf(nz, rad - fn * inv_d, pull_Gz * inv_d);
@@ -532,10 +614,15 @@ __global__ void __launch_bounds__(MAX_T) gconv_fwd_L1(
           locate_spline(grid, vl.w, iv, t, sxi);
           slab = (int64_t)pr * I + iv;
         }
+#ifdef LOUP_CONV_TABLE_FP32
+        s_snd[ch] = snd;
+        s_pw[ch] = loup::conv_basis(t);
+#else
         const float s = t - 0.5f, s_sq = s * s;
         const float s1 = s * 0x1.0p-8f, s2 = s_sq * 0x1.0p-14f, s3 = s * s_sq * 0x1.0p-19f;
         s_snd[ch] = snd;
         s_pw[ch] = make_float4(s1, s2, s3, -1.5f * (1.0f + s1 + s2 + s3));
+#endif
         s_tq[ch] = slab * (10 * (int64_t)C);
         if (density_table) {
           const float4 dc = __ldg(density_table + slab);
@@ -565,12 +652,21 @@ __global__ void __launch_bounds__(MAX_T) gconv_fwd_L1(
       const int snd = s_snd[k];
       const float4 pw = s_pw[k];
       const float* she = s_sh + k * ED;
+#ifdef LOUP_CONV_TABLE_FP32
+      const auto* tq = loup::conv_table(packed_table) + s_tq[k];
+#else
       const uint2* tq = packed_table + s_tq[k];
+#endif
       if (PAIR && k + 1 < cnt && s_tq[k + 1] == s_tq[k]) {
         const int sndB = s_snd[k + 1];
         const float4 pwB = s_pw[k + 1];
         const float* sheB = she + ED;
       { // path 0 (0,0,0) pair
+#ifdef LOUP_CONV_TABLE_FP32
+        const auto cubic = loup::conv_cubic(tq + 0 * C + ch, bias_shift);
+        const float w = cubic.value(pw);
+        const float wB = cubic.value(pwB);
+#else
         const uint2 c = __ldg(tq + 0 * C + ch);
         const unsigned eb0 = (c.y & 0x0F800000u) + bias_shift;
         const float eb_f = __uint_as_float(eb0);
@@ -580,6 +676,7 @@ __global__ void __launch_bounds__(MAX_T) gconv_fwd_L1(
         const float r3 = __uint_as_float((__funnelshift_l(c.y, c.y, 19) & 0x7F8000u) | eb0);
         const float w = fmaf(pw.z, r3, fmaf(pw.y, r2, fmaf(pw.x, r1, fmaf(pw.w, eb_f, r0))));
         const float wB = fmaf(pwB.z, r3, fmaf(pwB.y, r2, fmaf(pwB.x, r1, fmaf(pwB.w, eb_f, r0))));
+#endif
         const float xi_0 = __ldg(x0 + ((int64_t)snd * 1 + 0) * C + ch);
         const float xiB_0 = __ldg(x0 + ((int64_t)sndB * 1 + 0) * C + ch);
         acc[0] = fmaf(w * xi_0, she[0], acc[0]);
@@ -589,6 +686,11 @@ __global__ void __launch_bounds__(MAX_T) gconv_fwd_L1(
         // q_m = p . B'_m Y1; the paths' constants are in the stores
         float w1, w1B, w4, w4B, w6, w6B, w7, w7B;
         {
+#ifdef LOUP_CONV_TABLE_FP32
+          const auto cubic = loup::conv_cubic(tq + 1 * C + ch, bias_shift);
+          w1 = cubic.value(pw);
+          w1B = cubic.value(pwB);
+#else
           const uint2 c = __ldg(tq + 1 * C + ch);
           const unsigned eb0 = (c.y & 0x0F800000u) + bias_shift;
           const float eb_f = __uint_as_float(eb0);
@@ -598,8 +700,14 @@ __global__ void __launch_bounds__(MAX_T) gconv_fwd_L1(
           const float r3 = __uint_as_float((__funnelshift_l(c.y, c.y, 19) & 0x7F8000u) | eb0);
           w1 = fmaf(pw.z, r3, fmaf(pw.y, r2, fmaf(pw.x, r1, fmaf(pw.w, eb_f, r0))));
           w1B = fmaf(pwB.z, r3, fmaf(pwB.y, r2, fmaf(pwB.x, r1, fmaf(pwB.w, eb_f, r0))));
+#endif
         }
         {
+#ifdef LOUP_CONV_TABLE_FP32
+          const auto cubic = loup::conv_cubic(tq + 4 * C + ch, bias_shift);
+          w4 = cubic.value(pw);
+          w4B = cubic.value(pwB);
+#else
           const uint2 c = __ldg(tq + 4 * C + ch);
           const unsigned eb0 = (c.y & 0x0F800000u) + bias_shift;
           const float eb_f = __uint_as_float(eb0);
@@ -609,8 +717,14 @@ __global__ void __launch_bounds__(MAX_T) gconv_fwd_L1(
           const float r3 = __uint_as_float((__funnelshift_l(c.y, c.y, 19) & 0x7F8000u) | eb0);
           w4 = fmaf(pw.z, r3, fmaf(pw.y, r2, fmaf(pw.x, r1, fmaf(pw.w, eb_f, r0))));
           w4B = fmaf(pwB.z, r3, fmaf(pwB.y, r2, fmaf(pwB.x, r1, fmaf(pwB.w, eb_f, r0))));
+#endif
         }
         {
+#ifdef LOUP_CONV_TABLE_FP32
+          const auto cubic = loup::conv_cubic(tq + 6 * C + ch, bias_shift);
+          w6 = cubic.value(pw);
+          w6B = cubic.value(pwB);
+#else
           const uint2 c = __ldg(tq + 6 * C + ch);
           const unsigned eb0 = (c.y & 0x0F800000u) + bias_shift;
           const float eb_f = __uint_as_float(eb0);
@@ -620,8 +734,14 @@ __global__ void __launch_bounds__(MAX_T) gconv_fwd_L1(
           const float r3 = __uint_as_float((__funnelshift_l(c.y, c.y, 19) & 0x7F8000u) | eb0);
           w6 = fmaf(pw.z, r3, fmaf(pw.y, r2, fmaf(pw.x, r1, fmaf(pw.w, eb_f, r0))));
           w6B = fmaf(pwB.z, r3, fmaf(pwB.y, r2, fmaf(pwB.x, r1, fmaf(pwB.w, eb_f, r0))));
+#endif
         }
         {
+#ifdef LOUP_CONV_TABLE_FP32
+          const auto cubic = loup::conv_cubic(tq + 7 * C + ch, bias_shift);
+          w7 = cubic.value(pw);
+          w7B = cubic.value(pwB);
+#else
           const uint2 c = __ldg(tq + 7 * C + ch);
           const unsigned eb0 = (c.y & 0x0F800000u) + bias_shift;
           const float eb_f = __uint_as_float(eb0);
@@ -631,6 +751,7 @@ __global__ void __launch_bounds__(MAX_T) gconv_fwd_L1(
           const float r3 = __uint_as_float((__funnelshift_l(c.y, c.y, 19) & 0x7F8000u) | eb0);
           w7 = fmaf(pw.z, r3, fmaf(pw.y, r2, fmaf(pw.x, r1, fmaf(pw.w, eb_f, r0))));
           w7B = fmaf(pwB.z, r3, fmaf(pwB.y, r2, fmaf(pwB.x, r1, fmaf(pwB.w, eb_f, r0))));
+#endif
         }
         const float pc0 = __ldg(x1 + ((int64_t)snd * 3 + 0) * C + ch);
         const float pc1 = __ldg(x1 + ((int64_t)snd * 3 + 1) * C + ch);
@@ -674,6 +795,11 @@ __global__ void __launch_bounds__(MAX_T) gconv_fwd_L1(
         acc[25] = fmaf(w7B, fmaf(ddB, sheB[8], -0x1.8c97f00000000p-1f * qq4B), acc[25]);
       }
       { // path 2 (0,1,1) pair
+#ifdef LOUP_CONV_TABLE_FP32
+        const auto cubic = loup::conv_cubic(tq + 2 * C + ch, bias_shift);
+        const float w = cubic.value(pw);
+        const float wB = cubic.value(pwB);
+#else
         const uint2 c = __ldg(tq + 2 * C + ch);
         const unsigned eb0 = (c.y & 0x0F800000u) + bias_shift;
         const float eb_f = __uint_as_float(eb0);
@@ -683,6 +809,7 @@ __global__ void __launch_bounds__(MAX_T) gconv_fwd_L1(
         const float r3 = __uint_as_float((__funnelshift_l(c.y, c.y, 19) & 0x7F8000u) | eb0);
         const float w = fmaf(pw.z, r3, fmaf(pw.y, r2, fmaf(pw.x, r1, fmaf(pw.w, eb_f, r0))));
         const float wB = fmaf(pwB.z, r3, fmaf(pwB.y, r2, fmaf(pwB.x, r1, fmaf(pwB.w, eb_f, r0))));
+#endif
         const float xi_0 = __ldg(x0 + ((int64_t)snd * 1 + 0) * C + ch);
         const float xiB_0 = __ldg(x0 + ((int64_t)sndB * 1 + 0) * C + ch);
         acc[2] = fmaf(w * xi_0, she[1], acc[2]);
@@ -693,6 +820,11 @@ __global__ void __launch_bounds__(MAX_T) gconv_fwd_L1(
         acc[4] = fmaf(wB * xiB_0, sheB[3], acc[4]);
       }
       { // path 3 (1,0,1) pair
+#ifdef LOUP_CONV_TABLE_FP32
+        const auto cubic = loup::conv_cubic(tq + 3 * C + ch, bias_shift);
+        const float w = cubic.value(pw);
+        const float wB = cubic.value(pwB);
+#else
         const uint2 c = __ldg(tq + 3 * C + ch);
         const unsigned eb0 = (c.y & 0x0F800000u) + bias_shift;
         const float eb_f = __uint_as_float(eb0);
@@ -702,6 +834,7 @@ __global__ void __launch_bounds__(MAX_T) gconv_fwd_L1(
         const float r3 = __uint_as_float((__funnelshift_l(c.y, c.y, 19) & 0x7F8000u) | eb0);
         const float w = fmaf(pw.z, r3, fmaf(pw.y, r2, fmaf(pw.x, r1, fmaf(pw.w, eb_f, r0))));
         const float wB = fmaf(pwB.z, r3, fmaf(pwB.y, r2, fmaf(pwB.x, r1, fmaf(pwB.w, eb_f, r0))));
+#endif
         const float xi_0 = __ldg(x1 + ((int64_t)snd * 3 + 0) * C + ch);
         const float xiB_0 = __ldg(x1 + ((int64_t)sndB * 3 + 0) * C + ch);
         const float xi_1 = __ldg(x1 + ((int64_t)snd * 3 + 1) * C + ch);
@@ -716,6 +849,11 @@ __global__ void __launch_bounds__(MAX_T) gconv_fwd_L1(
         acc[7] = fmaf(wB * xiB_2, sheB[0], acc[7]);
       }
       { // path 5 (0,2,2) pair
+#ifdef LOUP_CONV_TABLE_FP32
+        const auto cubic = loup::conv_cubic(tq + 5 * C + ch, bias_shift);
+        const float w = cubic.value(pw);
+        const float wB = cubic.value(pwB);
+#else
         const uint2 c = __ldg(tq + 5 * C + ch);
         const unsigned eb0 = (c.y & 0x0F800000u) + bias_shift;
         const float eb_f = __uint_as_float(eb0);
@@ -725,6 +863,7 @@ __global__ void __launch_bounds__(MAX_T) gconv_fwd_L1(
         const float r3 = __uint_as_float((__funnelshift_l(c.y, c.y, 19) & 0x7F8000u) | eb0);
         const float w = fmaf(pw.z, r3, fmaf(pw.y, r2, fmaf(pw.x, r1, fmaf(pw.w, eb_f, r0))));
         const float wB = fmaf(pwB.z, r3, fmaf(pwB.y, r2, fmaf(pwB.x, r1, fmaf(pwB.w, eb_f, r0))));
+#endif
         const float xi_0 = __ldg(x0 + ((int64_t)snd * 1 + 0) * C + ch);
         const float xiB_0 = __ldg(x0 + ((int64_t)sndB * 1 + 0) * C + ch);
         acc[11] = fmaf(w * xi_0, she[4], acc[11]);
@@ -739,6 +878,11 @@ __global__ void __launch_bounds__(MAX_T) gconv_fwd_L1(
         acc[15] = fmaf(wB * xiB_0, sheB[8], acc[15]);
       }
       { // path 8 (0,3,3) pair
+#ifdef LOUP_CONV_TABLE_FP32
+        const auto cubic = loup::conv_cubic(tq + 8 * C + ch, bias_shift);
+        const float w = cubic.value(pw);
+        const float wB = cubic.value(pwB);
+#else
         const uint2 c = __ldg(tq + 8 * C + ch);
         const unsigned eb0 = (c.y & 0x0F800000u) + bias_shift;
         const float eb_f = __uint_as_float(eb0);
@@ -748,6 +892,7 @@ __global__ void __launch_bounds__(MAX_T) gconv_fwd_L1(
         const float r3 = __uint_as_float((__funnelshift_l(c.y, c.y, 19) & 0x7F8000u) | eb0);
         const float w = fmaf(pw.z, r3, fmaf(pw.y, r2, fmaf(pw.x, r1, fmaf(pw.w, eb_f, r0))));
         const float wB = fmaf(pwB.z, r3, fmaf(pwB.y, r2, fmaf(pwB.x, r1, fmaf(pwB.w, eb_f, r0))));
+#endif
         const float xi_0 = __ldg(x0 + ((int64_t)snd * 1 + 0) * C + ch);
         const float xiB_0 = __ldg(x0 + ((int64_t)sndB * 1 + 0) * C + ch);
         acc[26] = fmaf(w * xi_0, she[9], acc[26]);
@@ -766,6 +911,11 @@ __global__ void __launch_bounds__(MAX_T) gconv_fwd_L1(
         acc[32] = fmaf(wB * xiB_0, sheB[15], acc[32]);
       }
       { // path 9 (1,2,3) pair
+#ifdef LOUP_CONV_TABLE_FP32
+        const auto cubic = loup::conv_cubic(tq + 9 * C + ch, bias_shift);
+        const float w = cubic.value(pw);
+        const float wB = cubic.value(pwB);
+#else
         const uint2 c = __ldg(tq + 9 * C + ch);
         const unsigned eb0 = (c.y & 0x0F800000u) + bias_shift;
         const float eb_f = __uint_as_float(eb0);
@@ -775,6 +925,7 @@ __global__ void __launch_bounds__(MAX_T) gconv_fwd_L1(
         const float r3 = __uint_as_float((__funnelshift_l(c.y, c.y, 19) & 0x7F8000u) | eb0);
         const float w = fmaf(pw.z, r3, fmaf(pw.y, r2, fmaf(pw.x, r1, fmaf(pw.w, eb_f, r0))));
         const float wB = fmaf(pwB.z, r3, fmaf(pwB.y, r2, fmaf(pwB.x, r1, fmaf(pwB.w, eb_f, r0))));
+#endif
         const float xi_0 = __ldg(x1 + ((int64_t)snd * 3 + 0) * C + ch);
         const float xiB_0 = __ldg(x1 + ((int64_t)sndB * 3 + 0) * C + ch);
         const float xi_1 = __ldg(x1 + ((int64_t)snd * 3 + 1) * C + ch);
@@ -823,6 +974,10 @@ __global__ void __launch_bounds__(MAX_T) gconv_fwd_L1(
         k += 2;
       } else {
       { // path 0 (0,0,0)
+#ifdef LOUP_CONV_TABLE_FP32
+        const auto cubic = loup::conv_cubic(tq + 0 * C + ch, bias_shift);
+        const float w = cubic.value(pw);
+#else
         const uint2 c = __ldg(tq + 0 * C + ch);
         const unsigned eb0 = (c.y & 0x0F800000u) + bias_shift;
         const float eb_f = __uint_as_float(eb0);
@@ -831,6 +986,7 @@ __global__ void __launch_bounds__(MAX_T) gconv_fwd_L1(
         const float r2 = __uint_as_float((__funnelshift_l(c.x, c.x, 20) & 0x7FF800u) | eb0);
         const float r3 = __uint_as_float((__funnelshift_l(c.y, c.y, 19) & 0x7F8000u) | eb0);
         const float w = fmaf(pw.z, r3, fmaf(pw.y, r2, fmaf(pw.x, r1, fmaf(pw.w, eb_f, r0))));
+#endif
         const float xi_0 = __ldg(x0 + ((int64_t)snd * 1 + 0) * C + ch);
         acc[0] = fmaf(w * xi_0, she[0], acc[0]);
       }
@@ -838,6 +994,10 @@ __global__ void __launch_bounds__(MAX_T) gconv_fwd_L1(
         // q_m = p . B'_m Y1; the paths' constants are in the stores
         float w1, w4, w6, w7;
         {
+#ifdef LOUP_CONV_TABLE_FP32
+          const auto cubic = loup::conv_cubic(tq + 1 * C + ch, bias_shift);
+          w1 = cubic.value(pw);
+#else
           const uint2 c = __ldg(tq + 1 * C + ch);
           const unsigned eb0 = (c.y & 0x0F800000u) + bias_shift;
           const float eb_f = __uint_as_float(eb0);
@@ -846,8 +1006,13 @@ __global__ void __launch_bounds__(MAX_T) gconv_fwd_L1(
           const float r2 = __uint_as_float((__funnelshift_l(c.x, c.x, 20) & 0x7FF800u) | eb0);
           const float r3 = __uint_as_float((__funnelshift_l(c.y, c.y, 19) & 0x7F8000u) | eb0);
           w1 = fmaf(pw.z, r3, fmaf(pw.y, r2, fmaf(pw.x, r1, fmaf(pw.w, eb_f, r0))));
+#endif
         }
         {
+#ifdef LOUP_CONV_TABLE_FP32
+          const auto cubic = loup::conv_cubic(tq + 4 * C + ch, bias_shift);
+          w4 = cubic.value(pw);
+#else
           const uint2 c = __ldg(tq + 4 * C + ch);
           const unsigned eb0 = (c.y & 0x0F800000u) + bias_shift;
           const float eb_f = __uint_as_float(eb0);
@@ -856,8 +1021,13 @@ __global__ void __launch_bounds__(MAX_T) gconv_fwd_L1(
           const float r2 = __uint_as_float((__funnelshift_l(c.x, c.x, 20) & 0x7FF800u) | eb0);
           const float r3 = __uint_as_float((__funnelshift_l(c.y, c.y, 19) & 0x7F8000u) | eb0);
           w4 = fmaf(pw.z, r3, fmaf(pw.y, r2, fmaf(pw.x, r1, fmaf(pw.w, eb_f, r0))));
+#endif
         }
         {
+#ifdef LOUP_CONV_TABLE_FP32
+          const auto cubic = loup::conv_cubic(tq + 6 * C + ch, bias_shift);
+          w6 = cubic.value(pw);
+#else
           const uint2 c = __ldg(tq + 6 * C + ch);
           const unsigned eb0 = (c.y & 0x0F800000u) + bias_shift;
           const float eb_f = __uint_as_float(eb0);
@@ -866,8 +1036,13 @@ __global__ void __launch_bounds__(MAX_T) gconv_fwd_L1(
           const float r2 = __uint_as_float((__funnelshift_l(c.x, c.x, 20) & 0x7FF800u) | eb0);
           const float r3 = __uint_as_float((__funnelshift_l(c.y, c.y, 19) & 0x7F8000u) | eb0);
           w6 = fmaf(pw.z, r3, fmaf(pw.y, r2, fmaf(pw.x, r1, fmaf(pw.w, eb_f, r0))));
+#endif
         }
         {
+#ifdef LOUP_CONV_TABLE_FP32
+          const auto cubic = loup::conv_cubic(tq + 7 * C + ch, bias_shift);
+          w7 = cubic.value(pw);
+#else
           const uint2 c = __ldg(tq + 7 * C + ch);
           const unsigned eb0 = (c.y & 0x0F800000u) + bias_shift;
           const float eb_f = __uint_as_float(eb0);
@@ -876,6 +1051,7 @@ __global__ void __launch_bounds__(MAX_T) gconv_fwd_L1(
           const float r2 = __uint_as_float((__funnelshift_l(c.x, c.x, 20) & 0x7FF800u) | eb0);
           const float r3 = __uint_as_float((__funnelshift_l(c.y, c.y, 19) & 0x7F8000u) | eb0);
           w7 = fmaf(pw.z, r3, fmaf(pw.y, r2, fmaf(pw.x, r1, fmaf(pw.w, eb_f, r0))));
+#endif
         }
         const float pc0 = __ldg(x1 + ((int64_t)snd * 3 + 0) * C + ch);
         const float pc1 = __ldg(x1 + ((int64_t)snd * 3 + 1) * C + ch);
@@ -899,6 +1075,10 @@ __global__ void __launch_bounds__(MAX_T) gconv_fwd_L1(
         acc[25] = fmaf(w7, fmaf(dd, she[8], -0x1.8c97f00000000p-1f * qq4), acc[25]);
       }
       { // path 2 (0,1,1)
+#ifdef LOUP_CONV_TABLE_FP32
+        const auto cubic = loup::conv_cubic(tq + 2 * C + ch, bias_shift);
+        const float w = cubic.value(pw);
+#else
         const uint2 c = __ldg(tq + 2 * C + ch);
         const unsigned eb0 = (c.y & 0x0F800000u) + bias_shift;
         const float eb_f = __uint_as_float(eb0);
@@ -907,12 +1087,17 @@ __global__ void __launch_bounds__(MAX_T) gconv_fwd_L1(
         const float r2 = __uint_as_float((__funnelshift_l(c.x, c.x, 20) & 0x7FF800u) | eb0);
         const float r3 = __uint_as_float((__funnelshift_l(c.y, c.y, 19) & 0x7F8000u) | eb0);
         const float w = fmaf(pw.z, r3, fmaf(pw.y, r2, fmaf(pw.x, r1, fmaf(pw.w, eb_f, r0))));
+#endif
         const float xi_0 = __ldg(x0 + ((int64_t)snd * 1 + 0) * C + ch);
         acc[2] = fmaf(w * xi_0, she[1], acc[2]);
         acc[3] = fmaf(w * xi_0, she[2], acc[3]);
         acc[4] = fmaf(w * xi_0, she[3], acc[4]);
       }
       { // path 3 (1,0,1)
+#ifdef LOUP_CONV_TABLE_FP32
+        const auto cubic = loup::conv_cubic(tq + 3 * C + ch, bias_shift);
+        const float w = cubic.value(pw);
+#else
         const uint2 c = __ldg(tq + 3 * C + ch);
         const unsigned eb0 = (c.y & 0x0F800000u) + bias_shift;
         const float eb_f = __uint_as_float(eb0);
@@ -921,6 +1106,7 @@ __global__ void __launch_bounds__(MAX_T) gconv_fwd_L1(
         const float r2 = __uint_as_float((__funnelshift_l(c.x, c.x, 20) & 0x7FF800u) | eb0);
         const float r3 = __uint_as_float((__funnelshift_l(c.y, c.y, 19) & 0x7F8000u) | eb0);
         const float w = fmaf(pw.z, r3, fmaf(pw.y, r2, fmaf(pw.x, r1, fmaf(pw.w, eb_f, r0))));
+#endif
         const float xi_0 = __ldg(x1 + ((int64_t)snd * 3 + 0) * C + ch);
         const float xi_1 = __ldg(x1 + ((int64_t)snd * 3 + 1) * C + ch);
         const float xi_2 = __ldg(x1 + ((int64_t)snd * 3 + 2) * C + ch);
@@ -929,6 +1115,10 @@ __global__ void __launch_bounds__(MAX_T) gconv_fwd_L1(
         acc[7] = fmaf(w * xi_2, she[0], acc[7]);
       }
       { // path 5 (0,2,2)
+#ifdef LOUP_CONV_TABLE_FP32
+        const auto cubic = loup::conv_cubic(tq + 5 * C + ch, bias_shift);
+        const float w = cubic.value(pw);
+#else
         const uint2 c = __ldg(tq + 5 * C + ch);
         const unsigned eb0 = (c.y & 0x0F800000u) + bias_shift;
         const float eb_f = __uint_as_float(eb0);
@@ -937,6 +1127,7 @@ __global__ void __launch_bounds__(MAX_T) gconv_fwd_L1(
         const float r2 = __uint_as_float((__funnelshift_l(c.x, c.x, 20) & 0x7FF800u) | eb0);
         const float r3 = __uint_as_float((__funnelshift_l(c.y, c.y, 19) & 0x7F8000u) | eb0);
         const float w = fmaf(pw.z, r3, fmaf(pw.y, r2, fmaf(pw.x, r1, fmaf(pw.w, eb_f, r0))));
+#endif
         const float xi_0 = __ldg(x0 + ((int64_t)snd * 1 + 0) * C + ch);
         acc[11] = fmaf(w * xi_0, she[4], acc[11]);
         acc[12] = fmaf(w * xi_0, she[5], acc[12]);
@@ -945,6 +1136,10 @@ __global__ void __launch_bounds__(MAX_T) gconv_fwd_L1(
         acc[15] = fmaf(w * xi_0, she[8], acc[15]);
       }
       { // path 8 (0,3,3)
+#ifdef LOUP_CONV_TABLE_FP32
+        const auto cubic = loup::conv_cubic(tq + 8 * C + ch, bias_shift);
+        const float w = cubic.value(pw);
+#else
         const uint2 c = __ldg(tq + 8 * C + ch);
         const unsigned eb0 = (c.y & 0x0F800000u) + bias_shift;
         const float eb_f = __uint_as_float(eb0);
@@ -953,6 +1148,7 @@ __global__ void __launch_bounds__(MAX_T) gconv_fwd_L1(
         const float r2 = __uint_as_float((__funnelshift_l(c.x, c.x, 20) & 0x7FF800u) | eb0);
         const float r3 = __uint_as_float((__funnelshift_l(c.y, c.y, 19) & 0x7F8000u) | eb0);
         const float w = fmaf(pw.z, r3, fmaf(pw.y, r2, fmaf(pw.x, r1, fmaf(pw.w, eb_f, r0))));
+#endif
         const float xi_0 = __ldg(x0 + ((int64_t)snd * 1 + 0) * C + ch);
         acc[26] = fmaf(w * xi_0, she[9], acc[26]);
         acc[27] = fmaf(w * xi_0, she[10], acc[27]);
@@ -963,6 +1159,10 @@ __global__ void __launch_bounds__(MAX_T) gconv_fwd_L1(
         acc[32] = fmaf(w * xi_0, she[15], acc[32]);
       }
       { // path 9 (1,2,3)
+#ifdef LOUP_CONV_TABLE_FP32
+        const auto cubic = loup::conv_cubic(tq + 9 * C + ch, bias_shift);
+        const float w = cubic.value(pw);
+#else
         const uint2 c = __ldg(tq + 9 * C + ch);
         const unsigned eb0 = (c.y & 0x0F800000u) + bias_shift;
         const float eb_f = __uint_as_float(eb0);
@@ -971,6 +1171,7 @@ __global__ void __launch_bounds__(MAX_T) gconv_fwd_L1(
         const float r2 = __uint_as_float((__funnelshift_l(c.x, c.x, 20) & 0x7FF800u) | eb0);
         const float r3 = __uint_as_float((__funnelshift_l(c.y, c.y, 19) & 0x7F8000u) | eb0);
         const float w = fmaf(pw.z, r3, fmaf(pw.y, r2, fmaf(pw.x, r1, fmaf(pw.w, eb_f, r0))));
+#endif
         const float xi_0 = __ldg(x1 + ((int64_t)snd * 3 + 0) * C + ch);
         const float xi_1 = __ldg(x1 + ((int64_t)snd * 3 + 1) * C + ch);
         const float xi_2 = __ldg(x1 + ((int64_t)snd * 3 + 2) * C + ch);
@@ -1160,11 +1361,16 @@ __global__ void __launch_bounds__(512) gconv_bwd_L1(
       const int pr = loup::table_pair(pair_sym, species[snd], sa, S);
       slab = (int64_t)pr * I + iv;
     }
+#ifdef LOUP_CONV_TABLE_FP32
+    const float4 pw = loup::conv_basis(t), dp = loup::conv_slope_basis(t);
+    const auto* tq = loup::conv_table(packed_table) + slab * (10 * (int64_t)C);
+#else
     const float s = t - 0.5f, s_sq = s * s;
     const float s1 = s * 0x1.0p-8f, s2 = s_sq * 0x1.0p-14f, s3 = s * s_sq * 0x1.0p-19f;
     const float ds2 = (2.0f * s) * 0x1.0p-6f, ds3 = (3.0f * s_sq) * 0x1.0p-11f;
     const float nw_hb = -1.5f * (1.0f + s1 + s2 + s3), ndt_hb = -1.5f * (1.0f + ds2 + ds3);
     const uint2* tq = packed_table + slab * (10 * (int64_t)C);
+#endif
     float pull_Gx = 0.0f, pull_Gy = 0.0f, pull_Gz = 0.0f, pull_R = 0.0f;
     for (int ch = lane; ch < C; ch += 32) {
       const float4* sq4 = reinterpret_cast<const float4*>(s_q + ch * 44);
@@ -1186,6 +1392,11 @@ __global__ void __launch_bounds__(512) gconv_bwd_L1(
       const float xz = __ldg(x1_p + ((int64_t)snd * 3 + 2) * C + ch);
       float dx1_0 = 0.0f, dx1_1 = 0.0f, dx1_2 = 0.0f;
       { // path 0 (0,0,0) scalar
+#ifdef LOUP_CONV_TABLE_FP32
+        const auto cubic = loup::conv_cubic(tq + 0 * C + ch, bias_shift);
+        const float w = cubic.value(pw);
+        const float dw = cubic.slope(dp);
+#else
         const uint2 c = __ldg(tq + 0 * C + ch);
         const unsigned eb0 = (c.y & 0x0F800000u) + bias_shift;
         const float eb_f = __uint_as_float(eb0);
@@ -1195,10 +1406,16 @@ __global__ void __launch_bounds__(512) gconv_bwd_L1(
         const float r3 = __uint_as_float((__funnelshift_l(c.y, c.y, 19) & 0x7F8000u) | eb0);
         const float w = fmaf(s3, r3, fmaf(s2, r2, fmaf(s1, r1, fmaf(nw_hb, eb_f, r0))));
         const float dw = fmaf(ds3, r3, fmaf(ds2, r2, fmaf(ndt_hb, eb_f, r1)));
+#endif
         if (WANT_DX) dx0_acc = fmaf(w, Q0.x, dx0_acc);
         pull_R = fmaf(dw, x0 * Q0.x, pull_R);
       }
       { // path 1 (1,1,0) lower
+#ifdef LOUP_CONV_TABLE_FP32
+        const auto cubic = loup::conv_cubic(tq + 1 * C + ch, bias_shift);
+        const float w = cubic.value(pw);
+        const float dw = cubic.slope(dp);
+#else
         const uint2 c = __ldg(tq + 1 * C + ch);
         const unsigned eb0 = (c.y & 0x0F800000u) + bias_shift;
         const float eb_f = __uint_as_float(eb0);
@@ -1208,6 +1425,7 @@ __global__ void __launch_bounds__(512) gconv_bwd_L1(
         const float r3 = __uint_as_float((__funnelshift_l(c.y, c.y, 19) & 0x7F8000u) | eb0);
         const float w = fmaf(s3, r3, fmaf(s2, r2, fmaf(s1, r1, fmaf(nw_hb, eb_f, r0))));
         const float dw = fmaf(ds3, r3, fmaf(ds2, r2, fmaf(ndt_hb, eb_f, r1)));
+#endif
         const float A = xx * nx + xy * ny + xz * nz;
         const float wq = w * Q0.y;
         pull_Gx = fmaf(wq, xx, pull_Gx); pull_Gy = fmaf(wq, xy, pull_Gy); pull_Gz = fmaf(wq, xz, pull_Gz);
@@ -1215,6 +1433,11 @@ __global__ void __launch_bounds__(512) gconv_bwd_L1(
         pull_R = fmaf(dw, A * Q0.y, pull_R);
       }
       { // path 2 (0,1,1) scalar
+#ifdef LOUP_CONV_TABLE_FP32
+        const auto cubic = loup::conv_cubic(tq + 2 * C + ch, bias_shift);
+        const float w = cubic.value(pw);
+        const float dw = cubic.slope(dp);
+#else
         const uint2 c = __ldg(tq + 2 * C + ch);
         const unsigned eb0 = (c.y & 0x0F800000u) + bias_shift;
         const float eb_f = __uint_as_float(eb0);
@@ -1224,6 +1447,7 @@ __global__ void __launch_bounds__(512) gconv_bwd_L1(
         const float r3 = __uint_as_float((__funnelshift_l(c.y, c.y, 19) & 0x7F8000u) | eb0);
         const float w = fmaf(s3, r3, fmaf(s2, r2, fmaf(s1, r1, fmaf(nw_hb, eb_f, r0))));
         const float dw = fmaf(ds3, r3, fmaf(ds2, r2, fmaf(ndt_hb, eb_f, r1)));
+#endif
         const float h = Q0.z * nx + Q0.w * ny + Q1.x * nz;
         const float wx = w * x0;
         pull_Gx = fmaf(wx, Q0.z, pull_Gx); pull_Gy = fmaf(wx, Q0.w, pull_Gy); pull_Gz = fmaf(wx, Q1.x, pull_Gz);
@@ -1231,6 +1455,11 @@ __global__ void __launch_bounds__(512) gconv_bwd_L1(
         pull_R = fmaf(dw, x0 * h, pull_R);
       }
       { // path 3 (1,0,1) raise
+#ifdef LOUP_CONV_TABLE_FP32
+        const auto cubic = loup::conv_cubic(tq + 3 * C + ch, bias_shift);
+        const float w = cubic.value(pw);
+        const float dw = cubic.slope(dp);
+#else
         const uint2 c = __ldg(tq + 3 * C + ch);
         const unsigned eb0 = (c.y & 0x0F800000u) + bias_shift;
         const float eb_f = __uint_as_float(eb0);
@@ -1240,10 +1469,16 @@ __global__ void __launch_bounds__(512) gconv_bwd_L1(
         const float r3 = __uint_as_float((__funnelshift_l(c.y, c.y, 19) & 0x7F8000u) | eb0);
         const float w = fmaf(s3, r3, fmaf(s2, r2, fmaf(s1, r1, fmaf(nw_hb, eb_f, r0))));
         const float dw = fmaf(ds3, r3, fmaf(ds2, r2, fmaf(ndt_hb, eb_f, r1)));
+#endif
         pull_R = fmaf(dw, xx * Q1.y + xy * Q1.z + xz * Q1.w, pull_R);
         if (WANT_DX) { dx1_0 = fmaf(w, Q1.y, dx1_0); dx1_1 = fmaf(w, Q1.z, dx1_1); dx1_2 = fmaf(w, Q1.w, dx1_2); }
       }
       { // path 4 (1,2,1) lower
+#ifdef LOUP_CONV_TABLE_FP32
+        const auto cubic = loup::conv_cubic(tq + 4 * C + ch, bias_shift);
+        const float w = cubic.value(pw);
+        const float dw = cubic.slope(dp);
+#else
         const uint2 c = __ldg(tq + 4 * C + ch);
         const unsigned eb0 = (c.y & 0x0F800000u) + bias_shift;
         const float eb_f = __uint_as_float(eb0);
@@ -1253,6 +1488,7 @@ __global__ void __launch_bounds__(512) gconv_bwd_L1(
         const float r3 = __uint_as_float((__funnelshift_l(c.y, c.y, 19) & 0x7F8000u) | eb0);
         const float w = fmaf(s3, r3, fmaf(s2, r2, fmaf(s1, r1, fmaf(nw_hb, eb_f, r0))));
         const float dw = fmaf(ds3, r3, fmaf(ds2, r2, fmaf(ndt_hb, eb_f, r1)));
+#endif
         const float h = Q2.x * nx + Q2.y * ny + Q2.z * nz;
         const float A = xx * nx + xy * ny + xz * nz;
         const float B = xx * Q2.x + xy * Q2.y + xz * Q2.z;
@@ -1264,6 +1500,11 @@ __global__ void __launch_bounds__(512) gconv_bwd_L1(
         if (WANT_DX) { dx1_0 = fmaf(wh, nx, fmaf(-wk, Q2.x, dx1_0)); dx1_1 = fmaf(wh, ny, fmaf(-wk, Q2.y, dx1_1)); dx1_2 = fmaf(wh, nz, fmaf(-wk, Q2.z, dx1_2)); }
       }
       { // path 5 (0,2,2) scalar
+#ifdef LOUP_CONV_TABLE_FP32
+        const auto cubic = loup::conv_cubic(tq + 5 * C + ch, bias_shift);
+        const float w = cubic.value(pw);
+        const float dw = cubic.slope(dp);
+#else
         const uint2 c = __ldg(tq + 5 * C + ch);
         const unsigned eb0 = (c.y & 0x0F800000u) + bias_shift;
         const float eb_f = __uint_as_float(eb0);
@@ -1273,6 +1514,7 @@ __global__ void __launch_bounds__(512) gconv_bwd_L1(
         const float r3 = __uint_as_float((__funnelshift_l(c.y, c.y, 19) & 0x7F8000u) | eb0);
         const float w = fmaf(s3, r3, fmaf(s2, r2, fmaf(s1, r1, fmaf(nw_hb, eb_f, r0))));
         const float dw = fmaf(ds3, r3, fmaf(ds2, r2, fmaf(ndt_hb, eb_f, r1)));
+#endif
         const float qzz = -Q2.w - Q3.z;
         const float vx = Q2.w * nx + Q3.x * ny + Q3.y * nz;
         const float vy = Q3.x * nx + Q3.z * ny + Q3.w * nz;
@@ -1284,6 +1526,11 @@ __global__ void __launch_bounds__(512) gconv_bwd_L1(
         pull_R = fmaf(dw, x0 * h, pull_R);
       }
       { // path 6 (1,1,2) raise
+#ifdef LOUP_CONV_TABLE_FP32
+        const auto cubic = loup::conv_cubic(tq + 6 * C + ch, bias_shift);
+        const float w = cubic.value(pw);
+        const float dw = cubic.slope(dp);
+#else
         const uint2 c = __ldg(tq + 6 * C + ch);
         const unsigned eb0 = (c.y & 0x0F800000u) + bias_shift;
         const float eb_f = __uint_as_float(eb0);
@@ -1293,6 +1540,7 @@ __global__ void __launch_bounds__(512) gconv_bwd_L1(
         const float r3 = __uint_as_float((__funnelshift_l(c.y, c.y, 19) & 0x7F8000u) | eb0);
         const float w = fmaf(s3, r3, fmaf(s2, r2, fmaf(s1, r1, fmaf(nw_hb, eb_f, r0))));
         const float dw = fmaf(ds3, r3, fmaf(ds2, r2, fmaf(ndt_hb, eb_f, r1)));
+#endif
         const float qzz = -Q4.x - Q4.w;
         const float vx = Q4.x * nx + Q4.y * ny + Q4.z * nz;
         const float vy = Q4.y * nx + Q4.w * ny + Q5.x * nz;
@@ -1305,6 +1553,11 @@ __global__ void __launch_bounds__(512) gconv_bwd_L1(
         pull_Gz = fmaf(w2, Q4.z * xx + Q5.x * xy + qzz * xz, pull_Gz);
       }
       { // path 7 (1,3,2) lower
+#ifdef LOUP_CONV_TABLE_FP32
+        const auto cubic = loup::conv_cubic(tq + 7 * C + ch, bias_shift);
+        const float w = cubic.value(pw);
+        const float dw = cubic.slope(dp);
+#else
         const uint2 c = __ldg(tq + 7 * C + ch);
         const unsigned eb0 = (c.y & 0x0F800000u) + bias_shift;
         const float eb_f = __uint_as_float(eb0);
@@ -1314,6 +1567,7 @@ __global__ void __launch_bounds__(512) gconv_bwd_L1(
         const float r3 = __uint_as_float((__funnelshift_l(c.y, c.y, 19) & 0x7F8000u) | eb0);
         const float w = fmaf(s3, r3, fmaf(s2, r2, fmaf(s1, r1, fmaf(nw_hb, eb_f, r0))));
         const float dw = fmaf(ds3, r3, fmaf(ds2, r2, fmaf(ndt_hb, eb_f, r1)));
+#endif
         const float qzz = -Q5.y - Q6.x;
         const float vx = Q5.y * nx + Q5.z * ny + Q5.w * nz;
         const float vy = Q5.z * nx + Q6.x * ny + Q6.y * nz;
@@ -1329,6 +1583,11 @@ __global__ void __launch_bounds__(512) gconv_bwd_L1(
         if (WANT_DX) { dx1_0 = fmaf(wh, nx, fmaf(-wk2, vx, dx1_0)); dx1_1 = fmaf(wh, ny, fmaf(-wk2, vy, dx1_1)); dx1_2 = fmaf(wh, nz, fmaf(-wk2, vz, dx1_2)); }
       }
       { // path 8 (0,3,3) scalar
+#ifdef LOUP_CONV_TABLE_FP32
+        const auto cubic = loup::conv_cubic(tq + 8 * C + ch, bias_shift);
+        const float w = cubic.value(pw);
+        const float dw = cubic.slope(dp);
+#else
         const uint2 c = __ldg(tq + 8 * C + ch);
         const unsigned eb0 = (c.y & 0x0F800000u) + bias_shift;
         const float eb_f = __uint_as_float(eb0);
@@ -1338,6 +1597,7 @@ __global__ void __launch_bounds__(512) gconv_bwd_L1(
         const float r3 = __uint_as_float((__funnelshift_l(c.y, c.y, 19) & 0x7F8000u) | eb0);
         const float w = fmaf(s3, r3, fmaf(s2, r2, fmaf(s1, r1, fmaf(nw_hb, eb_f, r0))));
         const float dw = fmaf(ds3, r3, fmaf(ds2, r2, fmaf(ndt_hb, eb_f, r1)));
+#endif
         const float q7 = -Q6.z - Q7.y, q8 = -Q6.w - Q7.w;
         const float Qxx = Q6.z * nx + Q6.w * ny + Q7.x * nz;
         const float Qxy = Q6.w * nx + Q7.y * ny + Q7.z * nz;
@@ -1355,6 +1615,11 @@ __global__ void __launch_bounds__(512) gconv_bwd_L1(
         pull_R = fmaf(dw, x0 * h, pull_R);
       }
       { // path 9 (1,2,3) raise
+#ifdef LOUP_CONV_TABLE_FP32
+        const auto cubic = loup::conv_cubic(tq + 9 * C + ch, bias_shift);
+        const float w = cubic.value(pw);
+        const float dw = cubic.slope(dp);
+#else
         const uint2 c = __ldg(tq + 9 * C + ch);
         const unsigned eb0 = (c.y & 0x0F800000u) + bias_shift;
         const float eb_f = __uint_as_float(eb0);
@@ -1364,6 +1629,7 @@ __global__ void __launch_bounds__(512) gconv_bwd_L1(
         const float r3 = __uint_as_float((__funnelshift_l(c.y, c.y, 19) & 0x7F8000u) | eb0);
         const float w = fmaf(s3, r3, fmaf(s2, r2, fmaf(s1, r1, fmaf(nw_hb, eb_f, r0))));
         const float dw = fmaf(ds3, r3, fmaf(ds2, r2, fmaf(ndt_hb, eb_f, r1)));
+#endif
         const float q7 = -Q8.y - Q9.x, q8 = -Q8.z - Q9.z;
         const float Qxx = Q8.y * nx + Q8.z * ny + Q8.w * nz;
         const float Qxy = Q8.z * nx + Q9.x * ny + Q9.y * nz;
@@ -1408,7 +1674,7 @@ __global__ void __launch_bounds__(512) gconv_bwd_L1(
         ddens = fmaf(t, fmaf(3.0f * dc.w, t, 2.0f * dc.z), dc.y) * sxi;
       }
       const float fn = pull_Gx * nx + pull_Gy * ny + pull_Gz * nz;
-      const float rad = fmaf(pull_R, sxi * 0x1.0p-8f, dD1_r * ddens);
+      const float rad = fmaf(pull_R, sxi * loup::kConvSlopeScale, dD1_r * ddens);
       float fx = fmaf(nx, rad - fn * inv_d, pull_Gx * inv_d);
       float fy = fmaf(ny, rad - fn * inv_d, pull_Gy * inv_d);
       float fz = fmaf(nz, rad - fn * inv_d, pull_Gz * inv_d);
@@ -1502,10 +1768,15 @@ __global__ void __launch_bounds__(MAX_T) gconv_fwd_L1s(
           locate_spline(grid, vl.w, iv, t, sxi);
           slab = (int64_t)pr * I + iv;
         }
+#ifdef LOUP_CONV_TABLE_FP32
+        s_snd[ch] = snd;
+        s_pw[ch] = loup::conv_basis(t);
+#else
         const float s = t - 0.5f, s_sq = s * s;
         const float s1 = s * 0x1.0p-8f, s2 = s_sq * 0x1.0p-14f, s3 = s * s_sq * 0x1.0p-19f;
         s_snd[ch] = snd;
         s_pw[ch] = make_float4(s1, s2, s3, -1.5f * (1.0f + s1 + s2 + s3));
+#endif
         s_tq[ch] = slab * (10 * (int64_t)C);
         if (density_table) {
           const float4 dc = __ldg(density_table + slab);
@@ -1530,12 +1801,21 @@ __global__ void __launch_bounds__(MAX_T) gconv_fwd_L1s(
       const int snd = s_snd[k];
       const float4 pw = s_pw[k];
       const float* she = s_sh + k * ED;
+#ifdef LOUP_CONV_TABLE_FP32
+      const auto* tq = loup::conv_table(packed_table) + s_tq[k];
+#else
       const uint2* tq = packed_table + s_tq[k];
+#endif
       if (PAIR && k + 1 < cnt && s_tq[k + 1] == s_tq[k]) {
         const int sndB = s_snd[k + 1];
         const float4 pwB = s_pw[k + 1];
         const float* sheB = she + ED;
       { // path 0 (0,0,0) pair
+#ifdef LOUP_CONV_TABLE_FP32
+        const auto cubic = loup::conv_cubic(tq + 0 * C + ch, bias_shift);
+        const float w = cubic.value(pw);
+        const float wB = cubic.value(pwB);
+#else
         const uint2 c = __ldg(tq + 0 * C + ch);
         const unsigned eb0 = (c.y & 0x0F800000u) + bias_shift;
         const float eb_f = __uint_as_float(eb0);
@@ -1545,12 +1825,18 @@ __global__ void __launch_bounds__(MAX_T) gconv_fwd_L1s(
         const float r3 = __uint_as_float((__funnelshift_l(c.y, c.y, 19) & 0x7F8000u) | eb0);
         const float w = fmaf(pw.z, r3, fmaf(pw.y, r2, fmaf(pw.x, r1, fmaf(pw.w, eb_f, r0))));
         const float wB = fmaf(pwB.z, r3, fmaf(pwB.y, r2, fmaf(pwB.x, r1, fmaf(pwB.w, eb_f, r0))));
+#endif
         const float xi_0 = __ldg(x0 + ((int64_t)snd * 1 + 0) * C + ch);
         const float xiB_0 = __ldg(x0 + ((int64_t)sndB * 1 + 0) * C + ch);
         acc[0] = fmaf(w * xi_0, she[0], acc[0]);
         acc[0] = fmaf(wB * xiB_0, sheB[0], acc[0]);
       }
       { // path 1 (1,1,0) pair
+#ifdef LOUP_CONV_TABLE_FP32
+        const auto cubic = loup::conv_cubic(tq + 1 * C + ch, bias_shift);
+        const float w = cubic.value(pw);
+        const float wB = cubic.value(pwB);
+#else
         const uint2 c = __ldg(tq + 1 * C + ch);
         const unsigned eb0 = (c.y & 0x0F800000u) + bias_shift;
         const float eb_f = __uint_as_float(eb0);
@@ -1560,6 +1846,7 @@ __global__ void __launch_bounds__(MAX_T) gconv_fwd_L1s(
         const float r3 = __uint_as_float((__funnelshift_l(c.y, c.y, 19) & 0x7F8000u) | eb0);
         const float w = fmaf(pw.z, r3, fmaf(pw.y, r2, fmaf(pw.x, r1, fmaf(pw.w, eb_f, r0))));
         const float wB = fmaf(pwB.z, r3, fmaf(pwB.y, r2, fmaf(pwB.x, r1, fmaf(pwB.w, eb_f, r0))));
+#endif
         const float xi_0 = __ldg(x1 + ((int64_t)snd * 3 + 0) * C + ch);
         const float xiB_0 = __ldg(x1 + ((int64_t)sndB * 3 + 0) * C + ch);
         const float xi_1 = __ldg(x1 + ((int64_t)snd * 3 + 1) * C + ch);
@@ -1576,6 +1863,10 @@ __global__ void __launch_bounds__(MAX_T) gconv_fwd_L1s(
         k += 2;
       } else {
       { // path 0 (0,0,0)
+#ifdef LOUP_CONV_TABLE_FP32
+        const auto cubic = loup::conv_cubic(tq + 0 * C + ch, bias_shift);
+        const float w = cubic.value(pw);
+#else
         const uint2 c = __ldg(tq + 0 * C + ch);
         const unsigned eb0 = (c.y & 0x0F800000u) + bias_shift;
         const float eb_f = __uint_as_float(eb0);
@@ -1584,10 +1875,15 @@ __global__ void __launch_bounds__(MAX_T) gconv_fwd_L1s(
         const float r2 = __uint_as_float((__funnelshift_l(c.x, c.x, 20) & 0x7FF800u) | eb0);
         const float r3 = __uint_as_float((__funnelshift_l(c.y, c.y, 19) & 0x7F8000u) | eb0);
         const float w = fmaf(pw.z, r3, fmaf(pw.y, r2, fmaf(pw.x, r1, fmaf(pw.w, eb_f, r0))));
+#endif
         const float xi_0 = __ldg(x0 + ((int64_t)snd * 1 + 0) * C + ch);
         acc[0] = fmaf(w * xi_0, she[0], acc[0]);
       }
       { // path 1 (1,1,0)
+#ifdef LOUP_CONV_TABLE_FP32
+        const auto cubic = loup::conv_cubic(tq + 1 * C + ch, bias_shift);
+        const float w = cubic.value(pw);
+#else
         const uint2 c = __ldg(tq + 1 * C + ch);
         const unsigned eb0 = (c.y & 0x0F800000u) + bias_shift;
         const float eb_f = __uint_as_float(eb0);
@@ -1596,6 +1892,7 @@ __global__ void __launch_bounds__(MAX_T) gconv_fwd_L1s(
         const float r2 = __uint_as_float((__funnelshift_l(c.x, c.x, 20) & 0x7FF800u) | eb0);
         const float r3 = __uint_as_float((__funnelshift_l(c.y, c.y, 19) & 0x7F8000u) | eb0);
         const float w = fmaf(pw.z, r3, fmaf(pw.y, r2, fmaf(pw.x, r1, fmaf(pw.w, eb_f, r0))));
+#endif
         const float xi_0 = __ldg(x1 + ((int64_t)snd * 3 + 0) * C + ch);
         const float xi_1 = __ldg(x1 + ((int64_t)snd * 3 + 1) * C + ch);
         const float xi_2 = __ldg(x1 + ((int64_t)snd * 3 + 2) * C + ch);
@@ -1656,11 +1953,16 @@ __global__ void __launch_bounds__(512) gconv_bwd_L1s(
       const int pr = loup::table_pair(pair_sym, species[snd], sa, S);
       slab = (int64_t)pr * I + iv;
     }
+#ifdef LOUP_CONV_TABLE_FP32
+    const float4 pw = loup::conv_basis(t), dp = loup::conv_slope_basis(t);
+    const auto* tq = loup::conv_table(packed_table) + slab * (10 * (int64_t)C);
+#else
     const float s = t - 0.5f, s_sq = s * s;
     const float s1 = s * 0x1.0p-8f, s2 = s_sq * 0x1.0p-14f, s3 = s * s_sq * 0x1.0p-19f;
     const float ds2 = (2.0f * s) * 0x1.0p-6f, ds3 = (3.0f * s_sq) * 0x1.0p-11f;
     const float nw_hb = -1.5f * (1.0f + s1 + s2 + s3), ndt_hb = -1.5f * (1.0f + ds2 + ds3);
     const uint2* tq = packed_table + slab * (10 * (int64_t)C);
+#endif
     float pull_Gx = 0.0f, pull_Gy = 0.0f, pull_Gz = 0.0f, pull_R = 0.0f;
     for (int ch = lane; ch < C; ch += 32) {
       const float4* sq4 = reinterpret_cast<const float4*>(s_q + ch * 4);
@@ -1672,6 +1974,11 @@ __global__ void __launch_bounds__(512) gconv_bwd_L1s(
       const float xz = __ldg(x1_p + ((int64_t)snd * 3 + 2) * C + ch);
       float dx1_0 = 0.0f, dx1_1 = 0.0f, dx1_2 = 0.0f;
       { // path 0 (0,0,0) scalar
+#ifdef LOUP_CONV_TABLE_FP32
+        const auto cubic = loup::conv_cubic(tq + 0 * C + ch, bias_shift);
+        const float w = cubic.value(pw);
+        const float dw = cubic.slope(dp);
+#else
         const uint2 c = __ldg(tq + 0 * C + ch);
         const unsigned eb0 = (c.y & 0x0F800000u) + bias_shift;
         const float eb_f = __uint_as_float(eb0);
@@ -1681,10 +1988,16 @@ __global__ void __launch_bounds__(512) gconv_bwd_L1s(
         const float r3 = __uint_as_float((__funnelshift_l(c.y, c.y, 19) & 0x7F8000u) | eb0);
         const float w = fmaf(s3, r3, fmaf(s2, r2, fmaf(s1, r1, fmaf(nw_hb, eb_f, r0))));
         const float dw = fmaf(ds3, r3, fmaf(ds2, r2, fmaf(ndt_hb, eb_f, r1)));
+#endif
         if (WANT_DX) dx0_acc = fmaf(w, Q0.x, dx0_acc);
         pull_R = fmaf(dw, x0 * Q0.x, pull_R);
       }
       { // path 1 (1,1,0) lower
+#ifdef LOUP_CONV_TABLE_FP32
+        const auto cubic = loup::conv_cubic(tq + 1 * C + ch, bias_shift);
+        const float w = cubic.value(pw);
+        const float dw = cubic.slope(dp);
+#else
         const uint2 c = __ldg(tq + 1 * C + ch);
         const unsigned eb0 = (c.y & 0x0F800000u) + bias_shift;
         const float eb_f = __uint_as_float(eb0);
@@ -1694,6 +2007,7 @@ __global__ void __launch_bounds__(512) gconv_bwd_L1s(
         const float r3 = __uint_as_float((__funnelshift_l(c.y, c.y, 19) & 0x7F8000u) | eb0);
         const float w = fmaf(s3, r3, fmaf(s2, r2, fmaf(s1, r1, fmaf(nw_hb, eb_f, r0))));
         const float dw = fmaf(ds3, r3, fmaf(ds2, r2, fmaf(ndt_hb, eb_f, r1)));
+#endif
         const float A = xx * nx + xy * ny + xz * nz;
         const float wq = w * Q0.y;
         pull_Gx = fmaf(wq, xx, pull_Gx); pull_Gy = fmaf(wq, xy, pull_Gy); pull_Gz = fmaf(wq, xz, pull_Gz);
@@ -1727,7 +2041,7 @@ __global__ void __launch_bounds__(512) gconv_bwd_L1s(
         ddens = fmaf(t, fmaf(3.0f * dc.w, t, 2.0f * dc.z), dc.y) * sxi;
       }
       const float fn = pull_Gx * nx + pull_Gy * ny + pull_Gz * nz;
-      const float rad = fmaf(pull_R, sxi * 0x1.0p-8f, dD1_r * ddens);
+      const float rad = fmaf(pull_R, sxi * loup::kConvSlopeScale, dD1_r * ddens);
       float fx = fmaf(nx, rad - fn * inv_d, pull_Gx * inv_d);
       float fy = fmaf(ny, rad - fn * inv_d, pull_Gy * inv_d);
       float fz = fmaf(nz, rad - fn * inv_d, pull_Gz * inv_d);
@@ -1791,11 +2105,16 @@ __global__ void __launch_bounds__(128) gconv_bwd_L1sr(
       locate_spline(grid, vl.w, iv, t, sxi);
     }
     const int64_t slab = (int64_t)loup::table_pair(pair_sym, sj, species[i], S) * I + iv;
+#ifdef LOUP_CONV_TABLE_FP32
+    const float4 pw = loup::conv_basis(t), dp = loup::conv_slope_basis(t);
+    const auto* tq = loup::conv_table(packed_table) + slab * (10 * (int64_t)C);
+#else
     const float s = t - 0.5f, s_sq = s * s;
     const float s1 = s * 0x1.0p-8f, s2 = s_sq * 0x1.0p-14f, s3 = s * s_sq * 0x1.0p-19f;
     const float ds2 = (2.0f * s) * 0x1.0p-6f, ds3 = (3.0f * s_sq) * 0x1.0p-11f;
     const float nw_hb = -1.5f * (1.0f + s1 + s2 + s3), ndt_hb = -1.5f * (1.0f + ds2 + ds3);
     const uint2* tq = packed_table + slab * (10 * (int64_t)C);
+#endif
     const float* gi = dmid0 + (int64_t)i * 2 * C;
     float pull_Gx = 0.0f, pull_Gy = 0.0f, pull_Gz = 0.0f, pull_R = 0.0f;
     #pragma unroll
@@ -1803,6 +2122,11 @@ __global__ void __launch_bounds__(128) gconv_bwd_L1sr(
       const int ch = lane + 32 * r;
       const float q0 = 0x1.0000000000000p+0f * __ldg(gi + 0 * C + ch), q1 = 0x1.0000000000000p+0f * __ldg(gi + 1 * C + ch);
       { // path 0 (0,0,0) scalar
+#ifdef LOUP_CONV_TABLE_FP32
+        const auto cubic = loup::conv_cubic(tq + 0 * C + ch, bias_shift);
+        const float w = cubic.value(pw);
+        const float dw = cubic.slope(dp);
+#else
         const uint2 c = __ldg(tq + 0 * C + ch);
         const unsigned eb0 = (c.y & 0x0F800000u) + bias_shift;
         const float eb_f = __uint_as_float(eb0);
@@ -1812,10 +2136,16 @@ __global__ void __launch_bounds__(128) gconv_bwd_L1sr(
         const float r3 = __uint_as_float((__funnelshift_l(c.y, c.y, 19) & 0x7F8000u) | eb0);
         const float w = fmaf(s3, r3, fmaf(s2, r2, fmaf(s1, r1, fmaf(nw_hb, eb_f, r0))));
         const float dw = fmaf(ds3, r3, fmaf(ds2, r2, fmaf(ndt_hb, eb_f, r1)));
+#endif
         if (WANT_DX) d0[r] = fmaf(w, q0, d0[r]);
         pull_R = fmaf(dw, x0[r] * q0, pull_R);
       }
       { // path 1 (1,1,0) lower
+#ifdef LOUP_CONV_TABLE_FP32
+        const auto cubic = loup::conv_cubic(tq + 1 * C + ch, bias_shift);
+        const float w = cubic.value(pw);
+        const float dw = cubic.slope(dp);
+#else
         const uint2 c = __ldg(tq + 1 * C + ch);
         const unsigned eb0 = (c.y & 0x0F800000u) + bias_shift;
         const float eb_f = __uint_as_float(eb0);
@@ -1825,6 +2155,7 @@ __global__ void __launch_bounds__(128) gconv_bwd_L1sr(
         const float r3 = __uint_as_float((__funnelshift_l(c.y, c.y, 19) & 0x7F8000u) | eb0);
         const float w = fmaf(s3, r3, fmaf(s2, r2, fmaf(s1, r1, fmaf(nw_hb, eb_f, r0))));
         const float dw = fmaf(ds3, r3, fmaf(ds2, r2, fmaf(ndt_hb, eb_f, r1)));
+#endif
         const float A = xx[r] * nx + xy[r] * ny + xz[r] * nz;
         const float wq = w * q1;
         pull_Gx = fmaf(wq, xx[r], pull_Gx); pull_Gy = fmaf(wq, xy[r], pull_Gy); pull_Gz = fmaf(wq, xz[r], pull_Gz);
@@ -1855,7 +2186,7 @@ __global__ void __launch_bounds__(128) gconv_bwd_L1sr(
         }
       }
       const float fn = pull_Gx * nx + pull_Gy * ny + pull_Gz * nz;
-      const float rad = fmaf(pull_R, sxi * 0x1.0p-8f, dDi * ddens);
+      const float rad = fmaf(pull_R, sxi * loup::kConvSlopeScale, dDi * ddens);
       float fx = fmaf(nx, rad - fn * inv_d, pull_Gx * inv_d);
       float fy = fmaf(ny, rad - fn * inv_d, pull_Gy * inv_d);
       float fz = fmaf(nz, rad - fn * inv_d, pull_Gz * inv_d);
@@ -1961,10 +2292,15 @@ __global__ void __launch_bounds__(MAX_T) gconv_fwd_L2a(
           locate_spline(grid, vl.w, iv, t, sxi);
           slab = (int64_t)pr * I + iv;
         }
+#ifdef LOUP_CONV_TABLE_FP32
+        s_snd[ch] = snd;
+        s_pw[ch] = loup::conv_basis(t);
+#else
         const float s = t - 0.5f, s_sq = s * s;
         const float s1 = s * 0x1.0p-8f, s2 = s_sq * 0x1.0p-14f, s3 = s * s_sq * 0x1.0p-19f;
         s_snd[ch] = snd;
         s_pw[ch] = make_float4(s1, s2, s3, -1.5f * (1.0f + s1 + s2 + s3));
+#endif
         s_tq[ch] = slab * (17 * (int64_t)C);
         if (density_table) {
           const float4 dc = __ldg(density_table + slab);
@@ -1994,12 +2330,21 @@ __global__ void __launch_bounds__(MAX_T) gconv_fwd_L2a(
       const int snd = s_snd[k];
       const float4 pw = s_pw[k];
       const float* she = s_sh + k * ED;
+#ifdef LOUP_CONV_TABLE_FP32
+      const auto* tq = loup::conv_table(packed_table) + s_tq[k];
+#else
       const uint2* tq = packed_table + s_tq[k];
+#endif
       if (PAIR && k + 1 < cnt && s_tq[k + 1] == s_tq[k]) {
         const int sndB = s_snd[k + 1];
         const float4 pwB = s_pw[k + 1];
         const float* sheB = she + ED;
       { // path 0 (0,0,0) pair
+#ifdef LOUP_CONV_TABLE_FP32
+        const auto cubic = loup::conv_cubic(tq + 0 * C + ch, bias_shift);
+        const float w = cubic.value(pw);
+        const float wB = cubic.value(pwB);
+#else
         const uint2 c = __ldg(tq + 0 * C + ch);
         const unsigned eb0 = (c.y & 0x0F800000u) + bias_shift;
         const float eb_f = __uint_as_float(eb0);
@@ -2009,6 +2354,7 @@ __global__ void __launch_bounds__(MAX_T) gconv_fwd_L2a(
         const float r3 = __uint_as_float((__funnelshift_l(c.y, c.y, 19) & 0x7F8000u) | eb0);
         const float w = fmaf(pw.z, r3, fmaf(pw.y, r2, fmaf(pw.x, r1, fmaf(pw.w, eb_f, r0))));
         const float wB = fmaf(pwB.z, r3, fmaf(pwB.y, r2, fmaf(pwB.x, r1, fmaf(pwB.w, eb_f, r0))));
+#endif
         const float xi_0 = __ldg(x0 + ((int64_t)snd * 1 + 0) * C + ch);
         const float xiB_0 = __ldg(x0 + ((int64_t)sndB * 1 + 0) * C + ch);
         acc[0] = fmaf(w * xi_0, she[0], acc[0]);
@@ -2018,6 +2364,11 @@ __global__ void __launch_bounds__(MAX_T) gconv_fwd_L2a(
         // q_m = p . B'_m Y1; the paths' constants are in the stores
         float w1, w1B, w5, w5B, w9, w9B, w10, w10B;
         {
+#ifdef LOUP_CONV_TABLE_FP32
+          const auto cubic = loup::conv_cubic(tq + 1 * C + ch, bias_shift);
+          w1 = cubic.value(pw);
+          w1B = cubic.value(pwB);
+#else
           const uint2 c = __ldg(tq + 1 * C + ch);
           const unsigned eb0 = (c.y & 0x0F800000u) + bias_shift;
           const float eb_f = __uint_as_float(eb0);
@@ -2027,8 +2378,14 @@ __global__ void __launch_bounds__(MAX_T) gconv_fwd_L2a(
           const float r3 = __uint_as_float((__funnelshift_l(c.y, c.y, 19) & 0x7F8000u) | eb0);
           w1 = fmaf(pw.z, r3, fmaf(pw.y, r2, fmaf(pw.x, r1, fmaf(pw.w, eb_f, r0))));
           w1B = fmaf(pwB.z, r3, fmaf(pwB.y, r2, fmaf(pwB.x, r1, fmaf(pwB.w, eb_f, r0))));
+#endif
         }
         {
+#ifdef LOUP_CONV_TABLE_FP32
+          const auto cubic = loup::conv_cubic(tq + 5 * C + ch, bias_shift);
+          w5 = cubic.value(pw);
+          w5B = cubic.value(pwB);
+#else
           const uint2 c = __ldg(tq + 5 * C + ch);
           const unsigned eb0 = (c.y & 0x0F800000u) + bias_shift;
           const float eb_f = __uint_as_float(eb0);
@@ -2038,8 +2395,14 @@ __global__ void __launch_bounds__(MAX_T) gconv_fwd_L2a(
           const float r3 = __uint_as_float((__funnelshift_l(c.y, c.y, 19) & 0x7F8000u) | eb0);
           w5 = fmaf(pw.z, r3, fmaf(pw.y, r2, fmaf(pw.x, r1, fmaf(pw.w, eb_f, r0))));
           w5B = fmaf(pwB.z, r3, fmaf(pwB.y, r2, fmaf(pwB.x, r1, fmaf(pwB.w, eb_f, r0))));
+#endif
         }
         {
+#ifdef LOUP_CONV_TABLE_FP32
+          const auto cubic = loup::conv_cubic(tq + 9 * C + ch, bias_shift);
+          w9 = cubic.value(pw);
+          w9B = cubic.value(pwB);
+#else
           const uint2 c = __ldg(tq + 9 * C + ch);
           const unsigned eb0 = (c.y & 0x0F800000u) + bias_shift;
           const float eb_f = __uint_as_float(eb0);
@@ -2049,8 +2412,14 @@ __global__ void __launch_bounds__(MAX_T) gconv_fwd_L2a(
           const float r3 = __uint_as_float((__funnelshift_l(c.y, c.y, 19) & 0x7F8000u) | eb0);
           w9 = fmaf(pw.z, r3, fmaf(pw.y, r2, fmaf(pw.x, r1, fmaf(pw.w, eb_f, r0))));
           w9B = fmaf(pwB.z, r3, fmaf(pwB.y, r2, fmaf(pwB.x, r1, fmaf(pwB.w, eb_f, r0))));
+#endif
         }
         {
+#ifdef LOUP_CONV_TABLE_FP32
+          const auto cubic = loup::conv_cubic(tq + 10 * C + ch, bias_shift);
+          w10 = cubic.value(pw);
+          w10B = cubic.value(pwB);
+#else
           const uint2 c = __ldg(tq + 10 * C + ch);
           const unsigned eb0 = (c.y & 0x0F800000u) + bias_shift;
           const float eb_f = __uint_as_float(eb0);
@@ -2060,6 +2429,7 @@ __global__ void __launch_bounds__(MAX_T) gconv_fwd_L2a(
           const float r3 = __uint_as_float((__funnelshift_l(c.y, c.y, 19) & 0x7F8000u) | eb0);
           w10 = fmaf(pw.z, r3, fmaf(pw.y, r2, fmaf(pw.x, r1, fmaf(pw.w, eb_f, r0))));
           w10B = fmaf(pwB.z, r3, fmaf(pwB.y, r2, fmaf(pwB.x, r1, fmaf(pwB.w, eb_f, r0))));
+#endif
         }
         const float pc0 = __ldg(x1 + ((int64_t)snd * 3 + 0) * C + ch);
         const float pc1 = __ldg(x1 + ((int64_t)snd * 3 + 1) * C + ch);
@@ -2103,6 +2473,11 @@ __global__ void __launch_bounds__(MAX_T) gconv_fwd_L2a(
         acc[25] = fmaf(w10B, fmaf(ddB, sheB[8], -0x1.8c97f00000000p-1f * qq4B), acc[25]);
       }
       { // path 3 (0,1,1) pair
+#ifdef LOUP_CONV_TABLE_FP32
+        const auto cubic = loup::conv_cubic(tq + 3 * C + ch, bias_shift);
+        const float w = cubic.value(pw);
+        const float wB = cubic.value(pwB);
+#else
         const uint2 c = __ldg(tq + 3 * C + ch);
         const unsigned eb0 = (c.y & 0x0F800000u) + bias_shift;
         const float eb_f = __uint_as_float(eb0);
@@ -2112,6 +2487,7 @@ __global__ void __launch_bounds__(MAX_T) gconv_fwd_L2a(
         const float r3 = __uint_as_float((__funnelshift_l(c.y, c.y, 19) & 0x7F8000u) | eb0);
         const float w = fmaf(pw.z, r3, fmaf(pw.y, r2, fmaf(pw.x, r1, fmaf(pw.w, eb_f, r0))));
         const float wB = fmaf(pwB.z, r3, fmaf(pwB.y, r2, fmaf(pwB.x, r1, fmaf(pwB.w, eb_f, r0))));
+#endif
         const float xi_0 = __ldg(x0 + ((int64_t)snd * 1 + 0) * C + ch);
         const float xiB_0 = __ldg(x0 + ((int64_t)sndB * 1 + 0) * C + ch);
         acc[2] = fmaf(w * xi_0, she[1], acc[2]);
@@ -2122,6 +2498,11 @@ __global__ void __launch_bounds__(MAX_T) gconv_fwd_L2a(
         acc[4] = fmaf(wB * xiB_0, sheB[3], acc[4]);
       }
       { // path 4 (1,0,1) pair
+#ifdef LOUP_CONV_TABLE_FP32
+        const auto cubic = loup::conv_cubic(tq + 4 * C + ch, bias_shift);
+        const float w = cubic.value(pw);
+        const float wB = cubic.value(pwB);
+#else
         const uint2 c = __ldg(tq + 4 * C + ch);
         const unsigned eb0 = (c.y & 0x0F800000u) + bias_shift;
         const float eb_f = __uint_as_float(eb0);
@@ -2131,6 +2512,7 @@ __global__ void __launch_bounds__(MAX_T) gconv_fwd_L2a(
         const float r3 = __uint_as_float((__funnelshift_l(c.y, c.y, 19) & 0x7F8000u) | eb0);
         const float w = fmaf(pw.z, r3, fmaf(pw.y, r2, fmaf(pw.x, r1, fmaf(pw.w, eb_f, r0))));
         const float wB = fmaf(pwB.z, r3, fmaf(pwB.y, r2, fmaf(pwB.x, r1, fmaf(pwB.w, eb_f, r0))));
+#endif
         const float xi_0 = __ldg(x1 + ((int64_t)snd * 3 + 0) * C + ch);
         const float xiB_0 = __ldg(x1 + ((int64_t)sndB * 3 + 0) * C + ch);
         const float xi_1 = __ldg(x1 + ((int64_t)snd * 3 + 1) * C + ch);
@@ -2145,6 +2527,11 @@ __global__ void __launch_bounds__(MAX_T) gconv_fwd_L2a(
         acc[7] = fmaf(wB * xiB_2, sheB[0], acc[7]);
       }
       { // path 8 (0,2,2) pair
+#ifdef LOUP_CONV_TABLE_FP32
+        const auto cubic = loup::conv_cubic(tq + 8 * C + ch, bias_shift);
+        const float w = cubic.value(pw);
+        const float wB = cubic.value(pwB);
+#else
         const uint2 c = __ldg(tq + 8 * C + ch);
         const unsigned eb0 = (c.y & 0x0F800000u) + bias_shift;
         const float eb_f = __uint_as_float(eb0);
@@ -2154,6 +2541,7 @@ __global__ void __launch_bounds__(MAX_T) gconv_fwd_L2a(
         const float r3 = __uint_as_float((__funnelshift_l(c.y, c.y, 19) & 0x7F8000u) | eb0);
         const float w = fmaf(pw.z, r3, fmaf(pw.y, r2, fmaf(pw.x, r1, fmaf(pw.w, eb_f, r0))));
         const float wB = fmaf(pwB.z, r3, fmaf(pwB.y, r2, fmaf(pwB.x, r1, fmaf(pwB.w, eb_f, r0))));
+#endif
         const float xi_0 = __ldg(x0 + ((int64_t)snd * 1 + 0) * C + ch);
         const float xiB_0 = __ldg(x0 + ((int64_t)sndB * 1 + 0) * C + ch);
         acc[11] = fmaf(w * xi_0, she[4], acc[11]);
@@ -2168,6 +2556,11 @@ __global__ void __launch_bounds__(MAX_T) gconv_fwd_L2a(
         acc[15] = fmaf(wB * xiB_0, sheB[8], acc[15]);
       }
       { // path 13 (0,3,3) pair
+#ifdef LOUP_CONV_TABLE_FP32
+        const auto cubic = loup::conv_cubic(tq + 13 * C + ch, bias_shift);
+        const float w = cubic.value(pw);
+        const float wB = cubic.value(pwB);
+#else
         const uint2 c = __ldg(tq + 13 * C + ch);
         const unsigned eb0 = (c.y & 0x0F800000u) + bias_shift;
         const float eb_f = __uint_as_float(eb0);
@@ -2177,6 +2570,7 @@ __global__ void __launch_bounds__(MAX_T) gconv_fwd_L2a(
         const float r3 = __uint_as_float((__funnelshift_l(c.y, c.y, 19) & 0x7F8000u) | eb0);
         const float w = fmaf(pw.z, r3, fmaf(pw.y, r2, fmaf(pw.x, r1, fmaf(pw.w, eb_f, r0))));
         const float wB = fmaf(pwB.z, r3, fmaf(pwB.y, r2, fmaf(pwB.x, r1, fmaf(pwB.w, eb_f, r0))));
+#endif
         const float xi_0 = __ldg(x0 + ((int64_t)snd * 1 + 0) * C + ch);
         const float xiB_0 = __ldg(x0 + ((int64_t)sndB * 1 + 0) * C + ch);
         acc[26] = fmaf(w * xi_0, she[9], acc[26]);
@@ -2195,6 +2589,11 @@ __global__ void __launch_bounds__(MAX_T) gconv_fwd_L2a(
         acc[32] = fmaf(wB * xiB_0, sheB[15], acc[32]);
       }
       { // path 14 (1,2,3) pair
+#ifdef LOUP_CONV_TABLE_FP32
+        const auto cubic = loup::conv_cubic(tq + 14 * C + ch, bias_shift);
+        const float w = cubic.value(pw);
+        const float wB = cubic.value(pwB);
+#else
         const uint2 c = __ldg(tq + 14 * C + ch);
         const unsigned eb0 = (c.y & 0x0F800000u) + bias_shift;
         const float eb_f = __uint_as_float(eb0);
@@ -2204,6 +2603,7 @@ __global__ void __launch_bounds__(MAX_T) gconv_fwd_L2a(
         const float r3 = __uint_as_float((__funnelshift_l(c.y, c.y, 19) & 0x7F8000u) | eb0);
         const float w = fmaf(pw.z, r3, fmaf(pw.y, r2, fmaf(pw.x, r1, fmaf(pw.w, eb_f, r0))));
         const float wB = fmaf(pwB.z, r3, fmaf(pwB.y, r2, fmaf(pwB.x, r1, fmaf(pwB.w, eb_f, r0))));
+#endif
         const float xi_0 = __ldg(x1 + ((int64_t)snd * 3 + 0) * C + ch);
         const float xiB_0 = __ldg(x1 + ((int64_t)sndB * 3 + 0) * C + ch);
         const float xi_1 = __ldg(x1 + ((int64_t)snd * 3 + 1) * C + ch);
@@ -2252,6 +2652,10 @@ __global__ void __launch_bounds__(MAX_T) gconv_fwd_L2a(
         k += 2;
       } else {
       { // path 0 (0,0,0)
+#ifdef LOUP_CONV_TABLE_FP32
+        const auto cubic = loup::conv_cubic(tq + 0 * C + ch, bias_shift);
+        const float w = cubic.value(pw);
+#else
         const uint2 c = __ldg(tq + 0 * C + ch);
         const unsigned eb0 = (c.y & 0x0F800000u) + bias_shift;
         const float eb_f = __uint_as_float(eb0);
@@ -2260,6 +2664,7 @@ __global__ void __launch_bounds__(MAX_T) gconv_fwd_L2a(
         const float r2 = __uint_as_float((__funnelshift_l(c.x, c.x, 20) & 0x7FF800u) | eb0);
         const float r3 = __uint_as_float((__funnelshift_l(c.y, c.y, 19) & 0x7F8000u) | eb0);
         const float w = fmaf(pw.z, r3, fmaf(pw.y, r2, fmaf(pw.x, r1, fmaf(pw.w, eb_f, r0))));
+#endif
         const float xi_0 = __ldg(x0 + ((int64_t)snd * 1 + 0) * C + ch);
         acc[0] = fmaf(w * xi_0, she[0], acc[0]);
       }
@@ -2267,6 +2672,10 @@ __global__ void __launch_bounds__(MAX_T) gconv_fwd_L2a(
         // q_m = p . B'_m Y1; the paths' constants are in the stores
         float w1, w5, w9, w10;
         {
+#ifdef LOUP_CONV_TABLE_FP32
+          const auto cubic = loup::conv_cubic(tq + 1 * C + ch, bias_shift);
+          w1 = cubic.value(pw);
+#else
           const uint2 c = __ldg(tq + 1 * C + ch);
           const unsigned eb0 = (c.y & 0x0F800000u) + bias_shift;
           const float eb_f = __uint_as_float(eb0);
@@ -2275,8 +2684,13 @@ __global__ void __launch_bounds__(MAX_T) gconv_fwd_L2a(
           const float r2 = __uint_as_float((__funnelshift_l(c.x, c.x, 20) & 0x7FF800u) | eb0);
           const float r3 = __uint_as_float((__funnelshift_l(c.y, c.y, 19) & 0x7F8000u) | eb0);
           w1 = fmaf(pw.z, r3, fmaf(pw.y, r2, fmaf(pw.x, r1, fmaf(pw.w, eb_f, r0))));
+#endif
         }
         {
+#ifdef LOUP_CONV_TABLE_FP32
+          const auto cubic = loup::conv_cubic(tq + 5 * C + ch, bias_shift);
+          w5 = cubic.value(pw);
+#else
           const uint2 c = __ldg(tq + 5 * C + ch);
           const unsigned eb0 = (c.y & 0x0F800000u) + bias_shift;
           const float eb_f = __uint_as_float(eb0);
@@ -2285,8 +2699,13 @@ __global__ void __launch_bounds__(MAX_T) gconv_fwd_L2a(
           const float r2 = __uint_as_float((__funnelshift_l(c.x, c.x, 20) & 0x7FF800u) | eb0);
           const float r3 = __uint_as_float((__funnelshift_l(c.y, c.y, 19) & 0x7F8000u) | eb0);
           w5 = fmaf(pw.z, r3, fmaf(pw.y, r2, fmaf(pw.x, r1, fmaf(pw.w, eb_f, r0))));
+#endif
         }
         {
+#ifdef LOUP_CONV_TABLE_FP32
+          const auto cubic = loup::conv_cubic(tq + 9 * C + ch, bias_shift);
+          w9 = cubic.value(pw);
+#else
           const uint2 c = __ldg(tq + 9 * C + ch);
           const unsigned eb0 = (c.y & 0x0F800000u) + bias_shift;
           const float eb_f = __uint_as_float(eb0);
@@ -2295,8 +2714,13 @@ __global__ void __launch_bounds__(MAX_T) gconv_fwd_L2a(
           const float r2 = __uint_as_float((__funnelshift_l(c.x, c.x, 20) & 0x7FF800u) | eb0);
           const float r3 = __uint_as_float((__funnelshift_l(c.y, c.y, 19) & 0x7F8000u) | eb0);
           w9 = fmaf(pw.z, r3, fmaf(pw.y, r2, fmaf(pw.x, r1, fmaf(pw.w, eb_f, r0))));
+#endif
         }
         {
+#ifdef LOUP_CONV_TABLE_FP32
+          const auto cubic = loup::conv_cubic(tq + 10 * C + ch, bias_shift);
+          w10 = cubic.value(pw);
+#else
           const uint2 c = __ldg(tq + 10 * C + ch);
           const unsigned eb0 = (c.y & 0x0F800000u) + bias_shift;
           const float eb_f = __uint_as_float(eb0);
@@ -2305,6 +2729,7 @@ __global__ void __launch_bounds__(MAX_T) gconv_fwd_L2a(
           const float r2 = __uint_as_float((__funnelshift_l(c.x, c.x, 20) & 0x7FF800u) | eb0);
           const float r3 = __uint_as_float((__funnelshift_l(c.y, c.y, 19) & 0x7F8000u) | eb0);
           w10 = fmaf(pw.z, r3, fmaf(pw.y, r2, fmaf(pw.x, r1, fmaf(pw.w, eb_f, r0))));
+#endif
         }
         const float pc0 = __ldg(x1 + ((int64_t)snd * 3 + 0) * C + ch);
         const float pc1 = __ldg(x1 + ((int64_t)snd * 3 + 1) * C + ch);
@@ -2328,6 +2753,10 @@ __global__ void __launch_bounds__(MAX_T) gconv_fwd_L2a(
         acc[25] = fmaf(w10, fmaf(dd, she[8], -0x1.8c97f00000000p-1f * qq4), acc[25]);
       }
       { // path 3 (0,1,1)
+#ifdef LOUP_CONV_TABLE_FP32
+        const auto cubic = loup::conv_cubic(tq + 3 * C + ch, bias_shift);
+        const float w = cubic.value(pw);
+#else
         const uint2 c = __ldg(tq + 3 * C + ch);
         const unsigned eb0 = (c.y & 0x0F800000u) + bias_shift;
         const float eb_f = __uint_as_float(eb0);
@@ -2336,12 +2765,17 @@ __global__ void __launch_bounds__(MAX_T) gconv_fwd_L2a(
         const float r2 = __uint_as_float((__funnelshift_l(c.x, c.x, 20) & 0x7FF800u) | eb0);
         const float r3 = __uint_as_float((__funnelshift_l(c.y, c.y, 19) & 0x7F8000u) | eb0);
         const float w = fmaf(pw.z, r3, fmaf(pw.y, r2, fmaf(pw.x, r1, fmaf(pw.w, eb_f, r0))));
+#endif
         const float xi_0 = __ldg(x0 + ((int64_t)snd * 1 + 0) * C + ch);
         acc[2] = fmaf(w * xi_0, she[1], acc[2]);
         acc[3] = fmaf(w * xi_0, she[2], acc[3]);
         acc[4] = fmaf(w * xi_0, she[3], acc[4]);
       }
       { // path 4 (1,0,1)
+#ifdef LOUP_CONV_TABLE_FP32
+        const auto cubic = loup::conv_cubic(tq + 4 * C + ch, bias_shift);
+        const float w = cubic.value(pw);
+#else
         const uint2 c = __ldg(tq + 4 * C + ch);
         const unsigned eb0 = (c.y & 0x0F800000u) + bias_shift;
         const float eb_f = __uint_as_float(eb0);
@@ -2350,6 +2784,7 @@ __global__ void __launch_bounds__(MAX_T) gconv_fwd_L2a(
         const float r2 = __uint_as_float((__funnelshift_l(c.x, c.x, 20) & 0x7FF800u) | eb0);
         const float r3 = __uint_as_float((__funnelshift_l(c.y, c.y, 19) & 0x7F8000u) | eb0);
         const float w = fmaf(pw.z, r3, fmaf(pw.y, r2, fmaf(pw.x, r1, fmaf(pw.w, eb_f, r0))));
+#endif
         const float xi_0 = __ldg(x1 + ((int64_t)snd * 3 + 0) * C + ch);
         const float xi_1 = __ldg(x1 + ((int64_t)snd * 3 + 1) * C + ch);
         const float xi_2 = __ldg(x1 + ((int64_t)snd * 3 + 2) * C + ch);
@@ -2358,6 +2793,10 @@ __global__ void __launch_bounds__(MAX_T) gconv_fwd_L2a(
         acc[7] = fmaf(w * xi_2, she[0], acc[7]);
       }
       { // path 8 (0,2,2)
+#ifdef LOUP_CONV_TABLE_FP32
+        const auto cubic = loup::conv_cubic(tq + 8 * C + ch, bias_shift);
+        const float w = cubic.value(pw);
+#else
         const uint2 c = __ldg(tq + 8 * C + ch);
         const unsigned eb0 = (c.y & 0x0F800000u) + bias_shift;
         const float eb_f = __uint_as_float(eb0);
@@ -2366,6 +2805,7 @@ __global__ void __launch_bounds__(MAX_T) gconv_fwd_L2a(
         const float r2 = __uint_as_float((__funnelshift_l(c.x, c.x, 20) & 0x7FF800u) | eb0);
         const float r3 = __uint_as_float((__funnelshift_l(c.y, c.y, 19) & 0x7F8000u) | eb0);
         const float w = fmaf(pw.z, r3, fmaf(pw.y, r2, fmaf(pw.x, r1, fmaf(pw.w, eb_f, r0))));
+#endif
         const float xi_0 = __ldg(x0 + ((int64_t)snd * 1 + 0) * C + ch);
         acc[11] = fmaf(w * xi_0, she[4], acc[11]);
         acc[12] = fmaf(w * xi_0, she[5], acc[12]);
@@ -2374,6 +2814,10 @@ __global__ void __launch_bounds__(MAX_T) gconv_fwd_L2a(
         acc[15] = fmaf(w * xi_0, she[8], acc[15]);
       }
       { // path 13 (0,3,3)
+#ifdef LOUP_CONV_TABLE_FP32
+        const auto cubic = loup::conv_cubic(tq + 13 * C + ch, bias_shift);
+        const float w = cubic.value(pw);
+#else
         const uint2 c = __ldg(tq + 13 * C + ch);
         const unsigned eb0 = (c.y & 0x0F800000u) + bias_shift;
         const float eb_f = __uint_as_float(eb0);
@@ -2382,6 +2826,7 @@ __global__ void __launch_bounds__(MAX_T) gconv_fwd_L2a(
         const float r2 = __uint_as_float((__funnelshift_l(c.x, c.x, 20) & 0x7FF800u) | eb0);
         const float r3 = __uint_as_float((__funnelshift_l(c.y, c.y, 19) & 0x7F8000u) | eb0);
         const float w = fmaf(pw.z, r3, fmaf(pw.y, r2, fmaf(pw.x, r1, fmaf(pw.w, eb_f, r0))));
+#endif
         const float xi_0 = __ldg(x0 + ((int64_t)snd * 1 + 0) * C + ch);
         acc[26] = fmaf(w * xi_0, she[9], acc[26]);
         acc[27] = fmaf(w * xi_0, she[10], acc[27]);
@@ -2392,6 +2837,10 @@ __global__ void __launch_bounds__(MAX_T) gconv_fwd_L2a(
         acc[32] = fmaf(w * xi_0, she[15], acc[32]);
       }
       { // path 14 (1,2,3)
+#ifdef LOUP_CONV_TABLE_FP32
+        const auto cubic = loup::conv_cubic(tq + 14 * C + ch, bias_shift);
+        const float w = cubic.value(pw);
+#else
         const uint2 c = __ldg(tq + 14 * C + ch);
         const unsigned eb0 = (c.y & 0x0F800000u) + bias_shift;
         const float eb_f = __uint_as_float(eb0);
@@ -2400,6 +2849,7 @@ __global__ void __launch_bounds__(MAX_T) gconv_fwd_L2a(
         const float r2 = __uint_as_float((__funnelshift_l(c.x, c.x, 20) & 0x7FF800u) | eb0);
         const float r3 = __uint_as_float((__funnelshift_l(c.y, c.y, 19) & 0x7F8000u) | eb0);
         const float w = fmaf(pw.z, r3, fmaf(pw.y, r2, fmaf(pw.x, r1, fmaf(pw.w, eb_f, r0))));
+#endif
         const float xi_0 = __ldg(x1 + ((int64_t)snd * 3 + 0) * C + ch);
         const float xi_1 = __ldg(x1 + ((int64_t)snd * 3 + 1) * C + ch);
         const float xi_2 = __ldg(x1 + ((int64_t)snd * 3 + 2) * C + ch);
@@ -2557,10 +3007,15 @@ __global__ void __launch_bounds__(MAX_T) gconv_fwd_L2b(
           locate_spline(grid, vl.w, iv, t, sxi);
           slab = (int64_t)pr * I + iv;
         }
+#ifdef LOUP_CONV_TABLE_FP32
+        s_snd[ch] = snd;
+        s_pw[ch] = loup::conv_basis(t);
+#else
         const float s = t - 0.5f, s_sq = s * s;
         const float s1 = s * 0x1.0p-8f, s2 = s_sq * 0x1.0p-14f, s3 = s * s_sq * 0x1.0p-19f;
         s_snd[ch] = snd;
         s_pw[ch] = make_float4(s1, s2, s3, -1.5f * (1.0f + s1 + s2 + s3));
+#endif
         s_tq[ch] = slab * (17 * (int64_t)C);
         if (density_table) {
           const float4 dc = __ldg(density_table + slab);
@@ -2608,7 +3063,11 @@ __global__ void __launch_bounds__(MAX_T) gconv_fwd_L2b(
       const int snd = s_snd[k];
       const float4 pw = s_pw[k];
       const float* she = s_sh + k * ED;
+#ifdef LOUP_CONV_TABLE_FP32
+      const auto* tq = loup::conv_table(packed_table) + s_tq[k];
+#else
       const uint2* tq = packed_table + s_tq[k];
+#endif
       if (PAIR && k + 1 < cnt && s_tq[k + 1] == s_tq[k]) {
         const int sndB = s_snd[k + 1];
         const float4 pwB = s_pw[k + 1];
@@ -2618,6 +3077,11 @@ __global__ void __launch_bounds__(MAX_T) gconv_fwd_L2b(
         // constants are in the stores
         float w2, w2B, w6, w6B, w7, w7B, w12, w12B, w11, w11B;
         {
+#ifdef LOUP_CONV_TABLE_FP32
+          const auto cubic = loup::conv_cubic(tq + 2 * C + ch, bias_shift);
+          w2 = cubic.value(pw);
+          w2B = cubic.value(pwB);
+#else
           const uint2 c = __ldg(tq + 2 * C + ch);
           const unsigned eb0 = (c.y & 0x0F800000u) + bias_shift;
           const float eb_f = __uint_as_float(eb0);
@@ -2627,8 +3091,14 @@ __global__ void __launch_bounds__(MAX_T) gconv_fwd_L2b(
           const float r3 = __uint_as_float((__funnelshift_l(c.y, c.y, 19) & 0x7F8000u) | eb0);
           w2 = fmaf(pw.z, r3, fmaf(pw.y, r2, fmaf(pw.x, r1, fmaf(pw.w, eb_f, r0))));
           w2B = fmaf(pwB.z, r3, fmaf(pwB.y, r2, fmaf(pwB.x, r1, fmaf(pwB.w, eb_f, r0))));
+#endif
         }
         {
+#ifdef LOUP_CONV_TABLE_FP32
+          const auto cubic = loup::conv_cubic(tq + 6 * C + ch, bias_shift);
+          w6 = cubic.value(pw);
+          w6B = cubic.value(pwB);
+#else
           const uint2 c = __ldg(tq + 6 * C + ch);
           const unsigned eb0 = (c.y & 0x0F800000u) + bias_shift;
           const float eb_f = __uint_as_float(eb0);
@@ -2638,8 +3108,14 @@ __global__ void __launch_bounds__(MAX_T) gconv_fwd_L2b(
           const float r3 = __uint_as_float((__funnelshift_l(c.y, c.y, 19) & 0x7F8000u) | eb0);
           w6 = fmaf(pw.z, r3, fmaf(pw.y, r2, fmaf(pw.x, r1, fmaf(pw.w, eb_f, r0))));
           w6B = fmaf(pwB.z, r3, fmaf(pwB.y, r2, fmaf(pwB.x, r1, fmaf(pwB.w, eb_f, r0))));
+#endif
         }
         {
+#ifdef LOUP_CONV_TABLE_FP32
+          const auto cubic = loup::conv_cubic(tq + 7 * C + ch, bias_shift);
+          w7 = cubic.value(pw);
+          w7B = cubic.value(pwB);
+#else
           const uint2 c = __ldg(tq + 7 * C + ch);
           const unsigned eb0 = (c.y & 0x0F800000u) + bias_shift;
           const float eb_f = __uint_as_float(eb0);
@@ -2649,8 +3125,14 @@ __global__ void __launch_bounds__(MAX_T) gconv_fwd_L2b(
           const float r3 = __uint_as_float((__funnelshift_l(c.y, c.y, 19) & 0x7F8000u) | eb0);
           w7 = fmaf(pw.z, r3, fmaf(pw.y, r2, fmaf(pw.x, r1, fmaf(pw.w, eb_f, r0))));
           w7B = fmaf(pwB.z, r3, fmaf(pwB.y, r2, fmaf(pwB.x, r1, fmaf(pwB.w, eb_f, r0))));
+#endif
         }
         {
+#ifdef LOUP_CONV_TABLE_FP32
+          const auto cubic = loup::conv_cubic(tq + 12 * C + ch, bias_shift);
+          w12 = cubic.value(pw);
+          w12B = cubic.value(pwB);
+#else
           const uint2 c = __ldg(tq + 12 * C + ch);
           const unsigned eb0 = (c.y & 0x0F800000u) + bias_shift;
           const float eb_f = __uint_as_float(eb0);
@@ -2660,8 +3142,14 @@ __global__ void __launch_bounds__(MAX_T) gconv_fwd_L2b(
           const float r3 = __uint_as_float((__funnelshift_l(c.y, c.y, 19) & 0x7F8000u) | eb0);
           w12 = fmaf(pw.z, r3, fmaf(pw.y, r2, fmaf(pw.x, r1, fmaf(pw.w, eb_f, r0))));
           w12B = fmaf(pwB.z, r3, fmaf(pwB.y, r2, fmaf(pwB.x, r1, fmaf(pwB.w, eb_f, r0))));
+#endif
         }
         {
+#ifdef LOUP_CONV_TABLE_FP32
+          const auto cubic = loup::conv_cubic(tq + 11 * C + ch, bias_shift);
+          w11 = cubic.value(pw);
+          w11B = cubic.value(pwB);
+#else
           const uint2 c = __ldg(tq + 11 * C + ch);
           const unsigned eb0 = (c.y & 0x0F800000u) + bias_shift;
           const float eb_f = __uint_as_float(eb0);
@@ -2671,6 +3159,7 @@ __global__ void __launch_bounds__(MAX_T) gconv_fwd_L2b(
           const float r3 = __uint_as_float((__funnelshift_l(c.y, c.y, 19) & 0x7F8000u) | eb0);
           w11 = fmaf(pw.z, r3, fmaf(pw.y, r2, fmaf(pw.x, r1, fmaf(pw.w, eb_f, r0))));
           w11B = fmaf(pwB.z, r3, fmaf(pwB.y, r2, fmaf(pwB.x, r1, fmaf(pwB.w, eb_f, r0))));
+#endif
         }
         const float xc0 = __ldg(x2 + ((int64_t)snd * 5 + 0) * C + ch);
         const float xc1 = __ldg(x2 + ((int64_t)snd * 5 + 1) * C + ch);
@@ -2732,6 +3221,11 @@ __global__ void __launch_bounds__(MAX_T) gconv_fwd_L2b(
         acc[11] = fmaf(w11B, xc4B, acc[11]);
       }
       { // path 15 (2,1,3) pair
+#ifdef LOUP_CONV_TABLE_FP32
+        const auto cubic = loup::conv_cubic(tq + 15 * C + ch, bias_shift);
+        const float w = cubic.value(pw);
+        const float wB = cubic.value(pwB);
+#else
         const uint2 c = __ldg(tq + 15 * C + ch);
         const unsigned eb0 = (c.y & 0x0F800000u) + bias_shift;
         const float eb_f = __uint_as_float(eb0);
@@ -2741,6 +3235,7 @@ __global__ void __launch_bounds__(MAX_T) gconv_fwd_L2b(
         const float r3 = __uint_as_float((__funnelshift_l(c.y, c.y, 19) & 0x7F8000u) | eb0);
         const float w = fmaf(pw.z, r3, fmaf(pw.y, r2, fmaf(pw.x, r1, fmaf(pw.w, eb_f, r0))));
         const float wB = fmaf(pwB.z, r3, fmaf(pwB.y, r2, fmaf(pwB.x, r1, fmaf(pwB.w, eb_f, r0))));
+#endif
         const float xi_0 = __ldg(x2 + ((int64_t)snd * 5 + 0) * C + ch);
         const float xiB_0 = __ldg(x2 + ((int64_t)sndB * 5 + 0) * C + ch);
         const float xi_1 = __ldg(x2 + ((int64_t)snd * 5 + 1) * C + ch);
@@ -2795,6 +3290,11 @@ __global__ void __launch_bounds__(MAX_T) gconv_fwd_L2b(
         acc[23] = fmaf(wB * xiB_4, sheB[3], acc[23]);
       }
       { // path 16 (2,3,3) pair
+#ifdef LOUP_CONV_TABLE_FP32
+        const auto cubic = loup::conv_cubic(tq + 16 * C + ch, bias_shift);
+        const float w = cubic.value(pw);
+        const float wB = cubic.value(pwB);
+#else
         const uint2 c = __ldg(tq + 16 * C + ch);
         const unsigned eb0 = (c.y & 0x0F800000u) + bias_shift;
         const float eb_f = __uint_as_float(eb0);
@@ -2804,6 +3304,7 @@ __global__ void __launch_bounds__(MAX_T) gconv_fwd_L2b(
         const float r3 = __uint_as_float((__funnelshift_l(c.y, c.y, 19) & 0x7F8000u) | eb0);
         const float w = fmaf(pw.z, r3, fmaf(pw.y, r2, fmaf(pw.x, r1, fmaf(pw.w, eb_f, r0))));
         const float wB = fmaf(pwB.z, r3, fmaf(pwB.y, r2, fmaf(pwB.x, r1, fmaf(pwB.w, eb_f, r0))));
+#endif
         const float xi_0 = __ldg(x2 + ((int64_t)snd * 5 + 0) * C + ch);
         const float xiB_0 = __ldg(x2 + ((int64_t)sndB * 5 + 0) * C + ch);
         const float xi_1 = __ldg(x2 + ((int64_t)snd * 5 + 1) * C + ch);
@@ -2884,6 +3385,10 @@ __global__ void __launch_bounds__(MAX_T) gconv_fwd_L2b(
         // constants are in the stores
         float w2, w6, w7, w12, w11;
         {
+#ifdef LOUP_CONV_TABLE_FP32
+          const auto cubic = loup::conv_cubic(tq + 2 * C + ch, bias_shift);
+          w2 = cubic.value(pw);
+#else
           const uint2 c = __ldg(tq + 2 * C + ch);
           const unsigned eb0 = (c.y & 0x0F800000u) + bias_shift;
           const float eb_f = __uint_as_float(eb0);
@@ -2892,8 +3397,13 @@ __global__ void __launch_bounds__(MAX_T) gconv_fwd_L2b(
           const float r2 = __uint_as_float((__funnelshift_l(c.x, c.x, 20) & 0x7FF800u) | eb0);
           const float r3 = __uint_as_float((__funnelshift_l(c.y, c.y, 19) & 0x7F8000u) | eb0);
           w2 = fmaf(pw.z, r3, fmaf(pw.y, r2, fmaf(pw.x, r1, fmaf(pw.w, eb_f, r0))));
+#endif
         }
         {
+#ifdef LOUP_CONV_TABLE_FP32
+          const auto cubic = loup::conv_cubic(tq + 6 * C + ch, bias_shift);
+          w6 = cubic.value(pw);
+#else
           const uint2 c = __ldg(tq + 6 * C + ch);
           const unsigned eb0 = (c.y & 0x0F800000u) + bias_shift;
           const float eb_f = __uint_as_float(eb0);
@@ -2902,8 +3412,13 @@ __global__ void __launch_bounds__(MAX_T) gconv_fwd_L2b(
           const float r2 = __uint_as_float((__funnelshift_l(c.x, c.x, 20) & 0x7FF800u) | eb0);
           const float r3 = __uint_as_float((__funnelshift_l(c.y, c.y, 19) & 0x7F8000u) | eb0);
           w6 = fmaf(pw.z, r3, fmaf(pw.y, r2, fmaf(pw.x, r1, fmaf(pw.w, eb_f, r0))));
+#endif
         }
         {
+#ifdef LOUP_CONV_TABLE_FP32
+          const auto cubic = loup::conv_cubic(tq + 7 * C + ch, bias_shift);
+          w7 = cubic.value(pw);
+#else
           const uint2 c = __ldg(tq + 7 * C + ch);
           const unsigned eb0 = (c.y & 0x0F800000u) + bias_shift;
           const float eb_f = __uint_as_float(eb0);
@@ -2912,8 +3427,13 @@ __global__ void __launch_bounds__(MAX_T) gconv_fwd_L2b(
           const float r2 = __uint_as_float((__funnelshift_l(c.x, c.x, 20) & 0x7FF800u) | eb0);
           const float r3 = __uint_as_float((__funnelshift_l(c.y, c.y, 19) & 0x7F8000u) | eb0);
           w7 = fmaf(pw.z, r3, fmaf(pw.y, r2, fmaf(pw.x, r1, fmaf(pw.w, eb_f, r0))));
+#endif
         }
         {
+#ifdef LOUP_CONV_TABLE_FP32
+          const auto cubic = loup::conv_cubic(tq + 12 * C + ch, bias_shift);
+          w12 = cubic.value(pw);
+#else
           const uint2 c = __ldg(tq + 12 * C + ch);
           const unsigned eb0 = (c.y & 0x0F800000u) + bias_shift;
           const float eb_f = __uint_as_float(eb0);
@@ -2922,8 +3442,13 @@ __global__ void __launch_bounds__(MAX_T) gconv_fwd_L2b(
           const float r2 = __uint_as_float((__funnelshift_l(c.x, c.x, 20) & 0x7FF800u) | eb0);
           const float r3 = __uint_as_float((__funnelshift_l(c.y, c.y, 19) & 0x7F8000u) | eb0);
           w12 = fmaf(pw.z, r3, fmaf(pw.y, r2, fmaf(pw.x, r1, fmaf(pw.w, eb_f, r0))));
+#endif
         }
         {
+#ifdef LOUP_CONV_TABLE_FP32
+          const auto cubic = loup::conv_cubic(tq + 11 * C + ch, bias_shift);
+          w11 = cubic.value(pw);
+#else
           const uint2 c = __ldg(tq + 11 * C + ch);
           const unsigned eb0 = (c.y & 0x0F800000u) + bias_shift;
           const float eb_f = __uint_as_float(eb0);
@@ -2932,6 +3457,7 @@ __global__ void __launch_bounds__(MAX_T) gconv_fwd_L2b(
           const float r2 = __uint_as_float((__funnelshift_l(c.x, c.x, 20) & 0x7FF800u) | eb0);
           const float r3 = __uint_as_float((__funnelshift_l(c.y, c.y, 19) & 0x7F8000u) | eb0);
           w11 = fmaf(pw.z, r3, fmaf(pw.y, r2, fmaf(pw.x, r1, fmaf(pw.w, eb_f, r0))));
+#endif
         }
         const float xc0 = __ldg(x2 + ((int64_t)snd * 5 + 0) * C + ch);
         const float xc1 = __ldg(x2 + ((int64_t)snd * 5 + 1) * C + ch);
@@ -2964,6 +3490,10 @@ __global__ void __launch_bounds__(MAX_T) gconv_fwd_L2b(
         acc[11] = fmaf(w11, xc4, acc[11]);
       }
       { // path 15 (2,1,3)
+#ifdef LOUP_CONV_TABLE_FP32
+        const auto cubic = loup::conv_cubic(tq + 15 * C + ch, bias_shift);
+        const float w = cubic.value(pw);
+#else
         const uint2 c = __ldg(tq + 15 * C + ch);
         const unsigned eb0 = (c.y & 0x0F800000u) + bias_shift;
         const float eb_f = __uint_as_float(eb0);
@@ -2972,6 +3502,7 @@ __global__ void __launch_bounds__(MAX_T) gconv_fwd_L2b(
         const float r2 = __uint_as_float((__funnelshift_l(c.x, c.x, 20) & 0x7FF800u) | eb0);
         const float r3 = __uint_as_float((__funnelshift_l(c.y, c.y, 19) & 0x7F8000u) | eb0);
         const float w = fmaf(pw.z, r3, fmaf(pw.y, r2, fmaf(pw.x, r1, fmaf(pw.w, eb_f, r0))));
+#endif
         const float xi_0 = __ldg(x2 + ((int64_t)snd * 5 + 0) * C + ch);
         const float xi_1 = __ldg(x2 + ((int64_t)snd * 5 + 1) * C + ch);
         const float xi_2 = __ldg(x2 + ((int64_t)snd * 5 + 2) * C + ch);
@@ -3000,6 +3531,10 @@ __global__ void __launch_bounds__(MAX_T) gconv_fwd_L2b(
         acc[23] = fmaf(w * xi_4, she[3], acc[23]);
       }
       { // path 16 (2,3,3)
+#ifdef LOUP_CONV_TABLE_FP32
+        const auto cubic = loup::conv_cubic(tq + 16 * C + ch, bias_shift);
+        const float w = cubic.value(pw);
+#else
         const uint2 c = __ldg(tq + 16 * C + ch);
         const unsigned eb0 = (c.y & 0x0F800000u) + bias_shift;
         const float eb_f = __uint_as_float(eb0);
@@ -3008,6 +3543,7 @@ __global__ void __launch_bounds__(MAX_T) gconv_fwd_L2b(
         const float r2 = __uint_as_float((__funnelshift_l(c.x, c.x, 20) & 0x7FF800u) | eb0);
         const float r3 = __uint_as_float((__funnelshift_l(c.y, c.y, 19) & 0x7F8000u) | eb0);
         const float w = fmaf(pw.z, r3, fmaf(pw.y, r2, fmaf(pw.x, r1, fmaf(pw.w, eb_f, r0))));
+#endif
         const float xi_0 = __ldg(x2 + ((int64_t)snd * 5 + 0) * C + ch);
         const float xi_1 = __ldg(x2 + ((int64_t)snd * 5 + 1) * C + ch);
         const float xi_2 = __ldg(x2 + ((int64_t)snd * 5 + 2) * C + ch);
@@ -3202,11 +3738,16 @@ __global__ void __launch_bounds__(512) gconv_bwd_L2lp(
       const int pr = loup::table_pair(pair_sym, species[snd], sa, S);
       slab = (int64_t)pr * I + iv;
     }
+#ifdef LOUP_CONV_TABLE_FP32
+    const float4 pw = loup::conv_basis(t), dp = loup::conv_slope_basis(t);
+    const auto* tq = loup::conv_table(packed_table) + slab * (17 * (int64_t)C);
+#else
     const float s = t - 0.5f, s_sq = s * s;
     const float s1 = s * 0x1.0p-8f, s2 = s_sq * 0x1.0p-14f, s3 = s * s_sq * 0x1.0p-19f;
     const float ds2 = (2.0f * s) * 0x1.0p-6f, ds3 = (3.0f * s_sq) * 0x1.0p-11f;
     const float nw_hb = -1.5f * (1.0f + s1 + s2 + s3), ndt_hb = -1.5f * (1.0f + ds2 + ds3);
     const uint2* tq = packed_table + slab * (17 * (int64_t)C);
+#endif
     float pull_Gx = 0.0f, pull_Gy = 0.0f, pull_Gz = 0.0f, pull_R = 0.0f;
     for (int ch = lane; ch < C; ch += 32) {
       const float4* sq4 = reinterpret_cast<const float4*>(s_q + ch * 44);
@@ -3228,6 +3769,11 @@ __global__ void __launch_bounds__(512) gconv_bwd_L2lp(
       const float xz = __ldg(x1_p + ((int64_t)snd * 3 + 2) * C + ch);
       float dx1_0 = 0.0f, dx1_1 = 0.0f, dx1_2 = 0.0f;
       { // path 0 (0,0,0) scalar
+#ifdef LOUP_CONV_TABLE_FP32
+        const auto cubic = loup::conv_cubic(tq + 0 * C + ch, bias_shift);
+        const float w = cubic.value(pw);
+        const float dw = cubic.slope(dp);
+#else
         const uint2 c = __ldg(tq + 0 * C + ch);
         const unsigned eb0 = (c.y & 0x0F800000u) + bias_shift;
         const float eb_f = __uint_as_float(eb0);
@@ -3237,10 +3783,16 @@ __global__ void __launch_bounds__(512) gconv_bwd_L2lp(
         const float r3 = __uint_as_float((__funnelshift_l(c.y, c.y, 19) & 0x7F8000u) | eb0);
         const float w = fmaf(s3, r3, fmaf(s2, r2, fmaf(s1, r1, fmaf(nw_hb, eb_f, r0))));
         const float dw = fmaf(ds3, r3, fmaf(ds2, r2, fmaf(ndt_hb, eb_f, r1)));
+#endif
         if (WANT_DX) dx0_acc = fmaf(w, Q0.x, dx0_acc);
         pull_R = fmaf(dw, x0 * Q0.x, pull_R);
       }
       { // path 1 (1,1,0) lower
+#ifdef LOUP_CONV_TABLE_FP32
+        const auto cubic = loup::conv_cubic(tq + 1 * C + ch, bias_shift);
+        const float w = cubic.value(pw);
+        const float dw = cubic.slope(dp);
+#else
         const uint2 c = __ldg(tq + 1 * C + ch);
         const unsigned eb0 = (c.y & 0x0F800000u) + bias_shift;
         const float eb_f = __uint_as_float(eb0);
@@ -3250,6 +3802,7 @@ __global__ void __launch_bounds__(512) gconv_bwd_L2lp(
         const float r3 = __uint_as_float((__funnelshift_l(c.y, c.y, 19) & 0x7F8000u) | eb0);
         const float w = fmaf(s3, r3, fmaf(s2, r2, fmaf(s1, r1, fmaf(nw_hb, eb_f, r0))));
         const float dw = fmaf(ds3, r3, fmaf(ds2, r2, fmaf(ndt_hb, eb_f, r1)));
+#endif
         const float A = xx * nx + xy * ny + xz * nz;
         const float wq = w * Q0.y;
         pull_Gx = fmaf(wq, xx, pull_Gx); pull_Gy = fmaf(wq, xy, pull_Gy); pull_Gz = fmaf(wq, xz, pull_Gz);
@@ -3257,6 +3810,11 @@ __global__ void __launch_bounds__(512) gconv_bwd_L2lp(
         pull_R = fmaf(dw, A * Q0.y, pull_R);
       }
       { // path 3 (0,1,1) scalar
+#ifdef LOUP_CONV_TABLE_FP32
+        const auto cubic = loup::conv_cubic(tq + 3 * C + ch, bias_shift);
+        const float w = cubic.value(pw);
+        const float dw = cubic.slope(dp);
+#else
         const uint2 c = __ldg(tq + 3 * C + ch);
         const unsigned eb0 = (c.y & 0x0F800000u) + bias_shift;
         const float eb_f = __uint_as_float(eb0);
@@ -3266,6 +3824,7 @@ __global__ void __launch_bounds__(512) gconv_bwd_L2lp(
         const float r3 = __uint_as_float((__funnelshift_l(c.y, c.y, 19) & 0x7F8000u) | eb0);
         const float w = fmaf(s3, r3, fmaf(s2, r2, fmaf(s1, r1, fmaf(nw_hb, eb_f, r0))));
         const float dw = fmaf(ds3, r3, fmaf(ds2, r2, fmaf(ndt_hb, eb_f, r1)));
+#endif
         const float h = Q0.z * nx + Q0.w * ny + Q1.x * nz;
         const float wx = w * x0;
         pull_Gx = fmaf(wx, Q0.z, pull_Gx); pull_Gy = fmaf(wx, Q0.w, pull_Gy); pull_Gz = fmaf(wx, Q1.x, pull_Gz);
@@ -3273,6 +3832,11 @@ __global__ void __launch_bounds__(512) gconv_bwd_L2lp(
         pull_R = fmaf(dw, x0 * h, pull_R);
       }
       { // path 4 (1,0,1) raise
+#ifdef LOUP_CONV_TABLE_FP32
+        const auto cubic = loup::conv_cubic(tq + 4 * C + ch, bias_shift);
+        const float w = cubic.value(pw);
+        const float dw = cubic.slope(dp);
+#else
         const uint2 c = __ldg(tq + 4 * C + ch);
         const unsigned eb0 = (c.y & 0x0F800000u) + bias_shift;
         const float eb_f = __uint_as_float(eb0);
@@ -3282,10 +3846,16 @@ __global__ void __launch_bounds__(512) gconv_bwd_L2lp(
         const float r3 = __uint_as_float((__funnelshift_l(c.y, c.y, 19) & 0x7F8000u) | eb0);
         const float w = fmaf(s3, r3, fmaf(s2, r2, fmaf(s1, r1, fmaf(nw_hb, eb_f, r0))));
         const float dw = fmaf(ds3, r3, fmaf(ds2, r2, fmaf(ndt_hb, eb_f, r1)));
+#endif
         pull_R = fmaf(dw, xx * Q1.y + xy * Q1.z + xz * Q1.w, pull_R);
         if (WANT_DX) { dx1_0 = fmaf(w, Q1.y, dx1_0); dx1_1 = fmaf(w, Q1.z, dx1_1); dx1_2 = fmaf(w, Q1.w, dx1_2); }
       }
       { // path 5 (1,2,1) lower
+#ifdef LOUP_CONV_TABLE_FP32
+        const auto cubic = loup::conv_cubic(tq + 5 * C + ch, bias_shift);
+        const float w = cubic.value(pw);
+        const float dw = cubic.slope(dp);
+#else
         const uint2 c = __ldg(tq + 5 * C + ch);
         const unsigned eb0 = (c.y & 0x0F800000u) + bias_shift;
         const float eb_f = __uint_as_float(eb0);
@@ -3295,6 +3865,7 @@ __global__ void __launch_bounds__(512) gconv_bwd_L2lp(
         const float r3 = __uint_as_float((__funnelshift_l(c.y, c.y, 19) & 0x7F8000u) | eb0);
         const float w = fmaf(s3, r3, fmaf(s2, r2, fmaf(s1, r1, fmaf(nw_hb, eb_f, r0))));
         const float dw = fmaf(ds3, r3, fmaf(ds2, r2, fmaf(ndt_hb, eb_f, r1)));
+#endif
         const float h = Q2.x * nx + Q2.y * ny + Q2.z * nz;
         const float A = xx * nx + xy * ny + xz * nz;
         const float B = xx * Q2.x + xy * Q2.y + xz * Q2.z;
@@ -3306,6 +3877,11 @@ __global__ void __launch_bounds__(512) gconv_bwd_L2lp(
         if (WANT_DX) { dx1_0 = fmaf(wh, nx, fmaf(-wk, Q2.x, dx1_0)); dx1_1 = fmaf(wh, ny, fmaf(-wk, Q2.y, dx1_1)); dx1_2 = fmaf(wh, nz, fmaf(-wk, Q2.z, dx1_2)); }
       }
       { // path 8 (0,2,2) scalar
+#ifdef LOUP_CONV_TABLE_FP32
+        const auto cubic = loup::conv_cubic(tq + 8 * C + ch, bias_shift);
+        const float w = cubic.value(pw);
+        const float dw = cubic.slope(dp);
+#else
         const uint2 c = __ldg(tq + 8 * C + ch);
         const unsigned eb0 = (c.y & 0x0F800000u) + bias_shift;
         const float eb_f = __uint_as_float(eb0);
@@ -3315,6 +3891,7 @@ __global__ void __launch_bounds__(512) gconv_bwd_L2lp(
         const float r3 = __uint_as_float((__funnelshift_l(c.y, c.y, 19) & 0x7F8000u) | eb0);
         const float w = fmaf(s3, r3, fmaf(s2, r2, fmaf(s1, r1, fmaf(nw_hb, eb_f, r0))));
         const float dw = fmaf(ds3, r3, fmaf(ds2, r2, fmaf(ndt_hb, eb_f, r1)));
+#endif
         const float qzz = -Q2.w - Q3.z;
         const float vx = Q2.w * nx + Q3.x * ny + Q3.y * nz;
         const float vy = Q3.x * nx + Q3.z * ny + Q3.w * nz;
@@ -3326,6 +3903,11 @@ __global__ void __launch_bounds__(512) gconv_bwd_L2lp(
         pull_R = fmaf(dw, x0 * h, pull_R);
       }
       { // path 9 (1,1,2) raise
+#ifdef LOUP_CONV_TABLE_FP32
+        const auto cubic = loup::conv_cubic(tq + 9 * C + ch, bias_shift);
+        const float w = cubic.value(pw);
+        const float dw = cubic.slope(dp);
+#else
         const uint2 c = __ldg(tq + 9 * C + ch);
         const unsigned eb0 = (c.y & 0x0F800000u) + bias_shift;
         const float eb_f = __uint_as_float(eb0);
@@ -3335,6 +3917,7 @@ __global__ void __launch_bounds__(512) gconv_bwd_L2lp(
         const float r3 = __uint_as_float((__funnelshift_l(c.y, c.y, 19) & 0x7F8000u) | eb0);
         const float w = fmaf(s3, r3, fmaf(s2, r2, fmaf(s1, r1, fmaf(nw_hb, eb_f, r0))));
         const float dw = fmaf(ds3, r3, fmaf(ds2, r2, fmaf(ndt_hb, eb_f, r1)));
+#endif
         const float qzz = -Q4.x - Q4.w;
         const float vx = Q4.x * nx + Q4.y * ny + Q4.z * nz;
         const float vy = Q4.y * nx + Q4.w * ny + Q5.x * nz;
@@ -3347,6 +3930,11 @@ __global__ void __launch_bounds__(512) gconv_bwd_L2lp(
         pull_Gz = fmaf(w2, Q4.z * xx + Q5.x * xy + qzz * xz, pull_Gz);
       }
       { // path 10 (1,3,2) lower
+#ifdef LOUP_CONV_TABLE_FP32
+        const auto cubic = loup::conv_cubic(tq + 10 * C + ch, bias_shift);
+        const float w = cubic.value(pw);
+        const float dw = cubic.slope(dp);
+#else
         const uint2 c = __ldg(tq + 10 * C + ch);
         const unsigned eb0 = (c.y & 0x0F800000u) + bias_shift;
         const float eb_f = __uint_as_float(eb0);
@@ -3356,6 +3944,7 @@ __global__ void __launch_bounds__(512) gconv_bwd_L2lp(
         const float r3 = __uint_as_float((__funnelshift_l(c.y, c.y, 19) & 0x7F8000u) | eb0);
         const float w = fmaf(s3, r3, fmaf(s2, r2, fmaf(s1, r1, fmaf(nw_hb, eb_f, r0))));
         const float dw = fmaf(ds3, r3, fmaf(ds2, r2, fmaf(ndt_hb, eb_f, r1)));
+#endif
         const float qzz = -Q5.y - Q6.x;
         const float vx = Q5.y * nx + Q5.z * ny + Q5.w * nz;
         const float vy = Q5.z * nx + Q6.x * ny + Q6.y * nz;
@@ -3371,6 +3960,11 @@ __global__ void __launch_bounds__(512) gconv_bwd_L2lp(
         if (WANT_DX) { dx1_0 = fmaf(wh, nx, fmaf(-wk2, vx, dx1_0)); dx1_1 = fmaf(wh, ny, fmaf(-wk2, vy, dx1_1)); dx1_2 = fmaf(wh, nz, fmaf(-wk2, vz, dx1_2)); }
       }
       { // path 13 (0,3,3) scalar
+#ifdef LOUP_CONV_TABLE_FP32
+        const auto cubic = loup::conv_cubic(tq + 13 * C + ch, bias_shift);
+        const float w = cubic.value(pw);
+        const float dw = cubic.slope(dp);
+#else
         const uint2 c = __ldg(tq + 13 * C + ch);
         const unsigned eb0 = (c.y & 0x0F800000u) + bias_shift;
         const float eb_f = __uint_as_float(eb0);
@@ -3380,6 +3974,7 @@ __global__ void __launch_bounds__(512) gconv_bwd_L2lp(
         const float r3 = __uint_as_float((__funnelshift_l(c.y, c.y, 19) & 0x7F8000u) | eb0);
         const float w = fmaf(s3, r3, fmaf(s2, r2, fmaf(s1, r1, fmaf(nw_hb, eb_f, r0))));
         const float dw = fmaf(ds3, r3, fmaf(ds2, r2, fmaf(ndt_hb, eb_f, r1)));
+#endif
         const float q7 = -Q6.z - Q7.y, q8 = -Q6.w - Q7.w;
         const float Qxx = Q6.z * nx + Q6.w * ny + Q7.x * nz;
         const float Qxy = Q6.w * nx + Q7.y * ny + Q7.z * nz;
@@ -3397,6 +3992,11 @@ __global__ void __launch_bounds__(512) gconv_bwd_L2lp(
         pull_R = fmaf(dw, x0 * h, pull_R);
       }
       { // path 14 (1,2,3) raise
+#ifdef LOUP_CONV_TABLE_FP32
+        const auto cubic = loup::conv_cubic(tq + 14 * C + ch, bias_shift);
+        const float w = cubic.value(pw);
+        const float dw = cubic.slope(dp);
+#else
         const uint2 c = __ldg(tq + 14 * C + ch);
         const unsigned eb0 = (c.y & 0x0F800000u) + bias_shift;
         const float eb_f = __uint_as_float(eb0);
@@ -3406,6 +4006,7 @@ __global__ void __launch_bounds__(512) gconv_bwd_L2lp(
         const float r3 = __uint_as_float((__funnelshift_l(c.y, c.y, 19) & 0x7F8000u) | eb0);
         const float w = fmaf(s3, r3, fmaf(s2, r2, fmaf(s1, r1, fmaf(nw_hb, eb_f, r0))));
         const float dw = fmaf(ds3, r3, fmaf(ds2, r2, fmaf(ndt_hb, eb_f, r1)));
+#endif
         const float q7 = -Q8.y - Q9.x, q8 = -Q8.z - Q9.z;
         const float Qxx = Q8.y * nx + Q8.z * ny + Q8.w * nz;
         const float Qxy = Q8.z * nx + Q9.x * ny + Q9.y * nz;
@@ -3450,7 +4051,7 @@ __global__ void __launch_bounds__(512) gconv_bwd_L2lp(
         ddens = fmaf(t, fmaf(3.0f * dc.w, t, 2.0f * dc.z), dc.y) * sxi;
       }
       const float fn = pull_Gx * nx + pull_Gy * ny + pull_Gz * nz;
-      const float rad = fmaf(pull_R, sxi * 0x1.0p-8f, dD1_r * ddens);
+      const float rad = fmaf(pull_R, sxi * loup::kConvSlopeScale, dD1_r * ddens);
       float fx = fmaf(nx, rad - fn * inv_d, pull_Gx * inv_d);
       float fy = fmaf(ny, rad - fn * inv_d, pull_Gy * inv_d);
       float fz = fmaf(nz, rad - fn * inv_d, pull_Gz * inv_d);
@@ -3542,11 +4143,16 @@ __global__ void __launch_bounds__(128) gconv_bwd_L2(
       const int pr = loup::table_pair(pair_sym, species[snd], sa, S);
       slab = (int64_t)pr * I + iv;
     }
+#ifdef LOUP_CONV_TABLE_FP32
+    const float4 pw = loup::conv_basis(t), dp = loup::conv_slope_basis(t);
+    const auto* tq = loup::conv_table(packed_table) + slab * (17 * (int64_t)C);
+#else
     const float s = t - 0.5f, s_sq = s * s;
     const float s1 = s * 0x1.0p-8f, s2 = s_sq * 0x1.0p-14f, s3 = s * s_sq * 0x1.0p-19f;
     const float ds2 = (2.0f * s) * 0x1.0p-6f, ds3 = (3.0f * s_sq) * 0x1.0p-11f;
     const float nw_hb = -1.5f * (1.0f + s1 + s2 + s3), ndt_hb = -1.5f * (1.0f + ds2 + ds3);
     const uint2* tq = packed_table + slab * (17 * (int64_t)C);
+#endif
     float dY[16];
     #pragma unroll
     for (int i = 0; i < 16; ++i) dY[i] = 0.0f;
@@ -3571,6 +4177,11 @@ __global__ void __launch_bounds__(128) gconv_bwd_L2(
           // added to dY[1..3] / sqrt 3 (Y1 = sqrt 3 n)
           float R2, dw2, R6, dw6, R7, dw7, R12, dw12, R11, dw11;
           {
+#ifdef LOUP_CONV_TABLE_FP32
+            const auto cubic = loup::conv_cubic(tq + 2 * C + ch, bias_shift);
+            R2 = cubic.value(pw);
+            dw2 = cubic.slope(dp);
+#else
             const uint2 c = __ldg(tq + 2 * C + ch);
             const unsigned eb0 = (c.y & 0x0F800000u) + bias_shift;
             const float eb_f = __uint_as_float(eb0);
@@ -3580,8 +4191,14 @@ __global__ void __launch_bounds__(128) gconv_bwd_L2(
             const float r3 = __uint_as_float((__funnelshift_l(c.y, c.y, 19) & 0x7F8000u) | eb0);
             R2 = fmaf(s3, r3, fmaf(s2, r2, fmaf(s1, r1, fmaf(nw_hb, eb_f, r0))));
             dw2 = fmaf(ds3, r3, fmaf(ds2, r2, fmaf(ndt_hb, eb_f, r1)));
+#endif
           }
           {
+#ifdef LOUP_CONV_TABLE_FP32
+            const auto cubic = loup::conv_cubic(tq + 6 * C + ch, bias_shift);
+            R6 = cubic.value(pw);
+            dw6 = cubic.slope(dp);
+#else
             const uint2 c = __ldg(tq + 6 * C + ch);
             const unsigned eb0 = (c.y & 0x0F800000u) + bias_shift;
             const float eb_f = __uint_as_float(eb0);
@@ -3591,8 +4208,14 @@ __global__ void __launch_bounds__(128) gconv_bwd_L2(
             const float r3 = __uint_as_float((__funnelshift_l(c.y, c.y, 19) & 0x7F8000u) | eb0);
             R6 = fmaf(s3, r3, fmaf(s2, r2, fmaf(s1, r1, fmaf(nw_hb, eb_f, r0))));
             dw6 = fmaf(ds3, r3, fmaf(ds2, r2, fmaf(ndt_hb, eb_f, r1)));
+#endif
           }
           {
+#ifdef LOUP_CONV_TABLE_FP32
+            const auto cubic = loup::conv_cubic(tq + 7 * C + ch, bias_shift);
+            R7 = cubic.value(pw);
+            dw7 = cubic.slope(dp);
+#else
             const uint2 c = __ldg(tq + 7 * C + ch);
             const unsigned eb0 = (c.y & 0x0F800000u) + bias_shift;
             const float eb_f = __uint_as_float(eb0);
@@ -3602,8 +4225,14 @@ __global__ void __launch_bounds__(128) gconv_bwd_L2(
             const float r3 = __uint_as_float((__funnelshift_l(c.y, c.y, 19) & 0x7F8000u) | eb0);
             R7 = fmaf(s3, r3, fmaf(s2, r2, fmaf(s1, r1, fmaf(nw_hb, eb_f, r0))));
             dw7 = fmaf(ds3, r3, fmaf(ds2, r2, fmaf(ndt_hb, eb_f, r1)));
+#endif
           }
           {
+#ifdef LOUP_CONV_TABLE_FP32
+            const auto cubic = loup::conv_cubic(tq + 12 * C + ch, bias_shift);
+            R12 = cubic.value(pw);
+            dw12 = cubic.slope(dp);
+#else
             const uint2 c = __ldg(tq + 12 * C + ch);
             const unsigned eb0 = (c.y & 0x0F800000u) + bias_shift;
             const float eb_f = __uint_as_float(eb0);
@@ -3613,8 +4242,14 @@ __global__ void __launch_bounds__(128) gconv_bwd_L2(
             const float r3 = __uint_as_float((__funnelshift_l(c.y, c.y, 19) & 0x7F8000u) | eb0);
             R12 = fmaf(s3, r3, fmaf(s2, r2, fmaf(s1, r1, fmaf(nw_hb, eb_f, r0))));
             dw12 = fmaf(ds3, r3, fmaf(ds2, r2, fmaf(ndt_hb, eb_f, r1)));
+#endif
           }
           {
+#ifdef LOUP_CONV_TABLE_FP32
+            const auto cubic = loup::conv_cubic(tq + 11 * C + ch, bias_shift);
+            R11 = cubic.value(pw);
+            dw11 = cubic.slope(dp);
+#else
             const uint2 c = __ldg(tq + 11 * C + ch);
             const unsigned eb0 = (c.y & 0x0F800000u) + bias_shift;
             const float eb_f = __uint_as_float(eb0);
@@ -3624,6 +4259,7 @@ __global__ void __launch_bounds__(128) gconv_bwd_L2(
             const float r3 = __uint_as_float((__funnelshift_l(c.y, c.y, 19) & 0x7F8000u) | eb0);
             R11 = fmaf(s3, r3, fmaf(s2, r2, fmaf(s1, r1, fmaf(nw_hb, eb_f, r0))));
             dw11 = fmaf(ds3, r3, fmaf(ds2, r2, fmaf(ndt_hb, eb_f, r1)));
+#endif
           }
           const float ga = s_g[ch * 31 + 0];
           const float gb0 = s_g[ch * 31 + 1], gb1 = s_g[ch * 31 + 2], gb2 = s_g[ch * 31 + 3];
@@ -3667,6 +4303,11 @@ __global__ void __launch_bounds__(128) gconv_bwd_L2(
           dY[3] = fmaf(0x1.279a740000000p-1f, fmaf(x2_0, cx, fmaf(x2_3, cy, fmaf(qzz, cz, fmaf(al, vz, fmaf(hk, gc2, k22r * gvz))))), dY[3]);
         }
         { // path 15 (2,1,3)
+#ifdef LOUP_CONV_TABLE_FP32
+          const auto cubic = loup::conv_cubic(tq + 15 * C + ch, bias_shift);
+          const float R = cubic.value(pw);
+          const float dw = cubic.slope(dp);
+#else
           const uint2 c = __ldg(tq + 15 * C + ch);
           const unsigned eb0 = (c.y & 0x0F800000u) + bias_shift;
           const float eb_f = __uint_as_float(eb0);
@@ -3676,6 +4317,7 @@ __global__ void __launch_bounds__(128) gconv_bwd_L2(
           const float r3 = __uint_as_float((__funnelshift_l(c.y, c.y, 19) & 0x7F8000u) | eb0);
           const float R = fmaf(s3, r3, fmaf(s2, r2, fmaf(s1, r1, fmaf(nw_hb, eb_f, r0))));
           const float dw = fmaf(ds3, r3, fmaf(ds2, r2, fmaf(ndt_hb, eb_f, r1)));
+#endif
           const float g0 = s_g[ch * 31 + 17];
           const float g1 = s_g[ch * 31 + 18];
           const float g2 = s_g[ch * 31 + 19];
@@ -3714,6 +4356,11 @@ __global__ void __launch_bounds__(128) gconv_bwd_L2(
           gx2_4 = fmaf(R, Cg4, gx2_4);
         }
         { // path 16 (2,3,3)
+#ifdef LOUP_CONV_TABLE_FP32
+          const auto cubic = loup::conv_cubic(tq + 16 * C + ch, bias_shift);
+          const float R = cubic.value(pw);
+          const float dw = cubic.slope(dp);
+#else
           const uint2 c = __ldg(tq + 16 * C + ch);
           const unsigned eb0 = (c.y & 0x0F800000u) + bias_shift;
           const float eb_f = __uint_as_float(eb0);
@@ -3723,6 +4370,7 @@ __global__ void __launch_bounds__(128) gconv_bwd_L2(
           const float r3 = __uint_as_float((__funnelshift_l(c.y, c.y, 19) & 0x7F8000u) | eb0);
           const float R = fmaf(s3, r3, fmaf(s2, r2, fmaf(s1, r1, fmaf(nw_hb, eb_f, r0))));
           const float dw = fmaf(ds3, r3, fmaf(ds2, r2, fmaf(ndt_hb, eb_f, r1)));
+#endif
           const float g0 = s_g[ch * 31 + 24];
           const float g1 = s_g[ch * 31 + 25];
           const float g2 = s_g[ch * 31 + 26];
@@ -3819,7 +4467,7 @@ __global__ void __launch_bounds__(128) gconv_bwd_L2(
       float gx, gy, gz;
       sh16_grad(nx, ny, nz, s_dy[wid], gx, gy, gz);
       const float dot = nx * gx + ny * gy + nz * gz;
-      const float rad = fmaf(pull_R, sxi * 0x1.0p-8f, dD1_r * ddens);
+      const float rad = fmaf(pull_R, sxi * loup::kConvSlopeScale, dD1_r * ddens);
       float fx = fmaf(nx, rad - dot * inv_d, gx * inv_d);
       float fy = fmaf(ny, rad - dot * inv_d, gy * inv_d);
       float fz = fmaf(nz, rad - dot * inv_d, gz * inv_d);

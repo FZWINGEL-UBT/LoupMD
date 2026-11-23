@@ -66,7 +66,11 @@ std::string layer0_jit_source(const Layer0IR& ir) {
 }
 
 std::string conv_jit_source() {
-    return "// LoupMD conv kernels, JIT (kernel_ir.cu)\n#include \"generated_conv.cuh\"\n";
+    return "// LoupMD conv kernels, JIT (kernel_ir.cu)\n"
+#ifdef LOUP_CONV_TABLE_FP32
+           "#define LOUP_CONV_TABLE_FP32 1\n"
+#endif
+           "#include \"generated_conv.cuh\"\n";
 }
 
 std::vector<std::string> conv_jit_names(const ConvIR& ir, int* n_fwd_kernels, int* n_bwd_kernels) {
