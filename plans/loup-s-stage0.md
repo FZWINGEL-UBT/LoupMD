@@ -15,6 +15,7 @@ Base `mh1-two-half-adjoint` at `0b1107b`; design imported unchanged in `0c600aa`
 ## Operations
 
 - Training backend: use `mace-torch==0.3.16` for **all Stage 0 runs**, including the learning curve and closed-loop retraining. The [pre-Stage-1 training-engine design](loup-s-training-engine.md) is ready for a reference profile when authorized. No Stage 0 run switches backend; implementation and qualification are outside Stage 0.
+- The [research review](loup-s-training-review.md) puts diagnosis of the failing fit and stock precision/library comparisons before custom CUDA. CPU-only workload census and validation control recorded in STATUS §6.70; no new GPU or Colab allocation for this investigation.
 - Local 5060 Ti: WSL side build, reservation `status` first; every GPU operation under foreground `local_gpu.py run`, one short job at a time. No timing, A/B or memory measurements. Do not modify the source or the other development checkout.
 - Ada: Windows OpenSSH only after go; git archive to `/mnt/homes/zwingel`, NFS nvcc/static libstdc++, detached jobs under `gpu_guard.py` on a card with no GPU processes. CPU suite on leto. Sustained runs ≥3 s back to back, second half reported; random operands for kernel benches; clocks and power recorded.
 - Colab: T4 smoke, L4 training only. Named sessions, create destination, ≤16 MB chunks, SHA256, retry lost connections, detach/poll, fetch/check artifacts then stop. Owner logs account 2 in when needed. Stage estimate **75–95 CU**, not a measurement.
