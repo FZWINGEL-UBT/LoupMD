@@ -212,6 +212,36 @@ def _assemble(args):
     return record
 
 
+def verify_training_release(base, data, count):
+    """Bind the transferred qualification receipt to the exact cold-start inputs."""
+    from .train import file_digest
+
+    receipt = json.loads((data / 'release.json').read_bytes())
+    manifest = json.loads((data / 'manifest.json').read_bytes())
+    base_receipt = base / 'manifest.json'
+    if (count not in LEVELS or receipt.get('schema') != 'loupmd.curve-release.v2' or
+            receipt.get('label_release') != 'curve-labels-v2' or
+            receipt.get('base_manifest_sha256') != file_digest(base_receipt)):
+        raise ValueError('wrong learning-curve release or baseline')
+    splits = json.loads(base_receipt.read_bytes())['splits']
+    counts = {k: count if k == 'train' else splits[k]['frames'] for k in ('train', 'valid', 'teacher-test')}
+    groups = receipt.get('groups', {})
+    # The v2 issuer qualifies four contiguous 25-frame shards as a single group.
+    starts = range(0, (count - BASE_FRAMES) // SHARD_FRAMES, 4)
+    if (receipt.get('split_counts') != counts or manifest['split_counts'] != counts or
+            set(groups) != {str(i) for i in starts} or
+            any(not _SHA.fullmatch(g.get(k, '')) for g in groups.values() for k in ('gate_sha256', 'receipt_sha256'))):
+        raise ValueError('incomplete learning-curve release coverage')
+    if not receipt.get('train_sha256') == manifest['train_sha256'] == file_digest(data / 'train.xyz'):
+        raise ValueError('training data differ from the qualified release')
+    for role in counts:
+        name = role + '.xyz'
+        pin = splits[role]['output_sha256']
+        if (manifest['input_sha256'][name] != pin or file_digest(base / name) != pin or
+                (role != 'train' and file_digest(data / name) != pin)):
+            raise ValueError(f'{name}: release uses different baseline data')
+
+
 def main(argv=None):
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('--base', type=Path, required=True, help='frozen train.xyz, valid.xyz and teacher-test.xyz')

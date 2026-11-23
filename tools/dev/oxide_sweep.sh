@@ -16,19 +16,15 @@ case $arm in
     curve10000) epochs=5; boundary=4; data=$root/curve-v2-10000;;
     *) usage;;
 esac
-(cd "$base" && sha256sum -c train.sha256 valid.sha256 teacher-test.sha256 >&2)
-if [[ $data != "$base" ]]; then
+if [[ $data == "$base" ]]; then
+    (cd "$base" && sha256sum -c train.sha256 valid.sha256 teacher-test.sha256 >&2)
+else
     # Reject a data point made from old labels or an unmatched validation/test set.
     "$py" - "$base" "$data" "${arm#curve}" <<'PY'
-import json, sys
+import sys
 from pathlib import Path
-from loupmd.distill.train import file_digest
-base, data = map(Path, sys.argv[1:3]); n = int(sys.argv[3]); m = json.loads((data/'manifest.json').read_text())
-if not (data/'release.json').is_file() or m['split_counts'] != {'train': n, 'valid': 30, 'teacher-test': 60}:
-    raise SystemExit('missing corrected release or unexpected split counts')
-if (m['input_sha256']['train.xyz'] != file_digest(base/'train.xyz') or m['train_sha256'] != file_digest(data/'train.xyz')
-        or any(file_digest(data/name) != file_digest(base/name) for name in ('valid.xyz', 'teacher-test.xyz'))):
-    raise SystemExit('unmatched learning-curve inputs')
+from loupmd.distill.curve import verify_training_release
+verify_training_release(Path(sys.argv[1]), Path(sys.argv[2]), int(sys.argv[3]))
 PY
 fi
 args=(--seed 1 --width "$width" --cutoff "$cutoff" --radial-head 64 --dtype "$dtype" --epochs "$epochs" --stage-two-start "$boundary")

@@ -171,3 +171,31 @@ def test_production_levels_select_numeric_prefixes(tmp_path):
     for count, last in ((1000, 27), (3000, 107), (10000, 387)):
         paths = curve._shards([tmp_path], (count - curve.BASE_FRAMES) // curve.SHARD_FRAMES)
         assert [p.name for p in paths] == [f'part-{i:02d}.xyz' for i in range(last + 1)]
+
+
+@pytest.mark.parametrize('mutation', ['empty-receipt', 'wrong-corpus', 'wrong-baseline', 'missing-group', 'changed-valid'])
+def test_training_admission_rejects_a_receipt_for_different_bytes(study, mutation):
+    base, data = study / 'base', assemble(study, 6)
+    manifest = json.loads((data / 'manifest.json').read_text())
+    (base / 'manifest.json').write_text(json.dumps({'splits': {
+        split: {'output_sha256': digest(base / f'{split}.xyz'), 'frames': count}
+        for split, count in (('train', 2), ('valid', 1), ('teacher-test', 1))}}))
+    receipt = dict(schema='loupmd.curve-release.v2', label_release='curve-labels-v2',
+                   base_manifest_sha256=digest(base / 'manifest.json'), split_counts=manifest['split_counts'],
+                   train_sha256=manifest['train_sha256'], groups={'0': {'gate_sha256': SHA, 'receipt_sha256': SHA}})
+    path = data / 'release.json'
+    path.write_text(json.dumps(receipt))
+    curve.verify_training_release(base, data, 6)
+    if mutation == 'empty-receipt':
+        receipt = {}
+    elif mutation == 'wrong-corpus':
+        receipt['train_sha256'] = digest(base / 'train.xyz')
+    elif mutation == 'wrong-baseline':
+        receipt['base_manifest_sha256'] = SHA
+    elif mutation == 'missing-group':
+        receipt['groups'] = {}
+    else:
+        shutil.copyfile(base / 'teacher-test.xyz', data / 'valid.xyz')
+    path.write_text(json.dumps(receipt))
+    with pytest.raises(ValueError, match='release'):
+        curve.verify_training_release(base, data, 6)

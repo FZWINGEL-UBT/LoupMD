@@ -3041,6 +3041,10 @@ Colab L4 only, same validation split at epoch 30: force RMSE **21.93 / 20.90 meV
 
 **5060 Ti only — FP32 physics qualification.** At 1 and 0.5 fs the strict NVE no-worse rule failed absolute drift despite unresolved differences at block-error scale. Label bars do not waive this or the phonon miss. Native training-only curvature labels prepared (50 displacements, checked pair-difference error 0.000910 eV/Å²). No adoption.
 
+**Corrected curve data — workstation label gates, not a performance result.** First 1,000-frame cold-start point released after whole-group checks; two of the seven extension groups used the native full-coefficient side build. Actual release digest, unchanged evaluation sets and schedule in STATUS §6.70.
+
+**5060 Ti only — water teacher calibration.** OFF24 300 K NVE energy RMS decreased from 0.05435 to 0.01391 meV/atom at 1→0.5 fs. Independent 20 ps NPT runs gave density 1.06232/1.07324 g/cm³ and O diffusion 1.874e−5/1.643e−5 cm²/s. Use both reference runs with block errors; these are not student results. Full provenance in STATUS §6.70.
+
 **5060 Ti only — repeated-cell neighbor rebuild, correctness (`048489b907`).** The CUDA step graph's optional rebuild captured the periodic cell in its bin/count/fill calls. A host rebuild on the first frame in a new cell was not enough: a subsequent on-device rebuild could overwrite its list with shifts from the old cell. Include the captured cell in the step-graph key only when that branch exists. Native MH-1 regression: before the fix the reused and fresh evaluations differed by 1.7412 eV on 135 atoms; after the fix evaluation at both cells with forced rebuilds and the unchanged-cell graph-reuse control passed. No timing or adoption claim.
 
 **Corrected MH-1 label gate, 5060 Ti only.** Reused/fresh 3× E/F/stress: validation 30/30 each (stored 13/30); teacher-test 60/60 each (stored 60/60). Original bytes unchanged; max validation force delta reused vs fresh 8.27e−7 eV/Å. **RTX 4000 Ada and RTX A4000 separately:** same native changed-cell regression passed on leeloo and Coraline before either generated new shards; no timing.
