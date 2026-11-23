@@ -1,0 +1,133 @@
+"""Run one distillation job using the operator's already authenticated WSL Colab CLI.
+
+Pass a bash job and its inputs; the job runs in /content/loup-s and puts deliverables in out/.
+A new, unique session owns exactly this job. The local controller must stay alive until stop.
+"""
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import os
+import subprocess
+import tempfile
+import time
+import uuid
+from pathlib import Path
+
+from loupmd.distill import transfer
+
+REMOTE = '/content/loup-s'
+
+
+def cli(*args, retry=True, timeout=300):
+    exe = os.environ.get('COLAB_CLI', str(Path.home() / '.local/bin/colab'))
+    for attempt in range(3):
+        p = subprocess.run([exe, *map(str, args)], stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                           text=True, timeout=timeout, stdin=subprocess.DEVNULL, check=False)
+        if 'connection was lost' not in p.stdout.lower():
+            if p.returncode:
+                raise RuntimeError(p.stdout)
+            return p.stdout
+        if not retry or attempt == 2:
+            raise RuntimeError(p.stdout)
+        time.sleep(5)
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--gpu', required=True, choices=('L4', 'T4'))
+    parser.add_argument('--account', required=True, choices=('1', '2'), help='bookkeeping only; never logs in')
+    parser.add_argument('--output', required=True, type=Path, help='a new local run directory')
+    parser.add_argument('--hours', type=float, default=4, help='maximum detached job duration')
+    parser.add_argument('job', type=Path)
+    parser.add_argument('input', type=Path, nargs='*')
+    args = parser.parse_args()
+    files = [args.job, *args.input]
+    if args.hours <= 0 or not all(f.is_file() for f in files) or len({f.name for f in files}) != len(files):
+        parser.error('provide existing files with distinct basenames and a positive deadline')
+    args.output.mkdir(parents=True, exist_ok=False)
+    session = 'ls0-' + uuid.uuid4().hex[:12]
+    record = {'session': session, 'account': args.account, 'gpu': args.gpu, 'start': time.time(),
+              'usage_before': cli('usage'), 'input_sha256': {}}
+
+    def save():
+        (args.output / 'allocation.json').write_text(json.dumps(record, indent=2) + '\n')
+
+    save()
+    print(f'{session}: {args.gpu} account {args.account}', flush=True)
+    with tempfile.TemporaryDirectory() as tmp:
+        def remote(body):
+            program = Path(tmp) / 'exec.py'
+            program.write_text('import os, json, subprocess\nfrom pathlib import Path\n' + body + '\nprint("LS0_OK")\n')
+            result = cli('exec', '-s', session, '-f', program, '--timeout', '180')
+            if 'LS0_OK' not in result.splitlines():
+                raise RuntimeError(result)
+            return result
+
+        try:
+            # If the response is lost, do not request a second allocation; finally targets only this unique name.
+            print(cli('new', '-s', session, '--gpu', args.gpu, retry=False, timeout=450), flush=True)
+            record.update(allocated=time.time(), usage_during=cli('usage'))
+            save()
+            remote(f'Path({REMOTE!r}).mkdir(exist_ok=True)\nPath({(REMOTE + "/out")!r}).mkdir(exist_ok=True)')
+            for file in files:
+                parts = []
+                checksum = hashlib.sha256()
+                for i, block in enumerate(transfer.chunks(file)):
+                    chunk = Path(tmp) / 'chunk'
+                    chunk.write_bytes(block)
+                    checksum.update(block)
+                    name = f'{REMOTE}/.part{i}'
+                    cli('upload', '-s', session, chunk, name, timeout=480)
+                    parts.append(name)
+                digest = checksum.hexdigest()
+                # Leave the pieces until the next upload overwrites them: repeating assemble after a lost
+                # response must still work. The VM is released at the end of the job.
+                remote(Path(transfer.__file__).read_text()
+                       + f'\nassemble({parts!r}, {REMOTE + "/" + file.name!r}, {digest!r})')
+                record['input_sha256'][file.name] = digest
+                save()
+            # Exclusive launch marker makes replay after a lost response idempotent.
+            script = 'bash "$1"; rc=$?; echo "$rc" >exit.part; mv exit.part exit; exit "$rc"'
+            remote(f'''os.chdir({REMOTE!r})
+if not Path("started").exists():
+    with open("started", "x"), open("out/job.log", "ab") as log:
+        proc = subprocess.Popen(["bash", "-c", {script!r}, "job", {args.job.name!r}], start_new_session=True,
+                                stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT)
+        Path("pid").write_text(str(proc.pid))''')
+            end = time.monotonic() + 3600 * args.hours
+            while True:
+                result = remote(f'os.chdir({REMOTE!r}); print("LS0_RC=" + (Path("exit").read_text().strip() if Path("exit").exists() else "running"))')
+                rc = next(s[7:] for s in result.splitlines() if s.startswith('LS0_RC='))
+                if rc != 'running':
+                    break
+                if time.monotonic() >= end:
+                    raise TimeoutError(f'{session}: remote job deadline exceeded')
+                time.sleep(30)
+            result = remote(f'''os.chdir({REMOTE!r}); import hashlib
+with open("result.tar.gz", "wb") as out:
+    subprocess.run(["tar", "-czf", "-", "out"], stdout=out, check=True)
+from functools import partial
+h = hashlib.sha256()
+with open("result.tar.gz", "rb") as f:
+    for b in iter(partial(f.read, 1048576), b""): h.update(b)
+print("LS0_SHA=" + h.hexdigest())''')
+            digest = next(s[8:] for s in result.splitlines() if s.startswith('LS0_SHA='))
+            download = args.output / 'result.part'
+            cli('download', '-s', session, REMOTE + '/result.tar.gz', download, timeout=900)
+            transfer.assemble([download], args.output / 'result.tar.gz', digest)
+            download.unlink()
+            record.update(exit_code=int(rc), result_sha256=digest)
+            if int(rc):
+                raise RuntimeError(f'{session}: job exit {rc}; see out/job.log in result.tar.gz')
+        finally:
+            record['stop_requested'] = time.time()
+            save()
+            print(cli('stop', '-s', session), flush=True)
+            record.update(stopped=time.time(), usage_after=cli('usage'))
+            save()
+
+
+if __name__ == '__main__':
+    main()
