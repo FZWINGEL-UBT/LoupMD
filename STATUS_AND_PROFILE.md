@@ -3521,3 +3521,7 @@ List 34 went through the device tests that still named single GPUs (ledger `idea
 ### 6.69 List 36: small cells after the lane-group kernels (23 November 2026)
 
 A 300 K census of water216 and NaCl216 on the Ada with the lane-group kernels on: the rebuild kernels are 5% of OFF23-S water216's step (54 rebuilds in 256 steps) and 2% of OFF23-M's; the time is in the 8-24 GEMM launches a step and the conv pair. The two-half switches, screened for the first time on products of a few hundred rows, hold there on both GPUs (`LOUP_LIN_HALF=0` costs 10-11% on the Ada and 6-7% on the A4000; the thresholds sit on flat stretches). Nothing adopted (ledger `ideas-20261123-list36`).
+
+### 6.70 Loup-S Stage 0: student baseline and workflow
+
+**5060 Ti only — export/gate preflight, not a fidelity result.** List 15 `s64l0.model` on the first 320-atom `test.xyz` frame, two 0.05 Å rattles, default engine at `0b1107b`. `python -m loupmd validate --model … --sha256 … --structure sto320.xyz --ref-device cuda --json gate.json`: **2/2 pass**. Worst ratios to the student's own float32–float64 deviation: E 0.01, F 0.41, S 0.40. No teacher comparison, local time or memory figure. Record: WSL `~/loup-s-stage0/preflight/gate.json`.
