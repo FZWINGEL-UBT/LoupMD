@@ -1,12 +1,12 @@
 # Loup-S: a per-system student architecture built from the engine's own measurements
 
-Stage 0 implementation status: the approved text below is preserved as the design baseline. The engine sampler, two-phase stress-training recipe and label report are in the tree. SrTiO3 teacher labels exist; the gate of the historical `s64l0` is a workflow preflight only (STATUS §6.70). No §6.5 timing estimate has yet been replaced. Run record: `plans/loup-s-stage0.md`.
+Stage 0 implementation status: the approved design baseline follows. Engine sampling, two-phase stress training, gated export and the label report have run end to end on SrTiO3. The four-epoch T4 smoke passed the engine gate but failed teacher fidelity; it is not a baseline. Full-length training has started. Section 5.1 now identifies the historical students' radial input. SrTiO3 teacher NPT spread, NVE timestep and deterministic reference checks are in STATUS §6.70. No §6.5 timing estimate has yet been replaced. Run record: `plans/loup-s-stage0.md`.
 
-Status (23 November 2026): design only. The owner approved the direction and the outline of sections 4 to 10 on
-23 November 2026; nothing here is built. Every figure is either quoted from `OPTIMISATION_LEDGER.md` or
+Original design status (23 November 2026, before implementation): the owner approved the direction and the outline of sections 4 to 10 on
+23 November 2026. At approval, nothing here had been built. Every original figure is either quoted from `OPTIMISATION_LEDGER.md` or
 `STATUS_AND_PROFILE.md` (entry or section named), marked as an estimate or a target, or cited from a named paper
-and marked as not checked. No measurement was made for
-this document. Sections 6.4 and 12 and the pair-term, first-hop, message-form and harmonics rows of section 5.2's
+and marked as not checked. No measurement was made for the original design.
+Sections 6.4 and 12 and the pair-term, first-hop, message-form and harmonics rows of section 5.2's
 table were added in discussion after that approval, and a second review the same day corrected sections 5.3, 6.2
 and 6.5. A third, external review the same day moved the stop rule's baseline to `s64r8`; split and tightened the
 fidelity bar (per species, molecular centre-of-mass terms, a tail cap, fixed tolerances for deterministic
@@ -245,6 +245,8 @@ which grows as `S (S + 1) / 2` with `S` species. Loup-S takes the form `s64l0` w
 the other is an ablation (section 5.2). With species-independent radial functions the 16 message channels carry the
 sender's species as well as its environment, which three species may allow and six may not: that is what the
 four-species system of Stage 0 tests.
+
+**Stage 0 verification.** Both list 15 `s64l0` and list 16 `s64r8` used the plain distance-only Bessel input, not a species-scaled distance: both training logs say `Distance transform for radial basis functions: None`, and both checkpoints contain `BesselBasis` and `PolynomialCutoff`. The new recipe makes that choice explicit; the MLP widths are `[64,64,64]` and `[64,64,8]` respectively. ZBL is a separate pair contribution in the new stress-trained recipe, not a species embedding in its radial MLP.
 
 ### 5.2 Defaults and their ablations
 
