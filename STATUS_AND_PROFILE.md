@@ -3598,3 +3598,14 @@ The teacher-test gate passed **60/60** for all three sets of values (fresh, reus
 **Colab L4 only — centered FP32 vs FP64, corrected `s64l0` seed 1, 22:23 UTC.** Two concurrent sessions, same 300/30 split, batch 4, energy/force/stress loss. Phase-one training log timestamps, eight consecutive epoch intervals ending at epochs 6–13: median **17.4 s/epoch FP32, 48.2 s/epoch FP64; 2.76×**. At FP32 epoch 17, validation RMSE was **2.21 meV/atom energy, 28.09 meV/Å forces, 9.07 meV/Å³ stress**. This is validation during training, not held-out §4 fidelity or a 3× export gate. Both phases and both FP64 seeds are needed for the precision decision.
 
 **22:37 UTC, Colab L4 only.** Matched epoch 30 validation RMSE (centered FP32 / FP64): energy **2.30 / 3.24 meV/atom**, forces **21.93 / 20.90 meV/Å**, stress **8.93 / 10.89 meV/Å³**. The FP32 run had since logged epoch 65 (0.42 meV/atom, 15.18 meV/Å, 1.86 meV/Å³). Both runs remained in phase one.
+
+**Centered-FP32 `s64l0` seed 1 completed (Colab L4 only).** Zero-based epoch 149 validation RMSE: 0.05 meV/atom, 12.60 meV/Å, 0.18 meV/Å³. Median epoch time 17.471 s for intervals ending at epochs 6–100 and 17.470 s for 113–149. Detached exit 0; recovered physical student SHA256 `c608e501c692b0881964a2b5b9b73122e5e5a3b72bb987ac00c9d22de2d31ac2` and epoch-110 checkpoint `ec97637bc20cd21bdb22dbbe7515c9de9efced58a9d5024c86afb5657d354b4d` match manifest.
+
+**5060 Ti only, no timing.** `distill.publish --ref-device cuda`: 2/2, worst energy/force/stress ratios 0.01/0.49/1.30 (limit 3× or floor). `distill.fidelity --regime target`, corrected 320-atom SrTiO3, both sets 60 frames; teacher = MH-1 `omat_pbe`. All species ≤2%, both tails and energy pass.
+
+| Sampling | Force RMSE (meV/Å; relative) | O / Sr / Ti relative (%) | p99.9 / cap (meV/Å) | E RMSE (meV/atom) | Stress RMSE (meV/Å³) |
+|---|---:|---:|---:|---:|---:|
+| Frozen teacher-test | 8.799; 1.571% | 1.598 / 1.410 / 1.576 | 45.30 / 56.02 | 0.0301 | 0.0655 |
+| Own-student target (2 replicas, 300 K, seed 3101) | 8.860; 1.579% | 1.622 / 1.452 / 1.549 | 45.66 / 56.10 | 0.0284 | 0.0659 |
+
+Round-0 student/teacher force-RMSE ratio 1.0068. `v2-l4-s64l0-fp32-seed1-r2/{release/gate.json,teacher-score.json,fidelity.json}` under the WSL campaign root. No claim for later closed-loop rounds, MD observables, or the two-FP64-seed spread.
