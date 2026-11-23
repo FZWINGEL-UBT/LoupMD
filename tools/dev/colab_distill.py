@@ -20,6 +20,22 @@ from loupmd.distill import transfer
 REMOTE = '/content/loup-s'
 
 
+class _ConnectionLost(RuntimeError):
+    """No reply; the remote job may still be healthy."""
+
+
+def _wait_for_exit(poll, deadline):
+    while (remaining := deadline - time.monotonic()) > 0:
+        try:
+            rc = poll(min(300, remaining))
+            if rc != 'running':
+                return int(rc)
+        except (subprocess.TimeoutExpired, _ConnectionLost) as exc:
+            print(f'Status unavailable; keeping detached job: {exc}', flush=True)
+        time.sleep(max(0, min(30, deadline - time.monotonic())))
+    raise TimeoutError('remote job deadline exceeded')
+
+
 def cli(*args, retry=True, timeout=300):
     exe = os.environ.get('COLAB_CLI', str(Path.home() / '.local/bin/colab'))
     for attempt in range(3):
@@ -30,7 +46,7 @@ def cli(*args, retry=True, timeout=300):
                 raise RuntimeError(p.stdout)
             return p.stdout
         if not retry or attempt == 2:
-            raise RuntimeError(p.stdout)
+            raise _ConnectionLost(p.stdout)
         time.sleep(5)
 
 
@@ -57,10 +73,10 @@ def main():
     save()
     print(f'{session}: {args.gpu} account {args.account}', flush=True)
     with tempfile.TemporaryDirectory() as tmp:
-        def remote(body):
+        def remote(body, **cli_options):
             program = Path(tmp) / 'exec.py'
             program.write_text('import os, json, subprocess\nfrom pathlib import Path\n' + body + '\nprint("LS0_OK")\n')
-            result = cli('exec', '-s', session, '-f', program, '--timeout', '180')
+            result = cli('exec', '-s', session, '-f', program, '--timeout', '180', **cli_options)
             if 'LS0_OK' not in result.splitlines():
                 raise RuntimeError(result)
             return result
@@ -96,15 +112,12 @@ if not Path("started").exists():
         proc = subprocess.Popen(["bash", "-c", {script!r}, "job", {args.job.name!r}], start_new_session=True,
                                 stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT)
         Path("pid").write_text(str(proc.pid))''')
-            end = time.monotonic() + 3600 * args.hours
-            while True:
-                result = remote(f'os.chdir({REMOTE!r}); print("LS0_RC=" + (Path("exit").read_text().strip() if Path("exit").exists() else "running"))')
-                rc = next(s[7:] for s in result.splitlines() if s.startswith('LS0_RC='))
-                if rc != 'running':
-                    break
-                if time.monotonic() >= end:
-                    raise TimeoutError(f'{session}: remote job deadline exceeded')
-                time.sleep(30)
+            def poll(timeout):
+                result = remote(f'os.chdir({REMOTE!r}); print("LS0_RC=" + (Path("exit").read_text().strip() if Path("exit").exists() else "running"))',
+                                retry=False, timeout=timeout)
+                return next(s[7:] for s in result.splitlines() if s.startswith('LS0_RC='))
+
+            rc = _wait_for_exit(poll, time.monotonic() + 3600 * args.hours)
             result = remote(f'''os.chdir({REMOTE!r}); import hashlib
 with open("result.tar.gz", "wb") as out:
     subprocess.run(["tar", "-czf", "-", "out"], stdout=out, check=True)

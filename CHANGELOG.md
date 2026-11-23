@@ -3,6 +3,7 @@
 ## Unreleased
 
 - Per-system MACE distillation: periodic engine labels with stress, two-phase training, gated bundle export and student-trajectory fidelity reports. The [Stage 0 run record](plans/loup-s-stage0.md) distinguishes workflow checks from trained baselines.
+- A timeout while checking detached Colab training no longer discards the run: the controller retries the read-only status check within the original job deadline.
 
 ## 0.0.2 (20 November 2026)
 
