@@ -162,3 +162,21 @@ def test_unpublished_completion_distinguishes_running_from_deleted_session(tmp_p
     assert colab_distill._file_completion(receipt, missing_file) is None
     with pytest.raises(RuntimeError, match='Session'):
         colab_distill._file_completion(receipt, missing_session)
+
+
+def test_status_outage_preserves_detached_result_until_file_api_recovers(tmp_path, monkeypatch):
+    receipt = tmp_path / 'receipt'
+    digest = hashlib.sha256(b'complete archive').hexdigest()
+    replies = iter([RuntimeError('Download failed: HTTP 503 Service Unavailable'), f'0 {digest}\n'])
+    monkeypatch.setattr(colab_distill.time, 'sleep', lambda _: None)
+
+    def fetch(name, dest):
+        result = next(replies)
+        if isinstance(result, Exception):
+            raise result
+        dest.write_text(result)
+
+    assert colab_distill._wait_for_exit(
+        lambda _: colab_distill._file_completion(receipt, fetch),
+        colab_distill.time.monotonic() + 90,
+    ) == (0, digest)

@@ -38,9 +38,12 @@ def _file_completion(local, fetch):
     try:
         fetch('completion', local)
     except RuntimeError as exc:
-        if 'File or directory not found: /content/loup-s/completion' in str(exc):
+        detail = str(exc)
+        if f'File or directory not found: {REMOTE}/completion' in detail:
             return None
-        raise
+        if "Session '" in detail and "' not found" in detail:
+            raise  # confirmed deallocation, not just an unreachable Contents API
+        raise _ConnectionLost(detail) from exc
     fields = local.read_text().split()
     if (len(fields) != 2 or not fields[0].isdecimal() or not 0 <= int(fields[0]) <= 255
             or len(fields[1]) != 64 or any(c not in '0123456789abcdef' for c in fields[1])):
