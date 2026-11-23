@@ -66,10 +66,33 @@ def _confirmed_setup(body, local_receipt, directory, execute, download):
             except (subprocess.TimeoutExpired, RuntimeError):
                 if attempt:
                     raise
-                continue  # only mkdir, checked assembly and guarded launch may be replayed
+                continue  # only mkdir and checked assembly may be replayed here
             if local_receipt.read_text() != nonce:
                 raise RuntimeError('wrong Colab setup receipt')
             return
+
+
+def _confirm_launch(launch, read_pid, deadline):
+    """A detached process may outlive both the exec reply and the file channel."""
+    while (remaining := deadline - time.monotonic()) > 0:
+        try:
+            launch(min(90, remaining))
+            return
+        except (subprocess.TimeoutExpired, _ConnectionLost):
+            pass
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        try:
+            pid = read_pid(min(45, remaining)).strip()
+        except (subprocess.TimeoutExpired, RuntimeError) as exc:
+            print(f'Launch status unavailable; retaining session: {exc}', flush=True)
+        else:
+            if not pid.isascii() or not pid.isdecimal() or int(pid) <= 0:
+                raise ValueError('invalid detached PID')
+            return
+        time.sleep(max(0, min(30, deadline - time.monotonic())))
+    raise TimeoutError('detached job deadline exceeded while confirming launch')
 
 
 def main():
@@ -132,20 +155,31 @@ def main():
                 save()
             # Exclusive launch marker makes replay after a lost response idempotent.
             script = 'bash "$1"; rc=$?; echo "$rc" >exit.part; mv exit.part exit; exit "$rc"'
-            setup(f'''os.chdir({REMOTE!r})
+            launch_code = f'''os.chdir({REMOTE!r})
 if not Path("started").exists():
     with open("started", "x"), open("out/job.log", "ab") as log:
         proc = subprocess.Popen(["bash", "-c", {script!r}, "job", {args.job.name!r}], start_new_session=True,
                                 stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT)
-        Path("pid").write_text(str(proc.pid))
+        Path("pid.part").write_text(str(proc.pid))
+        Path("pid.part").replace("pid")
 if not Path("pid").is_file():
-    raise RuntimeError("incomplete detached launch; refusing to start twice")''')
+    raise RuntimeError("incomplete detached launch; refusing to start twice")'''
+
+            def read_pid(timeout):
+                pid = Path(tmp) / 'pid'
+                pid.unlink(missing_ok=True)
+                cli('download', '-s', session, REMOTE + '/pid', pid, retry=False, timeout=timeout)
+                return pid.read_text()
+
+            deadline = time.monotonic() + 3600 * args.hours
+            _confirm_launch(lambda timeout: remote(launch_code, retry=False, timeout=timeout), read_pid, deadline)
+
             def poll(timeout):
                 result = remote(f'os.chdir({REMOTE!r}); print("LS0_RC=" + (Path("exit").read_text().strip() if Path("exit").exists() else "running"))',
                                 retry=False, timeout=timeout)
                 return next(s[7:] for s in result.splitlines() if s.startswith('LS0_RC='))
 
-            rc = _wait_for_exit(poll, time.monotonic() + 3600 * args.hours)
+            rc = _wait_for_exit(poll, deadline)
             result = remote(f'''os.chdir({REMOTE!r}); import hashlib
 with open("result.tar.gz", "wb") as out:
     subprocess.run(["tar", "-czf", "-", "out"], stdout=out, check=True)

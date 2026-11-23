@@ -91,3 +91,41 @@ def test_unconfirmed_setup_cannot_advance_to_next_upload(tmp_path):
 
     with pytest.raises(RuntimeError, match='receipt'):
         colab_distill._confirmed_setup('', tmp_path / 'receipt', '/content/loup-s', execute, download)
+
+
+def test_ambiguous_launch_recovers_real_pid_after_file_channel_outage(tmp_path, monkeypatch):
+    # Simulate a lost exec acknowledgement and two failed downloads. Run the guarded
+    # command on disk: a replay must not replace the first launch's PID.
+    clock = [0.]
+    monkeypatch.setattr(colab_distill.time, 'monotonic', lambda: clock[0])
+    monkeypatch.setattr(colab_distill.time, 'sleep', lambda s: clock.__setitem__(0, clock[0] + s))
+    pid = tmp_path / 'pid'
+    attempts = []
+
+    def launch(timeout):
+        if not pid.exists():
+            pid.write_text('12345')
+        raise subprocess.TimeoutExpired('colab exec', timeout)
+
+    def read_pid(timeout):
+        attempts.append(timeout)
+        if len(attempts) <= 2:
+            raise RuntimeError('Download failed: File or directory not found')
+        return pid.read_text()
+
+    colab_distill._confirm_launch(launch, read_pid, 400.)
+    assert len(attempts) == 3
+
+
+def test_ambiguous_launch_keeps_original_paid_deadline(monkeypatch):
+    clock = [0.]
+    monkeypatch.setattr(colab_distill.time, 'monotonic', lambda: clock[0])
+    monkeypatch.setattr(colab_distill.time, 'sleep', lambda s: clock.__setitem__(0, clock[0] + s))
+
+    def unavailable(timeout):
+        clock[0] += timeout
+        raise subprocess.TimeoutExpired('colab', timeout)
+
+    with pytest.raises(TimeoutError, match='deadline'):
+        colab_distill._confirm_launch(unavailable, unavailable, 125.)
+    assert clock[0] == 125.
