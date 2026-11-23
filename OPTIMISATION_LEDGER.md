@@ -3041,6 +3041,7 @@ Each entry has the same fields. Unless stated, the system is OMAT-0 medium on th
 - **5060 Ti only, first full `s64l0` round 0:** independent 60-frame target-temperature own test: F RMSE 13.18% (2% cap), p99.9 0.439 eV/Å, energy 35.46 meV/atom, stress 0.07987 eV/Å³. Own/teacher-test F RMSE ratio 0.879. Absolute fidelity fails before any harvest; falsifier 1 remains open (§6.70).
 - **5060 Ti only, data diagnosis:** ten frozen train/validation/test trajectory frames vs independently run FP64 MH-1 `omat_pbe`: max force-component delta 2.04e−5 eV/Å; energy/stress deltas in §6.70. No gross discrepancy found on these samples; not an all-frame parity check.
 - **CPU only, training design screen:** verified reverse pairs on all 3,000 frozen graphs; compact radial cache arithmetic and a toy parameter-gradient check in STATUS §6.70. No CUDA implementation, timing, device-memory measurement or adoption.
+- **L4 training / 5060 Ti only for gate and round-0 fidelity.** Full `s64r8` FP64 seed 1: validation F RMSE 0.31444 eV/Å; phase-one/two medians both 43.53 s/epoch. Published bundle passes its 3× gate 2/2; independent own-trajectory error is 12.65% vs ≤2%, p99.9 0.40479 eV/Å, E 35.33 meV/atom, stress 0.07927 eV/Å³. Own/teacher-test F RMSE ratio 0.897 before harvest. See STATUS §6.70 for per-species results and hashes.
 
 <a id="ideas-20261123-list36"></a>
 #### ideas-20261123-list36: the thirty-sixth list (small cells: what a rebuild costs after list 34, and the two-half switches on products of a few hundred rows)
