@@ -19,6 +19,34 @@ from loupmd.distill import transfer
 
 REMOTE = '/content/loup-s'
 
+# Do not depend on a healthy notebook kernel after launching the detached job.
+# Publish the receipt last, including on failure so the trainer's log is retrievable.
+_PAYLOAD = r'''bash "$1"
+rc=$?
+if tar -czf result.tar.gz out && sha=$(sha256sum result.tar.gz); then
+    printf '%s %s\n' "$rc" "${sha%% *}" >completion.part
+else
+    echo 'result packaging failed' >completion.part
+fi
+mv completion.part completion
+exit "$rc"
+'''
+
+
+def _file_completion(local, fetch):
+    local.unlink(missing_ok=True)
+    try:
+        fetch('completion', local)
+    except RuntimeError as exc:
+        if 'File or directory not found: /content/loup-s/completion' in str(exc):
+            return None
+        raise
+    fields = local.read_text().split()
+    if (len(fields) != 2 or not fields[0].isdecimal() or not 0 <= int(fields[0]) <= 255
+            or len(fields[1]) != 64 or any(c not in '0123456789abcdef' for c in fields[1])):
+        raise RuntimeError(f'invalid Colab completion receipt: {fields!r}')
+    return int(fields[0]), fields[1]
+
 
 class _ConnectionLost(RuntimeError):
     """No reply; the remote job may still be healthy."""
@@ -27,9 +55,9 @@ class _ConnectionLost(RuntimeError):
 def _wait_for_exit(poll, deadline):
     while (remaining := deadline - time.monotonic()) > 0:
         try:
-            rc = poll(min(300, remaining))
-            if rc != 'running':
-                return int(rc)
+            result = poll(min(45, remaining))
+            if result is not None:
+                return result
         except (subprocess.TimeoutExpired, _ConnectionLost) as exc:
             print(f'Status unavailable; keeping detached job: {exc}', flush=True)
         time.sleep(max(0, min(30, deadline - time.monotonic())))
@@ -154,11 +182,10 @@ def main():
                 record['input_sha256'][file.name] = digest
                 save()
             # Exclusive launch marker makes replay after a lost response idempotent.
-            script = 'bash "$1"; rc=$?; echo "$rc" >exit.part; mv exit.part exit; exit "$rc"'
             launch_code = f'''os.chdir({REMOTE!r})
 if not Path("started").exists():
     with open("started", "x"), open("out/job.log", "ab") as log:
-        proc = subprocess.Popen(["bash", "-c", {script!r}, "job", {args.job.name!r}], start_new_session=True,
+        proc = subprocess.Popen(["bash", "-c", {_PAYLOAD!r}, "job", {args.job.name!r}], start_new_session=True,
                                 stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT)
         Path("pid.part").write_text(str(proc.pid))
         Path("pid.part").replace("pid")
@@ -175,20 +202,11 @@ if not Path("pid").is_file():
             _confirm_launch(lambda timeout: remote(launch_code, retry=False, timeout=timeout), read_pid, deadline)
 
             def poll(timeout):
-                result = remote(f'os.chdir({REMOTE!r}); print("LS0_RC=" + (Path("exit").read_text().strip() if Path("exit").exists() else "running"))',
-                                retry=False, timeout=timeout)
-                return next(s[7:] for s in result.splitlines() if s.startswith('LS0_RC='))
+                return _file_completion(Path(tmp) / 'completion', lambda name, dest:
+                                        cli('download', '-s', session, f'{REMOTE}/{name}', dest,
+                                            retry=False, timeout=timeout))
 
-            rc = _wait_for_exit(poll, deadline)
-            result = remote(f'''os.chdir({REMOTE!r}); import hashlib
-with open("result.tar.gz", "wb") as out:
-    subprocess.run(["tar", "-czf", "-", "out"], stdout=out, check=True)
-from functools import partial
-h = hashlib.sha256()
-with open("result.tar.gz", "rb") as f:
-    for b in iter(partial(f.read, 1048576), b""): h.update(b)
-print("LS0_SHA=" + h.hexdigest())''')
-            digest = next(s[8:] for s in result.splitlines() if s.startswith('LS0_SHA='))
+            rc, digest = _wait_for_exit(poll, deadline)
             download = args.output / 'result.part'
             cli('download', '-s', session, REMOTE + '/result.tar.gz', download, timeout=900)
             transfer.assemble([download], args.output / 'result.tar.gz', digest)

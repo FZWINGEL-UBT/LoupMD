@@ -33,7 +33,8 @@ def test_chunk_boundary_and_atomic_digest_check(tmp_path):
 
 
 def test_status_timeout_does_not_discard_a_detached_job(monkeypatch):
-    replies = iter([subprocess.TimeoutExpired('colab exec', 300), 'running', '17'])
+    completed = 17, hashlib.sha256(b'failed job and its log').hexdigest()
+    replies = iter([subprocess.TimeoutExpired('colab download', 45), None, completed])
     monkeypatch.setattr(colab_distill.time, 'sleep', lambda seconds: None)
 
     def poll(timeout):
@@ -43,7 +44,7 @@ def test_status_timeout_does_not_discard_a_detached_job(monkeypatch):
         return response
 
     # Preserve the real remote exit code so even a failed job's log can be downloaded.
-    assert colab_distill._wait_for_exit(poll, colab_distill.time.monotonic() + 900) == 17
+    assert colab_distill._wait_for_exit(poll, colab_distill.time.monotonic() + 900) == completed
 
 
 def test_unreachable_status_cannot_run_past_paid_deadline(monkeypatch):
@@ -129,3 +130,35 @@ def test_ambiguous_launch_keeps_original_paid_deadline(monkeypatch):
     with pytest.raises(TimeoutError, match='deadline'):
         colab_distill._confirm_launch(unavailable, unavailable, 125.)
     assert clock[0] == 125.
+
+
+@pytest.mark.parametrize('exit_code', [0, 23])
+def test_detached_payload_can_be_collected_without_exec(tmp_path, exit_code):
+    import tarfile
+
+    remote = tmp_path / 'vm'
+    remote.mkdir()
+    (remote / 'out').mkdir()
+    (remote / 'train.sh').write_text(f'echo "epoch 149" >out/train.log\nexit {exit_code}\n')
+    # Run the actual detached shell, without a live Colab kernel for status or retrieval.
+    subprocess.run(['bash', '-c', colab_distill._PAYLOAD, 'job', 'train.sh'], cwd=remote)
+    fetch = lambda name, dest: dest.write_bytes((remote / name).read_bytes())
+    record = colab_distill._file_completion(tmp_path / 'receipt', fetch)
+    assert record[0] == exit_code
+    saved = tmp_path / 'result.tar.gz'
+    assemble([remote / 'result.tar.gz'], saved, record[1])
+    with tarfile.open(saved) as archive:
+        assert archive.extractfile('out/train.log').read() == b'epoch 149\n'
+
+
+def test_unpublished_completion_distinguishes_running_from_deleted_session(tmp_path):
+    def missing_file(name, dest):
+        raise RuntimeError(f'Download failed: File or directory not found: /content/loup-s/{name}')
+
+    def missing_session(name, dest):
+        raise RuntimeError("Session 'my-run' not found.")
+
+    receipt = tmp_path / 'receipt'
+    assert colab_distill._file_completion(receipt, missing_file) is None
+    with pytest.raises(RuntimeError, match='Session'):
+        colab_distill._file_completion(receipt, missing_session)
