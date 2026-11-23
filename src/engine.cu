@@ -1052,6 +1052,7 @@ struct LoupHandle {
     bool md_graph_thermo = false;  // the graphs carry the two thermo kernels
     bool md_graph_fixcom = false;  // the graphs are the fix_com variant (and its degrees of freedom)
     bool md_graph_varcell = false; // the graphs are the variable-cell step
+    double md_rebuild_cell[9]{};  // cell captured by nl_bin/count/fill when md_dev_rebuild is true
     double md_graph_cellrate = 0.0;
     double md_graph_npt[7] = {0, 0, 0, 0, 0, 0, 0};  // the barostat's settings the graphs bake in (NptParams)
     bool last_pass_stress = false; // the last force pass carried stress: the virial on the device is current with
@@ -3906,6 +3907,7 @@ static int run_md_loop(
         if (instantiate(h->md_step_graph, h->md_step_exec, step_body) != 0) return -1;
         if (instantiate(h->md_checked_graph, h->md_checked_exec, checked_rest_body) != 0) return -1;
         h->md_dev_rebuild = dev;
+        if (dev) memcpy(h->md_rebuild_cell, h->cell_in, sizeof(h->md_rebuild_cell));
         note_params();
         return 0;
     };
@@ -3918,6 +3920,7 @@ static int run_md_loop(
         h->md_graph_mass_temp != mass_temp_k || h->md_graph_chain != 1000 * tchain + tloop ||
         h->md_graph_thermo != (thermo_every > 0) ||
         h->md_graph_fixcom != fix_com || h->md_graph_varcell != var_cell || h->md_graph_cellrate != cell_rate ||
+        (h->md_dev_rebuild && memcmp(h->md_rebuild_cell, h->cell_in, sizeof(h->md_rebuild_cell)) != 0) ||
         memcmp(h->md_graph_npt, npt_key, sizeof(npt_key)) != 0) {
         h->invalidate_md_graphs();
     }
