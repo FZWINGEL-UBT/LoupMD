@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Fixed history-dependent energies, forces and stress when reusing an evaluator across periodic cell changes. The graph that rebuilds the neighbor list on the GPU now uses the current cell instead of replaying a previous cell's periodic images.
 - Per-system MACE distillation: periodic engine labels with stress, two-phase training, gated bundle export and student-trajectory fidelity reports. The [Stage 0 run record](plans/loup-s-stage0.md) distinguishes workflow checks from trained baselines.
 - A timeout while checking detached Colab training no longer discards the run: the controller retries the read-only status check within the original job deadline.
 - `loupmd.distill.curve` publishes nested 1,000-, 3,000- and 10,000-frame training sets with pinned inputs, teacher-label and split-isolation checks. A finite shared-filesystem queue assigns shards to available labelling GPUs.
