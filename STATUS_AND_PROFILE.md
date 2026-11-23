@@ -3446,3 +3446,39 @@ Measured vs `04b6364` (NVE MD ms/step):
 | `POLAR-1-L` `nbcl5` | 35.031 ms | 30.768 ms | **1.139×** | 43.342 ms | 34.834 ms | **1.244×** |
 
 All `sm_120` and `sm_89` 3× gates pass (`POLAR-1-S` oxide 6/6 & crystals `--include-unstable` 6/6, `POLAR-1-M` oxide 18/18 on both GPUs, `POLAR-1-L` oxide 6/6 `sm_120` and `NaCl`/`NbCl5` 4/4 `sm_89` with pure-FP32 fallback via `drop_w2t_half()` on `SrTiO3` blowups, `MH-1` 18/18, `OMAT-0-M` 18/18, `tests/cpu` 497 passed, `tests/gpu -m fast` 57 passed).
+
+### 6.65 The Ada's power limit, sustained kernel rates, and list 32 (23 November 2026)
+
+List 32 (the handoff's: INT8 six-product GEMMs on producer-written planes for MH-1 / OMOL-0 XL; POLAR-1 phase 2; tiled skinny fusion) was checked before building, each premise measured on the Ada (`leto`, `leeloo`). Nothing was adopted; the code is `28912bb`'s. Ledger: `meas-ada-power-sustained`, `ideas-20261123-list32`, `polar-row-exp-fused`. Ada only throughout: the 5060 Ti was not timed in this session.
+
+**The power limit.** The RTX 4000 Ada runs every tensor-core GEMM at its 130 W limit (`power.limit` = `power.max_limit`). Bursts of the INT8 kernel with host sleeps between them (6 s a duty cycle, second half read):
+
+| busy fraction | SM clock | board power | kernel (13,608 x 512 x 512) |
+| ---: | ---: | ---: | ---: |
+| 1.00 | 1,875 MHz | 127.6 W | 318.7 us |
+| 0.75 | 2,205 MHz | 117.0 W | 290.2 us |
+| 0.50 | 2,370 MHz | 91.3 W | 287.0 us |
+| 0.15 | 2,175 MHz | 48.4 W | 296.0 us |
+
+About 32 W are drawn with the clocks running and nothing launched; the kernel's dynamic power is 50-51 mW per MHz at every clock. Under the limit the clock is therefore (130 W - 32 W) / (energy per cycle), and a kernel's rate is its work per joule. In the MD loop the clock is 1,650-1,755 MHz (MH-1 SrTiO3, 127.7 W) and 1,740-1,755 MHz (OMOL-0 XL water216), against 2,355-2,370 MHz unthrottled.
+
+**Sustained kernel rates** (each kernel back to back for 5 s, second half read; the production kernels called from the library; random operands; TFLOP/s as 2 M N K / time, and the kernel's clock):
+
+| kernel | 35,000 x 512 x 512 | 13,608 x 512 x 512 | 4,536 x 1,024 x 1,024 |
+| --- | ---: | ---: | ---: |
+| INT8 six products on pre-packed planes | 811.3 us, 22.62, 1,755-1,770 MHz | 327.6 us, 21.78, 1,815 MHz | 375.3 us, 25.34, 2,055 MHz |
+| `hgemm2f_kernel` (forward two-half, FP32 operand) | 966.4 us, 18.99, 1,560 MHz | 386.2 us, 18.48, 1,575 MHz | 485.5 us, 19.59, 1,695 MHz |
+| `hgemm2_kernel<0>` (operand in binary16 panels) | 913.6 us, 20.08, 1,590 MHz | 364.0 us, 19.60, 1,605 MHz | 455.5 us, 20.88, 1,740 MHz |
+| `hgemm2f_row_kernel` (exponents cached) | 992.9 us, 18.48 | 394.1 us, 18.10 | 494.6 us, 19.23 |
+| `h2r_row_exp_kernel` | 217.4 us | 17.9 us | 12.8 us |
+| FP32 to three INT8 planes | 404.1 us | 150.1 us | 32.0 us |
+
+At half duty (2,355 MHz, not limited) the first three rows read 25.2 / 21.1 / 22.3 TFLOP/s on the first shape. The kernel shootouts of lists 30-32 ran 30-50 launches after an idle gap and so read the unthrottled figures (`oz6_pre_v5` 25.8 TFLOP/s there, 22.6 sustained).
+
+**Censuses on the Ada** (`nsys`, 15 steady NVE steps, kernel sums per step): MH-1 SrTiO3 5,000 atoms 24.61 ms, of which the forward two-half GEMMs 11.37, the reverse ones with the gate 4.92, conv 4.27, products 2.93; OMOL-0 XL water216 20.34 ms (10.02 and 3.98); POLAR-1-M NbCl5 19.79 ms (row GEMMs 6.5, `h2r_row_exp_kernel` 1.82 in 68 launches); POLAR-1-M NaCl216 3.69 ms under the trace (68 `row_exp` launches 0.25, 54 split-K reductions 0.21).
+
+**List 32 A (INT8), not built.** The open accuracy screens of `oz6_v2` (every eligible GEMM on the INT8 kernel) all pass on `sm_89`: OMAT-0 medium oxide 18 / 18 (worst force 2.05x of the bound's 3), MH-1 `omol` organic 24 / 24 (0.32x), MH-1 crystals 18 / 18 (0.87x), OMOL-0 XL organic 8 / 8 (0.84x, CPU reference). The speed premise does not hold as projected (1.25x-1.30x): with planes and exponents for free the table and the censuses give at most 2.3 of 24.6 ms on MH-1 SrTiO3 (1.10x) and 2.2 of 20.3 ms on OMOL-0 XL water216 (1.12x); a pack pass costs more than the product saves above L2 size, and neither the product kernels nor the gate epilogues see a whole row in one block.
+
+**List 32 B (POLAR-1 phase 2), rejected.** The fused 64 x 128 prototype takes 463 us on 13,608 x 512 x 512 against the row kernel's 394 us plus an 18 us exponent launch. The same idea inside the production row kernel (`polar-row-exp-fused`, two forms) reproduces the launch path's bits on 18 shapes and is slower on all but one: every column tile and K slice repeats the pass. Per product 13.8 -> 19.9 us (216 rows), 61.2 -> 76.0 us (1,944), 167.2 -> 197.3 us (5,832); POLAR-1-M NaCl216 in the MD loop 2.339 / 2.372 -> 2.633 / 2.661 ms/step (first form). Reverted.
+
+On the Ada the two-half GEMMs run within about 20% of the INT8 kernel at the same power, and no kernel-level item measured here is worth more than a tenth of a step.

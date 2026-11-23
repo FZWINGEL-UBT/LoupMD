@@ -118,6 +118,11 @@ Practical rules, commands, invariants, and hard-won lessons for working on LoupM
   - Small `POLAR` cells (`nacl216`) exhibit ±2–3% plan-choice spread across fresh autotune runs. Use a fresh `LOUP_CACHE_DIR=/tmp/fresh_plans` for POLAR ABBAs, and **never mutate `~/.cache/loupmd/` plan files without telling the user**.
   - `cublasLt` GEMMs must be timed **inside CUDA graph replay**, not eager calls.
   - `cublas_bind` (`cublasSetStream` + per-lane workspace) must run on every forked stream (`fork()` / `lane(k)` / `join()`).
+- **Kernel shootouts must be sustained (ledger `meas-ada-power-sustained`, 23 November 2026):**
+  - The RTX 4000 Ada runs every tensor-core GEMM at its 130 W limit, and the governor lowers the SM clock from about 2,355 MHz to 1,560-1,815 MHz once a load lasts. A bench of 30-50 launches after an idle gap (allocations, host-side data) runs before that: it reads 6-13% above the sustained rate and ranks kernels by work per cycle, where the MD loop ranks them by work per joule (`oz6_pre_v5`: `25.8 TF` in a shootout, `22.6 TF` sustained; projected `1.25x-1.30x`, ceiling `1.10x-1.12x`).
+  - Time each variant back to back for at least 3 s and read the second half, with random (not zero) operands, and record `nvidia-smi --query-gpu=clocks.sm,power.draw` during the run. To set a candidate beside the production kernels on the same operands, link the bench against the library: `loup::hgemm2_f32a`, `hgemm2_gate`, `hgemm2_f32a_row`, `hgemm2_row_exp`, `hgemm2_split_pad` and `hgemm2_pack_b_col` are exported.
+  - A pass that a product kernel repeats in every block (per column tile, per K slice) is not free because it hides behind the tensor cores: under the power limit its instructions cost time (ledger `polar-row-exp-fused`).
+  - `nsys --cuda-graph-trace=node` adds about a third to a small cell's step (POLAR-1-M NaCl216 3.0 against 2.3 ms): read kernel sums from it, not the step time; and kernels of overlapping lanes report the time they shared the GPU, not what a launch costs by itself.
 
 ---
 
