@@ -4,7 +4,7 @@ Stage 0 implementation status: engine sampling, two-phase stress training, gated
 Label-integrity update: the stale cell in a captured neighbor rebuild was fixed (`048489b907`). The **versioned 300/30/60 SrTiO3 base splits** passed the full 3× teacher gate and direct fresh-vs-reused agreement on every frame. The original labels, students and scores remain historical; the Ada measurements describe those archived bundles, not an adoption. Fidelity thresholds are unchanged.
 Training backend decision: Stage 0 stays on mace-torch. Corrected centered-FP32 `s64l0` ran all 150 epochs, passed its 3× export gate and the 300 K label bar on its own trajectories (1.579% force RMSE). L4 medians were 17.47 s/epoch in both phases, versus 48.18 s/epoch so far for the matched FP64 first phase. This is a precision comparison, not a custom-engine speedup or a Stage 0 exit. See STATUS §6.70. Section 10's training-engine plan starts only after Stage 0.
 Stage 0 physics and timing update: centered FP32 passed relaxed lattice but missed 8/960 phonon frequencies at both displacement sizes; it is not qualified for adoption. The 320-atom grouping experiment in §6.5 retained a small-cell fusion target on Ada, not a new production default.
-Oxide fixed-set update (§§4, 8): 60 nominal student-visited and 40 independent hot/strained frames are frozen and teacher-gated. Retain the 5× target tail factor. On this student and cell, use a 3% per-frame force-RMSE audit threshold; no universal per-atom trigger qualified. Water and melt require their own calibration.
+Oxide fixed-set update (§§4, 8): 60 nominal student-visited and 40 independent hot/strained frames are frozen and teacher-gated. Retain the 5× target tail factor. The 3% oxide frame-audit threshold is an offline proposal, not a new general operating default. No universal per-atom trigger qualified.
 
 Original design status (23 November 2026, before implementation): the owner approved the direction and the outline of sections 4 to 10 on
 23 November 2026. At approval, nothing here had been built. Every original figure is either quoted from `OPTIMISATION_LEDGER.md` or
@@ -536,7 +536,7 @@ tool.
   fraction does not grow with the cell: the teacher runs tiled, and both models cost about the same per atom at any
   size.
 
-  **Stage 0, SrTiO3 only:** round the largest target-validation frame-relative force RMSE up to the next percentage point. This gave 3% in every leave-one-trajectory-out fit. On untouched student MD: 0/60 nominal and 40/40 hard frames flagged; the original 4% flagged 0/60 and 33/40. This compares thresholds on teacher calls, not the cost or effectiveness of a cadence `K` or a pre-call trigger.
+  **Stage 0, SrTiO3 only:** an exploratory rule (round the largest target-validation frame-relative force RMSE up to a percentage point) gave 3% in every leave-one-trajectory-out fit. In offline comparison, 0/60 nominal and 40/40 hard frames flagged; the original 4% flagged 0/60 and 33/40. The rounding rule was proposed after analysis. Keep 4% as the general default and qualify 3% prospectively on independent oxide trajectories. Neither the cost nor the effectiveness of a cadence `K` or a pre-call trigger was measured.
 - **A per-atom trigger (Stage 3).** So that the teacher is called when the student leaves its data and not only on a
   clock, the kernels flag atoms by a distance in feature space, with the shortest interatomic distance as a second
   check. Ranges of the layer-0 scalar sums would not do: an atom can sit inside every radial range with a wrong
