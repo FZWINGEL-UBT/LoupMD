@@ -748,6 +748,18 @@ bool device_is_tuned_cc() {
     return (major == 12 && minor == 0) || (major == 8 && (minor == 6 || minor == 9));
 }
 
+// The same set plus compute capability 8.0 (A100, list 37: the two-half package and the conv timing 0.81-0.98 of
+// the step beside the TF32 + FP16 cubin, gated on the generic families). MACE-POLAR-1 was not measured there, so
+// its own defaults (setup_polar_h2, the species tables, the hidden fold) keep device_is_tuned_cc().
+static bool device_is_tuned_generic_cc() {
+    if (device_is_tuned_cc()) return true;
+    int dev = 0, major = 0, minor = 0;
+    CUDA_CHECK_THROW(cudaGetDevice(&dev));
+    CUDA_CHECK_THROW(cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor, dev));
+    CUDA_CHECK_THROW(cudaDeviceGetAttribute(&minor, cudaDevAttrComputeCapabilityMinor, dev));
+    return major == 8 && minor == 0;
+}
+
 // S130 / S132: compact live channels of a kind-1 layer (the projections feed the product directly), certified from exact
 // zeros of the loaded float32 weights. Channel c is dead when its product weights (every species) or every projection
 // column (C0_l or W_lin_l [:, c]) are zero, or, on the fused terminal path, its folded readout row; it is angular when
@@ -1423,7 +1435,7 @@ void GenericModel::share_layer_buffers(bool on) {
 static bool two_half_switch(const char* name) {
     const char* e = std::getenv(name);
     if (e && (e[0] == '0' || e[0] == '1')) return e[0] == '1';
-    return device_is_tuned_cc();
+    return device_is_tuned_generic_cc();
 }
 void GenericModel::setup_w2t_half() {
     w2t_half_ = false;
@@ -2164,7 +2176,7 @@ bool GenericModel::set_cell(const double* cell) { return lr_ ? lr_->set_cell(cel
 // nothing changed, 1 if a variant changed.
 int GenericModel::tune_conv_variants(cudaStream_t st) {
     if (conv_tune_env_ == 0) return 0;
-    if (!device_is_tuned_cc() && conv_tune_env_ != 1) return 0;
+    if (!(lr_ ? device_is_tuned_cc() : device_is_tuned_generic_cc()) && conv_tune_env_ != 1) return 0;
     if (conv_var_override_ >= 0) return 0;  // forced variant: nothing to time
     if (!conv_args_.valid) return -1;
     const ConvTuneArgs& a = conv_args_;

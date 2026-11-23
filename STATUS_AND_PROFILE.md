@@ -3521,3 +3521,9 @@ List 34 went through the device tests that still named single GPUs (ledger `idea
 ### 6.69 List 36: small cells after the lane-group kernels (23 November 2026)
 
 A 300 K census of water216 and NaCl216 on the Ada with the lane-group kernels on: the rebuild kernels are 5% of OFF23-S water216's step (54 rebuilds in 256 steps) and 2% of OFF23-M's; the time is in the 8-24 GEMM launches a step and the conv pair. The two-half switches, screened for the first time on products of a few hundred rows, hold there on both GPUs (`LOUP_LIN_HALF=0` costs 10-11% on the Ada and 6-7% on the A4000; the thresholds sit on flat stretches). Nothing adopted (ledger `ideas-20261123-list36`).
+
+### 6.70 List 37: the A100 gets the two-half package (23 November 2026)
+
+Measured on a Colab A100-SXM4-40GB (ledger `ideas-20261123-list37`): beside the TF32 + FP16 cubin the two-half package and the per-system conv timing run MH-1 at `0.807` (SrTiO3) and `0.858` (NaCl216) of the cc 8.0 defaults' step, OMOL-0 XL water216 at `0.818`, OMAT-0 medium and MP-0b3 at `0.95-0.96` on the large cells, the OFF23 models at `0.97-0.99`; one 216-atom cell ties. Without the cubin everything is 11-70% slower, and the own extensions add nothing beside it, so both stay as they were. The 16 gate runs of the generic families pass on the A100 (worst force 2.18x). The package and the mapped evaluate staging are now the default on compute capability 8.0 for the models without the long range. POLAR-1 was not measured there (Colab lacks a module its checkpoints need); two Alex jobs are queued for it.
+
+A Colab L4 (the Ada's compute capability at 72 W) confirms today's defaults: every switch off is slower or within noise, the lane-group kernels are worth 12% on OFF23-S water216.
