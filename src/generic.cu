@@ -23,6 +23,9 @@
 #include "jit.hpp"
 #include "kernel_ir.hpp"
 #include "layer0_kernels.cuh"
+#ifdef LOUP_STUDENT_LAUNCH_BENCH
+#include "../tools/dev/student_projection_group.cuh"
+#endif
 
 namespace loup {
 
@@ -2567,6 +2570,14 @@ void GenericModel::record(const GenericPassInputs& in) {
                     transB ? K : Nc, beta, C + row0 * Nc, Nc);
         }
     };
+#ifdef LOUP_STUDENT_LAUNCH_BENCH
+    StudentProjectionGroup group{};
+    const bool group_species = std::getenv("LOUP_BENCH_GROUP_PROJECTIONS") != nullptr;
+    auto flush_group = [&] {
+        if (group.used) launch_student_projection_group(group, st);
+        group.used = group.row_tiles = 0;
+    };
+#endif
     // list 24 item 4: species_gemm (beta 0) on hgemm2f_kernel for each species with panels in ps (LOUP_LIN_HALF_PARTS
     // bit 128), else the FP32 GEMM; slot: LOUP_DEBUG_LIN_AMAX's record of A over every row of the degree
     auto species_proj = [&](const std::vector<GenericLayer::H2Proj>& ps, int slot, bool transB, int l, int K, int Nc,
@@ -2578,6 +2589,18 @@ void GenericModel::record(const GenericPassInputs& in) {
             if (lane_base >= 0) lane(lane_base + s);
             const int64_t row0 = (int64_t)start[s] * d;
             const GenericLayer::H2Proj* p = (size_t)s < ps.size() ? &ps[s] : nullptr;
+#ifdef LOUP_STUDENT_LAUNCH_BENCH
+            // Only combine existing unsplit H2 launches. Leave every FP32 fallback and the per-matrix tail tiles intact.
+            if (group_species && p && p->B && in.gemm_h2_fwd && count[s] * d >= lin_half_srows_ && K < 1024) {
+                if (group.used == 12 || (group.used && (group.cols != Nc || group.inner != K))) flush_group();
+                group.cols = Nc;
+                group.inner = K;
+                group.matrix[group.used++] = {A + row0 * K, p->B, C + row0 * Nc, count[s] * d, group.row_tiles,
+                                               p->sA, p->os};
+                group.row_tiles += (count[s] * d + 127) / 128;
+                continue;
+            }
+#endif
             if (p && p->B && in.gemm_h2_fwd && (int64_t)count[s] * d >= lin_half_srows_)
                 in.gemm_h2_fwd(count[s] * d, Nc, K, A + row0 * K, p->sA, p->B, p->os, C + row0 * Nc, 0.0f);
             else
@@ -2741,6 +2764,9 @@ void GenericModel::record(const GenericPassInputs& in) {
                 for (int l = 0; l < 4; ++l)
                     species_proj(L->hs_flin[l], 16 * t + l, false, l, Kh, Cm, L->S0[l], L->C0[l], (int64_t)Kh * Cm,
                                  L->msgf[l], 4 * l);
+#ifdef LOUP_STUDENT_LAUNCH_BENCH
+                flush_group();
+#endif
                 join();
             } else {
                 // Residual-free degrees l >= 1 (l > lmax_x; res0 from the S59 table) whose projection can take the gate
@@ -3249,6 +3275,9 @@ void GenericModel::record(const GenericPassInputs& in) {
                 for (int l = 0; l < 4; ++l)
                     species_proj(L->hs_blin[l], 16 * t + 8 + l, true, l, Cm, Kh, L->dmsgf[l], L->C0[l],
                                  (int64_t)Kh * Cm, L->S0[l], 4 * l);
+#ifdef LOUP_STUDENT_LAUNCH_BENCH
+                flush_group();
+#endif
                 join();
             } else {
                 fork();

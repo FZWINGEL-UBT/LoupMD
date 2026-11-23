@@ -43,6 +43,9 @@
 
 #include "gate_epilogue.cuh"
 #include "generic.hpp"
+#ifdef LOUP_STUDENT_LAUNCH_BENCH
+#include "../tools/dev/student_projection_group.cuh"
+#endif
 
 namespace loup {
 
@@ -332,16 +335,35 @@ constexpr int kHFwdVariant = 1;           // hgemm2_f32a's restart variant (hgem
 // ga.lin_l: gout_l = g (lin_l s + res_l), res_l never stored; the tile's lin_l rows are prefetched into L2 four K steps
 // before the loop ends and each thread's 32 lin_l pairs are loaded before its first store (lists 23 and 25 read them
 // one store at a time: the epilogue added 2.2 ms to OMOL-0 XL water 5,184, about what the gate kernel saved).
+#ifdef LOUP_STUDENT_LAUNCH_BENCH
+template <int RV, int DEG, bool TAIL, bool SPLIT = false, bool RESID = false, class Params = GateArgs>
+#else
 template <int RV, int DEG, bool TAIL, bool SPLIT = false, bool RESID = false>
+#endif
 __global__ void __launch_bounds__(128, 2) hgemm2f_kernel(int M, int N, int K, const float* __restrict__ A, float sA,
                                                          const __half* __restrict__ B, float oscale,
+#ifdef LOUP_STUDENT_LAUNCH_BENCH
+                                                         float* __restrict__ C, float beta, const __grid_constant__ Params ga) {
+#else
                                                          float* __restrict__ C, float beta, GateArgs ga) {
+#endif
     static_assert(!SPLIT || DEG <= 0, "only the plain and rows instances split");
     static_assert(!RESID || DEG == 3 || DEG == 5, "only degrees 1 and 2 have a residual");
     extern __shared__ __align__(128) unsigned char hsm[];
     const unsigned sbase = (unsigned)__cvta_generic_to_shared(hsm);
     const int tid = threadIdx.x, lane = tid & 31, warp = tid >> 5, wm = warp >> 1, wn = warp & 1;
-    const int m0 = blockIdx.y * kHM, n0 = blockIdx.x * kHN;
+    int row_tile = blockIdx.y;
+#ifdef LOUP_STUDENT_LAUNCH_BENCH
+    if constexpr (std::is_same_v<Params, StudentProjectionGroup>) {
+        int i = ga.used - 1;
+        while (i > 0 && row_tile < ga.matrix[i].tile_start) --i;
+        const auto& p = ga.matrix[i];
+        row_tile -= p.tile_start;
+        M = p.rows; A = p.a; B = static_cast<const __half*>(p.b); C = p.c;
+        sA = p.input_scale; oscale = p.output_scale;
+    }
+#endif
+    const int m0 = row_tile * kHM, n0 = blockIdx.x * kHN;
     const int Kp = TAIL ? (K + kHK - 1) / kHK * kHK : K;
     const int64_t planeB = TAIL ? (int64_t)((N + kHN - 1) / kHN * kHN) * Kp : (int64_t)N * K;
     const int jn = TAIL ? min(4, max(0, (N - n0 - wn * 32) / 8)) : 4;  // this warp's 8-column groups below N
@@ -731,6 +753,18 @@ void launch_hgemm2(int M, int N, int K, const __half* A, const __half* B, float 
 }
 
 }  // namespace
+
+#ifdef LOUP_STUDENT_LAUNCH_BENCH
+void launch_student_projection_group(const StudentProjectionGroup& p, cudaStream_t stream) {
+    const dim3 grid((p.cols + kHN - 1) / kHN, p.row_tiles);
+    if (p.cols % kHN || p.inner % kHK)
+        hgemm2f_kernel<1, 0, true><<<grid, 128, kHSmem, stream>>>(
+            0, p.cols, p.inner, nullptr, 0, nullptr, 0, nullptr, 0, p);
+    else
+        hgemm2f_kernel<1, 0, false><<<grid, 128, kHSmem, stream>>>(
+            0, p.cols, p.inner, nullptr, 0, nullptr, 0, nullptr, 0, p);
+}
+#endif
 
 // Two blocks (2 x 48 KB) per SM need the largest shared-memory carveout.
 void hgemm2_init() {
