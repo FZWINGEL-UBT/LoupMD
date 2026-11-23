@@ -3482,3 +3482,25 @@ At half duty (2,355 MHz, not limited) the first three rows read 25.2 / 21.1 / 22
 **List 32 B (POLAR-1 phase 2), rejected.** The fused 64 x 128 prototype takes 463 us on 13,608 x 512 x 512 against the row kernel's 394 us plus an 18 us exponent launch. The same idea inside the production row kernel (`polar-row-exp-fused`, two forms) reproduces the launch path's bits on 18 shapes and is slower on all but one: every column tile and K slice repeats the pass. Per product 13.8 -> 19.9 us (216 rows), 61.2 -> 76.0 us (1,944), 167.2 -> 197.3 us (5,832); POLAR-1-M NaCl216 in the MD loop 2.339 / 2.372 -> 2.633 / 2.661 ms/step (first form). Reverted.
 
 On the Ada the two-half GEMMs run within about 20% of the INT8 kernel at the same power, and no kernel-level item measured here is worth more than a tenth of a step.
+
+### 6.66 List 33: every switch again, rest against 300 K, the RTX A4000, and the owner's paper on path pruning (23 November 2026)
+
+List 33 was this session's own, all measurements (ledger `ideas-20261123-list33`). Ada and A4000 only.
+
+**Switches.** Each switch was run against today's defaults on the Ada for MH-1 NaCl216, OMAT-0 medium SrTiO3, OMOL-0 XL water216 and POLAR-1-M NaCl216 / NbCl5. No default flips: everything that is on is faster on, and nothing that is off gains more than 1%.
+
+**Closed.** The INT8 six-product GEMM with four lanes at once is `0.82-0.83` of the two-half kernels only when its planes are free; with its own pack it is `0.88-0.97` on small cells and `1.13-1.14` from 1,500 atoms. Without any `h2r_row_exp_kernel` launch POLAR-1 NaCl216 runs at `0.971-0.976`, so producer-written exponents are not built; the row kernel's split-K stays (`1.01-1.09` off).
+
+**Rest against 300 K** (ledger `meas-rest-vs-300k`). The censuses so far profiled the ideal cell at rest. In the benchmark's 300 K state OMAT-0 medium SrTiO3 takes 8.65 ms against 7.41, MH-1 SrTiO3 26.18 against 24.32; the GEMM-bound cases move 1-2%. The difference is the layer-1 conv: the forward changes from the paired variant (1.32 ms) to R5 (2.05 ms) and the backward grows from 2.91 to 3.22 ms. At 300 K the conv pair is 61% of OMAT-0 medium's step.
+
+**RTX A4000** (`sm_86`). The Ada's defaults, forced by environment, against today's path there: MH-1 NaCl216 `0.632`, MH-1 SrTiO3 `0.706`, OMAT-0 medium SrTiO3 `0.891`, OMOL-0 XL water216 `0.600`, POLAR-1-M `0.639` / `0.634`, POLAR-1-L NaCl216 `0.628`. A library with compute capability 8.6 beside 8.9 in the four device tests is built; its gates and the library A/B were running at this commit, so nothing is adopted yet.
+
+**The owner's paper** (arXiv:2611.21683, tensor-product paths that cancel under site symmetry and importance-ranked path pruning in NequIP; ledger `meas-tp-path-pruning`). LoupMD has the exact form already: paths behind exactly-zero projections are not run (MP-0 medium), dead channels and zero blocks are left out. The rest was measured in float64 torch MACE on the gate's frames:
+
+- The paper's exact cancellation holds in MACE on the ideal lattice (ideal SrTiO3: 10 of 14 paths contribute exactly nothing) and is gone at the gate's 0.05 A rattle.
+- No path fits the 3x rule: the cheapest costs 4.5-17 meV/A rms on the oxide set (35x the float32 yardstick at the least) and 42-85 meV/A on organics. Three paths (a third of the paper's operation proxy) cost 12-31 meV/A, eight of fourteen 52-196 meV/A.
+- The one mask the engine has kernels for (the last layer's output degree 0 only) makes OMAT-0 medium, MP-0b3, MPA-0, MatPES and OFF23-M `2.4x-2.5x` faster and moves the forces by 52-204 meV/A (7-23%).
+- Ranked (path, channel) columns are about twice as good a unit as paths (30% of them off: 15-25 meV/A on the oxide set, 60%: 45-67 meV/A, on frames the ranking never saw; 20-40x better than random masks), but they need conv kernels that do not exist, and nothing at that level fits the 3x rule either.
+- For scale, sibling foundation models differ by 33-53 meV/A on the same frames.
+
+Nothing is adopted. A lossy reduced model would be a different product from the engine's 3x contract.
