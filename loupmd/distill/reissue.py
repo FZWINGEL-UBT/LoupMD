@@ -18,6 +18,7 @@ from tempfile import TemporaryDirectory
 import numpy as np
 from ase.io.extxyz import read_xyz
 
+from loupmd import config
 from .curve import _Inventory
 from .train import file_digest
 
@@ -29,6 +30,17 @@ FROZEN = {
     'valid': (30, '13cef8d03e7e79d4d7d6c919d7f14cac26834ad6aec5f9f613ddc114b98a7924'),
     'teacher-test': (60, 'd0bc3eb8a27673c6611b13a26e861f1746ccaf8b7a655cb584cd4b205b783f0d'),
 }
+NATIVE_AGREEMENT_LIMITS = {
+    'energy_abs_eV_atom': config.GATE_ENERGY_FLOOR_MEV_PER_ATOM / 1000,
+    'force_max_abs_eV_A': config.GATE_FORCE_FLOOR_EV_PER_A,
+    'stress_max_abs_eV_A3': config.GATE_STRESS_FLOOR_EV_PER_A3,
+}
+
+
+def native_paths_agree(delta):
+    """Native repeatability uses the absolute gate floors, not stock FP32's error."""
+    return isinstance(delta, dict) and all(
+        type(delta.get(k)) in (int, float) and 0 <= delta[k] <= limit for k, limit in NATIVE_AGREEMENT_LIMITS.items())
 
 
 def _receipt(raw, split, library_sha):
@@ -61,6 +73,8 @@ def _issue_frame(source, row, library_sha):
         result = row[kind]
         if result.get('passed') is not True or result.get('failed') != [] or result.get('atoms') != n:
             raise ValueError(f'{row["frame_id"]}: {kind} did not pass')
+    if not native_paths_agree(row.get('sequential_vs_fresh')):
+        raise ValueError(f'{row["frame_id"]}: sequential vs fresh exceeds native agreement limits or is missing')
     labels = row['labels']
     values = []
     for key, shape in [('REF_energy', ()), ('REF_forces', (n, 3)), ('REF_stress', (3, 3))]:

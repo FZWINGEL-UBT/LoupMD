@@ -41,7 +41,9 @@ def inputs(tmp_path, monkeypatch):
             labels = {'REF_forces': (a.positions * np.pi).tolist(), 'REF_energy': -.01234567891234,
                       'REF_stress': (np.eye(3) / 7).tolist()}
             passed = {'passed': True, 'failed': [], 'atoms': len(a)}
-            rows.append(dict(frame_id=a.info['frame_id'], labels=labels, sequential=passed, fresh=passed))
+            rows.append(dict(frame_id=a.info['frame_id'], labels=labels, sequential=passed, fresh=passed,
+                             sequential_vs_fresh=dict(energy_abs_eV_atom=1e-9, force_max_abs_eV_A=1e-7,
+                                                      stress_max_abs_eV_A3=1e-9)))
         splits[split] = (2, digest(path))
         report = dict(schema='loupmd.frozen-cell-gate.v1', passed=True, frames=2, source_sha256=digest(path),
                       teacher_head='omat_pbe', teacher_sha256=reissue.TEACHER_SHA256, library_version='corrected',
@@ -117,6 +119,20 @@ def test_bad_final_split_does_not_release_partial_data(inputs, fault):
         issue(inputs)
     assert not out.exists()
     assert not list(out.parent.glob('.base-labels-v2.*'))
+
+
+@pytest.mark.parametrize('quantity,error', [('energy_abs_eV_atom', 2e-5),
+                                           ('force_max_abs_eV_A', 2e-5),
+                                           ('stress_max_abs_eV_A3', 2e-7)])
+def test_individual_stock_passes_do_not_excuse_history_dependence(inputs, quantity, error):
+    _, reports, _, out = inputs
+    p = reports / 'valid.json'
+    report = json.loads(p.read_text())
+    report['rows'][1]['sequential_vs_fresh'][quantity] = error
+    p.write_text(json.dumps(report))
+    with pytest.raises(ValueError, match='sequential vs fresh'):
+        issue(inputs)
+    assert not out.exists()
 
 
 def test_changed_sampling_cell_requires_investigation_not_new_labels(inputs, monkeypatch):

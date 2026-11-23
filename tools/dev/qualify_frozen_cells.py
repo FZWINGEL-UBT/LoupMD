@@ -17,6 +17,7 @@ import numpy as np
 import loupmd as lm
 from loupmd import _core, config
 from loupmd.distill.frames import _check_geometry, _labels
+from loupmd.distill.reissue import NATIVE_AGREEMENT_LIMITS, native_paths_agree
 from loupmd.models import sha256_of
 from loupmd.validate import gate, references
 
@@ -105,7 +106,9 @@ def qualify(source, checkpoint):
                 mace_version=mace_version, torch_version=torch_version, reference_device=references.device_tag('cuda'),
                 rule=dict(factor=config.GATE_FACTOR, energy_floor_meV_per_atom=config.GATE_ENERGY_FLOOR_MEV_PER_ATOM,
                           force_floor_eV_per_A=config.GATE_FORCE_FLOOR_EV_PER_A, stress_floor_eV_per_A3=config.GATE_STRESS_FLOOR_EV_PER_A3),
-                passed=all(r['sequential']['passed'] and r['fresh']['passed'] for r in rows), frames=len(rows), rows=rows)
+                native_agreement_limits=NATIVE_AGREEMENT_LIMITS,
+                passed=all(r['sequential']['passed'] and r['fresh']['passed'] and
+                           native_paths_agree(r['sequential_vs_fresh']) for r in rows), frames=len(rows), rows=rows)
 
 
 def main():
