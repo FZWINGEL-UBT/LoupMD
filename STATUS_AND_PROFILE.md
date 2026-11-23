@@ -3609,3 +3609,5 @@ The teacher-test gate passed **60/60** for all three sets of values (fresh, reus
 | Own-student target (2 replicas, 300 K, seed 3101) | 8.860; 1.579% | 1.622 / 1.452 / 1.549 | 45.66 / 56.10 | 0.0284 | 0.0659 |
 
 Round-0 student/teacher force-RMSE ratio 1.0068. `v2-l4-s64l0-fp32-seed1-r2/{release/gate.json,teacher-score.json,fidelity.json}` under the WSL campaign root. No claim for later closed-loop rounds, MD observables, or the two-FP64-seed spread.
+
+**5060 Ti only — corrected FP32 oxide static fidelity.** Relaxed lattice axes pass the 0.2% tolerance (largest deviation 0.09301%). At both 0.010 and 0.005 Å central displacements, **8 of 960** sorted phonon frequencies exceeded `max(3%, 0.1 THz)`; worst error was 1.73 times its limit. Thus the force/energy label pass does **not** qualify the full §4 fidelity bar. Compare with matched FP64 students before attributing this to dtype. Reports: `~/loup-s-stage0/sto320/observables-v2-fp32-r2/static{.01,.005}.json`.
