@@ -58,3 +58,36 @@ def test_unreachable_status_cannot_run_past_paid_deadline(monkeypatch):
     with pytest.raises(TimeoutError, match='job deadline'):
         colab_distill._wait_for_exit(poll, 450.)
     assert now[0] == 450.
+
+
+@pytest.mark.parametrize('error', [subprocess.TimeoutExpired('exec', 90), colab_distill._ConnectionLost('lost')])
+def test_completed_setup_survives_lost_reply_without_resubmitting(tmp_path, error):
+    # A non-repeatable action exposes a duplicate. The receipt is written on the
+    # remote side, not by the test's download implementation.
+    calls = []
+
+    def execute(code, **kwargs):
+        calls.append('exec')
+        exec(code, {'Path': type(tmp_path)})
+        raise error
+
+    def download(remote, local):
+        local.write_bytes(type(tmp_path)(remote).read_bytes())
+
+    colab_distill._confirmed_setup(
+        f'Path({str(tmp_path / "started")!r}).touch(exist_ok=False)',
+        tmp_path / 'receipt', str(tmp_path), execute, download,
+    )
+    assert (tmp_path / 'started').is_file()
+    assert calls == ['exec']
+
+
+def test_unconfirmed_setup_cannot_advance_to_next_upload(tmp_path):
+    def execute(code, **kwargs):
+        raise subprocess.TimeoutExpired('exec', 90)
+
+    def download(remote, local):
+        local.write_text('receipt for a different operation')
+
+    with pytest.raises(RuntimeError, match='receipt'):
+        colab_distill._confirmed_setup('', tmp_path / 'receipt', '/content/loup-s', execute, download)

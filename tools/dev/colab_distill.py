@@ -50,6 +50,28 @@ def cli(*args, retry=True, timeout=300):
         time.sleep(5)
 
 
+def _confirmed_setup(body, local_receipt, directory, execute, download):
+    """Recover a lost exec reply over Colab's independent file channel."""
+    nonce = uuid.uuid4().hex
+    receipt = f'{directory}/.ok-{nonce}'
+    code = body + f'\nPath({receipt!r}).write_text({nonce!r})'
+    for attempt in range(2):
+        try:
+            execute(code, retry=False, timeout=90)
+            return
+        except (subprocess.TimeoutExpired, _ConnectionLost):
+            local_receipt.unlink(missing_ok=True)
+            try:
+                download(receipt, local_receipt)
+            except (subprocess.TimeoutExpired, RuntimeError):
+                if attempt:
+                    raise
+                continue  # only mkdir, checked assembly and guarded launch may be replayed
+            if local_receipt.read_text() != nonce:
+                raise RuntimeError('wrong Colab setup receipt')
+            return
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--gpu', required=True, choices=('L4', 'T4'))
@@ -81,12 +103,16 @@ def main():
                 raise RuntimeError(result)
             return result
 
+        def setup(body):
+            _confirmed_setup(body, Path(tmp) / 'receipt', REMOTE, remote,
+                             lambda src, dst: cli('download', '-s', session, src, dst, timeout=45))
+
         try:
             # If the response is lost, do not request a second allocation; finally targets only this unique name.
             print(cli('new', '-s', session, '--gpu', args.gpu, retry=False, timeout=450), flush=True)
             record.update(allocated=time.time(), usage_during=cli('usage'))
             save()
-            remote(f'Path({REMOTE!r}).mkdir(exist_ok=True)\nPath({(REMOTE + "/out")!r}).mkdir(exist_ok=True)')
+            setup(f'Path({REMOTE!r}).mkdir(exist_ok=True)\nPath({(REMOTE + "/out")!r}).mkdir(exist_ok=True)')
             for file in files:
                 parts = []
                 checksum = hashlib.sha256()
@@ -100,18 +126,20 @@ def main():
                 digest = checksum.hexdigest()
                 # Leave the pieces until the next upload overwrites them: repeating assemble after a lost
                 # response must still work. The VM is released at the end of the job.
-                remote(Path(transfer.__file__).read_text()
-                       + f'\nassemble({parts!r}, {REMOTE + "/" + file.name!r}, {digest!r})')
+                setup(Path(transfer.__file__).read_text()
+                      + f'\nassemble({parts!r}, {REMOTE + "/" + file.name!r}, {digest!r})')
                 record['input_sha256'][file.name] = digest
                 save()
             # Exclusive launch marker makes replay after a lost response idempotent.
             script = 'bash "$1"; rc=$?; echo "$rc" >exit.part; mv exit.part exit; exit "$rc"'
-            remote(f'''os.chdir({REMOTE!r})
+            setup(f'''os.chdir({REMOTE!r})
 if not Path("started").exists():
     with open("started", "x"), open("out/job.log", "ab") as log:
         proc = subprocess.Popen(["bash", "-c", {script!r}, "job", {args.job.name!r}], start_new_session=True,
                                 stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT)
-        Path("pid").write_text(str(proc.pid))''')
+        Path("pid").write_text(str(proc.pid))
+if not Path("pid").is_file():
+    raise RuntimeError("incomplete detached launch; refusing to start twice")''')
             def poll(timeout):
                 result = remote(f'os.chdir({REMOTE!r}); print("LS0_RC=" + (Path("exit").read_text().strip() if Path("exit").exists() else "running"))',
                                 retry=False, timeout=timeout)
