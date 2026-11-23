@@ -1,6 +1,7 @@
 # Loup-S: a per-system student architecture built from the engine's own measurements
 
 Stage 0 implementation status: the approved design baseline follows. Engine sampling, two-phase stress training, gated export and the label report have run end to end on SrTiO3. The four-epoch T4 smoke passed the engine gate but failed teacher fidelity; it is not a baseline. Full-length training has started. Section 5.1 now identifies the historical students' radial input. SrTiO3 teacher NPT spread, NVE timestep and deterministic reference checks are in STATUS §6.70. No §6.5 timing estimate has yet been replaced. Run record: `plans/loup-s-stage0.md`.
+Training backend decision: Stage 0 stays on mace-torch. Section 10 records the likely move to an in-house training backend before Stage 1.
 
 Original design status (23 November 2026, before implementation): the owner approved the direction and the outline of sections 4 to 10 on
 23 November 2026. At approval, nothing here had been built. Every original figure is either quoted from `OPTIMISATION_LEDGER.md` or
@@ -455,7 +456,7 @@ The layer-0 launches (1 and 3) are therefore benched first in Stage 2, at 10 col
    student reaches the same bar, which is a speed lever that costs no kernel work. The larger sets add independent
    configurations, not more steps of the same run: more temperatures, isotropic and shear strains, and a stride
    between frames longer than the slowest decorrelation time that matters for the observables.
-2. **Train.** mace-torch with the student's blocks, float64, on energies, forces and, for periodic systems, stress:
+2. **Train.** Stage 0 uses `mace-torch==0.3.16` to train the student, initially in float64, on energies, forces and, for periodic systems, stress:
    the bar holds lattice parameters and densities under NPT, and a model fitted to forces alone can carry a pressure
    offset. The teacher's stress comes with its forces. About 2-3 h per student on an L4 (list 15: 1 h 46 min and
    3 h 22 min, without stress). Float32 is usually twice as fast by mace-torch's documentation and replaces float64
@@ -619,8 +620,10 @@ Effort figures are rough.
 - Exit: section 6.5's first two columns measured; falsifiers 1, 2 and 6 answered; rows in the ledger and the status
   file.
 
+**Between Stages 0 and 1: training backend.** We expect to build our own training backend before the Stage 1 ablations. This is the likely direction, not a Stage 0 deliverable. Profile a full mace-torch epoch on the frozen Stage 0 data to decide what to replace. Keep mace-torch as the reference: on identical batches and weights, compare energies, forces, stress, parameter gradients and one optimizer update. Judge the speedup by time and compute units to reach the same held-out fidelity, not by inference speed. If the new backend is not ready, Stage 1 can start on mace-torch.
+
 **Stage 1: the blocks in torch (about two to three weeks, mostly training time).**
-- 1a, accuracy in torch only: the student's interaction blocks for mace-torch, and the ablations of section 5.2 with
+- 1a, accuracy before export: train the student's interaction blocks using the selected backend, and run the ablations of section 5.2 with
   the per-atom-energy loss, about 31 runs on one seed on SrTiO3, each measured on Stage 0's evaluation set. No
   exporter work yet. Then, since which paths and channels a model can drop depends on the site symmetry (the owner's
   paper, arXiv:2611.21683; on the ideal lattice Sr and Ti keep scalars only, `meas-tp-path-pruning`), the ablations
