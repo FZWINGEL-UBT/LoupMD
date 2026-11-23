@@ -1,7 +1,7 @@
 # Loup-S: a per-system student architecture built from the engine's own measurements
 
-Stage 0 implementation status: engine sampling, two-phase stress training, gated export and the label report have run end to end on SrTiO3. The four-epoch smoke is not a baseline. Both FP64 seed-1 students passed the 3× engine gate; round-0 force errors on their own trajectories were 13.18% (`s64l0`) and 12.65% (`s64r8`), versus the 2% target. This is before closed-loop retraining, not an answer to falsifier 1. Section 5.1 identifies the historical radial input; STATUS §6.70 records the measurements, including teacher NPT spread, NVE timestep and deterministic checks. No §6.5 timing estimate has been replaced. Run record: `plans/loup-s-stage0.md`.
-Label-integrity hold: a sequence-dependent native teacher discrepancy was reproduced on frozen validation data. The first-seed scores above are against the original labels, not newly certified teacher accuracy. No speed estimate or fidelity threshold has been changed; see STATUS §6.70 before using these baselines.
+Stage 0 implementation status: engine sampling, two-phase stress training, gated export and the label report have run end to end on SrTiO3. Both FP64 seed-1 students passed the 3× engine gate; round-0 force errors on their own trajectories were 13.18% (`s64l0`) and 12.65% (`s64r8`) against the original labels, versus the 2% target. These are not closed-loop results. **§6.5 now reports the two measured RTX 4000 Ada baselines**, not 5060 Ti timings; generic/fused targets remain estimates. See STATUS §6.70 and `plans/loup-s-stage0.md`.
+Label-integrity hold: a sequence-dependent native teacher discrepancy was reproduced on frozen validation data. The first-seed scores are not certified teacher accuracy. The timing measurements describe the archived bundles, not an adoption. Fidelity thresholds are unchanged.
 Training backend decision: Stage 0 stays on mace-torch. Section 10 links the proposed pre-Stage-1 backend, its reference update and its adoption criteria; no training speedup is claimed.
 
 Original design status (23 November 2026, before implementation): the owner approved the direction and the outline of sections 4 to 10 on
@@ -423,21 +423,31 @@ has not measured it. A rough count for OMAT-0 medium, with each product's gradie
 layer 0's gradient buffers placed in layer 1's dead ones, gives about 58 kB of node buffers for today's 85, or about
 71 kB per atom in all. The data flow of the density kinds needs checking before that count is relied on.
 
-### 6.5 Estimated step
+### 6.5 Measured baselines and estimated targets
 
-SrTiO3, 5,000 atoms, 5 A (about 220,000 active edges), 5060 Ti, ms per step. The rates are section 3's, taken from
-different builds, cards and temperatures, with FP32 GEMMs at 12 TFLOP/s (`meas-tc-overlap-ozaki-locality`). These are
-estimates; Stage 0 replaces the first column with a census.
+SrTiO3, 5,000 atoms, 5 Å; ms per MD step. **Measured, RTX 4000 Ada only:** unprofiled sustained steps for each seed-1 bundle; separate 16-step Nsight Systems census at 300 K. The census rows sum kernel durations and include simultaneous streams; they do **not** add to the wall time. The trace identifies dedicated kernels but not callers of the shared dense kernels. Pool the latter rather than assigning them to `C0`, lifts or readouts from launch shape alone.
 
-| Piece | `s64l0` | `s64r8` | Loup-S, generic path | Loup-S fused (target) |
-| --- | --- | --- | --- | --- |
-| Layer 0 edge kernels | 0.37 | 0.37 | 0.37 | 0.25-0.30 |
-| `C0` and its transpose | 0.33 (K 195) | 0.05 (K 27) | 0.05 (K 27) | in kernel |
-| Layer 1 convolution pair | 0.52 (64 channels) | 0.52 | 0.13 (16 channels) | 0.10 |
-| Lift / message maps | 0.11 | 0.11 | 0.03 | in kernel |
-| Products and readouts | 0.33 | 0.33 | 0.33 | 0.10-0.15 |
-| Compaction, rebuild, integrator | 0.08 | 0.08 | 0.08 | 0.08 |
-| **Step** | **1.7 (0.35 us per atom)** | **1.5 (0.29)** | **1.0 (0.20)** | **0.55-0.65 (0.11-0.13)** |
+| Measured piece (Ada only) | `s64l0` | `s64r8` |
+| --- | ---: | ---: |
+| Layer 0 edge kernels (`first_fwd` / `first_bwd_edge`) | 0.487 | 0.319 |
+| Layer 1 convolution pair (`gconv`) | 0.777 | 0.776 |
+| All dense GEMMs, including `C0` and its transpose | 1.146 | 0.473 |
+| Dedicated product / fused readout kernels (`gprod`) | 0.241 | 0.243 |
+| Remaining kernels (compaction, rebuild, integrator and support) | 0.095 | 0.094 |
+| Kernel union (overlap counted once) | 2.196 | 1.668 |
+| **Unprofiled step** | **2.298 (0.460 µs/atom)** | **1.770 (0.354 µs/atom)** |
+
+**Estimates only, 5060 Ti design model:** §3 rates from different builds, cards and temperatures; FP32 GEMMs at 12 TFLOP/s. The design comparison below uses its original **estimated** `s64r8` baseline of 1.5 ms, **not** the measured Ada time. No local timing or cross-card speedup is implied.
+
+| Piece | Loup-S, generic path | Loup-S fused (target) |
+| --- | ---: | ---: |
+| Layer 0 edge kernels | 0.37 | 0.25–0.30 |
+| `C0` and its transpose | 0.05 (K 27) | in kernel |
+| Layer 1 convolution pair | 0.13 (16 channels) | 0.10 |
+| Lift / message maps | 0.03 | in kernel |
+| Products and readouts | 0.33 | 0.10–0.15 |
+| Compaction, rebuild, integrator | 0.08 | 0.08 |
+| **Estimated step** | **1.0** | **0.55–0.65** |
 
 The fused column's in-kernel maps are counted in its kernels' rows. The generic path's 16-channel figure scales the
 128-channel rate by the width, which the under-filled blocks of section 6.1 will not reach on today's kernels.
