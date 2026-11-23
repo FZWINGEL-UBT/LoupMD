@@ -3517,3 +3517,7 @@ List 34 went through the device tests that still named single GPUs (ledger `idea
 ### 6.68 List 35: the evaluate path's mapped staging on the Ada and the A4000 (23 November 2026)
 
 `loup_evaluate`'s upload and results by kernels on a mapped staging area (list 24, a default on the 5060 Ti only) is now the default on compute capability 8.9 and 8.6 too (ledger `ideas-20261123-list35`). On native Linux the two copy nodes cost 3-6 us a call: OFF23-S water216 `0.972` (Ada) / `0.982` (A4000) of a synchronous evaluate, OMAT-0 medium NaCl216 `0.984` / `0.980`, large cells unchanged, none slower. Gates with it on pass on both GPUs. POLAR-1's own switches, screened against the new A4000 defaults, show no flip. No default of the tuned set names the 5060 Ti alone any more, except the pruned R5 forward's carveout (MP-0 medium, 18 us).
+
+### 6.69 List 36: small cells after the lane-group kernels (23 November 2026)
+
+A 300 K census of water216 and NaCl216 on the Ada with the lane-group kernels on: the rebuild kernels are 5% of OFF23-S water216's step (54 rebuilds in 256 steps) and 2% of OFF23-M's; the time is in the 8-24 GEMM launches a step and the conv pair. The two-half switches, screened for the first time on products of a few hundred rows, hold there on both GPUs (`LOUP_LIN_HALF=0` costs 10-11% on the Ada and 6-7% on the A4000; the thresholds sit on flat stretches). Nothing adopted (ledger `ideas-20261123-list36`).
