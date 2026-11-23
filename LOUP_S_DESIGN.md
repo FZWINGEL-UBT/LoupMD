@@ -1,7 +1,7 @@
 # Loup-S: a per-system student architecture built from the engine's own measurements
 
 Stage 0 implementation status: the approved design baseline follows. Engine sampling, two-phase stress training, gated export and the label report have run end to end on SrTiO3. The four-epoch T4 smoke passed the engine gate but failed teacher fidelity; it is not a baseline. Full-length training has started. Section 5.1 now identifies the historical students' radial input. SrTiO3 teacher NPT spread, NVE timestep and deterministic reference checks are in STATUS §6.70. No §6.5 timing estimate has yet been replaced. Run record: `plans/loup-s-stage0.md`.
-Training backend decision: Stage 0 stays on mace-torch. Section 10 records the likely move to an in-house training backend before Stage 1.
+Training backend decision: Stage 0 stays on mace-torch. Section 10 links the proposed pre-Stage-1 backend, its reference update and its adoption criteria; no training speedup is claimed.
 
 Original design status (23 November 2026, before implementation): the owner approved the direction and the outline of sections 4 to 10 on
 23 November 2026. At approval, nothing here had been built. Every original figure is either quoted from `OPTIMISATION_LEDGER.md` or
@@ -620,7 +620,7 @@ Effort figures are rough.
 - Exit: section 6.5's first two columns measured; falsifiers 1, 2 and 6 answered; rows in the ledger and the status
   file.
 
-**Between Stages 0 and 1: training backend.** We expect to build our own training backend before the Stage 1 ablations. This is the likely direction, not a Stage 0 deliverable. Profile a full mace-torch epoch on the frozen Stage 0 data to decide what to replace. Keep mace-torch as the reference: on identical batches and weights, compare energies, forces, stress, parameter gradients and one optimizer update. Judge the speedup by time and compute units to reach the same held-out fidelity, not by inference speed. If the new backend is not ready, Stage 1 can start on mace-torch.
+**Between Stages 0 and 1: training backend.** We expect to build our own training backend before the Stage 1 ablations. This is not a Stage 0 deliverable. The [training-engine design](plans/loup-s-training-engine.md) starts with a whole-epoch mace-torch profile on frozen Stage 0 data, then replaces one measured bottleneck. It specifies the reference force/stress parameter gradients, optimizer update, checkpoint branches and time/CU-to-fidelity decision. Stage 1 can start on mace-torch if the candidate is not ready.
 
 **Stage 1: the blocks in torch (about two to three weeks, mostly training time).**
 - 1a, accuracy before export: train the student's interaction blocks using the selected backend, and run the ablations of section 5.2 with
