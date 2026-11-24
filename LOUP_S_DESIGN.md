@@ -14,6 +14,7 @@ All four corrected FP64 baselines have now run the full schedule and passed the 
 The wide FP64 seed-1 phonon pass does not replicate: seed 2 misses six of 960 frequencies at both displacement sizes. The same six indices also miss for centered FP32. Wide seed 2 misses 126/420 RDF bins, 5/9 displacements and 4/4 strict NVE bounds. None of the four corrected FP64 baselines passes the full §4 MD bar; see STATUS §6.70.
 Closed-loop round 1 (§7.4): the wide FP64 child passes native export and both target label bars; fresh student-visited/frozen teacher force RMSE ratio 0.99697. Falsifier 1 requires round 2; no round-1 convergence claim.
 First channel variant: the cold 32-channel FP64 seed-1 model passes the native export and own-trajectory label bar. It trains 1.69× faster than matched width 64 on L4, with higher force RMSE on both common oxide sets but lower p99.9 on the hard set. This is training throughput, not an inference or MD qualification (§10; STATUS §6.70).
+Hardware and ownership update (24 November): remaining Stage 0 fits may use guarded, unoccupied workstations as well as account-1 L4s. This session no longer uses the local 5060 Ti, including for gates. The owner assigned the training-engine work to another session; it does not replace the stock Stage 0 trainer.
 
 Original design status (23 November 2026, before implementation): the owner approved the direction and the outline of sections 4 to 10 on
 23 November 2026. At approval, nothing here had been built. Every original figure is either quoted from `OPTIMISATION_LEDGER.md` or
