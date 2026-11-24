@@ -78,17 +78,25 @@ gates in that form. Most are read when an engine is made; the MD-loop switches a
 | `LOUP_GENERIC` | any | ignored (0.0.1: `0` selected the kernels specialised to MACE-OMAT-0 medium, which were retired with their switches `LOUP_SPLINE_VARIANT`, `LOUP_WPRIME_THREADS`, `LOUP_WPRIME_RCV` and `LOUP_M1_CHUNK`) | `loupmd/bundles.py` |
 | `LOUP_REORDER` | `0`, `1` | atom reordering off or on | `src/engine.cu` |
 | `LOUP_ROW_SORT` | `global` | every neighbour row sorted in global scratch, the path of rows over 4,096 edges | `src/engine.cu` |
-| `LOUP_NB_GROUPS` | `0`, `1` | the lane-group neighbour-list kernels off, or on any GPU (default: on for `sm_120` and compute capability 8.0) | `src/engine.cu` |
-| `LOUP_POLAR_FOLD` | `0`, `1` | MACE-POLAR-1: `0`: the unfolded SCF and electron-energy GEMMs; `1`: the fold on GPUs other than `sm_120` and compute capability 8.0 | `src/polar.cu` |
-| `LOUP_CHAIN_FOLD` | `0`, `1` | `0`: whole systems of multi-layer models on the generic kernels without the skip-chain fold (tiled systems never fold); `1`: the fold on GPUs other than `sm_120` and compute capability 8.0 | `src/generic.cu` |
-| `LOUP_SPECIES_TABLES` | `0`, `1` | `0`: layer 0's species-only GEMMs instead of the per-species tables (OMOL-0, MH-1); `1`: the tables on GPUs other than `sm_120` and compute capability 8.0 | `src/generic.cu` |
+| `LOUP_NB_GROUPS` | `0`, `1` | the lane-group neighbour-list kernels off, or on any GPU (default: on for compute capability 12.0, 8.9, 8.6 and 8.0) | `src/engine.cu` |
+| `LOUP_POLAR_FOLD` | `0`, `1` | MACE-POLAR-1: `0`: the unfolded SCF and electron-energy GEMMs; `1`: the fold on GPUs other than those of compute capability 12.0, 8.9, 8.6 and 8.0 | `src/polar.cu` |
+| `LOUP_CHAIN_FOLD` | `0`, `1` | `0`: whole systems of multi-layer models on the generic kernels without the skip-chain fold; `1`: the fold on GPUs other than those of compute capability 12.0, 8.9, 8.6 and 8.0 (`LOUP_TILE_FOLD=0`: not in tiled calls) | `src/generic.cu` |
+| `LOUP_SPECIES_TABLES` | `0`, `1` | `0`: layer 0's species-only GEMMs instead of the per-species tables (OMOL-0, MH-1, POLAR-1); `1`: the tables on GPUs other than those of compute capability 12.0, 8.9, 8.6 and 8.0 | `src/generic.cu` |
 | `LOUP_CONV_FWD_VARIANT` | `0`, `1`, `2` | forces the generic conv forward variant | `src/generic.cu` |
 | `LOUP_CONV_TUNE` | `0`, `1` | per-system timing of the conv forward variants off, or on for any GPU | `src/generic.cu` |
 | `LOUP_CONV_PRUNE` | `0` | keeps every conv path of a layer whose higher-degree projections are exactly zero (MACE-MP-0 medium's second layer), instead of the pruned paths and the scalar-only product | `src/generic.cu` |
 | `LOUP_LIN_COMPACT` | `0` | the dense projections and product kernels instead of a layer's live channels (MACE-MPtrj-2022.9, MACE-MP-0 medium's first layer) | `src/generic.cu` |
 | `LOUP_SENDER_BWD` | `0` | the receiver-owned backward of a pruned conv layer on whole systems too (tiles and open domains always run it) | `src/generated_generic.cu` |
 | `LOUP_GATE_FUSE`, `LOUP_GATE_FUSE_FWD` | `0` | the gate kernels of gated layers (MH-1, OMOL-0, POLAR-1) instead of the gate in the neighbouring GEMM's epilogue, backward / forward | `src/engine.cu` |
-| `LOUP_GATE_FWD_L1` | `0`, `1`, `2` | the gated store of later gated layers in their projections' epilogue: `0` off, `1` with the own SGEMM forced for those projections above 1,600 rows and none fused at or below (the default on `sm_120`), `2` only where the autotune picked it; it needs the own-SGEMM extensions (`LOUP_OWN_EXT`) | `src/engine.cu` |
+| `LOUP_GATE_FWD_L1` | `0`, `1`, `2` | the gated store of later gated layers in their projections' epilogue: `0` off, `1` with the own SGEMM forced for those projections above 1,600 rows and none fused at or below (the default on compute capability 12.0, 8.9 and 8.6), `2` only where the autotune picked it; it needs the own-SGEMM extensions (`LOUP_OWN_EXT`) | `src/engine.cu` |
+| `LOUP_W2T_HALF`, `LOUP_W2F_HALF`, `LOUP_LIN_HALF` | `0`, `1` | the two-half FP16 tensor-core GEMMs of the reverse projections, the forward projections and the plain linear maps (each operand split into two binary16 halves, FP32 accumulation) off, or on any GPU; default: on for compute capability 12.0, 8.9, 8.6 and 8.0. A system whose operands leave binary16's range falls back to the FP32 GEMMs by itself. `LOUP_LIN_HALF` does not apply to MACE-POLAR-1 | `src/generic.cu` |
+| `LOUP_LIN_HALF_PARTS`, `LOUP_LIN_HALF_EXP`, `LOUP_W2F_HALF_EXP`, `LOUP_LIN_HALF_SPECIES_ROWS`, `LOUP_LIN_HALF_FOLD_TILES`, `LOUP_H2_SPLITK` | integers | which products run on the two-half kernel (a bit mask), the split exponents, the row count from which a species' rows take it, the fold's tile count, and `0` for no split-K on small, long products | `src/generic.cu`, `src/engine.cu` |
+| `LOUP_RES_BWD` | `0` to `3` | how the residual connection's backward is formed (default `3`: one product per degree) | `src/generic.cu` |
+| `LOUP_GATE_FWD_L0` | `1`, `2` | layer 0's gated store in its projection's epilogue, as `LOUP_GATE_FWD_L1` | `src/engine.cu` |
+| `LOUP_GATE_FWD_TILED`, `LOUP_SWEEP_ZERO`, `LOUP_TILE_FOLD` | `0` | tiled calls: the gated store in the last-layer sweep off; sweeps zero every buffer instead of their accumulators; no skip-chain fold | `src/generic.cu`, `src/engine.cu` |
+| `LOUP_EVAL_MAPPED` | `0`, `1` | `loup_evaluate`'s upload and results through copy nodes (`0`), or staged without them on any GPU; default: on for compute capability 12.0, 8.9, 8.6 and 8.0 | `src/engine.cu` |
+| `LOUP_POLAR_H2` | `0`, `1` | MACE-POLAR-1: the long-range GEMMs on the per-row two-half kernel off, or on any GPU; default: on for compute capability 12.0, 8.9, 8.6 and 8.0. `LOUP_POLAR_H2_MINM` sets the row count from which a product takes it | `src/generic.cu`, `src/polar.cu` |
+| `LOUP_POLAR_KSPLIT`, `LOUP_POLAR_WBLK` | integer; `0` | MACE-POLAR-1: the k passes' blocks per multiprocessor (default 4); `0`: the strided weight slices instead of contiguous blocks | `src/polar.cu` |
 | `LOUP_POLAR_HFOLD` | `0` to `3` | MACE-POLAR-1: the long-range hidden fold per degree (bit l - 1: degree l); `0`: every layer's output formed | `src/generic.cu` |
 | `LOUP_POLAR_ZBLK` | `0` | MACE-POLAR-1: runs the GEMMs of exactly-zero weight blocks, which are skipped by default | `src/polar.cu` |
 | `LOUP_JIT` | `0`, `1` | the run-time compiler: `0` off; unset: conv layers whose width the library has no instance for, and products it was not built with, are compiled when a bundle is loaded, where NVRTC (`libnvrtc.so`) is found (else the built-in kernels run); `1` also the first layer's kernels | `src/jit.cu` |
@@ -101,7 +109,7 @@ gates in that form. Most are read when an engine is made; the MD-loop switches a
 | `LOUP_HYBRID_CUBIN` | path | loads this GEMM cubin instead of the shipped one | `src/engine.cu` |
 | `LOUP_LR_HYBRID` | `1` | the hybrid cubin for long-range models too | `src/engine.cu` |
 | `LOUP_FORCE_TC` | `1` | every GEMM the tensor-core cubin can take runs on it; no plans are read or stored | `src/engine.cu` |
-| `LOUP_OWN_EXT` | `0`, `1` | the `sm_120` own-SGEMM extensions off, or on any GPU | `src/engine.cu` |
+| `LOUP_OWN_EXT` | `0`, `1` | the own-SGEMM extensions off, or on any GPU (default: on for compute capability 12.0, 8.9 and 8.6) | `src/engine.cu` |
 | `LOUP_DEBUG_HIDE_KERNEL` | signature | hides the library's own kernels of that signature, so a plugin can be tested | `src/generic.cu` |
 | `LOUP_TILE_GEMM_BUCKETS` | `0` | tiled call: times every tile row count's GEMMs | `src/engine.cu` |
 | `LOUP_TILE_WAVEFRONT` | `0`, `1` | tiled call: forces the wavefront schedule off or on | `src/engine.cu` |
@@ -125,6 +133,7 @@ gates in that form. Most are read when an engine is made; the MD-loop switches a
 | `LOUP_D3_ATM_PROJ` | `0` | D3 three-body term: the per-triangle C6 table walk | `src/dispersion/d3_pair.cu` |
 | `LOUP_SWEEP_REPLAY` | any value | generic path: a whole system runs the sweep schedule of a tiled one, without the skip-chain fold (not for long-range models) | `src/generic.cu` |
 | `LOUP_DEBUG_PACK` | any value | prints the packed tables' relative error per layer | `src/generic.cu` |
+| `LOUP_DEBUG_W2T_HALF`, `LOUP_DEBUG_GOUT`, `LOUP_DEBUG_LIN_AMAX` | any value | print the two-half GEMMs' deviation from FP32, the gate outputs' and the linear maps' largest magnitudes | `src/engine.cu`, `src/generic.cu` |
 | `LOUP_DEBUG_ERRORS` | any value | prints every library error to standard error | `src/engine.cu` |
 | `LOUP_DEBUG_JIT`, `LOUP_DEBUG_COMPACT`, `LOUP_DEBUG_ARM` | `1` | print what the run-time compiler builds or reads from its cache, the compacted layers, and why nothing is queued ahead | `src/generic.cu`, `src/jit.cu`, `src/engine.cu` |
 | `LOUP_DEBUG_EVAL_TIMES` | `1` | when a handle is destroyed, prints where its `loup_evaluate` calls spent their time | `src/engine.cu` |

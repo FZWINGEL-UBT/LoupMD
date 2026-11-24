@@ -47,9 +47,10 @@ It needs Linux x86_64 (glibc 2.28 or newer) or WSL2, an NVIDIA GPU of compute ca
 driver for CUDA 13, and Python 3.10 or newer. The
 [install guide](https://fzwingel-ubt.github.io/LoupMD/install/) has the details.
 
-This release (0.0.2) has been verified from its wheel on an RTX 5060 Ti (compute capability 12.0) only. The wheel
+This release (0.0.3) has been verified from its wheel on an RTX 5060 Ti (compute capability 12.0) only. The wheel
 also holds code for compute capability 8.0, 8.6, 8.9, 9.0 and 10.0, which is untested from the wheel in this
-release (`docs/validation/release-0.0.2.md` in the repository).
+release; builds of the same sources were measured and gated on an A100, an RTX A4000 and an RTX 4000 Ada
+(`docs/validation/release-0.0.3.md` in the repository).
 
 ## Documentation
 

@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.0.3 (24 November 2026)
+
+- MACE-POLAR-1 takes the cell's total charge and spin multiplicity: `charge=` and `spin_multiplicity=`, or
+  `--charge` and `--spin-multiplicity`, as for MACE-OMOL-0. Up to 0.0.2 the `polar1-*` models refused both and ran
+  every cell as a neutral singlet. The model holds the summed atomic charges of its two spin channels to
+  (Q + M - 1) / 2 and (Q - M + 1) / 2; the engine had both targets fixed at zero. Energies, forces and stress of
+  charged and open-shell cells are gated against MACE with the same settings.
+- `loupmd validate` with `--charge` or `--spin-multiplicity` on a `polar1-*` model compares the stress with a
+  reference of the same charge and spin (the reference was computed for the neutral singlet).
+- Faster kernels on the tensor cores. The products of the projections and linear maps run in FP16 with each operand
+  split into two halves and FP32 accumulation, inside the same 3x accuracy gate; a system whose values leave
+  binary16's range falls back to FP32 by itself. On an RTX 5060 Ti against 0.0.2 (before the last of these changes):
+  MACE-MH-1 on 5,000 atoms of SrTiO3 30.6 to 23.4 ms per evaluation, on 216 atoms of NaCl 1.33 to 1.03 ms per MD
+  step; MACE-OMOL-0 XL on 216 water molecules 21.3 to 16.6 ms; MACE-OMAT-0 medium and MACE-OFF23 medium 5 to 7%
+  faster. MACE-POLAR-1's long-range products take the same kernels (MD steps 1.13 to 1.22 times faster again).
+- The tuned defaults, until now those of compute capability 12.0 only, also apply on 8.9 (RTX 4000 Ada: 1.08 to
+  1.88 times faster than its previous defaults), 8.6 (RTX A4000: steps at 0.63 to 0.92 of before) and 8.0 (A100:
+  MACE-MH-1 at 0.81 to 0.86 of its previous step, MACE-OMOL-0 XL 0.82, MACE-POLAR-1 0.57 to 0.84, MACE-OMAT-0
+  medium and MACE-MP-0b3 0.95 to 0.96 on large cells). Each was measured and gated on that GPU with a build of
+  these sources; the wheel itself was run on the RTX 5060 Ti only.
+- Tiled runs keep the gated layers' forward results for the backward sweep and fold the skip chain.
+- `loup_evaluate` stages its upload and results without copy nodes.
+
 ## 0.0.2 (20 November 2026)
 
 - The export extra installs torch 2.15.0 and mace-torch 0.3.17 on Python 3.11 and newer. Python 3.10 keeps torch

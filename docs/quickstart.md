@@ -120,7 +120,7 @@ details, and [restarts](guide/restart.md) shows how to continue a run (`loupmd r
 The report has these blocks:
 
 ```text
-LoupMD 0.0.2: MD run, status ...
+LoupMD 0.0.3: MD run, status ...
 Model and structure     the label, file, SHA-256 and head; atoms, elements and cell lengths in A
 Physics                 the ensemble, integrator, timestep in fs, steps and seed
 Plan                    whole cell or tiles, the GPU, memory, kernels, the neighbour skin in A, the precision
