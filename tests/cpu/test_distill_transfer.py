@@ -8,6 +8,42 @@ from loupmd.distill.transfer import assemble, chunks
 from tools.dev import colab_distill
 
 
+@pytest.mark.parametrize('corrupt', [False, True])
+def test_detached_job_verifies_every_input_without_a_second_kernel_request(tmp_path, corrupt):
+    from pathlib import Path
+    import shutil
+
+    vm = tmp_path / 'vm'
+    stage = vm / 'staging'
+    stage.mkdir(parents=True)
+    (vm / 'out').mkdir()
+    files = [tmp_path / name for name in ('train.sh', 'train.xyz', 'valid.xyz')]
+    for file, data in zip(files, (b'cat train.xyz valid.xyz >out/trained', b'train frames', b'valid frames')):
+        file.write_bytes(data)
+    # Only the file channel is available after launching the detached verifier.
+    program = colab_distill._input_verifier()
+    proc = subprocess.Popen(['bash', '-c', colab_distill._PAYLOAD, 'job', 'train.sh', program], cwd=vm)
+    try:
+        def upload(local, remote):
+            dest = stage / Path(remote).name
+            shutil.copyfile(local, dest)
+            if corrupt and dest.read_bytes() == b'valid frames':
+                dest.write_bytes(b'wrong frames')
+
+        received = colab_distill._upload_inputs(files, tmp_path, upload)
+        code = proc.wait(timeout=15)
+        assert received == {f.name: hashlib.sha256(f.read_bytes()).hexdigest() for f in files}
+        if corrupt:
+            assert code != 0 and not (vm / 'out/trained').exists()
+        else:
+            assert code == 0 and (vm / 'out/trained').read_bytes() == b'train framesvalid frames'
+        assert int((vm / 'completion').read_text().split()[0]) == code
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait()
+
+
 def test_chunk_boundary_and_atomic_digest_check(tmp_path):
     data = b'123456789'
     source = tmp_path / 'train.xyz'
@@ -59,39 +95,6 @@ def test_unreachable_status_cannot_run_past_paid_deadline(monkeypatch):
     with pytest.raises(TimeoutError, match='job deadline'):
         colab_distill._wait_for_exit(poll, 450.)
     assert now[0] == 450.
-
-
-@pytest.mark.parametrize('error', [subprocess.TimeoutExpired('exec', 90), colab_distill._ConnectionLost('lost')])
-def test_completed_setup_survives_lost_reply_without_resubmitting(tmp_path, error):
-    # A non-repeatable action exposes a duplicate. The receipt is written on the
-    # remote side, not by the test's download implementation.
-    calls = []
-
-    def execute(code, **kwargs):
-        calls.append('exec')
-        exec(code, {'Path': type(tmp_path)})
-        raise error
-
-    def download(remote, local):
-        local.write_bytes(type(tmp_path)(remote).read_bytes())
-
-    colab_distill._confirmed_setup(
-        f'Path({str(tmp_path / "started")!r}).touch(exist_ok=False)',
-        tmp_path / 'receipt', str(tmp_path), execute, download,
-    )
-    assert (tmp_path / 'started').is_file()
-    assert calls == ['exec']
-
-
-def test_unconfirmed_setup_cannot_advance_to_next_upload(tmp_path):
-    def execute(code, **kwargs):
-        raise subprocess.TimeoutExpired('exec', 90)
-
-    def download(remote, local):
-        local.write_text('receipt for a different operation')
-
-    with pytest.raises(RuntimeError, match='receipt'):
-        colab_distill._confirmed_setup('', tmp_path / 'receipt', '/content/loup-s', execute, download)
 
 
 def test_ambiguous_launch_recovers_real_pid_after_file_channel_outage(tmp_path, monkeypatch):

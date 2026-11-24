@@ -31,3 +31,21 @@ def assemble(parts, destination, digest):
         finally:
             output.close()
             pending.unlink(missing_ok=True)
+
+
+def receive_inputs(staging):
+    """One detached verifier: wait for the last upload, then publish checked inputs."""
+    import json
+    import time
+
+    staging = Path(staging)
+    marker = staging / 'ready'
+    while not marker.exists() or not (digest := marker.read_bytes()).endswith(b'\n'):
+        time.sleep(1)
+    manifest = (staging / 'manifest').read_bytes()
+    if digest != (sha256(manifest).hexdigest() + '\n').encode():
+        raise ValueError('sha256 mismatch: input manifest')
+    for i, (name, count, expected) in enumerate(json.loads(manifest)):
+        if not name or Path(name).name != name:
+            raise ValueError('expected an input basename')
+        assemble((staging / f'{i}.{j}' for j in range(count)), staging.parent / name, expected)

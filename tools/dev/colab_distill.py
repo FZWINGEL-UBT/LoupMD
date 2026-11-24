@@ -21,7 +21,7 @@ REMOTE = '/content/loup-s'
 
 # Do not depend on a healthy notebook kernel after launching the detached job.
 # Publish the receipt last, including on failure so the trainer's log is retrievable.
-_PAYLOAD = r'''bash "$1"
+_PAYLOAD = r'''python -c "$2" && bash "$1"
 rc=$?
 if tar -czf result.tar.gz out && sha=$(sha256sum result.tar.gz); then
     printf '%s %s\n' "$rc" "${sha%% *}" >completion.part
@@ -81,26 +81,30 @@ def cli(*args, retry=True, timeout=300):
         time.sleep(5)
 
 
-def _confirmed_setup(body, local_receipt, directory, execute, download):
-    """Recover a lost exec reply over Colab's independent file channel."""
-    nonce = uuid.uuid4().hex
-    receipt = f'{directory}/.ok-{nonce}'
-    code = body + f'\nPath({receipt!r}).write_text({nonce!r})'
-    for attempt in range(2):
-        try:
-            execute(code, retry=False, timeout=90)
-            return
-        except (subprocess.TimeoutExpired, _ConnectionLost):
-            local_receipt.unlink(missing_ok=True)
-            try:
-                download(receipt, local_receipt)
-            except (subprocess.TimeoutExpired, RuntimeError):
-                if attempt:
-                    raise
-                continue  # only mkdir and checked assembly may be replayed here
-            if local_receipt.read_text() != nonce:
-                raise RuntimeError('wrong Colab setup receipt')
-            return
+def _input_verifier():
+    return Path(transfer.__file__).read_text() + "\nreceive_inputs('staging')\n"
+
+
+def _upload_inputs(files, tmp, upload):
+    """Only the file channel is needed after launch; never reuse another input's parts."""
+    stage = f'{REMOTE}/staging'
+    chunk = Path(tmp) / 'chunk'
+    manifest = []
+    for i, file in enumerate(files):
+        digest = hashlib.sha256()
+        count = 0
+        for block in transfer.chunks(file):
+            chunk.write_bytes(block)
+            digest.update(block)
+            upload(chunk, f'{stage}/{i}.{count}')
+            count += 1
+        manifest.append((file.name, count, digest.hexdigest()))
+    encoded = json.dumps(manifest).encode()
+    chunk.write_bytes(encoded)
+    upload(chunk, f'{stage}/manifest')
+    chunk.write_text(hashlib.sha256(encoded).hexdigest() + '\n')
+    upload(chunk, f'{stage}/ready')
+    return {name: digest for name, _, digest in manifest}
 
 
 def _confirm_launch(launch, read_pid, deadline):
@@ -144,7 +148,9 @@ def main():
               'usage_before': cli('usage'), 'input_sha256': {}}
 
     def save():
-        (args.output / 'allocation.json').write_text(json.dumps(record, indent=2) + '\n')
+        pending = args.output / 'allocation.part'
+        pending.write_text(json.dumps(record, indent=2) + '\n')
+        pending.replace(args.output / 'allocation.json')
 
     save()
     print(f'{session}: {args.gpu} account {args.account}', flush=True)
@@ -157,38 +163,21 @@ def main():
                 raise RuntimeError(result)
             return result
 
-        def setup(body):
-            _confirmed_setup(body, Path(tmp) / 'receipt', REMOTE, remote,
-                             lambda src, dst: cli('download', '-s', session, src, dst, timeout=45))
-
         try:
             # If the response is lost, do not request a second allocation; finally targets only this unique name.
             print(cli('new', '-s', session, '--gpu', args.gpu, retry=False, timeout=450), flush=True)
-            record.update(allocated=time.time(), usage_during=cli('usage'))
+            record['allocated'] = time.time()
             save()
-            setup(f'Path({REMOTE!r}).mkdir(exist_ok=True)\nPath({(REMOTE + "/out")!r}).mkdir(exist_ok=True)')
-            for file in files:
-                parts = []
-                checksum = hashlib.sha256()
-                for i, block in enumerate(transfer.chunks(file)):
-                    chunk = Path(tmp) / 'chunk'
-                    chunk.write_bytes(block)
-                    checksum.update(block)
-                    name = f'{REMOTE}/.part{i}'
-                    cli('upload', '-s', session, chunk, name, timeout=480)
-                    parts.append(name)
-                digest = checksum.hexdigest()
-                # Leave the pieces until the next upload overwrites them: repeating assemble after a lost
-                # response must still work. The VM is released at the end of the job.
-                setup(Path(transfer.__file__).read_text()
-                      + f'\nassemble({parts!r}, {REMOTE + "/" + file.name!r}, {digest!r})')
-                record['input_sha256'][file.name] = digest
-                save()
+            record['usage_during'] = cli('usage')
+            save()
             # Exclusive launch marker makes replay after a lost response idempotent.
-            launch_code = f'''os.chdir({REMOTE!r})
+            launch_code = f'''Path({REMOTE!r}).mkdir(exist_ok=True)
+os.chdir({REMOTE!r})
+Path("out").mkdir(exist_ok=True)
+Path("staging").mkdir(exist_ok=True)
 if not Path("started").exists():
     with open("started", "x"), open("out/job.log", "ab") as log:
-        proc = subprocess.Popen(["bash", "-c", {_PAYLOAD!r}, "job", {args.job.name!r}], start_new_session=True,
+        proc = subprocess.Popen(["bash", "-c", {_PAYLOAD!r}, "job", {args.job.name!r}, {_input_verifier()!r}], start_new_session=True,
                                 stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT)
         Path("pid.part").write_text(str(proc.pid))
         Path("pid.part").replace("pid")
@@ -203,6 +192,9 @@ if not Path("pid").is_file():
 
             deadline = time.monotonic() + 3600 * args.hours
             _confirm_launch(lambda timeout: remote(launch_code, retry=False, timeout=timeout), read_pid, deadline)
+            record['input_sha256'] = _upload_inputs(
+                files, tmp, lambda src, dst: cli('upload', '-s', session, src, dst, timeout=480))
+            save()
 
             def poll(timeout):
                 return _file_completion(Path(tmp) / 'completion', lambda name, dest:
@@ -221,7 +213,9 @@ if not Path("pid").is_file():
             record['stop_requested'] = time.time()
             save()
             print(cli('stop', '-s', session), flush=True)
-            record.update(stopped=time.time(), usage_after=cli('usage'))
+            record['stopped'] = time.time()
+            save()
+            record['usage_after'] = cli('usage')
             save()
 
 
