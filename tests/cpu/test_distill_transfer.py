@@ -8,6 +8,46 @@ from loupmd.distill.transfer import assemble, chunks
 from tools.dev import colab_distill
 
 
+@pytest.mark.parametrize('disconnect', [False, True])
+def test_execution_cell_owns_real_work_but_disconnection_does_not_kill_it(tmp_path, disconnect):
+    import os
+    import shutil
+    import sys
+    import time
+    from pathlib import Path
+
+    vm = tmp_path / 'vm'
+    job = tmp_path / 'train.sh'
+    job.write_text('echo finished >out/model')
+    cell = subprocess.Popen([sys.executable, '-c', colab_distill._launch_program(str(vm), job.name)])
+    try:
+        deadline = time.monotonic() + 15
+        while not (vm / 'pid').exists() and time.monotonic() < deadline:
+            time.sleep(.05)
+        pid = int((vm / 'pid').read_text())
+        assert os.getsid(pid) == pid
+        # The verified inputs are not available yet: the legitimate computation
+        # is still running and the execution cell must not have returned.
+        with pytest.raises(subprocess.TimeoutExpired):
+            cell.wait(timeout=.2)
+        if disconnect:
+            cell.terminate()
+            cell.wait(timeout=3)
+        colab_distill._upload_inputs([job], tmp_path,
+                                    lambda src, dst: shutil.copyfile(src, vm / 'staging' / Path(dst).name))
+        if not disconnect:
+            assert cell.wait(timeout=15) == 0
+        deadline = time.monotonic() + 15
+        while not (vm / 'completion').exists() and time.monotonic() < deadline:
+            time.sleep(.05)
+        assert (vm / 'completion').read_text().split()[0] == '0'
+        assert (vm / 'out/model').read_text().strip() == 'finished'
+    finally:
+        if cell.poll() is None:
+            cell.kill()
+            cell.wait()
+
+
 @pytest.mark.parametrize('corrupt', [False, True])
 def test_detached_job_verifies_every_input_without_a_second_kernel_request(tmp_path, corrupt):
     from pathlib import Path

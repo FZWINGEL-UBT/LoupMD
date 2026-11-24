@@ -85,6 +85,27 @@ def _input_verifier():
     return Path(transfer.__file__).read_text() + "\nreceive_inputs('staging')\n"
 
 
+def _launch_program(root, job):
+    # The execution cell owns the real computation until it finishes. A lost
+    # notebook connection must neither kill the worker nor start it a second time.
+    return f'''import os, subprocess
+from pathlib import Path
+Path({root!r}).mkdir(exist_ok=True)
+os.chdir({root!r})
+Path("out").mkdir(exist_ok=True)
+Path("staging").mkdir(exist_ok=True)
+if not Path("started").exists():
+    with open("started", "x"), open("out/job.log", "ab") as log:
+        proc = subprocess.Popen(["bash", "-c", {_PAYLOAD!r}, "job", {job!r}, {_input_verifier()!r}],
+                                start_new_session=True, stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT)
+        Path("pid.part").write_text(str(proc.pid))
+        Path("pid.part").replace("pid")
+        proc.wait()
+if not Path("pid").is_file():
+    raise RuntimeError("incomplete detached launch; refusing to start twice")
+'''
+
+
 def _upload_inputs(files, tmp, upload):
     """Only the file channel is needed after launch; never reuse another input's parts."""
     stage = f'{REMOTE}/staging'
@@ -112,7 +133,6 @@ def _confirm_launch(launch, read_pid, deadline):
     while (remaining := deadline - time.monotonic()) > 0:
         try:
             launch(min(90, remaining))
-            return
         except (subprocess.TimeoutExpired, _ConnectionLost):
             pass
         remaining = deadline - time.monotonic()
@@ -121,6 +141,8 @@ def _confirm_launch(launch, read_pid, deadline):
         try:
             pid = read_pid(min(45, remaining)).strip()
         except (subprocess.TimeoutExpired, RuntimeError) as exc:
+            if "Session '" in str(exc) and "' not found" in str(exc):
+                raise
             print(f'Launch status unavailable; retaining session: {exc}', flush=True)
         else:
             if not pid.isascii() or not pid.isdecimal() or int(pid) <= 0:
@@ -155,13 +177,9 @@ def main():
     save()
     print(f'{session}: {args.gpu} account {args.account}', flush=True)
     with tempfile.TemporaryDirectory() as tmp:
-        def remote(body, **cli_options):
-            program = Path(tmp) / 'exec.py'
-            program.write_text('import os, json, subprocess\nfrom pathlib import Path\n' + body + '\nprint("LS0_OK")\n')
-            result = cli('exec', '-s', session, '-f', program, '--timeout', '180', **cli_options)
-            if 'LS0_OK' not in result.splitlines():
-                raise RuntimeError(result)
-            return result
+        program = Path(tmp) / 'exec.py'
+        program.write_text(_launch_program(REMOTE, args.job.name))
+        client = None
 
         try:
             # If the response is lost, do not request a second allocation; finally targets only this unique name.
@@ -170,19 +188,16 @@ def main():
             save()
             record['usage_during'] = cli('usage')
             save()
-            # Exclusive launch marker makes replay after a lost response idempotent.
-            launch_code = f'''Path({REMOTE!r}).mkdir(exist_ok=True)
-os.chdir({REMOTE!r})
-Path("out").mkdir(exist_ok=True)
-Path("staging").mkdir(exist_ok=True)
-if not Path("started").exists():
-    with open("started", "x"), open("out/job.log", "ab") as log:
-        proc = subprocess.Popen(["bash", "-c", {_PAYLOAD!r}, "job", {args.job.name!r}, {_input_verifier()!r}], start_new_session=True,
-                                stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT)
-        Path("pid.part").write_text(str(proc.pid))
-        Path("pid.part").replace("pid")
-if not Path("pid").is_file():
-    raise RuntimeError("incomplete detached launch; refusing to start twice")'''
+            deadline = time.monotonic() + 3600 * args.hours
+
+            def launch(_timeout):
+                nonlocal client
+                if client is None or client.poll() is not None:
+                    with (args.output / 'exec.log').open('ab') as log:
+                        client = subprocess.Popen(
+                            [os.environ.get('COLAB_CLI', str(Path.home() / '.local/bin/colab')), 'exec', '-s',
+                             session, '-f', str(program), '--timeout', str(max(1, deadline - time.monotonic()))],
+                            stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT)
 
             def read_pid(timeout):
                 pid = Path(tmp) / 'pid'
@@ -190,8 +205,7 @@ if not Path("pid").is_file():
                 cli('download', '-s', session, REMOTE + '/pid', pid, retry=False, timeout=timeout)
                 return pid.read_text()
 
-            deadline = time.monotonic() + 3600 * args.hours
-            _confirm_launch(lambda timeout: remote(launch_code, retry=False, timeout=timeout), read_pid, deadline)
+            _confirm_launch(launch, read_pid, deadline)
             record['input_sha256'] = _upload_inputs(
                 files, tmp, lambda src, dst: cli('upload', '-s', session, src, dst, timeout=480))
             save()
@@ -210,6 +224,9 @@ if not Path("pid").is_file():
             if int(rc):
                 raise RuntimeError(f'{session}: job exit {rc}; see out/job.log in result.tar.gz')
         finally:
+            if client is not None and client.poll() is None:
+                client.terminate()
+                client.wait()
             record['stop_requested'] = time.time()
             save()
             print(cli('stop', '-s', session), flush=True)
