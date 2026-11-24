@@ -43,9 +43,8 @@ def native_paths_agree(delta):
         type(delta.get(k)) in (int, float) and 0 <= delta[k] <= limit for k, limit in NATIVE_AGREEMENT_LIMITS.items())
 
 
-def _receipt(raw, split, library_sha):
+def _receipt(raw, split, library_sha, count, pin):
     gate = json.loads(raw)
-    count, pin = FROZEN[split]
     for key, expected in dict(schema='loupmd.frozen-cell-gate.v1', source_sha256=pin, frames=count,
                               teacher_head='omat_pbe', teacher_sha256=TEACHER_SHA256,
                               library_sha256=library_sha).items():
@@ -60,9 +59,9 @@ def _receipt(raw, split, library_sha):
     return gate
 
 
-def _issue_frame(source, row, library_sha):
-    # This is NOT a general extxyz transformer. All three input byte streams are pinned and use
-    # exactly this schema. Preserve the geometry, momenta and MD metadata as originally written;
+def _issue_frame(source, row, library_sha, release):
+    # Pinned baseline and curve extxyz use exactly this layout. Preserve their
+    # geometry, momenta and sampling metadata without reserializing any of them;
     # ASE's standard writer would round the newly qualified per-atom forces to 8 decimal places.
     count_line = source.readline()
     n = int(count_line)
@@ -90,7 +89,7 @@ def _issue_frame(source, row, library_sha):
         header, substitutions = re.subn(pattern, replacement, header)
         if substitutions != 1:
             raise ValueError('unexpected frozen REF metadata')
-    text = [count_line, f'{header} label_release={RELEASE} label_library_sha256={library_sha}\n']
+    text = [count_line, f'{header} label_release={release} label_library_sha256={library_sha}\n']
     for force in forces:
         original, _, _, _ = source.readline().rsplit(None, 3)
         text.append(original + ' ' + ' '.join(repr(float(x)) for x in force) + '\n')
@@ -122,7 +121,7 @@ def _publish(base, reports, library, out):
             if sha256(raw).hexdigest() != pin:
                 raise ValueError(f'{path}: frozen source sha256 mismatch')
             receipt = (reports / f'{split}.json').read_bytes()
-            gate = _receipt(receipt, split, library_sha)
+            gate = _receipt(receipt, split, library_sha, count, pin)
             for key in ('library_version', 'bundle_sha256'):
                 if record.setdefault(key, gate[key]) != gate[key]:
                     raise ValueError(f'{split}: gate reports disagree on {key}')
@@ -131,7 +130,7 @@ def _publish(base, reports, library, out):
             dest = stage / path.name
             with dest.open('xb') as writer:
                 for row in gate['rows']:
-                    a, payload = _issue_frame(source, row, library_sha)
+                    a, payload = _issue_frame(source, row, library_sha, RELEASE)
                     inventory.accept(a, split, None)  # includes cross-split ID/seed/geometry isolation
                     info = a.info
                     for role in ('teacher', 'sampler'):

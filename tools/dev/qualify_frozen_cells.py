@@ -7,8 +7,12 @@ contains the exact sequential labels that were gated, for offline reissue.
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import ProcessPoolExecutor
 from dataclasses import asdict
+from itertools import repeat
 import json
+import multiprocessing
+import os
 from pathlib import Path
 
 from ase.io import iread
@@ -42,7 +46,9 @@ def first_call(bundle, at):
     return engine.evaluate(at.positions, at.cell.array, compute_stress=True)
 
 
-def qualify(source, checkpoint):
+def qualify(source, checkpoint, fresh_workers=1):
+    if not 1 <= fresh_workers <= 4:
+        raise ValueError('fresh workers must be 1..4')
     source_sha = sha256_of(source)
     library = _core.library_path().resolve()
     library_sha = sha256_of(library)
@@ -77,10 +83,19 @@ def qualify(source, checkpoint):
     teacher_sha = teacher.sha256
     del teacher  # the sequential native handle is no longer needed
 
+    # Loading and certifying the full spline table is CPU-bound on each *fresh*
+    # handle. Separate spawned processes share no handle or inherited CUDA state.
+    # The guard follows all descendants. Never fan out the sequential/stock paths.
+    atoms = (at for _, at in configs)
+    if fresh_workers == 1:
+        fresh_values = map(first_call, repeat(bundle), atoms)
+    else:
+        with ProcessPoolExecutor(fresh_workers, mp_context=multiprocessing.get_context('spawn')) as pool:
+            fresh_values = list(pool.map(first_call, repeat(bundle), atoms))
     rows = []
-    for i, ((name, at), reused, ref64, ref32, sref) in enumerate(zip(configs, seq, r64, r32, stress_refs, strict=True)):
+    results = zip(configs, seq, r64, r32, stress_refs, fresh_values, strict=True)
+    for i, ((name, at), reused, ref64, ref32, sref, fresh) in enumerate(results):
         historical = stored(at)
-        fresh = first_call(bundle, at)
         row = dict(frame_id=name, trajectory_id=at.info['trajectory_id'], step=int(at.info['step']),
                    replica=int(at.info['replica']), regime=at.info['regime'], cell_A=at.cell.array.tolist(),
                    cell_changed=i > 0 and not np.array_equal(at.cell.array, configs[i-1][1].cell.array),
@@ -103,6 +118,8 @@ def qualify(source, checkpoint):
     return dict(schema='loupmd.frozen-cell-gate.v1', source=str(source.resolve()), source_sha256=source_sha,
                 library=str(library), library_sha256=library_sha, library_version=lm.library_version(),
                 bundle=str(bundle), bundle_sha256=sha256_of(bundle), teacher_head=HEAD, teacher_sha256=teacher_sha,
+                native_environment={k: v for k, v in os.environ.items() if k.startswith('LOUP_') and k != 'LOUP_LIB'},
+                fresh_workers=fresh_workers,
                 mace_version=mace_version, torch_version=torch_version, reference_device=references.device_tag('cuda'),
                 rule=dict(factor=config.GATE_FACTOR, energy_floor_meV_per_atom=config.GATE_ENERGY_FLOOR_MEV_PER_ATOM,
                           force_floor_eV_per_A=config.GATE_FORCE_FLOOR_EV_PER_A, stress_floor_eV_per_A3=config.GATE_STRESS_FLOOR_EV_PER_A3),
@@ -116,10 +133,12 @@ def main():
     ap.add_argument('source', type=Path)
     ap.add_argument('report', type=Path, help='new file; historical failures do not count against corrected labels')
     ap.add_argument('--checkpoint', type=Path, help='explicit MH-1 checkpoint (verified against the model table)')
+    ap.add_argument('--fresh-workers', type=int, default=1, choices=range(1, 5),
+                    help='process-isolated first calls under the same GPU reservation, after sequential evaluation')
     args = ap.parse_args()
     if args.report.exists():
         raise FileExistsError(args.report)
-    result = qualify(args.source, args.checkpoint)
+    result = qualify(args.source, args.checkpoint, args.fresh_workers)
     with args.report.open('x') as f:
         json.dump(result, f, allow_nan=False, separators=(',', ':'))
         f.write('\n')
