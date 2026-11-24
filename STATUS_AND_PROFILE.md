@@ -3707,6 +3707,8 @@ Evidence: `sto320/v2-l4-s64r8-seed2/observables-v2`. Canonical record SHA256 pre
 
 **5060 Ti only — wide FP64 seed 2, no timing.** Native export passes 2/2; worst E/F/S ratios against stock FP32 deviations 0.01/0.74/0.99 (3× rule). Bundle `078e1936faf41d6616faa3db9132b01cac3fe4d63b6a77f0f06abef94f55b12a`. `sto320/v2-l4-s64l0-seed2/{fidelity,teacher-score}.json`:
 
+Gate device provenance: `release/gate.json` identifies RTX 5060 Ti, driver 621.14, compute capability 12.0 for the selected native device; the uncached reference independently reports `cuda:NVIDIA GeForce RTX 5060 Ti:sm120:cuda13.0`. WSL enumerates only that card. The `GPU information: NVIDIA RTX A6000, 8, 6, ...` line in the same process is from the installed `cuequivariance_ops.triton.cache_manager.get_gpu_information`: after NVML returns `Not Supported`, it prints hardcoded A6000 tuning defaults for a name absent from its table. That line is not an execution-device or VRAM measurement.
+
 | Trajectory (60 frames each) | Force RMSE meV/Å | Relative overall | O / Sr / Ti relative, % | p99.9 vector / cap, meV/Å | E RMSE meV/atom | Stress RMSE meV/Å³ |
 | --- | ---: | ---: | --- | --- | ---: | ---: |
 | Student | 9.223 | 1.644% | 1.706 / 1.500 / 1.585 | 45.79 / 56.10 | 0.03756 | 0.04314 |
