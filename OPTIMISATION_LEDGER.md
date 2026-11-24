@@ -3100,6 +3100,8 @@ On 60 independently student-visited frames the same FP64 model passed the absolu
 
 **5060 Ti only — FP64 closed-loop round 1, independent evaluation.** Native export 2/2. Force RMSE 8.518/8.544 meV/Å on fresh student-visited / frozen teacher frames, ratio 0.996965. Both absolute target label bars pass. The ratio is below 1.5, but round 1 cannot decide the two-round falsifier. STATUS §6.70.
 
+**5060 Ti only — FP64 round-2 training labels.** Worst 30/100 from new round-1 student trajectories; stored, fresh and sequential teacher labels each pass 30/30. The 360-frame replay is ready; this measures label integrity, not the next child's fidelity. STATUS §6.70.
+
 - **5060 Ti only, historical s64l0 preflight.** `0b1107b` engine, list 15 checkpoint `8cae906ea0db6da0…`; first test configuration, two independent 0.05 Å rattles. The unmodified `loupmd validate` 3× rule passed both: worst engine deviations from the student's float64 reference were 0.00009 meV/atom, 8.753e-6 eV/Å and 2.856e-8 eV/Å³. Not teacher fidelity, not a stress-trained checkpoint, no timing. See STATUS §6.70.
 - **5060 Ti only, teacher labels.** Fresh engine Langevin frames include stress: 300 train, 30 validation, 60 teacher-test. The held-out 300 K teacher RMS force is 0.56025 eV/Å per component (species values in STATUS §6.70). Not a fidelity or timing result.
 - **T4 smoke training; 5060 Ti only for gate and fidelity.** Eight training frames, four epochs, both phases, pre-phase-two EMA retained. `s64l0` gate 2/2; worst F and S ratios 0.35 and 0.15. Eight new student-visited frames: force RMSE 95.0% of teacher RMS, p99.9 vector error 23.66 eV/Å, E RMSE 393.35 meV/atom, S RMSE 0.04459 eV/Å³. Fails fidelity; a workflow test, not falsifier 1.

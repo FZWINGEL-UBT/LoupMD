@@ -3744,3 +3744,5 @@ Strict NVE passes 0/4. At 1/0.5 fs, student vs teacher energy RMS (meV/atom) is 
 | Frozen teacher | 1.525% | 1.574 / 1.383 / 1.487 | 44.78 / 56.02 | 0.05531 | 0.05010 |
 
 `sto320/oxide-loop-v1/fp64/round-1/evaluation.json` SHA `01fb792fb4a5d56ddc7a91d8030198c2d3be7cad57aa46d548751f0f213532fb`. The protocol requires round 2 before answering falsifier 1; no MD fidelity or convergence claim from round 1.
+
+**5060 Ti only — round-2 oxide harvest qualification, no timing.** Seed 57102, fresh trajectories from round-1 child `38413c47…2d0d8`; selected the worst 30/100 as prescribed. Stored, sequential and fresh teacher checks each passed 30/30. Selected file SHA `abf958a0011a7d5cfcb82bffd8af6e80958397fd927eb1dca9441c0ff214bbd9`. All ten inputs to the 360-frame round-2 replay verified (`paired-inputs.sha256` digest `45d54fe8bd41158254d11b975a6da6dff63f6d26060361274a69ff5ed9c31699`); original boundary unchanged, no held-out geometry added. No round-2 student result yet.
