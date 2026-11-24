@@ -46,7 +46,7 @@ import numpy as np
 from ase.geometry import find_mic
 from ase.io import iread, read, write
 
-from .train import file_digest, parse_args as train_args, plan_job
+from .train import BASE_SPLITS, MACE_VERSION, file_digest, parse_args as train_args, plan_job
 from .water import inspect_water
 from .water_gate import TEACHER
 
@@ -81,9 +81,35 @@ def rollout_args(root, model, sha, role, output):
             '--shear', '.01' if hard else '0', '--output', str(output)]
 
 
-def checked_student(job):
+def _same_scale_dict(actual, expected):
+    return actual.keys() == expected.keys() and all(
+        (actual[k] == v if isinstance(v, str) else np.isclose(actual[k], v, atol=0., rtol=1e-12))
+        for k,v in expected.items())
+
+
+def checked_student(root, job):
+    """Bind independently returned model + gate to the requested sealed arm, not just OFF24."""
+    job = job.resolve()
+    data = root/'dispatch'
+    modes = {f'{mode}-s1-v1': mode for mode in ('control','net-torque')}
+    if job.name not in modes or job.parent != root.resolve():
+        raise ValueError('water job must name the requested dispatch arm below the dataset root')
+    mode = modes[job.name]
+    dispatch = json.loads((data/'release.json').read_text())
+    arm = dispatch[mode]
     model = job/'checked/student.model'
     manifest = json.loads((job/'checked/manifest.json').read_text())
+    if not (dispatch['schema'] == 'loupmd.water-release.v1' and dispatch['teacher_sha256'] == TEACHER
+            and manifest['teacher_head'] == 'default' and manifest['mace_torch'] == MACE_VERSION
+            and manifest['resume'] is None and manifest['recipe'] == arm['recipe']
+            and manifest['recipe']['molecular_loss'] == mode and manifest['pair_id'] == arm['pair_id']
+            and _same_scale_dict(manifest['molecular'], arm['molecular'])
+            and _same_scale_dict(manifest['energy_offsets_eV'], arm['offsets'])):
+        raise ValueError(f'student does not match sealed dispatch arm {mode}')
+    sources = [(s['role'], s['sha256']) for s in manifest['sources']]
+    expected = [(role, dispatch['inputs_sha256'][role+'.xyz']) for role in BASE_SPLITS]
+    if sources != expected or any(file_digest(data/(role+'.xyz')) != sha for role,sha in expected):
+        raise ValueError('student manifest source roles or SHA-256 differ from dispatch')
     gate = json.loads((job/'release/gate.json').read_text())
     sha = file_digest(model)
     if not (manifest['teacher_sha256'] == TEACHER and manifest['student_sha256'] == sha == gate['model']['sha256']
@@ -208,6 +234,7 @@ def main(argv=None):
     sub = p.add_subparsers(dest='task', required=True)
     sub.add_parser('sample').add_argument('part', choices=PARTS)
     sub.add_parser('assemble').add_argument('output', type=Path)
+    sub.add_parser('check-student').add_argument('job', type=Path, help='print trusted SHA for a sealed control/weighted run')
     ro = sub.add_parser('rollout'); ro.add_argument('job', type=Path); ro.add_argument('regime', choices=('target','hard'))
     sub.add_parser('start-md')
     md = sub.add_parser('md'); md.add_argument('case', choices=MD); md.add_argument('--job', type=Path)
@@ -221,9 +248,11 @@ def main(argv=None):
             frames(sample_args(root, a.part))
         else:
             name = 'fixed-student-test' if a.regime=='target' else 'hard'
-            frames(rollout_args(root, *checked_student(a.job), a.regime, a.job/f'{name}.xyz'))
+            frames(rollout_args(root, *checked_student(root,a.job), a.regime, a.job/f'{name}.xyz'))
     elif a.task=='assemble':
         print(json.dumps(assemble(root, a.output), indent=2))
+    elif a.task=='check-student':
+        print(checked_student(root,a.job)[1])
     elif a.task=='start-md':
         dest = root/'observables/start.xyz'; dest.parent.mkdir(parents=True,exist_ok=True)
         at=read(root/'valid.xyz',index=19)
@@ -234,7 +263,7 @@ def main(argv=None):
     elif a.task=='md':
         from .observables import main as observables
         directory=(a.job or root)/'observables'
-        model,sha=checked_student(a.job) if a.job else ('off24-medium',None)
+        model,sha=checked_student(root,a.job) if a.job else ('off24-medium',None)
         observables(md_args(root,'student' if a.job else 'teacher',a.case,directory,model,sha))
     else:
         reduce(root,a.job)

@@ -75,3 +75,54 @@ def test_release_binds_actual_colab_wrapper_and_both_complete_recipes(tmp_path):
         args = (tmp_path/f'{mode}.args').read_text().splitlines()
         assert option(args, 'molecular-loss') == mode and option(args, 'batch-size') == '2'
     assert f'{wp.COLAB_SHA}  colab_train.sh\n' in (tmp_path/'inputs.sha256').read_text()
+
+
+def test_swapped_independently_gated_students_fail_closed(tmp_path):
+    import hashlib
+    import json
+    from loupmd.distill.train import BASE_SPLITS, file_digest
+
+    data = tmp_path/'dispatch'
+    data.mkdir()
+    def store(path, value):
+        path.write_text(json.dumps(value))
+    roles = []
+    pins = {}
+    for role in BASE_SPLITS:
+        path = data/f'{role}.xyz'
+        path.write_text(role)
+        pins[path.name] = file_digest(path)
+        roles.append({'role':role, 'sha256':pins[path.name]})
+    release = dict(schema='loupmd.water-release.v1', teacher_sha256=wp.TEACHER, inputs_sha256=pins)
+    for mode in ('control','net-torque'):
+        run = tmp_path/f'{mode}-s1-v1'
+        checked, native = run/'checked', run/'release'
+        checked.mkdir(parents=True)
+        native.mkdir()
+        spec = dict(pair_id=hashlib.sha256(mode.encode()).hexdigest(),recipe={'molecular_loss':mode,'seed':1},
+                    molecular={'molecule_key':'mol_id','net_scale':4.},offsets={'8':-42.})
+        release[mode] = spec
+        model = checked/'student.model'
+        model.write_bytes(mode.encode())
+        sha = file_digest(model)
+        store(checked/'manifest.json',dict(**{k:v for k,v in spec.items() if k!='offsets'},teacher_sha256=wp.TEACHER,
+             teacher_head='default',resume=None,mace_torch='0.3.16',student_sha256=sha,sources=roles,energy_offsets_eV=spec['offsets']))
+        store(native/'gate.json',dict(model={'sha256':sha},passed=True,rows=[{'passed':True}]))
+        bundle = native/'student.loup'
+        bundle.write_bytes(b'gate-qualified '+mode.encode())
+        (native/'student.loup.sha256').write_text(file_digest(bundle)+'  student.loup\n')
+    store(data/'release.json',release)
+    for mode in ('control','net-torque'):
+        run = tmp_path/f'{mode}-s1-v1'
+        assert wp.checked_student(tmp_path,run)[0] == run/'checked/student.model'
+    a,b=tmp_path/'control-s1-v1',tmp_path/'net-torque-s1-v1'
+    a.rename(tmp_path/'moving'); b.rename(a); (tmp_path/'moving').rename(b)
+    for run in (a,b):
+        with pytest.raises(ValueError,match='dispatch arm'):
+            wp.checked_student(tmp_path,run)
+    # Reversing the swap restores each release, but reordered split identities are not valid.
+    a.rename(tmp_path/'moving'); b.rename(a); (tmp_path/'moving').rename(b)
+    path=a/'checked/manifest.json'
+    m=json.loads(path.read_text()); m['sources'].reverse(); store(path,m)
+    with pytest.raises(ValueError,match='source'):
+        wp.checked_student(tmp_path,a)
