@@ -9,13 +9,16 @@ from __future__ import annotations
 import argparse
 import json
 import re
-from itertools import product
 from pathlib import Path
 
 import numpy as np
-from ase.geometry import find_mic, minkowski_reduce
 from ase.io import iread
 from ase.stress import full_3x3_to_voigt_6_stress
+
+if __package__:
+    from .molecular import grouped_geometry
+else:  # direct python path/to/fidelity.py invocation
+    from molecular import grouped_geometry
 
 
 _FORCE_FRACTION = 0.02
@@ -68,35 +71,7 @@ def _molecule_key(atoms, required):
 
 
 def _molecular_components(atoms, key, ref, error, net, torque):
-    ids = np.asarray(atoms.arrays[key])
-    if ids.dtype.kind not in "iu" or ids.shape != (len(atoms),) or np.any(ids < 0):
-        raise ValueError(f"{key} must contain one nonnegative integer molecule ID per atom")
-    order = np.argsort(ids, kind="stable")
-    ids = ids[order]
-    starts = np.r_[0, np.flatnonzero(ids[1:] != ids[:-1]) + 1]
-    sizes = np.diff(np.r_[starts, len(ids)])
-    masses = atoms.get_masses()[order]
-    if not np.isfinite(masses).all() or np.any(masses <= 0):
-        raise ValueError("molecular COM requires finite positive masses")
-
-    # With IDs but no bond topology or image flags, unwrap a compact molecule
-    # relative to its first atom. Check ALL intramolecular pairs have consistent,
-    # unique minimum images (an extended chain cannot silently get a false torque).
-    pos = atoms.positions[order]
-    cell, _ = minkowski_reduce(atoms.cell)
-    displ, _ = find_mic(pos - np.repeat(pos[starts], sizes, axis=0), cell)
-    # Voronoi-relevant lattice vectors lie among the {-1,0,1} combinations of
-    # the Minkowski-reduced basis. Projection extremes test every pair in O(N).
-    for indices in product((-1, 0, 1), repeat=3):
-        if indices <= (0, 0, 0):  # one sign suffices
-            continue
-        vec = np.asarray(indices) @ cell
-        projection = displ @ vec
-        extent = np.maximum.reduceat(projection, starts) - np.minimum.reduceat(projection, starts)
-        if np.any(extent >= (0.5 - 1e-12) * (vec @ vec)):
-            raise ValueError("ambiguous periodic molecule images; compact molecules required")
-    com = np.add.reduceat(masses[:, None] * displ, starts, axis=0) / np.add.reduceat(masses, starts)[:, None]
-    arms = displ - np.repeat(com, sizes, axis=0)
+    order, starts, arms = grouped_geometry(atoms, key)
     ref, error = ref[order], error[order]
     net.add(np.add.reduceat(ref, starts, axis=0), np.add.reduceat(error, starts, axis=0))
     torque.add(np.add.reduceat(np.cross(arms, ref), starts, axis=0),

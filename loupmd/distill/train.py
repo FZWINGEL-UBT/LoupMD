@@ -38,6 +38,8 @@ def parse_args(argv=None):
     parser.add_argument('--stage-two-start', type=int, help='first stage-two epoch (zero based; default MACE 3/4 rule)')
     parser.add_argument('--batch-size', type=int, default=4)
     parser.add_argument('--valid-batch-size', type=int, default=8)
+    parser.add_argument('--molecular-loss', choices=('control', 'net-torque'),
+                        help='water pair: same mol_id-labelled inputs and train-only scales. Control uses stock stress loss.')
     parser.add_argument('--resume', type=Path, help='completed parent job with preserved pre_stage_two.pt')
     parser.add_argument('--augment', type=Path, action='append', default=[],
                         help='selected student harvest extxyz, repeat for all rounds; requires --resume')
@@ -65,6 +67,15 @@ def file_digest(path):
     return digest.hexdigest()
 
 
+def _molecular():
+    # The standalone upload only needs the sibling files for molecular jobs.
+    if __package__:
+        from . import molecular
+    else:
+        import molecular
+    return molecular
+
+
 def _inspect_sources(args):
     """Validate before MACE, which otherwise silently zero-weights missing labels."""
     sources = []
@@ -72,6 +83,7 @@ def _inspect_sources(args):
     teacher = None
     train_counts, train_energies = [], []
     all_z = set()
+    scales = _molecular().ReferenceScales() if args.molecular_loss else None
     files = [(role, getattr(args, role.replace('-', '_'))) for role in BASE_SPLITS]
     for role, path in files + [('harvest', p) for p in args.augment]:
         n = 0
@@ -108,6 +120,10 @@ def _inspect_sources(args):
                     raise ValueError(f'{label}: missing or invalid {key}, expected shape {shape}')
             if not np.allclose(info['REF_stress'], np.asarray(info['REF_stress']).T, atol=1e-10, rtol=1e-7):
                 raise ValueError(f'{label}: non-symmetric REF_stress')
+            if scales is not None:
+                grouped = _molecular().grouped_geometry(a, 'mol_id')
+                if role == 'train':
+                    scales.observe(a, grouped)
             z, counts = np.unique(a.numbers, return_counts=True)
             all_z.update(z.tolist())
             if role == 'train':
@@ -124,7 +140,7 @@ def _inspect_sources(args):
     counts = np.array([[row.get(z, 0) for z in zs] for row in train_counts], dtype=np.float64)
     # Same minimum-norm fit as MACE --E0s average, including fixed stoichiometry.
     e0 = np.linalg.lstsq(counts, np.asarray(train_energies, dtype=np.float64), rcond=None)[0]
-    return sources, {str(z): float(e) for z, e in zip(zs, e0)}, teacher
+    return sources, {str(z): float(e) for z, e in zip(zs, e0)}, teacher, scales.result() if scales else None
 
 
 def _arguments(job):
@@ -146,6 +162,11 @@ def _arguments(job):
                    lr=.01, stage_two_lr=.001, ema_decay=.99, batch_size=r['batch_size'], valid_batch_size=r['valid_batch_size'],
                    scaling='rms_forces_scaling', scheduler_patience=5, patience=r['epochs'] + 1,
                    eval_interval=1, max_num_epochs=r['epochs'], start_stage_two=r['stage_two_start'])
+    if 'molecular' in job:
+        # 0.3.16 forwards explicitly mapped extra arrays to AtomicData. Use
+        # the normal single Default head and retain the held-out test file.
+        options['heads'] = repr({'Default': {'arrays_keys': {'mol_anchor': 'mol_anchor', 'mol_arm': 'mol_arm'},
+                                             'test_file': str(options['test_file'])}})
     if job['resume']:
         options.update(avg_num_neighbors=job['avg_num_neighbors'], compute_avg_num_neighbors='False')
     args = [item for name, value in options.items() for item in ('--' + name, str(value))]
@@ -158,7 +179,7 @@ def _arguments(job):
 
 
 def plan_job(args):
-    sources, offsets, teacher = _inspect_sources(args)
+    sources, offsets, teacher, scales = _inspect_sources(args)
     recipe = {key: getattr(args, key) for key in ('width', 'radial_head', 'cutoff', 'seed', 'dtype', 'epochs',
                                                     'stage_two_start', 'batch_size', 'valid_batch_size')}
     job = dict(schema=1, mace_torch=MACE_VERSION, recipe=recipe, out=str(args.out.resolve()), sources=sources,
@@ -166,6 +187,9 @@ def plan_job(args):
                centered_before_cast=args.dtype == 'float32', resume=None,
                radial_input=dict(basis='bessel', num_basis=8, cutoff_polynomial_order=5, species_dependent=False,
                                  distance_transform='None', apply_cutoff_before_mlp=True, mlp_widths=[64, 64, args.radial_head]))
+    if scales is not None:
+        recipe['molecular_loss'] = args.molecular_loss
+        job['molecular'] = scales
     identities = [(s['role'], s['sha256']) for s in sources]
     if args.resume:
         parent = json.loads((args.resume / 'manifest.json').read_text(encoding='utf-8'))
@@ -207,7 +231,11 @@ def write_inputs(job, dest):
                 a.info = {k: a.info[k] for k in keep}
                 a.info['REF_energy'] = energy
                 a.set_constraint()
-                write(stream, a, format='extxyz', columns=['symbols', 'positions', 'REF_forces'], write_results=False)
+                columns = ['symbols', 'positions', 'REF_forces']
+                if 'molecular' in job:
+                    a.arrays['mol_anchor'], a.arrays['mol_arm'] = _molecular().molecular_geometry(a, 'mol_id')
+                    columns += ['mol_id', 'mol_anchor', 'mol_arm']
+                write(stream, a, format='extxyz', columns=columns, write_results=False)
 
 
 def restart_paths(checkpoints, job):
@@ -267,8 +295,11 @@ def run_job(job):
     if job['resume']:
         _seed_resume(job, checkpoints)
     with (out / 'train.log').open('w', encoding='utf-8') as log:
-        subprocess.run([sys.executable, '-m', 'mace.cli.run_train', *job['mace_args']],
-                       cwd=out, stdout=log, stderr=subprocess.STDOUT, check=True)
+        if job['recipe'].get('molecular_loss') == 'net-torque':
+            command = [sys.executable, str(Path(__file__).resolve().with_name('molecular_loss.py')), str(out/'plan.json')]
+        else:
+            command = [sys.executable, '-m', 'mace.cli.run_train', *job['mace_args']]
+        subprocess.run(command, cwd=out, stdout=log, stderr=subprocess.STDOUT, check=True)
     pre, _ = restart_paths(checkpoints, job)
     r = job['recipe']
     if not (checkpoints / f"student_run-{r['seed']}_epoch-{r['epochs'] - 1}_swa.pt").is_file():

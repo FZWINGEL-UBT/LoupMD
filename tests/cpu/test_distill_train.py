@@ -133,3 +133,37 @@ def test_export_restores_species_offsets_in_model_order_at_reference_precision()
     np.testing.assert_array_equal(result, [[100000000.125, -1000.25]])
     with pytest.raises(ValueError, match='zero'):
         restore(result, [8, 1], offsets)
+
+
+def test_molecular_pair_uses_training_only_scales_and_preserves_ids(tmp_path, splits):
+    from loupmd.distill import train as module
+
+    for name in ('train', 'valid', 'teacher-test'):
+        path = tmp_path / f'{name}.xyz'
+        frames = read(path, ':')
+        for a in frames:
+            a.arrays['mol_id'] = np.array([591, 591])
+            if name != 'train':
+                a.arrays['REF_forces'] *= 1e5
+        write(path, frames)
+
+    def plan(mode, dtype='float64'):
+        return module.plan_job(module.parse_args([*splits, '--out', str(tmp_path / 'job'), '--batch-size', '2',
+                                                  '--molecular-loss', mode, '--dtype', dtype]))
+    control, weighted = plan('control'), plan('net-torque')
+    assert control['molecular'] == weighted['molecular'] == plan('net-torque', 'float32')['molecular']
+    assert weighted['pair_id'] == plan('net-torque', 'float32')['pair_id']
+    assert control['pair_id'] != weighted['pair_id']
+    assert control['energy_offsets_eV'] == weighted['energy_offsets_eV']
+    assert weighted['molecular']['net_force_component_mse'] == pytest.approx(np.mean((np.array([3, 5, 7])*.001)**2))
+    for label, job in [('c', control), ('w', weighted)]:
+        dest = tmp_path / label
+        module.write_inputs(job, dest)
+        atoms = read(dest / 'train.xyz', 0)
+        np.testing.assert_array_equal(atoms.arrays['mol_id'], [591, 591])
+        np.testing.assert_array_equal(atoms.arrays['mol_anchor'], [0, 0])
+        np.testing.assert_allclose(atoms.arrays['mol_arm'], [[-1, 0, 0], [1, 0, 0]])
+    assert (tmp_path / 'c/train.xyz').read_bytes() == (tmp_path / 'w/train.xyz').read_bytes()
+    write(tmp_path / 'valid.xyz', frame('valid', 2, 50.))
+    with pytest.raises(ValueError, match='mol_id'):
+        plan('net-torque')
