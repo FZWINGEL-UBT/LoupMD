@@ -21,7 +21,7 @@ def add_parser(sub):
     parser.add_argument("--sha256", metavar="HEX", help="the stated hash of a file that is not in the label table")
     parser.add_argument("--trusted", action="store_true", help="load a file outside the label table without a hash")
     parser.add_argument("--download", action="store_true", help="download a label's checkpoint if it is missing")
-    parser.add_argument("--charge", type=int, help="total charge (models with a charge embedding)")
+    parser.add_argument("--charge", type=int, help="total charge of the cell in e (MACE-OMOL-0, MACE-POLAR-1)")
     parser.add_argument("--spin-multiplicity", type=int, help="2S + 1 (models with a spin embedding)")
     parser.add_argument("--optimizer", choices=("lbfgs", "fire"), default="lbfgs", help="default lbfgs")
     parser.add_argument("--fmax", type=float, default=0.05, metavar="EV_PER_A", help="default 0.05 eV/A")

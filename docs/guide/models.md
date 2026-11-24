@@ -73,9 +73,21 @@ installed.
 
 ## Charge and spin
 
-MACE-OMOL-0 (`omol0-xl`) embeds the total charge and spin of the cell. Pass them as `charge=` (in e) and
+Two families take the total charge and spin of the cell. MACE-OMOL-0 (`omol0-xl`) embeds them. MACE-POLAR-1
+(`polar1-s`, `polar1-m`, `polar1-l`) holds its atomic charges to them: the charges of the two spin channels sum to
+(Q + M - 1) / 2 and (Q - M + 1) / 2 for total charge Q and spin multiplicity M. Pass them as `charge=` (in e) and
 `spin_multiplicity=` (2S + 1), or `--charge` and `--spin-multiplicity`; the defaults are 0 and 1. Both must be
-integers. The export folds them into the bundle, so each setting is its own bundle. Other models refuse them.
+integers. The export writes them into the bundle, so each setting is its own bundle. Other models refuse them.
+
+```python
+ff = lm.load("polar1-m", charge=-1)                        # an anion in its box
+ff = lm.load("polar1-m", charge=1, spin_multiplicity=2)    # a radical cation
+```
+
+LoupMD's cells are periodic, so a charged molecule is a charged periodic cell, as it is for MACE with `pbc=True`:
+the long-range term has no k = 0 Coulomb contribution, which amounts to a uniform neutralising background. Use a
+box large enough for the interaction between the images to be negligible. Up to 0.0.2 the POLAR-1 models refused
+`charge` and `spin_multiplicity` and ran every cell as a neutral singlet.
 
 ## The bundle and its cache
 

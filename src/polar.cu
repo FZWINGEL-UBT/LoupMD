@@ -1035,7 +1035,9 @@ __global__ void fukui_sums_kernel(int N, const float* __restrict__ q, const floa
     }
 }
 
-// q_out = q_in with q[0] += fk_n0 (Q0/2 - Sq0), q[4] += fk_n1 (Q1/2 - Sq1); fk_n = fk / Sf (Sf = 1 if 0). Q = 0.
+// q_out = q_in with q[0] += fk_n0 (T0 - Sq0), q[4] += fk_n1 (T1 - Sq1); fk_n = fk / Sf (Sf = 1 if 0). The targets
+// T0 = (Q + M - 1) / 2 and T1 = (Q - M + 1) / 2 (total charge Q, spin multiplicity M) are in red[ch] already: the
+// forward presets red[ch] = -T before fukui_sums_kernel adds Sq, so 0 - red[ch] is T - Sq.
 __global__ void fukui_apply_kernel(int N, const float* __restrict__ q, const float* __restrict__ fk, int fk_ld,
                                    const double* __restrict__ red, float* __restrict__ qo) {
     const int i = blockIdx.x * blockDim.x + threadIdx.x;
@@ -1080,7 +1082,7 @@ __global__ void fukui_bwd_kernel(int N, const float* __restrict__ G, const float
         const double sf = zero ? 1.0 : red[2 + ch];
         const double T = red[4 + ch] / sf;  // sum_b G_b fk_n,b
         v = (float)(v - T);
-        const double cq = 0.0 - red[ch];  // Q/2 - Sq
+        const double cq = 0.0 - red[ch];  // T - Sq (red[ch] = Sq - T)
         // dfk_n[a] = G[a] cq ; dfk[a] = dfk_n[a] / sf - (sum_b dfk_n[b] fk[b]) / sf^2 (no second term when sf == 0)
         double d = (double)G[i] * cq / sf;
         if (!zero) d -= cq * red[4 + ch] / (sf * sf);
@@ -1306,6 +1308,8 @@ struct PolarLR::Impl {
     double *SC = nullptr, *SS = nullptr;  // per k structure factors
     float* dk = nullptr;                  // per k backward coefficients
     double* red = nullptr;                              // fukui reductions, 8 per use
+    double* red0 = nullptr;                             // their start values (-target in slots 0, 1), if not neutral
+    double q_target[2] = {0.0, 0.0};                    // per spin channel: (Q + M - 1) / 2, (Q - M + 1) / 2
     double* kpart = nullptr;  // k-split partial sums: [k_splits_max(N)][N][16] (feat_pass) or [..][N][11]
     std::vector<Step> steps;
     // local electron energy state
@@ -1406,6 +1410,14 @@ void PolarLR::load(const Bundle& b, int S, int n_layers) {
     P.lmax = b.meta_int("LR.lmax");
     P.n_rec = b.meta_int("LR.n_rec");
     P.add_le = b.meta_int("LR.add_le");
+    {
+        // Total charge and spin multiplicity of the cell (bundles without the keys: neutral singlet).
+        const int Q = b.has_meta("LR.charge") ? b.meta_int("LR.charge") : 0;
+        const int M = b.has_meta("LR.spin_multiplicity") ? b.meta_int("LR.spin_multiplicity") : 1;
+        if (M < 1) throw std::runtime_error("polar bundle: spin multiplicity must be at least 1");
+        P.q_target[0] = 0.5 * (Q + (M - 1));
+        P.q_target[1] = 0.5 * (Q - (M - 1));
+    }
     if (P.lmax < 0 || P.lmax > 2 || P.C < 32 || P.C % 32 || P.n_rec < 1 || P.n_rec > 8)
         throw std::runtime_error("polar bundle: unsupported long-range shape");
     P.rows = 0;
@@ -1927,6 +1939,20 @@ void PolarLR::alloc_system(int N) {
         CUDA_CHECK_THROW(cudaMalloc(&r, 8 * (2 * P.n_rec + 4) * sizeof(double)));
         P.s_.push_back(r);
         P.red = r;
+        P.red0 = nullptr;
+        if (P.q_target[0] != 0.0 || P.q_target[1] != 0.0) {
+            const int nred0 = 8 * (2 * P.n_rec + 4);
+            std::vector<double> h(nred0, 0.0);
+            for (int u = 0; u <= P.n_rec; ++u) {  // the first constraint and one per SCF step
+                h[8 * u] = -P.q_target[0];
+                h[8 * u + 1] = -P.q_target[1];
+            }
+            double* r0 = nullptr;
+            CUDA_CHECK_THROW(cudaMalloc(&r0, nred0 * sizeof(double)));
+            P.s_.push_back(r0);
+            CUDA_CHECK_THROW(cudaMemcpy(r0, h.data(), nred0 * sizeof(double), cudaMemcpyHostToDevice));
+            P.red0 = r0;
+        }
     }
     P.steps.resize(P.n_rec);
     for (int i = 0; i < P.n_rec; ++i) {
@@ -2031,7 +2057,11 @@ void PolarLR::record(cudaStream_t st, int N, const GemmFn& gemm_f32,
     auto fork = [&] { if (fork_fn) fork_fn(); };
     auto lane = [&](int k) { if (lane_fn) lane_fn(k); };
     auto join = [&] { if (join_fn) join_fn(); };
-    CUDA_CHECK_THROW(cudaMemsetAsync(P.red, 0, nred * sizeof(double), st));
+    if (P.red0) {
+        CUDA_CHECK_THROW(cudaMemcpyAsync(P.red, P.red0, nred * sizeof(double), cudaMemcpyDeviceToDevice, st));
+    } else {
+        CUDA_CHECK_THROW(cudaMemsetAsync(P.red, 0, nred * sizeof(double), st));
+    }
     double* red_f0 = P.red;                       // first fukui
     auto red_step = [&](int i) { return P.red + 8 * (1 + i); };
     frac_kernel<<<blocks_for(N), 256, 0, st>>>(N, pos64, P.minv, P.fracu);

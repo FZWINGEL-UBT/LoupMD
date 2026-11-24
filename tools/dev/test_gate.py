@@ -287,7 +287,8 @@ def main():
         stress_ref = [s for _, _, s in ref64]
         if polar:
             print("PolarMACE: float64 native-energy strain gradient (complete cell dependence)")
-            stress_ref = polar_reference.stress_reference(model_path, configs, device=args.ref_device)
+            stress_ref = polar_reference.stress_reference(model_path, configs, device=args.ref_device,
+                                                          charge=args.charge, spin=args.spin_multiplicity)
         save_refs(cache, ref64, ref32, stress_ref)
         print(f"MACE references saved to {cache}")
     if torch.cuda.is_available():

@@ -85,12 +85,21 @@ def energy_stress(calc, atoms):
     return float(energy.detach()) * calc.energy_units_to_eV, stress.detach().cpu().numpy()
 
 
-def stress_reference(model_path, configs, *, device):
-    """Float64 strain-autograd targets; no finite-difference step or altered gate allowance."""
+def stress_reference(model_path, configs, *, device, charge=None, spin=None):
+    """Float64 strain-autograd targets; no finite-difference step or altered gate allowance. ``charge`` and ``spin``
+    are the cell's total charge and spin multiplicity (MACECalculator reads them from ``atoms.info``)."""
     from mace.calculators import MACECalculator
 
     calc = MACECalculator(model_paths=model_path, device=device, default_dtype="float64")
-    return [energy_stress(calc, atoms)[1] for _, atoms in configs]
+    out = []
+    for _, atoms in configs:
+        at = atoms.copy()
+        if charge is not None:
+            at.info["charge"] = int(charge)
+        if spin is not None:
+            at.info["spin"] = int(spin)
+        out.append(energy_stress(calc, at)[1])
+    return out
 
 
 def fd_stress(model_path, configs, *, device, h):

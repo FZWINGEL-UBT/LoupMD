@@ -495,6 +495,8 @@ def joint_embedding_vector(m64, charge, spin_multiplicity):
     ScaleShiftMACE adds to every atom's layer-0 node features. None for a model without one (then charge and spin
     must not be given)."""
     if not hasattr(m64, "joint_embedding"):
+        if type(m64).__name__ == "PolarMACE":
+            return None, {}  # MACE-POLAR-1 takes them through its charge constraint (export.polar.charge_spin_meta)
         if charge is not None or spin_multiplicity is not None:
             raise ValueError("the model has no total-charge / spin embedding: charge and spin_multiplicity do not apply")
         return None, {}
@@ -733,6 +735,7 @@ def export_model(model_path, atomic_nums, out_path, head=None, charge=None, spin
         from . import polar as export_polar
 
         export_polar.export_lr(m64, cols, T, meta, str(m64.products[-1].linear.irreps_out))
+        meta.update(export_polar.charge_spin_meta(charge, spin_multiplicity))
 
     # ZBL pair repulsion (per ordered pair)
     has_zbl = int(bool(getattr(m64, "pair_repulsion", False)))

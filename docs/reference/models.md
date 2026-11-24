@@ -82,7 +82,11 @@ also when its file is given by path; there is no default head.
 `omol0-xl` has a total-charge and a total-spin embedding, one value per structure; the checkpoint's embeddings
 cover total charge -100 to 100 and total spin 0 to 100. Set them with `--charge` and `--spin-multiplicity` (2S + 1),
 or `charge=` and `spin_multiplicity=`; the defaults are 0 and 1. The export folds both into the bundle, so each
-setting is its own bundle. Other models refuse them.
+setting is its own bundle.
+
+The `polar1-*` models take the same two settings (since 0.0.3). They have no embedding for them: the model
+constrains the summed atomic charges of its two spin channels to (Q + M - 1) / 2 and (Q - M + 1) / 2, before its
+self-consistent steps and after each one. The bundle stores Q and M. Other models refuse them.
 
 ## Finding and trusting the file
 

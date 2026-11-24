@@ -264,7 +264,7 @@ def load(model, head=None, *, checkpoint=None, sha256=None, trusted=False, downl
       fetches a label's file when it is missing;
     - ``sha256`` or ``trusted=True``: needed for a file that is not in the label table, because a checkpoint is a
       pickle and runs code when it is exported;
-    - ``charge``, ``spin_multiplicity``: total charge and spin of the cell for models that take them (OMOL-0);
+    - ``charge``, ``spin_multiplicity``: total charge and spin of the cell for models that take them (OMOL-0, POLAR-1);
     - ``device``: the GPU index;
     - ``precision``: ``"float32"``, the only one: float64 forces are cut (PLAN.md A3) and refused.
 

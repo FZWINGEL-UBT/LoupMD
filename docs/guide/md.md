@@ -193,7 +193,7 @@ and evaluated once; if any part fails the run is left as it was. Its keywords:
 | `momenta` (ASE units) | `set_momenta` | the momenta |
 | `masses` (amu) | `set_masses` | the masses; momenta stay, as in ASE |
 | `species` | `set_species` | the elements, within those of the run's bundle (`elements=` adds more); a changed atom takes the new element's mass |
-| `total_charge`, `spin_multiplicity` | `set_charges` | OMOL-0's inputs; the model is loaded again. Per-atom charges are refused |
+| `total_charge`, `spin_multiplicity` | `set_charges` | OMOL-0's and POLAR-1's inputs; the model is loaded again. Per-atom charges are refused |
 | `friction_per_fs` | `set_friction` | the Langevin or BAOAB friction |
 
 Every change but the friction sets the engine's state anew; the thermo rows stay on their cadence. Before the first

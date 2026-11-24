@@ -82,6 +82,17 @@ def _put_mlp(T, prefix, layers):
 
 
 @torch.no_grad()
+def charge_spin_meta(charge, spin_multiplicity):
+    """The cell's total charge Q (in e) and spin multiplicity M = 2S + 1 for MACE-POLAR-1 (defaults 0 and 1). The model
+    constrains the two spin channels' summed monopoles to (Q + M - 1) / 2 and (Q - M + 1) / 2 before the SCF steps and
+    after each one; the engine reads the two integers and forms the targets."""
+    q = 0 if charge is None else int(charge)
+    m = 1 if spin_multiplicity is None else int(spin_multiplicity)
+    if m < 1:
+        raise ValueError(f"spin multiplicity {m} must be at least 1")
+    return {"LR.charge": q, "LR.spin_multiplicity": m, "charge": q, "spin_multiplicity": m}
+
+
 def export_lr(m, cols, T, meta, hidden_irreps):
     hidden = o3.Irreps(hidden_irreps)
     C = eg.single_mul(hidden)

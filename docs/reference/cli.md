@@ -150,7 +150,7 @@ loupmd validate [-h] [--model MODEL] [--dispersion PRESET] [--functional NAME]
 | `--include-unstable` | also gate configurations on which the model itself is not float32-reproducible |
 | `--specialised` | refused: the kernels specialised to MACE-OMAT-0 medium (an option of 0.0.1) were retired, and every model runs the generic kernels |
 | `--capacity` `CAPACITY` | whole: one call per structure (default); tiled: tile by tile, about four tiles per structure, as large cells run; wavefront: tiled in the wavefront order with the row pool (two-layer models) (one of: whole, tiled, wavefront) |
-| `--charge` `CHARGE` | total charge (models with a charge embedding) |
+| `--charge` `CHARGE` | total charge of the cell in e (MACE-OMOL-0, MACE-POLAR-1) |
 | `--spin-multiplicity` `SPIN_MULTIPLICITY` | 2S + 1 (models with a spin embedding) |
 | `--device` `N` | the GPU index (default 0) |
 | `--json` `FILE` | write the record (loupmd.gate/1) to FILE, or - for stdout |
@@ -202,7 +202,7 @@ loupmd md [-h] [--structure FILE] --model MODEL [--head HEAD] [--checkpoint PATH
 | `--sha256` `HEX` | the stated hash of a file that is not in the label table |
 | `--trusted` | load a file outside the label table without a hash |
 | `--download` | download a label's checkpoint if it is missing |
-| `--charge` `CHARGE` | total charge (models with a charge embedding) |
+| `--charge` `CHARGE` | total charge of the cell in e (MACE-OMOL-0, MACE-POLAR-1) |
 | `--spin-multiplicity` `SPIN_MULTIPLICITY` | 2S + 1 (models with a spin embedding) |
 | `--ensemble` `ENSEMBLE` | NVT (default), NVE or NPT (Langevin BAOAB at --pressure; experimental) |
 | `--pressure` `GPA` | the target pressure in GPa of --ensemble NPT (default 0) |
@@ -265,7 +265,7 @@ loupmd init md [-h] [--structure FILE] --model MODEL [--head HEAD] [--checkpoint
 | `--sha256` `HEX` | the stated hash of a file that is not in the label table |
 | `--trusted` | load a file outside the label table without a hash |
 | `--download` | download a label's checkpoint if it is missing |
-| `--charge` `CHARGE` | total charge (models with a charge embedding) |
+| `--charge` `CHARGE` | total charge of the cell in e (MACE-OMOL-0, MACE-POLAR-1) |
 | `--spin-multiplicity` `SPIN_MULTIPLICITY` | 2S + 1 (models with a spin embedding) |
 | `--ensemble` `ENSEMBLE` | NVT (default), NVE or NPT (Langevin BAOAB at --pressure; experimental) |
 | `--pressure` `GPA` | the target pressure in GPa of --ensemble NPT (default 0) |
@@ -328,7 +328,7 @@ loupmd relax [-h] --model MODEL [--head HEAD] [--checkpoint PATH] [--sha256 HEX]
 | `--sha256` `HEX` | the stated hash of a file that is not in the label table |
 | `--trusted` | load a file outside the label table without a hash |
 | `--download` | download a label's checkpoint if it is missing |
-| `--charge` `CHARGE` | total charge (models with a charge embedding) |
+| `--charge` `CHARGE` | total charge of the cell in e (MACE-OMOL-0, MACE-POLAR-1) |
 | `--spin-multiplicity` `SPIN_MULTIPLICITY` | 2S + 1 (models with a spin embedding) |
 | `--optimizer` `OPTIMIZER` | default lbfgs (one of: lbfgs, fire) |
 | `--fmax` `EV_PER_A` | default 0.05 eV/A |

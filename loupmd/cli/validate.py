@@ -52,7 +52,7 @@ def add_parser(sub):
                         help="whole: one call per structure (default); tiled: tile by tile, about four tiles per "
                              "structure, as large cells run; wavefront: tiled in the wavefront order with the row "
                              "pool (two-layer models)")
-    parser.add_argument("--charge", type=int, help="total charge (models with a charge embedding)")
+    parser.add_argument("--charge", type=int, help="total charge of the cell in e (MACE-OMOL-0, MACE-POLAR-1)")
     parser.add_argument("--spin-multiplicity", type=int, help="2S + 1 (models with a spin embedding)")
     parser.add_argument("--device", type=int, default=0, metavar="N", help="the GPU index (default 0)")
     parser.add_argument("--json", metavar="FILE", help="write the record (loupmd.gate/1) to FILE, or - for stdout")

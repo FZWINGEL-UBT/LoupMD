@@ -699,7 +699,7 @@ class Simulation:
         - ``species`` (atomic numbers or symbols, ``(N,)``): within the elements of the run's bundle (the starting
           structure's), so nothing is exported; an atom whose element changes takes the new element's standard
           mass unless ``masses`` is given too, and keeps its momentum;
-        - ``total_charge``, ``spin_multiplicity``: for models that take them (OMOL-0). They are export arguments
+        - ``total_charge``, ``spin_multiplicity``: for models that take them (OMOL-0, POLAR-1). They are export arguments
           (PLAN.md O7), so the model is loaded again with them and a new bundle and engine are made;
         - ``charges``: per-atom charges are an input of no model LoupMD runs, and are refused;
         - ``friction_per_fs``: the Langevin (or BAOAB) friction in 1/fs.
@@ -716,9 +716,9 @@ class Simulation:
             raise InputError(f"this simulation is {self.status}; events apply between two run() calls")
         if charges is not None:
             raise PlanRefused("per-atom charges as an input",
-                              why="no model LoupMD runs takes per-atom charges; OMOL-0 takes the cell's total charge "
-                                  "and spin multiplicity (PLAN.md O7)",
-                              next_step="Use update(total_charge=..., spin_multiplicity=...) for OMOL-0.")
+                              why="no model LoupMD runs takes per-atom charges; OMOL-0 and POLAR-1 take the cell's total "
+                                  "charge and spin multiplicity (PLAN.md O7)",
+                              next_step="Use update(total_charge=..., spin_multiplicity=...) for OMOL-0 or POLAR-1.")
         n = len(self._atoms)
 
         def per_atom(value, name, shape):
@@ -810,7 +810,7 @@ class Simulation:
         self.update(species=species)
 
     def set_charges(self, charges=None, *, total_charge=None, spin_multiplicity=None):
-        """The cell's total charge and spin multiplicity (OMOL-0), one event (``update``): the model is loaded
+        """The cell's total charge and spin multiplicity (OMOL-0, POLAR-1), one event (``update``): the model is loaded
         again with them. Per-atom ``charges`` are refused."""
         if charges is None and total_charge is None and spin_multiplicity is None:
             raise InputError("set_charges needs total_charge or spin_multiplicity")

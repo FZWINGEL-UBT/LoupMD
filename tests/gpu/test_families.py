@@ -65,6 +65,41 @@ def test_generic_model_without_neighbour_pairs_matches_mace(model, symbols):
     assert np.abs(f).max() < 1e-6
 
 
+@pytest.mark.parametrize("charge,spin", [(1, None), (-1, 2), (0, 3)])
+def test_polar_total_charge_and_spin_match_mace(charge, spin):
+    """MACE-POLAR-1 holds the summed charges of its two spin channels to (Q + M - 1) / 2 and (Q - M + 1) / 2. Up to
+    0.0.2 the engine's targets were fixed at zero and the export refused both arguments, so a charged or open-shell
+    cell could not be run. A water dimer in a box, against MACE in float64 with the same charge and spin; and the
+    result must differ from the neutral singlet's (measured: by 0.2 to 6 eV)."""
+    from ase import Atoms
+    from mace.calculators import MACECalculator
+
+    path = find_model("MACE-POLAR-1-S.model")
+    at = Atoms("OH2OH2", positions=[(5.0, 5.0, 5.0), (5.76, 5.59, 5.0), (4.24, 5.59, 5.0),
+                                    (5.1, 5.2, 7.9), (5.3, 4.3, 8.2), (5.6, 5.9, 8.4)], cell=[12.0] * 3, pbc=True)
+    z, m = at.get_atomic_numbers(), at.get_masses()
+
+    def run(**kw):
+        eng = LoupEngine(ensure_loup_bundle(path, [1, 8], **kw))
+        eng.set_system(z, m)
+        return eng.evaluate(at.positions, at.cell.array)
+
+    kw = {"charge": charge} if spin is None else {"charge": charge, "spin_multiplicity": spin}
+    e, f, _ = run(**kw)
+    ref = at.copy()
+    ref.info["charge"] = charge
+    ref.info["spin"] = 1 if spin is None else spin
+    ref.calc = MACECalculator(model_paths=path, device="cpu", default_dtype="float64")
+    e_ref, f_ref = ref.get_potential_energy(), ref.get_forces()
+    assert abs(e - e_ref) < 1e-4 * len(at), f"{e - e_ref:.3e} eV"
+    assert np.abs(f - f_ref).max() < 2e-4, f"{np.abs(f - f_ref).max():.3e} eV/A"
+    e0, f0, _ = run()
+    assert abs(e - e0) > 0.05, "the charged / open-shell cell gave the neutral singlet's energy"
+    e00, f00, _ = run(charge=0, spin_multiplicity=1)
+    # the defaults written out are the defaults (two evaluations differ by the order of the float32 sums)
+    assert abs(e00 - e0) < 1e-5 and np.abs(f00 - f0).max() < 1e-5
+
+
 @pytest.mark.parametrize("model", ["mace-omat-0-small.model", "mace-mh-1.model"])
 def test_receiver_with_an_empty_species_segment_matches_mace(model):
     """Two Sr and an O within the cutoff, the Ti beyond it: each Sr receives O and Sr edges but none from Ti, the

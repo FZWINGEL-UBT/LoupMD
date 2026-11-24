@@ -176,8 +176,9 @@ def ensure_loup_bundle(model_path: str, atomic_numbers: list[int], cache_dir: st
     Every model takes the generic kernels; ``generic`` is accepted and ignored (the kernels specialised to
     MACE-OMAT-0 medium were retired). ``head`` selects a multi-head model's head
     (default: omat_pbe if present, else the last head). ``charge`` and ``spin_multiplicity`` (total charge in e and
-    2S + 1) apply to models with a total charge / spin embedding (MACE-OMOL-0; default 0 and 1); the export folds
-    them into the bundle, so each setting is its own bundle. Other models refuse them."""
+    2S + 1) apply to MACE-OMOL-0 (its total charge / spin embedding) and to MACE-POLAR-1 (the totals its charge
+    constraint holds); default 0 and 1. The export writes them into the bundle, so each setting is its own bundle.
+    Other models refuse them."""
     def integral(name, v):  # categorical model inputs: 0.5 must not round to 0, 1.0 must share 1's bundle
         if v is None:
             return None

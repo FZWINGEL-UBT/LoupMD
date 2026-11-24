@@ -143,10 +143,11 @@ def _evaluate(model_path, dtype, configs, head, device, charge, spin):
     return out
 
 
-def _fd_stress(model_path, configs, device, h=FD_STRESS_H):
+def _fd_stress(model_path, configs, device, h=FD_STRESS_H, charge=None, spin=None):
     """Stress as the float64 MACE energy's central difference under symmetric strain. For PolarMACE this is the
     reference whatever mace-torch is installed: up to 0.3.16 its autograd stress leaves out the k-space terms' cell
-    dependence (about 0.02 GPa on a water box with POLAR-1-S); 0.3.17 has it."""
+    dependence (about 0.02 GPa on a water box with POLAR-1-S); 0.3.17 has it. ``charge`` and ``spin`` are the
+    cell's, as in ``_evaluate`` (without them the reference would be the neutral singlet's stress)."""
     import numpy as np
     from mace.calculators import MACECalculator
 
@@ -155,6 +156,10 @@ def _fd_stress(model_path, configs, device, h=FD_STRESS_H):
     for _, at in configs:
         def energy(eps, at=at):
             a = at.copy()
+            if charge is not None:
+                a.info["charge"] = int(charge)
+            if spin is not None:
+                a.info["spin"] = int(spin)
             deformation = np.eye(3) + eps
             a.set_cell(at.cell.array @ deformation, scale_atoms=False)
             a.positions = at.positions @ deformation
@@ -181,7 +186,7 @@ def compute(model_path, configs, head, device, charge, spin):
     ref32 = _evaluate(model_path, "float32", configs, head, device, charge, spin)
     stress_ref = [s for _, _, s in ref64]
     if type(torch.load(model_path, map_location="cpu", weights_only=False)).__name__ == "PolarMACE":
-        stress_ref = _fd_stress(model_path, configs, device)
+        stress_ref = _fd_stress(model_path, configs, device, charge=charge, spin=spin)
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
     return ref64, ref32, stress_ref

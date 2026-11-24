@@ -38,7 +38,7 @@ _COMMENTS = {
     "sha256": "the stated hash of a file that is not in the label table",
     "trusted": "load a file outside the label table without a hash",
     "download": "download a label's checkpoint if it is missing",
-    "charge": "total charge (models with a charge embedding)",
+    "charge": "total charge of the cell in e (MACE-OMOL-0, MACE-POLAR-1)",
     "spin_multiplicity": "2S + 1 (models with a spin embedding)",
     "ensemble": '"NVT", "NVE" or "NPT" (Langevin BAOAB, experimental); [integrator] chooses another integrator',
     "pressure_GPa": 'the target pressure of ensemble "NPT"',

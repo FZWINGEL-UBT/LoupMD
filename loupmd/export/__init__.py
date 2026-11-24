@@ -3,8 +3,8 @@ path (``loupmd.export.generic``); the kernels specialised to MACE-OMAT-0 medium 
 stage 5).
 
   python -m loupmd.export --model M --elements 8,22,38 --output out.loup [--head H]
-                          [--charge Q --spin-multiplicity M]   (models with a total charge / spin embedding:
-                                                                MACE-OMOL-0)
+                          [--charge Q --spin-multiplicity M]   (MACE-OMOL-0's total charge / spin embedding;
+                                                                MACE-POLAR-1's charge constraint)
 
 ``--generic`` is accepted and ignored (it selected the generic path before every model took it).
 
