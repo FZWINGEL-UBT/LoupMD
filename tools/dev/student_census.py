@@ -16,6 +16,7 @@ import json
 import math
 import os
 import sqlite3
+import statistics
 import subprocess
 import sys
 import threading
@@ -26,6 +27,7 @@ from pathlib import Path
 
 SIZES = {320: 4, 5000: 10, 40000: 20}
 SAMPLE_INTERVAL_S = 0.05
+WARMUP_STEPS = 1000  # 1 ps at 1 fs: ten Langevin damping times, independent of cell size
 
 
 def parse_trace(path, steps):
@@ -171,10 +173,19 @@ def timing_summary(start_ns, blocks):
     raise ValueError('no full blocks in second half')
 
 
+def _measurement_temperature(blocks, read_start_ns, atoms):
+    # Endpoint temperatures for complete measured blocks, not the initial velocities or final snapshot.
+    temp = statistics.median(b['final_temperature_K'] for b in blocks if b['end_ns'] > read_start_ns)
+    # Gross kinetic-temperature screen, not a confidence interval for correlated blocks.
+    if abs(temp - 300.) > 3 * 300. * math.sqrt(2. / (3 * atoms - 3)):
+        raise ValueError(f'median measured temperature {temp:.2f} K outside the 300 K thermal window')
+    return temp
+
+
 def _sustain(run):
-    # Size each block to about 150 ms after a 100-step warmup (includes first-use autotuning).
+    # Size each block to about 150 ms after thermalisation and first-use autotuning.
     # The engine returns host-side final thermo, so run() has completed the steps when it returns.
-    warm = run(100, 1)
+    warm = run(WARMUP_STEPS, 1)
     n = max(1, min(4096, round(150 / max(warm.step_ms, 0.001))))
     blocks = []
     start = time.perf_counter_ns()
@@ -242,7 +253,8 @@ def measure(args):
                       system='periodic cubic SrTiO3', cell_A=at.cell.array.tolist(), pid=os.getpid(), **gpu,
                       initial_velocities='Maxwell-Boltzmann', velocity_seed=42, initial_temperature_K=at.get_temperature(),
                       target_temperature_K=300.0, integrator='Langevin', dt_fs=1.0, friction_per_fs=0.01, skin_A=0.5,
-                      warmup_steps=100, warmup_seed=1, conditioning_steps=sum(b['steps'] for b in blocks),
+                      warmup_steps=WARMUP_STEPS, warmup_seed=1, conditioning_steps=sum(b['steps'] for b in blocks),
+                      measured_block_median_K=_measurement_temperature(blocks, timing['read_start_ns'], len(at)),
                       conditioning_blocks=len(blocks), conditioning_block_steps=blocks[0]['steps'],
                       final_temperature_K=blocks[-1]['final_temperature_K'])
         if args.mode == 'trace':

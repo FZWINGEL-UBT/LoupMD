@@ -88,6 +88,17 @@ def test_latter_half_is_by_elapsed_time_not_block_count():
         census.timing_summary(0, blocks[:2])
 
 
+def test_large_cell_burn_in_cannot_mask_a_cold_timing_window():
+    blocks = [{'end_ns': i, 'final_temperature_K': t}
+              for i, t in enumerate((300., 300., 301., 283., 285., 287.))]
+    with pytest.raises(ValueError, match='temperature'):
+        census._measurement_temperature(blocks, 2, 40000)
+    # A single cold final endpoint is not the temperature of an entire window.
+    blocks[-3]['final_temperature_K'] = 299.
+    blocks[-2]['final_temperature_K'] = 301.
+    assert census._measurement_temperature(blocks, 2, 40000) == 299.
+
+
 def test_process_memory_is_pid_specific_not_board_memory():
     rows = [SimpleNamespace(pid=7, usedGpuMemory=1234), SimpleNamespace(pid=8, usedGpuMemory=2**28)]
     assert census.process_bytes(rows, 7) == 1234
