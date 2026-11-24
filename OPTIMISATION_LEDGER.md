@@ -3047,6 +3047,10 @@ Colab L4 only, same validation split at epoch 30: force RMSE **21.93 / 20.90 meV
 
 **5060 Ti only — 1200 K Li/Na/K chloride teacher.** Independent NPT seed densities 1.22457 and 1.18863 g/cm³. Halving the NVE step to 0.5 fs reduced matched 4 ps energy RMS from 0.004249 to 0.001149 meV/atom. Retain 0.5 fs as the second comparison; the fitted drifts are below their block SEM. No student or transport adoption; full statistics and digest in STATUS §6.70.
 
+**5060 Ti only — diffusive reference verified.** Four independent MH-1 chloride-melt trajectories gave positive finite-window self-diffusion estimates for *each* species; Cl/K/Li/Na means 0.48083/0.51014/0.71809/0.70836 Å²/ps. Use the retained per-seed spread for the student rattle-vs-trajectory comparison; no student measured. See STATUS §6.70.
+
+**Workstation label gates — 3,000-frame learning-curve point.** Corrected release admitted with unchanged held-outs; train digest `8240882d…ac7567d`. This is a dataset result, not a training-speed or fidelity measurement.
+
 **5060 Ti only — repeated-cell neighbor rebuild, correctness (`048489b907`).** The CUDA step graph's optional rebuild captured the periodic cell in its bin/count/fill calls. A host rebuild on the first frame in a new cell was not enough: a subsequent on-device rebuild could overwrite its list with shifts from the old cell. Include the captured cell in the step-graph key only when that branch exists. Native MH-1 regression: before the fix the reused and fresh evaluations differed by 1.7412 eV on 135 atoms; after the fix evaluation at both cells with forced rebuilds and the unchanged-cell graph-reuse control passed. No timing or adoption claim.
 
 **Corrected MH-1 label gate, 5060 Ti only.** Reused/fresh 3× E/F/stress: validation 30/30 each (stored 13/30); teacher-test 60/60 each (stored 60/60). Original bytes unchanged; max validation force delta reused vs fresh 8.27e−7 eV/Å. **RTX 4000 Ada and RTX A4000 separately:** same native changed-cell regression passed on leeloo and Coraline before either generated new shards; no timing.
