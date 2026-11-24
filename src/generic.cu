@@ -749,8 +749,9 @@ bool device_is_tuned_cc() {
 }
 
 // The same set plus compute capability 8.0 (A100, list 37: the two-half package and the conv timing 0.81-0.98 of
-// the step beside the TF32 + FP16 cubin, gated on the generic families). MACE-POLAR-1 was not measured there, so
-// its own defaults (setup_polar_h2, the species tables, the hidden fold) keep device_is_tuned_cc().
+// the step beside the TF32 + FP16 cubin, gated on the generic families). MACE-POLAR-1's own defaults
+// (setup_polar_h2, the species tables, the hidden fold) follow since the second part of list 37 (0.57-0.84 of the
+// step, gated); only its per-system conv timing, not measured there, keeps device_is_tuned_cc().
 static bool device_is_tuned_generic_cc() {
     if (device_is_tuned_cc()) return true;
     int dev = 0, major = 0, minor = 0;
@@ -826,7 +827,7 @@ void GenericModel::setup_polar_h2() {
     const char* e = std::getenv("LOUP_POLAR_H2");
     if (e && (e[0] == '0' || e[0] == '1')) {
         if (e[0] == '0') return;
-    } else if (!device_is_tuned_cc()) {
+    } else if (!device_is_tuned_generic_cc()) {
         return;
     }
     if (const char* mm = std::getenv("LOUP_POLAR_H2_MINM"); mm && *mm) polar_h2_min_m_ = std::atoi(mm);
@@ -1899,7 +1900,7 @@ void GenericModel::setup_species_tables(const Bundle& b) {
     if (!L || !L->first_hidden || L->kind != 4 || L->skip_folded || L->lmax_x != 0) return;
     const char* env = std::getenv("LOUP_SPECIES_TABLES");
     if (env && env[0] == '0') return;
-    if (!(lr_ ? device_is_tuned_cc() : folds_measured_here()) && !(env && env[0] == '1')) return;
+    if (!(lr_ ? device_is_tuned_generic_cc() : folds_measured_here()) && !(env && env[0] == '1')) return;
     DevCompose dc;
     const double* E = dc.dup(b.f32("embedding", {S_, C0_}));
     const double* Wup = dc.dup(b.f32("L0.W_up_0", {L->C_in, L->C_x}));
@@ -2087,7 +2088,7 @@ std::string GenericModel::kernel_signature() const {
 // by default; LOUP_POLAR_HFOLD=0 disables it, 1 / 2 / 3 (bit l - 1: degree l) choose the folded degrees on any GPU.
 void GenericModel::setup_lr_fold(const Bundle& b) {
     if (!lr_) return;
-    int mask = device_is_tuned_cc() ? 3 : 0;
+    int mask = device_is_tuned_generic_cc() ? 3 : 0;
     if (const char* e = std::getenv("LOUP_POLAR_HFOLD"); e && e[0] >= '0' && e[0] <= '3') mask = e[0] - '0';
     const int nL = n_layers_, C = layers_[0]->C_out, le_l = lr_->le_lmax();
     for (int l = 1; l <= std::min(layers_[0]->lmax_out, 2); ++l) {
