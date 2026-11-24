@@ -3702,3 +3702,16 @@ Both nominal label sets pass. The student-visited force error rose from 1.596% a
 The 300 K, zero-pressure NPT runs both have 601/601 valid frames. Cell edge −0.0102504 Å vs 0.00035975 Å teacher spread; density +0.0094574 vs 0.00033235 g/cm³. 159/420 partial RDF bins and 4/9 RMS displacement components miss. All three Sr lags miss at both block lengths; the fourth miss is Ti at 500 fs for primary blocking and O at 200 fs for 5 ps blocks. In NVE, 1 fs energy RMS 0.00259348 meV/atom passes, signed drift +0.00015083 meV/atom/ps misses. At 0.5 fs, RMS 0.00067248 and drift −0.00004036 both miss. Neither drift difference is resolved at block uncertainty. Neither narrow seed meets the full §4 bar.
 
 Evidence: `sto320/v2-l4-s64r8-seed2/observables-v2`. Canonical record SHA256 prefixes for `static.01`, `static.005`, `stats-50`, `stats-100`, `nve`: `cc67ef1f`, `1cc371d2`, `94dacbf9`, `3c2e590c`, `0ff055cc`, respectively.
+
+**L4 only — corrected wide FP64 seed 2.** Completed 150/150 logged epochs, medians 48.527/48.531 s per epoch in the phase-one/two windows above. Same 8 Bessels, 5 Å and order-5 cutoff before the 64→64→64 MLP; no species input or distance transform. Verified archive `96445cf1e2a693ed2dd48cb9ca5f631025b24713f8bf2db3bfb7f86cc4d6db07`; physical model `ed087d550cd71ceb0492bf637dc574ddd63d7159b7bcbbd5a97b6a81e3bebe75`, epoch-110 boundary `774a385052d5e6ecd5d7cf3371ffd620e21dbafba52c0f8a17e6d04c42271e34`.
+
+**5060 Ti only — wide FP64 seed 2, no timing.** Native export passes 2/2; worst E/F/S ratios against stock FP32 deviations 0.01/0.74/0.99 (3× rule). Bundle `078e1936faf41d6616faa3db9132b01cac3fe4d63b6a77f0f06abef94f55b12a`. `sto320/v2-l4-s64l0-seed2/{fidelity,teacher-score}.json`:
+
+| Trajectory (60 frames each) | Force RMSE meV/Å | Relative overall | O / Sr / Ti relative, % | p99.9 vector / cap, meV/Å | E RMSE meV/atom | Stress RMSE meV/Å³ |
+| --- | ---: | ---: | --- | --- | ---: | ---: |
+| Student | 9.223 | 1.644% | 1.706 / 1.500 / 1.585 | 45.79 / 56.10 | 0.03756 | 0.04314 |
+| Teacher | 9.227 | 1.647% | 1.696 / 1.465 / 1.622 | 46.34 / 56.02 | 0.03978 | 0.05086 |
+
+**Whole-schedule precision screen:** `tools/dev/oxide_precision.py` verified three completed cold runs against identical dataset hashes, schedule and ordered teacher-test frame IDs. Centered FP32 seed 1 at 8.79944 meV/Å lies inside the observed FP64 range [8.53480, 9.22650]; all three pass both nominal label checks. Two seeds define an observed range, not a confidence interval. The numeric criterion passes. The centered FP32 student's measured §4 MD failures above still prevent adoption; neither a rate difference nor these two seeds establish their cause. Report: `sto320/sweep-plans/precision.json`.
+
+**5060 Ti only — fixed-set comparison, both FP64 seed-2 models.** Same ordered 60 target and 40 hot/strained frames for both models and the seed-1 controls. Target/hard force RMSE (% of teacher RMS) is **1.645/18.460** for wide and **1.892/22.565** for narrow. Hard p99.9 vector errors are **3.934/4.122 eV/Å** wide/narrow. Narrow had lower hard RMSE than wide at seed 1 (12.804% vs 15.91%); that ordering reverses at seed 2. Do not rank radial width from a single seed. Sealed `common-oxide-v1/{target,hot}.json` under both corrected seed-2 runs; independent own-trajectory tests above.
