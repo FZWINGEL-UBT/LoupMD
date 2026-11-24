@@ -3696,3 +3696,9 @@ Strict 5 ps NVE RMS/drift comparison passes 1/4: 1 fs RMS 0.002511 vs teacher 0.
 | Teacher | 10.710 | 1.912% | 1.931 / 1.756 / 1.929 | 54.65 / 56.02 | 0.02966 | 0.10311 |
 
 Both nominal label sets pass. The student-visited force error rose from 1.596% at narrow seed 1; neither the 3× gate nor these target-frame metrics establish matched MD fidelity or close falsifier 1.
+
+**5060 Ti only — matched narrow FP64 seed-2 physics, no timing.** Frozen teacher, same protocols as seed 1. All three relaxed axes pass (maximum 0.07554%); all 960 phonons pass at both displacements (worst 0.789× tolerance). The ten seed-1 phonon misses do not recur.
+
+The 300 K, zero-pressure NPT runs both have 601/601 valid frames. Cell edge −0.0102504 Å vs 0.00035975 Å teacher spread; density +0.0094574 vs 0.00033235 g/cm³. 159/420 partial RDF bins and 4/9 RMS displacement components miss. All three Sr lags miss at both block lengths; the fourth miss is Ti at 500 fs for primary blocking and O at 200 fs for 5 ps blocks. In NVE, 1 fs energy RMS 0.00259348 meV/atom passes, signed drift +0.00015083 meV/atom/ps misses. At 0.5 fs, RMS 0.00067248 and drift −0.00004036 both miss. Neither drift difference is resolved at block uncertainty. Neither narrow seed meets the full §4 bar.
+
+Evidence: `sto320/v2-l4-s64r8-seed2/observables-v2`. Canonical record SHA256 prefixes for `static.01`, `static.005`, `stats-50`, `stats-100`, `nve`: `cc67ef1f`, `1cc371d2`, `94dacbf9`, `3c2e590c`, `0ff055cc`, respectively.
