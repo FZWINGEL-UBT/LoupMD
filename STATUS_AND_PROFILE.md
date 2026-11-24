@@ -3746,3 +3746,14 @@ Strict NVE passes 0/4. At 1/0.5 fs, student vs teacher energy RMS (meV/atom) is 
 `sto320/oxide-loop-v1/fp64/round-1/evaluation.json` SHA `01fb792fb4a5d56ddc7a91d8030198c2d3be7cad57aa46d548751f0f213532fb`. The protocol requires round 2 before answering falsifier 1; no MD fidelity or convergence claim from round 1.
 
 **5060 Ti only — round-2 oxide harvest qualification, no timing.** Seed 57102, fresh trajectories from round-1 child `38413c47…2d0d8`; selected the worst 30/100 as prescribed. Stored, sequential and fresh teacher checks each passed 30/30. Selected file SHA `abf958a0011a7d5cfcb82bffd8af6e80958397fd927eb1dca9441c0ff214bbd9`. All ten inputs to the 360-frame round-2 replay verified (`paired-inputs.sha256` digest `45d54fe8bd41158254d11b975a6da6dff63f6d26060361274a69ff5ed9c31699`); original boundary unchanged, no held-out geometry added. No round-2 student result yet.
+
+**L4 only — cold 32-channel oxide variant.** Compared with `s64l0` FP64 seed 1 on the same 300/30/60 data and 150 epochs: change hidden width 64→32; keep the radial MLP 64→64→64, eight Bessels, 5 Å and order-5 cutoff. Warm epoch medians 28.510/28.478 s for width 32 vs 48.172/48.193 s for width 64 (about 1.69× throughput, not inference speed). Successful allocation 2.43 CU estimated; interrupted attempt 1.79 CU separately. Archive `b3700854ec8eb5a7925f94df74a50a72e40c56209c593dcbfa24f89a5f611d59`; physical model `dd39728655f99acd6afd8ade6fdf2890b9da4dad4fb8e0065dff73f3723cf9b1`.
+
+**5060 Ti only — width 32 verification, no timing.** Native export passes 2/2 (worst E/F/S ratios 0.025/0.685/0.187); bundle `5d7ff09e3578b1e41536ae45dd013123e7f54f1098b57d4ca6db3d5ec6219b81`. Both nominal label bars pass:
+
+| Trajectory (60 frames each) | Force RMSE meV/Å | Relative overall | O / Sr / Ti, % | p99.9 vector / cap, meV/Å | E RMSE meV/atom | Stress RMSE meV/Å³ |
+| --- | ---: | ---: | --- | --- | ---: | ---: |
+| Student | 9.822 | 1.750% | 1.791 / 1.680 / 1.706 | 49.79 / 56.12 | 0.03378 | 0.10148 |
+| Teacher | 9.897 | 1.767% | 1.788 / 1.658 / 1.765 | 50.80 / 56.02 | 0.02440 | 0.10862 |
+
+On the identical 60 target / 40 hot or strained frames, width 32 relative force errors are 1.749% / 16.974% vs 1.516% / 15.905% at width 64. Hard p99.9 vector errors go the other way: 3.226 vs 3.712 eV/Å. Single seed, no §4 MD or adoption claim. Evidence: `sto320/v2-l4-width32-float64-seed1/{checked,release,fidelity.json,teacher-score.json,common-oxide-v1}`.
