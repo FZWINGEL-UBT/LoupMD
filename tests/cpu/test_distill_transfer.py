@@ -225,7 +225,8 @@ def test_status_outage_preserves_detached_result_until_file_api_recovers(tmp_pat
     ) == (0, digest)
 
 
-def test_final_download_recovers_after_partial_file_with_published_digest(tmp_path, monkeypatch):
+@pytest.mark.parametrize('silent', [False, True], ids=['transport-error', 'short-success'])
+def test_final_download_recovers_after_partial_file_with_published_digest(tmp_path, monkeypatch, silent):
     contents = b'completed training archive'
     digest = hashlib.sha256(contents).hexdigest()
     tries = []
@@ -236,7 +237,9 @@ def test_final_download_recovers_after_partial_file_with_published_digest(tmp_pa
         tries.append(timeout)
         if len(tries) == 1:
             dest.write_bytes(contents[:4])
-            raise RuntimeError('Download failed: HTTP 503 Service Unavailable')
+            if not silent:
+                raise RuntimeError('Download failed: HTTP 503 Service Unavailable')
+            return
         dest.write_bytes(contents)
 
     dest = tmp_path / 'result.tar.gz'
@@ -244,19 +247,23 @@ def test_final_download_recovers_after_partial_file_with_published_digest(tmp_pa
     assert dest.read_bytes() == contents
 
 
-def test_final_download_never_publishes_corrupt_or_missing_vm_result(tmp_path):
+def test_final_download_never_publishes_corrupt_or_missing_vm_result(tmp_path, monkeypatch):
     dest = tmp_path / 'result.tar.gz'
     digest = hashlib.sha256(b'trained artifact').hexdigest()
-    deadline = colab_distill.time.monotonic() + 900
+    now = [0.]
+    monkeypatch.setattr(colab_distill.time, 'monotonic', lambda: now[0])
+    monkeypatch.setattr(colab_distill.time, 'sleep', lambda s: now.__setitem__(0, now[0] + s))
+    deadline = 8.
 
     def gone(path, timeout):
         raise RuntimeError("Session 'my-run' not found.")
 
     with pytest.raises(RuntimeError, match="Session 'my-run' not found"):
         colab_distill._collect_archive(dest, digest, gone, deadline)
-    with pytest.raises(ValueError, match='sha256'):
+    with pytest.raises(TimeoutError, match='deadline'):
         colab_distill._collect_archive(dest, digest, lambda p, _: p.write_bytes(b'truncated'), deadline)
-    assert not dest.exists()
+    assert now[0] == deadline
+    assert not dest.exists() and not dest.with_suffix('.part').exists()
 
 
 def test_unadmitted_worker_cannot_consume_a_full_training_allocation(monkeypatch):

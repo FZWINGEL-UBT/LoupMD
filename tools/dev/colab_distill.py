@@ -83,15 +83,15 @@ def _collect_archive(dest, digest, fetch, deadline):
                 if _missing_session(exc):
                     raise
                 print(f'Archive download unavailable; retaining completed job: {exc}', flush=True)
-                time.sleep(max(0, min(5, deadline - time.monotonic())))
-                continue
-            sha = hashlib.sha256()
-            for block in transfer.chunks(partial):
-                sha.update(block)
-            if sha.hexdigest() != digest:
-                raise ValueError(f'sha256 mismatch: {dest}')
-            partial.replace(dest)
-            return
+            else:
+                sha = hashlib.sha256()
+                for block in transfer.chunks(partial):
+                    sha.update(block)
+                if sha.hexdigest() == digest:
+                    partial.replace(dest)
+                    return
+                print('Archive SHA256 differs from completion receipt; retrying download', flush=True)
+            time.sleep(max(0, min(5, deadline - time.monotonic())))
         raise TimeoutError('completed archive download deadline exceeded')
     finally:
         partial.unlink(missing_ok=True)
