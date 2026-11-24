@@ -102,12 +102,17 @@ def cli(*args, retry=True, timeout=300):
     for attempt in range(3):
         p = subprocess.run([exe, *map(str, args)], stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                            text=True, timeout=timeout, stdin=subprocess.DEVNULL, check=False)
-        if 'connection was lost' not in p.stdout.lower():
+        detail = p.stdout
+        connection_lost = 'connection was lost' in detail.lower()
+        if 'colab-runtime-proxy-token' in detail.lower() or 'httpsconnectionpool' in detail.lower():
+            # requests can include the entire signed runtime URL in an exception.
+            detail = f'colab {args[0]}: provider transport diagnostic withheld (private runtime URL)'
+        if not connection_lost:
             if p.returncode:
-                raise RuntimeError(p.stdout)
-            return p.stdout
+                raise RuntimeError(detail)
+            return detail
         if not retry or attempt == 2:
-            raise _ConnectionLost(p.stdout)
+            raise _ConnectionLost(detail)
         time.sleep(5)
 
 
@@ -225,14 +230,14 @@ def main():
             def launch(_timeout):
                 nonlocal client
                 if client is None or client.poll() is not None:
-                    with (args.output / 'exec.log').open('ab') as log:
-                        client = subprocess.Popen(
-                            [os.environ.get('COLAB_CLI', str(Path.home() / '.local/bin/colab')), 'exec', '-s',
-                             session, '-f', str(program), '--timeout', str(max(1, deadline - time.monotonic()))],
-                            # jupyter-kernel-client's handshake timeout is independent
-                            # of exec --timeout; its 10 s default may lose the first cell.
-                            env={**os.environ, 'REQUEST_TIMEOUT': '90'},
-                            stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT)
+                    # jupyter-kernel-client's handshake timeout is independent of
+                    # exec --timeout. Never persist the CLI's raw signed proxy URLs;
+                    # the real trainer writes its own logs and completion receipt.
+                    client = subprocess.Popen(
+                        [os.environ.get('COLAB_CLI', str(Path.home() / '.local/bin/colab')), 'exec', '-s',
+                         session, '-f', str(program), '--timeout', str(max(1, deadline - time.monotonic()))],
+                        env={**os.environ, 'REQUEST_TIMEOUT': '90'},
+                        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
             def read_pid(timeout):
                 pid = Path(tmp) / 'pid'

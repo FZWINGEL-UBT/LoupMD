@@ -270,3 +270,13 @@ def test_unadmitted_worker_cannot_consume_a_full_training_allocation(monkeypatch
     with pytest.raises(TimeoutError, match='launch'):
         colab_distill._confirm_launch(lambda _: None, no_pid, 5 * 3600.)
     assert now[0] == 300.
+
+
+def test_provider_connection_errors_never_expose_runtime_capability(monkeypatch):
+    private_url = '/api/contents/file?authuser=0&colab-runtime-proxy-token=private-test-capability'
+    monkeypatch.setattr(subprocess, 'run', lambda *args, **kwargs:
+                        subprocess.CompletedProcess(args[0], 1, stdout='Download failed: ' + private_url))
+    with pytest.raises(RuntimeError) as caught:
+        colab_distill.cli('download', retry=False)
+    assert 'private-test-capability' not in str(caught.value)
+    assert 'download' in str(caught.value).lower()
