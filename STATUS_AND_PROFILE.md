@@ -3735,3 +3735,12 @@ Six sorted frequencies outside the band for centered FP32 also miss at wide FP64
 Strict NVE passes 0/4. At 1/0.5 fs, student vs teacher energy RMS (meV/atom) is 0.00273269/0.000651019 vs 0.00265186/0.000620824. Signed drift (meV/atom/ps) is −0.000070965/−0.000019104 vs −0.000020397/+0.000007441. Neither drift difference is resolved at ten-block uncertainty. Same `observables-v2` directory; canonical record SHA prefixes: `stats-50` `6d3c16b4`, `stats-100` `41df628f`, `nve` `52e8fe8b`, `nve-10blocks` `3a0c184d`. None of the four corrected FP64 baselines meets the complete §4 physics bar despite all four passing the nominal label bar.
 
 **L4 only — first wide FP64 closed-loop child.** Base 300 + 30 selected and independently gated student-visited training frames; frozen validation/test unchanged. Starting checkpoint and recovered pre-phase-two SHA both `0ada20eb25bfbe00645adc4887f53767b3746bb0fc6f6b8e0c7ef24f3f739bcd`. All epochs 111–149 logged; median 52.806 s per epoch over 120–140. Allocation stopped after collection (1.26 CU estimated). Archive `ef71b0bf86f1fdc5e09811143fe058de833eebd29481a943b0b6f1e2e2d6d741`, verified physical child `38413c4702dea5fb808a2818447007800b8fbc1fe3651eec2af98487f0a2d0d8`. Training completion is not a teacher-fidelity verdict.
+
+**5060 Ti only — first FP64 loop round, held-out fidelity.** The child passes native export on both configurations (worst E/F/S ratios 0.041/0.362/0.342). Own/teacher-test force RMSE **8.51823/8.54416 meV/Å**, ratio **0.996965** vs 0.99668 at round 0. Both target label bars pass. This does not demonstrate improved accuracy: the own geometries differ by round; on the unchanged teacher geometries RMSE was 8.535 before retraining.
+
+| Split (60 frames each) | Relative force RMSE | O / Sr / Ti, % | Atom p99.9 / cap, meV/Å | E RMSE meV/atom | Stress RMSE meV/Å³ |
+| --- | ---: | --- | --- | ---: | ---: |
+| Round-1 student | 1.518% | 1.586 / 1.415 / 1.438 | 41.96 / 56.10 | 0.04913 | 0.04466 |
+| Frozen teacher | 1.525% | 1.574 / 1.383 / 1.487 | 44.78 / 56.02 | 0.05531 | 0.05010 |
+
+`sto320/oxide-loop-v1/fp64/round-1/evaluation.json` SHA `01fb792fb4a5d56ddc7a91d8030198c2d3be7cad57aa46d548751f0f213532fb`. The protocol requires round 2 before answering falsifier 1; no MD fidelity or convergence claim from round 1.
