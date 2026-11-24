@@ -3685,3 +3685,14 @@ Strict 5 ps NVE RMS/drift comparison passes 1/4: 1 fs RMS 0.002511 vs teacher 0.
 **5060 Ti only — corrected narrow FP64 seed-1 matched MD (no timing).** At 300 K / 0 GPa, 141/420 partial RDF bins miss the teacher spread. The isotropic cell-edge shift is −0.007334 Å vs 0.000360 Å spread; density +0.006765 vs 0.000332 g/cm³. With the primary 2.5 ps blocks, 4/9 RMS displacements miss (Sr and Ti at 200/500 fs); with 5 ps blocks, 3/9 miss (Sr at 200 fs changes verdict). Strict 1 and 0.5 fs NVE misses **4/4**: energy RMS 0.00268484/0.00066644 meV/atom; signed drift +0.00011422/−0.00004458 meV/atom/ps. Neither drift is resolved at block uncertainty. Same frozen teacher runs as wide; narrow `observables-v2/{stats-50,stats-100,nve}.json` record SHAs `af378cf3…3a557fa`, `26b8e517…a2a8dba`, `4ab16f5e…fb860a4e`.
 
 **Ada census protocol clarification, no new timing:** `ae158cb6` collected the six corrected baselines and their six traces. For subsequent runs `08d0642b` uses the documented 290–315 K operational range on the measured-window median, not a size-dependent rule derived from independent kinetic-energy samples. All twelve recorded medians above fall inside that band; neither the 40k transient rejection nor §6.5 changes. No GPU rerun or A/B implied.
+
+**L4 only — corrected `s64r8` FP64 seed 2.** Same 300/30/60 splits, 8 radial Bessels, 5 Å and polynomial order 5 before a 64→64→8 radial MLP, no species input or distance transform. Completed 150 epochs; median elapsed epoch at 10–30 / 120–140 was 43.323 / 43.348 s. Allocation `ls0-22441b5ad3b1` stopped after retrieval (4.04 estimated CU, including setup). Result archive `00a5020b05eba5cffdf890fe7f213d9c133f5335ce8c75910b739c7c9948d544`, physical model `d4eea40dc6fe1d6abde75489ec5adb9ec861924efa3e417d798a03e5204a700b`.
+
+**5060 Ti only — narrow FP64 seed-2 gate and force fidelity (no timing).** `sto320/v2-l4-s64r8-seed2` contains `release/gate.json` (2/2; worst E/F/S tolerance ratios 0.00845/0.448/0.604), `fidelity.json` (own two fresh target trajectories) and `teacher-score.json` (previously frozen teacher-test). Bundle SHA `9a5900fe16c59e7699c930d6598e5a9747aef3e168cf91e15bba7f4dd61acfef`.
+
+| Trajectory (60 frames each) | Force RMSE meV/Å | Relative overall | O / Sr / Ti relative, % | p99.9 vector / cap, meV/Å | E RMSE meV/atom | Stress RMSE meV/Å³ |
+| --- | ---: | ---: | --- | --- | ---: | ---: |
+| Student | 10.624 | 1.894% | 1.930 / 1.802 / 1.864 | 53.02 / 56.09 | 0.03464 | 0.10357 |
+| Teacher | 10.710 | 1.912% | 1.931 / 1.756 / 1.929 | 54.65 / 56.02 | 0.02966 | 0.10311 |
+
+Both nominal label sets pass. The student-visited force error rose from 1.596% at narrow seed 1; neither the 3× gate nor these target-frame metrics establish matched MD fidelity or close falsifier 1.
