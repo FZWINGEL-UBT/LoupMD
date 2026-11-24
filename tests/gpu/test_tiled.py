@@ -750,7 +750,9 @@ def test_tile_gemm_buckets_time_fewer_shapes_and_keep_the_result(tmp_path):
     """S5-T10: in the tiled call a GEMM decision timed for one row count serves its size bucket (four per octave),
     so the first call on a new workspace times far fewer shapes. LOUP_TILE_GEMM_BUCKETS=0 times every row count.
     Each side runs in a process of its own with an empty plan cache and without hybrids (the same kernels either
-    way, so the bound is float32 rounding of other GEMM tilings)."""
+    way, so the bound is float32 rounding of other GEMM tilings), and without the two-half FP16 kernels: where they
+    are the default they take the row-dependent GEMMs, which are then not timed at all (RTX 4000 Ada: 90 shapes
+    without buckets and 56 with; with the kernels off 314 and 98)."""
     import os
     import pathlib
     import subprocess
@@ -760,6 +762,7 @@ def test_tile_gemm_buckets_time_fewer_shapes_and_keep_the_result(tmp_path):
     runs = {}
     for buckets in ("1", "0"):
         env = dict(os.environ, LOUP_TILE_GEMM_BUCKETS=buckets, LOUP_DEBUG_GEMM="1", LOUP_NO_HYBRID="1",
+                   LOUP_W2T_HALF="0", LOUP_W2F_HALF="0", LOUP_LIN_HALF="0",
                    LOUP_CACHE_DIR=str(tmp_path / f"plans{buckets}"))
         start = time.perf_counter()
         done = subprocess.run([sys.executable, "-c", _COUNT_TIMINGS, str(tmp_path / f"f{buckets}.npy")], env=env,
