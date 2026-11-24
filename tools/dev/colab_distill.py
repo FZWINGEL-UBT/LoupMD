@@ -33,6 +33,10 @@ exit "$rc"
 '''
 
 
+def _missing_session(exc):
+    return "Session '" in str(exc) and "' not found" in str(exc)
+
+
 def _file_completion(local, fetch):
     local.unlink(missing_ok=True)
     try:
@@ -41,7 +45,7 @@ def _file_completion(local, fetch):
         detail = str(exc)
         if f'File or directory not found: {REMOTE}/completion' in detail:
             return None
-        if "Session '" in detail and "' not found" in detail:
+        if _missing_session(exc):
             raise  # confirmed deallocation, not just an unreachable Contents API
         raise _ConnectionLost(detail) from exc
     fields = local.read_text().split()
@@ -65,6 +69,32 @@ def _wait_for_exit(poll, deadline):
             print(f'Status unavailable; keeping detached job: {exc}', flush=True)
         time.sleep(max(0, min(30, deadline - time.monotonic())))
     raise TimeoutError('remote job deadline exceeded')
+
+
+def _collect_archive(dest, digest, fetch, deadline):
+    """After completion, a transient download failure must not discard a whole run."""
+    partial = dest.with_suffix('.part')
+    try:
+        while (remaining := deadline - time.monotonic()) > 0:
+            partial.unlink(missing_ok=True)
+            try:
+                fetch(partial, min(900, remaining))
+            except (subprocess.TimeoutExpired, RuntimeError) as exc:
+                if _missing_session(exc):
+                    raise
+                print(f'Archive download unavailable; retaining completed job: {exc}', flush=True)
+                time.sleep(max(0, min(5, deadline - time.monotonic())))
+                continue
+            sha = hashlib.sha256()
+            for block in transfer.chunks(partial):
+                sha.update(block)
+            if sha.hexdigest() != digest:
+                raise ValueError(f'sha256 mismatch: {dest}')
+            partial.replace(dest)
+            return
+        raise TimeoutError('completed archive download deadline exceeded')
+    finally:
+        partial.unlink(missing_ok=True)
 
 
 def cli(*args, retry=True, timeout=300):
@@ -141,7 +171,7 @@ def _confirm_launch(launch, read_pid, deadline):
         try:
             pid = read_pid(min(45, remaining)).strip()
         except (subprocess.TimeoutExpired, RuntimeError) as exc:
-            if "Session '" in str(exc) and "' not found" in str(exc):
+            if _missing_session(exc):
                 raise
             print(f'Launch status unavailable; retaining session: {exc}', flush=True)
         else:
@@ -216,10 +246,11 @@ def main():
                                             retry=False, timeout=timeout))
 
             rc, digest = _wait_for_exit(poll, deadline)
-            download = args.output / 'result.part'
-            cli('download', '-s', session, REMOTE + '/result.tar.gz', download, timeout=900)
-            transfer.assemble([download], args.output / 'result.tar.gz', digest)
-            download.unlink()
+            record['remote_completion'] = {'exit_code': rc, 'sha256': digest}
+            save()  # Not a local result until its verified bytes are published.
+            _collect_archive(args.output / 'result.tar.gz', digest, lambda path, timeout:
+                             cli('download', '-s', session, REMOTE + '/result.tar.gz', path,
+                                 retry=False, timeout=timeout), time.monotonic() + 900)
             record.update(exit_code=int(rc), result_sha256=digest)
             if int(rc):
                 raise RuntimeError(f'{session}: job exit {rc}; see out/job.log in result.tar.gz')

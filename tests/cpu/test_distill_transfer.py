@@ -223,3 +223,37 @@ def test_status_outage_preserves_detached_result_until_file_api_recovers(tmp_pat
         lambda _: colab_distill._file_completion(receipt, fetch),
         colab_distill.time.monotonic() + 90,
     ) == (0, digest)
+
+
+def test_final_download_recovers_after_partial_file_with_published_digest(tmp_path, monkeypatch):
+    contents = b'completed training archive'
+    digest = hashlib.sha256(contents).hexdigest()
+    tries = []
+    monkeypatch.setattr(colab_distill.time, 'sleep', lambda _: None)
+
+    def fetch(dest, timeout):
+        assert not dest.exists() and 0 < timeout <= 900
+        tries.append(timeout)
+        if len(tries) == 1:
+            dest.write_bytes(contents[:4])
+            raise RuntimeError('Download failed: HTTP 503 Service Unavailable')
+        dest.write_bytes(contents)
+
+    dest = tmp_path / 'result.tar.gz'
+    colab_distill._collect_archive(dest, digest, fetch, colab_distill.time.monotonic() + 900)
+    assert dest.read_bytes() == contents
+
+
+def test_final_download_never_publishes_corrupt_or_missing_vm_result(tmp_path):
+    dest = tmp_path / 'result.tar.gz'
+    digest = hashlib.sha256(b'trained artifact').hexdigest()
+    deadline = colab_distill.time.monotonic() + 900
+
+    def gone(path, timeout):
+        raise RuntimeError("Session 'my-run' not found.")
+
+    with pytest.raises(RuntimeError, match="Session 'my-run' not found"):
+        colab_distill._collect_archive(dest, digest, gone, deadline)
+    with pytest.raises(ValueError, match='sha256'):
+        colab_distill._collect_archive(dest, digest, lambda p, _: p.write_bytes(b'truncated'), deadline)
+    assert not dest.exists()
