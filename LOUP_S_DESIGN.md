@@ -11,6 +11,7 @@ Matched wide FP64 seed 1 now **passes all 960 phonons** at both displacements wh
 The corrected narrow FP64 seed 1 passes the relaxed lattice but misses the same ten phonons at both displacements (worst 2.72× tolerance). It also misses 141/420 partial RDF bins and all four matched NVE bounds. Its faster Ada step is **not** an equal-fidelity speedup over the wide control.
 Both corrected `s64r8` FP64 seeds pass the 3× export check and the target student-visited label bar (1.596% and 1.894% force error). Seed 2 passes all 960 phonons at both displacements, unlike seed 1, but misses 159/420 RDF bins and three of four NVE bounds. Neither narrow seed meets the full §4 bar; see STATUS §6.70.
 All four corrected FP64 baselines have now run the full schedule and passed the export and own-trajectory label checks. For `s64l0`, the §10 held-out precision screen **passes**: centered FP32 is 8.799 meV/Å, between FP64 seeds 1 and 2 at 8.535 and 9.227. The separate §4 MD bar still fails for the FP32 student; no precision switch for matched production-fidelity comparisons.
+The wide FP64 seed-1 phonon pass does not replicate: seed 2 misses six of 960 frequencies at both displacement sizes. The same six indices also miss for centered FP32. The full two-seed static comparison is in STATUS §6.70.
 
 Original design status (23 November 2026, before implementation): the owner approved the direction and the outline of sections 4 to 10 on
 23 November 2026. At approval, nothing here had been built. Every original figure is either quoted from `OPTIMISATION_LEDGER.md` or

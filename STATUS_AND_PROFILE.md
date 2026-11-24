@@ -3717,3 +3717,15 @@ Gate device provenance: `release/gate.json` identifies RTX 5060 Ti, driver 621.1
 **Whole-schedule precision screen:** `tools/dev/oxide_precision.py` verified three completed cold runs against identical dataset hashes, schedule and ordered teacher-test frame IDs. Centered FP32 seed 1 at 8.79944 meV/Å lies inside the observed FP64 range [8.53480, 9.22650]; all three pass both nominal label checks. Two seeds define an observed range, not a confidence interval. The numeric criterion passes. The centered FP32 student's measured §4 MD failures above still prevent adoption; neither a rate difference nor these two seeds establish their cause. Report: `sto320/sweep-plans/precision.json`.
 
 **5060 Ti only — fixed-set comparison, both FP64 seed-2 models.** Same ordered 60 target and 40 hot/strained frames for both models and the seed-1 controls. Target/hard force RMSE (% of teacher RMS) is **1.645/18.460** for wide and **1.892/22.565** for narrow. Hard p99.9 vector errors are **3.934/4.122 eV/Å** wide/narrow. Narrow had lower hard RMSE than wide at seed 1 (12.804% vs 15.91%); that ordering reverses at seed 2. Do not rank radial width from a single seed. Sealed `common-oxide-v1/{target,hot}.json` under both corrected seed-2 runs; independent own-trajectory tests above.
+
+**5060 Ti only — completed SrTiO₃ static comparison.** Wide FP64 seed 2 required a second relaxation block (1,800 + 1,027 FIRE iterations) to reach the unchanged force threshold (final 0.0004971 eV/Å). All three relaxed axes pass, worst 0.08103%. Phonon errors are signed in the records; `phonon_pass` compares their absolute values with the mode-wise limits. Counts below are identical at 0.01 and 0.005 Å. The ratio is the largest absolute error divided by its limit across both displacements.
+
+| Architecture / training dtype | Seed | Passing frequencies / 960 | Worst ratio | Failed sorted indices (zero-based) |
+| --- | ---: | ---: | ---: | --- |
+| Wide FP64 | 1 | 960 | 0.989 | none |
+| Wide FP64 | 2 | 954 | 1.164 | 348–353 |
+| Wide centered FP32 | 1 | 952 | 1.732 | 3–4, 348–353 |
+| Narrow FP64 | 1 | 950 | 2.723 | 3–4, 340–341, 348–353 |
+| Narrow FP64 | 2 | 960 | 0.789 | none |
+
+Six sorted frequencies outside the band for centered FP32 also miss at wide FP64 seed 2. Neither architecture passed all modes at both FP64 seeds. These indices compare sorted spectra, not matched eigenvectors. Wide seed-2 canonical records: `sto320/v2-l4-s64l0-seed2/observables-v2/static{.01,.005}.json`, SHA prefixes `a8be1c4d`, `03206c45`.
