@@ -257,3 +257,16 @@ def test_final_download_never_publishes_corrupt_or_missing_vm_result(tmp_path):
     with pytest.raises(ValueError, match='sha256'):
         colab_distill._collect_archive(dest, digest, lambda p, _: p.write_bytes(b'truncated'), deadline)
     assert not dest.exists()
+
+
+def test_unadmitted_worker_cannot_consume_a_full_training_allocation(monkeypatch):
+    now = [0.]
+    monkeypatch.setattr(colab_distill.time, 'monotonic', lambda: now[0])
+    monkeypatch.setattr(colab_distill.time, 'sleep', lambda s: now.__setitem__(0, now[0] + s))
+
+    def no_pid(_):
+        raise RuntimeError('File or directory not found: /content/loup-s/pid')
+
+    with pytest.raises(TimeoutError, match='launch'):
+        colab_distill._confirm_launch(lambda _: None, no_pid, 5 * 3600.)
+    assert now[0] == 300.

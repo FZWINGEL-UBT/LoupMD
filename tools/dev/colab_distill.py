@@ -160,6 +160,8 @@ def _upload_inputs(files, tmp, upload):
 
 def _confirm_launch(launch, read_pid, deadline):
     """A detached process may outlive both the exec reply and the file channel."""
+    # No inputs have been sent yet. Never charge a whole training deadline for setup.
+    deadline = min(deadline, time.monotonic() + 300)
     while (remaining := deadline - time.monotonic()) > 0:
         try:
             launch(min(90, remaining))
@@ -227,6 +229,9 @@ def main():
                         client = subprocess.Popen(
                             [os.environ.get('COLAB_CLI', str(Path.home() / '.local/bin/colab')), 'exec', '-s',
                              session, '-f', str(program), '--timeout', str(max(1, deadline - time.monotonic()))],
+                            # jupyter-kernel-client's handshake timeout is independent
+                            # of exec --timeout; its 10 s default may lose the first cell.
+                            env={**os.environ, 'REQUEST_TIMEOUT': '90'},
                             stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT)
 
             def read_pid(timeout):
