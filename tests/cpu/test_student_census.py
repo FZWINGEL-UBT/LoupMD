@@ -92,11 +92,17 @@ def test_large_cell_burn_in_cannot_mask_a_cold_timing_window():
     blocks = [{'end_ns': i, 'final_temperature_K': t}
               for i, t in enumerate((300., 300., 301., 283., 285., 287.))]
     with pytest.raises(ValueError, match='temperature'):
-        census._measurement_temperature(blocks, 2, 40000)
+        census._measurement_temperature(blocks, 2)
     # A single cold final endpoint is not the temperature of an entire window.
     blocks[-3]['final_temperature_K'] = 299.
     blocks[-2]['final_temperature_K'] = 301.
-    assert census._measurement_temperature(blocks, 2, 40000) == 299.
+    assert census._measurement_temperature(blocks, 2) == 299.
+
+
+@pytest.mark.parametrize('temperature', [290., 310., 315.])
+def test_census_uses_the_operational_band_not_an_iid_temperature_interval(temperature):
+    blocks = [{'end_ns': i, 'final_temperature_K': temperature} for i in range(10)]
+    assert census._measurement_temperature(blocks, 4) == temperature
 
 
 def test_process_memory_is_pid_specific_not_board_memory():

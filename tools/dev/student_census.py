@@ -173,12 +173,12 @@ def timing_summary(start_ns, blocks):
     raise ValueError('no full blocks in second half')
 
 
-def _measurement_temperature(blocks, read_start_ns, atoms):
+def _measurement_temperature(blocks, read_start_ns):
     # Endpoint temperatures for complete measured blocks, not the initial velocities or final snapshot.
     temp = statistics.median(b['final_temperature_K'] for b in blocks if b['end_ns'] > read_start_ns)
-    # Gross kinetic-temperature screen, not a confidence interval for correlated blocks.
-    if abs(temp - 300.) > 3 * 300. * math.sqrt(2. / (3 * atoms - 3)):
-        raise ValueError(f'median measured temperature {temp:.2f} K outside the 300 K thermal window')
+    # AGENTS.md §4's operational MD window, not an IID confidence interval.
+    if not 290. <= temp <= 315.:
+        raise ValueError(f'median measured temperature {temp:.2f} K outside 290–315 K')
     return temp
 
 
@@ -254,7 +254,7 @@ def measure(args):
                       initial_velocities='Maxwell-Boltzmann', velocity_seed=42, initial_temperature_K=at.get_temperature(),
                       target_temperature_K=300.0, integrator='Langevin', dt_fs=1.0, friction_per_fs=0.01, skin_A=0.5,
                       warmup_steps=WARMUP_STEPS, warmup_seed=1, conditioning_steps=sum(b['steps'] for b in blocks),
-                      measured_block_median_K=_measurement_temperature(blocks, timing['read_start_ns'], len(at)),
+                      measured_block_median_K=_measurement_temperature(blocks, timing['read_start_ns']),
                       conditioning_blocks=len(blocks), conditioning_block_steps=blocks[0]['steps'],
                       final_temperature_K=blocks[-1]['final_temperature_K'])
         if args.mode == 'trace':
