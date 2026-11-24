@@ -1,12 +1,12 @@
 # Loup-S: a per-system student architecture built from the engine's own measurements
 
 Stage 0 implementation status: engine sampling, two-phase stress training, gated export and the label report have run end to end on SrTiO3. Both FP64 seed-1 students passed the 3× engine gate; round-0 force errors on their own trajectories were 13.18% (`s64l0`) and 12.65% (`s64r8`) against the original labels, versus the 2% target. These are not closed-loop results. **§6.5 now reports the two measured RTX 4000 Ada baselines**, not 5060 Ti timings; generic/fused targets remain estimates. See STATUS §6.70 and `plans/loup-s-stage0.md`.
-Label-integrity update: the stale cell in a captured neighbor rebuild was fixed (`048489b907`). The **versioned 300/30/60 SrTiO3 base splits** passed the full 3× teacher gate and direct fresh-vs-reused agreement on every frame. The original labels, students and scores remain historical; the Ada measurements describe those archived bundles, not an adoption. Fidelity thresholds are unchanged.
+Label-integrity update: the stale cell in a captured neighbor rebuild was fixed (`048489b907`). The **versioned 300/30/60 SrTiO3 base splits** passed the full 3× teacher gate and direct fresh-vs-reused agreement on every frame. The original labels, students and scores remain historical. Fidelity thresholds are unchanged.
 Training backend decision: Stage 0 stays on mace-torch. Corrected `s64l0` seed 1 ran all 150 epochs and passed the 3× export gate in both precisions. L4 medians at epochs 10–30 and 120–140 were 17.46/17.46 s (centered FP32) and 48.17/48.19 s (FP64): 2.76× in both phases. On their own 300 K trajectories both pass the §4 label bar (1.579% FP32, 1.516% FP64); these are not the §4 MD tests or the two-round falsifier. See STATUS §6.70. Section 10's training-engine plan starts only after Stage 0.
 Stage 0 physics and timing update: centered FP32 passed relaxed lattice but missed 8/960 phonon frequencies at both displacement sizes. It also missed the matched NPT cell/density, 157/420 partial RDF bins and 5/9 displacement components. It is **not qualified for adoption**. These are failures of this student, not evidence that FP32 caused them. The 320-atom grouping experiment in §6.5 retained a small-cell fusion target on Ada, not a new production default.
 Oxide fixed-set update (§§4, 8): 60 nominal student-visited and 40 independent hot/strained frames are frozen and teacher-gated. Retain the 5× target tail factor. The 3% oxide frame-audit threshold is an offline proposal, not a new general operating default. No universal per-atom trigger qualified.
 §6.5 provenance clarification: the 5% paired-order analysis criterion was in the SHA-pinned experiment script before the first timed output. No timing or adoption result changed.
-Corrected narrow baseline: `s64r8` FP64 seed 1 now passes 3× and the own-trajectory target label bar (1.596%, vs 1.516% for corrected wide). Both use the same eight radial Bessels and 5 Å cutoff; narrow's radial MLP ends in 8, wide's in 64. The corrected bundles have distinct hashes from those measured in §6.5; their Ada census is scheduled separately.
+Corrected narrow baseline: `s64r8` FP64 seed 1 passes 3× and the own-trajectory target label bar (1.596%, vs 1.516% for corrected wide). Both use the same eight radial Bessels and 5 Å cutoff; narrow's radial MLP ends in 8, wide's in 64. **§6.5 now measures the corrected FP64 weights** on leeloo after 1,000 Langevin steps; §6.4 records their measured NVML slopes. Historical weights and the launch-group discriminator remain in STATUS §6.70. No kernel or precision adoption.
 
 Original design status (23 November 2026, before implementation): the owner approved the direction and the outline of sections 4 to 10 on
 23 November 2026. At approval, nothing here had been built. Every original figure is either quoted from `OPTIMISATION_LEDGER.md` or
@@ -390,6 +390,8 @@ The student rows are estimates:
 | Loup-S, generic path | 25.5 | 7.6 | 33 | about 380,000 |
 | Loup-S, fused | 2.7 | 7.6 | 10.6 | about 1.2 million |
 
+Measured separately, **RTX 4000 Ada only**, corrected FP64-trained seed-1 exports on the generic inference path: 5,000→40,000-atom NVML slopes **45.96 kB/atom wide** (4.3% below the rounded 48 count) and **35.83 kB/atom narrow**. The narrow radial-head baseline is not the proposed narrowed-message Loup-S architecture in the 33 kB row; its footprint does not validate that estimate.
+
 - On the generic path the footprint is the l <= 3 message arrays at 64 channels, 4.1 kB each: `msgf` and `dmsgf` in
   layer 0, `lin`, `dlin` and `dmsgf` in layer 1. The rank-8 head shrinks `S0` from 13.3 to 2.0 kB.
 - Fused, only what crosses between the three launches is kept: `S0` with its gradient in place, `h`, `x` and their
@@ -429,19 +431,19 @@ layer 0's gradient buffers placed in layer 1's dead ones, gives about 58 kB of n
 
 ### 6.5 Measured baselines and estimated targets
 
-SrTiO3, 5,000 atoms, 5 Å; ms per MD step. **Measured, RTX 4000 Ada only:** unprofiled sustained steps for each seed-1 bundle; separate 16-step Nsight Systems census at 300 K. The census rows sum kernel durations and include simultaneous streams; they do **not** add to the wall time. The trace identifies dedicated kernels but not callers of the shared dense kernels. Pool the latter rather than assigning them to `C0`, lifts or readouts from launch shape alone.
+SrTiO3, 5,000 atoms, 5 Å; ms per MD step. **Measured, RTX 4000 Ada only:** corrected FP64-trained seed-1 bundles, 1,000-step 300 K Langevin burn-in, sustained unprofiled step time and separate 16-step Nsight Systems census. Timing-window median temperatures: 300.97 K wide, 300.57 K narrow. The census rows sum kernel durations and include simultaneous streams; they do **not** add to the wall time. Pool shared dense kernels rather than guessing callers from launch shape.
 
 | Measured piece (Ada only) | `s64l0` | `s64r8` |
 | --- | ---: | ---: |
-| Layer 0 edge kernels (`first_fwd` / `first_bwd_edge`) | 0.487 | 0.319 |
-| Layer 1 convolution pair (`gconv`) | 0.777 | 0.776 |
-| All dense GEMMs, including `C0` and its transpose | 1.146 | 0.473 |
-| Dedicated product / fused readout kernels (`gprod`) | 0.241 | 0.243 |
-| Remaining kernels (compaction, rebuild, integrator and support) | 0.095 | 0.094 |
-| Kernel union (overlap counted once) | 2.196 | 1.668 |
-| **Unprofiled step** | **2.298 (0.460 µs/atom)** | **1.770 (0.354 µs/atom)** |
+| Layer 0 edge kernels (`first_fwd` / `first_bwd_edge`) | 0.479 | 0.316 |
+| Layer 1 convolution pair (`gconv`) | 0.727 | 0.746 |
+| All dense GEMMs, including `C0` and its transpose | 1.137 | 0.475 |
+| Dedicated product / fused readout kernels (`gprod`) | 0.244 | 0.236 |
+| Remaining kernels (compaction, rebuild, integrator and support) | 0.092 | 0.095 |
+| Kernel union (overlap counted once) | 2.138 | 1.628 |
+| **Unprofiled step** | **2.250 (0.450 µs/atom)** | **1.750 (0.350 µs/atom)** |
 
-**320 atoms, Ada only — §9 falsifier 6.** In an unprofiled `A B B A` comparison, grouping 20 existing layer-0 projection launches into two saved 6.20% and 6.53% of the `s64l0` step in the two orders; `s64r8` saved 4.44% and 4.61%. Separate Nsight traces verified 18 fewer launches and unchanged projection block counts. Keep the small-cell fusion target: only the wide model cleared the 5% criterion in both orders. The criterion is in `tools/dev/student_launch_pairs.py`, SHA256 `0ef195979407513e5a0b51425a482a7d19dbbd743163c5944f64a9d065cee6b6` in the pre-run `launch-discriminator-v1/experiment.sha256`. This does not establish that most of either step is launch overhead, and is not a cross-GPU adoption.
+**320 atoms, Ada only — §9 falsifier 6, original seed-1 bundles.** In an unprofiled `A B B A` comparison, grouping 20 existing layer-0 projection launches into two saved 6.20% and 6.53% of the `s64l0` step in the two orders; `s64r8` saved 4.44% and 4.61%. Separate Nsight traces verified 18 fewer launches and unchanged projection block counts. Keep the small-cell fusion target: only the wide model cleared the 5% criterion in both orders. The criterion is in `tools/dev/student_launch_pairs.py`, SHA256 `0ef195979407513e5a0b51425a482a7d19dbbd743163c5944f64a9d065cee6b6` in the pre-run `launch-discriminator-v1/experiment.sha256`. This does not establish that most of either step is launch overhead, and is not a cross-GPU adoption.
 
 **Estimates only, 5060 Ti design model:** §3 rates from different builds, cards and temperatures; FP32 GEMMs at 12 TFLOP/s. The design comparison below uses its original **estimated** `s64r8` baseline of 1.5 ms, **not** the measured Ada time. No local timing or cross-card speedup is implied.
 
