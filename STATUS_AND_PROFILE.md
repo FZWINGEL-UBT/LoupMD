@@ -3729,3 +3729,7 @@ Gate device provenance: `release/gate.json` identifies RTX 5060 Ti, driver 621.1
 | Narrow FP64 | 2 | 960 | 0.789 | none |
 
 Six sorted frequencies outside the band for centered FP32 also miss at wide FP64 seed 2. Neither architecture passed all modes at both FP64 seeds. These indices compare sorted spectra, not matched eigenvectors. Wide seed-2 canonical records: `sto320/v2-l4-s64l0-seed2/observables-v2/static{.01,.005}.json`, SHA prefixes `a8be1c4d`, `03206c45`.
+
+**5060 Ti only — wide FP64 seed-2 dynamics.** Both matched 300 K / zero-pressure NPT trajectories pass 601/601 geometry checks. Relative to the teacher, the mean cell edge shifts −0.00460860 Å (teacher spread 0.00035975; 5 ps block contrast SEM 0.00043203), and density +0.00424807 g/cm³ (spread 0.00033235; SEM 0.00039799). 126/420 partial RDF bins miss: O–O 32, O–Sr 29, O–Ti 25, Sr–Sr 14, Sr–Ti 11, Ti–Ti 15. Displacements miss 5/9: O at 200 fs, Sr and Ti at 200 and 500 fs; unchanged with 2.5/5 ps blocks.
+
+Strict NVE passes 0/4. At 1/0.5 fs, student vs teacher energy RMS (meV/atom) is 0.00273269/0.000651019 vs 0.00265186/0.000620824. Signed drift (meV/atom/ps) is −0.000070965/−0.000019104 vs −0.000020397/+0.000007441. Neither drift difference is resolved at ten-block uncertainty. Same `observables-v2` directory; canonical record SHA prefixes: `stats-50` `6d3c16b4`, `stats-100` `41df628f`, `nve` `52e8fe8b`, `nve-10blocks` `3a0c184d`. None of the four corrected FP64 baselines meets the complete §4 physics bar despite all four passing the nominal label bar.
