@@ -3062,6 +3062,10 @@ On 60 independently student-visited frames the same FP64 model passed the absolu
 
 **L4 only (training), 5060 Ti only (export/fidelity) — corrected narrow seed 1.** `s64r8` FP64 finished both phases, 43.483/43.493 s/epoch versus 48.172/48.193 s for wide. Both pass the 3× native gate and the absolute labels at 300 K on their own trajectories (narrow 1.596%, wide 1.516%). Held-out teacher-test narrow force RMSE 8.987 meV/Å. Preserve both models and pre-phase-two checkpoints; a single seed does not establish a rank or a deployable precision.
 
+**5060 Ti only — fixed-frame narrow control.** On the common frozen 1000 K strained/rattled diagnostic, narrow FP64 seed 1 has 12.804% relative force RMSE vs 15.91% for wide FP64; narrow p99.9 2.740 eV/Å. No ranking across seeds or admission from this hard population.
+
+**5060 Ti sampling; leto CPU only for the reference gate — water admitted to training.** All 390 serialized OFF24 E/F/stress labels qualified. Both molecular arms passed input and recipe SHA checks. Paired recipes and training-only scales in STATUS §6.70. No student or timing result.
+
 **5060 Ti only — repeated-cell neighbor rebuild, correctness (`048489b907`).** The CUDA step graph's optional rebuild captured the periodic cell in its bin/count/fill calls. A host rebuild on the first frame in a new cell was not enough: a subsequent on-device rebuild could overwrite its list with shifts from the old cell. Include the captured cell in the step-graph key only when that branch exists. Native MH-1 regression: before the fix the reused and fresh evaluations differed by 1.7412 eV on 135 atoms; after the fix evaluation at both cells with forced rebuilds and the unchanged-cell graph-reuse control passed. No timing or adoption claim.
 
 **Corrected MH-1 label gate, 5060 Ti only.** Reused/fresh 3× E/F/stress: validation 30/30 each (stored 13/30); teacher-test 60/60 each (stored 60/60). Original bytes unchanged; max validation force delta reused vs fresh 8.27e−7 eV/Å. **RTX 4000 Ada and RTX A4000 separately:** same native changed-cell regression passed on leeloo and Coraline before either generated new shards; no timing.
