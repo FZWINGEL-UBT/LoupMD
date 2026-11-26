@@ -275,7 +275,7 @@ __global__ void gate_fwd_kernel(int N, int C, int lx, const float* __restrict__ 
                                 const float* __restrict__ res1, const float* __restrict__ res2, float* __restrict__ o0,
                                 float* __restrict__ o1, float* __restrict__ o2, float* __restrict__ o3, unsigned fused) {
     const int a = blockIdx.x, c = threadIdx.x;
-    if (a >= N) return;
+    if (a >= N || c >= C) return;
     const float s = 1.0f / (D[a] * beta + alpha);
     const int64_t r0 = (int64_t)a * 4 * C, q0 = res0_sp ? (int64_t)res0_sp[a] * 4 * C : r0;
     auto pre0 = [&](int col) { return lin0[r0 + col] * s + (res0 ? res0[q0 + col] : 0.0f); };
@@ -320,6 +320,7 @@ __global__ void gate_bwd_kernel(int N, int C, int lx, const float* __restrict__ 
     const int64_t r0 = (int64_t)a * 4 * C, q0 = res0_sp ? (int64_t)res0_sp[a] * 4 * C : r0;
     auto pre0 = [&](int col) { return lin0[r0 + col] * s + (res0 ? res0[q0 + col] : 0.0f); };
     float acc = 0.0f, accq = 0.0f;  // sum dpre * lin; sum dgout * v (vform degrees)
+    if (c < C) {
     if (!(fused & 1u)) {
         const float p = pre0(c);
         const float d = g0[(int64_t)a * C + c] * cs * dsilu_f(p);
@@ -370,6 +371,7 @@ __global__ void gate_bwd_kernel(int N, int C, int lx, const float* __restrict__ 
         if (dp0) dp0[r0 + l * C + c] = dgp;
         dl0[r0 + l * C + c] = dgp * s;
         acc = fmaf(dgp, lin0[r0 + l * C + c], acc);
+    }
     }
     #pragma unroll
     for (int off = 16; off > 0; off >>= 1) {
@@ -952,12 +954,12 @@ void GenericModel::load(const Bundle& b) {
         if (L->kind < 0 || L->kind > 4 || L->lmax_x > 2 || L->lmax_in > 3 || L->lmax_out > 2 || L->lmax_x > L->lmax_in)
             throw std::runtime_error("generic bundle layer " + std::to_string(t) + ": unsupported shape");
         // Hidden widths (C_in / C_msg / C_out: GEMMs, gates with one thread per channel, products on 128-channel
-        // blocks) up to 1024; the conv width C_x up to 512 (the conv kernels size threads and shared memory by it),
-        // except in the hidden-table layer 0, which runs no conv (C_x feeds only its GEMMs).
+        // blocks) 16..1024 (multiples of 16); the conv width C_x 16..512 (the conv kernels size threads and shared
+        // memory by it), except in the hidden-table layer 0, which runs no conv (C_x feeds only its GEMMs).
         for (int c : {L->C_in, L->C_msg, L->C_out})
-            if (c < 32 || c > 1024 || c % 32) throw std::runtime_error("generic bundle: hidden channel counts must be 32..1024, multiples of 32");
-        if (L->C_x < 32 || L->C_x > (L->first_hidden ? 1024 : 512) || L->C_x % 32)
-            throw std::runtime_error("generic bundle: conv channel count must be 32..512, multiples of 32");
+            if (c < 16 || c > 1024 || c % 16) throw std::runtime_error("generic bundle: hidden channel counts must be 16..1024, multiples of 16");
+        if (L->C_x < 16 || L->C_x > (L->first_hidden ? 1024 : 512) || L->C_x % 16)
+            throw std::runtime_error("generic bundle: conv channel count must be 16..512, multiples of 16");
         if (L->C_msg != L->C_out) throw std::runtime_error("generic bundle: product channels differ from the hidden channels");
         if (t == 0 && (L->lmax_in != 0 || L->C_in != C0_)) throw std::runtime_error("generic bundle: layer 0 input");
         if (t > 0) {
@@ -2920,7 +2922,8 @@ void GenericModel::record(const GenericPassInputs& in) {
         if (L->kind == 4) {
             const float* res0 = L->res0_table ? L->res0_table : L->res[0];
             const int* res0_sp = L->res0_table ? in.species : nullptr;
-            gate_fwd_kernel<<<N, Cm, 0, st>>>(N, Cm, L->lmax_x, L->D, L->alpha, L->beta, L->gate_cs, L->gate_cg,
+            const int gblk = ((Cm + 31) / 32) * 32;
+            gate_fwd_kernel<<<N, gblk, 0, st>>>(N, Cm, L->lmax_x, L->D, L->alpha, L->beta, L->gate_cs, L->gate_cg,
                                               L->lin[0], L->lin[1], L->lin[2], L->lin[3], res0, res0_sp,
                                               L->lmax_x >= 1 ? L->res[1] : nullptr,
                                               L->lmax_x >= 2 ? L->res[2] : nullptr, L->gout[0], L->gout[1],
@@ -3267,13 +3270,15 @@ void GenericModel::record(const GenericPassInputs& in) {
                 else run_gemm(true, N * dimL(l), Cm, Cm, 1.0f, L->dmsgf[l], Cm, L->W_2[l], Cm, 0.0f, L->dgout[l], Cm);
             }
             join();
-            if (fused != 15u)
-                gate_bwd_kernel<<<N, Cm, 0, st>>>(N, Cm, L->lmax_x, L->D, L->alpha, L->beta, L->gate_cs, L->gate_cg,
+            if (fused != 15u) {
+                const int gblk = ((Cm + 31) / 32) * 32;
+                gate_bwd_kernel<<<N, gblk, 0, st>>>(N, Cm, L->lmax_x, L->D, L->alpha, L->beta, L->gate_cs, L->gate_cg,
                                                   L->lin[0], lins[1], lins[2], lins[3], res0, res0_sp, ress[1],
                                                   ress[2], L->dgout[0], L->dgout[1], L->dgout[2], L->dgout[3], dpre0,
                                                   (t > 0 && !rdl && L->lmax_x >= 1) ? L->dpre[1] : nullptr,
                                                   (t > 0 && !rdl && L->lmax_x >= 2) ? L->dpre[2] : nullptr, L->dlin[0],
                                                   L->dlin[1], L->dlin[2], L->dlin[3], L->dD, fused, vform, rform);
+            }
         }
         const bool density = L->kind >= 2;
         if (L->first_hidden) {

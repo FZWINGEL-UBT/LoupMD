@@ -2,7 +2,13 @@
 
 **Decision:** keep every Stage 0 run on `mace-torch==0.3.16`. For Stage 1, design an in-house **differentiable backend**, not a second MD engine or a new optimizer. Start at the energy model boundary. Keep the mace-torch training loop, loss and checkpoint reader as long as they serve that boundary. A new loop is justified only if a profile implicates the loop itself or a required loss cannot be integrated into it. Stage 1 can start on mace-torch if the candidate fails qualification.
 
-**Status:** proposal, not an implemented or benchmarked backend. No change to active training, compute permissions, Stage 0 datasets, checkpoints, or the engine’s release gate. The [parent design](../LOUP_S_DESIGN.md) defines architecture, fidelity and stage exits in §§4, 5, 7 and 10; the [Stage 0 plan](loup-s-stage0.md) owns run history and spend.
+**Status (24 November 2026):** an FP32 backend is implemented and was run on the local RTX 5060 Ti only
+(owner's instruction): `loupmd/fasttrain`, driven through mace's own `run_train` by `python -m loupmd.fasttrain.run`.
+It trains `s64l0` at 1.23 s per epoch against 16.3 s (stock e3nn) and 6.56 s (stock cuEquivariance), and a full
+150-epoch FP32 run reached the stock reference's final errors (test / valid force RMSE 8.7 / 12.5 against 8.8 /
+12.6 meV/A). Numbers, parity checks and the open list: [status section 7](../STATUS_AND_PROFILE.md); ledger rows
+`ft-*`. Qualification below (second seed, `s64r8`, FP64, restarts, other GPUs) is still open. Earlier status:
+proposal, not an implemented or benchmarked backend. No change to active training, compute permissions, Stage 0 datasets, checkpoints, or the engine’s release gate. The [parent design](../LOUP_S_DESIGN.md) defines architecture, fidelity and stage exits in §§4, 5, 7 and 10; the [Stage 0 plan](loup-s-stage0.md) owns run history and spend.
 
 ## What is being replaced
 

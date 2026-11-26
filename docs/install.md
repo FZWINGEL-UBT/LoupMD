@@ -123,7 +123,7 @@ pickle and runs code when it is loaded, so a file outside the table needs `--sha
 Many models are under the Academic Software License (non-commercial use only). The run report and `loupmd models`
 name the licence of each.
 
-The cache root is `$LOUPMD_CACHE`, else `~/.cache/loupmd`. It holds `models/`, `bundles/`, `gate_refs/` and `lib/`
+The cache root is `$LOUPMD_CACHE`, else `~/.cache/loupmd`. It holds `models/`, `bundles/`, `gate_refs/`, `lib/`, `train/`
 and the engine's GEMM plan files (`plans_*.bin`) in the root itself, and must lie outside the Python environment.
 `loupmd cache list`, `size` and `prune` manage it. See [environment variables](reference/environment.md).
 

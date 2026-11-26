@@ -46,7 +46,7 @@ loupmd models [-h] [--download LABEL] [--long]
 
 ### `loupmd cache`
 
-LoupMD's cache: downloaded models, exported bundles, GEMM plans, gate references and locally built libraries.
+LoupMD's cache: downloaded models, exported bundles, GEMM plans, gate references, locally built libraries and the training runs' derived data.
 
 ```text
 loupmd cache [-h] ACTION ...
@@ -57,12 +57,12 @@ loupmd cache [-h] ACTION ...
 every cached file with its size and last use
 
 ```text
-loupmd cache list [-h] [--kind {models,bundles,plans,gate_refs,lib}]
+loupmd cache list [-h] [--kind {models,bundles,plans,gate_refs,lib,train}]
 ```
 
 | Argument | Meaning |
 | --- | --- |
-| `--kind` `KIND` | only this kind (repeatable) (one of: models, bundles, plans, gate_refs, lib) |
+| `--kind` `KIND` | only this kind (repeatable) (one of: models, bundles, plans, gate_refs, lib, train) |
 
 #### `loupmd cache size`
 
@@ -74,18 +74,18 @@ loupmd cache size [-h]
 
 #### `loupmd cache prune`
 
-Removes bundles, plans and gate references (what LoupMD can make again); models and libraries only when named with --kind.
+Removes bundles, plans, gate references and training data (what LoupMD can make again); models and libraries only when named with --kind.
 
 ```text
 loupmd cache prune [-h] [--older-than DAYS] [--max-size SIZE]
-                          [--kind {models,bundles,plans,gate_refs,lib}] [--dry-run]
+                          [--kind {models,bundles,plans,gate_refs,lib,train}] [--dry-run]
 ```
 
 | Argument | Meaning |
 | --- | --- |
 | `--older-than` `DAYS` | remove what was not used for DAYS days |
 | `--max-size` `SIZE` | then remove the least recently used files until the kinds fit SIZE (500M, 1G, ...) |
-| `--kind` `KIND` | prune this kind (repeatable; default: bundles, plans, gate_refs) (one of: models, bundles, plans, gate_refs, lib) |
+| `--kind` `KIND` | prune this kind (repeatable; default: bundles, plans, gate_refs, train) (one of: models, bundles, plans, gate_refs, lib, train) |
 | `--dry-run` | show what would be removed |
 
 ### `loupmd bench`

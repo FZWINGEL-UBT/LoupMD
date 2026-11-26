@@ -9,7 +9,7 @@ from .. import cache
 def add_parser(sub):
     parser = sub.add_parser("cache", help="list, measure or prune the cache",
                             description="LoupMD's cache: downloaded models, exported bundles, GEMM plans, gate "
-                                        "references and locally built libraries.")
+                                        "references, locally built libraries and the training runs' derived data.")
     actions = parser.add_subparsers(dest="action", metavar="ACTION")
     listing = actions.add_parser("list", help="every cached file with its size and last use")
     listing.add_argument("--kind", action="append", choices=cache.KINDS, help="only this kind (repeatable)")
@@ -17,13 +17,13 @@ def add_parser(sub):
     size = actions.add_parser("size", help="bytes per kind")
     size.set_defaults(run=run_size)
     prune = actions.add_parser("prune", help="remove files by age or to fit a size",
-                               description="Removes bundles, plans and gate references (what LoupMD can make "
-                                           "again); models and libraries only when named with --kind.")
+                               description="Removes bundles, plans, gate references and training data (what LoupMD "
+                                           "can make again); models and libraries only when named with --kind.")
     prune.add_argument("--older-than", type=float, metavar="DAYS", help="remove what was not used for DAYS days")
     prune.add_argument("--max-size", metavar="SIZE", help="then remove the least recently used files until the "
                                                           "kinds fit SIZE (500M, 1G, ...)")
     prune.add_argument("--kind", action="append", choices=cache.KINDS, help="prune this kind (repeatable; default: "
-                                                                            "bundles, plans, gate_refs)")
+                                                                            "bundles, plans, gate_refs, train)")
     prune.add_argument("--dry-run", action="store_true", help="show what would be removed")
     prune.set_defaults(run=run_prune)
     parser.set_defaults(run=lambda args: _usage(parser))

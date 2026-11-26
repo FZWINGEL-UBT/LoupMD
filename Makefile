@@ -73,7 +73,27 @@ $(WHEELDIR)/jit.o: $(WHEEL_JIT_INCS)
 $(WHEELDIR)/libloupmd.so: $(WHEEL_OBJS)
 	$(NVCC) -shared $(WHEEL_OBJS) $(LDFLAGS) -o $@
 
+# Loup-S training library (loupmd/fasttrain/cuda.py): its own objects and artifact, never part of libloupmd.so.
+# src/train/generated_train.cuh comes from tools/dev/gen_strain_kernels.py.
+TRAIN_SRCS = src/train/strain.cu
+TRAIN_OBJS = $(patsubst src/%.cu,$(OBJDIR)/%.o,$(TRAIN_SRCS))
+TRAIN_CC = $(patsubst sm_%,%,$(CUDA_ARCH))
+TRAIN_GENCODE ?= -gencode arch=compute_$(TRAIN_CC),code=$(CUDA_ARCH)
+TRAIN_LEAN ?= 0
+TRAIN_DEFS = $(if $(filter 1,$(TRAIN_LEAN)),-DLST_LEAN=1,)
+.PHONY: train-lib train-cli
+$(OBJDIR)/train/strain.o: src/train/strain.cu | $(OBJDIR)
+	@mkdir -p $(dir $@)
+	$(NVCC) -O3 -std=c++17 $(TRAIN_GENCODE) $(TRAIN_DEFS) -Iinclude -Isrc -diag-suppress=1046 -Xcompiler -fPIC -MMD -MP $(CPPFLAGS) -MF $(@:.o=.d) -c $< -o $@
+train-lib: $(OBJDIR)/libloupstrain.so
+$(OBJDIR)/libloupstrain.so: $(TRAIN_OBJS)
+	$(NVCC) -shared $(TRAIN_GENCODE) $(TRAIN_OBJS) -lcublas -lcudart -o $@
+
+train-cli: $(OBJDIR)/loupstrain_cli
+$(OBJDIR)/loupstrain_cli: src/train/loupstrain_cli.cu $(OBJDIR)/libloupstrain.so | $(OBJDIR)
+	$(NVCC) -O3 -std=c++17 $(TRAIN_GENCODE) -Iinclude -Isrc $< -Xcompiler -pthread -Xlinker -rpath -Xlinker '$$ORIGIN' -Xlinker -L$(OBJDIR) -Xlinker -lloupstrain -lcudart -o $@
+
 clean:
 	rm -rf build libloupmd.so
 
--include $(DEPS) $(WHEEL_OBJS:.o=.d)
+-include $(DEPS) $(WHEEL_OBJS:.o=.d) $(TRAIN_OBJS:.o=.d)

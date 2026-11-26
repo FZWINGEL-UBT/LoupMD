@@ -3757,3 +3757,256 @@ Strict NVE passes 0/4. At 1/0.5 fs, student vs teacher energy RMS (meV/atom) is 
 | Teacher | 9.897 | 1.767% | 1.788 / 1.658 / 1.765 | 50.80 / 56.02 | 0.02440 | 0.10862 |
 
 On the identical 60 target / 40 hot or strained frames, width 32 relative force errors are 1.749% / 16.974% vs 1.516% / 15.905% at width 64. Hard p99.9 vector errors go the other way: 3.226 vs 3.712 eV/Å. Single seed, no §4 MD or adoption claim. Evidence: `sto320/v2-l4-width32-float64-seed1/{checked,release,fidelity.json,teacher-score.json,common-oxide-v1}`.
+
+
+## 7. Loup-S training engine (`loupmd/fasttrain`), 24 November 2026, 5060 Ti only
+
+An in-house FP32 training backend for the Loup-S students: stock mace-torch 0.3.16 `ScaleShiftMACE`, 64x0e,
+two interactions, l <= 3, correlation 3, radial MLP [8, 64, 64, 64, 256], ZBL pair repulsion. It trains the
+mace model's own parameter tensors; mace keeps the data, optimizer, scheduler, SWA stage two, EMA, checkpoints and
+logs (`python -m loupmd.fasttrain.run <run_train arguments>`, the same arguments as `loupmd/distill/train.py`
+passes to `mace.cli.run_train`). Only the local RTX 5060 Ti was used (owner, 24 November 2026); nothing here was
+measured on `sm_89` or an A100.
+
+**What replaces what.** `run.py` replaces `mace.tools.train.train_one_epoch` (and `evaluate`, during training
+and for the final error tables). Each epoch's batches come from mace's own loader iterator (`_next_index`), so
+the sampler and its generator draw exactly as in stock mace. `LOUP_FASTTRAIN=0` runs stock mace,
+`LOUP_FASTTRAIN_EVAL=0` / `LOUP_FASTTRAIN_TABLES=0` keep mace's evaluation; LBFGS, distributed runs, loader
+worker processes, other losses, optimizers and architectures fall back to mace's loop (logged).
+
+**How a step runs** (`engine.py`, `ops.py`): every frame resident on the device; batches padded to one static
+shape (dummy nodes with up to 32 self-loop slack edges, their vectors beyond the cutoff, a dummy graph slot; the
+loss divides by the real counts); the whole optimizer step (forward, force pass, loss, backward, clipping, fused
+capturable Adam/AMSGrad with device learning rates, EMA) captured in one CUDA graph after three warm-up steps.
+The model: fused edge basis (Triton, generated: Y, dY, Bessel x cutoff and its r-derivative); radial MLPs with
+their forward-mode r-tangent (no double backward through the MLP); the conv as multilinear Triton kernels closed
+under differentiation; the correlation-3 product as 28 generated invariant polynomials (293 terms); linear layers
+folded on tape; the force pass takes dE/d(conv outputs) by autograd and forms the edge gradient in one fused
+kernel (`force_edge`). Since every edge has its reverse at the same length (all 300 + 30 frames), the radial MLPs
+run once per edge pair and the conv kernels read R and T through a pair index (`PAIRS`, `pidx`).
+
+**Correctness.**
+
+| Check | Result |
+| --- | --- |
+| FP64, one padded batch (4 graphs in 5 slots) against mace's autograd | energy 3.6e-14 eV, forces rel 9.6e-15, stress rel 2.6e-15, loss equal to 15 digits, worst parameter-gradient rel 6.3e-14 |
+| FP32 graph replay against eager | losses equal to every printed digit |
+| 6 epochs (stage two from 3), engine vs stock mace e3nn, same seed | validation loss 0.886388 / 0.330494 / 0.154913 / 0.145707 / 0.121968 / 0.115397 vs 0.886388 / 0.330493 / 0.154946 / 0.145722 / 0.121979 / 0.115409; final tables identical to the printed digit |
+| 150 epochs (default recipe, stage two from 111) vs the stock FP32 reference `v2-l4-s64l0-fp32-seed1-r2` | final stage-two model RMSE F: train 11.8 / 11.9, valid 12.5 / 12.6, test 8.7 / 8.8 meV/A (engine / reference); stage one 12.0 / 12.0, 12.7 / 12.7, 8.9 / 8.9; E and stress RMSE <= 0.2 meV/atom and meV/A^3 in both |
+
+FP32 runs are not bitwise repeatable (atomics): two engine runs both reach the same final errors but differ at the
+stage-two switch (epoch 111 validation E RMSE 21.6 vs 0.37 meV/atom), as stock mace does (reference: 5.7).
+
+**Speed** (300 frames of 320 atoms, ~15.5k directed edges each, batch 4, 75 steps per epoch, FP32):
+
+| Path | s / epoch | ms / step |
+| --- | ---: | ---: |
+| stock mace-torch, e3nn (`baseline-e3nn`, 6 epochs) | 16.3 | |
+| stock mace-torch, cuEquivariance (`baseline-cueq`) | 6.56 | |
+| stock reference 150-epoch run (43 min, `v2-l4-s64l0-fp32-seed1-r2`) | ~17 | |
+| engine steps only (`fasttrain_engine_check.py --mode bench`) | 1.05 | 13.9 |
+| engine inside `run_train`, validation and checkpoints included | 1.23 | |
+| C++/CUDA library (`libloupstrain.so`), steps only | 0.553 | 7.37 |
+| C++/CUDA library inside `run_train`, validation cached (`fast-e150cache`) | 0.66 | |
+
+The 150-epoch job: 185 s of epochs (10:00:21 to 10:03:27), 242 s wall with input writing, the 5.5 s set-up and the
+final tables; the reference took 43 minutes. Step-time history (ms per step, steps only): 60.4 eager reference
+student -> 52.2 fused basis -> 40.3 polynomial product -> 36.8 tangent MLP -> 30.6 static padded eager -> 27.75
+CUDA graph -> 25.4 (layout and fold fixes) -> 23.5 edge-parallel slots and per-MLP GEMMs -> 20.3 fused force-pass
+edge kernel -> 13.9 edge pairs. Ledger: the `ft-*` rows.
+
+**Profile** (eager, 10 steps, ms per step, after edge pairs): cuBLAS/cutlass GEMMs ~4.8 (radial MLPs and the
+node projections), `_silu_tb` fwd + bwd 2.0, small elementwise kernels 1.6 (42 launches), `_node_x` 1.47,
+`_node_g` 1.44, `_edge_pair` 1.28, `_force_edge` 0.73, `edge_basis` 0.18. Open ideas: one Triton kernel for each
+radial MLP pass (layers in shared memory, SiLU in the epilogue, no `z`/`h` round trips); fusing the remaining
+elementwise chains (loss, stress, EMA); node kernels over channel tiles of 64.
+
+**C++/CUDA library (the default since 24 November).** `src/train/strain.cu` (+ `mlp_fused.cuh`, `gemm_tn.cuh`,
+`include/loupstrain.h`, ABI 3) builds `libloupstrain.so`; `loupmd/fasttrain/cuda.py` (`CudaTrainer`) drives it on
+the mace model's own parameter, Adam-state and EMA tensors. The batch is assembled on the device from per-frame
+topology; one CUDA graph per step; own edge, conv, slot, force, product, loss, Adam / AMSGrad, clipping and EMA
+kernels; the radial MLPs as two fused kernels (forward, backward), cuBLAS for the node GEMMs and dW4. FP64 parity
+1.5e-15 after four Adam steps; FP32 gradients within 1.1e-6 of FP64. Steps: 13.9 (Triton) -> 8.33 -> 7.37 ms.
+`LOUP_FASTTRAIN_ENGINE=triton` keeps the Triton engine. A DRAM survey (ncu `dram__bytes.sum`, 1.9 GB per step,
+floor 4.27 ms at 448 GB/s) leaves about 1.0 ms of slack in the MLP backward (issue- and latency-bound), 0.4 ms in
+its forward, 1.1 ms in the conv and slot kernels and 0.24 ms in expand / basis; the cuBLAS dW4 GEMM sits at 94%
+of DRAM bandwidth. Rejected: split MLP backward, own split-K weight-gradient GEMM (ledger).
+
+150 epochs (mace's recipe, stage two from 111), test / valid / train F RMSE: library 8.9 / 12.7 / 11.9 meV/A in
+120 s of epochs (179 s wall); with the validation cache (`ft-eval-cache`, 138 -> 64 ms per validation pass)
+9.0 / 12.8 / 12.1 in 98.9 s of epochs; Triton engine 8.7 / 12.5 / 11.8 in 186 s; stock FP32 reference 8.8 / 12.6 /
+11.9 in 43 minutes.
+
+**Recipes (`loupmd/fasttrain/recipe.py`, `--loup_recipe NAME|path.json`).** A JSON recipe replaces mace's epoch
+loop (`mace.tools.train`): epochs, batch size, seed, lr schedule per optimizer step (constant, cosine, linear,
+exp, piecewise; linear warm-up), loss-weight phases with linear ramps, EMA decay, clipping, validation interval,
+time budget and force-error target. The library takes per-step lr and loss-weight tables (`lst_begin_epoch_steps`),
+so a schedule costs nothing per step. Validation runs under the EMA weights with mace's metrics and logs; every
+evaluation is a row of `<results>/recipe_log.jsonl` (epoch, wall, step and validation seconds, lr, weights,
+errors); the final EMA model is saved as mace's stage-one and stage-two checkpoints, so mace's tables and model
+export follow. `mace-constant` (mace's settings) reproduces mace's own validation curve within 0.5 meV/A
+(epochs 5-35). Screens so far (ledger `ft-recipe`): the lr is what limits progress at mace's 0.01; a peak of
+0.03 with a late drop and the energy / stress weights switched only below lr 2e-3 (`p30-75`) gives valid F 13.7,
+E 0.05, test F 9.3 in 75 epochs (about 50 s of steps and validation), against 12.8 / 0.05 / 9.0 after mace's 150;
+switching the weights at lr 6e-3 costs 10+ meV/A; peaks >= 0.02 spike early, and repeat runs of one recipe differ
+by more than some recipes do. With gradient clipping at 1 (mace: 10) and a 0.05 peak, `r50-60-clip1` gives
+valid F 12.10 / 12.55 / 12.08 (seeds 1-3), test 8.3-8.6, E <= 0.05, S <= 0.19 in 39-40 s of steps and validation:
+better than mace's 150-epoch recipe (12.8 / 9.0) in 40% of its training time.
+
+**Post-training** (`ft-post-train`, `ft-frames-batched`): mace's stage-one / stage-two tables and training plots
+now run on the evaluator, results are reused when both stages are the same model, and frames are converted once
+(batched on the device). A 60-epoch recipe run: set-up 6.6 s (trainer 3.0 s), training and validation 39 s,
+post-training 12.2 s (was 37 s), 66 s wall (was 99 s). Stock mace's post-training is 34-47 s.
+With `ft-e2e-tables` (no plots in recipe runs, light table batches, reused evaluators, no cuEquivariance /
+OpenEquivariance imports): imports 3.6 s, set-up 5.9 s, training 33.5 s, validation 4.1 s, post-training 3.3 s,
+**51.7 s wall** for a 60-epoch recipe (valid F 12.03-12.11, test 8.1-8.3).
+
+**Muon and precision (24 November, ledger `ft-muon`, `ft-muon-no-l2`, `ft-dpa4-hybridmuon`, `ft-tf32-bf16`).**
+Recipe `optimizer.kind = "muon"` runs Muon on the matrix blocks in the fused step (7.58 against 7.37 ms per step):
+at 60 epochs valid F 7.6-8.1 against Adam's 12.0-12.9, at 240 epochs 5.86 (test 3.6) in 161 s wall. mace's L2
+weight decay (5e-7) cost both optimizers: Muon tensors no longer take it (ABI 6), and `optimizer.weight_decay` 0
+brings Muon to 7.63 / 7.91 and Adam to 11.00 / 11.45 (seeds). DPA4's 8 + 2 Newton-Schulz steps help a little
+(7.36-7.74); its Magma-lite damping, decoupled weight decay and WSD did not. `optimizer.math` `tf32` / `bf16`
+(cuBLAS compute types, tensor-core radial MLPs): 6.86 / 6.75 ms per step with valid F unchanged at 60 epochs
+(E 0.049 / 0.553 meV/atom against 0.026); on this card TF32 tensor cores run at about the FP32 rate; on the RTX
+4000 Ada both modes save 14% (8.34 -> 7.17 / 7.14 ms), and A100-class cards should gain more.
+
+**Named recipes** (`--loup_recipe fastNN`, ledger `ft-recipe-fast`, FP32): `fast30` valid / test F 8.77 / 5.8
+meV/A in 35 s wall, `fast40` 8.13 / 5.3 in 41 s, `fast60` 7.28 / 4.6 in 54 s, `fast120` 6.23 / 3.9 in 99 s
+(RTX 4000 Ada); stock mace's 150-epoch recipe: 12.8 / 9.0 in about 40 minutes.
+Batch 1 + blocked SOAP (`--loup_recipe soapNN`, ledger `ft-recipe-b1`; Muon / SOAP lr x1.5, Adam beta2 0.99):
+`soap30` valid F 5.98-6.01, `soap40` 5.66-5.69, `soap60` 5.30 / 5.47, `soap120` 4.91 (leeloo); on the 5060 Ti
+with today's defaults 40 epochs take about 44 s wall and 60 epochs about 56 s. `soap40` reaches what the batch-4
+`fast120` did not (6.23) in about a third of its time.
+On cards whose TF32 tensor rate is well above FP32 (RTX 4000 Ada, A100 / H100 class): `soap36t` / `soap48t` / `soap72t` (ledger `ft-tf32-phase`): 1.2x the epochs with TF32 until the energy-weighted end phase (`optimizer.math_until`, `lst_set_math`), about soap30 / 40 / 60's training time on the 4000 Ada with valid F 5.82 / 5.57 / 5.27 against 6.01 / 5.71 / 5.36 and the same energy error; no gain at 120 epochs. On the 5060 Ti (TF32 at about the FP32 rate) keep the FP32 soapNN.
+
+**Batch size (24 November; for later: automatic choice).** Two separate questions. (1) Throughput: time per
+frame falls from batch 1 (2.53 ms) to batch 4 (1.86 ms) and stops there (batch 8 about 2.0 ms per frame in an
+Adam-era round, 0.6 s per epoch, no faster than batch 4): the 5060 Ti is full at about 1,000-1,500 atoms per step
+for this model (4 SrTiO3 frames of about 350 atoms). The saturation point depends on atoms per step against the
+GPU's size and the model's width (an A100's 108 SMs need more; a 3,000-atom frame fills this card at batch 1),
+not on the dataset. (2) Learning: on 300 frames the number of updates limits progress, so smaller batches win per
+epoch (batch 1 + blocked SOAP 5.48-5.57 against 5.77 at batch 4; batch 8 Adam 14.45 against 12.22 at batch 4);
+the best batch for learning depends mostly on the dataset (frames, gradient noise) and the optimizer (SOAP /
+Muon tolerate larger batches than Adam), and a frame's hundreds of force labels make per-frame gradients
+informative, so MLIP batches stay small. Plan for an automatic choice (not built): (a) at start-up, time about
+20 captured steps at batch 1, 2, 4, 8, 16 (seconds) and keep the smallest batch within 5-10% of the best time
+per frame; (b) estimate the gradient noise scale B_noise = tr(Sigma) / |G|^2 (McCandlish et al. 2018, "An
+Empirical Model of Large-Batch Training") from gradient norms at two batch sizes, at start-up and occasionally
+during training (it grows as the loss falls: the case for a batch ramp); (c) pick B maximising steps per second(B)
+x 1 / (1 + B_noise / B). The learning rate must move with B (our recipes are tuned per batch; square-root scaling
+for Adam-like optimizers, Muon / SOAP to be checked), and (b)-(c) need validating against real time-to-quality
+runs before use; (a) alone is a small change in `run.py`. A step-time sweep over batch 1-16 with today's library
+is round 38 (`.tmp_o/r38.sh`).
+
+**Kernel rounds, 24-25 November (batch 1 first; ledger `ft-kern-*`).** Method: an ncu `--set full` profile of
+one SOAP refresh step at batch 1 (`.tmp_o/prof27/det-b1.md`, `ncu_detail.py`: per kernel waves, occupancy,
+SM / memory / DRAM %, issue, SM balance, top stalls, a floor `t max(SM%, MEM%)`), read together with the nsys
+in-graph times (ncu serialises kernels and flushes L2 before each one, so its DRAM figures overstate the graph's).
+At batch 1 (349 atoms, 15,780 edges) 82% of the kernel time is under-filled grids (0.5-0.8 waves, long-scoreboard
+stalls), not bandwidth or FLOPs. Each change is a switch read at engine creation (one library, A/B by environment,
+mirrored order); FP64 gradients against the reference stay at 1e-15 for all of them.
+
+| Switch | What | Batch 1 ms / step | Batch 4 |
+| --- | --- | --- | --- |
+| `LST_CB_WS=0` | no cuBLAS workspace (no split-K) | 2.54 -> 3.82: REJECTED | 7.48 -> 12.55 |
+| `LST_FORCE_WPB`, `LST_SLOT_NPB` | k_force_node / k_slot block sizes | ties | ties |
+| `LST_SEG_GEMM=1` | the per-degree node GEMMs (`per_l`) as one segmented launch (`seg_gemm.cuh`) | 2.52 -> 2.40 (-5%) | 7.45 -> 7.34 (-1.5%) |
+| `LST_CONV_ES=2` / `4` | k_conv: a node's edges over 2 / 4 thread groups, summed in shared memory | 2.52 -> 2.47 alone; with SEG 2.53 -> 2.37 / 2.35 | 7.47 -> 7.37; with SEG 7.54 -> 7.23 / 7.26 |
+| `LST_GEMM_TN=1` | own split-K for the weight gradients on top of SEG | tie | tie |
+| `LST_NO_DEADW=1 LST_ZERO_FUSED=1` | no gy / se writes outside debug steps; one zeroing kernel instead of nine memset nodes | 2.37 -> 2.34 | 7.21 -> 7.19 |
+| `LST_FORCE_JYW=1` | JY^T gy over 16 lanes in k_force_node | tie | tie |
+| `LST_FPAIR_WARP=1` | k_forces_pair one warp per atom (grid was 2 blocks at batch 1) | 2.35 -> 2.33 | tie |
+| `LST_MULTI_GEMM=1` | the weight-only products (6 + 12 small GEMMs) as one launch each (`multi_gemm.cuh`) | 2.33 -> 2.29 | tie |
+| vector rows (unconditional) | k_basis / k_edge_cot store and load 16-wide rows as float4 | 2.29 -> 2.25 | 7.13 -> 6.98 |
+| `LST_SOAP_EIG=1` | SOAP refresh as one CTA per (matrix, side) plus a chunked apply | tie (2.26) | tie (6.98 / 7.00) |
+| `LST_SLOT_ES=2` / `4` | k_slot: a node's edges over 2 / 4 thread groups | 2.26 -> 2.30: REJECTED | 7.01 -> 7.31 |
+| `LST_WG_SIDE=1` | the backward's weight-gradient GEMMs (and the radial MLPs' dW4) on a third stream | 2.25 -> 2.17 | 7.00 -> 6.95 |
+| `LST_PAR=3` | MLP 1 forward, backward slots + MLP 1 on the second stream | 2.25 -> 2.20; with WG_SIDE 2.09 | 6.90; with WG_SIDE 6.87 |
+| `LST_MLP_DUAL=1` | both MLP backwards in one launch (needs PAR bit 2 off) | with WG_SIDE 2.15 -> 2.12; vs PAR=3 2.05 -> 2.08 | tie |
+| `LST_FORCE_ES=2` / `4` | k_force_node: 2 / 4 warps per atom (alternate edges) | with WG + PAR 2.04 -> 2.06 / 2.03 | 7.01 -> 6.87 / 6.83 |
+| `LST_SLOT_PP=1` | k_slot over each node's own pairs (offsets from `k_pair_ptr`), no skipped edges | 1.94 -> 1.94: tie, kept off (ledger ft-kern-slot-pp) | 6.75 -> 6.75 |
+| `LST_MLP_PIPE=0` (default on) | MLP backward `k_mlp_bwdp`: gh3 first through cp.async stages (ledger ft-kern-mlp-pipe) | 1.95 -> 1.90: ADOPTED | 6.75 -> 6.52 |
+| `LST_MLP_GRIDBAL=1` | MLP backward grid cut to ceil(tiles / rounds) | tie: kept off | tie |
+| `LST_MLP_L2PF=1` | k_mlp_bwdp prefetches its next tile's gout into L2 | tie: kept off | tie |
+| `lst_set_node_order` (`LST_FORCE_ORDER=0` off, default on) | k_force_node in each frame's own atom order (ledger ft-kern-force-order) | 1.88 -> 1.86 (k_force_node 141 -> 122 us): ADOPTED | 6.48 -> 6.41 |
+| `LST_PROD_DIRECT=0` (default on) | direct species-reduced `gW0`/`gW1` in `k_prod_rev{1,2}_dir`, dropping `Wp0`/`Wp1` + 2 GEMMs (ledger ft-kern-prod-direct) | 1.88 -> 1.87 (-0.7%; Ada 1.85 -> 1.81): ADOPTED | 6.45 -> 6.35 (-1.6%; Ada 6.46 -> 6.33) |
+| `LST_VG_EARLY`, `LST_MLP_NOZ1`, `LST_MLP_FWD_SWZ` | early view-grads on `s3`; 3-array `k_mlp_bwdp_noz1`; XOR-swizzled `k_mlp_fwd_swz` | ties: kept off | ties / +0.4% |
+| `LST_PAIR_BASIS=0` (default on) | pair-indexed `Y/Yw/gyb/UP` + exact `(-1)^l` parity + matrix-free `JY` (`sh16_pair.cuh`; ledger ft-kern-pair-basis) | 1.85 -> 1.72 (-6.8%; Ada 2.02 -> 1.83, -9.4%): ADOPTED | 6.31 -> 5.79 (-8.2%; Ada 6.94 -> 6.40, -7.7%) |
+| `LST_MLP0_FIRST=0` (default on) | launch `mlp_fwd(0)` on `st` before side-stream `mlp_fwd(1)` (ledger ft-kern-mlp0-first) | 1.715 -> 1.70 (-0.9%; Ada 1.805 -> 1.79): ADOPTED | tie |
+| `LST_M0_SPECIES=0` (default on) | species-sliced `M0` GEMMs + wgrads (`k_spc_group`, `k_seg_gemm_spc`, `k_seg_wgrad_spc`), dropping `k_expand`/`k_pick`/`tmp` (ledger ft-kern-m0-species) | 1.72 -> 1.58 (-8.3%; combined 1.54, Ada 1.83 -> 1.67): ADOPTED | 5.80 -> 5.41 (-6.6%; Ada 6.42 -> 5.98) |
+
+**Defaults since 25 November** (ledger `ft-kern-b1`, `ft-kern-mlp-pipe`, `ft-kern-force-order`, `ft-kern-prod-direct`, `ft-kern-pair-basis`, `ft-kern-mlp0-first`, `ft-kern-m0-species`): `SEG_GEMM`, `CONV_ES=2`, `NO_DEADW`, `ZERO_FUSED`,
+`FPAIR_WARP`, `MULTI_GEMM`, `WG_SIDE`, `PAR=3`, `FORCE_ES=4`, `MLP_PIPE`, `FORCE_ORDER`, `PROD_DIRECT`, `PAIR_BASIS`, `MLP0_FIRST`, `M0_SPECIES` are on without any environment (`=0`, `CONV_ES=1`,
+`FORCE_ES=1` turn them off). Blocked SOAP every 10, everything off -> defaults, ms per step: batch 1 2.46 -> 2.03
+(-17.5%), batch 2 4.24 -> 3.62 (-15%), batch 4 7.43 -> 6.81 (-8%). FP64 gradients 1.1e-15 against the reference with nothing set; everything off against the defaults,
+library against library, 6.5e-15 over 3 x 10 steps (plain Muon). Rejected: `SLOT_ES`, `CB_WS=0`; kept off:
+`SOAP_EIG`, `MLP_DUAL`, `GEMM_TN`, `FORCE_JYW`. nsys at batch 1 after the rounds: 2.21 ms of kernels per step
+serialised, gaps 0.03 ms (the streams overlap about 0.15 ms of it); MLP backward 0.37, force node 0.20, cuBLAS nt
+GEMMs 0.17, MLP forward 0.17, slots 0.22, convolutions 0.38. At batch 4 the MLP backward (1.30 ms) is near the
+card's FP32 rate: the remaining large step is TF32 (`ft-tf32-bf16`), not FP32 kernel work.
+SOAP runs are not bit-reproducible: two runs of one setting differ by 0.1-0.2 in the parameters after 30 steps,
+even in FP64 (atomic-add order, 1e-16, amplified by the tolerance-stopped Jacobi rotations of near-degenerate
+eigenvalues); plain Muon stays at 1e-14. Seeds land within the usual spread.
+
+Checked and not material on this profile: register spills (only k_soap_b, 7,892 spill instructions in a
+1.1 ms refresh-step kernel), shared-memory bank conflicts (k_mlp_fwd / k_mlp_bwd, about 0.4% of their cycles).
+Batch-size sweep with today's library (round 38, SOAP every 10): 2.53 / 4.27 / 7.46 / 16.3 / 29.8 ms per step at
+batch 1 / 2 / 4 / 8 / 16, i.e. 0.76 / 0.64 / 0.56 / 0.62 / 0.57 s per epoch.
+
+**Recipe screens for fewer epochs (25 November, leeloo, ledger `ft-recipe-b1`).** Batch 1 + blocked SOAP, valid
+F (2 seeds): 30 epochs 6.20-6.33, 40 epochs 5.94-5.97, 60 epochs 5.42-5.59; batch-1 Muon 6.78 / 6.31 / 5.76 at
+30 / 40 / 60 epochs, i.e. SOAP saves about a third of the epochs at 30-40. Around the 40-epoch recipe the schedule
+is flat within the seed spread (0.1-0.2): peaks 0.03-0.06, SOAP every 5, EMA 0.995 / 0.998, clip 3, linear decay,
+the weight switch at 0.9 / 0.95 T all land at 5.80-6.03. What did move it: the Muon / SOAP lr multiplier (x1.5: 30 epochs 6.27 -> 6.11, with
+Adam beta2 0.99 6.00, 3 seeds; x2.0 / x2.5 worse again) and beta2 0.99 for the Adam part. Named recipes `soap30` / `soap40` / `soap60` /
+`soap120`: peak 0.05, linear decay to 0.0015 at 0.9 T, weights 1000 / 100 / 10 from 0.9 T, validation every 5
+epochs (each validation costs about 60 ms: 30 frames at about 1 ms per frame of evaluator GPU time plus mace's
+metrics; a captured evaluator saved under 1 ms of it).
+**End to end** (60 epochs batch 1 blocked SOAP, 5060 Ti, cProfile): set-up 6.8 s (frame conversion 2.4 s, model
+build and TorchScript 1.6 s, imports), training 41.0 s, validation 4.7 s, post-training 3.7 s, 62.5 s wall with
+the profiler. Frame conversion is mostly a cold start (first call 2.1 s, warm 0.6 s: the float64 ZBL
+kernels load lazily); the ZBL terms on the CPU only move that cost to the pairing (1.67 s cold): left as is.
+On the defaults (no profiler): 55.7 s wall, of which 36.9 s steps, 4.3 s validation, set-up 6.2
+s, post-training 3.4 s, about 5 s start-up (valid F 5.56); 40 epochs 44.3 s wall (steps 24.7 s, F 5.90).
+Start-up: under WSL, torchmetrics' import-time `shutil.which("latex")` walked the 68 Windows directories on PATH (0.43 s); `run.main` drops `/mnt/<drive>/` entries while mace imports: entry-point import 3.31 -> 2.85 s. The rest of the start-up is mace's own imports (torch, `torch._dynamo`, e3nn, scipy, torchmetrics); an evaluator warm-up thread saved the first validation's 0.55 s cold start but cost as much in set-up (GIL): rejected (ledger ft-e2e-start). On the 4000 Ada, TF32 (`optimizer.math`) cuts soap40's steps 26.7 -> 22.4 s for valid F 5.68 -> 5.75 (screen e9); at equal training time (1.2x the epochs) F 5.74 -> 5.58 at 40 epochs' time and 5.36 -> 5.26 at 60, but valid E 0.02 -> 0.04 meV/atom (screens e10 / e11); on the 5060 Ti the step gains only 5%. Kept as an option for TF32-fast cards; the named recipes stay FP32.
+SOAP kernels (ledger ft-soap-kern): one pass per Jacobi round (`LST_SOAP_JFUSE`, default on), k-major 16-byte tiles with staged loads in the SOAP block GEMMs (bitwise equal), FP32 bias corrections and division-free element loops in the rotated Adam: batch-1 SOAP step 2.04 -> 1.95 ms on the 5060 Ti (k_soap_a 119 -> 67 us, the refresh 540 -> 497 us under ncu), seeds unchanged. Refreshing every 20 steps instead of 10 ties in accuracy but saves only 0.5% of the time now: not adopted. Post-training and exit (ledger ft-e2e-post): the recipe run's `__main__` now uses the package module (one set of caches; the stock-evaluate fallback works again), the final tables in batches of 16, the stage-two TorchScript compile memoized, `os._exit` after flushing: soap30 post-training 3.33 -> 2.27 s, exit 0.7 -> 0.15 s, wall 32.4-33.8 -> 31.7-32.0 s. Set-up (ledger ft-e2e-setup): mace's force-RMS scaling statistics without collating batches (bit for bit) and its Clebsch-Gordan matrices from a disk cache (`<cache root>/train/cg`): soap30 wall -0.54 s (1.7%). A CUDA warm-up thread loads the frame conversion's kernel libraries while mace reads its data (`LOUP_FT_WARM`), and mace's `from_config` and the frame conversion run on one torch thread (`LOUP_FT_DATA_THREADS`, bit for bit; ledger ft-e2e-warm): soap30 wall 32.39 / 30.30 -> 29.55 / 29.07 s (-2.0 s, 6.5%); the same thread also loads cuBLAS's kernel libraries (`LOUP_FT_WARM_GEMM`), a further -0.41 s (29.5 -> 29.1 s). Evaluators share each frame's host topology and each frame list's device arrays with the trainer, and the polynomial and SiLU checks run once (ledger ft-e2e-evalsetup): -0.31 s, post-training 2.11 -> 1.94 s. mace's import-time `torch._dynamo` (for torch.compile, unused in training) is a stand-in module that a recipe run never resolves (its own `disable` defers to the real one once that is imported; dunder lookups such as `inspect.getmodule`'s `__file__` do not resolve it; ledger ft-e2e-lazy-dynamo): soap40 wall 35.24 -> 34.54 s, and 35.00 -> 34.50 s (means of 3) in the final form. The PATH trim of the Windows drives had stopped covering mace's import once `install()` imported mace first; it now runs before `install()` (-0.6 s). Kernel round of 25 November afternoon (5060 Ti only; handoff.md): the pipelined MLP backward `LST_MLP_PIPE` (batch 1 1.95 -> 1.90 ms, batch 4 6.75 -> 6.52, bitwise the same sums), the force pass in the frames' own atom order (`lst_set_node_order`, 1.88 -> 1.86 ms; soap40 train 23.6 -> 22.85 s with both on), and direct product weight-gradient reduction (`LST_PROD_DIRECT`, batch 4 6.45 -> 6.35 ms, batch 1 1.88 -> 1.87 ms) are now defaults; `LST_SLOT_PP`, `LST_MLP_GRIDBAL`, `LST_MLP_L2PF`, `LST_VG_EARLY`, `LST_MLP_NOZ1`, `LST_MLP_FWD_SWZ` tie. Validation and the post-training tables run through the library (`lst_evaluate`, `CudaEvaluator`, parameters by name; ledger ft-e2e-cuda-eval): FP64 3e-15 against the Triton Evaluator, soap40 wall 34.72 -> 33.59 s (means of 3), validation 1.4 -> 0.6 s, post-training 2.3 -> 1.9 s.
+
+**Frame sampling (25 November, ledger `ft-recipe-sampling`; 6 seeds, 5060 Ti and leeloo).** Drawing half of each
+epoch's frames in proportion to the square of their last relative loss, with importance-weighted loss weights
+(exponent 0.5), lowers valid F at equal steps: 30 epochs 6.13 -> 5.82, 40 5.76 -> 5.54, 60 5.45 -> 5.25, 120
+4.99 -> 4.88 (2 seeds); the named `soap30` / `soap40` / `soap60` / `soap120` recipes now sample so, and the TF32 ones (4000 Ada, 3 seeds: soap36t 5.93 -> 5.65, soap48t 5.62 -> 5.33, soap72t 5.30 -> 5.08). A frame's score is an exponential average (0.5) of its relative losses: another 0.04-0.06 at 40 and 60 epochs (6 seeds). Batch 2 with sampling at equal training time ties batch 1. Sampling
+without the importance weights gained only 0.05-0.1, sharper sampling or the full correction lost again. Earlier
+batch-4 Muon screens (ledger `ft-recipe-screens-b4`: AMSGrad and betas, block-RMS / Adam-RMS directions, NorMuon,
+cautious masks on all tensors, z-score clipping, weight averaging, mixed precision, rattled teacher frames,
+per-atom energy targets) tied or lost; batch 2 and cautious Adam were taken up.
+
+**SOAP betas (25 November, ledger `ft-recipe-soap-betas`; 6 seeds, 5060 Ti and leeloo).** SOAP's first- and
+second-moment betas 0.995 / 0.995 instead of the published 0.95 / 0.95: valid F soap30 5.80 -> 4.76, soap40 5.56 ->
+4.52, soap60 5.22 -> 4.28, soap120 4.88 -> 4.01 (2 seeds), so 30 epochs now beat the former 120-epoch recipe. Beta1 at
+or above 0.99 with beta2 0.95 diverges; 0.997 ties, 0.999 loses. All named soap recipes take it. TF32 soap48t 5.33 -> 4.40 (4000 Ada, 3 seeds); frame sampling still gains 0.07-0.12 on top. soap60 / soap120 take 0.997 (4.28 -> 4.21, 4.00 -> 3.89, 3 seeds). The batch-4 Muon recipes fast60 / fast120 take Muon momentum 0.99 (7.32 -> 5.89, 6.23 -> 4.96; ledger ft-recipe-muon-momentum). Every SOAP recipe takes main-phase stress weight 30 (valid F ties; valid E soap30 0.026 -> 0.020, soap40 0.025 -> 0.019, soap60 0.022 -> 0.017, soap120 0.018 -> 0.012 eV; stress error halved to quartered; ledger ft-recipe-stress-weight).
+
+**Recipe screens after the SOAP betas (25 November, e42-e55, 6 seeds each, 5060 Ti and leeloo; ledger
+`ft-recipe-soap-betas`, `ft-recipe-muon-wd`, `ft-recipe-stress-weight`).** At betas 0.995 soap40's valid F sits at
+4.48-4.52 meV/A whatever the schedule or weights: Nesterov off, the sampling's power / correction / uniform share,
+peak 0.035-0.07, Muon multiplier 1.0-3.0, end phase from 34-38, knee 0.0015-0.003, warm-up 1-2 epochs, plateaus at
+the peak to 6-24 epochs (soap60 too), cosine (4.59) and geometric (4.81) decays, decoupled weight decay of the Muon /
+SOAP blocks (new library option `optimizer.muon_wd`, `lst_set_muon_wd`; 1e-4 to 3e-3: 4.53-4.90), forces 50-300
+against energy; a combination of the leaning levers did not hold on fresh seeds 7-12 (4.49 against 4.48). What
+moved: the stress weight. Main-phase stress 30 (from 1) leaves F unchanged and lowers valid E by a quarter to a
+third (soap40 0.025 -> 0.019, soap120 0.018 -> 0.012 eV) and the stress error by half or more, in every SOAP
+recipe. The training error is now below the validation error (soap40 seed 1: 3.4 / 4.5 meV/A; soap120 2.5 / 3.8):
+further gains at a given budget more likely need more or other training frames than another schedule.
+
+**Waves 21-45 & zero-Torch `loupstrain_cli` close-out (26 November 2026, `sm_120` 5060 Ti + `sm_89` RTX 4000 Ada; ledger `ft-e2e-cli-waves21-43`, `ft-kern-wave44-cl80b`, `ft-kern-wave45-cm81`, `ft-arch-screens-w22`).** Standalone zero-Torch C++/CUDA trainer `build/sm_120/loupstrain_cli` (`TRAIN_LEAN=1`, SASS-only, `libloupstrain.so` 6.1 MB `sm_120` / 5.7 MB `sm_89`) with GPU cell-list + Morton/knot sort, K=32 FP16 cubic radial spline, FP16 activations + native HFMA2 pair-folded edge kernels (`edge_h2.cuh`), pre-packed FP16 Tensor Core segmented GEMMs (`LST_SEGG_H16=1`, `k_pack_segg_w_h`, `fast_div_deg`), interleaved zero-PRMT `Y3P_H` (`LST_Y3P=3`), dedicated lean non-QR BF16 TC SOAP (`LST_SOAP_FAST=1`, `k_soap_a_fast_bf16`, `LST_SOAP_MROT=2`, `LST_SOAP_QR=2`), per-atom $E_i^T$ distillation (`--w-ei 300`), VarPro readout (`--varpro`), and unmodified `r_max = 5.5 A` (`c55-e21`).
+
+| Card / Config (`sto320/base-labels-v2`, `c55-e21`, default exact `STAT_EVERY=1`) | `train_gpu` (ms/step) | `TOTAL_WALL` (`REAL`) | 4-seed gates (`EP=21` / `EP=22`) | Valid F / E (`meV/A`, `meV/at`) | Test F / S (`meV/A`, `meV/A^3`) |
+| --- | ---: | ---: | --- | --- | --- |
+| **RTX 4000 Ada (`leto`, `sm_89`)** `cm81f` | **2.572 s** (`0.408 ms/step`, `-51.5 ms` vs `cl80b`) | **2.833-2.876 s** (`2.95 s`; `SE2`: `2.827 s`) | **4/4 + 4/4 PASS** | `4.37-4.49` / `0.014-0.021` | `2.77-2.82` / `0.017-0.033` |
+| **RTX 5060 Ti (`sm_120`)** `cm81f` | **2.636 s** (`0.419 ms/step`, `-22 ms` vs `cl80b`) | **3.360-3.503 s** (`SE2`: `2.628 s` GPU / `3.292 s` wall) | **4/4 + 4/4 PASS** | `4.38-4.47` / `0.015-0.020` | `2.74-2.82` / `0.015-0.032` |
+| **RTX 5060 Ti (`sm_120`)** `c50-e40` (exact 5.0 A control) | **4.676 s** (`0.390 ms/step`) | **5.345 s** | PASS (s1) | `4.48` / `0.019` | `2.82` / `0.027` |
+| **Stock `mace-torch` FP64 round-trip** (`s64l0_c55_e22_s1.model`) | — | — | **PASS** | `4.442` / `0.0356` | `2.761` / `0.0191` |
+
+Fresh Wave 45 `ncu` (`sm_120`, 66 kernels) & `nsys` (`--cuda-graph-trace=node`): `k_slot_xd_opt_v3` `53.3/50.6 us` `ncu` (`38.9/42.6 us` `nsys`, `R=80`, `PRMT 48/64->16`), `k_force_pair_h2` `49.9 us` (`38.6 us` `nsys`), `k_conv_pair_h2` REV2 `44.1/42.0 us` (`34.2/34.5 us` `nsys`, `STACK=0`), `k_soap_a_fast_bf16` `26.4 us` `ncu` (`R=112` `sm_120` / `R=90` `sm_89`; `12.1 us` `nsys` Ada vs `13.8 us` prior), all 8 `k_seg_gemm_*_h_v2` `<8.9 us` `ncu` (`2.8-7.1 us` `nsys` Ada), `k_pack_segg_w_h` `1.4-1.8 us` hidden on `s3`. Compared against Stage 0's `mace-torch` Adam+AMSGrad baseline on the exact same `sto320/base-labels-v2` 300 frames (`~7,230 s` L4 FP64, `tF = 8.54-9.23 meV/A`), `loupstrain_cli` is **~900-2,500x faster and ~3.0x lower force RMSE** (`2.76-2.82 meV/A`).
+
+**Not yet done:** FP64 training timing, `s64r8` (radial head 8), species-dependent radial basis, narrow `C_msg` / vector messages, molecular COM+torque and curvature losses, multihead, restart from a mace checkpoint (`--restart_latest`, untested), automatic batch size (above).

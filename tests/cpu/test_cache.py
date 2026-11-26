@@ -181,7 +181,8 @@ def test_listing_and_sizes_cover_both_layouts(filled):
                      "m.model": "models"}
     assert [e.path.name for e in cache.entries(["bundles"])] == ["a_8_1111.loup", "d_8_4444.loup", "b_8_2222.loup",
                                                                  "c_8_3333.loup"]   # oldest use first
-    assert cache.sizes() == {"models": 9000, "bundles": 10000, "plans": 500, "gate_refs": 700, "lib": 0, "total": 20200}
+    assert cache.sizes() == {"models": 9000, "bundles": 10000, "plans": 500, "gate_refs": 700, "lib": 0, "train": 0,
+                             "total": 20200}
 
 
 def test_prune_by_age_spares_models_and_what_is_in_use(filled):

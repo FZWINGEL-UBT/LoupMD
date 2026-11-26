@@ -20,6 +20,7 @@ __global__ void __launch_bounds__(MAX_T) gconv_fwd_L0(
   const int half = R == 1 ? 0 : (threadIdx.x >> 7), ch = R == 1 ? threadIdx.x : (threadIdx.x & 127);
   const int rcv = blockIdx.x * R + half;
   if (rcv >= N) return;
+  const bool active = (C_FIX && (C_FIX & 31) == 0) ? true : (ch < C);
   {  // S99: before the edge loop, so the zero targets are dead during it (no register pressure there)
     const int tpr = R == 1 ? (int)blockDim.x : 128;
     if (zx0) for (int i = ch; i < 1 * C; i += tpr) zx0[(int64_t)rcv * 1 * C + i] = 0.0f;
@@ -40,7 +41,7 @@ __global__ void __launch_bounds__(MAX_T) gconv_fwd_L0(
   };
   for (int base = eb; base < ee; base += TILE) {
     const int cnt = (ee - base < TILE) ? (ee - base) : TILE;
-    if (ch >= 32 && ch - 32 < cnt) {
+    if (C >= 64 && ch >= 32 && ch - 32 < cnt) {
       const float4 vl = __ldg(vec_len + base + (ch - 32));
       if (sh_perm) loup::edge_sh16(vl.y, vl.z, vl.x, vl.w, reinterpret_cast<float4*>(s_sh + (ch - 32) * ED));
       else         loup::edge_sh16(vl.x, vl.y, vl.z, vl.w, reinterpret_cast<float4*>(s_sh + (ch - 32) * ED));
@@ -89,6 +90,7 @@ __global__ void __launch_bounds__(MAX_T) gconv_fwd_L0(
       }
     }
     sync_grp();
+    if (active) {
     for (int k = 0; k < cnt;) {
       const int snd = s_snd[k];
       const float4 pw = s_pw[k];
@@ -295,9 +297,11 @@ __global__ void __launch_bounds__(MAX_T) gconv_fwd_L0(
         k += 1;
       }
     }
+    }
     sync_grp();
   }
   if (density_table && ch == 0) D[rcv] = dsum;
+  if (active) {
   mid0[((int64_t)rcv * 1 + 0) * 1 * C + 0 * C + ch] = acc[0];
   mid1[((int64_t)rcv * 3 + 0) * 1 * C + 0 * C + ch] = acc[1] * 0x1.279a740000000p-1f;
   mid1[((int64_t)rcv * 3 + 1) * 1 * C + 0 * C + ch] = acc[2] * 0x1.279a740000000p-1f;
@@ -314,6 +318,7 @@ __global__ void __launch_bounds__(MAX_T) gconv_fwd_L0(
   mid3[((int64_t)rcv * 7 + 4) * 1 * C + 0 * C + ch] = acc[13] * 0x1.83091e0000000p-2f;
   mid3[((int64_t)rcv * 7 + 5) * 1 * C + 0 * C + ch] = acc[14] * 0x1.83091e0000000p-2f;
   mid3[((int64_t)rcv * 7 + 6) * 1 * C + 0 * C + ch] = acc[15] * 0x1.83091e0000000p-2f;
+  }
 }
 
 template <bool WANT_DX, int C_FIX = 0, bool PRELOC = false>
@@ -564,6 +569,7 @@ __global__ void __launch_bounds__(MAX_T) gconv_fwd_L1(
   const int half = R == 1 ? 0 : (threadIdx.x >> 7), ch = R == 1 ? threadIdx.x : (threadIdx.x & 127);
   const int rcv = blockIdx.x * R + half;
   if (rcv >= N) return;
+  const bool active = (C_FIX && (C_FIX & 31) == 0) ? true : (ch < C);
   {  // S99: before the edge loop, so the zero targets are dead during it (no register pressure there)
     const int tpr = R == 1 ? (int)blockDim.x : 128;
     if (zx0) for (int i = ch; i < 1 * C; i += tpr) zx0[(int64_t)rcv * 1 * C + i] = 0.0f;
@@ -585,7 +591,7 @@ __global__ void __launch_bounds__(MAX_T) gconv_fwd_L1(
   };
   for (int base = eb; base < ee; base += TILE) {
     const int cnt = (ee - base < TILE) ? (ee - base) : TILE;
-    if (ch >= 32 && ch - 32 < cnt) {
+    if (C >= 64 && ch >= 32 && ch - 32 < cnt) {
       const float4 vl = __ldg(vec_len + base + (ch - 32));
       if (sh_perm) loup::edge_sh16(vl.y, vl.z, vl.x, vl.w, reinterpret_cast<float4*>(s_sh + (ch - 32) * ED));
       else         loup::edge_sh16(vl.x, vl.y, vl.z, vl.w, reinterpret_cast<float4*>(s_sh + (ch - 32) * ED));
@@ -648,6 +654,7 @@ __global__ void __launch_bounds__(MAX_T) gconv_fwd_L1(
       }
     }
     sync_grp();
+    if (active) {
     for (int k = 0; k < cnt;) {
       const int snd = s_snd[k];
       const float4 pw = s_pw[k];
@@ -1198,9 +1205,11 @@ __global__ void __launch_bounds__(MAX_T) gconv_fwd_L1(
         k += 1;
       }
     }
+    }
     sync_grp();
   }
   if (density_table && ch == 0) D[rcv] = dsum;
+  if (active) {
   mid0[((int64_t)rcv * 1 + 0) * 2 * C + 0 * C + ch] = acc[0];
   mid0[((int64_t)rcv * 1 + 0) * 2 * C + 1 * C + ch] = acc[1] * 0x1.279a740000000p-1f;
   mid1[((int64_t)rcv * 3 + 0) * 3 * C + 0 * C + ch] = acc[2] * 0x1.279a740000000p-1f;
@@ -1241,6 +1250,7 @@ __global__ void __launch_bounds__(MAX_T) gconv_fwd_L1(
   mid3[((int64_t)rcv * 7 + 4) * 2 * C + 1 * C + ch] = acc[37] * 0x1.1aa69e0000000p-4f;
   mid3[((int64_t)rcv * 7 + 5) * 2 * C + 1 * C + ch] = acc[38] * 0x1.bee9060000000p-3f;
   mid3[((int64_t)rcv * 7 + 6) * 2 * C + 1 * C + ch] = acc[39] * 0x1.11acee0000000p-2f;
+  }
 }
 
 template <bool WANT_DX, int C_FIX = 0, bool PRELOC = false>
@@ -1709,6 +1719,7 @@ __global__ void __launch_bounds__(MAX_T) gconv_fwd_L1s(
   const int half = R == 1 ? 0 : (threadIdx.x >> 7), ch = R == 1 ? threadIdx.x : (threadIdx.x & 127);
   const int rcv = blockIdx.x * R + half;
   if (rcv >= N) return;
+  const bool active = (C_FIX && (C_FIX & 31) == 0) ? true : (ch < C);
   {  // S99: before the edge loop, so the zero targets are dead during it (no register pressure there)
     const int tpr = R == 1 ? (int)blockDim.x : 128;
     if (zx0) for (int i = ch; i < 1 * C; i += tpr) zx0[(int64_t)rcv * 1 * C + i] = 0.0f;
@@ -1744,7 +1755,7 @@ __global__ void __launch_bounds__(MAX_T) gconv_fwd_L1s(
   };
   for (int base = eb; base < ee; base += TILE) {
     const int cnt = (ee - base < TILE) ? (ee - base) : TILE;
-    if (ch >= 32 && ch - 32 < cnt) {
+    if (C >= 64 && ch >= 32 && ch - 32 < cnt) {
       const float4 vl = __ldg(vec_len + base + (ch - 32));
       { float4 sh_t[4];
         if (sh_perm) loup::edge_sh16(vl.y, vl.z, vl.x, vl.w, sh_t);
@@ -1797,6 +1808,7 @@ __global__ void __launch_bounds__(MAX_T) gconv_fwd_L1s(
       }
     }
     sync_grp();
+    if (active) {
     for (int k = 0; k < cnt;) {
       const int snd = s_snd[k];
       const float4 pw = s_pw[k];
@@ -1903,11 +1915,14 @@ __global__ void __launch_bounds__(MAX_T) gconv_fwd_L1s(
         k += 1;
       }
     }
+    }
     sync_grp();
   }
   if (density_table && ch == 0) D[rcv] = dsum;
+  if (active) {
   mid0[((int64_t)rcv * 1 + 0) * 2 * C + 0 * C + ch] = acc[0];
   mid0[((int64_t)rcv * 1 + 0) * 2 * C + 1 * C + ch] = acc[1] * 0x1.279a740000000p-1f;
+  }
 }
 
 constexpr int kGconvBwdL1sQS = 4;  // staged dmid floats per channel (dynamic smem C * QS)
@@ -2241,6 +2256,7 @@ __global__ void __launch_bounds__(MAX_T) gconv_fwd_L2a(
   const int half = R == 1 ? 0 : (threadIdx.x >> 7), ch = R == 1 ? threadIdx.x : (threadIdx.x & 127);
   const int rcv = blockIdx.x * R + half;
   if (rcv >= N) return;
+  const bool active = (C_FIX && (C_FIX & 31) == 0) ? true : (ch < C);
   {  // S99: before the edge loop, so the zero targets are dead during it (no register pressure there)
     const int tpr = R == 1 ? (int)blockDim.x : 128;
     if (zx0) for (int i = ch; i < 1 * C; i += tpr) zx0[(int64_t)rcv * 1 * C + i] = 0.0f;
@@ -2263,7 +2279,7 @@ __global__ void __launch_bounds__(MAX_T) gconv_fwd_L2a(
   };
   for (int base = eb; base < ee; base += TILE) {
     const int cnt = (ee - base < TILE) ? (ee - base) : TILE;
-    if (ch >= 32 && ch - 32 < cnt) {
+    if (C >= 64 && ch >= 32 && ch - 32 < cnt) {
       const float4 vl = __ldg(vec_len + base + (ch - 32));
       if (sh_perm) loup::edge_sh16(vl.y, vl.z, vl.x, vl.w, reinterpret_cast<float4*>(s_sh + (ch - 32) * ED));
       else         loup::edge_sh16(vl.x, vl.y, vl.z, vl.w, reinterpret_cast<float4*>(s_sh + (ch - 32) * ED));
@@ -2326,6 +2342,7 @@ __global__ void __launch_bounds__(MAX_T) gconv_fwd_L2a(
       }
     }
     sync_grp();
+    if (active) {
     for (int k = 0; k < cnt;) {
       const int snd = s_snd[k];
       const float4 pw = s_pw[k];
@@ -2876,9 +2893,11 @@ __global__ void __launch_bounds__(MAX_T) gconv_fwd_L2a(
         k += 1;
       }
     }
+    }
     sync_grp();
   }
   if (density_table && ch == 0) D[rcv] = dsum;
+  if (active) {
   mid0[((int64_t)rcv * 1 + 0) * 3 * C + 0 * C + ch] = acc[0];
   mid0[((int64_t)rcv * 1 + 0) * 3 * C + 1 * C + ch] = acc[1] * 0x1.279a740000000p-1f;
   mid1[((int64_t)rcv * 3 + 0) * 5 * C + 0 * C + ch] = acc[2] * 0x1.279a740000000p-1f;
@@ -2919,6 +2938,7 @@ __global__ void __launch_bounds__(MAX_T) gconv_fwd_L2a(
   mid3[((int64_t)rcv * 7 + 4) * 4 * C + 1 * C + ch] = acc[37] * 0x1.1aa69e0000000p-4f;
   mid3[((int64_t)rcv * 7 + 5) * 4 * C + 1 * C + ch] = acc[38] * 0x1.bee9060000000p-3f;
   mid3[((int64_t)rcv * 7 + 6) * 4 * C + 1 * C + ch] = acc[39] * 0x1.11acee0000000p-2f;
+  }
 }
 
 template <int R, bool PAIR, int MAX_T = (R == 1 ? 256 : 128 * R), bool PRELOC = false, int C_FIX = 0>
@@ -2938,6 +2958,7 @@ __global__ void __launch_bounds__(MAX_T) gconv_fwd_L2b(
   const int half = R == 1 ? 0 : (threadIdx.x >> 7), ch = R == 1 ? threadIdx.x : (threadIdx.x & 127);
   const int rcv = blockIdx.x * R + half;
   if (rcv >= N) return;
+  const bool active = (C_FIX && (C_FIX & 31) == 0) ? true : (ch < C);
   {  // S99: before the edge loop, so the zero targets are dead during it (no register pressure there)
     const int tpr = R == 1 ? (int)blockDim.x : 128;
     if (zx0) for (int i = ch; i < 1 * C; i += tpr) zx0[(int64_t)rcv * 1 * C + i] = 0.0f;
@@ -2960,7 +2981,7 @@ __global__ void __launch_bounds__(MAX_T) gconv_fwd_L2b(
   };
   for (int base = eb; base < ee; base += TILE) {
     const int cnt = (ee - base < TILE) ? (ee - base) : TILE;
-    if (ch >= 32 && ch - 32 < cnt) {
+    if (C >= 64 && ch >= 32 && ch - 32 < cnt) {
       const float4 vl = __ldg(vec_len + base + (ch - 32));
       if (sh_perm) loup::edge_sh16(vl.y, vl.z, vl.x, vl.w, reinterpret_cast<float4*>(s_sh + (ch - 32) * ED));
       else         loup::edge_sh16(vl.x, vl.y, vl.z, vl.w, reinterpret_cast<float4*>(s_sh + (ch - 32) * ED));
@@ -3059,6 +3080,7 @@ __global__ void __launch_bounds__(MAX_T) gconv_fwd_L2b(
       }
     }
     sync_grp();
+    if (active) {
     for (int k = 0; k < cnt;) {
       const int snd = s_snd[k];
       const float4 pw = s_pw[k];
@@ -3584,9 +3606,11 @@ __global__ void __launch_bounds__(MAX_T) gconv_fwd_L2b(
         k += 1;
       }
     }
+    }
     sync_grp();
   }
   if (density_table && ch == 0) D[rcv] = dsum;
+  if (active) {
   mid0[((int64_t)rcv * 1 + 0) * 3 * C + 2 * C + ch] = acc[0] * 0x1.279a740000000p-2f;
   mid1[((int64_t)rcv * 3 + 0) * 5 * C + 3 * C + ch] = acc[1] * 0x1.43d1360000000p-2f;
   mid1[((int64_t)rcv * 3 + 1) * 5 * C + 3 * C + ch] = acc[2] * 0x1.43d1360000000p-2f;
@@ -3618,6 +3642,7 @@ __global__ void __launch_bounds__(MAX_T) gconv_fwd_L2b(
   mid3[((int64_t)rcv * 7 + 4) * 4 * C + 3 * C + ch] = acc[28] * 0x1.11acee0000000p-3f;
   mid3[((int64_t)rcv * 7 + 5) * 4 * C + 3 * C + ch] = acc[29] * 0x1.bee9060000000p-3f;
   mid3[((int64_t)rcv * 7 + 6) * 4 * C + 3 * C + ch] = acc[30] * 0x1.bee9060000000p-4f;
+  }
 }
 
 template <bool WANT_DX, int C_FIX = 0, bool PRELOC = false>
