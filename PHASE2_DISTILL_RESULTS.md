@@ -14,7 +14,7 @@ Fidelity bar: overall & per-species force RMSE $\le 2\%$, energy RMSE $\le 1$ me
 | `sto_s64r8_c50` | `64x0e` | 8 | 5.0 | 137k | **0.75% PASS** | 0.016 | — | label PASS | 1.811 ms | 0.362 | 12.68× |
 | `sto_c64_m32_r8_c50` | `64x0e` / `32` conv | 8 | 5.0 | 126k | **0.80% PASS** | 0.017 | — | label PASS | 1.313 ms | 0.263 | **17.49×** |
 | `sto_c64_m16_r8_c50` | `64x0e` / `16` conv | 8 | 5.0 | 120k | **0.86% PASS** | 0.021 | — | 3× gate PASS (all 6 variants) | 1.466 ms | 0.293 | 15.67× |
-| **`sto_s32r8_c50`** | **`32x0e`** | **8** | **5.0** | **46k** | **0.94% PASS** | **0.022** | 54.2% (15.97% w/ probes) | 3× gate PASS; allgreen §4 MD running | **1.126 ms** | **0.225** | **20.41×** |
+| **`sto_s32r8_c50`** | **`32x0e`** | **8** | **5.0** | **46k** | **0.94% PASS** (1.18% allgreen) | **0.022** | 54.2% (**15.97%** allgreen) | **3× gate PASS; 960/960 phonons PASS, lat −0.024% PASS** | **1.126 ms** | **0.225** | **20.41×** |
 | **`sto_s16r8_c50`** | **`16x0e`** | **8** | **5.0** | **21k** | **1.24% PASS** | **0.021** | — | 3× gate PASS (0.75×, all 6 variants) | **1.004 ms** | **0.201** | **22.87×** |
 | `sto_16v1_r8_c50` | `16x0e+16x1o` | 8 | 5.0 | 27k | 1.84% | 0.391 | 16.09% | 3× gate PASS (1.37×, all 6 variants) | 1.556 ms | 0.311 | 14.77× |
 
@@ -55,9 +55,20 @@ Fidelity bar: overall & per-species force RMSE $\le 2\%$, molecular COM force & 
   - `w_64v1_agn_r8_c60_v3` (`zbl = True, bs = 4`): `2.86%` F, `COM 5.78%`, `TRQ 4.67%` — ALREADY passed matched 2×40 ps NPT **O diffusion (`-2.1%`, 8.6× inside teacher spread)** and H/O displacements, missing density by only `0.0009 g/cm³` (ZBL kink on O–H bond caused `H-O` RDF max error `0.26`).
   - `w_64v1_agn_r64_nozbl_c60` (`R = 64, 6.0 Å, zbl = False, bs = 2`, 213k): dropped training loss **3× further to `0.0091`** (re-running cleanly with OOM-safe E0 calibration + full §4 MD on `murphy`).
 
-## 4. What Limits Throughput at `C = 16` (`sto_s16r8_c50`, `1.004 ms/step` = `0.201 µs/at` on 5,000 atoms)
+## 4. Measured `nsys` Kernel Census at `C = 64 -> 32 -> 16` (5,000-atom SrTiO₃, RTX 5060 Ti, `nsys --cuda-graph-trace=node`)
 
-Even though `sto_s16r8_c50` has only 21k params and already hits **22.9× MH-1** (`1.80×` faster than `s64r8`, clearing the `LOUP_S_DESIGN.md` §4 stop rule), it is only 11% faster than `sto_s32r8_c50` (`1.126 ms`) because of MACE/LoupMD structural floors:
+Exact per-step GPU kernel times averaged over 20 300 K Langevin steps (after warmup + autotune):
+
+| Kernel Group | `sto_s64r8_c50` (`64x0e`) | `sto_s32r8_c50` (`32x0e`) | **`sto_s16r8_c50` (`16x0e`)** | Share of `s16` | Scaling `64 -> 32 -> 16` |
+|---|---:|---:|---:|---:|---|
+| **Layer-1 conv** (`gconv_bwd_L0` + `gconv_fwd_L0`) | 453.4 + 225.0 = **678.4 µs** | 256.0 + 118.2 = **374.2 µs** | 227.2 + 98.7 = **325.9 µs** | **34.6%** | 1.81× then only **1.15×** (50% idle lanes!) |
+| **Layer-0 edge** (`first_bwd_edge` + `first_fwd`) | 233.0 + 88.3 = **321.3 µs** | 234.4 + 89.0 = **323.4 µs** | 227.1 + 88.1 = **315.3 µs** | **33.5%** | **1.00×** (invariant; 85% idle lanes on `J-1=9`) |
+| **All GEMMs** (`hgemm2f` + `sgemm*` + `cutlass`) | 405.0 + 16.0 = **421.0 µs** | 194.4 + 22.3 = **216.7 µs** | 147.4 + 18.1 = **165.5 µs** | **17.6%** | **32 calls/step** of `128×64` `hgemm2f` on 16-col matrices! |
+| **Products** (`gprod_ro1` + `gprod_bwd` + `gprod_fwd`) | 115.6 + 81.9 + 35.7 = **233.2 µs** | 41.9 + 33.8 + 15.5 = **91.2 µs** | 30.9 + 15.6 + 12.6 = **59.1 µs** | **6.3%** | 2.56× then **1.54×** (50% idle lanes) |
+| **Compaction + rebuild + Langevin + skin/guards** | **~76 µs** | **~77 µs** | **~77 µs** | **8.2%** | Hard MD/neighbor floor (compact 37 µs, rebuild 15 µs, Langevin 17 µs) |
+| **GPU kernel sum / Unprofiled wall step** | 1,730 / **1,811 µs** | 1,083 / **1,126 µs** | 943 / **1,004 µs** | **100%** | **`12.7×` -> `20.4×` -> `22.9×` MH-1** |
+
+Even though `sto_s16r8_c50` has only 21k params and already hits **22.9× MH-1** (`1.80×` faster than `s64r8`, clearing the `LOUP_S_DESIGN.md` §4 stop rule), **91.8% of its GPU time (`866 / 943 µs`) is still neural-network kernel overhead** (the true neighbor + integrator floor is only `77 µs` = `0.015 µs/atom-step` = **~300× MH-1**!):
 
 1. **Channel-invariant Layer-0 + neighbor/compaction floor (~40% of step, ~0.41 ms):** `first_fwd_kernel`, `first_bwd_edge_kernel`, compaction, and neighbor rebuild do not shrink with `C`. At `R = 8` (`J = 10` columns), `first_fwd_kernel` still launches `64` threads/atom (only 9 accumulate: 86% idle) and `first_bwd_edge_kernel` uses 32-lane warps with only 5 active lanes (84% idle).
 2. **50% idle warp lanes across all `C = 16` conv and product kernels:** `gconv_fwd_L0`, `gconv_bwd_L0`, `gprod_fwd`, `gprod_bwd`, and `gprod_ro1_fused` all round `blockDim` up to 32 threads with `active = (ch < 16)`.
