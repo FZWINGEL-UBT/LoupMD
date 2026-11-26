@@ -215,7 +215,7 @@ void save_lsm(const std::string& path, const LsmModel& m) {
 // ============================================================================ Fast extXYZ parser
 struct RawFrame {
     int n = 0;
-    double cell[9] = {};
+    double cell[9] = {1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0};
     int pbc[3] = {1, 1, 1};
     double volume = 1.0;
     double energy = 0.0;
@@ -1600,7 +1600,14 @@ std::vector<LstMuonBlock> build_muon_blocks(const LsmModel& m) {
     const int S = m.S, C = m.C, H = m.H, NB = m.NB, K3 = m.K3;
     std::vector<LstMuonBlock> out;
     auto add = [&](int p, int b, int r, int c, long off, long bs, long rs, long cs) {
-        out.push_back(LstMuonBlock{p, b, r, c, off, bs, rs, cs});
+        if (r > 64 && c > 64) {
+            for (int r0 = 0; r0 < r; r0 += 64)
+                for (int c0 = 0; c0 < c; c0 += 64)
+                    out.push_back(LstMuonBlock{p, b, std::min(64, r - r0), std::min(64, c - c0),
+                                               off + (long)r0 * rs + (long)c0 * cs, bs, rs, cs});
+        } else {
+            out.push_back(LstMuonBlock{p, b, r, c, off, bs, rs, cs});
+        }
     };
     // Layer 0: linear_up (1), conv_tp_weights.layer0..3 (2..5), linear (6), skip_tp (7)
     add(1, 1, C, C, 0, C * C, C, 1);

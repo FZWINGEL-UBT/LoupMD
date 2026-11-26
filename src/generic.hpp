@@ -98,6 +98,14 @@ void hgemm2_f32a_row_gate_bwd(int l, int M, int N, int K, const float* A, const 
                               const GateArgs& g, void* ws, cudaStream_t stream, const int8_t* eA_cached = nullptr);
 void hgemm2_f32a_row_gate_fwd(int l, int M, int N, int K, const float* A, const void* B_panel, const float* inv_sB,
                               const GateArgs& g, void* ws, cudaStream_t stream, const int8_t* eA_cached = nullptr);
+// Fused ILMlip readout tail (depth==2, width==128, need_grad==true):
+// pre0[N,128] -> +alpha_Z -> silu -> @W1 -> +b1 -> silu -> .u_Z (+ZBL switch) -> silu_bwd -> @W1^T -> silu_bwd -> dpre0[N,128]
+void hgemm2_ilmlip_ro_tail_w128(
+    int N, bool zbl_sw, float inv_zc, const int* species,
+    const float* pre0, const float* alpha_Z, const float* b1, const float* u_Z,
+    const void* W1_B, const float* W1_inv_sB, const void* W1_BT, const float* W1_inv_sBT,
+    const double* e_zbl, double* energy, double* atom_energy, float* w_zbl_out, float* dpre0,
+    cudaStream_t stream);
 using GemmH2RowFn = std::function<void(int M, int N, int K, const float* A, const void* B_panel,
                                        const float* inv_sB, float* C, float beta, const int8_t* eA_cached)>;
 using GemmH2RowGateFn = std::function<void(int l, int M, int N, int K, const float* A, const void* B_panel,
@@ -186,6 +194,7 @@ struct GenericPassInputs {
 struct GenericLayer;
 
 class PolarLR;
+class IlmlipModel;
 
 class GenericModel {
 public:
@@ -228,9 +237,9 @@ public:
     bool hand_locals(int t, int i) const { return hand_[(size_t)t][(size_t)i].locals; }
     // Sweeps need every layer's output to exist (not with the long range) or, with the skip-chain fold, the fold's
     // hand-over (use_chain_fold(on, true)).
-    bool sweeps_available() const { return lr_ == nullptr && (!chain_fold_ || fold_sweeps_); }
+    bool sweeps_available() const { return lr_ == nullptr && ilmlip_ == nullptr && (!chain_fold_ || fold_sweeps_); }
     // Whether the model can sweep once the fold is off (use_chain_fold(false)): every model without long range.
-    bool sweeps_possible() const { return lr_ == nullptr; }
+    bool sweeps_possible() const { return lr_ == nullptr && ilmlip_ == nullptr; }
     // The skip-chain fold (S57, S73) of the systems allocated from now on: on only where setup_chain_fold built it.
     // The fold's composed weights sit beside the plain ones, so a handle switches per system: whole systems fold,
     // tile domains (which sweep) only with `sweeps` (list 20: two-layer models, whose sweeps then hand on the fold's
@@ -363,6 +372,7 @@ private:
     int C0_ = 0;
     std::vector<GenericLayer*> layers_;
     PolarLR* lr_ = nullptr;
+    IlmlipModel* ilmlip_ = nullptr;
     // ZBL per ordered pair
     float zbl_c_[4] = {0, 0, 0, 0};
     float zbl_p_ = 5.0f, zbl_rmax_ = 0.0f;

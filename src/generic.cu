@@ -17,6 +17,7 @@
 
 #include "bundle.hpp"
 #include "generated_generic.cuh"
+#include "ilmlip.hpp"
 #include "kernel_plugin.h"
 #include "model.hpp"
 #include "polar.hpp"
@@ -871,6 +872,8 @@ GenericModel::~GenericModel() {
 }
 
 void GenericModel::free_model() {
+    delete ilmlip_;
+    ilmlip_ = nullptr;
     delete lr_;
     lr_ = nullptr;
     for (auto* l : layers_) delete l;
@@ -889,6 +892,16 @@ void GenericModel::free_model() {
 
 void GenericModel::load(const Bundle& b) {
     free_model();
+    if (b.meta("arch") == "ilmlip") {
+        ilmlip_ = new IlmlipModel();
+        ilmlip_->load(b);
+        S_ = ilmlip_->S();
+        Z_ = ilmlip_->atomic_numbers();
+        r_max_ = ilmlip_->r_max();
+        e0_ = ilmlip_->e0();
+        n_layers_ = 2;
+        return;
+    }
     if (b.meta("arch") != "generic") throw std::runtime_error("not a generic bundle");
     if (b.meta_int("exporter_version") != 2)
         throw std::runtime_error("generic bundle exporter version " + b.meta("exporter_version") + ", expected 2 (re-export)");
@@ -1404,6 +1417,7 @@ void GenericModel::load(const Bundle& b) {
 // fold's skip terms without the S59 tables (Wh). With the fold and the tables every consumer reads a species table
 // instead, and the gather is skipped.
 void GenericModel::update_h0_read() {
+    if (ilmlip_ || layers_.empty()) { h0_read_ = false; return; }
     const GenericLayer* L0 = layers_[0];
     h0_read_ = n_layers_ == 1 || ((!L0->first_hidden || L0->kind == 4) && !L0->res0_table);
     if (chain_fold_) {
@@ -1415,6 +1429,7 @@ void GenericModel::update_h0_read() {
 
 void GenericModel::use_chain_fold(bool on, bool sweeps) {
     if (N_ > 0) throw std::logic_error("generic: use_chain_fold with a system allocated");
+    if (ilmlip_) { chain_fold_ = fold_sweeps_ = false; return; }
     // list 20: a domain folds only with two layers, whose sweeps then hand layer 1's x and the readout hidden over
     chain_fold_ = on && chain_fold_built_ && (!sweeps || n_layers_ == 2);
     fold_sweeps_ = sweeps && chain_fold_;
@@ -2008,7 +2023,7 @@ void GenericModel::setup_chain_fold(const Bundle& b) {
         for (int l = 0; l < 3; ++l) layers_[t]->fold[l] = std::move(out[t][l]);
     chain_fold_ = chain_fold_built_ = true;
 }
-size_t GenericModel::system_bytes() const { return sys_bytes_ + (lr_ ? lr_->system_bytes() : 0); }
+size_t GenericModel::system_bytes() const { return ilmlip_ ? ilmlip_->system_bytes() : sys_bytes_ + (lr_ ? lr_->system_bytes() : 0); }
 float* GenericModel::layer_out(int t, int l) const { return layers_[t]->hout[l]; }
 float* GenericModel::layer_out_grad(int t, int l) const { return layers_[t]->dhout[l]; }
 int GenericModel::out_width(int t) const { return layers_[t]->C_out; }
@@ -2063,6 +2078,7 @@ __global__ void add_row_vector_kernel(int N, int C, const float* __restrict__ w,
 }  // namespace
 
 std::string GenericModel::kernel_signature() const {
+    if (ilmlip_) return ilmlip_->kernel_signature();
     std::string out;
     for (const GenericLayer* L : layers_) {
         if (!out.empty()) out += ';';
@@ -2177,6 +2193,7 @@ bool GenericModel::set_cell(const double* cell) { return lr_ ? lr_->set_cell(cel
 // times them on any GPU (tests). Returns -1 before a pass has been recorded for this system (call again later), 0 if
 // nothing changed, 1 if a variant changed.
 int GenericModel::tune_conv_variants(cudaStream_t st) {
+    if (ilmlip_) return 0;
     if (conv_tune_env_ == 0) return 0;
     if (!device_is_tuned_cc() && conv_tune_env_ != 1) return 0;
     if (conv_var_override_ >= 0) return 0;  // forced variant: nothing to time
@@ -2226,6 +2243,12 @@ int GenericModel::tune_conv_variants(cudaStream_t st) {
 }
 
 void GenericModel::free_system() {
+    if (ilmlip_) {
+        ilmlip_->free_system();
+        N_ = 0;
+        sys_bytes_ = sys_bytes_unshared_ = sys_max_alloc_ = 0;
+        return;
+    }
     conv_args_ = ConvTuneArgs{};
     for (auto* L : layers_) L->fwd_var = 0;
     if (lr_) lr_->free_system();
@@ -2256,6 +2279,13 @@ void GenericModel::free_system() {
 
 void GenericModel::alloc_system(int N) {
     free_system();
+    if (ilmlip_) {
+        ilmlip_->alloc_system(N);
+        N_ = N;
+        sys_bytes_ = sys_bytes_unshared_ = ilmlip_->system_bytes();
+        sys_max_alloc_ = ilmlip_->largest_buffer_bytes();
+        return;
+    }
     sys_bytes_ = 0;
     sys_max_alloc_ = 0;
     auto alloc = [&](size_t floats) -> float* {
@@ -2474,6 +2504,7 @@ void GenericModel::alloc_system(int N) {
 }
 
 void GenericModel::ensure_edges(int E_cap) {
+    if (ilmlip_) { edge_bytes_ = 0; return; }
     if (E_cap <= E_cap_) return;
     if (d_edge_dvec_) cudaFree(d_edge_dvec_);
     d_edge_dvec_ = nullptr;
@@ -2492,14 +2523,20 @@ static const GenericLayer* pick_preloc_layer(const std::vector<GenericLayer*>& l
     return nullptr;
 }
 const SplineGrid* GenericModel::preloc_grid() const {
+    if (ilmlip_) return nullptr;
     const GenericLayer* L = pick_preloc_layer(layers_);
     return L ? &L->grid : nullptr;
 }
 int GenericModel::preloc_pair_sym() const {
+    if (ilmlip_) return 1;
     const GenericLayer* L = pick_preloc_layer(layers_);
     return L ? L->pair_sym : 1;
 }
 void GenericModel::record(const GenericPassInputs& in) {
+    if (ilmlip_) {
+        ilmlip_->record(in);
+        return;
+    }
     const SplineGrid* pg = preloc_grid();
     const int pg_psym = preloc_pair_sym();
     auto can_preloc = [&](const GenericLayer* L) {

@@ -2595,9 +2595,10 @@ LoupHandle* loup_create(const char* loup_path, int device_id) {
         }
         {
             const loup::Bundle bundle(loup_path);
-            if (bundle.meta("arch") != "generic")  // e.g. omat0_medium_spec: the specialised path, retired (stage 5)
-                throw std::runtime_error(std::string(loup_path) + ": bundle arch '" + bundle.meta("arch") +
-                                         "' is no longer supported; re-export it (every model exports as arch=generic)");
+            const std::string& arch = bundle.meta("arch");
+            if (arch != "generic" && arch != "ilmlip")  // e.g. omat0_medium_spec: the specialised path, retired (stage 5)
+                throw std::runtime_error(std::string(loup_path) + ": bundle arch '" + arch +
+                                         "' is no longer supported; re-export it (supported: arch=generic, arch=ilmlip)");
             h->gen = std::make_unique<loup::GenericModel>();
             h->gen->load(bundle);
         }
