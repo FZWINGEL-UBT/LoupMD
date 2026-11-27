@@ -73,8 +73,8 @@ inline std::string build_prod_ft_source(const std::string& sig, int lo, const st
         bool seen_feat = false;
         while (std::getline(iss, line)) {
             if (line.find("if (active) {") != std::string::npos) { in_active = true; continue; }
+            if (line.find("const float x") != std::string::npos) { in_active = true; continue; }  // loads
             if (!in_active) continue;
-            if (line.find("const float x") != std::string::npos) continue;  // loads
             if (line.find("const float wb = __ldg(wr + ") != std::string::npos) {
                 seen_feat = true;
                 FeatBlock fb;
@@ -93,6 +93,9 @@ inline std::string build_prod_ft_source(const std::string& sig, int lo, const st
                     const size_t e0 = line.find("fmaf(wb, ") + 9;
                     const size_t e1 = line.rfind(", o");
                     feat_blocks.back().items.emplace_back(cc, line.substr(e0, e1 - e0));
+                } else if (line.find("const float ") != std::string::npos) {
+                    // release/v1 gen_product.py interleaves SSA temps right before the wb block that uses them
+                    fwd_ssa.push_back(line);
                 }
                 if (line.find("y0[") != std::string::npos) break;
                 continue;
