@@ -68,7 +68,20 @@ $(WHEELDIR)/jit.o: $(WHEEL_JIT_INCS)
 $(WHEELDIR)/libloupmd.so: $(WHEEL_OBJS)
 	$(NVCC) -shared $(WHEEL_OBJS) $(LDFLAGS) -o $@
 
-clean:
-	rm -rf build libloupmd.so
+# Full pure-CUDA foundation MACE fine-tuning library (libloupmd_ft.so): zero PyTorch, never part of libloupmd.so.
+MACE_FT_CC = $(patsubst sm_%,%,$(CUDA_ARCH))
+MACE_FT_GENCODE ?= -gencode arch=compute_$(MACE_FT_CC),code=$(CUDA_ARCH)
+MACE_FT_OBJS = $(OBJDIR)/train/mace_ft/mace_ft_train.o $(OBJDIR)/bundle.o $(OBJDIR)/jit.o $(OBJDIR)/polar.o $(OBJDIR)/hgemm2.o
+$(OBJDIR)/train/mace_ft/mace_ft_train.o: src/train/mace_ft/mace_ft_train.cu | $(OBJDIR)
+	@mkdir -p $(dir $@)
+	$(NVCC) -O3 -std=c++17 $(MACE_FT_GENCODE) -Iinclude -Isrc -Isrc/train/mace_ft -diag-suppress=1046 -Xcompiler -fPIC -MMD -MP $(CPPFLAGS) -MF $(@:.o=.d) -c $< -o $@
+.PHONY: mace-ft-lib
+mace-ft-lib: $(OBJDIR)/libloupmd_ft.so
+	cp $(OBJDIR)/libloupmd_ft.so libloupmd_ft.so
+$(OBJDIR)/libloupmd_ft.so: $(MACE_FT_OBJS)
+	$(NVCC) -shared $(MACE_FT_GENCODE) $(MACE_FT_OBJS) -lcublas -lcudart -ldl -o $@
 
--include $(DEPS) $(WHEEL_OBJS:.o=.d)
+clean:
+	rm -rf build libloupmd.so libloupmd_ft.so
+
+-include $(DEPS) $(WHEEL_OBJS:.o=.d) $(MACE_FT_OBJS:.o=.d)

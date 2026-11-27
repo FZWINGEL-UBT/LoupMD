@@ -99,6 +99,8 @@ class ForceField:
         self._probed = known is not None
         self._engine_factory, self._ensure_bundle, self._probe, self._environ = (engine_factory, ensure_bundle, probe,
                                                                                  environ)
+        if known is None and models.is_loup_bundle(resolved.path):
+            self._learn()
 
     @property
     def name(self) -> str:
@@ -109,10 +111,30 @@ class ForceField:
         return f"ForceField({self.name}: {self.path.name}, SHA-256 {self.sha256[:16]}...{head})"
 
     def _learn(self):
-        """For a file outside the table: its elements and heads, read once (when torch is there to read them)."""
+        """For a file outside the table: read metadata once (.loup binary header or checkpoint probe)."""
         if self._probed:
             return
         self._probed = True
+        if models.is_loup_bundle(self.path):
+            from .export.bundle import read_bundle
+
+            meta, tensors = read_bundle(self.path)
+            raw_z = meta.get("Z", "")
+            if isinstance(raw_z, str):
+                elems = tuple(sorted(int(z) for z in raw_z.split(",") if z.strip()))
+            else:
+                elems = tuple(sorted(int(z) for z in raw_z))
+            self.elements = elems
+            self.heads = ()
+            r_max_arr = tensors.get("r_max")
+            if r_max_arr is not None:
+                import numpy as np
+                self.r_max_A = float(np.asarray(r_max_arr).reshape(-1)[0])
+            self.family = str(meta.get("arch", "bundle"))
+            self.long_range = (self.family == "polar")
+            self.bundle = self.path
+            self._bundle_elements = frozenset(elems)
+            return
         found = (self._probe or probe_checkpoint)(self.path)
         if not found:
             return
@@ -174,18 +196,21 @@ class ForceField:
                 raise PlanRefused(reasons, next_step="Use capacity 'auto' or 'whole' with state 'auto' or 'device'.")
         numbers = sorted({int(z) for z in atoms.numbers} | {int(z) for z in extra_elements})
         self.check_elements(numbers)
-        ensure_bundle = self._ensure_bundle
-        if ensure_bundle is None:
-            from . import bundles
-
-            ensure_bundle = bundles.ensure_bundle
         factory = self._engine_factory
         if factory is None:
             from . import _core
 
             factory = _core.LoupEngine
-        bundle = ensure_bundle(self.path, numbers, head=self.head, charge=self.charge,
-                               spin_multiplicity=self.spin_multiplicity, environ=self._environ)
+        if self.bundle is not None and set(numbers) <= self._bundle_elements:
+            bundle = self.bundle
+        else:
+            ensure_bundle = self._ensure_bundle
+            if ensure_bundle is None:
+                from . import bundles
+
+                ensure_bundle = bundles.ensure_bundle
+            bundle = ensure_bundle(self.path, numbers, head=self.head, charge=self.charge,
+                                   spin_multiplicity=self.spin_multiplicity, environ=self._environ)
         engine = factory(bundle, device_id=self.device)
         self.last_bundle = bundle                  # of the engine made last, for the run's record
         self.last_execution = {"mode": "whole", "receivers": 0, "plan": None}
@@ -217,23 +242,33 @@ class ForceField:
             return self.engine
         if not set(numbers) <= self._bundle_elements:
             self.check_elements(numbers)
-            ensure_bundle = self._ensure_bundle
-            if ensure_bundle is None:
-                from . import bundles
-
-                ensure_bundle = bundles.ensure_bundle
             factory = self._engine_factory
             if factory is None:
                 from . import _core
 
                 factory = _core.LoupEngine
-            # Elements seen before stay in the bundle, so going back to an earlier structure exports nothing.
-            elements = sorted(self._bundle_elements | set(numbers))
-            bundle = ensure_bundle(self.path, elements, head=self.head, charge=self.charge,
-                                   spin_multiplicity=self.spin_multiplicity, environ=self._environ)
+            if self.bundle is not None and set(numbers) <= self._bundle_elements:
+                bundle, elements = self.bundle, sorted(self._bundle_elements)
+            else:
+                ensure_bundle = self._ensure_bundle
+                if ensure_bundle is None:
+                    from . import bundles
+
+                    ensure_bundle = bundles.ensure_bundle
+                # Elements seen before stay in the bundle, so going back to an earlier structure exports nothing.
+                elements = sorted(self._bundle_elements | set(numbers))
+                bundle = ensure_bundle(self.path, elements, head=self.head, charge=self.charge,
+                                       spin_multiplicity=self.spin_multiplicity, environ=self._environ)
             self.engine = self._system = None                       # free the old engine before the next is made
             self.engine, self.bundle = factory(bundle, device_id=self.device), bundle
             self._bundle_elements = frozenset(elements)
+        elif self.engine is None and self.bundle is not None:
+            factory = self._engine_factory
+            if factory is None:
+                from . import _core
+
+                factory = _core.LoupEngine
+            self.engine = factory(self.bundle, device_id=self.device)
         self._system = None
         self.engine.set_system(atoms.numbers, atoms.get_masses(), skin=float(skin))
         self._system = system
