@@ -7,7 +7,7 @@ import torch
 triton = pytest.importorskip('triton')
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason='needs CUDA')
 
-from loupmd.fasttrain.ops import edge_basis  # noqa: E402
+from loupgym.fasttrain.ops import edge_basis  # noqa: E402
 
 R_MAX, P, NB = 5.0, 5, 8
 

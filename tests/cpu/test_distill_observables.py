@@ -5,8 +5,8 @@ from ase import Atoms, units
 from ase.calculators.emt import EMT
 from ase.build import bulk
 
-from loupmd.distill import observables as obs
-from loupmd.distill import observable_static as static
+from loupgym.distill import observables as obs
+from loupgym.distill import observable_static as static
 
 
 def frame(x=0.0, side=10.):

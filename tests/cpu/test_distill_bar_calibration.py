@@ -5,8 +5,8 @@ import pytest
 from ase import Atoms
 from ase.io import write
 
-from loupmd.distill.bar_calibration import calibrate
-from loupmd.distill.train import file_digest
+from loupgym.distill.bar_calibration import calibrate
+from loupgym.distill.train import file_digest
 
 
 def inputs(tmp_path, *, split='valid', frozen=False, reissue=False):

@@ -3,7 +3,7 @@
 The specification of the C++/CUDA training library (src/train): forward energy, force pass (first reverse),
 loss, and the parameter gradient by an explicit second reverse sweep. Each stage is a named tensor so the
 library's kernels can be compared stage by stage. ``check`` compares the parameter gradients with autograd
-through loupmd.fasttrain.engine (FP64).
+through loupgym.fasttrain.engine (FP64).
 
 Notation: nodes n (species s(n)), directed edges e = s(e) -> r(e), pairs p(e) (both directions of an edge share
 the radial weights), components m = (l, mu) of degree l(m) <= 3, channels c, d. Conv slots:
@@ -210,8 +210,8 @@ def step(model, bt, poly, act, lw, keep=None):
     sp = bt.species
     N = sp.shape[0]
     st = {}                                   # stages
-    from loupmd.fasttrain import ops
-    from loupmd.fasttrain.engine import FastStudent
+    from loupgym.fasttrain import ops
+    from loupgym.fasttrain.engine import FastStudent
     fs = FastStudent(model)
     Y, ef, dEf, U, JY = ops.edge_basis_raw(bt.vectors, fs.bw, fs.prefactor, fs.r_max, fs.p)
     xe, dxe = ef[bt.pe0], dEf[bt.pe0]
@@ -414,10 +414,10 @@ def step(model, bt, poly, act, lw, keep=None):
 
 def check(args):
     from fasttrain_parity import load_items
-    from loupmd.fasttrain.data import frames_from_dataset
-    from loupmd.fasttrain.engine import PaddedFrames, FastStudent
-    from loupmd.fasttrain import _product_poly as pp
-    from loupmd.fasttrain.model import silu_norm_constant
+    from loupgym.fasttrain.data import frames_from_dataset
+    from loupgym.fasttrain.engine import PaddedFrames, FastStudent
+    from loupgym.fasttrain import _product_poly as pp
+    from loupgym.fasttrain.model import silu_norm_constant
     dtype, dev = torch.float64, torch.device('cuda')
     model = torch.load(args.model, map_location='cpu').to(dtype)
     items = load_items(args.xyz, model, dtype, 7)

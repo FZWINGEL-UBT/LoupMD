@@ -1,5 +1,6 @@
 #include "kernels_common.cuh"
 #include "model.hpp"
+#include "cell.hpp"
 #include <cub/cub.cuh>
 #include <cmath>
 
@@ -518,7 +519,9 @@ template <bool kGlobal>
 __device__ __forceinline__ void sort_gather_row(
     CellMat64 cell, const int* __restrict__ row_ptr, const uint32_t* __restrict__ sort_keys,
     const int* __restrict__ tmp_snd, const int* __restrict__ tmp_shifts, const int* __restrict__ species,
-    int* __restrict__ senders, double* __restrict__ shift_cart,
+    const double* __restrict__ pos64,
+    int* __restrict__ senders, double* __restrict__ shift_cart, char4* __restrict__ cell_codes,
+    float4* __restrict__ ref_vec_snd,
     int* __restrict__ order_err, unsigned long long* __restrict__ scratch
 ) {
     extern __shared__ unsigned long long smem_keys[];
@@ -544,38 +547,421 @@ __device__ __forceinline__ void sort_gather_row(
             __syncthreads();
         }
     }
+    const double rx = (ref_vec_snd && pos64) ? pos64[blockIdx.x * 3 + 0] : 0.0;
+    const double ry = (ref_vec_snd && pos64) ? pos64[blockIdx.x * 3 + 1] : 0.0;
+    const double rz = (ref_vec_snd && pos64) ? pos64[blockIdx.x * 3 + 2] : 0.0;
     for (int t = threadIdx.x; t < L; t += blockDim.x) {
         const int src = (int)(unsigned int)sk[t];
         const int e = b + t;
         const int snd = tmp_snd[src];
         senders[e] = snd;
-        const double sx = (double)tmp_shifts[src * 3 + 0];
-        const double sy = (double)tmp_shifts[src * 3 + 1];
-        const double sz = (double)tmp_shifts[src * 3 + 2];
-        shift_cart[e * 3 + 0] = sx * cell.c[0] + sy * cell.c[3] + sz * cell.c[6];
-        shift_cart[e * 3 + 1] = sx * cell.c[1] + sy * cell.c[4] + sz * cell.c[7];
-        shift_cart[e * 3 + 2] = sx * cell.c[2] + sy * cell.c[5] + sz * cell.c[8];
+        const int ix = tmp_shifts[src * 3 + 0];
+        const int iy = tmp_shifts[src * 3 + 1];
+        const int iz = tmp_shifts[src * 3 + 2];
+        const double sx = (double)ix;
+        const double sy = (double)iy;
+        const double sz = (double)iz;
+        const double scx = sx * cell.c[0] + sy * cell.c[3] + sz * cell.c[6];
+        const double scy = sx * cell.c[1] + sy * cell.c[4] + sz * cell.c[7];
+        const double scz = sx * cell.c[2] + sy * cell.c[5] + sz * cell.c[8];
+        shift_cart[e * 3 + 0] = scx;
+        shift_cart[e * 3 + 1] = scy;
+        shift_cart[e * 3 + 2] = scz;
+        if (cell_codes) {
+            const bool ok = (ix >= -127 && ix <= 127 && iy >= -127 && iy <= 127 && iz >= -127 && iz <= 127);
+            cell_codes[e] = ok ? make_char4((signed char)ix, (signed char)iy, (signed char)iz, 0)
+                               : make_char4(0, 0, 0, 1);
+        }
+        if (ref_vec_snd && pos64) {
+            const double vx = (rx - pos64[snd * 3 + 0]) + scx;
+            const double vy = (ry - pos64[snd * 3 + 1]) + scy;
+            const double vz = (rz - pos64[snd * 3 + 2]) + scz;
+            ref_vec_snd[e] = make_float4((float)vx, (float)vy, (float)vz, __int_as_float(snd));
+        }
         if (t > 0 && species[snd] < species[tmp_snd[(int)(unsigned int)sk[t - 1]]]) *order_err = 1;
     }
 }
 __global__ void sort_gather_rows_kernel(
     CellMat64 cell, const int* __restrict__ row_ptr, const uint32_t* __restrict__ sort_keys,
     const int* __restrict__ tmp_snd, const int* __restrict__ tmp_shifts, const int* __restrict__ species,
-    int* __restrict__ senders, double* __restrict__ shift_cart,
+    const double* __restrict__ pos64,
+    int* __restrict__ senders, double* __restrict__ shift_cart, char4* __restrict__ cell_codes,
+    float4* __restrict__ ref_vec_snd,
     int* __restrict__ order_err, const int* __restrict__ go  // as fill_neighbors_kernel
 ) {
     if (go && !*go) return;
-    sort_gather_row<false>(cell, row_ptr, sort_keys, tmp_snd, tmp_shifts, species, senders, shift_cart, order_err,
-                           nullptr);
+    sort_gather_row<false>(cell, row_ptr, sort_keys, tmp_snd, tmp_shifts, species, pos64, senders, shift_cart,
+                           cell_codes, ref_vec_snd, order_err, nullptr);
 }
 __global__ void sort_gather_rows_global_kernel(
     CellMat64 cell, const int* __restrict__ row_ptr, const uint32_t* __restrict__ sort_keys,
     const int* __restrict__ tmp_snd, const int* __restrict__ tmp_shifts, const int* __restrict__ species,
-    int* __restrict__ senders, double* __restrict__ shift_cart,
+    const double* __restrict__ pos64,
+    int* __restrict__ senders, double* __restrict__ shift_cart, char4* __restrict__ cell_codes,
+    float4* __restrict__ ref_vec_snd,
     int* __restrict__ order_err, unsigned long long* __restrict__ scratch
 ) {
-    sort_gather_row<true>(cell, row_ptr, sort_keys, tmp_snd, tmp_shifts, species, senders, shift_cart, order_err,
-                          scratch);
+    sort_gather_row<true>(cell, row_ptr, sort_keys, tmp_snd, tmp_shifts, species, pos64, senders, shift_cart,
+                          cell_codes, ref_vec_snd, order_err, scratch);
+}
+
+// Zero-FP64 in-place active-edge compaction for fixed-cell arch=ilmlip MD steps:
+// Reads 1x LDG.128 ref_vec_snd[e] = (ref_vx, ref_vy, ref_vz, int_as_float(snd)) computed in exact FP64 at rebuild
+// plus L2-resident delta_f32[i] = (float3)(pos64[i] - ref_pos64[i]) (|delta| < half_skin -> ~1.5e-8 A accuracy),
+// eliminates ALL FP64 instructions, skips sqrtf on inactive edges, and compacts directly into [row_ptr[i], row_end[i]).
+// Single-cutoff specialization (0 B static SMEM -> 100% occupancy on STO, Salt, Water r=5.8/5.8!)
+template <bool PACK_VS>
+__global__ __launch_bounds__(128) void compact_active_ilmlip_f32_kernel(
+    int N, float r_max, float r_max2,
+    const int* __restrict__ row_ptr,
+    const float4* __restrict__ ref_vec_snd,
+    const float4* __restrict__ delta_f32,
+    int* __restrict__ act_senders,
+    float4* __restrict__ act_vec_len,
+    int* __restrict__ act_row_end,
+    int* __restrict__ act_row_end2,
+    const int* __restrict__ skip_if_nz
+) {
+    (void)r_max2;
+    (void)act_row_end2;
+    const int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    const int i = tid >> 5;
+    const int lane = tid & 31;
+    if (i >= N) return;
+    const int eb = row_ptr[i];
+    if (skip_if_nz && *skip_if_nz) {
+        if (lane == 0) act_row_end[i] = eb;
+        return;
+    }
+    const int ee = row_ptr[i + 1];
+    const float4 di = __ldg(delta_f32 + i);
+    const float r_max_sq = r_max * r_max;
+    int out_cursor = eb;
+    for (int base = eb; base < ee; base += 32) {
+        const int e = base + lane;
+        bool act = false;
+        int s = 0;
+        float fx = 0.0f, fy = 0.0f, fz = 0.0f, r2 = 0.0f;
+        if (e < ee) {
+            const float4 rv = __ldcs(ref_vec_snd + e);
+            s = __float_as_int(rv.w);
+            const float4 ds = __ldg(delta_f32 + s);
+            fx = rv.x + (di.x - ds.x);
+            fy = rv.y + (di.y - ds.y);
+            fz = rv.z + (di.z - ds.z);
+            r2 = fmaf(fx, fx, fmaf(fy, fy, fz * fz));
+            act = (r2 < r_max_sq);
+        }
+        const unsigned mask = __ballot_sync(0xffffffffu, act);
+        if (act) {
+            const int dst = out_cursor + __popc(mask & ((1u << lane) - 1u));
+            if constexpr (PACK_VS) {
+                act_vec_len[dst] = make_float4(fx, fy, fz, __int_as_float(s));
+            } else {
+                act_senders[dst] = s;
+                act_vec_len[dst] = make_float4(fx, fy, fz, sqrtf(r2));
+            }
+        }
+        out_cursor += __popc(mask);
+    }
+    if (lane == 0) act_row_end[i] = out_cursor;
+}
+
+// Dual-cutoff single-pass SMEM-buffered partitioning:
+// Inner edges (r < r_max2) stream directly to [eb, out_lo).
+// Outer edges (r_max2 <= r < r_max) buffer in per-warp SoA SMEM (96 slots, 6.0 KB/block when PACK_VS=true!),
+// overflowing to [out_hi, ee) only if an atom has >96 outer-shell neighbors.
+template <bool PACK_VS>
+__global__ __launch_bounds__(128) void compact_active_ilmlip_f32_dual_kernel(
+    int N, float r_max, float r_max2,
+    const int* __restrict__ row_ptr,
+    const float4* __restrict__ ref_vec_snd,
+    const float4* __restrict__ delta_f32,
+    int* __restrict__ act_senders,
+    float4* __restrict__ act_vec_len,
+    int* __restrict__ act_row_end,
+    int* __restrict__ act_row_end2,
+    const int* __restrict__ skip_if_nz
+) {
+    const int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    const int i = tid >> 5;
+    const int lane = tid & 31;
+    if (i >= N) return;
+    const int eb = row_ptr[i];
+    if (skip_if_nz && *skip_if_nz) {
+        if (lane == 0) {
+            act_row_end[i] = eb;
+            if (act_row_end2) act_row_end2[i] = eb;
+        }
+        return;
+    }
+    const int ee = row_ptr[i + 1];
+    const float4 di = __ldg(delta_f32 + i);
+    const float r_max_sq = r_max * r_max;
+    constexpr int kSmemOuter = 96;
+    __shared__ int   s_out_s[PACK_VS ? 1 : 4][PACK_VS ? 1 : kSmemOuter];
+    __shared__ float s_out_x[4][kSmemOuter];
+    __shared__ float s_out_y[4][kSmemOuter];
+    __shared__ float s_out_z[4][kSmemOuter];
+    __shared__ float s_out_r[4][kSmemOuter];
+    const int wid = threadIdx.x >> 5;
+    const float r_max2_sq = r_max2 * r_max2;
+    int out_lo = eb;
+    int out_hi = ee;
+    int n_smem = 0;
+    for (int base = eb; base < ee; base += 32) {
+        const int e = base + lane;
+        bool act_in = false, act_out = false;
+        int s = 0;
+        float fx = 0.0f, fy = 0.0f, fz = 0.0f, r2 = 0.0f;
+        if (e < ee) {
+            const float4 rv = __ldcs(ref_vec_snd + e);
+            s = __float_as_int(rv.w);
+            const float4 ds = __ldg(delta_f32 + s);
+            fx = rv.x + (di.x - ds.x);
+            fy = rv.y + (di.y - ds.y);
+            fz = rv.z + (di.z - ds.z);
+            r2 = fmaf(fx, fx, fmaf(fy, fy, fz * fz));
+            act_in = (r2 < r_max2_sq);
+            act_out = (!act_in && r2 < r_max_sq);
+        }
+        const unsigned mask_in = __ballot_sync(0xffffffffu, act_in);
+        if (act_in) {
+            const int dst = out_lo + __popc(mask_in & ((1u << lane) - 1u));
+            if constexpr (PACK_VS) {
+                act_vec_len[dst] = make_float4(fx, fy, fz, __int_as_float(s));
+            } else {
+                act_senders[dst] = s;
+                act_vec_len[dst] = make_float4(fx, fy, fz, sqrtf(r2));
+            }
+        }
+        out_lo += __popc(mask_in);
+
+        const unsigned mask_out = __ballot_sync(0xffffffffu, act_out);
+        const int cnt_out = __popc(mask_out);
+        if (cnt_out > 0) {
+            const int rnk = __popc(mask_out & ((1u << lane) - 1u));
+            if (n_smem + cnt_out <= kSmemOuter) {
+                if (act_out) {
+                    const int idx = n_smem + rnk;
+                    s_out_x[wid][idx] = fx;
+                    s_out_y[wid][idx] = fy;
+                    s_out_z[wid][idx] = fz;
+                    if constexpr (PACK_VS) {
+                        s_out_r[wid][idx] = __int_as_float(s);
+                    } else {
+                        s_out_s[wid][idx] = s;
+                        s_out_r[wid][idx] = sqrtf(r2);
+                    }
+                }
+                n_smem += cnt_out;
+            } else {
+                out_hi -= cnt_out;
+                if (act_out) {
+                    const int dst = out_hi + rnk;
+                    if constexpr (PACK_VS) {
+                        act_vec_len[dst] = make_float4(fx, fy, fz, __int_as_float(s));
+                    } else {
+                        act_senders[dst] = s;
+                        act_vec_len[dst] = make_float4(fx, fy, fz, sqrtf(r2));
+                    }
+                }
+            }
+        }
+    }
+    __syncwarp();
+    for (int k = lane; k < n_smem; k += 32) {
+        const int dst = out_lo + k;
+        if constexpr (!PACK_VS) act_senders[dst] = s_out_s[wid][k];
+        act_vec_len[dst] = make_float4(s_out_x[wid][k], s_out_y[wid][k], s_out_z[wid][k], s_out_r[wid][k]);
+    }
+    const int n_ovf = ee - out_hi;
+    if (n_ovf > 0) {
+        const int ovf_dst = out_lo + n_smem;
+        if (ovf_dst < out_hi) {
+            for (int k = 0; k < n_ovf; k += 32) {
+                int s_tmp = 0;
+                float4 vl_tmp = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
+                if (k + lane < n_ovf) {
+                    if constexpr (!PACK_VS) s_tmp = act_senders[out_hi + k + lane];
+                    vl_tmp = act_vec_len[out_hi + k + lane];
+                }
+                __syncwarp();
+                if (k + lane < n_ovf) {
+                    if constexpr (!PACK_VS) act_senders[ovf_dst + k + lane] = s_tmp;
+                    act_vec_len[ovf_dst + k + lane] = vl_tmp;
+                }
+                __syncwarp();
+            }
+        }
+    }
+    if (lane == 0) {
+        act_row_end2[i] = out_lo;
+        act_row_end[i] = out_lo + n_smem + n_ovf;
+    }
+}
+
+void launch_compact_active_ilmlip_f32(
+    cudaStream_t st, int warpGridN, bool dual, bool pack_vs,
+    int N, float r_max, float r_max2,
+    const int* row_ptr, const float4* ref_vec_snd, const float4* delta_f32,
+    int* act_senders, float4* act_vec_len, int* act_row_end, int* act_row_end2,
+    const int* skip_if_nz
+) {
+    if (dual) {
+        if (pack_vs) {
+            compact_active_ilmlip_f32_dual_kernel<true><<<warpGridN, 128, 0, st>>>(
+                N, r_max, r_max2, row_ptr, ref_vec_snd, delta_f32,
+                nullptr, act_vec_len, act_row_end, act_row_end2, skip_if_nz);
+        } else {
+            compact_active_ilmlip_f32_dual_kernel<false><<<warpGridN, 128, 0, st>>>(
+                N, r_max, r_max2, row_ptr, ref_vec_snd, delta_f32,
+                act_senders, act_vec_len, act_row_end, act_row_end2, skip_if_nz);
+        }
+    } else {
+        if (pack_vs) {
+            compact_active_ilmlip_f32_kernel<true><<<warpGridN, 128, 0, st>>>(
+                N, r_max, r_max2, row_ptr, ref_vec_snd, delta_f32,
+                nullptr, act_vec_len, act_row_end, nullptr, skip_if_nz);
+        } else {
+            compact_active_ilmlip_f32_kernel<false><<<warpGridN, 128, 0, st>>>(
+                N, r_max, r_max2, row_ptr, ref_vec_snd, delta_f32,
+                act_senders, act_vec_len, act_row_end, nullptr, skip_if_nz);
+        }
+    }
+}
+
+// Single-kernel in-place active-edge compaction for arch=ilmlip:
+// - Reads 4 B/edge char4 cell_codes (6x less DRAM than 24 B/edge FP64 shift_cart), with bit-exact FP64 shift
+//   computation (skipping shift math completely when code == (0,0,0) and falling back to shift_cart on |shift|>127).
+// - Ballot-compacts active edges (r < r_max) of receiver row i directly into [row_ptr[i], row_ptr[i] + count) of
+//   act_senders & act_vec_len, storing act_row_end[i] = row_ptr[i] + count.
+// - Eliminates tmp_vec_len, cub::DeviceScan (2 launches), scatter_active_edges, and act_receivers/act_slab/act_t_sx.
+__global__ void compact_active_ilmlip_kernel(
+    int N, float r_max, float r_max2, CellMat64 cell, const CellDev* __restrict__ celldev,
+    const double* __restrict__ pos64,
+    const int* __restrict__ row_ptr,
+    const int* __restrict__ senders,
+    const char4* __restrict__ cell_codes,
+    const double* __restrict__ shift_cart,
+    int* __restrict__ act_senders,
+    float4* __restrict__ act_vec_len,
+    int* __restrict__ act_row_end,
+    int* __restrict__ act_row_end2
+) {
+    const int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    const int i = tid >> 5;
+    const int lane = tid & 31;
+    if (i >= N) return;
+    const double* cc = celldev ? celldev->h : cell.c;
+    const double c0 = cc[0], c1 = cc[1], c2 = cc[2];
+    const double c3 = cc[3], c4 = cc[4], c5 = cc[5];
+    const double c6 = cc[6], c7 = cc[7], c8 = cc[8];
+    const bool ortho = (c1 == 0.0 && c2 == 0.0 && c3 == 0.0 && c5 == 0.0 && c6 == 0.0 && c7 == 0.0);
+    const int eb = row_ptr[i];
+    const int ee = row_ptr[i + 1];
+    const double rx = pos64[i * 3 + 0];
+    const double ry = pos64[i * 3 + 1];
+    const double rz = pos64[i * 3 + 2];
+    const bool dual = (act_row_end2 != nullptr && r_max2 < r_max);
+    int out_lo = eb;
+    int out_hi = ee;
+    for (int base = eb; base < ee; base += 32) {
+        const int e = base + lane;
+        bool act_in = false, act_out = false;
+        int s = 0;
+        float4 vl = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
+        if (e < ee) {
+            s = __ldg(senders + e);
+            double vx = rx - pos64[s * 3 + 0];
+            double vy = ry - pos64[s * 3 + 1];
+            double vz = rz - pos64[s * 3 + 2];
+            const uint32_t code_u32 = __ldg(reinterpret_cast<const uint32_t*>(cell_codes + e));
+            if (code_u32 != 0u) {
+                const char4 cd = *reinterpret_cast<const char4*>(&code_u32);
+                if (__builtin_expect(cd.w == 0, 1)) {
+                    const double sx = (double)cd.x;
+                    const double sy = (double)cd.y;
+                    const double sz = (double)cd.z;
+                    if (ortho) {
+                        vx += sx * c0;
+                        vy += sy * c4;
+                        vz += sz * c8;
+                    } else {
+                        vx += sx * c0 + sy * c3 + sz * c6;
+                        vy += sx * c1 + sy * c4 + sz * c7;
+                        vz += sx * c2 + sy * c5 + sz * c8;
+                    }
+                } else {
+                    vx += shift_cart[e * 3 + 0];
+                    vy += shift_cart[e * 3 + 1];
+                    vz += shift_cart[e * 3 + 2];
+                }
+            }
+            const float fx = (float)vx, fy = (float)vy, fz = (float)vz;
+            const float r2 = fmaf(fx, fx, fmaf(fy, fy, fz * fz));
+            if (act_senders) {
+                const float len = sqrtf(r2);
+                vl = make_float4(fx, fy, fz, len);
+                if (!dual) {
+                    act_in = (len < r_max);
+                } else {
+                    act_in = (len < r_max2);
+                    act_out = (!act_in && len < r_max);
+                }
+            } else {
+                vl = make_float4(fx, fy, fz, __int_as_float(s));
+                if (!dual) {
+                    act_in = (r2 < r_max * r_max);
+                } else {
+                    act_in = (r2 < r_max2 * r_max2);
+                    act_out = (!act_in && r2 < r_max * r_max);
+                }
+            }
+        }
+        const unsigned mask_in = __ballot_sync(0xffffffffu, act_in);
+        if (act_in) {
+            const int dst = out_lo + __popc(mask_in & ((1u << lane) - 1u));
+            if (act_senders) act_senders[dst] = s;
+            act_vec_len[dst] = vl;
+        }
+        out_lo += __popc(mask_in);
+        if (dual) {
+            const unsigned mask_out = __ballot_sync(0xffffffffu, act_out);
+            const int cnt_out = __popc(mask_out);
+            out_hi -= cnt_out;
+            if (act_out) {
+                const int dst = out_hi + __popc(mask_out & ((1u << lane) - 1u));
+                if (act_senders) act_senders[dst] = s;
+                act_vec_len[dst] = vl;
+            }
+        }
+    }
+    if (!dual) {
+        if (lane == 0) act_row_end[i] = out_lo;
+        return;
+    }
+    const int n_outer = ee - out_hi;
+    if (out_lo < out_hi && n_outer > 0) {
+        for (int k = 0; k < n_outer; k += 32) {
+            int s_tmp = 0;
+            float4 vl_tmp = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
+            if (k + lane < n_outer) {
+                if (act_senders) s_tmp = act_senders[out_hi + k + lane];
+                vl_tmp = act_vec_len[out_hi + k + lane];
+            }
+            __syncwarp();
+            if (k + lane < n_outer) {
+                if (act_senders) act_senders[out_lo + k + lane] = s_tmp;
+                act_vec_len[out_lo + k + lane] = vl_tmp;
+            }
+            __syncwarp();
+        }
+    }
+    if (lane == 0) {
+        act_row_end2[i] = out_lo;
+        act_row_end[i] = out_lo + n_outer;
+    }
 }
 
 __global__ void compute_and_count_active_kernel(
@@ -684,6 +1070,29 @@ __global__ void check_skin_kernel(
     double dz = pos64[i * 3 + 2] - ref_pos64[i * 3 + 2];
     const double d2 = dx * dx + dy * dy + dz * dz;
     if (half_skin <= 0.0 || d2 > half_skin * half_skin) *need_rebuild = 1;
+}
+
+__global__ void check_skin_max_kernel(
+    int N, double half_skin,
+    const double* __restrict__ pos64,
+    const double* __restrict__ ref_pos64,
+    int* __restrict__ need_rebuild,
+    unsigned int* __restrict__ max_ref_disp2,
+    float4* __restrict__ delta_f32
+) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    double d2 = 0.0;
+    if (i < N) {
+        double dx = pos64[i * 3 + 0] - ref_pos64[i * 3 + 0];
+        double dy = pos64[i * 3 + 1] - ref_pos64[i * 3 + 1];
+        double dz = pos64[i * 3 + 2] - ref_pos64[i * 3 + 2];
+        if (delta_f32) delta_f32[i] = make_float4((float)dx, (float)dy, (float)dz, 0.0f);
+        d2 = dx * dx + dy * dy + dz * dz;
+        if (half_skin <= 0.0 || d2 > half_skin * half_skin) *need_rebuild = 1;
+    }
+    const unsigned int rbits = __float_as_uint((float)d2);
+    const unsigned int rm = __reduce_max_sync(0xffffffffu, rbits);
+    if ((threadIdx.x & 31) == 0 && rm != 0u) atomicMax(max_ref_disp2, rm);
 }
 
 void compute_cell_mat(const double* cell_row_major, CellMat64& out, double& out_vol, double heights[3]) {

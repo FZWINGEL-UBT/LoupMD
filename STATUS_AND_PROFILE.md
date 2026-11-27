@@ -4010,3 +4010,21 @@ further gains at a given budget more likely need more or other training frames t
 Fresh Wave 45 `ncu` (`sm_120`, 66 kernels) & `nsys` (`--cuda-graph-trace=node`): `k_slot_xd_opt_v3` `53.3/50.6 us` `ncu` (`38.9/42.6 us` `nsys`, `R=80`, `PRMT 48/64->16`), `k_force_pair_h2` `49.9 us` (`38.6 us` `nsys`), `k_conv_pair_h2` REV2 `44.1/42.0 us` (`34.2/34.5 us` `nsys`, `STACK=0`), `k_soap_a_fast_bf16` `26.4 us` `ncu` (`R=112` `sm_120` / `R=90` `sm_89`; `12.1 us` `nsys` Ada vs `13.8 us` prior), all 8 `k_seg_gemm_*_h_v2` `<8.9 us` `ncu` (`2.8-7.1 us` `nsys` Ada), `k_pack_segg_w_h` `1.4-1.8 us` hidden on `s3`. Compared against Stage 0's `mace-torch` Adam+AMSGrad baseline on the exact same `sto320/base-labels-v2` 300 frames (`~7,230 s` L4 FP64, `tF = 8.54-9.23 meV/A`), `loupstrain_cli` is **~900-2,500x faster and ~3.0x lower force RMSE** (`2.76-2.82 meV/A`).
 
 **Not yet done:** FP64 training timing, `s64r8` (radial head 8), species-dependent radial basis, narrow `C_msg` / vector messages, molecular COM+torque and curvature losses, multihead, restart from a mace checkpoint (`--restart_latest`, untested), automatic batch size (above).
+
+---
+
+## 8. Phase 2 FastLR-SK <=0.050 us/atom-step delivery & Engine `v41` (27 November 2026, `5060 Ti only`)
+
+Promoted Engine `v41` (`build/sm_120/libloupmd_ilmlip_v41.so` -> `libloupmd.so`) plus pure-CUDA `v3` training (`lrsk_full_trainer.py`, `lrsk_full_n3tbu.py`) delivers **<= 0.0500 us/atom-step** in both NVE and Langevin MD across all four target systems on RTX 5060 Ti (`5060 Ti only`, median of 3x500 warmed steps after 200-step warmup, verified in one unified pass):
+
+| System (`final_fast50/*.pt`) | Architecture (`c`, `taper`, `nb`, `r`) | `N` | NVE ms (`us/at`) | LGV ms (`us/at`) | 3x Gate (`E / F / S`) | Domain Accuracy (`float64` PyTorch) |
+| --- | --- | ---: | ---: | ---: | --- | --- |
+| **SrTiO₃** (`sto_final.pt`) | `c=(4,4,0)` `t=[16,16,12,8]` `nb=(8,4)` `r=4.6` | 5000 | `0.2311` (`0.0462`) | `0.2448` (`0.0490`) | PASS (`0.02x/0.17x/0.06x`) | **960/960 phonons** (`max\|df\|=0.327 THz`); `valid=9.88, test=7.28, hard40=53.59 meV/A` |
+| **Molten Salt** (`salt_final.pt`) | `c=(4,4,0)` `t=[24,16,8,4]` `nb=(8,4)` `r=6.2` | 3888 | `0.1753` (`0.0451`) | `0.1845` (`0.0474`) | PASS (`0.00x/0.12x/0.05x`) | `valid=8.19, prod3=8.40, transp3=8.22, hard=12.03 meV/A` (`S=0.019-0.027`) |
+| **`n3tbu_v1`** (`n3tbu_final.pt`) | `c=(4,4,0)` `t=[16,16,8,4]` `nb=(8,4)` `r=(4.2,4.8)` | 4320 | `0.2004` (`0.0464`) | `0.2130` (`0.0493`) | PASS (`0.01x/0.17x/0.30x`) | `valid=20.48, test=20.81 meV/A` (`complete 23.42, dimer 20.54, monomer 16.23`) |
+| **Water** (`water_final.pt`) | `c=(2,2,0)` `t=[16,16,16]` `nb=(8,8)` `r=(4.2,5.8)` | 5184 | `0.2407` (`0.0464`) | `0.2576` (`0.0497`) | PASS (`0.11x/0.31x/0.59x`) | `valid=20.97, test=21.12, target=19.78 meV/A` (`COM=18.1-18.8, TRQ=12.8-13.5`) |
+
+- **Burst MD parity:** 8/8 checks (50 steps NVE & LGV vs `LOUP_NO_FLAT_MD=1` on all 4 real bundles) passed (`dp <= 1.46e-6 A`, `dv <= 5.04e-6 A/fs`).
+- **Key enablers:** (1) `q16_c2` 8-edge-in-16-lane subwarp L2 multipole forward/backward for `c=(2,2,0)` (`nb=(8,8)` on Water without exceeding 50 ns/at), (2) trimming L1 `l=2,3 -> 8,4` on Salt (`12,8` `taper=[16/24,16,12,8]` sat at `0.0509-0.0513 us/at` LGV vs `0.0474` at `[24,16,8,4]`) and `n3tbu` (`taper=[16,16,8,4]`).
+- **Rejected (`5060 Ti only` + workstations/Colab):** `NodeQ` node-only quadrupole contractions / charge field gradient (`nodeQ2` `22.00` target, `nodeQ2_gradG` `21.20` target vs `19.78` pure `c=(2,2,0) nb=(8,8)`), Salt `c=(2,2,0)` (`9.20-10.02 meV/A`), and Water tight `r_L1=3.5-4.0 A` at `r_L2=5.8 A`.
+

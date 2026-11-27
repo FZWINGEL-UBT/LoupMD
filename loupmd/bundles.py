@@ -121,6 +121,20 @@ def ensure_bundle(model_path, atomic_numbers, *, head=None, generic=None, charge
     charge = _integral("charge", charge)
     spin_multiplicity = _integral("spin_multiplicity", spin_multiplicity)
     z_sorted = sorted({int(z) for z in atomic_numbers})
+    from .models import is_loup_bundle
+    if is_loup_bundle(model_path):
+        from .errors import ModelElementError
+        from .export.bundle import read_bundle
+        meta, _ = read_bundle(model_path)
+        raw_z = meta.get("Z", "")
+        b_elems = {int(z) for z in (raw_z.split(",") if isinstance(raw_z, str) else raw_z) if str(z).strip()}
+        missing = sorted(set(z_sorted) - b_elems)
+        if missing:
+            raise ModelElementError(
+                f"bundle {model_path.name} has no weights for atomic numbers {missing}",
+                why=f"bundle elements are {sorted(b_elems)}")
+        cache.mark_in_use(model_path)
+        return model_path
     name = bundle_name(model_path, z_sorted, head, None, charge, spin_multiplicity)
     out = cache.cache_dir("bundles", environ=environ) / name
     old_layout = cache.cache_root(environ) / name       # where ensure_loup_bundle keeps its bundles
@@ -188,6 +202,16 @@ def ensure_loup_bundle(model_path: str, atomic_numbers: list[int], cache_dir: st
     charge = integral("charge", charge)
     spin_multiplicity = integral("spin_multiplicity", spin_multiplicity)
     z_sorted = sorted({int(z) for z in atomic_numbers})
+    from .models import is_loup_bundle
+    if is_loup_bundle(model_path):
+        from .export.bundle import read_bundle
+        meta, _ = read_bundle(model_path)
+        raw_z = meta.get("Z", "")
+        b_elems = {int(z) for z in (raw_z.split(",") if isinstance(raw_z, str) else raw_z) if str(z).strip()}
+        missing = sorted(set(z_sorted) - b_elems)
+        if missing:
+            raise ValueError(f"bundle {model_path} lacks elements {missing} (has {sorted(b_elems)})")
+        return Path(model_path)
     cdir = Path(cache_dir or Path.home() / ".cache" / "loupmd")
     cdir.mkdir(parents=True, exist_ok=True)
     tag = (f"{_model_digest(model_path)}|{z_sorted}|{head}|{charge}|{spin_multiplicity}|"

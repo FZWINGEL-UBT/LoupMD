@@ -20,8 +20,8 @@ import numpy as np
 
 import loupmd as lm
 from loupmd import _core, config
-from loupmd.distill.frames import _check_geometry, _labels
-from loupmd.distill.reissue import NATIVE_AGREEMENT_LIMITS, native_paths_agree
+from loupgym.distill.frames import _check_geometry, _labels
+from loupgym.distill.reissue import NATIVE_AGREEMENT_LIMITS, native_paths_agree
 from loupmd.models import sha256_of
 from loupmd.validate import gate, references
 

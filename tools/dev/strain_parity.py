@@ -40,11 +40,11 @@ def main():
     args = ap.parse_args()
     from fasttrain_parity import load_items
     from strain_reference import Poly, step
-    from loupmd.fasttrain import _product_poly as pp
-    from loupmd.fasttrain.cuda import CudaTrainer
-    from loupmd.fasttrain.engine import PaddedFrames
-    from loupmd.fasttrain.data import frames_from_dataset
-    from loupmd.fasttrain.model import silu_norm_constant
+    from loupgym.fasttrain import _product_poly as pp
+    from loupgym.fasttrain.cuda import CudaTrainer
+    from loupgym.fasttrain.engine import PaddedFrames
+    from loupgym.fasttrain.data import frames_from_dataset
+    from loupgym.fasttrain.model import silu_norm_constant
     dev = torch.device('cuda')
     dt = getattr(torch, args.dtype)
     model64 = torch.load(args.model, map_location='cpu').to(torch.float64)
@@ -60,7 +60,7 @@ def main():
     poly = Poly(pp.TERMS, pp.K, dev, torch.float64)
     loss, _, st = step(model64, bt, poly, act, lw)
     raw = [p for p in model64.parameters() if p.requires_grad]
-    from loupmd.fasttrain.engine import FastStudent
+    from loupgym.fasttrain.engine import FastStudent
     fs = FastStudent(model64)
     e, f, s = fs.evaluate(bt, training=True)
     le, lf, ls = fs.loss_terms(bt, e, f, s)
@@ -114,8 +114,8 @@ def make_opt(model, lr=float(os.environ.get("PARITY_LR", "0.01"))):
 
 def steps_parity(args, model64, items, items_l, dt):
     from mace.modules.loss import WeightedEnergyForcesStressLoss
-    from loupmd.fasttrain.cuda import CudaTrainer
-    from loupmd.fasttrain.engine import GraphTrainer
+    from loupgym.fasttrain.cuda import CudaTrainer
+    from loupgym.fasttrain.engine import GraphTrainer
     lw = (1.0, 100.0, 1.0) if args.stage == 1 else (1000.0, 100.0, 10.0)
     loss_fn = WeightedEnergyForcesStressLoss(energy_weight=lw[0], forces_weight=lw[1], stress_weight=lw[2])
     epochs = [[[5, 1, 3, 0], [2, 6, 4]], [[0, 1, 2, 3, 4], [6, 5]]][:max(1, args.steps // 2)]

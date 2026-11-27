@@ -3,8 +3,8 @@ import pytest
 from ase import Atoms
 from ase.io import read, write
 
-from loupmd.distill.water import assign_water_ids, inspect_water
-from loupmd.distill.molecular import molecular_geometry
+from loupgym.distill.water import assign_water_ids, inspect_water
+from loupgym.distill.molecular import molecular_geometry
 
 
 def wrapped_water():
@@ -40,7 +40,7 @@ def test_water_membership_and_periodic_com(tmp_path):
 def test_molecular_loss_no_cross_frame_cancellation():
     torch = pytest.importorskip('torch')
     pytest.importorskip('mace')
-    from loupmd.distill.molecular_loss import MolecularStressLoss
+    from loupgym.distill.molecular_loss import MolecularStressLoss
     from mace.modules.loss import WeightedEnergyForcesStressLoss
     from mace import data
     from mace.data.atomic_data import get_data_loader

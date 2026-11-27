@@ -30,8 +30,8 @@ if [[ $mode == plan ]]; then cat "$recipe/plan.json"; exit; fi
 ln -s "$data/$arm.args" "$recipe/train.args"
 "$py" tools/dev/colab_distill.py --account 1 --gpu L4 --hours 7 --output "$run" "$data/colab_train.sh" \
     "$data"/{train,molecular,molecular_loss}.py "$recipe/train.args" "$data"/{train,valid,teacher-test}.xyz
-"$py" -m loupmd.distill.results "$run" "$data"
+"$py" -m loupgym.distill.results "$run" "$data"
 export LOUP_LIB=$PWD/build/sm_120/libloupmd.so LOUPMD_MODELS="$HOME/models" TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD=1
 python3 /mnt/d/Margraf/FastMACE/tools/ci/local_gpu.py status
 python3 /mnt/d/Margraf/FastMACE/tools/ci/local_gpu.py run --purpose "water $arm export gate" --wait-minutes 240 -- \
-    "$py" -m loupmd.distill.publish "$run/checked" "$data/teacher-test.xyz" "$run/release" --ref-device cuda
+    "$py" -m loupgym.distill.publish "$run/checked" "$data/teacher-test.xyz" "$run/release" --ref-device cuda

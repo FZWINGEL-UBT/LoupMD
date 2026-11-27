@@ -6,11 +6,13 @@
 #include <cstdlib>
 #include <cstring>
 #include <stdexcept>
+#include <type_traits>
 
 #include "bundle.hpp"
 #include "generated_sh16.cuh"
 #include "kernels_common.cuh"
 #include "model.hpp"
+#include "ilmlip_lrsk_fast_api.hpp"
 
 namespace loup {
 namespace {
@@ -65,10 +67,53 @@ __device__ __forceinline__ double half_warp_sum_d(double v, unsigned mask) {
     return v;
 }
 
+// Precomputed exact 48-bit reciprocal split of r_max + optional rational radial warp:
+//   t = fmaf(r, q0, r * q1) matches IEEE __fdiv_rn(r, r_max) to 0.5000001 ULP in 2 cycles (zero stress bias!).
+//   u(t) = (1 + warp) * t / (1 + warp * t) when warp > 0, else t; envelope stays on raw t.
+struct ChebParam {
+    float r_max;
+    float q0;
+    float q1;
+    float warp;
+};
+
+inline ChebParam make_cheb_param(float r_max, float warp) {
+    const double inv = 1.0 / (double)r_max;
+    const float q0 = (float)inv;
+    const float q1 = (float)(inv - (double)q0);
+    return ChebParam{r_max, q0, q1, warp};
+}
+
+__device__ __forceinline__ float cheb_t(float r_f, ChebParam cp) {
+    return fmaf(r_f, cp.q0, r_f * cp.q1);
+}
+
+// Unit-vector l <= 3 real spherical harmonics (matches loup::edge_sh16 bit-for-bit without redundant 1/r).
+__device__ __forceinline__ void edge_sh16_unit(float x, float y, float z, float4 out[4]) {
+    const float s20 = loup::SH_S3 * x * z;
+    const float s21 = loup::SH_S3 * x * y;
+    const float y2 = y * y;
+    const float x2z2 = x * x + z * z;
+    const float s22 = y2 - 0.5f * x2z2;
+    const float s23 = loup::SH_S3 * y * z;
+    const float s24 = (0.5f * loup::SH_S3) * (z * z - x * x);
+    const float s30 = loup::SH_S56 * (s20 * z + s24 * x);
+    const float s31 = loup::SH_S5 * s20 * y;
+    const float s32 = loup::SH_S38 * (4.0f * y2 - x2z2) * x;
+    const float s33 = 0.5f * y * (2.0f * y2 - 3.0f * x2z2);
+    const float s34 = loup::SH_S38 * z * (4.0f * y2 - x2z2);
+    const float s35 = loup::SH_S5 * s24 * y;
+    const float s36 = loup::SH_S56 * (s24 * z - s20 * x);
+    out[0] = make_float4(1.0f, x * loup::SH_C1, y * loup::SH_C1, z * loup::SH_C1);
+    out[1] = make_float4(s20 * loup::SH_C2, s21 * loup::SH_C2, s22 * loup::SH_C2, s23 * loup::SH_C2);
+    out[2] = make_float4(s24 * loup::SH_C2, s30 * loup::SH_C3, s31 * loup::SH_C3, s32 * loup::SH_C3);
+    out[3] = make_float4(s33 * loup::SH_C3, s34 * loup::SH_C3, s35 * loup::SH_C3, s36 * loup::SH_C3);
+}
+
 // FP64 fallback for rare close-contact edges (r < 1.2 A, ZBL active): out-of-line to keep hot FP32 registers small.
 template <bool WITH_DERIV>
-__device__ __noinline__ void eval_cheb_fp64(float r_f, float r_max_f, int n_base, float* g, float* dg) {
-    const double inv_rmax = 1.0 / (double)r_max_f;
+__device__ __noinline__ void eval_cheb_fp64(float r_f, ChebParam cp, int n_base, float* g, float* dg) {
+    const double inv_rmax = 1.0 / (double)cp.r_max;
     double t = (double)r_f * inv_rmax;
     if (t < 0.0) t = 0.0;
     if (t >= 1.0) {
@@ -79,20 +124,29 @@ __device__ __noinline__ void eval_cheb_fp64(float r_f, float r_max_f, int n_base
     const double env = 1.0 - 21.0 * t5 + 35.0 * t5 * t - 15.0 * t5 * t2;
     const double omt = 1.0 - t;
     const double denv_dt = WITH_DERIV ? (-105.0 * t4 * omt * omt) : 0.0;
-    const double x = 2.0 * t - 1.0;
+    double u = t;
+    double dx_dt = 2.0;
+    if (cp.warp > 0.0f) {
+        const double a = (double)cp.warp;
+        const double inv_d = 1.0 / (1.0 + a * t);
+        u = (1.0 + a) * t * inv_d;
+        if (WITH_DERIV) dx_dt = 2.0 * (1.0 + a) * inv_d * inv_d;
+    }
+    const double env_dx = WITH_DERIV ? (dx_dt * env) : 0.0;
+    const double x = 2.0 * u - 1.0;
     double T0 = 1.0, dT0 = 0.0;
     g[0] = (float)env;
     if (WITH_DERIV) dg[0] = (float)(denv_dt * inv_rmax);
     if (n_base > 1) {
         double T1 = x, dT1 = 1.0;
         g[1] = (float)(T1 * env);
-        if (WITH_DERIV) dg[1] = (float)((2.0 * dT1 * env + T1 * denv_dt) * inv_rmax);
+        if (WITH_DERIV) dg[1] = (float)((env_dx * dT1 + T1 * denv_dt) * inv_rmax);
         for (int k = 2; k < n_base; ++k) {
             const double Tk = 2.0 * x * T1 - T0;
             g[k] = (float)(Tk * env);
             if (WITH_DERIV) {
                 const double dTk = 2.0 * T1 + 2.0 * x * dT1 - dT0;
-                dg[k] = (float)((2.0 * dTk * env + Tk * denv_dt) * inv_rmax);
+                dg[k] = (float)((env_dx * dTk + Tk * denv_dt) * inv_rmax);
                 dT0 = dT1; dT1 = dTk;
             }
             T0 = T1; T1 = Tk;
@@ -101,11 +155,9 @@ __device__ __noinline__ void eval_cheb_fp64(float r_f, float r_max_f, int n_base
 }
 
 // Compute Chebyshev basis g[0..n_base-1] (with C^2 envelope) and optionally dg/dr in pure FP32.
-// Uses exact IEEE __fdiv_rn(r, r_max) to avoid systematic 1/r_max stress bias without 1/64-rate FP64
-// and with zero __noinline__ ABI spills (0 bytes stack frame in all edge kernels).
 template <bool WITH_DERIV>
-__device__ __forceinline__ void eval_cheb(float r_f, float r_max_f, int n_base, float* g, float* dg) {
-    float t = __fdiv_rn(r_f, r_max_f);
+__device__ __forceinline__ void eval_cheb(float r_f, ChebParam cp, int n_base, float* g, float* dg) {
+    float t = cheb_t(r_f, cp);
     if (t < 0.0f) t = 0.0f;
     if (t >= 1.0f) {
         for (int k = 0; k < n_base; ++k) {
@@ -114,14 +166,23 @@ __device__ __forceinline__ void eval_cheb(float r_f, float r_max_f, int n_base, 
         }
         return;
     }
-    const float inv_rmax = 1.0f / r_max_f;
+    const float inv_rmax = cp.q0;
     const float t2 = t * t;
     const float t4 = t2 * t2;
     const float t5 = t4 * t;
     const float env = 1.0f - 21.0f * t5 + 35.0f * t5 * t - 15.0f * t5 * t2;
     const float omt = 1.0f - t;
     const float denv_dt = WITH_DERIV ? (-105.0f * t4 * omt * omt) : 0.0f;
-    const float x = 2.0f * t - 1.0f;
+    float u = t;
+    float dx_dt = 2.0f;
+    if (cp.warp > 0.0f) {
+        const float one_p_a = 1.0f + cp.warp;
+        const float inv_d = 1.0f / fmaf(cp.warp, t, 1.0f);
+        u = (one_p_a * t) * inv_d;
+        if constexpr (WITH_DERIV) dx_dt = (2.0f * one_p_a) * (inv_d * inv_d);
+    }
+    const float env_dx = WITH_DERIV ? (dx_dt * env) : 0.0f;
+    const float x = fmaf(2.0f, u, -1.0f);
     const float x2 = 2.0f * x;
     float T0 = 1.0f;
     float dT0 = 0.0f;
@@ -131,13 +192,13 @@ __device__ __forceinline__ void eval_cheb(float r_f, float r_max_f, int n_base, 
         float T1 = x;
         float dT1 = 1.0f;
         g[1] = T1 * env;
-        if (WITH_DERIV) dg[1] = (2.0f * dT1 * env + T1 * denv_dt) * inv_rmax;
+        if (WITH_DERIV) dg[1] = fmaf(env_dx, dT1, T1 * denv_dt) * inv_rmax;
         for (int k = 2; k < n_base; ++k) {
             const float Tk = fmaf(x2, T1, -T0);
             g[k] = Tk * env;
             if (WITH_DERIV) {
                 const float dTk = fmaf(x2, dT1, fmaf(2.0f, T1, -dT0));
-                dg[k] = (2.0f * dTk * env + Tk * denv_dt) * inv_rmax;
+                dg[k] = fmaf(env_dx, dTk, Tk * denv_dt) * inv_rmax;
                 dT0 = dT1;
                 dT1 = dTk;
             }
@@ -150,21 +211,29 @@ __device__ __forceinline__ void eval_cheb(float r_f, float r_max_f, int n_base, 
 // Compute 8 Chebyshev basis values (and optionally derivatives) directly into two float4s (0 stack, 0 bank conflicts).
 template <bool WITH_DERIV>
 __device__ __forceinline__ void eval_cheb8_f4(
-    float r_f, float r_max_f, float4& g03, float4& g47, float4& dg03, float4& dg47) {
-    float t = __fdiv_rn(r_f, r_max_f);
+    float r_f, ChebParam cp, float4& g03, float4& g47, float4& dg03, float4& dg47) {
+    float t = cheb_t(r_f, cp);
     if (t < 0.0f) t = 0.0f;
     if (t >= 1.0f) {
         g03 = g47 = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
         if constexpr (WITH_DERIV) dg03 = dg47 = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
         return;
     }
-    const float inv_rmax = 1.0f / r_max_f;
+    const float inv_rmax = cp.q0;
     const float t2 = t * t, t4 = t2 * t2, t5 = t4 * t;
     const float env = 1.0f - 21.0f * t5 + 35.0f * t5 * t - 15.0f * t5 * t2;
     const float omt = 1.0f - t;
     const float denv_dt = WITH_DERIV ? (-105.0f * t4 * omt * omt) : 0.0f;
-    const float env2 = 2.0f * env;
-    const float x = 2.0f * t - 1.0f;
+    float u = t;
+    float dx_dt = 2.0f;
+    if (cp.warp > 0.0f) {
+        const float one_p_a = 1.0f + cp.warp;
+        const float inv_d = 1.0f / fmaf(cp.warp, t, 1.0f);
+        u = (one_p_a * t) * inv_d;
+        if constexpr (WITH_DERIV) dx_dt = (2.0f * one_p_a) * (inv_d * inv_d);
+    }
+    const float env2 = WITH_DERIV ? (dx_dt * env) : 0.0f;
+    const float x = fmaf(2.0f, u, -1.0f);
     const float x2 = 2.0f * x;
 
     const float T0 = 1.0f;
@@ -249,7 +318,8 @@ __device__ __forceinline__ double eval_zbl_pair_deriv_d(double r, double rs, dou
 __device__ __forceinline__ void zbl_exact_vec(
     int i, int j, float4 vl, const double* pos64,
     double& rx, double& ry, double& rz, double& rd) {
-    rx = (double)vl.x; ry = (double)vl.y; rz = (double)vl.z; rd = (double)fmaxf(vl.w, 1e-8f);
+    rx = (double)vl.x; ry = (double)vl.y; rz = (double)vl.z;
+    rd = fmax(sqrt(rx * rx + ry * ry + rz * rz), 1e-8);
     if (pos64) {
         const double px = pos64[(int64_t)i * 3 + 0] - pos64[(int64_t)j * 3 + 0];
         const double py = pos64[(int64_t)i * 3 + 1] - pos64[(int64_t)j * 3 + 1];
@@ -278,9 +348,9 @@ struct Float4Pair {
 };
 
 template <bool WITH_DERIV>
-__device__ __noinline__ Float4Pair eval_cheb_fp64_4(float r_f, float r_max_f, int k_start) {
+__device__ __noinline__ Float4Pair eval_cheb_fp64_4(float r_f, ChebParam cp, int k_start) {
     Float4Pair out{{0.0f, 0.0f, 0.0f, 0.0f}, {0.0f, 0.0f, 0.0f, 0.0f}};
-    const double inv_rmax = 1.0 / (double)r_max_f;
+    const double inv_rmax = 1.0 / (double)cp.r_max;
     double t = (double)r_f * inv_rmax;
     if (t < 0.0) t = 0.0;
     if (t >= 1.0) return out;
@@ -288,7 +358,16 @@ __device__ __noinline__ Float4Pair eval_cheb_fp64_4(float r_f, float r_max_f, in
     const double env = 1.0 - 21.0 * t5 + 35.0 * t5 * t - 15.0 * t5 * t2;
     const double omt = 1.0 - t;
     const double denv_dt = WITH_DERIV ? (-105.0 * t4 * omt * omt) : 0.0;
-    const double x = 2.0 * t - 1.0;
+    double u = t;
+    double dx_dt = 2.0;
+    if (cp.warp > 0.0f) {
+        const double a = (double)cp.warp;
+        const double inv_d = 1.0 / (1.0 + a * t);
+        u = (1.0 + a) * t * inv_d;
+        if (WITH_DERIV) dx_dt = 2.0 * (1.0 + a) * inv_d * inv_d;
+    }
+    const double env_dx = WITH_DERIV ? (dx_dt * env) : 0.0;
+    const double x = 2.0 * u - 1.0;
     double T0 = 1.0, dT0 = 0.0, T1 = x, dT1 = 1.0;
     float gv[4] = {0.0f, 0.0f, 0.0f, 0.0f};
     float dv[4] = {0.0f, 0.0f, 0.0f, 0.0f};
@@ -310,7 +389,7 @@ __device__ __noinline__ Float4Pair eval_cheb_fp64_4(float r_f, float r_max_f, in
         if (k >= k_start) {
             const int j = k - k_start;
             gv[j] = (float)(Tk * env);
-            if (WITH_DERIV) dv[j] = (float)((2.0 * dTk * env + Tk * denv_dt) * inv_rmax);
+            if (WITH_DERIV) dv[j] = (float)((env_dx * dTk + Tk * denv_dt) * inv_rmax);
         }
     }
     out.a = make_float4(gv[0], gv[1], gv[2], gv[3]);
@@ -320,11 +399,11 @@ __device__ __noinline__ Float4Pair eval_cheb_fp64_4(float r_f, float r_max_f, in
 
 // Conflict-free strided compile-time Chebyshev writer: writes g[k * STRIDE] (and dg[k * STRIDE]).
 template <bool WITH_DERIV, int NB, int STRIDE>
-__device__ __forceinline__ void eval_cheb_nb_strided(float r_f, float r_max_f, float* g, float* dg) {
+__device__ __forceinline__ void eval_cheb_nb_strided(float r_f, ChebParam cp, float* g, float* dg) {
     if (__builtin_expect(r_f < 1.2f, 0)) {
         #pragma unroll
         for (int kb = 0; kb < NB; kb += 4) {
-            const Float4Pair p = eval_cheb_fp64_4<WITH_DERIV>(r_f, r_max_f, kb);
+            const Float4Pair p = eval_cheb_fp64_4<WITH_DERIV>(r_f, cp, kb);
             g[(kb + 0) * STRIDE] = p.a.x; g[(kb + 1) * STRIDE] = p.a.y;
             g[(kb + 2) * STRIDE] = p.a.z; g[(kb + 3) * STRIDE] = p.a.w;
             if constexpr (WITH_DERIV) {
@@ -334,7 +413,7 @@ __device__ __forceinline__ void eval_cheb_nb_strided(float r_f, float r_max_f, f
         }
         return;
     }
-    float t = __fdiv_rn(r_f, r_max_f);
+    float t = cheb_t(r_f, cp);
     if (t < 0.0f) t = 0.0f;
     if (t >= 1.0f) {
         #pragma unroll
@@ -344,25 +423,34 @@ __device__ __forceinline__ void eval_cheb_nb_strided(float r_f, float r_max_f, f
         }
         return;
     }
-    const float inv_rmax = 1.0f / r_max_f;
+    const float inv_rmax = cp.q0;
     const float t2 = t * t, t4 = t2 * t2, t5 = t4 * t;
     const float env = 1.0f - 21.0f * t5 + 35.0f * t5 * t - 15.0f * t5 * t2;
     const float omt = 1.0f - t;
     const float denv_dt = WITH_DERIV ? (-105.0f * t4 * omt * omt) : 0.0f;
-    const float x = 2.0f * t - 1.0f;
+    float u = t;
+    float dx_dt = 2.0f;
+    if (cp.warp > 0.0f) {
+        const float one_p_a = 1.0f + cp.warp;
+        const float inv_d = 1.0f / fmaf(cp.warp, t, 1.0f);
+        u = (one_p_a * t) * inv_d;
+        if constexpr (WITH_DERIV) dx_dt = (2.0f * one_p_a) * (inv_d * inv_d);
+    }
+    const float env_dx = WITH_DERIV ? (dx_dt * env) : 0.0f;
+    const float x = fmaf(2.0f, u, -1.0f);
     float T0 = 1.0f, dT0 = 0.0f;
     g[0] = env;
     if constexpr (WITH_DERIV) dg[0] = denv_dt * inv_rmax;
     float T1 = x, dT1 = 1.0f;
     g[STRIDE] = T1 * env;
-    if constexpr (WITH_DERIV) dg[STRIDE] = (2.0f * dT1 * env + T1 * denv_dt) * inv_rmax;
+    if constexpr (WITH_DERIV) dg[STRIDE] = fmaf(env_dx, dT1, T1 * denv_dt) * inv_rmax;
     #pragma unroll
     for (int k = 2; k < NB; ++k) {
         const float Tk = 2.0f * x * T1 - T0;
         g[k * STRIDE] = Tk * env;
         if constexpr (WITH_DERIV) {
             const float dTk = 2.0f * T1 + 2.0f * x * dT1 - dT0;
-            dg[k * STRIDE] = (2.0f * dTk * env + Tk * denv_dt) * inv_rmax;
+            dg[k * STRIDE] = fmaf(env_dx, dTk, Tk * denv_dt) * inv_rmax;
             dT0 = dT1; dT1 = dTk;
         }
         T0 = T1; T1 = Tk;
@@ -438,8 +526,8 @@ __device__ __forceinline__ void sh_grad_l3(
 // Keeps hot L1 edge fwd/bwd kernels 100% free of FP64/ZBL registers and __noinline__ ABI spills.
 // =================================================================================================
 __global__ void __launch_bounds__(128) ilmlip_zbl_fwd_kernel(
-    int N, int S, const int* __restrict__ zbl_flag,
-    const int* __restrict__ row_ptr, const int* __restrict__ senders,
+    int N, int S, int* __restrict__ zbl_flag, bool clear_after,
+    const int* __restrict__ row_ptr, const int* __restrict__ row_end, const int* __restrict__ senders,
     const float4* __restrict__ vec_len, const int* __restrict__ species,
     const double* __restrict__ pos64,
     const double* __restrict__ rs_pair, const double* __restrict__ zz_pair, const double* __restrict__ au_pair,
@@ -447,32 +535,41 @@ __global__ void __launch_bounds__(128) ilmlip_zbl_fwd_kernel(
     if (!(*zbl_flag)) return;
     const int wid = threadIdx.x >> 5;
     const int lane = threadIdx.x & 31;
-    const int i = blockIdx.x * 4 + wid;
-    if (i >= N) return;
-    const int z_i = species[i];
-    const int eb = row_ptr[i];
-    const int ee = row_ptr[i + 1];
-    double acc = 0.0;
-    for (int e = eb + lane; e < ee; e += 32) {
-        const float4 vl = __ldg(vec_len + e);
-        const float r = fmaxf(vl.w, 1e-8f);
-        const int j = __ldg(senders + e);
-        const int pair = z_i * S + __ldg(species + j);
-        const double rs = __ldg(rs_pair + pair);
-        if ((double)r < rs + 1e-3) {
-            double rx, ry, rz, rd;
-            zbl_exact_vec(i, j, vl, pos64, rx, ry, rz, rd);
-            if (rd < rs) acc += eval_zbl_pair_val_d(rd, rs, __ldg(zz_pair + pair), __ldg(au_pair + pair));
+    const int stride = gridDim.x * 4;
+    for (int i = blockIdx.x * 4 + wid; i < N; i += stride) {
+        const int z_i = species[i];
+        const int eb = row_ptr[i];
+        const int ee = row_end[i];
+        double acc = 0.0;
+        for (int e = eb + lane; e < ee; e += 32) {
+            const float4 vl = __ldg(vec_len + e);
+            const int j = senders ? __ldg(senders + e) : __float_as_int(vl.w);
+            const float r = senders ? fmaxf(vl.w, 1e-8f) : sqrtf(fmaxf(fmaf(vl.x, vl.x, fmaf(vl.y, vl.y, vl.z * vl.z)), 1e-16f));
+            const int pair = z_i * S + __ldg(species + j);
+            const double rs = __ldg(rs_pair + pair);
+            if ((double)r < rs + 1e-3) {
+                double rx, ry, rz, rd;
+                zbl_exact_vec(i, j, vl, pos64, rx, ry, rz, rd);
+                if (rd < rs) acc += eval_zbl_pair_val_d(rd, rs, __ldg(zz_pair + pair), __ldg(au_pair + pair));
+            }
+        }
+        const double tot = warp_sum_d(acc);
+        if (lane == 0) e_zbl_out[i] = tot;
+    }
+    if (clear_after) {
+        __syncthreads();
+        if (threadIdx.x == 0 && atomicAdd(zbl_flag + 1, 1) == (int)gridDim.x - 1) {
+            zbl_flag[1] = 0;
+            __threadfence();
+            zbl_flag[0] = 0;
         }
     }
-    const double tot = warp_sum_d(acc);
-    if (lane == 0) e_zbl_out[i] = tot;
 }
 
 template <bool STRESS>
 __global__ void __launch_bounds__(128) ilmlip_zbl_bwd_kernel(
-    int N, int S, const int* __restrict__ zbl_flag,
-    const int* __restrict__ row_ptr, const int* __restrict__ senders,
+    int N, int S, int* __restrict__ zbl_flag,
+    const int* __restrict__ row_ptr, const int* __restrict__ row_end, const int* __restrict__ senders,
     const float4* __restrict__ vec_len, const int* __restrict__ species,
     const double* __restrict__ pos64,
     const double* __restrict__ rs_pair, const double* __restrict__ zz_pair, const double* __restrict__ au_pair,
@@ -480,63 +577,70 @@ __global__ void __launch_bounds__(128) ilmlip_zbl_bwd_kernel(
     if (!(*zbl_flag)) return;
     const int wid = threadIdx.x >> 5;
     const int lane = threadIdx.x & 31;
-    const int i = blockIdx.x * 4 + wid;
-    if (i >= N) return;
-    const int z_i = species[i];
-    const float wz_i = w_zbl[i];
-    const int eb = row_ptr[i];
-    const int ee = row_ptr[i + 1];
-    double rfx = 0.0, rfy = 0.0, rfz = 0.0;
-    double v0 = 0.0, v1 = 0.0, v2 = 0.0, v3 = 0.0, v4 = 0.0, v5 = 0.0;
-    for (int e = eb + lane; e < ee; e += 32) {
-        const float4 vl = __ldg(vec_len + e);
-        const float r = fmaxf(vl.w, 1e-8f);
-        const int j = __ldg(senders + e);
-        const int pair = z_i * S + __ldg(species + j);
-        const double rs = __ldg(rs_pair + pair);
-        if ((double)r < rs + 1e-3) {
-            double rx, ry, rz, rd;
-            zbl_exact_vec(i, j, vl, pos64, rx, ry, rz, rd);
-            if (rd < rs) {
-                const double zbl_er = (double)wz_i * eval_zbl_pair_deriv_d(rd, rs, __ldg(zz_pair + pair), __ldg(au_pair + pair));
-                const double inv_rd = 1.0 / rd;
-                const double fx = (rx * inv_rd) * zbl_er;
-                const double fy = (ry * inv_rd) * zbl_er;
-                const double fz = (rz * inv_rd) * zbl_er;
-                rfx -= fx; rfy -= fy; rfz -= fz;
-                atomicAdd(forces + (int64_t)j * 3 + 0, fx);
-                atomicAdd(forces + (int64_t)j * 3 + 1, fy);
-                atomicAdd(forces + (int64_t)j * 3 + 2, fz);
-                if constexpr (STRESS) {
-                    v0 += rx * fx;
-                    v1 += 0.5 * (rx * fy + ry * fx);
-                    v2 += 0.5 * (rx * fz + rz * fx);
-                    v3 += ry * fy;
-                    v4 += 0.5 * (ry * fz + rz * fy);
-                    v5 += rz * fz;
+    const int stride = gridDim.x * 4;
+    for (int i = blockIdx.x * 4 + wid; i < N; i += stride) {
+        const int z_i = species[i];
+        const float wz_i = w_zbl[i];
+        const int eb = row_ptr[i];
+        const int ee = row_end[i];
+        double rfx = 0.0, rfy = 0.0, rfz = 0.0;
+        double v0 = 0.0, v1 = 0.0, v2 = 0.0, v3 = 0.0, v4 = 0.0, v5 = 0.0;
+        for (int e = eb + lane; e < ee; e += 32) {
+            const float4 vl = __ldg(vec_len + e);
+            const int j = senders ? __ldg(senders + e) : __float_as_int(vl.w);
+            const float r = senders ? fmaxf(vl.w, 1e-8f) : sqrtf(fmaxf(fmaf(vl.x, vl.x, fmaf(vl.y, vl.y, vl.z * vl.z)), 1e-16f));
+            const int pair = z_i * S + __ldg(species + j);
+            const double rs = __ldg(rs_pair + pair);
+            if ((double)r < rs + 1e-3) {
+                double rx, ry, rz, rd;
+                zbl_exact_vec(i, j, vl, pos64, rx, ry, rz, rd);
+                if (rd < rs) {
+                    const double zbl_er = (double)wz_i * eval_zbl_pair_deriv_d(rd, rs, __ldg(zz_pair + pair), __ldg(au_pair + pair));
+                    const double inv_rd = 1.0 / rd;
+                    const double fx = (rx * inv_rd) * zbl_er;
+                    const double fy = (ry * inv_rd) * zbl_er;
+                    const double fz = (rz * inv_rd) * zbl_er;
+                    rfx -= fx; rfy -= fy; rfz -= fz;
+                    atomicAdd(forces + (int64_t)j * 3 + 0, fx);
+                    atomicAdd(forces + (int64_t)j * 3 + 1, fy);
+                    atomicAdd(forces + (int64_t)j * 3 + 2, fz);
+                    if constexpr (STRESS) {
+                        v0 += rx * fx;
+                        v1 += 0.5 * (rx * fy + ry * fx);
+                        v2 += 0.5 * (rx * fz + rz * fx);
+                        v3 += ry * fy;
+                        v4 += 0.5 * (ry * fz + rz * fy);
+                        v5 += rz * fz;
+                    }
                 }
             }
         }
-    }
-    rfx = warp_sum_d(rfx); rfy = warp_sum_d(rfy); rfz = warp_sum_d(rfz);
-    if constexpr (STRESS) {
-        v0 = warp_sum_d(v0); v1 = warp_sum_d(v1); v2 = warp_sum_d(v2);
-        v3 = warp_sum_d(v3); v4 = warp_sum_d(v4); v5 = warp_sum_d(v5);
-    }
-    if (lane == 0) {
-        if (rfx != 0.0 || rfy != 0.0 || rfz != 0.0) {
-            atomicAdd(forces + (int64_t)i * 3 + 0, rfx);
-            atomicAdd(forces + (int64_t)i * 3 + 1, rfy);
-            atomicAdd(forces + (int64_t)i * 3 + 2, rfz);
-        }
+        rfx = warp_sum_d(rfx); rfy = warp_sum_d(rfy); rfz = warp_sum_d(rfz);
         if constexpr (STRESS) {
-            if (v0 != 0.0) atomicAdd(virial + 0, v0);
-            if (v1 != 0.0) atomicAdd(virial + 1, v1);
-            if (v2 != 0.0) atomicAdd(virial + 2, v2);
-            if (v3 != 0.0) atomicAdd(virial + 3, v3);
-            if (v4 != 0.0) atomicAdd(virial + 4, v4);
-            if (v5 != 0.0) atomicAdd(virial + 5, v5);
+            v0 = warp_sum_d(v0); v1 = warp_sum_d(v1); v2 = warp_sum_d(v2);
+            v3 = warp_sum_d(v3); v4 = warp_sum_d(v4); v5 = warp_sum_d(v5);
         }
+        if (lane == 0) {
+            if (rfx != 0.0 || rfy != 0.0 || rfz != 0.0) {
+                atomicAdd(forces + (int64_t)i * 3 + 0, rfx);
+                atomicAdd(forces + (int64_t)i * 3 + 1, rfy);
+                atomicAdd(forces + (int64_t)i * 3 + 2, rfz);
+            }
+            if constexpr (STRESS) {
+                if (v0 != 0.0) atomicAdd(virial + 0, v0);
+                if (v1 != 0.0) atomicAdd(virial + 1, v1);
+                if (v2 != 0.0) atomicAdd(virial + 2, v2);
+                if (v3 != 0.0) atomicAdd(virial + 3, v3);
+                if (v4 != 0.0) atomicAdd(virial + 4, v4);
+                if (v5 != 0.0) atomicAdd(virial + 5, v5);
+            }
+        }
+    }
+    __syncthreads();
+    if (threadIdx.x == 0 && atomicAdd(zbl_flag + 1, 1) == (int)gridDim.x - 1) {
+        zbl_flag[1] = 0;
+        __threadfence();
+        zbl_flag[0] = 0;
     }
 }
 
@@ -545,29 +649,34 @@ __global__ void __launch_bounds__(128) ilmlip_zbl_bwd_kernel(
 // Swaps sum_j and sum_k: accumulates G[z_j, k, lm] = sum_{j in z_j} g_k(r_ij) Y_lm(u_ij) in
 // registers with ZERO C1 reads in the edge loop and bank-conflict-free SMEM, then contracts ONCE!
 // =================================================================================================
-template <int LMAX, int NB, bool S3>
+template <int LMAX, int NB, int S_MAX, bool PACK_VS = false>
 __global__ void __launch_bounds__(128, 6) ilmlip_l1_edge_fwd_sumswap_kernel(
     int N, int S, int n_tot1, Int4 n_l, Int4 l1_off,
-    float r_max, float a0_over_sig0, float inv_DA1_sig0_kap_sq,
-    const int* __restrict__ row_ptr, const int* __restrict__ senders,
+    ChebParam r_max, float a0_over_sig0, float inv_DA1_sig0_kap_sq,
+    const int* __restrict__ row_ptr, const int* __restrict__ row_end, const int* __restrict__ senders,
     const float4* __restrict__ vec_len, const int* __restrict__ species,
     const float* __restrict__ C1,  // [S*S, NB, n_tot1]
     const float* __restrict__ rs_pair_f32, int* __restrict__ zbl_flag,
     Ptr4 A1, float* __restrict__ f0_out, double* __restrict__ e_zbl_out) {
     constexpr int N_SH = (LMAX + 1) * (LMAX + 1);
-    constexpr int NB_STRIDE = NB + 1;           // odd stride (9, 13, 17) -> ZERO SMEM bank conflicts!
-    constexpr int SH_STRIDE = N_SH | 1;         // odd stride (9, 17) -> ZERO SMEM bank conflicts!
+    constexpr bool L2_F4 = (LMAX == 2);
+    constexpr bool L3_F4 = (LMAX == 3);
+    constexpr bool L3_NB12_EXACT = (LMAX == 3 && NB == 12);
+    constexpr int BATCH = 32;                    // all 32 warp lanes active during edge_sh16 & eval_cheb!
+    constexpr int NB_STRIDE = NB + 1;           // odd stride (9, 13, 15, 17) -> ZERO SMEM bank conflicts!
     constexpr int K_LANES = (NB <= 8) ? 8 : 16;
     constexpr int M_LANES = 32 / K_LANES;
-    constexpr int N_MG = (N_SH + M_LANES - 1) / M_LANES;
+    constexpr int Y4_CNT = L3_F4 ? 4 : 2;
+    constexpr int N_MG = L2_F4 ? (8 / M_LANES) : (16 / M_LANES);
+    constexpr int ACC_N = L3_NB12_EXACT ? 6 : N_MG;
 
     union WarpBuf {
         struct {
-            float g[16][NB_STRIDE];
-            float Y[16][SH_STRIDE];
-            int zj[16];
+            float4 Y4[BATCH][Y4_CNT];
+            float  g[BATCH][NB_STRIDE];
+            int    zj[BATCH];
         } e;
-        float G[N_SH][4 * NB + 1];
+        float G[N_SH][S_MAX * NB + 1];
     };
     __shared__ WarpBuf s_wb[4];
 
@@ -578,27 +687,47 @@ __global__ void __launch_bounds__(128, 6) ilmlip_l1_edge_fwd_sumswap_kernel(
 
     const int z_i = species[i];
     const int eb = row_ptr[i];
-    const int ee = row_ptr[i + 1];
+    const int ee = row_end[i];
 
     const int my_k = lane & (K_LANES - 1);
     const int my_ms = lane / K_LANES;
 
-    float g0[N_MG], g1[N_MG], g2[N_MG];
-    float g3[S3 ? 1 : N_MG];
+    float g0[ACC_N], g1[ACC_N];
+    float g2[(S_MAX >= 3) ? ACC_N : 1];
+    float g3[(S_MAX >= 4) ? ACC_N : 1];
+    float g0_s = 0.0f, g1_s = 0.0f, g2_s = 0.0f, g3_s = 0.0f;
     #pragma unroll
-    for (int mg = 0; mg < N_MG; ++mg) {
-        g0[mg] = 0.0f; g1[mg] = 0.0f; g2[mg] = 0.0f;
-        if constexpr (!S3) g3[mg] = 0.0f;
+    for (int mg = 0; mg < ACC_N; ++mg) {
+        g0[mg] = 0.0f; g1[mg] = 0.0f;
+        if constexpr (S_MAX >= 3) g2[mg] = 0.0f;
+        if constexpr (S_MAX >= 4) g3[mg] = 0.0f;
     }
 
-    for (int eb_b = eb; eb_b < ee; eb_b += 16) {
-        const int bcnt = (ee - eb_b < 16) ? (ee - eb_b) : 16;
+    for (int eb_b = eb; eb_b < ee; eb_b += BATCH) {
+        const int bcnt = (ee - eb_b < BATCH) ? (ee - eb_b) : BATCH;
         if (lane < bcnt) {
             const int e = eb_b + lane;
             const float4 vl = __ldg(vec_len + e);
-            const int j = __ldg(senders + e);
+            int j;
+            float r, inv_d;
+            if constexpr (PACK_VS) {
+                j = __float_as_int(vl.w);
+                const float r2 = fmaf(vl.x, vl.x, fmaf(vl.y, vl.y, vl.z * vl.z));
+                inv_d = rsqrtf(fmaxf(r2, 1e-16f));
+                r = r2 * inv_d;
+            } else {
+                if (senders) {
+                    j = __ldg(senders + e);
+                    r = fmaxf(vl.w, 1e-8f);
+                    inv_d = 1.0f / r;
+                } else {
+                    j = __float_as_int(vl.w);
+                    const float r2 = fmaf(vl.x, vl.x, fmaf(vl.y, vl.y, vl.z * vl.z));
+                    inv_d = rsqrtf(fmaxf(r2, 1e-16f));
+                    r = r2 * inv_d;
+                }
+            }
             const int z_j = __ldg(species + j);
-            const float r = fmaxf(vl.w, 1e-8f);
             s_wb[wid].e.zj[lane] = z_j;
             if constexpr (NB == 8) {
                 float4 g03, g47, d0, d1;
@@ -607,40 +736,140 @@ __global__ void __launch_bounds__(128, 6) ilmlip_l1_edge_fwd_sumswap_kernel(
                 dst[0] = g03.x; dst[1] = g03.y; dst[2] = g03.z; dst[3] = g03.w;
                 dst[4] = g47.x; dst[5] = g47.y; dst[6] = g47.z; dst[7] = g47.w;
             } else {
-                eval_cheb<false>(r, r_max, NB, s_wb[wid].e.g[lane], nullptr);
+                float* dst = s_wb[wid].e.g[lane];
+                float t = cheb_t(r, r_max);
+                if (t < 0.0f) t = 0.0f;
+                if (t >= 1.0f) {
+                    #pragma unroll
+                    for (int k = 0; k < NB; ++k) dst[k] = 0.0f;
+                } else {
+                    const float t2 = t * t, t4 = t2 * t2, t5 = t4 * t;
+                    const float env = 1.0f - 21.0f * t5 + 35.0f * t5 * t - 15.0f * t5 * t2;
+                    float u = t;
+                    if (r_max.warp > 0.0f) u = ((1.0f + r_max.warp) * t) / fmaf(r_max.warp, t, 1.0f);
+                    const float x = fmaf(2.0f, u, -1.0f);
+                    const float x2 = 2.0f * x;
+                    float T0 = 1.0f, T1 = x;
+                    dst[0] = env;
+                    dst[1] = T1 * env;
+                    #pragma unroll
+                    for (int k = 2; k < NB; ++k) {
+                        const float Tk = fmaf(x2, T1, -T0);
+                        dst[k] = Tk * env;
+                        T0 = T1; T1 = Tk;
+                    }
+                }
             }
             if (rs_pair_f32 && __builtin_expect(r < __ldg(rs_pair_f32 + z_i * S + z_j), 0)) {
                 *zbl_flag = 1;
             }
-        } else if (lane >= 16 && lane < 16 + bcnt) {
-            const int bi = lane - 16;
-            const int e = eb_b + bi;
-            const float4 vl = __ldg(vec_len + e);
-            const float r = fmaxf(vl.w, 1e-8f);
-            float4 Yv[4];
-            loup::edge_sh16(vl.x, vl.y, vl.z, r, Yv);
-            unpack_sh16(Yv, LMAX, s_wb[wid].e.Y[bi]);
+            const float x = vl.x * inv_d, y = vl.y * inv_d, z = vl.z * inv_d;
+            if constexpr (L2_F4) {
+                const float s20 = loup::SH_S3 * x * z;
+                const float s21 = loup::SH_S3 * x * y;
+                const float y2 = y * y;
+                const float x2z2 = x * x + z * z;
+                const float s22 = y2 - 0.5f * x2z2;
+                const float s23 = loup::SH_S3 * y * z;
+                const float s24 = (0.5f * loup::SH_S3) * (z * z - x * x);
+                // Y[0] == 1.0f handled separately via g*_s -> pack Y[1..8] into two float4s!
+                s_wb[wid].e.Y4[lane][0] = make_float4(x * loup::SH_C1, y * loup::SH_C1, z * loup::SH_C1, s20 * loup::SH_C2);
+                s_wb[wid].e.Y4[lane][1] = make_float4(s21 * loup::SH_C2, s22 * loup::SH_C2, s23 * loup::SH_C2, s24 * loup::SH_C2);
+            } else {
+                float4 Yv[4];
+                edge_sh16_unit(x, y, z, Yv);
+                s_wb[wid].e.Y4[lane][0] = Yv[0];
+                s_wb[wid].e.Y4[lane][1] = Yv[1];
+                s_wb[wid].e.Y4[lane][2] = Yv[2];
+                s_wb[wid].e.Y4[lane][3] = Yv[3];
+            }
         }
         __syncwarp();
 
-        if (my_k < NB) {
+        if constexpr (L2_F4) {
+            if (my_k < NB) {
+                for (int bi = 0; bi < bcnt; ++bi) {
+                    const int zj = s_wb[wid].e.zj[bi];
+                    const float gv = s_wb[wid].e.g[bi][my_k];
+                    if constexpr (K_LANES == 8) {
+                        const float* Yk = reinterpret_cast<const float*>(s_wb[wid].e.Y4[bi]);
+                        const float y0 = Yk[my_ms];
+                        const float y1 = Yk[4 + my_ms];
+                        auto acc2 = [&](float& gs, float* dst) {
+                            if (my_ms == 0) gs += gv;
+                            dst[0] = fmaf(gv, y0, dst[0]);
+                            dst[1] = fmaf(gv, y1, dst[1]);
+                        };
+                        if (zj == 0) acc2(g0_s, g0);
+                        else if constexpr (S_MAX == 2) acc2(g1_s, g1);
+                        else if (zj == 1) acc2(g1_s, g1);
+                        else if constexpr (S_MAX == 3) acc2(g2_s, g2);
+                        else { if (zj == 2) acc2(g2_s, g2); else acc2(g3_s, g3); }
+                    } else {
+                        const float4 yv = s_wb[wid].e.Y4[bi][my_ms];
+                        auto acc4s = [&](float& gs, float* dst) {
+                            if (my_ms == 0) gs += gv;
+                            dst[0] = fmaf(gv, yv.x, dst[0]); dst[1] = fmaf(gv, yv.y, dst[1]);
+                            dst[2] = fmaf(gv, yv.z, dst[2]); dst[3] = fmaf(gv, yv.w, dst[3]);
+                        };
+                        if (zj == 0) acc4s(g0_s, g0);
+                        else if constexpr (S_MAX == 2) acc4s(g1_s, g1);
+                        else if (zj == 1) acc4s(g1_s, g1);
+                        else if constexpr (S_MAX == 3) acc4s(g2_s, g2);
+                        else { if (zj == 2) acc4s(g2_s, g2); else acc4s(g3_s, g3); }
+                    }
+                }
+            }
+        } else if constexpr (L3_NB12_EXACT) {
+            // Exact 32-lane tiling of 16x12 = 192 (6 elements/lane): 100% active lanes & 24 acc regs (vs 32)!
+            const int m_grp = lane >> 2;
+            const int k_base = (lane & 3) * 3;
             for (int bi = 0; bi < bcnt; ++bi) {
                 const int zj = s_wb[wid].e.zj[bi];
-                const float gv = s_wb[wid].e.g[bi][my_k];
-                const float* Yk = s_wb[wid].e.Y[bi];
-                #pragma unroll
-                for (int mg = 0; mg < N_MG; ++mg) {
-                    const int m = mg * M_LANES + my_ms;
-                    if (m < N_SH) {
-                        const float prod = gv * Yk[m];
-                        if (zj == 0)      g0[mg] += prod;
-                        else if (zj == 1) g1[mg] += prod;
-                        else if constexpr (S3) {
-                            g2[mg] += prod;
-                        } else {
-                            if (zj == 2) g2[mg] += prod;
-                            else         g3[mg] += prod;
-                        }
+                const float2 yv = reinterpret_cast<const float2*>(s_wb[wid].e.Y4[bi])[m_grp];
+                const float ga = s_wb[wid].e.g[bi][k_base + 0];
+                const float gb = s_wb[wid].e.g[bi][k_base + 1];
+                const float gc = s_wb[wid].e.g[bi][k_base + 2];
+                auto acc6 = [&](float* dst) {
+                    dst[0] = fmaf(ga, yv.x, dst[0]); dst[1] = fmaf(gb, yv.x, dst[1]); dst[2] = fmaf(gc, yv.x, dst[2]);
+                    dst[3] = fmaf(ga, yv.y, dst[3]); dst[4] = fmaf(gb, yv.y, dst[4]); dst[5] = fmaf(gc, yv.y, dst[5]);
+                };
+                if (zj == 0) acc6(g0);
+                else if constexpr (S_MAX == 2) acc6(g1);
+                else if (zj == 1) acc6(g1);
+                else if constexpr (S_MAX == 3) acc6(g2);
+                else { if (zj == 2) acc6(g2); else acc6(g3); }
+            }
+        } else {
+            if (my_k < NB) {
+                for (int bi = 0; bi < bcnt; ++bi) {
+                    const int zj = s_wb[wid].e.zj[bi];
+                    const float gv = s_wb[wid].e.g[bi][my_k];
+                    if constexpr (K_LANES == 8) {
+                        const float4 yv = s_wb[wid].e.Y4[bi][my_ms];
+                        auto acc4 = [&](float* dst) {
+                            dst[0] = fmaf(gv, yv.x, dst[0]); dst[1] = fmaf(gv, yv.y, dst[1]);
+                            dst[2] = fmaf(gv, yv.z, dst[2]); dst[3] = fmaf(gv, yv.w, dst[3]);
+                        };
+                        if (zj == 0) acc4(g0);
+                        else if constexpr (S_MAX == 2) acc4(g1);
+                        else if (zj == 1) acc4(g1);
+                        else if constexpr (S_MAX == 3) acc4(g2);
+                        else { if (zj == 2) acc4(g2); else acc4(g3); }
+                    } else {
+                        const float4 yv0 = s_wb[wid].e.Y4[bi][my_ms * 2 + 0];
+                        const float4 yv1 = s_wb[wid].e.Y4[bi][my_ms * 2 + 1];
+                        auto acc8 = [&](float* dst) {
+                            dst[0] = fmaf(gv, yv0.x, dst[0]); dst[1] = fmaf(gv, yv0.y, dst[1]);
+                            dst[2] = fmaf(gv, yv0.z, dst[2]); dst[3] = fmaf(gv, yv0.w, dst[3]);
+                            dst[4] = fmaf(gv, yv1.x, dst[4]); dst[5] = fmaf(gv, yv1.y, dst[5]);
+                            dst[6] = fmaf(gv, yv1.z, dst[6]); dst[7] = fmaf(gv, yv1.w, dst[7]);
+                        };
+                        if (zj == 0) acc8(g0);
+                        else if constexpr (S_MAX == 2) acc8(g1);
+                        else if (zj == 1) acc8(g1);
+                        else if constexpr (S_MAX == 3) acc8(g2);
+                        else { if (zj == 2) acc8(g2); else acc8(g3); }
                     }
                 }
             }
@@ -648,18 +877,47 @@ __global__ void __launch_bounds__(128, 6) ilmlip_l1_edge_fwd_sumswap_kernel(
         __syncwarp();
     }
 
-    if (my_k < NB) {
-        #pragma unroll
-        for (int mg = 0; mg < N_MG; ++mg) {
-            const int m = mg * M_LANES + my_ms;
-            if (m < N_SH) {
+    if constexpr (L2_F4) {
+        if (my_k < NB) {
+            if (my_ms == 0) {
+                s_wb[wid].G[0][0 * NB + my_k] = g0_s;
+                if (S > 1) s_wb[wid].G[0][1 * NB + my_k] = g1_s;
+                if constexpr (S_MAX >= 3) { if (S > 2) s_wb[wid].G[0][2 * NB + my_k] = g2_s; }
+                if constexpr (S_MAX >= 4) { if (S > 3) s_wb[wid].G[0][3 * NB + my_k] = g3_s; }
+            }
+            #pragma unroll
+            for (int mg = 0; mg < N_MG; ++mg) {
+                const int m = (K_LANES == 8) ? (1 + mg * 4 + my_ms) : (1 + my_ms * 4 + mg);
                 s_wb[wid].G[m][0 * NB + my_k] = g0[mg];
                 if (S > 1) s_wb[wid].G[m][1 * NB + my_k] = g1[mg];
-                if (S > 2) s_wb[wid].G[m][2 * NB + my_k] = g2[mg];
-                if constexpr (!S3) {
-                    if (S > 3) s_wb[wid].G[m][3 * NB + my_k] = g3[mg];
-                }
+                if constexpr (S_MAX >= 3) { if (S > 2) s_wb[wid].G[m][2 * NB + my_k] = g2[mg]; }
+                if constexpr (S_MAX >= 4) { if (S > 3) s_wb[wid].G[m][3 * NB + my_k] = g3[mg]; }
             }
+        }
+    } else if constexpr (L3_NB12_EXACT) {
+        const int m_base = (lane >> 2) * 2;
+        const int k_base = (lane & 3) * 3;
+        auto store6 = [&](int zj, const float* src) {
+            const int kb = zj * 12 + k_base;
+            s_wb[wid].G[m_base + 0][kb + 0] = src[0];
+            s_wb[wid].G[m_base + 0][kb + 1] = src[1];
+            s_wb[wid].G[m_base + 0][kb + 2] = src[2];
+            s_wb[wid].G[m_base + 1][kb + 0] = src[3];
+            s_wb[wid].G[m_base + 1][kb + 1] = src[4];
+            s_wb[wid].G[m_base + 1][kb + 2] = src[5];
+        };
+        store6(0, g0);
+        if (S > 1) store6(1, g1);
+        if constexpr (S_MAX >= 3) { if (S > 2) store6(2, g2); }
+        if constexpr (S_MAX >= 4) { if (S > 3) store6(3, g3); }
+    } else if (my_k < NB) {
+        #pragma unroll
+        for (int mg = 0; mg < N_MG; ++mg) {
+            const int m = my_ms * N_MG + mg;
+            s_wb[wid].G[m][0 * NB + my_k] = g0[mg];
+            if (S > 1) s_wb[wid].G[m][1 * NB + my_k] = g1[mg];
+            if constexpr (S_MAX >= 3) { if (S > 2) s_wb[wid].G[m][2 * NB + my_k] = g2[mg]; }
+            if constexpr (S_MAX >= 4) { if (S > 3) s_wb[wid].G[m][3 * NB + my_k] = g3[mg]; }
         }
     }
     __syncwarp();
@@ -669,7 +927,7 @@ __global__ void __launch_bounds__(128, 6) ilmlip_l1_edge_fwd_sumswap_kernel(
     const int nl0 = n_l.v[0], nl1 = n_l.v[1], nl2 = n_l.v[2], nl3 = n_l.v[3];
     const int off1 = l1_off.v[1], off2 = l1_off.v[2], off3 = l1_off.v[3];
 
-    float acc0 = 0.0f;
+    float acc0 = 0.0f, acc0_hi = 0.0f;
     if (lane < nl0) {
         for (int zj = 0; zj < S; ++zj) {
             const float* Cz = C1_zi + (int64_t)zj * NB * n_tot1 + lane;
@@ -678,9 +936,35 @@ __global__ void __launch_bounds__(128, 6) ilmlip_l1_edge_fwd_sumswap_kernel(
             for (int k = 0; k < NB; ++k) acc0 = fmaf(__ldg(Cz + k * n_tot1), G0[k], acc0);
         }
     }
+    if (lane + 32 < nl0) {
+        for (int zj = 0; zj < S; ++zj) {
+            const float* Cz = C1_zi + (int64_t)zj * NB * n_tot1 + (lane + 32);
+            const float* G0 = &s_wb[wid].G[0][zj * NB];
+            #pragma unroll 4
+            for (int k = 0; k < NB; ++k) acc0_hi = fmaf(__ldg(Cz + k * n_tot1), G0[k], acc0_hi);
+        }
+    }
 
     float acc1_0 = 0.0f, acc1_1 = 0.0f, acc1_2 = 0.0f;
-    if (lane < nl1) {
+    if (nl1 <= 16) {
+        const int g = lane >> 4, c = lane & 15;
+        if (c < nl1) {
+            for (int zj = g; zj < S; zj += 2) {
+                const float* Cz = C1_zi + (int64_t)zj * NB * n_tot1 + off1 + c;
+                const int base = zj * NB;
+                #pragma unroll 4
+                for (int k = 0; k < NB; ++k) {
+                    const float cv = __ldg(Cz + k * n_tot1);
+                    acc1_0 = fmaf(cv, s_wb[wid].G[1][base + k], acc1_0);
+                    acc1_1 = fmaf(cv, s_wb[wid].G[2][base + k], acc1_1);
+                    acc1_2 = fmaf(cv, s_wb[wid].G[3][base + k], acc1_2);
+                }
+            }
+        }
+        acc1_0 += __shfl_xor_sync(0xffffffffu, acc1_0, 16);
+        acc1_1 += __shfl_xor_sync(0xffffffffu, acc1_1, 16);
+        acc1_2 += __shfl_xor_sync(0xffffffffu, acc1_2, 16);
+    } else if (lane < nl1) {
         for (int zj = 0; zj < S; ++zj) {
             const float* Cz = C1_zi + (int64_t)zj * NB * n_tot1 + off1 + lane;
             const int base = zj * NB;
@@ -695,7 +979,69 @@ __global__ void __launch_bounds__(128, 6) ilmlip_l1_edge_fwd_sumswap_kernel(
     }
 
     float acc2_0 = 0.0f, acc2_1 = 0.0f, acc2_2 = 0.0f, acc2_3 = 0.0f, acc2_4 = 0.0f;
-    if (lane < nl2) {
+    if (nl2 <= 8) {
+        const int g = lane >> 3, c = lane & 7;
+        if (c < nl2) {
+            if (S <= 2) {
+                const int zj = g >> 1;
+                if (zj < S) {
+                    constexpr int KH = NB >> 1;
+                    const int k0 = (g & 1) ? KH : 0;
+                    const int k1 = (g & 1) ? NB : KH;
+                    const float* Cz = C1_zi + (int64_t)zj * NB * n_tot1 + off2 + c;
+                    const int base = zj * NB;
+                    #pragma unroll 4
+                    for (int k = k0; k < k1; ++k) {
+                        const float cv = __ldg(Cz + k * n_tot1);
+                        acc2_0 = fmaf(cv, s_wb[wid].G[4][base + k], acc2_0);
+                        acc2_1 = fmaf(cv, s_wb[wid].G[5][base + k], acc2_1);
+                        acc2_2 = fmaf(cv, s_wb[wid].G[6][base + k], acc2_2);
+                        acc2_3 = fmaf(cv, s_wb[wid].G[7][base + k], acc2_3);
+                        acc2_4 = fmaf(cv, s_wb[wid].G[8][base + k], acc2_4);
+                    }
+                }
+            } else if (g < S) {
+                const float* Cz = C1_zi + (int64_t)g * NB * n_tot1 + off2 + c;
+                const int base = g * NB;
+                #pragma unroll 4
+                for (int k = 0; k < NB; ++k) {
+                    const float cv = __ldg(Cz + k * n_tot1);
+                    acc2_0 = fmaf(cv, s_wb[wid].G[4][base + k], acc2_0);
+                    acc2_1 = fmaf(cv, s_wb[wid].G[5][base + k], acc2_1);
+                    acc2_2 = fmaf(cv, s_wb[wid].G[6][base + k], acc2_2);
+                    acc2_3 = fmaf(cv, s_wb[wid].G[7][base + k], acc2_3);
+                    acc2_4 = fmaf(cv, s_wb[wid].G[8][base + k], acc2_4);
+                }
+            }
+        }
+        acc2_0 += __shfl_xor_sync(0xffffffffu, acc2_0, 16); acc2_0 += __shfl_xor_sync(0xffffffffu, acc2_0, 8);
+        acc2_1 += __shfl_xor_sync(0xffffffffu, acc2_1, 16); acc2_1 += __shfl_xor_sync(0xffffffffu, acc2_1, 8);
+        acc2_2 += __shfl_xor_sync(0xffffffffu, acc2_2, 16); acc2_2 += __shfl_xor_sync(0xffffffffu, acc2_2, 8);
+        acc2_3 += __shfl_xor_sync(0xffffffffu, acc2_3, 16); acc2_3 += __shfl_xor_sync(0xffffffffu, acc2_3, 8);
+        acc2_4 += __shfl_xor_sync(0xffffffffu, acc2_4, 16); acc2_4 += __shfl_xor_sync(0xffffffffu, acc2_4, 8);
+    } else if (nl2 <= 16) {
+        const int g = lane >> 4, c = lane & 15;
+        if (c < nl2) {
+            for (int zj = g; zj < S; zj += 2) {
+                const float* Cz = C1_zi + (int64_t)zj * NB * n_tot1 + off2 + c;
+                const int base = zj * NB;
+                #pragma unroll 4
+                for (int k = 0; k < NB; ++k) {
+                    const float cv = __ldg(Cz + k * n_tot1);
+                    acc2_0 = fmaf(cv, s_wb[wid].G[4][base + k], acc2_0);
+                    acc2_1 = fmaf(cv, s_wb[wid].G[5][base + k], acc2_1);
+                    acc2_2 = fmaf(cv, s_wb[wid].G[6][base + k], acc2_2);
+                    acc2_3 = fmaf(cv, s_wb[wid].G[7][base + k], acc2_3);
+                    acc2_4 = fmaf(cv, s_wb[wid].G[8][base + k], acc2_4);
+                }
+            }
+        }
+        acc2_0 += __shfl_xor_sync(0xffffffffu, acc2_0, 16);
+        acc2_1 += __shfl_xor_sync(0xffffffffu, acc2_1, 16);
+        acc2_2 += __shfl_xor_sync(0xffffffffu, acc2_2, 16);
+        acc2_3 += __shfl_xor_sync(0xffffffffu, acc2_3, 16);
+        acc2_4 += __shfl_xor_sync(0xffffffffu, acc2_4, 16);
+    } else if (lane < nl2) {
         for (int zj = 0; zj < S; ++zj) {
             const float* Cz = C1_zi + (int64_t)zj * NB * n_tot1 + off2 + lane;
             const int base = zj * NB;
@@ -713,7 +1059,53 @@ __global__ void __launch_bounds__(128, 6) ilmlip_l1_edge_fwd_sumswap_kernel(
 
     float acc3_0 = 0.0f, acc3_1 = 0.0f, acc3_2 = 0.0f, acc3_3 = 0.0f, acc3_4 = 0.0f, acc3_5 = 0.0f, acc3_6 = 0.0f;
     if constexpr (LMAX == 3) {
-        if (lane < nl3) {
+        if (nl3 <= 8) {
+            const int g = lane >> 3, c = lane & 7;
+            if (c < nl3) {
+                if (S <= 2) {
+                    const int zj = g >> 1;
+                    if (zj < S) {
+                        constexpr int KH = NB >> 1;
+                        const int k0 = (g & 1) ? KH : 0;
+                        const int k1 = (g & 1) ? NB : KH;
+                        const float* Cz = C1_zi + (int64_t)zj * NB * n_tot1 + off3 + c;
+                        const int base = zj * NB;
+                        #pragma unroll 4
+                        for (int k = k0; k < k1; ++k) {
+                            const float cv = __ldg(Cz + k * n_tot1);
+                            acc3_0 = fmaf(cv, s_wb[wid].G[9][base + k],  acc3_0);
+                            acc3_1 = fmaf(cv, s_wb[wid].G[10][base + k], acc3_1);
+                            acc3_2 = fmaf(cv, s_wb[wid].G[11][base + k], acc3_2);
+                            acc3_3 = fmaf(cv, s_wb[wid].G[12][base + k], acc3_3);
+                            acc3_4 = fmaf(cv, s_wb[wid].G[13][base + k], acc3_4);
+                            acc3_5 = fmaf(cv, s_wb[wid].G[14][base + k], acc3_5);
+                            acc3_6 = fmaf(cv, s_wb[wid].G[15][base + k], acc3_6);
+                        }
+                    }
+                } else if (g < S) {
+                    const float* Cz = C1_zi + (int64_t)g * NB * n_tot1 + off3 + c;
+                    const int base = g * NB;
+                    #pragma unroll 4
+                    for (int k = 0; k < NB; ++k) {
+                        const float cv = __ldg(Cz + k * n_tot1);
+                        acc3_0 = fmaf(cv, s_wb[wid].G[9][base + k],  acc3_0);
+                        acc3_1 = fmaf(cv, s_wb[wid].G[10][base + k], acc3_1);
+                        acc3_2 = fmaf(cv, s_wb[wid].G[11][base + k], acc3_2);
+                        acc3_3 = fmaf(cv, s_wb[wid].G[12][base + k], acc3_3);
+                        acc3_4 = fmaf(cv, s_wb[wid].G[13][base + k], acc3_4);
+                        acc3_5 = fmaf(cv, s_wb[wid].G[14][base + k], acc3_5);
+                        acc3_6 = fmaf(cv, s_wb[wid].G[15][base + k], acc3_6);
+                    }
+                }
+            }
+            acc3_0 += __shfl_xor_sync(0xffffffffu, acc3_0, 16); acc3_0 += __shfl_xor_sync(0xffffffffu, acc3_0, 8);
+            acc3_1 += __shfl_xor_sync(0xffffffffu, acc3_1, 16); acc3_1 += __shfl_xor_sync(0xffffffffu, acc3_1, 8);
+            acc3_2 += __shfl_xor_sync(0xffffffffu, acc3_2, 16); acc3_2 += __shfl_xor_sync(0xffffffffu, acc3_2, 8);
+            acc3_3 += __shfl_xor_sync(0xffffffffu, acc3_3, 16); acc3_3 += __shfl_xor_sync(0xffffffffu, acc3_3, 8);
+            acc3_4 += __shfl_xor_sync(0xffffffffu, acc3_4, 16); acc3_4 += __shfl_xor_sync(0xffffffffu, acc3_4, 8);
+            acc3_5 += __shfl_xor_sync(0xffffffffu, acc3_5, 16); acc3_5 += __shfl_xor_sync(0xffffffffu, acc3_5, 8);
+            acc3_6 += __shfl_xor_sync(0xffffffffu, acc3_6, 16); acc3_6 += __shfl_xor_sync(0xffffffffu, acc3_6, 8);
+        } else if (lane < nl3) {
             for (int zj = 0; zj < S; ++zj) {
                 const float* Cz = C1_zi + (int64_t)zj * NB * n_tot1 + off3 + lane;
                 const int base = zj * NB;
@@ -733,6 +1125,7 @@ __global__ void __launch_bounds__(128, 6) ilmlip_l1_edge_fwd_sumswap_kernel(
     }
 
     float sq_lane = (lane < nl0) ? (acc0 * acc0) : 0.0f;
+    if (lane + 32 < nl0) sq_lane = fmaf(acc0_hi, acc0_hi, sq_lane);
     if (lane < nl1) sq_lane = fmaf(acc1_0, acc1_0, fmaf(acc1_1, acc1_1, fmaf(acc1_2, acc1_2, sq_lane)));
     if (lane < nl2) {
         sq_lane = fmaf(acc2_0, acc2_0, fmaf(acc2_1, acc2_1, fmaf(acc2_2, acc2_2,
@@ -752,6 +1145,7 @@ __global__ void __launch_bounds__(128, 6) ilmlip_l1_edge_fwd_sumswap_kernel(
     }
 
     if (lane < nl0) A1.p[0][(int64_t)i * nl0 + lane] = acc0 * f0;
+    if (lane + 32 < nl0) A1.p[0][(int64_t)i * nl0 + lane + 32] = acc0_hi * f0;
     if (lane < nl1) {
         float* d1 = A1.p[1] + (int64_t)i * 3 * nl1 + lane;
         d1[0] = acc1_0 * f0; d1[nl1] = acc1_1 * f0; d1[2 * nl1] = acc1_2 * f0;
@@ -772,6 +1166,345 @@ __global__ void __launch_bounds__(128, 6) ilmlip_l1_edge_fwd_sumswap_kernel(
 }
 
 // =================================================================================================
+// Kernel 1s-16: 16-Lane Subwarp (8 atoms/CTA, BATCH=16) Sum-Swap Layer-1 Edge Forward (NB==8, S<=4)
+// Cuts 32-lane tail waste by 25% on STO/Salt (avg_nb~33-38) and 17% on Water, doubles atoms/CTA!
+// =================================================================================================
+template <int LMAX, int S_MAX, bool PACK_VS = false>
+__global__ void __launch_bounds__(128, (LMAX == 3 && S_MAX >= 4) ? 5 : 6) ilmlip_l1_edge_fwd_sumswap16_kernel(
+    int N, int S, int n_tot1, Int4 n_l, Int4 l1_off,
+    ChebParam r_max, float a0_over_sig0, float inv_DA1_sig0_kap_sq,
+    const int* __restrict__ row_ptr, const int* __restrict__ row_end, const int* __restrict__ senders,
+    const float4* __restrict__ vec_len, const int* __restrict__ species,
+    const float* __restrict__ C1,
+    const float* __restrict__ rs_pair_f32, int* __restrict__ zbl_flag,
+    Ptr4 A1, float* __restrict__ f0_out, double* __restrict__ e_zbl_out) {
+    constexpr int NB = 8;
+    constexpr int N_SH = (LMAX + 1) * (LMAX + 1);
+    constexpr bool L2_F4 = (LMAX == 2);
+    constexpr int BATCH = 16;
+    constexpr int NB_STRIDE = NB + 1;
+    constexpr int Y4_CNT = L2_F4 ? 2 : 4;
+    constexpr int N_MG = L2_F4 ? 4 : 8;
+
+    union SubWarpBuf {
+        struct {
+            float4 Y4[BATCH][Y4_CNT];
+            float  g[BATCH][NB_STRIDE];
+            int    zj[BATCH];
+        } e;
+        float G[N_SH][S_MAX * NB + 1];
+    };
+    __shared__ SubWarpBuf s_wb[8];
+
+    const int sid = threadIdx.x >> 4;
+    const int slane = threadIdx.x & 15;
+    const unsigned smask = (sid & 1) ? 0xffff0000u : 0x0000ffffu;
+    const int i = blockIdx.x * 8 + sid;
+    if (i >= N) return;
+
+    const int z_i = species[i];
+    const int eb = row_ptr[i];
+    const int ee = row_end[i];
+    const int my_k = slane & 7;
+    const int my_ms = slane >> 3;
+
+    float g0[N_MG], g1[N_MG];
+    float g2[(S_MAX >= 3) ? N_MG : 1];
+    float g3[(S_MAX >= 4) ? N_MG : 1];
+    float g0_s = 0.0f, g1_s = 0.0f, g2_s = 0.0f, g3_s = 0.0f;
+    #pragma unroll
+    for (int mg = 0; mg < N_MG; ++mg) {
+        g0[mg] = 0.0f; g1[mg] = 0.0f;
+        if constexpr (S_MAX >= 3) g2[mg] = 0.0f;
+        if constexpr (S_MAX >= 4) g3[mg] = 0.0f;
+    }
+
+    for (int eb_b = eb; eb_b < ee; eb_b += BATCH) {
+        const int bcnt = (ee - eb_b < BATCH) ? (ee - eb_b) : BATCH;
+        if (slane < bcnt) {
+            const int e = eb_b + slane;
+            const float4 vl = __ldg(vec_len + e);
+            int j;
+            float r, inv_d;
+            if constexpr (PACK_VS) {
+                j = __float_as_int(vl.w);
+                const float r2 = fmaf(vl.x, vl.x, fmaf(vl.y, vl.y, vl.z * vl.z));
+                inv_d = rsqrtf(fmaxf(r2, 1e-16f));
+                r = r2 * inv_d;
+            } else {
+                if (senders) {
+                    j = __ldg(senders + e);
+                    r = fmaxf(vl.w, 1e-8f);
+                    inv_d = 1.0f / r;
+                } else {
+                    j = __float_as_int(vl.w);
+                    const float r2 = fmaf(vl.x, vl.x, fmaf(vl.y, vl.y, vl.z * vl.z));
+                    inv_d = rsqrtf(fmaxf(r2, 1e-16f));
+                    r = r2 * inv_d;
+                }
+            }
+            const int z_j = __ldg(species + j);
+            s_wb[sid].e.zj[slane] = z_j;
+            float4 g03, g47, d0, d1;
+            eval_cheb8_f4<false>(r, r_max, g03, g47, d0, d1);
+            float* dst = s_wb[sid].e.g[slane];
+            dst[0] = g03.x; dst[1] = g03.y; dst[2] = g03.z; dst[3] = g03.w;
+            dst[4] = g47.x; dst[5] = g47.y; dst[6] = g47.z; dst[7] = g47.w;
+            if (rs_pair_f32 && __builtin_expect(r < __ldg(rs_pair_f32 + z_i * S + z_j), 0)) {
+                *zbl_flag = 1;
+            }
+            const float x = vl.x * inv_d, y = vl.y * inv_d, z = vl.z * inv_d;
+            if constexpr (L2_F4) {
+                const float s20 = loup::SH_S3 * x * z;
+                const float s21 = loup::SH_S3 * x * y;
+                const float y2 = y * y;
+                const float x2z2 = x * x + z * z;
+                const float s22 = y2 - 0.5f * x2z2;
+                const float s23 = loup::SH_S3 * y * z;
+                const float s24 = (0.5f * loup::SH_S3) * (z * z - x * x);
+                s_wb[sid].e.Y4[slane][0] = make_float4(x * loup::SH_C1, y * loup::SH_C1, z * loup::SH_C1, s20 * loup::SH_C2);
+                s_wb[sid].e.Y4[slane][1] = make_float4(s21 * loup::SH_C2, s22 * loup::SH_C2, s23 * loup::SH_C2, s24 * loup::SH_C2);
+            } else {
+                float4 Yv[4];
+                edge_sh16_unit(x, y, z, Yv);
+                s_wb[sid].e.Y4[slane][0] = Yv[0];
+                s_wb[sid].e.Y4[slane][1] = Yv[1];
+                s_wb[sid].e.Y4[slane][2] = Yv[2];
+                s_wb[sid].e.Y4[slane][3] = Yv[3];
+            }
+        }
+        __syncwarp(smask);
+
+        if constexpr (L2_F4) {
+            for (int bi = 0; bi < bcnt; ++bi) {
+                const int zj = s_wb[sid].e.zj[bi];
+                const float gv = s_wb[sid].e.g[bi][my_k];
+                const float4 yv = s_wb[sid].e.Y4[bi][my_ms];
+                auto acc4s = [&](float& gs, float* dst) {
+                    if (my_ms == 0) gs += gv;
+                    dst[0] = fmaf(gv, yv.x, dst[0]); dst[1] = fmaf(gv, yv.y, dst[1]);
+                    dst[2] = fmaf(gv, yv.z, dst[2]); dst[3] = fmaf(gv, yv.w, dst[3]);
+                };
+                if (zj == 0) acc4s(g0_s, g0);
+                else if constexpr (S_MAX == 2) acc4s(g1_s, g1);
+                else if (zj == 1) acc4s(g1_s, g1);
+                else if constexpr (S_MAX == 3) acc4s(g2_s, g2);
+                else { if (zj == 2) acc4s(g2_s, g2); else acc4s(g3_s, g3); }
+            }
+        } else {
+            for (int bi = 0; bi < bcnt; ++bi) {
+                const int zj = s_wb[sid].e.zj[bi];
+                const float gv = s_wb[sid].e.g[bi][my_k];
+                const float4 yv0 = s_wb[sid].e.Y4[bi][my_ms * 2 + 0];
+                const float4 yv1 = s_wb[sid].e.Y4[bi][my_ms * 2 + 1];
+                auto acc8 = [&](float* dst) {
+                    dst[0] = fmaf(gv, yv0.x, dst[0]); dst[1] = fmaf(gv, yv0.y, dst[1]);
+                    dst[2] = fmaf(gv, yv0.z, dst[2]); dst[3] = fmaf(gv, yv0.w, dst[3]);
+                    dst[4] = fmaf(gv, yv1.x, dst[4]); dst[5] = fmaf(gv, yv1.y, dst[5]);
+                    dst[6] = fmaf(gv, yv1.z, dst[6]); dst[7] = fmaf(gv, yv1.w, dst[7]);
+                };
+                if (zj == 0) acc8(g0);
+                else if constexpr (S_MAX == 2) acc8(g1);
+                else if (zj == 1) acc8(g1);
+                else if constexpr (S_MAX == 3) acc8(g2);
+                else { if (zj == 2) acc8(g2); else acc8(g3); }
+            }
+        }
+        __syncwarp(smask);
+    }
+
+    if constexpr (L2_F4) {
+        if (my_ms == 0) {
+            s_wb[sid].G[0][0 * NB + my_k] = g0_s;
+            if (S > 1) s_wb[sid].G[0][1 * NB + my_k] = g1_s;
+            if constexpr (S_MAX >= 3) { if (S > 2) s_wb[sid].G[0][2 * NB + my_k] = g2_s; }
+            if constexpr (S_MAX >= 4) { if (S > 3) s_wb[sid].G[0][3 * NB + my_k] = g3_s; }
+        }
+        #pragma unroll
+        for (int mg = 0; mg < 4; ++mg) {
+            const int m = 1 + my_ms * 4 + mg;
+            s_wb[sid].G[m][0 * NB + my_k] = g0[mg];
+            if (S > 1) s_wb[sid].G[m][1 * NB + my_k] = g1[mg];
+            if constexpr (S_MAX >= 3) { if (S > 2) s_wb[sid].G[m][2 * NB + my_k] = g2[mg]; }
+            if constexpr (S_MAX >= 4) { if (S > 3) s_wb[sid].G[m][3 * NB + my_k] = g3[mg]; }
+        }
+    } else {
+        #pragma unroll
+        for (int mg = 0; mg < 8; ++mg) {
+            const int m = my_ms * 8 + mg;
+            s_wb[sid].G[m][0 * NB + my_k] = g0[mg];
+            if (S > 1) s_wb[sid].G[m][1 * NB + my_k] = g1[mg];
+            if constexpr (S_MAX >= 3) { if (S > 2) s_wb[sid].G[m][2 * NB + my_k] = g2[mg]; }
+            if constexpr (S_MAX >= 4) { if (S > 3) s_wb[sid].G[m][3 * NB + my_k] = g3[mg]; }
+        }
+    }
+    __syncwarp(smask);
+
+    const float* C1_zi = C1 + (int64_t)z_i * S * NB * n_tot1;
+    const int nl0 = n_l.v[0], nl1 = n_l.v[1], nl2 = n_l.v[2], nl3 = n_l.v[3];
+    const int off1 = l1_off.v[1], off2 = l1_off.v[2], off3 = l1_off.v[3];
+
+    float acc0 = 0.0f, acc0_hi = 0.0f;
+    if (slane < nl0) {
+        for (int zj = 0; zj < S; ++zj) {
+            const float* Cz = C1_zi + (int64_t)zj * NB * n_tot1 + slane;
+            const float* G0 = &s_wb[sid].G[0][zj * NB];
+            #pragma unroll 4
+            for (int k = 0; k < NB; ++k) acc0 = fmaf(__ldg(Cz + k * n_tot1), G0[k], acc0);
+        }
+    }
+    if (slane + 16 < nl0) {
+        for (int zj = 0; zj < S; ++zj) {
+            const float* Cz = C1_zi + (int64_t)zj * NB * n_tot1 + (slane + 16);
+            const float* G0 = &s_wb[sid].G[0][zj * NB];
+            #pragma unroll 4
+            for (int k = 0; k < NB; ++k) acc0_hi = fmaf(__ldg(Cz + k * n_tot1), G0[k], acc0_hi);
+        }
+    }
+
+    float acc1_0 = 0.0f, acc1_1 = 0.0f, acc1_2 = 0.0f;
+    float acc1h_0 = 0.0f, acc1h_1 = 0.0f, acc1h_2 = 0.0f;
+    if (slane < nl1) {
+        for (int zj = 0; zj < S; ++zj) {
+            const float* Cz = C1_zi + (int64_t)zj * NB * n_tot1 + off1 + slane;
+            const int base = zj * NB;
+            #pragma unroll 4
+            for (int k = 0; k < NB; ++k) {
+                const float cv = __ldg(Cz + k * n_tot1);
+                acc1_0 = fmaf(cv, s_wb[sid].G[1][base + k], acc1_0);
+                acc1_1 = fmaf(cv, s_wb[sid].G[2][base + k], acc1_1);
+                acc1_2 = fmaf(cv, s_wb[sid].G[3][base + k], acc1_2);
+            }
+        }
+    }
+    if (slane + 16 < nl1) {
+        for (int zj = 0; zj < S; ++zj) {
+            const float* Cz = C1_zi + (int64_t)zj * NB * n_tot1 + off1 + (slane + 16);
+            const int base = zj * NB;
+            #pragma unroll 4
+            for (int k = 0; k < NB; ++k) {
+                const float cv = __ldg(Cz + k * n_tot1);
+                acc1h_0 = fmaf(cv, s_wb[sid].G[1][base + k], acc1h_0);
+                acc1h_1 = fmaf(cv, s_wb[sid].G[2][base + k], acc1h_1);
+                acc1h_2 = fmaf(cv, s_wb[sid].G[3][base + k], acc1h_2);
+            }
+        }
+    }
+
+    float acc2_0 = 0.0f, acc2_1 = 0.0f, acc2_2 = 0.0f, acc2_3 = 0.0f, acc2_4 = 0.0f;
+    if (slane < nl2) {
+        for (int zj = 0; zj < S; ++zj) {
+            const float* Cz = C1_zi + (int64_t)zj * NB * n_tot1 + off2 + slane;
+            const int base = zj * NB;
+            #pragma unroll 4
+            for (int k = 0; k < NB; ++k) {
+                const float cv = __ldg(Cz + k * n_tot1);
+                acc2_0 = fmaf(cv, s_wb[sid].G[4][base + k], acc2_0);
+                acc2_1 = fmaf(cv, s_wb[sid].G[5][base + k], acc2_1);
+                acc2_2 = fmaf(cv, s_wb[sid].G[6][base + k], acc2_2);
+                acc2_3 = fmaf(cv, s_wb[sid].G[7][base + k], acc2_3);
+                acc2_4 = fmaf(cv, s_wb[sid].G[8][base + k], acc2_4);
+            }
+        }
+    }
+
+    float acc3_0 = 0.0f, acc3_1 = 0.0f, acc3_2 = 0.0f, acc3_3 = 0.0f, acc3_4 = 0.0f, acc3_5 = 0.0f, acc3_6 = 0.0f;
+    if constexpr (LMAX == 3) {
+        if (nl3 <= 8) {
+            const int g = slane >> 3, c = slane & 7;
+            if (c < nl3) {
+                for (int zj = g; zj < S; zj += 2) {
+                    const float* Cz = C1_zi + (int64_t)zj * NB * n_tot1 + off3 + c;
+                    const int base = zj * NB;
+                    #pragma unroll 4
+                    for (int k = 0; k < NB; ++k) {
+                        const float cv = __ldg(Cz + k * n_tot1);
+                        acc3_0 = fmaf(cv, s_wb[sid].G[9][base + k],  acc3_0);
+                        acc3_1 = fmaf(cv, s_wb[sid].G[10][base + k], acc3_1);
+                        acc3_2 = fmaf(cv, s_wb[sid].G[11][base + k], acc3_2);
+                        acc3_3 = fmaf(cv, s_wb[sid].G[12][base + k], acc3_3);
+                        acc3_4 = fmaf(cv, s_wb[sid].G[13][base + k], acc3_4);
+                        acc3_5 = fmaf(cv, s_wb[sid].G[14][base + k], acc3_5);
+                        acc3_6 = fmaf(cv, s_wb[sid].G[15][base + k], acc3_6);
+                    }
+                }
+            }
+            acc3_0 += __shfl_xor_sync(smask, acc3_0, 8);
+            acc3_1 += __shfl_xor_sync(smask, acc3_1, 8);
+            acc3_2 += __shfl_xor_sync(smask, acc3_2, 8);
+            acc3_3 += __shfl_xor_sync(smask, acc3_3, 8);
+            acc3_4 += __shfl_xor_sync(smask, acc3_4, 8);
+            acc3_5 += __shfl_xor_sync(smask, acc3_5, 8);
+            acc3_6 += __shfl_xor_sync(smask, acc3_6, 8);
+        } else if (slane < nl3) {
+            for (int zj = 0; zj < S; ++zj) {
+                const float* Cz = C1_zi + (int64_t)zj * NB * n_tot1 + off3 + slane;
+                const int base = zj * NB;
+                #pragma unroll 4
+                for (int k = 0; k < NB; ++k) {
+                    const float cv = __ldg(Cz + k * n_tot1);
+                    acc3_0 = fmaf(cv, s_wb[sid].G[9][base + k],  acc3_0);
+                    acc3_1 = fmaf(cv, s_wb[sid].G[10][base + k], acc3_1);
+                    acc3_2 = fmaf(cv, s_wb[sid].G[11][base + k], acc3_2);
+                    acc3_3 = fmaf(cv, s_wb[sid].G[12][base + k], acc3_3);
+                    acc3_4 = fmaf(cv, s_wb[sid].G[13][base + k], acc3_4);
+                    acc3_5 = fmaf(cv, s_wb[sid].G[14][base + k], acc3_5);
+                    acc3_6 = fmaf(cv, s_wb[sid].G[15][base + k], acc3_6);
+                }
+            }
+        }
+    }
+
+    float sq_lane = (slane < nl0) ? (acc0 * acc0) : 0.0f;
+    if (slane + 16 < nl0) sq_lane = fmaf(acc0_hi, acc0_hi, sq_lane);
+    if (slane < nl1) sq_lane = fmaf(acc1_0, acc1_0, fmaf(acc1_1, acc1_1, fmaf(acc1_2, acc1_2, sq_lane)));
+    if (slane + 16 < nl1) sq_lane = fmaf(acc1h_0, acc1h_0, fmaf(acc1h_1, acc1h_1, fmaf(acc1h_2, acc1h_2, sq_lane)));
+    if (slane < nl2) {
+        sq_lane = fmaf(acc2_0, acc2_0, fmaf(acc2_1, acc2_1, fmaf(acc2_2, acc2_2,
+                  fmaf(acc2_3, acc2_3, fmaf(acc2_4, acc2_4, sq_lane)))));
+    }
+    if constexpr (LMAX == 3) {
+        if (slane < nl3) {
+            sq_lane = fmaf(acc3_0, acc3_0, fmaf(acc3_1, acc3_1, fmaf(acc3_2, acc3_2,
+                      fmaf(acc3_3, acc3_3, fmaf(acc3_4, acc3_4, fmaf(acc3_5, acc3_5, fmaf(acc3_6, acc3_6, sq_lane)))))));
+        }
+    }
+    sq_lane += __shfl_xor_sync(smask, sq_lane, 8);
+    sq_lane += __shfl_xor_sync(smask, sq_lane, 4);
+    sq_lane += __shfl_xor_sync(smask, sq_lane, 2);
+    sq_lane += __shfl_xor_sync(smask, sq_lane, 1);
+    const float f0 = a0_over_sig0 / sqrtf(1.0f + sq_lane * inv_DA1_sig0_kap_sq);
+    if (slane == 0) {
+        f0_out[i] = f0;
+        if (e_zbl_out) e_zbl_out[i] = 0.0;
+    }
+
+    if (slane < nl0) A1.p[0][(int64_t)i * nl0 + slane] = acc0 * f0;
+    if (slane + 16 < nl0) A1.p[0][(int64_t)i * nl0 + slane + 16] = acc0_hi * f0;
+    if (slane < nl1) {
+        float* d1 = A1.p[1] + (int64_t)i * 3 * nl1 + slane;
+        d1[0] = acc1_0 * f0; d1[nl1] = acc1_1 * f0; d1[2 * nl1] = acc1_2 * f0;
+    }
+    if (slane + 16 < nl1) {
+        float* d1 = A1.p[1] + (int64_t)i * 3 * nl1 + slane + 16;
+        d1[0] = acc1h_0 * f0; d1[nl1] = acc1h_1 * f0; d1[2 * nl1] = acc1h_2 * f0;
+    }
+    if (slane < nl2) {
+        float* d2 = A1.p[2] + (int64_t)i * 5 * nl2 + slane;
+        d2[0] = acc2_0 * f0; d2[nl2] = acc2_1 * f0; d2[2 * nl2] = acc2_2 * f0;
+        d2[3 * nl2] = acc2_3 * f0; d2[4 * nl2] = acc2_4 * f0;
+    }
+    if constexpr (LMAX == 3) {
+        if (slane < nl3) {
+            float* d3 = A1.p[3] + (int64_t)i * 7 * nl3 + slane;
+            d3[0] = acc3_0 * f0; d3[nl3] = acc3_1 * f0; d3[2 * nl3] = acc3_2 * f0;
+            d3[3 * nl3] = acc3_3 * f0; d3[4 * nl3] = acc3_4 * f0; d3[5 * nl3] = acc3_5 * f0;
+            d3[6 * nl3] = acc3_6 * f0;
+        }
+    }
+}
+
+// =================================================================================================
 // Kernel 1a: Packed Fast Layer-1 Edge Forward
 // (n_l[0]<=32, n_l[1]<=16, n_l[2]<=16 (or <=8), n_l[3]<=8: packs l>=1 across 32 lanes,
 //  optional shared-memory C1 staging, split eval_cheb / edge_sh16, 8-edge warp batching)
@@ -779,8 +1512,8 @@ __global__ void __launch_bounds__(128, 6) ilmlip_l1_edge_fwd_sumswap_kernel(
 template <int LMAX, int NB_MAX, bool ZBL_SW, bool SMEM_C1, bool L2_16>
 __global__ void __launch_bounds__(128) ilmlip_l1_edge_fwd_packed_kernel(
     int N, int S, int n_base, int n_tot1, Int4 n_l, Int4 l1_off,
-    float r_max, float a0_over_sig0, float inv_DA1_sig0_kap_sq,
-    const int* __restrict__ row_ptr, const int* __restrict__ senders,
+    ChebParam r_max, float a0_over_sig0, float inv_DA1_sig0_kap_sq,
+    const int* __restrict__ row_ptr, const int* __restrict__ row_end, const int* __restrict__ senders,
     const float4* __restrict__ vec_len, const int* __restrict__ species,
     const double* __restrict__ pos64,
     const float* __restrict__ C1,  // [S*S, n_base, n_tot1]
@@ -808,7 +1541,7 @@ __global__ void __launch_bounds__(128) ilmlip_l1_edge_fwd_packed_kernel(
 
     const int z_i = species[i];
     const int eb = row_ptr[i];
-    const int ee = row_ptr[i + 1];
+    const int ee = row_end[i];
 
     // Map lane 0..31 to primary (l>=1, c) channel:
     // If !L2_16: 0..15 -> l=1, 16..23 -> l=2 (<=8), 24..31 -> l=3 (<=8 if LMAX==3)
@@ -989,8 +1722,8 @@ __global__ void __launch_bounds__(128) ilmlip_l1_edge_fwd_packed_kernel(
 template <int LMAX, int CH_PASSES, int NB_MAX, bool ZBL_SW>
 __global__ void __launch_bounds__(128) ilmlip_l1_edge_fwd_kernel(
     int N, int S, int n_base, int n_tot1, Int4 n_l, Int4 l1_off,
-    float r_max, float a0_over_sig0, float inv_DA1_sig0_kap_sq,
-    const int* __restrict__ row_ptr, const int* __restrict__ senders,
+    ChebParam r_max, float a0_over_sig0, float inv_DA1_sig0_kap_sq,
+    const int* __restrict__ row_ptr, const int* __restrict__ row_end, const int* __restrict__ senders,
     const float4* __restrict__ vec_len, const int* __restrict__ species,
     const double* __restrict__ pos64,
     const float* __restrict__ C1,  // [S*S, n_base, n_tot1]
@@ -1008,7 +1741,7 @@ __global__ void __launch_bounds__(128) ilmlip_l1_edge_fwd_kernel(
 
     const int z_i = species[i];
     const int eb = row_ptr[i];
-    const int ee = row_ptr[i + 1];
+    const int ee = row_end[i];
 
     float acc[CH_PASSES][N_SH];
     #pragma unroll
@@ -1119,7 +1852,7 @@ __global__ void __launch_bounds__(128) ilmlip_l1_edge_fwd_kernel(
 // Stages W_msg0 + W_msg1 ONCE per 8 atoms (256 threads) in dynamic SMEM (13.8 KB for l2, 17.9 KB
 // for l3) -> zero L1 thrashing, zero Bcat DRAM traffic, writes float4 I_pack4 for 1x LDG.128 L2 fwd!
 // =================================================================================================
-template <int LMAX>
+template <int LMAX, bool M8 = false>
 __global__ void __launch_bounds__(256) ilmlip_l1_node_fwd_lf1_msg_kernel(
     int N, int n_feat, int n_msg, Int4 n_l, Int4 msg_in_dim,
     CPtr4 A1, const float* __restrict__ W_msg0, const float* __restrict__ W_msg1,
@@ -1142,8 +1875,8 @@ __global__ void __launch_bounds__(256) ilmlip_l1_node_fwd_lf1_msg_kernel(
     if (i >= N) return;
 
     const int c = lane;
-    const int q = lane & 15;
-    const int half = lane >> 4;
+    const int q = M8 ? (lane & 7) : (lane & 15);
+    const int grp = M8 ? (lane >> 3) : (lane >> 4);
     const bool active_q = (q < n_msg);
 
     const int nl0 = n_l.v[0], nl1 = n_l.v[1], nl2 = n_l.v[2], nl3 = n_l.v[3];
@@ -1182,16 +1915,18 @@ __global__ void __launch_bounds__(256) ilmlip_l1_node_fwd_lf1_msg_kernel(
     float acc_i0 = 0.0f, acc_i1_0 = 0.0f, acc_i1_1 = 0.0f, acc_i1_2 = 0.0f;
     auto add_b0 = [&](float val, int b0off, int lim) {
         const float* wbase = sW0 + b0off * n_msg + q;
-        for (int k = 0; k < lim; k += 2) {
-            const int kk = k + half;
+        constexpr int STEP = M8 ? 4 : 2;
+        for (int k = 0; k < lim; k += STEP) {
+            const int kk = k + grp;
             const float v = __shfl_sync(0xffffffffu, val, (kk < lim) ? kk : 0);
             if (active_q && kk < lim) acc_i0 = fmaf(v, wbase[kk * n_msg], acc_i0);
         }
     };
     auto add_b1 = [&](float v0, float v1, float v2, int b1off, int lim) {
         const float* wbase = sW1 + b1off * n_msg + q;
-        for (int k = 0; k < lim; k += 2) {
-            const int kk = k + half;
+        constexpr int STEP = M8 ? 4 : 2;
+        for (int k = 0; k < lim; k += STEP) {
+            const int kk = k + grp;
             const int src = (kk < lim) ? kk : 0;
             const float s0 = __shfl_sync(0xffffffffu, v0, src);
             const float s1 = __shfl_sync(0xffffffffu, v1, src);
@@ -1312,7 +2047,13 @@ __global__ void __launch_bounds__(256) ilmlip_l1_node_fwd_lf1_msg_kernel(
     acc_i1_0 += __shfl_xor_sync(0xffffffffu, acc_i1_0, 16);
     acc_i1_1 += __shfl_xor_sync(0xffffffffu, acc_i1_1, 16);
     acc_i1_2 += __shfl_xor_sync(0xffffffffu, acc_i1_2, 16);
-    if (half == 0 && active_q) {
+    if constexpr (M8) {
+        acc_i0   += __shfl_xor_sync(0xffffffffu, acc_i0, 8);
+        acc_i1_0 += __shfl_xor_sync(0xffffffffu, acc_i1_0, 8);
+        acc_i1_1 += __shfl_xor_sync(0xffffffffu, acc_i1_1, 8);
+        acc_i1_2 += __shfl_xor_sync(0xffffffffu, acc_i1_2, 8);
+    }
+    if (grp == 0 && active_q) {
         if (I_pack4) {
             I_pack4[(int64_t)i * n_msg + q] = make_float4(acc_i0, acc_i1_0, acc_i1_1, acc_i1_2);
         } else {
@@ -1647,8 +2388,8 @@ __global__ void ilmlip_l1_node_fwd_kernel(
 template <bool REM_BF>
 __global__ void __launch_bounds__(256, 4) ilmlip_l2_edge_fwd_sp_kernel(
     int N, int S, int n_msg,
-    Int4 l2_c, float r_max, float a0_over_sig1, float inv_DA2_sig1_kap_sq,
-    const int* __restrict__ row_ptr, const int* __restrict__ senders,
+    Int4 l2_c, ChebParam r_max, float a0_over_sig1, float inv_DA2_sig1_kap_sq,
+    const int* __restrict__ row_ptr, const int* __restrict__ row_end, const int* __restrict__ senders,
     const float4* __restrict__ vec_len, const int* __restrict__ species,
     const float* __restrict__ C2,   // [S*S, 8, 2*n_msg]
     const float* __restrict__ Cbf,  // [S*S, 8, 2*n_msg]
@@ -1694,7 +2435,7 @@ __global__ void __launch_bounds__(256, 4) ilmlip_l2_edge_fwd_sp_kernel(
 
     const int z_i = species[i];
     const int eb = row_ptr[i];
-    const int ee = row_ptr[i + 1];
+    const int ee = row_end[i];
     const bool active_q = (slane < n_msg);
     const float4* I4_base = I_pack4 ? (I_pack4 + slane) : nullptr;
     const float* I0_base = I_node.p[0] + slane;
@@ -1822,8 +2563,8 @@ __global__ void __launch_bounds__(256, 4) ilmlip_l2_edge_fwd_sp_kernel(
 template <int LFEAT2, int SUBWARP, int MSG_PASSES, int NB_MAX, bool REM_BF, bool SMEM_C>
 __global__ void __launch_bounds__(128) ilmlip_l2_edge_fwd_fast_kernel(
     int N, int S, int n_base, int n_msg,
-    Int4 l2_c, float r_max, float a0_over_sig1, float inv_DA2_sig1_kap_sq,
-    const int* __restrict__ row_ptr, const int* __restrict__ senders,
+    Int4 l2_c, ChebParam r_max, float a0_over_sig1, float inv_DA2_sig1_kap_sq,
+    const int* __restrict__ row_ptr, const int* __restrict__ row_end, const int* __restrict__ senders,
     const float4* __restrict__ vec_len, const int* __restrict__ species,
     const float* __restrict__ C2,   // [S*S, n_base, (LFEAT2+1)*n_msg]
     const float* __restrict__ Cbf,  // [S*S, n_base, 2*n_msg]
@@ -1862,7 +2603,7 @@ __global__ void __launch_bounds__(128) ilmlip_l2_edge_fwd_fast_kernel(
 
     const int z_i = species[i];
     const int eb = row_ptr[i];
-    const int ee = row_ptr[i + 1];
+    const int ee = row_end[i];
     const float* C2_base = SMEM_C ? smem_c : C2;
     const float* Cbf_base = REM_BF ? (SMEM_C ? (smem_c + c2_elems) : Cbf) : nullptr;
 
@@ -2055,17 +2796,18 @@ __global__ void __launch_bounds__(128) ilmlip_l2_edge_fwd_fast_kernel(
 // =================================================================================================
 template <int MSG_PASSES, int MAX_L2_OUT, bool REM_BF>
 __global__ void __launch_bounds__(128) ilmlip_l2_edge_fwd_kernel(
-    int N, int S, int lfeat2, int lmsg, int lout2, int n_base, int n_msg, int n_l2_paths,
-    Int4 l2_c, float inv_rmax, float a0_over_sig1, float inv_DA2_sig1_kap_sq,
-    const int* __restrict__ row_ptr, const int* __restrict__ senders,
+    int N, int S, int lfeat2, int lmsg, int lout2, int n_base2, int n_base_bf, int n_msg, int n_l2_paths,
+    Int4 l2_c, ChebParam r_max2, ChebParam r_max1, float a0_over_sig1, float inv_DA2_sig1_kap_sq,
+    const int* __restrict__ row_ptr, const int* __restrict__ row_end, const int* __restrict__ senders,
     const float4* __restrict__ vec_len, const int* __restrict__ species,
-    const float* __restrict__ C2,   // [S*S, n_base, (lfeat2+1)*n_msg]
-    const float* __restrict__ Cbf,  // [S*S, n_base, (lmsg+1)*n_msg]
+    const float* __restrict__ C2,   // [S*S, n_base2, (lfeat2+1)*n_msg]
+    const float* __restrict__ Cbf,  // [S*S, n_base_bf, (lmsg+1)*n_msg]
     const float* __restrict__ f0, CPtr4 I_node,
     const int32_t* __restrict__ l2p,  // [n_l2_paths, 7]: l1, l2, L, p_in_L, cg_off, cg_cnt, reg_off
     const int32_t* __restrict__ cg_idx, const float* __restrict__ cg_val,
     Ptr4 A2, float* __restrict__ f1_out) {
     __shared__ float s_g[4][32];
+    __shared__ float s_g1[4][32];
     __shared__ float s_Y[4][16];
 
     const int wid = threadIdx.x >> 5;
@@ -2075,10 +2817,12 @@ __global__ void __launch_bounds__(128) ilmlip_l2_edge_fwd_kernel(
 
     const int z_i = species[i];
     const int eb = row_ptr[i];
-    const int ee = row_ptr[i + 1];
+    const int ee = row_end[i];
     const int l2_tot_cols = (lfeat2 + 1) * n_msg;
     const int bf_tot_cols = (lmsg + 1) * n_msg;
     const int sh_lmax = lfeat2 > lmsg ? lfeat2 : lmsg;
+    const bool dual_r = (r_max2.r_max < r_max1.r_max - 1e-6f);
+    const int nb_eval = (!dual_r && REM_BF && n_base_bf > n_base2) ? n_base_bf : n_base2;
 
     float acc[MSG_PASSES][MAX_L2_OUT];
     #pragma unroll
@@ -2092,10 +2836,12 @@ __global__ void __launch_bounds__(128) ilmlip_l2_edge_fwd_kernel(
         const int z_j = __ldg(species + j);
         const int pair = z_i * S + z_j;
         const float r = fmaxf(vl.w, 1e-8f);
+        if (dual_r && r >= r_max2.r_max) continue;
         const float f0_j = REM_BF ? __ldg(f0 + j) : 0.0f;
 
         if (lane == 0) {
-            eval_cheb<false>(r, inv_rmax, n_base, s_g[wid], nullptr);
+            eval_cheb<false>(r, r_max2, nb_eval, s_g[wid], nullptr);
+            if (REM_BF && dual_r) eval_cheb<false>(r, r_max1, n_base_bf, s_g1[wid], nullptr);
             float4 Yv[4];
             loup::edge_sh16(vl.x, vl.y, vl.z, r, Yv);
             s_Y[wid][0] = Yv[0].x; s_Y[wid][1] = Yv[0].y; s_Y[wid][2] = Yv[0].z; s_Y[wid][3] = Yv[0].w;
@@ -2106,8 +2852,9 @@ __global__ void __launch_bounds__(128) ilmlip_l2_edge_fwd_kernel(
         }
         __syncwarp();
 
-        const float* C2p = C2 + (int64_t)pair * n_base * l2_tot_cols;
-        const float* Cbfp = REM_BF ? (Cbf + (int64_t)pair * n_base * bf_tot_cols) : nullptr;
+        const float* C2p = C2 + (int64_t)pair * n_base2 * l2_tot_cols;
+        const float* Cbfp = REM_BF ? (Cbf + (int64_t)pair * n_base_bf * bf_tot_cols) : nullptr;
+        const float* g_bf = (REM_BF && dual_r) ? s_g1[wid] : s_g[wid];
 
         #pragma unroll
         for (int s = 0; s < MSG_PASSES; ++s) {
@@ -2118,7 +2865,7 @@ __global__ void __launch_bounds__(128) ilmlip_l2_edge_fwd_kernel(
             for (int l1 = 0; l1 <= lfeat2; ++l1) {
                 float rv = 0.0f;
                 const float* col = C2p + l1 * n_msg + q;
-                for (int k = 0; k < n_base; ++k) rv = fmaf(__ldg(col + k * l2_tot_cols), s_g[wid][k], rv);
+                for (int k = 0; k < n_base2; ++k) rv = fmaf(__ldg(col + k * l2_tot_cols), s_g[wid][k], rv);
                 r2[l1] = rv;
             }
 
@@ -2127,7 +2874,7 @@ __global__ void __launch_bounds__(128) ilmlip_l2_edge_fwd_kernel(
                 float rbf = 0.0f;
                 if (REM_BF) {
                     const float* col = Cbfp + l2 * n_msg + q;
-                    for (int k = 0; k < n_base; ++k) rbf = fmaf(__ldg(col + k * bf_tot_cols), s_g[wid][k], rbf);
+                    for (int k = 0; k < n_base_bf; ++k) rbf = fmaf(__ldg(col + k * bf_tot_cols), g_bf[k], rbf);
                     rbf *= f0_j;
                 }
                 const int m0 = l2 * l2;
@@ -2671,6 +3418,87 @@ __global__ void __launch_bounds__(128) ilmlip_energy_ro_kernel(
     if (lane == 0 && e_atom != 0.0) atomicAdd(energy, e_atom);
 }
 
+// Fused 1-hidden-layer Readout Tail for depth==1, width==64, need_grad==true:
+// 16 lanes/atom (8 atoms/CTA), float4 LDG.128/STG.128, 1 CTA-wide atomicAdd(energy), inline eA_dpre0!
+template <bool ZBL_SW>
+__global__ void __launch_bounds__(128) ilmlip_ro1_tail_w64_kernel(
+    int N, float inv_zc, const int* __restrict__ species,
+    const float* __restrict__ pre0, const float* __restrict__ alpha_Z, const float* __restrict__ u_Z,
+    const double* __restrict__ e_zbl, double* __restrict__ energy, double* __restrict__ atom_energy,
+    float* __restrict__ w_zbl_out, float* __restrict__ dpre0, int8_t* __restrict__ eA_dpre0) {
+    __shared__ double s_e[8];
+    const int sid = threadIdx.x >> 4;
+    const int slane = threadIdx.x & 15;
+    const unsigned smask = (sid & 1) ? 0xffff0000u : 0x0000ffffu;
+    const int i = blockIdx.x * 8 + sid;
+    if (slane == 0) s_e[sid] = 0.0;
+    if (i < N) {
+        const int sp = species[i];
+        const float4 p = reinterpret_cast<const float4*>(pre0 + (int64_t)i * 64)[slane];
+        const float4 a = __ldg(reinterpret_cast<const float4*>(alpha_Z + (int64_t)sp * 64) + slane);
+        const float4 u = __ldg(reinterpret_cast<const float4*>(u_Z + (int64_t)sp * 64) + slane);
+        const float zx = p.x + a.x, zy = p.y + a.y, zz = p.z + a.z, zw = p.w + a.w;
+        const float sx = 1.0f / (1.0f + __expf(-zx));
+        const float sy = 1.0f / (1.0f + __expf(-zy));
+        const float sz = 1.0f / (1.0f + __expf(-zz));
+        const float sw_ = 1.0f / (1.0f + __expf(-zw));
+        const float dot = fmaf(zx * sx, u.x, fmaf(zy * sy, u.y, fmaf(zz * sz, u.z, (zw * sw_) * u.w)));
+        const float e_ml = half_warp_sum_f(dot, smask);
+        float sw = 1.0f;
+        float wz = 0.0f;
+        double node_inter = (double)e_ml;
+        if constexpr (ZBL_SW) {
+            const double ez = e_zbl[i];
+            const double inv_zc_d = (double)inv_zc;
+            const double xc = ez * inv_zc_d;
+            if (xc <= 0.0) {
+                sw = 1.0f; wz = 1.0f; node_inter = (double)e_ml + ez;
+            } else if (xc >= 1.0) {
+                sw = 0.0f; wz = 1.0f; node_inter = ez;
+            } else {
+                const double xc2 = xc * xc;
+                const double xc3 = xc2 * xc;
+                const double sw_d = 1.0 - 10.0 * xc3 + 15.0 * xc3 * xc - 6.0 * xc3 * xc2;
+                const double omx = 1.0 - xc;
+                sw = (float)sw_d;
+                wz = (float)(1.0 + (double)e_ml * (-30.0 * xc2 * omx * omx) * inv_zc_d);
+                node_inter = sw_d * (double)e_ml + ez;
+            }
+        }
+        if (slane == 0) {
+            s_e[sid] = node_inter;
+            if (atom_energy) atom_energy[i] += node_inter;
+            if constexpr (ZBL_SW) w_zbl_out[i] = wz;
+        }
+        const float dpx = sw * u.x * (sx * (1.0f + zx * (1.0f - sx)));
+        const float dpy = sw * u.y * (sy * (1.0f + zy * (1.0f - sy)));
+        const float dpz = sw * u.z * (sz * (1.0f + zz * (1.0f - sz)));
+        const float dpw = sw * u.w * (sw_ * (1.0f + zw * (1.0f - sw_)));
+        reinterpret_cast<float4*>(dpre0 + (int64_t)i * 64)[slane] = make_float4(dpx, dpy, dpz, dpw);
+        if (eA_dpre0) {
+            float am = fmaxf(fmaxf(fabsf(dpx), fabsf(dpy)), fmaxf(fabsf(dpz), fabsf(dpw)));
+            am = fmaxf(am, __shfl_xor_sync(smask, am, 8));
+            am = fmaxf(am, __shfl_xor_sync(smask, am, 4));
+            am = fmaxf(am, __shfl_xor_sync(smask, am, 2));
+            am = fmaxf(am, __shfl_xor_sync(smask, am, 1));
+            if (slane == 0) {
+                int e = -127;
+                if (am > 0.0f && isfinite(am)) {
+                    e = (int)((__float_as_uint(am) >> 23) & 0xff) - 127 + 1;
+                    if (e < -108) e = -108;
+                    if (e > 108) e = 108;
+                }
+                eA_dpre0[i] = (int8_t)e;
+            }
+        }
+    }
+    __syncthreads();
+    if (threadIdx.x == 0) {
+        const double etot = (s_e[0] + s_e[1]) + (s_e[2] + s_e[3]) + (s_e[4] + s_e[5]) + (s_e[6] + s_e[7]);
+        if (etot != 0.0) atomicAdd(energy, etot);
+    }
+}
+
 // =================================================================================================
 // Kernel 6s: Zero-Spill Fast Layer-2 Invariants Backward (lout2==2, canonical 4 bisp, r_gram<=32)
 // Stages P and symmetric Gmat[r_gram][r_gram+1] in SMEM (0 triangular index math, 0 bank conflicts)
@@ -3195,14 +4023,16 @@ __global__ void __launch_bounds__(128) ilmlip_gate_bwd_pack_l2_kernel(
 // - __launch_bounds__(128, 5) -> 96 regs/thread (ZERO local-memory stack spills!)
 // - Register-cached C2+Cbf (0 SMEM reads for weights), padded [8][9] float4 SMEM, exact FP32 dA2_pack!
 // =================================================================================================
-template <bool REM_BF, bool STRESS>
+template <bool REM_BF, bool STRESS, bool F32_F = false>
 __global__ void __launch_bounds__(128, 5) ilmlip_l2_edge_bwd_sender_kernel(
-    int N, int S, int n_msg, float r_max,
-    const int* __restrict__ row_ptr, const int* __restrict__ senders,
+    int N, int S, int n_msg, ChebParam r_max,
+    const int* __restrict__ row_ptr, const int* __restrict__ row_end, const int* __restrict__ senders,
     const float4* __restrict__ vec_len, const int* __restrict__ species,
     const float* __restrict__ C2, const float* __restrict__ Cbf,
     const float* __restrict__ f0, const float4* __restrict__ I_pack4, CPtr4 I_node, const float* __restrict__ dA2_pack,
-    Ptr4 dI_node, float* __restrict__ df0_bf, double* __restrict__ forces, double* __restrict__ virial) {
+    Ptr4 dI_node, float* __restrict__ df0_bf,
+    double* __restrict__ forces, float* __restrict__ forces_f32, double* __restrict__ virial) {
+    using FT = typename std::conditional<F32_F, float, double>::type;
     __shared__ float4 s_g03[8][9];
     __shared__ float4 s_g47[8][9];
     __shared__ float4 s_dg03[8][9];
@@ -3210,7 +4040,7 @@ __global__ void __launch_bounds__(128, 5) ilmlip_l2_edge_bwd_sender_kernel(
     __shared__ float4 s_Y[8][9];
     __shared__ float4 s_vl[8][9];
     __shared__ float  s_er_dY[8][9][4];
-    __shared__ double s_sf[8][3];
+    __shared__ FT     s_sf[8][3];
     __shared__ int    s_eq[8][17];
     __shared__ int    s_iq[8][17];
 
@@ -3224,7 +4054,7 @@ __global__ void __launch_bounds__(128, 5) ilmlip_l2_edge_bwd_sender_kernel(
 
     const int z_j = species[j];
     const int eb = row_ptr[j];
-    const int ee = row_ptr[j + 1];
+    const int ee = row_end[j];
     const int l2_tot_cols = 2 * n_msg;
     const bool active_q = (slane < n_msg);
     const float f0_j = REM_BF ? __ldg(f0 + j) : 0.0f;
@@ -3386,7 +4216,7 @@ __global__ void __launch_bounds__(128, 5) ilmlip_l2_edge_bwd_sender_kernel(
                 }
                 __syncwarp(smask);
 
-                double bfx = 0.0, bfy = 0.0, bfz = 0.0;
+                FT bfx = (FT)0, bfy = (FT)0, bfz = (FT)0;
                 if (slane < bcnt) {
                     const float4 vl = s_vl[sid][slane];
                     const int i_nb = s_iq[sid][qb + slane];
@@ -3397,24 +4227,36 @@ __global__ void __launch_bounds__(128, 5) ilmlip_l2_edge_bwd_sender_kernel(
                     float gx, gy, gz;
                     sh_grad_l1(ed.y, ed.z, ed.w, gx, gy, gz);
                     const float dot = ux * gx + uy * gy + uz * gz;
-                    bfx = (double)(ux * ed.x + (gx - ux * dot) * inv_d);
-                    bfy = (double)(uy * ed.x + (gy - uy * dot) * inv_d);
-                    bfz = (double)(uz * ed.x + (gz - uz * dot) * inv_d);
-                    atomicAdd(forces + (int64_t)i_nb * 3 + 0, -bfx);
-                    atomicAdd(forces + (int64_t)i_nb * 3 + 1, -bfy);
-                    atomicAdd(forces + (int64_t)i_nb * 3 + 2, -bfz);
+                    bfx = (FT)(ux * ed.x + (gx - ux * dot) * inv_d);
+                    bfy = (FT)(uy * ed.x + (gy - uy * dot) * inv_d);
+                    bfz = (FT)(uz * ed.x + (gz - uz * dot) * inv_d);
+                    if constexpr (F32_F) {
+                        atomicAdd(forces_f32 + (int64_t)i_nb * 3 + 0, -bfx);
+                        atomicAdd(forces_f32 + (int64_t)i_nb * 3 + 1, -bfy);
+                        atomicAdd(forces_f32 + (int64_t)i_nb * 3 + 2, -bfz);
+                    } else {
+                        atomicAdd(forces + (int64_t)i_nb * 3 + 0, -bfx);
+                        atomicAdd(forces + (int64_t)i_nb * 3 + 1, -bfy);
+                        atomicAdd(forces + (int64_t)i_nb * 3 + 2, -bfz);
+                    }
                     if constexpr (STRESS) {
-                        v0 += (double)vl.x * bfx;
-                        v1 += 0.5 * ((double)vl.x * bfy + (double)vl.y * bfx);
-                        v2 += 0.5 * ((double)vl.x * bfz + (double)vl.z * bfx);
-                        v3 += (double)vl.y * bfy;
-                        v4 += 0.5 * ((double)vl.y * bfz + (double)vl.z * bfy);
-                        v5 += (double)vl.z * bfz;
+                        v0 += (double)vl.x * (double)bfx;
+                        v1 += 0.5 * ((double)vl.x * (double)bfy + (double)vl.y * (double)bfx);
+                        v2 += 0.5 * ((double)vl.x * (double)bfz + (double)vl.z * (double)bfx);
+                        v3 += (double)vl.y * (double)bfy;
+                        v4 += 0.5 * ((double)vl.y * (double)bfz + (double)vl.z * (double)bfy);
+                        v5 += (double)vl.z * (double)bfz;
                     }
                 }
-                bfx = half_warp_sum_d(bfx, smask);
-                bfy = half_warp_sum_d(bfy, smask);
-                bfz = half_warp_sum_d(bfz, smask);
+                if constexpr (F32_F) {
+                    bfx = half_warp_sum_f(bfx, smask);
+                    bfy = half_warp_sum_f(bfy, smask);
+                    bfz = half_warp_sum_f(bfz, smask);
+                } else {
+                    bfx = half_warp_sum_d(bfx, smask);
+                    bfy = half_warp_sum_d(bfy, smask);
+                    bfz = half_warp_sum_d(bfz, smask);
+                }
                 if (slane == 0) {
                     s_sf[sid][0] += bfx;
                     s_sf[sid][1] += bfy;
@@ -3479,11 +4321,17 @@ __global__ void __launch_bounds__(128, 5) ilmlip_l2_edge_bwd_sender_kernel(
         v3 = half_warp_sum_d(v3, smask); v4 = half_warp_sum_d(v4, smask); v5 = half_warp_sum_d(v5, smask);
     }
     if (slane == 0) {
-        const double sfx = s_sf[sid][0], sfy = s_sf[sid][1], sfz = s_sf[sid][2];
-        if (sfx != 0.0 || sfy != 0.0 || sfz != 0.0) {
-            atomicAdd(forces + (int64_t)j * 3 + 0, sfx);
-            atomicAdd(forces + (int64_t)j * 3 + 1, sfy);
-            atomicAdd(forces + (int64_t)j * 3 + 2, sfz);
+        const FT sfx = s_sf[sid][0], sfy = s_sf[sid][1], sfz = s_sf[sid][2];
+        if (sfx != (FT)0 || sfy != (FT)0 || sfz != (FT)0) {
+            if constexpr (F32_F) {
+                atomicAdd(forces_f32 + (int64_t)j * 3 + 0, sfx);
+                atomicAdd(forces_f32 + (int64_t)j * 3 + 1, sfy);
+                atomicAdd(forces_f32 + (int64_t)j * 3 + 2, sfz);
+            } else {
+                atomicAdd(forces + (int64_t)j * 3 + 0, sfx);
+                atomicAdd(forces + (int64_t)j * 3 + 1, sfy);
+                atomicAdd(forces + (int64_t)j * 3 + 2, sfz);
+            }
         }
         if constexpr (STRESS) {
             if (v0 != 0.0) atomicAdd(virial + 0, v0);
@@ -3502,8 +4350,8 @@ __global__ void __launch_bounds__(128, 5) ilmlip_l2_edge_bwd_sender_kernel(
 template <bool REM_BF, bool STRESS>
 __global__ void __launch_bounds__(128) ilmlip_l2_edge_bwd_sp_kernel(
     int N, int S, int n_msg,
-    Int4 l2_c, float r_max,
-    const int* __restrict__ row_ptr, const int* __restrict__ senders,
+    Int4 l2_c, ChebParam r_max,
+    const int* __restrict__ row_ptr, const int* __restrict__ row_end, const int* __restrict__ senders,
     const float4* __restrict__ vec_len, const int* __restrict__ species,
     const float* __restrict__ C2, const float* __restrict__ Cbf,
     const float* __restrict__ f0, const float4* __restrict__ I_pack4, CPtr4 I_node, CPtr4 dA2_raw,
@@ -3527,7 +4375,7 @@ __global__ void __launch_bounds__(128) ilmlip_l2_edge_bwd_sp_kernel(
 
     const int z_i = species[i];
     const int eb = row_ptr[i];
-    const int ee = row_ptr[i + 1];
+    const int ee = row_end[i];
     const int l2_tot_cols = 2 * n_msg;
     const bool active_q = (slane < n_msg);
 
@@ -3798,8 +4646,8 @@ __global__ void __launch_bounds__(128) ilmlip_l2_edge_bwd_sp_kernel(
 template <int LFEAT2, int SUBWARP, int MSG_PASSES, int NB_MAX, bool REM_BF, bool STRESS, bool SMEM_C>
 __global__ void __launch_bounds__(128) ilmlip_l2_edge_bwd_fast_kernel(
     int N, int S, int n_base, int n_msg,
-    Int4 l2_c, float r_max,
-    const int* __restrict__ row_ptr, const int* __restrict__ senders,
+    Int4 l2_c, ChebParam r_max,
+    const int* __restrict__ row_ptr, const int* __restrict__ row_end, const int* __restrict__ senders,
     const float4* __restrict__ vec_len, const int* __restrict__ species,
     const float* __restrict__ C2, const float* __restrict__ Cbf,
     const float* __restrict__ f0, CPtr4 I_node, CPtr4 dA2_raw,
@@ -3841,7 +4689,7 @@ __global__ void __launch_bounds__(128) ilmlip_l2_edge_bwd_fast_kernel(
 
     const int z_i = species[i];
     const int eb = row_ptr[i];
-    const int ee = row_ptr[i + 1];
+    const int ee = row_end[i];
     const float* C2_base = SMEM_C ? smem_c : C2;
     const float* Cbf_base = REM_BF ? (SMEM_C ? (smem_c + c2_elems) : Cbf) : nullptr;
 
@@ -4215,9 +5063,9 @@ __global__ void __launch_bounds__(128) ilmlip_l2_edge_bwd_fast_kernel(
 // =================================================================================================
 template <int MSG_PASSES, int MAX_L2_OUT, bool REM_BF, bool STRESS>
 __global__ void __launch_bounds__(128) ilmlip_l2_edge_bwd_kernel(
-    int N, int S, int lfeat2, int lmsg, int lout2, int n_base, int n_msg, int n_l2_paths,
-    Int4 l2_c, float inv_rmax,
-    const int* __restrict__ row_ptr, const int* __restrict__ senders,
+    int N, int S, int lfeat2, int lmsg, int lout2, int n_base2, int n_base_bf, int n_msg, int n_l2_paths,
+    Int4 l2_c, ChebParam r_max2, ChebParam r_max1,
+    const int* __restrict__ row_ptr, const int* __restrict__ row_end, const int* __restrict__ senders,
     const float4* __restrict__ vec_len, const int* __restrict__ species,
     const float* __restrict__ C2, const float* __restrict__ Cbf,
     const float* __restrict__ f0, CPtr4 I_node, CPtr4 dA2_raw,
@@ -4225,6 +5073,8 @@ __global__ void __launch_bounds__(128) ilmlip_l2_edge_bwd_kernel(
     Ptr4 dI_node, float* __restrict__ df0_bf, double* __restrict__ forces, double* __restrict__ virial) {
     __shared__ float s_g[4][32];
     __shared__ float s_dg[4][32];
+    __shared__ float s_g1[4][32];
+    __shared__ float s_dg1[4][32];
     __shared__ float s_Y[4][16];
 
     const int wid = threadIdx.x >> 5;
@@ -4234,11 +5084,13 @@ __global__ void __launch_bounds__(128) ilmlip_l2_edge_bwd_kernel(
 
     const int z_i = species[i];
     const int eb = row_ptr[i];
-    const int ee = row_ptr[i + 1];
+    const int ee = row_end[i];
     const int l2_tot_cols = (lfeat2 + 1) * n_msg;
     const int bf_tot_cols = (lmsg + 1) * n_msg;
     const int sh_lmax = lfeat2 > lmsg ? lfeat2 : lmsg;
     const int n_sh = (sh_lmax + 1) * (sh_lmax + 1);
+    const bool dual_r = (r_max2.r_max < r_max1.r_max - 1e-6f);
+    const int nb_eval = (!dual_r && REM_BF && n_base_bf > n_base2) ? n_base_bf : n_base2;
 
     // Stage receiver i's dA2_raw once in registers!
     float gA2[MSG_PASSES][MAX_L2_OUT];
@@ -4266,10 +5118,12 @@ __global__ void __launch_bounds__(128) ilmlip_l2_edge_bwd_kernel(
         const int z_j = __ldg(species + j);
         const int pair = z_i * S + z_j;
         const float r = fmaxf(vl.w, 1e-8f);
+        if (dual_r && r >= r_max2.r_max) continue;
         const float f0_j = REM_BF ? __ldg(f0 + j) : 0.0f;
 
         if (lane == 0) {
-            eval_cheb<true>(r, inv_rmax, n_base, s_g[wid], s_dg[wid]);
+            eval_cheb<true>(r, r_max2, nb_eval, s_g[wid], s_dg[wid]);
+            if (REM_BF && dual_r) eval_cheb<true>(r, r_max1, n_base_bf, s_g1[wid], s_dg1[wid]);
             float4 Yv[4];
             loup::edge_sh16(vl.x, vl.y, vl.z, r, Yv);
             s_Y[wid][0] = Yv[0].x; s_Y[wid][1] = Yv[0].y; s_Y[wid][2] = Yv[0].z; s_Y[wid][3] = Yv[0].w;
@@ -4280,8 +5134,10 @@ __global__ void __launch_bounds__(128) ilmlip_l2_edge_bwd_kernel(
         }
         __syncwarp();
 
-        const float* C2p = C2 + (int64_t)pair * n_base * l2_tot_cols;
-        const float* Cbfp = REM_BF ? (Cbf + (int64_t)pair * n_base * bf_tot_cols) : nullptr;
+        const float* C2p = C2 + (int64_t)pair * n_base2 * l2_tot_cols;
+        const float* Cbfp = REM_BF ? (Cbf + (int64_t)pair * n_base_bf * bf_tot_cols) : nullptr;
+        const float* g_bf = (REM_BF && dual_r) ? s_g1[wid] : s_g[wid];
+        const float* dg_bf = (REM_BF && dual_r) ? s_dg1[wid] : s_dg[wid];
 
         float er_lane = 0.0f;
         float df0_lane = 0.0f;
@@ -4297,7 +5153,7 @@ __global__ void __launch_bounds__(128) ilmlip_l2_edge_bwd_kernel(
             for (int l1 = 0; l1 <= lfeat2; ++l1) {
                 float rv = 0.0f, drv = 0.0f;
                 const float* col = C2p + l1 * n_msg + q;
-                for (int k = 0; k < n_base; ++k) {
+                for (int k = 0; k < n_base2; ++k) {
                     const float cval = __ldg(col + k * l2_tot_cols);
                     rv = fmaf(cval, s_g[wid][k], rv);
                     drv = fmaf(cval, s_dg[wid][k], drv);
@@ -4314,10 +5170,10 @@ __global__ void __launch_bounds__(128) ilmlip_l2_edge_bwd_kernel(
                 if (REM_BF) {
                     float rv = 0.0f, drv = 0.0f;
                     const float* col = Cbfp + l2 * n_msg + q;
-                    for (int k = 0; k < n_base; ++k) {
+                    for (int k = 0; k < n_base_bf; ++k) {
                         const float cval = __ldg(col + k * bf_tot_cols);
-                        rv = fmaf(cval, s_g[wid][k], rv);
-                        drv = fmaf(cval, s_dg[wid][k], drv);
+                        rv = fmaf(cval, g_bf[k], rv);
+                        drv = fmaf(cval, dg_bf[k], drv);
                     }
                     rbf[l2] = rv;
                     drbf_dr[l2] = drv;
@@ -4428,7 +5284,7 @@ __global__ void __launch_bounds__(128) ilmlip_l2_edge_bwd_kernel(
 // Stages W_msg0_T + W_msg1_T ONCE per 8 atoms (256 threads) in dynamic SMEM (13.8 KB for l2, 17.9 KB
 // for l3) -> zero L1 thrashing, zero bank conflicts across c=0..31, zero dBcat DRAM traffic!
 // =================================================================================================
-template <int LMAX>
+template <int LMAX, bool M8 = false>
 __global__ void __launch_bounds__(256) ilmlip_l1_node_bwd_lf1_msg_kernel(
     int N, int n_feat, int n_msg, Int4 n_l, Int4 msg_in_dim,
     CPtr4 A1, const float* __restrict__ dx, CPtr4 dI,
@@ -4459,6 +5315,13 @@ __global__ void __launch_bounds__(256) ilmlip_l1_node_bwd_lf1_msg_kernel(
         s_dI1[wid][0][lane] = __ldg(p1);
         s_dI1[wid][1][lane] = __ldg(p1 + n_msg);
         s_dI1[wid][2][lane] = __ldg(p1 + 2 * n_msg);
+    } else if constexpr (M8) {
+        if (lane < 8) {
+            s_dI0[wid][lane] = 0.0f;
+            s_dI1[wid][0][lane] = 0.0f;
+            s_dI1[wid][1][lane] = 0.0f;
+            s_dI1[wid][2][lane] = 0.0f;
+        }
     }
     __syncwarp();
 
@@ -4469,7 +5332,12 @@ __global__ void __launch_bounds__(256) ilmlip_l1_node_bwd_lf1_msg_kernel(
     auto get_gbc0 = [&](int off) -> float {
         const float* wt = sW0T + off + c;
         float acc = 0.0f;
-        if (n_msg == 16) {
+        if constexpr (M8) {
+            #pragma unroll
+            for (int q = 0; q < 8; ++q) {
+                if (q < n_msg) acc = fmaf(s_dI0[wid][q], wt[q * m0d], acc);
+            }
+        } else if (n_msg == 16) {
             #pragma unroll
             for (int q = 0; q < 16; ++q) acc = fmaf(s_dI0[wid][q], wt[q * m0d], acc);
         } else {
@@ -4480,7 +5348,17 @@ __global__ void __launch_bounds__(256) ilmlip_l1_node_bwd_lf1_msg_kernel(
     auto get_gbc1 = [&](int off, float& o0, float& o1, float& o2) {
         const float* wt = sW1T + off + c;
         float r0 = 0.0f, r1 = 0.0f, r2 = 0.0f;
-        if (n_msg == 16) {
+        if constexpr (M8) {
+            #pragma unroll
+            for (int q = 0; q < 8; ++q) {
+                if (q < n_msg) {
+                    const float w = wt[q * m1d];
+                    r0 = fmaf(s_dI1[wid][0][q], w, r0);
+                    r1 = fmaf(s_dI1[wid][1][q], w, r1);
+                    r2 = fmaf(s_dI1[wid][2][q], w, r2);
+                }
+            }
+        } else if (n_msg == 16) {
             #pragma unroll
             for (int q = 0; q < 16; ++q) {
                 const float w = wt[q * m1d];
@@ -5184,47 +6062,51 @@ __global__ void ilmlip_l1_node_bwd_kernel(
 }
 
 // =================================================================================================
-// Kernel 8b-pre: Pre-Contracted Layer-1 Edge Backward (S*NB<=32, NB in {8,12,16}, max_nl<=32)
-// Phase 1: ZERO-SHUFFLE pre-contraction! Each lane p = zj*NB + k (< S*NB <= 32) independently
-//   contracts s_gA1[wid] against coalesced C1_zick[z_i, c, p] -> 0 shuffles (~12x faster Phase 1!).
-// Phase 2: 1 THREAD = 1 FULL EDGE with streaming FP32 Chebyshev + exact pos64 FP64 ZBL close-contact!
+// Kernel 8b-pre: Pre-Contracted Layer-1 Edge Backward (32 lanes/atom -> 128 threads = 4 atoms/CTA!)
+// Phase 1: ZERO-SHUFFLE pre-contraction over p = lane, lane+32 (< S*NB <= 64)
+// Phase 2: 32 lanes/atom = 1 thread/edge with exact 2-FMA ChebParam, edge_sh16_unit (1x 1/r), STACK:0!
 // =================================================================================================
-template <int LMAX, int NB, bool ZBL_SW, bool STRESS>
-__global__ void __launch_bounds__(128) ilmlip_l1_edge_bwd_precontract_kernel(
-    int N, int S, int n_tot1, Int4 n_l, Int4 l1_off, float r_max, float inv_DA1_a0_kap_sq,
-    const int* __restrict__ row_ptr, const int* __restrict__ senders,
+template <int LMAX, int NB, bool ZBL_SW, bool STRESS, bool F32_F = false, int SW = 32, bool PACK_VS = false>
+__global__ void __launch_bounds__(128, (LMAX == 3) ? 5 : (ZBL_SW ? 4 : 6)) ilmlip_l1_edge_bwd_precontract_kernel(
+    int N, int S, int n_tot1, Int4 n_l, Int4 l1_off, ChebParam r_max, float inv_DA1_a0_kap_sq,
+    const int* __restrict__ row_ptr, const int* __restrict__ row_end, const int* __restrict__ senders,
     const float4* __restrict__ vec_len, const int* __restrict__ species,
     const double* __restrict__ pos64,
     const float* __restrict__ C1_zick,  // [S, n_tot1, S*NB]
     const double* __restrict__ rs_pair, const double* __restrict__ zz_pair, const double* __restrict__ au_pair,
     const float* __restrict__ w_zbl,
     CPtr4 A1, CPtr4 dA1, const float* __restrict__ f0_arr, const float* __restrict__ df0_bf,
-    double* __restrict__ forces, double* __restrict__ virial) {
-    constexpr int N_SH = (LMAX + 1) * (LMAX + 1);
-    constexpr int GT_STRIDE = ((NB * N_SH) % 16 == 0) ? (NB * N_SH + 8) : (NB * N_SH);
-    constexpr int MAX_GA = (LMAX == 2) ? 256 : 384;
-    __shared__ float s_Gt[4][4 * GT_STRIDE];
-    __shared__ float s_gA1[4][MAX_GA];
+    double* __restrict__ forces, float* __restrict__ forces_f32, double* __restrict__ virial) {
+    using FT = typename std::conditional<F32_F, float, double>::type;
+    constexpr int APB = 128 / SW;
+    constexpr int K_ROW_STRIDE = (LMAX == 3) ? 16 : 12;
+    constexpr int GT_STRIDE = (LMAX == 3) ? (NB * 16 + 4) : (NB * 12 + 4);
+    const int nl0 = n_l.v[0], nl1 = n_l.v[1], nl2 = n_l.v[2], nl3 = n_l.v[3];
+    const int ga_stride = nl0 + 3 * nl1 + 5 * nl2 + (LMAX == 3 ? 7 * nl3 : 0);
+    extern __shared__ float pre_smem[];
+    float* s_Gt_all = pre_smem;
+    float* s_gA1_all = s_Gt_all + (size_t)APB * S * GT_STRIDE;
 
-    const int wid = threadIdx.x >> 5;
-    const int lane = threadIdx.x & 31;
-    const int i = blockIdx.x * 4 + wid;
+    const int wid = (SW == 16) ? (threadIdx.x >> 4) : (threadIdx.x >> 5);
+    const int lane = threadIdx.x & (SW - 1);
+    const unsigned smask = (SW == 16) ? ((wid & 1) ? 0xffff0000u : 0x0000ffffu) : 0xffffffffu;
+    const int i = blockIdx.x * APB + wid;
     if (i >= N) return;
 
     const int eb = row_ptr[i];
-    const int ee = row_ptr[i + 1];
+    const int ee = row_end[i];
     if (eb >= ee) return;
 
     const int z_i = species[i];
     const float wz_i = ZBL_SW ? w_zbl[i] : 0.0f;
-    const int nl0 = n_l.v[0], nl1 = n_l.v[1], nl2 = n_l.v[2], nl3 = n_l.v[3];
     const int off1 = l1_off.v[1], off2 = l1_off.v[2], off3 = l1_off.v[3];
     const int ga1 = nl0;
     const int ga2 = ga1 + 3 * nl1;
     const int ga3 = ga2 + 5 * nl2;
 
     // Phase 1a: FUSED f0 gate backward directly into s_gA1[wid] (skips ilmlip_gate_bwd_kernel & DRAM round-trip!)
-    float* gA = s_gA1[wid];
+    float* s_Gt_w = s_Gt_all + (size_t)wid * S * GT_STRIDE;
+    float* gA = s_gA1_all + (size_t)wid * ga_stride;
     float dot_lane = 0.0f;
     const float* pA0 = A1.p[0] + (int64_t)i * nl0;
     const float* pd0 = dA1.p[0] + (int64_t)i * nl0;
@@ -5235,33 +6117,40 @@ __global__ void __launch_bounds__(128) ilmlip_l1_edge_bwd_precontract_kernel(
     const float* pA3 = (LMAX == 3) ? (A1.p[3] + (int64_t)i * 7 * nl3) : nullptr;
     const float* pd3 = (LMAX == 3) ? (dA1.p[3] + (int64_t)i * 7 * nl3) : nullptr;
 
-    if (lane < nl0) dot_lane = fmaf(pA0[lane], pd0[lane], dot_lane);
-    for (int idx = lane; idx < 3 * nl1; idx += 32) dot_lane = fmaf(pA1[idx], pd1[idx], dot_lane);
-    for (int idx = lane; idx < 5 * nl2; idx += 32) dot_lane = fmaf(pA2[idx], pd2[idx], dot_lane);
+    for (int idx = lane; idx < nl0; idx += SW) dot_lane = fmaf(pA0[idx], pd0[idx], dot_lane);
+    for (int idx = lane; idx < 3 * nl1; idx += SW) dot_lane = fmaf(pA1[idx], pd1[idx], dot_lane);
+    for (int idx = lane; idx < 5 * nl2; idx += SW) dot_lane = fmaf(pA2[idx], pd2[idx], dot_lane);
     if constexpr (LMAX == 3) {
-        for (int idx = lane; idx < 7 * nl3; idx += 32) dot_lane = fmaf(pA3[idx], pd3[idx], dot_lane);
+        for (int idx = lane; idx < 7 * nl3; idx += SW) dot_lane = fmaf(pA3[idx], pd3[idx], dot_lane);
     }
-    const float dot = warp_sum_f(dot_lane);
+    if constexpr (SW == 32) dot_lane += __shfl_xor_sync(smask, dot_lane, 16);
+    dot_lane += __shfl_xor_sync(smask, dot_lane, 8);
+    dot_lane += __shfl_xor_sync(smask, dot_lane, 4);
+    dot_lane += __shfl_xor_sync(smask, dot_lane, 2);
+    dot_lane += __shfl_xor_sync(smask, dot_lane, 1);
+    const float dot = dot_lane;
     const float f0_i = f0_arr[i];
     const float df_ext = df0_bf ? df0_bf[i] : 0.0f;
     const float sc = (df_ext * f0_i * f0_i + dot * f0_i) * inv_DA1_a0_kap_sq;
 
-    if (lane < nl0) gA[lane] = fmaf(f0_i, pd0[lane], -sc * pA0[lane]);
-    for (int idx = lane; idx < 3 * nl1; idx += 32) gA[ga1 + idx] = fmaf(f0_i, pd1[idx], -sc * pA1[idx]);
-    for (int idx = lane; idx < 5 * nl2; idx += 32) gA[ga2 + idx] = fmaf(f0_i, pd2[idx], -sc * pA2[idx]);
+    for (int idx = lane; idx < nl0; idx += SW) gA[idx] = fmaf(f0_i, pd0[idx], -sc * pA0[idx]);
+    for (int idx = lane; idx < 3 * nl1; idx += SW) gA[ga1 + idx] = fmaf(f0_i, pd1[idx], -sc * pA1[idx]);
+    for (int idx = lane; idx < 5 * nl2; idx += SW) gA[ga2 + idx] = fmaf(f0_i, pd2[idx], -sc * pA2[idx]);
     if constexpr (LMAX == 3) {
-        for (int idx = lane; idx < 7 * nl3; idx += 32) gA[ga3 + idx] = fmaf(f0_i, pd3[idx], -sc * pA3[idx]);
+        for (int idx = lane; idx < 7 * nl3; idx += SW) gA[ga3 + idx] = fmaf(f0_i, pd3[idx], -sc * pA3[idx]);
     }
-    __syncwarp();
+    __syncwarp(smask);
 
-    // Phase 1b: ZERO-SHUFFLE contraction! Lane p = zj*NB + k (< S*NB <= 32) computes its full N_SH row!
+    // Phase 1b: ZERO-SHUFFLE contraction! Subwarp lane p = zj*NB + k (< S*NB <= 64) computes its full N_SH row!
     const int snb = S * NB;
-    if (lane < snb) {
-        const float* C_zi = C1_zick + (int64_t)z_i * n_tot1 * snb + lane;
+    for (int p = lane; p < snb; p += SW) {
+        const float* C_zi = C1_zick + (int64_t)z_i * n_tot1 * snb + p;
         float s0 = 0.0f;
+        #pragma unroll 4
         for (int c = 0; c < nl0; ++c) s0 = fmaf(gA[c], __ldg(C_zi + c * snb), s0);
 
         float s1_0 = 0.0f, s1_1 = 0.0f, s1_2 = 0.0f;
+        #pragma unroll 4
         for (int c = 0; c < nl1; ++c) {
             const float cv = __ldg(C_zi + (off1 + c) * snb);
             s1_0 = fmaf(gA[ga1 + 0 * nl1 + c], cv, s1_0);
@@ -5270,6 +6159,7 @@ __global__ void __launch_bounds__(128) ilmlip_l1_edge_bwd_precontract_kernel(
         }
 
         float s2_0 = 0.0f, s2_1 = 0.0f, s2_2 = 0.0f, s2_3 = 0.0f, s2_4 = 0.0f;
+        #pragma unroll 4
         for (int c = 0; c < nl2; ++c) {
             const float cv = __ldg(C_zi + (off2 + c) * snb);
             s2_0 = fmaf(gA[ga2 + 0 * nl2 + c], cv, s2_0);
@@ -5279,15 +6169,16 @@ __global__ void __launch_bounds__(128) ilmlip_l1_edge_bwd_precontract_kernel(
             s2_4 = fmaf(gA[ga2 + 4 * nl2 + c], cv, s2_4);
         }
 
-        const int zj = lane / NB;
-        const int k  = lane - zj * NB;
-        float* row = &s_Gt[wid][zj * GT_STRIDE + k * N_SH];
+        const int zj = p / NB;
+        const int k  = p - zj * NB;
+        float* row = s_Gt_w + zj * GT_STRIDE + k * K_ROW_STRIDE;
         row[0] = s0;
         row[1] = s1_0; row[2] = s1_1; row[3] = s1_2;
         row[4] = s2_0; row[5] = s2_1; row[6] = s2_2; row[7] = s2_3; row[8] = s2_4;
 
         if constexpr (LMAX == 3) {
             float s3_0 = 0.0f, s3_1 = 0.0f, s3_2 = 0.0f, s3_3 = 0.0f, s3_4 = 0.0f, s3_5 = 0.0f, s3_6 = 0.0f;
+            #pragma unroll 4
             for (int c = 0; c < nl3; ++c) {
                 const float cv = __ldg(C_zi + (off3 + c) * snb);
                 s3_0 = fmaf(gA[ga3 + 0 * nl3 + c], cv, s3_0);
@@ -5302,86 +6193,135 @@ __global__ void __launch_bounds__(128) ilmlip_l1_edge_bwd_precontract_kernel(
             row[13] = s3_4; row[14] = s3_5; row[15] = s3_6;
         }
     }
-    __syncwarp();
+    __syncwarp(smask);
 
-    // Phase 2: 1 THREAD = 1 FULL EDGE! Zero C1/dA1 reads, zero shuffles, bank-conflict-free Gt!
-    double rfx = 0.0, rfy = 0.0, rfz = 0.0;
+    // Phase 2: SW LANES/ATOM (1 thread = 1 edge, zero C1/dA1 reads, 1x 1/r, exact 2-FMA ChebParam!)
+    FT rfx = (FT)0, rfy = (FT)0, rfz = (FT)0;
     double v0 = 0.0, v1 = 0.0, v2 = 0.0, v3 = 0.0, v4 = 0.0, v5 = 0.0;
-    const float inv_rmax = 1.0f / r_max;
+    const float inv_rmax = r_max.q0;
 
-    for (int e = eb + lane; e < ee; e += 32) {
+    for (int e = eb + lane; e < ee; e += SW) {
         const float4 vl = __ldg(vec_len + e);
-        const int j = __ldg(senders + e);
+        int j;
+        float r, inv_d;
+        if constexpr (PACK_VS) {
+            j = __float_as_int(vl.w);
+            const float r2 = fmaf(vl.x, vl.x, fmaf(vl.y, vl.y, vl.z * vl.z));
+            inv_d = rsqrtf(fmaxf(r2, 1e-16f));
+            r = r2 * inv_d;
+        } else {
+            if (senders) {
+                j = __ldg(senders + e);
+                r = fmaxf(vl.w, 1e-8f);
+                inv_d = 1.0f / r;
+            } else {
+                j = __float_as_int(vl.w);
+                const float r2 = fmaf(vl.x, vl.x, fmaf(vl.y, vl.y, vl.z * vl.z));
+                inv_d = rsqrtf(fmaxf(r2, 1e-16f));
+                r = r2 * inv_d;
+            }
+        }
         const int z_j = __ldg(species + j);
-        const float r = fmaxf(vl.w, 1e-8f);
+        const float ux = vl.x * inv_d, uy = vl.y * inv_d, uz = vl.z * inv_d;
+        float y1, y2, y3, y4, y5, y6, y7, y8;
+        float y9 = 0.0f, y10 = 0.0f, y11 = 0.0f, y12 = 0.0f, y13 = 0.0f, y14 = 0.0f, y15 = 0.0f;
+        if constexpr (LMAX == 2) {
+            y1 = ux * loup::SH_C1;
+            y2 = uy * loup::SH_C1;
+            y3 = uz * loup::SH_C1;
+            y4 = (loup::SH_S3 * ux * uz) * loup::SH_C2;
+            y5 = (loup::SH_S3 * ux * uy) * loup::SH_C2;
+            y6 = (uy * uy - 0.5f * (ux * ux + uz * uz)) * loup::SH_C2;
+            y7 = (loup::SH_S3 * uy * uz) * loup::SH_C2;
+            y8 = ((0.5f * loup::SH_S3) * (uz * uz - ux * ux)) * loup::SH_C2;
+        } else {
+            float4 Yv[4];
+            edge_sh16_unit(ux, uy, uz, Yv);
+            y1 = Yv[0].y; y2 = Yv[0].z; y3 = Yv[0].w;
+            y4 = Yv[1].x; y5 = Yv[1].y; y6 = Yv[1].z; y7 = Yv[1].w; y8 = Yv[2].x;
+            y9 = Yv[2].y; y10 = Yv[2].z; y11 = Yv[2].w;
+            y12 = Yv[3].x; y13 = Yv[3].y; y14 = Yv[3].z; y15 = Yv[3].w;
+        }
 
-        float4 Yv[4];
-        loup::edge_sh16(vl.x, vl.y, vl.z, r, Yv);
-        const float y0 = Yv[0].x, y1 = Yv[0].y, y2 = Yv[0].z, y3 = Yv[0].w;
-        const float y4 = Yv[1].x, y5 = Yv[1].y, y6 = Yv[1].z, y7 = Yv[1].w, y8 = Yv[2].x;
-        const float y9  = (LMAX == 3) ? Yv[2].y : 0.0f;
-        const float y10 = (LMAX == 3) ? Yv[2].z : 0.0f;
-        const float y11 = (LMAX == 3) ? Yv[2].w : 0.0f;
-        const float y12 = (LMAX == 3) ? Yv[3].x : 0.0f;
-        const float y13 = (LMAX == 3) ? Yv[3].y : 0.0f;
-        const float y14 = (LMAX == 3) ? Yv[3].z : 0.0f;
-        const float y15 = (LMAX == 3) ? Yv[3].w : 0.0f;
-
-        const float* Gt = &s_Gt[wid][z_j * GT_STRIDE];
+        const float* Gt = s_Gt_w + z_j * GT_STRIDE;
         float er = 0.0f;
         float dY1 = 0.0f, dY2 = 0.0f, dY3 = 0.0f, dY4 = 0.0f, dY5 = 0.0f, dY6 = 0.0f, dY7 = 0.0f, dY8 = 0.0f;
         float dY9 = 0.0f, dY10 = 0.0f, dY11 = 0.0f, dY12 = 0.0f, dY13 = 0.0f, dY14 = 0.0f, dY15 = 0.0f;
 
         auto accum_k = [&](int k, float gk, float dgk) {
-            const float* row = Gt + k * N_SH;
-            float rdot = row[0] * y0;
-            float g;
-            g = row[1]; rdot = fmaf(g, y1, rdot); dY1 = fmaf(g, gk, dY1);
-            g = row[2]; rdot = fmaf(g, y2, rdot); dY2 = fmaf(g, gk, dY2);
-            g = row[3]; rdot = fmaf(g, y3, rdot); dY3 = fmaf(g, gk, dY3);
-            g = row[4]; rdot = fmaf(g, y4, rdot); dY4 = fmaf(g, gk, dY4);
-            g = row[5]; rdot = fmaf(g, y5, rdot); dY5 = fmaf(g, gk, dY5);
-            g = row[6]; rdot = fmaf(g, y6, rdot); dY6 = fmaf(g, gk, dY6);
-            g = row[7]; rdot = fmaf(g, y7, rdot); dY7 = fmaf(g, gk, dY7);
-            g = row[8]; rdot = fmaf(g, y8, rdot); dY8 = fmaf(g, gk, dY8);
             if constexpr (LMAX == 3) {
-                g = row[9];  rdot = fmaf(g, y9,  rdot); dY9  = fmaf(g, gk, dY9);
-                g = row[10]; rdot = fmaf(g, y10, rdot); dY10 = fmaf(g, gk, dY10);
-                g = row[11]; rdot = fmaf(g, y11, rdot); dY11 = fmaf(g, gk, dY11);
-                g = row[12]; rdot = fmaf(g, y12, rdot); dY12 = fmaf(g, gk, dY12);
-                g = row[13]; rdot = fmaf(g, y13, rdot); dY13 = fmaf(g, gk, dY13);
-                g = row[14]; rdot = fmaf(g, y14, rdot); dY14 = fmaf(g, gk, dY14);
-                g = row[15]; rdot = fmaf(g, y15, rdot); dY15 = fmaf(g, gk, dY15);
+                const float4* r4 = reinterpret_cast<const float4*>(Gt + k * 16);
+                const float4 q0 = r4[0];
+                const float4 q1 = r4[1];
+                const float4 q2 = r4[2];
+                const float4 q3 = r4[3];
+                float rdot = q0.x;  // y0 == 1.0f
+                rdot = fmaf(q0.y, y1,  rdot); dY1  = fmaf(q0.y, gk, dY1);
+                rdot = fmaf(q0.z, y2,  rdot); dY2  = fmaf(q0.z, gk, dY2);
+                rdot = fmaf(q0.w, y3,  rdot); dY3  = fmaf(q0.w, gk, dY3);
+                rdot = fmaf(q1.x, y4,  rdot); dY4  = fmaf(q1.x, gk, dY4);
+                rdot = fmaf(q1.y, y5,  rdot); dY5  = fmaf(q1.y, gk, dY5);
+                rdot = fmaf(q1.z, y6,  rdot); dY6  = fmaf(q1.z, gk, dY6);
+                rdot = fmaf(q1.w, y7,  rdot); dY7  = fmaf(q1.w, gk, dY7);
+                rdot = fmaf(q2.x, y8,  rdot); dY8  = fmaf(q2.x, gk, dY8);
+                rdot = fmaf(q2.y, y9,  rdot); dY9  = fmaf(q2.y, gk, dY9);
+                rdot = fmaf(q2.z, y10, rdot); dY10 = fmaf(q2.z, gk, dY10);
+                rdot = fmaf(q2.w, y11, rdot); dY11 = fmaf(q2.w, gk, dY11);
+                rdot = fmaf(q3.x, y12, rdot); dY12 = fmaf(q3.x, gk, dY12);
+                rdot = fmaf(q3.y, y13, rdot); dY13 = fmaf(q3.y, gk, dY13);
+                rdot = fmaf(q3.z, y14, rdot); dY14 = fmaf(q3.z, gk, dY14);
+                rdot = fmaf(q3.w, y15, rdot); dY15 = fmaf(q3.w, gk, dY15);
+                er = fmaf(rdot, dgk, er);
+            } else {
+                const float4* r4 = reinterpret_cast<const float4*>(Gt + k * 12);
+                const float4 q0 = r4[0];
+                const float4 q1 = r4[1];
+                const float  q2 = Gt[k * 12 + 8];
+                float rdot = q0.x;  // y0 == 1.0f
+                rdot = fmaf(q0.y, y1, rdot); dY1 = fmaf(q0.y, gk, dY1);
+                rdot = fmaf(q0.z, y2, rdot); dY2 = fmaf(q0.z, gk, dY2);
+                rdot = fmaf(q0.w, y3, rdot); dY3 = fmaf(q0.w, gk, dY3);
+                rdot = fmaf(q1.x, y4, rdot); dY4 = fmaf(q1.x, gk, dY4);
+                rdot = fmaf(q1.y, y5, rdot); dY5 = fmaf(q1.y, gk, dY5);
+                rdot = fmaf(q1.z, y6, rdot); dY6 = fmaf(q1.z, gk, dY6);
+                rdot = fmaf(q1.w, y7, rdot); dY7 = fmaf(q1.w, gk, dY7);
+                rdot = fmaf(q2,   y8, rdot); dY8 = fmaf(q2,   gk, dY8);
+                er = fmaf(rdot, dgk, er);
             }
-            er = fmaf(rdot, dgk, er);
         };
 
         {
-            float t = __fdiv_rn(r, r_max);
-            if (t < 1.0f) {
-                if (t < 0.0f) t = 0.0f;
-                const float t2 = t * t, t4 = t2 * t2, t5 = t4 * t;
-                const float env = 1.0f - 21.0f * t5 + 35.0f * t5 * t - 15.0f * t5 * t2;
-                const float omt = 1.0f - t;
-                const float denv_dt = -105.0f * t4 * omt * omt;
-                const float x = 2.0f * t - 1.0f;
+            float t_r = cheb_t(r, r_max);
+            if (t_r < 1.0f) {
+                if (t_r < 0.0f) t_r = 0.0f;
+                const float t2 = t_r * t_r, t4 = t2 * t2, t5 = t4 * t_r;
+                const float env = 1.0f - 21.0f * t5 + 35.0f * t5 * t_r - 15.0f * t5 * t2;
+                const float omt = 1.0f - t_r;
+                const float denv_r = (-105.0f * t4 * omt * omt) * inv_rmax;
+                float u = t_r, dx_dt = 2.0f;
+                if (r_max.warp > 0.0f) {
+                    const float one_p_a = 1.0f + r_max.warp;
+                    const float inv_w = 1.0f / fmaf(r_max.warp, t_r, 1.0f);
+                    u = (one_p_a * t_r) * inv_w;
+                    dx_dt = (2.0f * one_p_a) * (inv_w * inv_w);
+                }
+                const float env2_r = (dx_dt * env) * inv_rmax;
+                const float x = fmaf(2.0f, u, -1.0f);
                 const float x2 = 2.0f * x;
                 float T0 = 1.0f, dT0 = 0.0f;
-                accum_k(0, env, denv_dt * inv_rmax);
+                accum_k(0, env, denv_r);
                 float T1 = x, dT1 = 1.0f;
-                accum_k(1, T1 * env, (2.0f * dT1 * env + T1 * denv_dt) * inv_rmax);
+                accum_k(1, T1 * env, fmaf(env2_r, 1.0f, T1 * denv_r));
                 #pragma unroll
                 for (int k = 2; k < NB; ++k) {
                     const float Tk = fmaf(x2, T1, -T0);
                     const float dTk = fmaf(x2, dT1, fmaf(2.0f, T1, -dT0));
-                    accum_k(k, Tk * env, (2.0f * dTk * env + Tk * denv_dt) * inv_rmax);
+                    accum_k(k, Tk * env, fmaf(env2_r, dTk, Tk * denv_r));
                     T0 = T1; T1 = Tk; dT0 = dT1; dT1 = dTk;
                 }
             }
         }
 
-        const float inv_d = 1.0f / r;
-        const float ux = vl.x * inv_d, uy = vl.y * inv_d, uz = vl.z * inv_d;
         float gx, gy, gz;
         if constexpr (LMAX == 2) {
             sh_grad_l2(ux, uy, uz, dY1, dY2, dY3, dY4, dY5, dY6, dY7, dY8, gx, gy, gz);
@@ -5390,43 +6330,75 @@ __global__ void __launch_bounds__(128) ilmlip_l1_edge_bwd_precontract_kernel(
                        dY9, dY10, dY11, dY12, dY13, dY14, dY15, gx, gy, gz);
         }
         const float dot = ux * gx + uy * gy + uz * gz;
-        double fx = (double)(ux * er + (gx - ux * dot) * inv_d);
-        double fy = (double)(uy * er + (gy - uy * dot) * inv_d);
-        double fz = (double)(uz * er + (gz - uz * dot) * inv_d);
+        FT fx = (FT)(ux * er + (gx - ux * dot) * inv_d);
+        FT fy = (FT)(uy * er + (gy - uy * dot) * inv_d);
+        FT fz = (FT)(uz * er + (gz - uz * dot) * inv_d);
         if constexpr (ZBL_SW) {
             const int pair = z_i * S + z_j;
             const double rs = __ldg(rs_pair + pair);
             if (__builtin_expect((double)r < rs, 0)) {
                 const double3 zf = eval_zbl_force_cold(i, j, vl, pos64, wz_i, rs, __ldg(zz_pair + pair), __ldg(au_pair + pair));
-                fx += zf.x;
-                fy += zf.y;
-                fz += zf.z;
+                fx += (FT)zf.x;
+                fy += (FT)zf.y;
+                fz += (FT)zf.z;
             }
         }
         rfx -= fx; rfy -= fy; rfz -= fz;
-        atomicAdd(forces + (int64_t)j * 3 + 0, fx);
-        atomicAdd(forces + (int64_t)j * 3 + 1, fy);
-        atomicAdd(forces + (int64_t)j * 3 + 2, fz);
+        if constexpr (F32_F) {
+            atomicAdd(forces_f32 + (int64_t)j * 3 + 0, fx);
+            atomicAdd(forces_f32 + (int64_t)j * 3 + 1, fy);
+            atomicAdd(forces_f32 + (int64_t)j * 3 + 2, fz);
+        } else {
+            atomicAdd(forces + (int64_t)j * 3 + 0, fx);
+            atomicAdd(forces + (int64_t)j * 3 + 1, fy);
+            atomicAdd(forces + (int64_t)j * 3 + 2, fz);
+        }
         if constexpr (STRESS) {
-            v0 += (double)vl.x * fx;
-            v1 += 0.5 * ((double)vl.x * fy + (double)vl.y * fx);
-            v2 += 0.5 * ((double)vl.x * fz + (double)vl.z * fx);
-            v3 += (double)vl.y * fy;
-            v4 += 0.5 * ((double)vl.y * fz + (double)vl.z * fy);
-            v5 += (double)vl.z * fz;
+            v0 += (double)vl.x * (double)fx;
+            v1 += 0.5 * ((double)vl.x * (double)fy + (double)vl.y * (double)fx);
+            v2 += 0.5 * ((double)vl.x * (double)fz + (double)vl.z * (double)fx);
+            v3 += (double)vl.y * (double)fy;
+            v4 += 0.5 * ((double)vl.y * (double)fz + (double)vl.z * (double)fy);
+            v5 += (double)vl.z * (double)fz;
         }
     }
 
-    rfx = warp_sum_d(rfx); rfy = warp_sum_d(rfy); rfz = warp_sum_d(rfz);
+    auto sw_sum_f = [&](float v) -> float {
+        if constexpr (SW == 32) v += __shfl_xor_sync(smask, v, 16);
+        v += __shfl_xor_sync(smask, v, 8);
+        v += __shfl_xor_sync(smask, v, 4);
+        v += __shfl_xor_sync(smask, v, 2);
+        v += __shfl_xor_sync(smask, v, 1);
+        return v;
+    };
+    auto sw_sum_d = [&](double v) -> double {
+        if constexpr (SW == 32) v += __shfl_xor_sync(smask, v, 16);
+        v += __shfl_xor_sync(smask, v, 8);
+        v += __shfl_xor_sync(smask, v, 4);
+        v += __shfl_xor_sync(smask, v, 2);
+        v += __shfl_xor_sync(smask, v, 1);
+        return v;
+    };
+    if constexpr (F32_F) {
+        rfx = sw_sum_f(rfx); rfy = sw_sum_f(rfy); rfz = sw_sum_f(rfz);
+    } else {
+        rfx = sw_sum_d(rfx); rfy = sw_sum_d(rfy); rfz = sw_sum_d(rfz);
+    }
     if constexpr (STRESS) {
-        v0 = warp_sum_d(v0); v1 = warp_sum_d(v1); v2 = warp_sum_d(v2);
-        v3 = warp_sum_d(v3); v4 = warp_sum_d(v4); v5 = warp_sum_d(v5);
+        v0 = sw_sum_d(v0); v1 = sw_sum_d(v1); v2 = sw_sum_d(v2);
+        v3 = sw_sum_d(v3); v4 = sw_sum_d(v4); v5 = sw_sum_d(v5);
     }
     if (lane == 0) {
-        if (rfx != 0.0 || rfy != 0.0 || rfz != 0.0) {
-            atomicAdd(forces + (int64_t)i * 3 + 0, rfx);
-            atomicAdd(forces + (int64_t)i * 3 + 1, rfy);
-            atomicAdd(forces + (int64_t)i * 3 + 2, rfz);
+        if (rfx != (FT)0 || rfy != (FT)0 || rfz != (FT)0) {
+            if constexpr (F32_F) {
+                atomicAdd(forces_f32 + (int64_t)i * 3 + 0, rfx);
+                atomicAdd(forces_f32 + (int64_t)i * 3 + 1, rfy);
+                atomicAdd(forces_f32 + (int64_t)i * 3 + 2, rfz);
+            } else {
+                atomicAdd(forces + (int64_t)i * 3 + 0, rfx);
+                atomicAdd(forces + (int64_t)i * 3 + 1, rfy);
+                atomicAdd(forces + (int64_t)i * 3 + 2, rfz);
+            }
         }
         if constexpr (STRESS) {
             if (v0 != 0.0) atomicAdd(virial + 0, v0);
@@ -5446,8 +6418,8 @@ __global__ void __launch_bounds__(128) ilmlip_l1_edge_bwd_precontract_kernel(
 // =================================================================================================
 template <int LMAX, int NB_MAX, bool ZBL_SW, bool STRESS, bool SMEM_C1>
 __global__ void __launch_bounds__(128) ilmlip_l1_edge_bwd_edgepar_kernel(
-    int N, int S, int n_base, int n_tot1, Int4 n_l, Int4 l1_off, float r_max,
-    const int* __restrict__ row_ptr, const int* __restrict__ senders,
+    int N, int S, int n_base, int n_tot1, Int4 n_l, Int4 l1_off, ChebParam r_max,
+    const int* __restrict__ row_ptr, const int* __restrict__ row_end, const int* __restrict__ senders,
     const float4* __restrict__ vec_len, const int* __restrict__ species,
     const double* __restrict__ pos64,
     const float* __restrict__ C1,
@@ -5457,7 +6429,7 @@ __global__ void __launch_bounds__(128) ilmlip_l1_edge_bwd_edgepar_kernel(
     const int i = blockIdx.x;
     if (i >= N) return;
     const int eb = row_ptr[i];
-    const int ee = row_ptr[i + 1];
+    const int ee = row_end[i];
     if (eb >= ee) return;
 
     __shared__ float s_g[4][2][NB_MAX];
@@ -5731,8 +6703,8 @@ __global__ void __launch_bounds__(128) ilmlip_l1_edge_bwd_edgepar_kernel(
 // =================================================================================================
 template <int LMAX, int CH_PASSES, int NB_MAX, bool ZBL_SW, bool STRESS>
 __global__ void __launch_bounds__(128) ilmlip_l1_edge_bwd_kernel(
-    int N, int S, int n_base, int n_tot1, Int4 n_l, Int4 l1_off, float r_max,
-    const int* __restrict__ row_ptr, const int* __restrict__ senders,
+    int N, int S, int n_base, int n_tot1, Int4 n_l, Int4 l1_off, ChebParam r_max,
+    const int* __restrict__ row_ptr, const int* __restrict__ row_end, const int* __restrict__ senders,
     const float4* __restrict__ vec_len, const int* __restrict__ species,
     const float* __restrict__ C1,
     const float* __restrict__ rs_pair, const float* __restrict__ zz_pair, const float* __restrict__ au_pair,
@@ -5755,7 +6727,7 @@ __global__ void __launch_bounds__(128) ilmlip_l1_edge_bwd_kernel(
 
     const int z_i = species[i];
     const int eb = row_ptr[i];
-    const int ee = row_ptr[i + 1];
+    const int ee = row_end[i];
     const float wz_i = ZBL_SW ? w_zbl[i] : 0.0f;
 
     float gA1[CH_PASSES][N_SH];
@@ -5909,6 +6881,20 @@ __global__ void __launch_bounds__(128) ilmlip_l1_edge_bwd_kernel(
     }
 }
 
+__global__ void ilmlip_add_forces_f32_kernel(
+    int n3, float* __restrict__ f32, double* __restrict__ f64) {
+    const int k = blockIdx.x * blockDim.x + threadIdx.x;
+    if (k < n3) {
+        f64[k] += (double)f32[k];
+        f32[k] = 0.0f;
+    }
+}
+
+#include "ilmlip_fast_pathAB.cuh"
+#include "ilmlip_lf2_kernels.cuh"
+#include "ilmlip_smma.cuh"
+#include "ilmlip_lrsk.cuh"
+
 }  // namespace
 
 // =================================================================================================
@@ -5920,6 +6906,9 @@ IlmlipModel::~IlmlipModel() {
 }
 
 void IlmlipModel::free_model() {
+    if (zbl_ev_fork_) { cudaEventDestroy(zbl_ev_fork_); zbl_ev_fork_ = nullptr; }
+    if (zbl_ev_join_) { cudaEventDestroy(zbl_ev_join_); zbl_ev_join_ = nullptr; }
+    if (zbl_stream_)  { cudaStreamDestroy(zbl_stream_); zbl_stream_  = nullptr; }
     for (void* p : model_allocs_) cudaFree(p);
     model_allocs_.clear();
     d_C1_ = d_C1_zick_ = d_C2_ = d_Cbf_ = nullptr;
@@ -5935,6 +6924,15 @@ void IlmlipModel::free_model() {
         d_ro_h2_pB_[d] = d_ro_h2_pBT_[d] = nullptr;
     }
     use_ro_h2_ = false;
+    has_lrsk_ = false;
+    lrsk_pol_gram_ = 0;
+    lrsk_sw_mp_ = 0;
+    lrsk_bo_width_ = 0;
+    lrsk_mp_cap_ = 0.0f;
+    lrsk_ef_cap_ = 0.0f;
+    d_lrsk_W_p1_ = d_lrsk_W_p2_ = d_lrsk_W_head_ = d_lrsk_W_head_T_ = d_lrsk_b_head_ = nullptr;
+    d_lrsk_W_rad4_ = nullptr;
+    d_lrsk_pol_W0_ = d_lrsk_pol_b0_ = d_lrsk_pol_u_ = nullptr;
 }
 
 void IlmlipModel::free_system() {
@@ -5956,9 +6954,18 @@ void IlmlipModel::free_system() {
     d_e_zbl_ = nullptr;
     d_zbl_flag_ = nullptr;
     d_eA_x_ = nullptr;
+    d_am_l1_ = nullptr;
     d_f0_ = d_w_zbl_ = d_df0_bf_ = d_f1_ = d_x_ = d_dx_ = nullptr;
     for (int d = 0; d < kMaxDepth; ++d) d_pre_[d] = d_h_[d] = nullptr;
     d_dh_[0] = d_dh_[1] = nullptr;
+    d_forces_f32_ = nullptr;
+    d_lrsk_I1_ = d_lrsk_I2_ = d_lrsk_dI1_ = d_lrsk_dI2_ = nullptr;
+    d_lrsk_qA_ = d_lrsk_qB_ = d_lrsk_pA_ = d_lrsk_pB_ = d_lrsk_QA_ = d_lrsk_QB_ = nullptr;
+    d_lrsk_g1A_ = d_lrsk_g1B_ = d_lrsk_g2A_ = d_lrsk_g2B_ = nullptr;
+    d_lrsk_es_ = d_lrsk_elr_ = d_lrsk_sw_ = nullptr;
+    d_lrsk_q_raw_ = nullptr;
+    d_lrsk_dqA_ = d_lrsk_dqB_ = d_lrsk_dpA_ = d_lrsk_dpB_ = d_lrsk_dQA_ = d_lrsk_dQB_ = nullptr;
+    d_lrsk_Phi_ = d_lrsk_Ef_ = d_lrsk_dPhi_ = d_lrsk_dEf_ = nullptr;
 }
 
 void IlmlipModel::load(const Bundle& b) {
@@ -5972,6 +6979,8 @@ void IlmlipModel::load(const Bundle& b) {
     Z_ = b.meta_ints("Z");
     if (S_ < 1 || S_ > 64 || (int)Z_.size() != S_) throw std::runtime_error("ilmlip bundle: bad S / Z");
     r_max_ = (float)b.f64("r_max", {1})[0];
+    r_max2_ = b.has("r_max2") ? (float)b.f64("r_max2", {1})[0] : r_max_;
+    radial_warp_ = b.has("radial_warp") ? (float)b.f64("radial_warp", {1})[0] : 0.0f;
     e0_ = b.f64("e0", {S_});
 
     lmax_ = b.meta_int("lmax");
@@ -5980,6 +6989,7 @@ void IlmlipModel::load(const Bundle& b) {
     lfeat2_ = b.meta_int("lfeat2");
     lout2_ = b.meta_int("lout2");
     n_base_ = b.meta_int("n_base");
+    n_base2_ = b.has_meta("n_base2") ? b.meta_int("n_base2") : n_base_;
     n_msg_ = b.meta_int("n_msg");
     r_gram_ = b.meta_int("r_gram");
     r_bisp_ = b.meta_int("r_bisp");
@@ -5998,8 +7008,38 @@ void IlmlipModel::load(const Bundle& b) {
     D_A2_ = b.meta_int("D_A2");
 
     if (lmax_ < 1 || lmax_ > 3 || lfeat_ > 2 || lmsg_ > 2 || lfeat2_ > 2 || lout2_ > 3 ||
-        n_base_ < 1 || n_base_ > 32 || n_msg_ < 1 || n_msg_ > 64 || ro_depth_ < 1 || ro_depth_ > kMaxDepth) {
+        n_base_ < 1 || n_base_ > 32 || n_msg_ < 0 || n_msg_ > 64 || ro_depth_ < 1 || ro_depth_ > kMaxDepth) {
         throw std::runtime_error("ilmlip bundle: unsupported dimensions");
+    }
+    has_lrsk_ = b.has_meta("lrsk") && (b.meta_int("lrsk") != 0);
+    has_l2_ = (n_msg_ > 0) && !has_lrsk_;
+    const bool need_bcat = has_l2_ || has_lrsk_;
+    if (has_lrsk_) {
+        lrsk_sym_ = b.has_meta("lrsk_sym") ? b.meta_int("lrsk_sym") : 0;
+        lrsk_c0_ = b.meta_int("lrsk_c0");
+        lrsk_c1_ = b.meta_int("lrsk_c1");
+        lrsk_c2_ = b.meta_int("lrsk_c2");
+        lrsk_pol_field_ = b.meta_int("lrsk_pol_field");
+        lrsk_pol_width_ = b.meta_int("lrsk_field_mlp_width");
+        lrsk_pol_gram_ = b.has_meta("lrsk_pol_gram") ? b.meta_int("lrsk_pol_gram") : 0;
+        lrsk_sw_mp_ = b.has_meta("lrsk_sw_mp") ? b.meta_int("lrsk_sw_mp") : 0;
+        lrsk_bo_width_ = b.has_meta("lrsk_pair_mlp_width") ? b.meta_int("lrsk_pair_mlp_width") : 0;
+        lrsk_mp_cap_ = b.has("lrsk_mp_cap") ? (float)b.f64("lrsk_mp_cap", {1})[0] : 0.0f;
+        lrsk_ef_cap_ = b.has("lrsk_ef_cap") ? (float)b.f64("lrsk_ef_cap", {1})[0] : 0.0f;
+        lrsk_n_terms_ = b.meta_int("lrsk_n_terms");
+        lrsk_n_terms_pad_ = (lrsk_n_terms_ + 3) & ~3;
+        lrsk_fast_sym_ = (lrsk_sym_ != 0) && (lrsk_c0_ <= 4) && (lrsk_c1_ <= 4) && (lrsk_c2_ <= 4) &&
+                         (S_ <= 4) && (n_base2_ >= 1 && n_base2_ <= 12) && (lrsk_bo_width_ <= 32);
+        if (!lrsk_fast_sym_ && (lrsk_pol_gram_ != 0 || lrsk_sw_mp_ != 0 || lrsk_mp_cap_ > 0.0f || lrsk_ef_cap_ > 0.0f || lrsk_bo_width_ > 0)) {
+            throw std::runtime_error("ilmlip lrsk v3/v4 (pol_gram/sw_mp/mp_cap/ef_cap/pair_mlp) requires lrsk_fast_sym");
+        }
+        lrsk_i_stride_ = lrsk_fast_sym_ ? std::max(1, std::max(lrsk_c1_, lrsk_c2_)) : 0;
+        lrsk_n_head_out_ = lrsk_fast_sym_
+            ? (1 + lrsk_c0_ + lrsk_c1_ + lrsk_c2_)
+            : (1 + 2 * (lrsk_c0_ + lrsk_c1_ + lrsk_c2_));
+        if (lrsk_c0_ > 16 || lrsk_c1_ > 16 || lrsk_c2_ > 8 || ro_width_ > 128 || lrsk_pol_width_ > 64 || lrsk_n_head_out_ > 96) {
+            throw std::runtime_error("ilmlip lrsk bundle: unsupported dimensions");
+        }
     }
 
     auto nl_v = b.meta_ints("n_l");
@@ -6014,16 +7054,19 @@ void IlmlipModel::load(const Bundle& b) {
     }
     if (max_nl_ > 64) throw std::runtime_error("ilmlip bundle: max(n_l) > 64 not supported");
 
-    auto mid_v = b.meta_ints("msg_in_dim");
-    if ((int)mid_v.size() != lmsg_ + 1) throw std::runtime_error("ilmlip bundle: msg_in_dim mismatch");
-    for (int l = 0; l < kMaxL; ++l) msg_in_dim_[l] = (l <= lmsg_) ? mid_v[l] : 0;
+    for (int l = 0; l < kMaxL; ++l) msg_in_dim_[l] = 0;
+    if (need_bcat) {
+        auto mid_v = b.meta_ints("msg_in_dim");
+        if ((int)mid_v.size() != lmsg_ + 1) throw std::runtime_error("ilmlip bundle: msg_in_dim mismatch");
+        for (int l = 0; l <= lmsg_; ++l) msg_in_dim_[l] = mid_v[l];
+    }
 
     auto sc = b.f64("scalars", {6});
     sigma0_ = (float)sc[0];
     sigma1_ = (float)sc[1];
     a0_ = (float)sc[2];
     kappa_ = (float)sc[3];
-    // energy_scale = sc[4] (already folded into u_Z at export)
+    energy_scale_ = (float)sc[4];
     z_c_ = (float)sc[5];
 
     const int P2 = S_ * S_;
@@ -6044,17 +7087,17 @@ void IlmlipModel::load(const Bundle& b) {
     d_zz_pair_ = upload_vec(model_allocs_, read_pair_f64("zz_pair"));
     d_au_pair_ = upload_vec(model_allocs_, read_pair_f64("au_pair"));
 
-    // Transpose radial tables [P2, C, n_base] -> [P2, n_base, C] so channel c is coalesced across warp lanes!
-    auto upload_radial_T = [&](const std::string& name, int C) -> float* {
-        auto src = b.f32(name, {P2, C, n_base_});
-        std::vector<float> dst((size_t)P2 * n_base_ * C);
+    // Transpose radial tables [P2, C, nb] -> [P2, nb, C] so channel c is coalesced across warp lanes!
+    auto upload_radial_T = [&](const std::string& name, int C, int nb) -> float* {
+        auto src = b.f32(name, {P2, C, nb});
+        std::vector<float> dst((size_t)P2 * nb * C);
         for (int p = 0; p < P2; ++p)
             for (int c = 0; c < C; ++c)
-                for (int k = 0; k < n_base_; ++k)
-                    dst[((size_t)p * n_base_ + k) * C + c] = src[((size_t)p * C + c) * n_base_ + k];
+                for (int k = 0; k < nb; ++k)
+                    dst[((size_t)p * nb + k) * C + c] = src[((size_t)p * C + c) * nb + k];
         return upload_vec(model_allocs_, dst);
     };
-    d_C1_ = upload_radial_T("C1_eff", n_tot1_);
+    d_C1_ = upload_radial_T("C1_eff", n_tot1_, n_base_);
     {
         // Also build [z_i, c, z_j * n_base + k] layout for zero-shuffle coalesced Phase 1 in L1 edge bwd!
         auto c1_src = b.f32("C1_eff", {P2, n_tot1_, n_base_});
@@ -6068,8 +7111,10 @@ void IlmlipModel::load(const Bundle& b) {
                             c1_src[((size_t)(zi * S_ + zj) * n_tot1_ + c) * n_base_ + k];
         d_C1_zick_ = upload_vec(model_allocs_, c1_zick);
     }
-    d_C2_ = upload_radial_T("C2_eff", (lfeat2_ + 1) * n_msg_);
-    if (remove_backflow_) d_Cbf_ = upload_radial_T("C_bf", (lmsg_ + 1) * n_msg_);
+    if (has_l2_) {
+        d_C2_ = upload_radial_T("C2_eff", (lfeat2_ + 1) * n_msg_, n_base2_);
+        if (remove_backflow_) d_Cbf_ = upload_radial_T("C_bf", (lmsg_ + 1) * n_msg_, n_base_);
+    }
 
     // Build enriched nu2 / nu3 tables with precomputed b2_off, x1_off, bcat_off
     auto nu2_raw = b.i32("nu2_table", {n_nu2_, 6});
@@ -6094,7 +7139,7 @@ void IlmlipModel::load(const Bundle& b) {
             nu2_ext[p * 9 + 7] = x1_off_cur;
             x1_off_cur += c;
         }
-        if (L <= lmsg_) {
+        if (need_bcat && L <= lmsg_) {
             nu2_ext[p * 9 + 8] = bcat_cur[L];
             bcat_cur[L] += c;
         }
@@ -6118,62 +7163,119 @@ void IlmlipModel::load(const Bundle& b) {
             nu3_ext[q * 8 + 6] = x1_off_cur;
             x1_off_cur += c;
         }
-        if (L <= lmsg_) {
+        if (need_bcat && L <= lmsg_) {
             nu3_ext[q * 8 + 7] = bcat_cur[L];
             bcat_cur[L] += c;
         }
     }
     if (x1_off_cur != n_inv1_) throw std::runtime_error("ilmlip bundle: n_inv1 mismatch");
-    for (int l = 0; l <= lmsg_; ++l)
-        if (bcat_cur[l] != msg_in_dim_[l]) throw std::runtime_error("ilmlip bundle: msg_in_dim mismatch");
+    if (need_bcat) {
+        for (int l = 0; l <= lmsg_; ++l)
+            if (bcat_cur[l] != msg_in_dim_[l]) throw std::runtime_error("ilmlip bundle: msg_in_dim mismatch");
+    }
 
     d_nu2_ = upload_vec(model_allocs_, nu2_ext);
     d_nu3_ = upload_vec(model_allocs_, nu3_ext);
 
-    // Verify canonical (lfeat==1, lmsg==1, lmax in {2,3}) nu2/nu3 layout for zero-spill specialized kernels
+    // Verify canonical (lfeat==1, lmax in {2,3}) nu2/nu3 layout for zero-spill specialized kernels
     fast_l1_node_lf1_ = false;
-    if (lfeat_ == 1 && lmsg_ == 1 && (lmax_ == 2 || lmax_ == 3)) {
+    fast_l1_node_lf1_s0_ = false;
+    fast_l1_node_1L_lf1_ = false;
+    if (lfeat_ == 1 && (lmax_ == 2 || lmax_ == 3)) {
         const int exp_nu2_cnt = (lmax_ == 2) ? 5 : 7;
-        const int exp_nu3_cnt = (lmax_ == 2) ? 8 : 12;
+        const int exp_nu3_cnt_full = (lmax_ == 2) ? 8 : 12;
+        const int exp_nu3_cnt_1L = (lmax_ == 2) ? 4 : 6;
         static const int exp_nu2[7][3] = {{0,0,0}, {0,1,1}, {1,1,0}, {1,2,1}, {2,2,0}, {2,3,1}, {3,3,0}};
         static const int exp_nu3_l2[8][3]  = {{0,0,0}, {1,1,0}, {3,1,0}, {4,0,0}, {0,1,1}, {2,1,1}, {3,0,1}, {4,1,1}};
         static const int exp_nu3_l3[12][3] = {{0,0,0}, {1,1,0}, {3,1,0}, {4,0,0}, {5,1,0}, {6,0,0},
                                               {0,1,1}, {2,1,1}, {3,0,1}, {4,1,1}, {5,0,1}, {6,1,1}};
-        if (n_nu2_ == exp_nu2_cnt && n_nu3_ == exp_nu3_cnt) {
-            bool ok = true;
+        if (n_nu2_ == exp_nu2_cnt) {
+            bool ok2 = true;
             for (int p = 0; p < exp_nu2_cnt; ++p) {
                 if (nu2_raw[p * 6 + 0] != exp_nu2[p][0] || nu2_raw[p * 6 + 1] != exp_nu2[p][1] ||
-                    nu2_raw[p * 6 + 2] != exp_nu2[p][2]) ok = false;
+                    nu2_raw[p * 6 + 2] != exp_nu2[p][2]) ok2 = false;
             }
             const auto* e3 = (lmax_ == 2) ? exp_nu3_l2 : exp_nu3_l3;
-            for (int q = 0; q < exp_nu3_cnt; ++q) {
-                if (nu3_raw[q * 6 + 0] != e3[q][0] || nu3_raw[q * 6 + 1] != e3[q][1] ||
-                    nu3_raw[q * 6 + 2] != e3[q][2]) ok = false;
+            if (ok2 && need_bcat && n_nu3_ == exp_nu3_cnt_full) {
+                bool ok3 = true;
+                for (int q = 0; q < exp_nu3_cnt_full; ++q) {
+                    if (nu3_raw[q * 6 + 0] != e3[q][0] || nu3_raw[q * 6 + 1] != e3[q][1] ||
+                        nu3_raw[q * 6 + 2] != e3[q][2]) ok3 = false;
+                }
+                if (ok3 && lmsg_ == 1) fast_l1_node_lf1_ = true;
+                if (ok3 && lmsg_ == 0) fast_l1_node_lf1_s0_ = true;
+            } else if (ok2 && !need_bcat && n_nu3_ == exp_nu3_cnt_1L) {
+                bool ok3 = true;
+                for (int q = 0; q < exp_nu3_cnt_1L; ++q) {
+                    if (nu3_raw[q * 6 + 0] != e3[q][0] || nu3_raw[q * 6 + 1] != e3[q][1] ||
+                        nu3_raw[q * 6 + 2] != e3[q][2]) ok3 = false;
+                }
+                fast_l1_node_1L_lf1_ = ok3;
             }
-            fast_l1_node_lf1_ = ok;
         }
     }
 
-    auto l2p_raw = b.i32("l2_paths", {n_l2_paths_, 6});
-    std::vector<int32_t> l2p_ext((size_t)n_l2_paths_ * 7, 0);
-    for (int L = 0; L < kMaxL; ++L) l2_npaths_[L] = 0;
-    int reg_off_cur = 0;
-    for (int p = 0; p < n_l2_paths_; ++p) {
-        const int L = l2p_raw[p * 6 + 2];
-        l2p_ext[p * 7 + 0] = l2p_raw[p * 6 + 0];
-        l2p_ext[p * 7 + 1] = l2p_raw[p * 6 + 1];
-        l2p_ext[p * 7 + 2] = L;
-        l2p_ext[p * 7 + 3] = l2p_raw[p * 6 + 3];
-        l2p_ext[p * 7 + 4] = l2p_raw[p * 6 + 4];
-        l2p_ext[p * 7 + 5] = l2p_raw[p * 6 + 5];
-        l2p_ext[p * 7 + 6] = reg_off_cur;
-        reg_off_cur += 2 * L + 1;
-        l2_npaths_[L] = std::max(l2_npaths_[L], l2p_raw[p * 6 + 3] + 1);
+    // Verify canonical (lfeat==2, lmax in {2,3}) nu2/nu3 layout for specialized lf2 kernels (both 2L/LR-SK and 1L!)
+    fast_l1_node_lf2_ = false;
+    fast_l1_node_1L_lf2_ = false;
+    if (lfeat_ == 2 && (lmax_ == 2 || lmax_ == 3)) {
+        const int exp_nu2_cnt = (lmax_ == 2) ? kLf2Nu2Cnt_L2 : kLf2Nu2Cnt_L3;
+        if (n_nu2_ == exp_nu2_cnt) {
+            bool ok2 = true;
+            const auto* e2 = (lmax_ == 2) ? kLf2ExpNu2_L2 : kLf2ExpNu2_L3;
+            for (int p = 0; p < exp_nu2_cnt; ++p) {
+                if (nu2_raw[p * 6 + 0] != e2[p][0] || nu2_raw[p * 6 + 1] != e2[p][1] ||
+                    nu2_raw[p * 6 + 2] != e2[p][2]) ok2 = false;
+            }
+            if (ok2 && need_bcat && (lmsg_ == 1 || lmsg_ == 2)) {
+                const int exp_nu3_cnt = (lmax_ == 2) ? kLf2Nu3Cnt_L2 : kLf2Nu3Cnt_L3;
+                if (n_nu3_ == exp_nu3_cnt) {
+                    bool ok3 = true;
+                    const auto* e3 = (lmax_ == 2) ? kLf2ExpNu3_L2 : kLf2ExpNu3_L3;
+                    for (int q = 0; q < exp_nu3_cnt; ++q) {
+                        if (nu3_raw[q * 6 + 0] != e3[q][0] || nu3_raw[q * 6 + 1] != e3[q][1] ||
+                            nu3_raw[q * 6 + 2] != e3[q][2]) ok3 = false;
+                    }
+                    fast_l1_node_lf2_ = ok3;
+                }
+            } else if (ok2 && !need_bcat) {
+                const int exp_nu3_cnt = (lmax_ == 2) ? kLf2_1L_Nu3Cnt_L2 : kLf2_1L_Nu3Cnt_L3;
+                if (n_nu3_ == exp_nu3_cnt) {
+                    bool ok3 = true;
+                    const auto* e3 = (lmax_ == 2) ? kLf2_1L_ExpNu3_L2 : kLf2_1L_ExpNu3_L3;
+                    for (int q = 0; q < exp_nu3_cnt; ++q) {
+                        if (nu3_raw[q * 6 + 0] != e3[q][0] || nu3_raw[q * 6 + 1] != e3[q][1] ||
+                            nu3_raw[q * 6 + 2] != e3[q][2]) ok3 = false;
+                    }
+                    fast_l1_node_1L_lf2_ = ok3;
+                }
+            }
+        }
     }
-    total_l2_out_ = reg_off_cur;
-    if (total_l2_out_ > 48) throw std::runtime_error("ilmlip bundle: total_l2_out > 48");
-    for (int L = 0; L < kMaxL; ++L) l2_c_[L] = l2_npaths_[L] * n_msg_;
-    d_l2p_ = upload_vec(model_allocs_, l2p_ext);
+
+    for (int L = 0; L < kMaxL; ++L) { l2_npaths_[L] = 0; l2_c_[L] = 0; gram_off_[L] = 0; }
+    total_l2_out_ = 0;
+    if (has_l2_ && n_l2_paths_ > 0) {
+        auto l2p_raw = b.i32("l2_paths", {n_l2_paths_, 6});
+        std::vector<int32_t> l2p_ext((size_t)n_l2_paths_ * 7, 0);
+        int reg_off_cur = 0;
+        for (int p = 0; p < n_l2_paths_; ++p) {
+            const int L = l2p_raw[p * 6 + 2];
+            l2p_ext[p * 7 + 0] = l2p_raw[p * 6 + 0];
+            l2p_ext[p * 7 + 1] = l2p_raw[p * 6 + 1];
+            l2p_ext[p * 7 + 2] = L;
+            l2p_ext[p * 7 + 3] = l2p_raw[p * 6 + 3];
+            l2p_ext[p * 7 + 4] = l2p_raw[p * 6 + 4];
+            l2p_ext[p * 7 + 5] = l2p_raw[p * 6 + 5];
+            l2p_ext[p * 7 + 6] = reg_off_cur;
+            reg_off_cur += 2 * L + 1;
+            l2_npaths_[L] = std::max(l2_npaths_[L], l2p_raw[p * 6 + 3] + 1);
+        }
+        total_l2_out_ = reg_off_cur;
+        if (total_l2_out_ > 48) throw std::runtime_error("ilmlip bundle: total_l2_out > 48");
+        for (int L = 0; L < kMaxL; ++L) l2_c_[L] = l2_npaths_[L] * n_msg_;
+        d_l2p_ = upload_vec(model_allocs_, l2p_ext);
+    }
 
     auto cg_i = b.i32("cg_idx");
     cg_count_ = (int)cg_i.size();
@@ -6183,8 +7285,7 @@ void IlmlipModel::load(const Bundle& b) {
     // Layer-2 invariant offsets in x[N, n_feat]
     int x_cur = n_inv1_ + l2_c_[0];
     const int n_tri = (r_gram_ * (r_gram_ + 1)) >> 1;
-    for (int L = 0; L < kMaxL; ++L) gram_off_[L] = 0;
-    if (r_gram_ > 0) {
+    if (has_l2_ && r_gram_ > 0) {
         std::vector<int32_t> ti, tj;
         ti.reserve(n_tri);
         tj.reserve(n_tri);
@@ -6201,7 +7302,7 @@ void IlmlipModel::load(const Bundle& b) {
     bisp_off_ = x_cur;
     bisp_idx_count_ = 0;
     fast_bisp_l2_ = false;
-    if (r_bisp_ > 0 && n_bisp_ > 0) {
+    if (has_l2_ && r_bisp_ > 0 && n_bisp_ > 0) {
         auto bt = b.i32("bisp_table", {n_bisp_, 5});
         d_bisp_ = upload_vec(model_allocs_, bt);
         auto bi = b.i32("bisp_idx");
@@ -6218,47 +7319,48 @@ void IlmlipModel::load(const Bundle& b) {
             }
             fast_bisp_l2_ = ok;
         }
-    } else if (r_bisp_ == 0 && lout2_ == 2) {
+    } else if (has_l2_ && r_bisp_ == 0 && (lout2_ == 1 || lout2_ == 2)) {
         fast_bisp_l2_ = true;
     }
     if (x_cur != n_feat_) throw std::runtime_error("ilmlip bundle: n_feat layout mismatch");
 
     // Node weights (merge W_G[L] and W_B[L] along columns into W_GB[L] for L>=1!)
-    for (int l = 0; l <= lmsg_; ++l) {
-        auto wm = b.f32("W_msg_" + std::to_string(l), {msg_in_dim_[l], n_msg_});
-        d_W_msg_[l] = upload_vec(model_allocs_, wm);
-        std::vector<float> wm_T((size_t)n_msg_ * msg_in_dim_[l]);
-        for (int k = 0; k < msg_in_dim_[l]; ++k)
-            for (int q = 0; q < n_msg_; ++q)
-                wm_T[(size_t)q * msg_in_dim_[l] + k] = wm[(size_t)k * n_msg_ + q];
-        d_W_msg_T_[l] = upload_vec(model_allocs_, wm_T);
-    }
-    r_gb_ = r_gram_ + r_bisp_;
-    if (l2_c_[0] > 0 && r_bisp_ > 0) {
-        d_W_B0_ = upload_vec(model_allocs_, b.f32("W_B_0", {l2_c_[0], r_bisp_}));
-    }
-    for (int L = 1; L <= lout2_; ++L) {
-        if (l2_c_[L] == 0 || r_gb_ == 0) continue;
-        const int K = l2_c_[L];
-        std::vector<float> wg = (r_gram_ > 0) ? b.f32("W_G_" + std::to_string(L), {K, r_gram_}) : std::vector<float>();
-        std::vector<float> wb = (r_bisp_ > 0) ? b.f32("W_B_" + std::to_string(L), {K, r_bisp_}) : std::vector<float>();
-        std::vector<float> wgb((size_t)K * r_gb_);
-        for (int k = 0; k < K; ++k) {
-            for (int c = 0; c < r_gram_; ++c) wgb[(size_t)k * r_gb_ + c] = wg[(size_t)k * r_gram_ + c];
-            for (int c = 0; c < r_bisp_; ++c) wgb[(size_t)k * r_gb_ + r_gram_ + c] = wb[(size_t)k * r_bisp_ + c];
+    r_gb_ = has_l2_ ? (r_gram_ + r_bisp_) : 0;
+    if (has_l2_) {
+        for (int l = 0; l <= lmsg_; ++l) {
+            auto wm = b.f32("W_msg_" + std::to_string(l), {msg_in_dim_[l], n_msg_});
+            d_W_msg_[l] = upload_vec(model_allocs_, wm);
+            std::vector<float> wm_T((size_t)n_msg_ * msg_in_dim_[l]);
+            for (int k = 0; k < msg_in_dim_[l]; ++k)
+                for (int q = 0; q < n_msg_; ++q)
+                    wm_T[(size_t)q * msg_in_dim_[l] + k] = wm[(size_t)k * n_msg_ + q];
+            d_W_msg_T_[l] = upload_vec(model_allocs_, wm_T);
         }
-        d_W_GB_[L] = upload_vec(model_allocs_, wgb);
+        if (l2_c_[0] > 0 && r_bisp_ > 0) {
+            d_W_B0_ = upload_vec(model_allocs_, b.f32("W_B_0", {l2_c_[0], r_bisp_}));
+        }
+        for (int L = 1; L <= lout2_; ++L) {
+            if (l2_c_[L] == 0 || r_gb_ == 0) continue;
+            const int K = l2_c_[L];
+            std::vector<float> wg = (r_gram_ > 0) ? b.f32("W_G_" + std::to_string(L), {K, r_gram_}) : std::vector<float>();
+            std::vector<float> wb = (r_bisp_ > 0) ? b.f32("W_B_" + std::to_string(L), {K, r_bisp_}) : std::vector<float>();
+            std::vector<float> wgb((size_t)K * r_gb_);
+            for (int k = 0; k < K; ++k) {
+                for (int c = 0; c < r_gram_; ++c) wgb[(size_t)k * r_gb_ + c] = wg[(size_t)k * r_gram_ + c];
+                for (int c = 0; c < r_bisp_; ++c) wgb[(size_t)k * r_gb_ + r_gram_ + c] = wb[(size_t)k * r_bisp_ + c];
+            }
+            d_W_GB_[L] = upload_vec(model_allocs_, wgb);
+        }
     }
     d_mu_x_ = upload_vec(model_allocs_, b.f32("mu_x", {n_feat_}));
     d_inv_std_x_ = upload_vec(model_allocs_, b.f32("inv_std_x", {n_feat_}));
 
-    // Pad n_feat_ to multiple of 128 (or 32) when readout width qualifies for hgemm2_f32a_row FP16x2 TC GEMMs!
-    // (For ro_width == 128, n_feat_pad_ % 128 == 0 lets BOTH ro_W_0 bwd and ro_W_1 fwd/bwd hit h2f_64x128_k128_fused!)
+    // Pad n_feat_ to multiple of 128 (or 64/32) when readout width qualifies for hgemm2_f32a_row FP16x2 TC GEMMs!
     const char* h2_env = std::getenv("LOUP_ILMLIP_H2");
     const bool h2_enabled = !(h2_env && h2_env[0] == '0');
-    const bool h2_shape_ok = h2_enabled && (ro_width_ >= 64) && ((ro_width_ & 15) == 0);
+    const bool h2_shape_ok = h2_enabled && (ro_width_ >= 32) && ((ro_width_ & 15) == 0);
     if (h2_shape_ok) {
-        const int align_k = (ro_width_ == 128) ? 128 : 32;
+        const int align_k = (ro_width_ == 128) ? 128 : 64;
         n_feat_pad_ = ((n_feat_ + align_k - 1) / align_k) * align_k;
     } else {
         n_feat_pad_ = n_feat_;
@@ -6275,35 +7377,378 @@ void IlmlipModel::load(const Bundle& b) {
     }
 
     use_ro_h2_ = false;
-    if (h2_shape_ok) {
+    use_node_h2_ = false;
+    bool h2_gpu_ok = false;
+    if (h2_enabled) {
         int dev = 0, maj = 0, min = 0;
         if (cudaGetDevice(&dev) == cudaSuccess &&
             cudaDeviceGetAttribute(&maj, cudaDevAttrComputeCapabilityMajor, dev) == cudaSuccess &&
             cudaDeviceGetAttribute(&min, cudaDevAttrComputeCapabilityMinor, dev) == cudaSuccess &&
             ((maj == 12 && min == 0) || (maj == 8 && (min == 0 || min == 6 || min == 9)))) {
-            for (int d = 0; d < ro_depth_; ++d) {
-                const int rows_w = (d == 0) ? n_feat_pad_ : ro_width_;
-                const int cols_w = ro_width_;
-                CUDA_CHECK_THROW(cudaMalloc(&d_ro_h2_B_[d], 2 * (size_t)hgemm2_pad_elems(cols_w, rows_w) * 2));
-                CUDA_CHECK_THROW(cudaMalloc(&d_ro_h2_pB_[d], (size_t)cols_w * sizeof(float)));
-                model_allocs_.push_back(d_ro_h2_B_[d]);
-                model_allocs_.push_back(d_ro_h2_pB_[d]);
-                hgemm2_pack_b_col(cols_w, rows_w, d_ro_W_[d], true, d_ro_h2_B_[d], d_ro_h2_pB_[d], nullptr);
-
-                CUDA_CHECK_THROW(cudaMalloc(&d_ro_h2_BT_[d], 2 * (size_t)hgemm2_pad_elems(rows_w, cols_w) * 2));
-                CUDA_CHECK_THROW(cudaMalloc(&d_ro_h2_pBT_[d], (size_t)rows_w * sizeof(float)));
-                model_allocs_.push_back(d_ro_h2_BT_[d]);
-                model_allocs_.push_back(d_ro_h2_pBT_[d]);
-                hgemm2_pack_b_col(rows_w, cols_w, d_ro_W_[d], false, d_ro_h2_BT_[d], d_ro_h2_pBT_[d], nullptr);
-            }
-            CUDA_CHECK_THROW(cudaStreamSynchronize(nullptr));
-            hgemm2_row_init();
-            use_ro_h2_ = true;
+            h2_gpu_ok = true;
         }
+    }
+    auto pack_h2_pair = [&](int rows_w, int cols_w, const float* d_w,
+                            void*& out_B, float*& out_pB, void*& out_BT, float*& out_pBT) {
+        CUDA_CHECK_THROW(cudaMalloc(&out_B, 2 * (size_t)hgemm2_pad_elems(cols_w, rows_w) * 2));
+        CUDA_CHECK_THROW(cudaMalloc(&out_pB, (size_t)cols_w * sizeof(float)));
+        model_allocs_.push_back(out_B);
+        model_allocs_.push_back(out_pB);
+        hgemm2_pack_b_col(cols_w, rows_w, d_w, true, out_B, out_pB, nullptr);
+
+        CUDA_CHECK_THROW(cudaMalloc(&out_BT, 2 * (size_t)hgemm2_pad_elems(rows_w, cols_w) * 2));
+        CUDA_CHECK_THROW(cudaMalloc(&out_pBT, (size_t)rows_w * sizeof(float)));
+        model_allocs_.push_back(out_BT);
+        model_allocs_.push_back(out_pBT);
+        hgemm2_pack_b_col(rows_w, cols_w, d_w, false, out_BT, out_pBT, nullptr);
+    };
+    if (h2_gpu_ok && h2_shape_ok) {
+        for (int d = 0; d < ro_depth_; ++d) {
+            const int rows_w = (d == 0) ? n_feat_pad_ : ro_width_;
+            pack_h2_pair(rows_w, ro_width_, d_ro_W_[d],
+                         d_ro_h2_B_[d], d_ro_h2_pB_[d], d_ro_h2_BT_[d], d_ro_h2_pBT_[d]);
+        }
+        use_ro_h2_ = true;
+    }
+    if (h2_gpu_ok && has_l2_) {
+        for (int l = 0; l <= lmsg_; ++l) {
+            if (d_W_msg_[l] && (msg_in_dim_[l] % 8 == 0) && (n_msg_ % 8 == 0) && msg_in_dim_[l] >= 32) {
+                pack_h2_pair(msg_in_dim_[l], n_msg_, d_W_msg_[l],
+                             d_W_msg_h2_B_[l], d_W_msg_h2_pB_[l], d_W_msg_h2_BT_[l], d_W_msg_h2_pBT_[l]);
+                use_node_h2_ = true;
+            }
+        }
+        if (d_W_B0_ && (l2_c_[0] % 8 == 0) && (r_bisp_ % 8 == 0) && l2_c_[0] >= 32) {
+            pack_h2_pair(l2_c_[0], r_bisp_, d_W_B0_,
+                         d_W_B0_h2_B_, d_W_B0_h2_pB_, d_W_B0_h2_BT_, d_W_B0_h2_pBT_);
+            use_node_h2_ = true;
+        }
+        for (int L = 1; L <= lout2_; ++L) {
+            if (d_W_GB_[L] && (l2_c_[L] % 8 == 0) && (r_gb_ % 8 == 0) && l2_c_[L] >= 32) {
+                pack_h2_pair(l2_c_[L], r_gb_, d_W_GB_[L],
+                             d_W_GB_h2_B_[L], d_W_GB_h2_pB_[L], d_W_GB_h2_BT_[L], d_W_GB_h2_pBT_[L]);
+                use_node_h2_ = true;
+            }
+        }
+    }
+    if (use_ro_h2_ || use_node_h2_) {
+        CUDA_CHECK_THROW(cudaStreamSynchronize(nullptr));
+        hgemm2_row_init();
     }
 
     d_alpha_Z_ = upload_vec(model_allocs_, b.f32("alpha_Z", {S_, ro_width_}));
     d_u_Z_ = upload_vec(model_allocs_, b.f32("u_Z", {S_, ro_width_}));
+
+    if (has_lrsk_) {
+        if (lrsk_fast_sym_) {
+            const int nm = lrsk_i_stride_;
+            if (lrsk_c1_ > 0) {
+                auto wp1 = b.f32("lrsk_W_p1", {msg_in_dim_[1], lrsk_c1_});
+                d_lrsk_W_p1_ = upload_vec(model_allocs_, wp1);
+                std::vector<float> wp1_T((size_t)nm * msg_in_dim_[1], 0.0f);
+                for (int k = 0; k < msg_in_dim_[1]; ++k)
+                    for (int c = 0; c < lrsk_c1_; ++c)
+                        wp1_T[(size_t)c * msg_in_dim_[1] + k] = wp1[(size_t)k * lrsk_c1_ + c];
+                d_lrsk_W_p1_T_ = upload_vec(model_allocs_, wp1_T);
+            }
+            if (lrsk_c2_ > 0) {
+                auto wp2 = b.f32("lrsk_W_p2", {msg_in_dim_[2], lrsk_c2_});
+                d_lrsk_W_p2_ = upload_vec(model_allocs_, wp2);
+                std::vector<float> wp2_T((size_t)nm * msg_in_dim_[2], 0.0f);
+                for (int k = 0; k < msg_in_dim_[2]; ++k)
+                    for (int c = 0; c < lrsk_c2_; ++c)
+                        wp2_T[(size_t)c * msg_in_dim_[2] + k] = wp2[(size_t)k * lrsk_c2_ + c];
+                d_lrsk_W_p2_T_ = upload_vec(model_allocs_, wp2_T);
+            }
+            if (lfeat_ == 2) {
+                std::vector<float> w0z((size_t)nm * msg_in_dim_[0], 0.0f);
+                d_lrsk_W0_zero_ = upload_vec(model_allocs_, w0z);
+            }
+            auto wh = b.f32("lrsk_W_head", {S_, ro_width_, lrsk_n_head_out_});
+            auto bh = b.f32("lrsk_b_head", {S_, lrsk_n_head_out_});
+            std::vector<float> wh16((size_t)S_ * ro_width_ * 16, 0.0f);
+            std::vector<float> bh16((size_t)S_ * 16, 0.0f);
+            for (int z = 0; z < S_; ++z) {
+                for (int r = 0; r < lrsk_n_head_out_; ++r) {
+                    bh16[(size_t)z * 16 + r] = bh[(size_t)z * lrsk_n_head_out_ + r];
+                    for (int k = 0; k < ro_width_; ++k)
+                        wh16[((size_t)z * ro_width_ + k) * 16 + r] = wh[((size_t)z * ro_width_ + k) * lrsk_n_head_out_ + r];
+                }
+            }
+            d_lrsk_W_head_p16_ = upload_vec(model_allocs_, wh16);
+            d_lrsk_b_head_p16_ = upload_vec(model_allocs_, bh16);
+
+            // Pack lrsk_W_rad [P2, n_terms, n_base2] -> bank-conflict-free 4-lane [P2, NB2_4, N_T4, 4]
+            auto wrad = b.f32("lrsk_W_rad", {P2, lrsk_n_terms_, n_base2_});
+            const int nb2_4 = (n_base2_ + 3) / 4;
+            const bool has_c2 = (lrsk_c2_ > 0);
+            const int n_t4 = has_c2 ? 15 : 6;
+            const int c0 = lrsk_c0_, c1 = lrsk_c1_, c2 = lrsk_c2_;
+            const int c01 = std::min(c0, c1), c02 = std::min(c0, c2), c12 = std::min(c1, c2);
+            const int o_w0   = 1;
+            const int o_w01  = o_w0 + c0;
+            const int o_w1s  = o_w01 + c01;
+            const int o_w1p  = o_w1s + c1;
+            const int o_w02  = o_w1p + c1;
+            const int o_w12s = o_w02 + c02;
+            const int o_w12p = o_w12s + c12;
+            const int o_w2s  = o_w12p + c12;
+            const int o_w2p  = o_w2s + c2;
+            const int o_w2d  = o_w2p + c2;
+            auto get_f4 = [&](int pair, int tidx, int blk) -> float4 {
+                const int k0 = blk * 4;
+                const float* s = wrad.data() + ((size_t)pair * lrsk_n_terms_ + tidx) * n_base2_ + k0;
+                return make_float4(
+                    (k0 + 0 < n_base2_) ? s[0] : 0.0f,
+                    (k0 + 1 < n_base2_) ? s[1] : 0.0f,
+                    (k0 + 2 < n_base2_) ? s[2] : 0.0f,
+                    (k0 + 3 < n_base2_) ? s[3] : 0.0f);
+            };
+            std::vector<float4> wfast4((size_t)P2 * nb2_4 * n_t4 * 4, make_float4(0.0f, 0.0f, 0.0f, 0.0f));
+            for (int zi = 0; zi < S_; ++zi) {
+                for (int zj = 0; zj < S_; ++zj) {
+                    const int p = zi * S_ + zj;
+                    const int pr = zj * S_ + zi;
+                    for (int blk = 0; blk < nb2_4; ++blk) {
+                        for (int c = 0; c < 4; ++c) {
+                            auto put = [&](int slot, float4 v) {
+                                wfast4[(((size_t)p * nb2_4 + blk) * n_t4 + slot) * 4 + c] = v;
+                            };
+                            if (c < c0)  put(0, get_f4(p, o_w0 + c, blk));
+                            if (c < c01) { put(1, get_f4(p, o_w01 + c, blk)); put(2, get_f4(pr, o_w01 + c, blk)); }
+                            if (c < c1)  { put(3, get_f4(p, o_w1s + c, blk)); put(4, get_f4(p, o_w1p + c, blk)); }
+                            if (c == 0)  put(5, get_f4(p, 0, blk));
+                            if (has_c2) {
+                                if (c < c02) { put(6, get_f4(p, o_w02 + c, blk)); put(7, get_f4(pr, o_w02 + c, blk)); }
+                                if (c < c12) {
+                                    put(8,  get_f4(p, o_w12s + c, blk)); put(9,  get_f4(pr, o_w12s + c, blk));
+                                    put(10, get_f4(p, o_w12p + c, blk)); put(11, get_f4(pr, o_w12p + c, blk));
+                                }
+                                if (c < c2) {
+                                    put(12, get_f4(p, o_w2s + c, blk));
+                                    put(13, get_f4(p, o_w2p + c, blk));
+                                    put(14, get_f4(p, o_w2d + c, blk));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            d_lrsk_W_fast4_ = upload_vec(model_allocs_, wfast4);
+
+            // Pack BO-LRSK v4 pair-symmetric Bond-Order MLP weights (L1-resident coalesced layout!)
+            if (lrsk_bo_width_ > 0) {
+                const int H = lrsk_bo_width_;
+                const int H_pad = (H + 3) & ~3;
+                const int H4 = H_pad >> 2;
+                const int pfd = 3 * c0 + 4 * c1;
+                std::vector<int> up_map(P2, 0);
+                int n_up = 0;
+                std::vector<int> key_to_up(P2, -1);
+                for (int zi = 0; zi < S_; ++zi) {
+                    for (int zj = 0; zj < S_; ++zj) {
+                        const int lo = std::min(zi, zj), hi = std::max(zi, zj);
+                        const int key = lo * S_ + hi;
+                        if (key_to_up[key] < 0) key_to_up[key] = n_up++;
+                        up_map[zi * S_ + zj] = key_to_up[key];
+                    }
+                }
+                auto bo_wx = b.f32("lrsk_bo_Wx", {H, pfd});
+                auto bo_wr = b.f32("lrsk_bo_Wr", {n_up, H, n_base2_});
+                auto bo_b  = b.f32("lrsk_bo_b",  {n_up, H});
+                auto bo_v  = b.f32("lrsk_bo_v",  {n_up, H});
+
+                auto feat_col = [&](int m, int ch) -> int {
+                    if (m < 3) return (ch < c0) ? (m * c0 + ch) : -1;
+                    return (ch < c1) ? (3 * c0 + (m - 3) * c1 + ch) : -1;
+                };
+                std::vector<float> wx_fwd((size_t)28 * H_pad, 0.0f);
+                for (int ch = 0; ch < 4; ++ch) {
+                    for (int m = 0; m < 7; ++m) {
+                        const int col = feat_col(m, ch);
+                        if (col < 0) continue;
+                        for (int h = 0; h < H; ++h) {
+                            wx_fwd[((size_t)(ch * 7 + m)) * H_pad + h] = bo_wx[(size_t)h * pfd + col];
+                        }
+                    }
+                }
+                std::vector<float4> wx_bwd4((size_t)7 * H4 * 4, make_float4(0.0f, 0.0f, 0.0f, 0.0f));
+                for (int m = 0; m < 7; ++m) {
+                    for (int h4 = 0; h4 < H4; ++h4) {
+                        for (int ch = 0; ch < 4; ++ch) {
+                            const int col = feat_col(m, ch);
+                            if (col < 0) continue;
+                            auto gwx = [&](int h) -> float { return (h < H) ? bo_wx[(size_t)h * pfd + col] : 0.0f; };
+                            wx_bwd4[((size_t)m * H4 + h4) * 4 + ch] = make_float4(
+                                gwx(4 * h4 + 0), gwx(4 * h4 + 1), gwx(4 * h4 + 2), gwx(4 * h4 + 3));
+                        }
+                    }
+                }
+                std::vector<float4> wr4((size_t)P2 * nb2_4 * H_pad, make_float4(0.0f, 0.0f, 0.0f, 0.0f));
+                std::vector<float> bv((size_t)P2 * 2 * H_pad, 0.0f);
+                for (int p = 0; p < P2; ++p) {
+                    const int up = up_map[p];
+                    for (int h = 0; h < H; ++h) {
+                        bv[((size_t)p * 2 + 0) * H_pad + h] = bo_b[(size_t)up * H + h];
+                        bv[((size_t)p * 2 + 1) * H_pad + h] = bo_v[(size_t)up * H + h];
+                        for (int blk = 0; blk < nb2_4; ++blk) {
+                            const int k0 = blk * 4;
+                            const float* s = bo_wr.data() + ((size_t)up * H + h) * n_base2_ + k0;
+                            wr4[((size_t)p * nb2_4 + blk) * H_pad + h] = make_float4(
+                                (k0 + 0 < n_base2_) ? s[0] : 0.0f,
+                                (k0 + 1 < n_base2_) ? s[1] : 0.0f,
+                                (k0 + 2 < n_base2_) ? s[2] : 0.0f,
+                                (k0 + 3 < n_base2_) ? s[3] : 0.0f);
+                        }
+                    }
+                }
+                d_lrsk_bo_Wx_fwd_  = upload_vec(model_allocs_, wx_fwd);
+                d_lrsk_bo_Wx_bwd4_ = upload_vec(model_allocs_, wx_bwd4);
+                d_lrsk_bo_Wr4_     = upload_vec(model_allocs_, wr4);
+                d_lrsk_bo_bv_      = upload_vec(model_allocs_, bv);
+            }
+
+            if (lrsk_pol_field_) {
+                const int f_dim = lrsk_pol_gram_
+                    ? (lrsk_c0_ + (lrsk_c1_ * (lrsk_c1_ + 1)) / 2 + lrsk_c1_ * lrsk_c1_)
+                    : (lrsk_c0_ + 2 * lrsk_c1_);
+                const int in_dim = f_dim + ro_width_;
+                lrsk_pol_in_pad_ = ((in_dim + 31) / 32) * 32;
+                lrsk_pol_w_pad_  = ((lrsk_pol_width_ + 15) / 16) * 16;
+                auto pw0 = b.f32("lrsk_pol_W0", {in_dim, lrsk_pol_width_});
+                std::vector<float> pw0_pad((size_t)lrsk_pol_in_pad_ * lrsk_pol_w_pad_, 0.0f);
+                for (int r = 0; r < in_dim; ++r)
+                    for (int c = 0; c < lrsk_pol_width_; ++c)
+                        pw0_pad[(size_t)r * lrsk_pol_w_pad_ + c] = pw0[(size_t)r * lrsk_pol_width_ + c];
+                d_lrsk_pol_W0_pad_ = upload_vec(model_allocs_, pw0_pad);
+                d_lrsk_pol_b0_ = upload_vec(model_allocs_, b.f32("lrsk_pol_b0", {lrsk_pol_width_}));
+                d_lrsk_pol_u_  = upload_vec(model_allocs_, b.f32("lrsk_pol_u",  {S_, lrsk_pol_width_}));
+                if (lrsk_pol_width_ <= 32 && ro_width_ <= 64 && in_dim <= (lrsk_pol_gram_ ? 96 : 80) && S_ <= 8) {
+                    const int k_tiles = (lrsk_pol_gram_ ? 96 : 80) / 16;
+                    const size_t n_u4 = (size_t)k_tiles * 4 * 32;
+                    d_lrsk_pol_cHL_ = upload_vec(model_allocs_, std::vector<uint4>(n_u4));
+                    d_lrsk_pol_rHL_ = upload_vec(model_allocs_, std::vector<uint4>(n_u4));
+                    float* d_inv_sw = nullptr;
+                    CUDA_CHECK_THROW(cudaMalloc(&d_inv_sw, sizeof(float)));
+                    lrsk_fast::launch_pack_pol_w0_hl(
+                        nullptr, (lrsk_pol_gram_ != 0), in_dim, lrsk_pol_width_, lrsk_pol_w_pad_,
+                        d_lrsk_pol_W0_pad_, d_lrsk_pol_cHL_, d_lrsk_pol_rHL_, d_inv_sw);
+                    CUDA_CHECK_THROW(cudaMemcpy(&lrsk_pol_inv_sW_, d_inv_sw, sizeof(float), cudaMemcpyDeviceToHost));
+                    cudaFree(d_inv_sw);
+                }
+                if (h2_gpu_ok && lrsk_pol_w_pad_ >= 32) {
+                    pack_h2_pair(lrsk_pol_in_pad_, lrsk_pol_w_pad_, d_lrsk_pol_W0_pad_,
+                                 d_lrsk_pol_h2_B_, d_lrsk_pol_h2_pB_, d_lrsk_pol_h2_BT_, d_lrsk_pol_h2_pBT_);
+                    lrsk_pol_h2_ = true;
+                    CUDA_CHECK_THROW(cudaStreamSynchronize(nullptr));
+                    hgemm2_row_init();
+                }
+            }
+        } else {
+            // General (asymmetric or wide sym) LR-SK path
+            if (lrsk_c1_ > 0) {
+                if (lrsk_sym_) {
+                    auto w1 = b.f32("lrsk_W_p1", {msg_in_dim_[1], lrsk_c1_});
+                    std::vector<float> w2((size_t)msg_in_dim_[1] * 2 * lrsk_c1_);
+                    for (int k = 0; k < msg_in_dim_[1]; ++k)
+                        for (int c = 0; c < lrsk_c1_; ++c) {
+                            const float v = w1[(size_t)k * lrsk_c1_ + c];
+                            w2[(size_t)k * 2 * lrsk_c1_ + c] = v;
+                            w2[(size_t)k * 2 * lrsk_c1_ + lrsk_c1_ + c] = v;
+                        }
+                    d_lrsk_W_p1_ = upload_vec(model_allocs_, w2);
+                } else {
+                    d_lrsk_W_p1_ = upload_vec(model_allocs_, b.f32("lrsk_W_p1", {msg_in_dim_[1], 2 * lrsk_c1_}));
+                }
+            }
+            if (lrsk_c2_ > 0) {
+                if (lrsk_sym_) {
+                    auto w1 = b.f32("lrsk_W_p2", {msg_in_dim_[2], lrsk_c2_});
+                    std::vector<float> w2((size_t)msg_in_dim_[2] * 2 * lrsk_c2_);
+                    for (int k = 0; k < msg_in_dim_[2]; ++k)
+                        for (int c = 0; c < lrsk_c2_; ++c) {
+                            const float v = w1[(size_t)k * lrsk_c2_ + c];
+                            w2[(size_t)k * 2 * lrsk_c2_ + c] = v;
+                            w2[(size_t)k * 2 * lrsk_c2_ + lrsk_c2_ + c] = v;
+                        }
+                    d_lrsk_W_p2_ = upload_vec(model_allocs_, w2);
+                } else {
+                    d_lrsk_W_p2_ = upload_vec(model_allocs_, b.f32("lrsk_W_p2", {msg_in_dim_[2], 2 * lrsk_c2_}));
+                }
+            }
+            if (lrsk_sym_) {
+                const int nh_s = 1 + lrsk_c0_ + lrsk_c1_ + lrsk_c2_;
+                auto whT_s = b.f32("lrsk_W_head_T", {S_, nh_s, ro_width_});
+                auto bh_s  = b.f32("lrsk_b_head",   {S_, nh_s});
+                std::vector<float> whT((size_t)S_ * lrsk_n_head_out_ * ro_width_);
+                std::vector<float> bh((size_t)S_ * lrsk_n_head_out_);
+                for (int z = 0; z < S_; ++z) {
+                    auto copy_row = [&](int dst_r, int src_r) {
+                        bh[(size_t)z * lrsk_n_head_out_ + dst_r] = bh_s[(size_t)z * nh_s + src_r];
+                        std::memcpy(whT.data() + ((size_t)z * lrsk_n_head_out_ + dst_r) * ro_width_,
+                                    whT_s.data() + ((size_t)z * nh_s + src_r) * ro_width_,
+                                    (size_t)ro_width_ * sizeof(float));
+                    };
+                    copy_row(0, 0);
+                    int dr = 1, sr = 1;
+                    for (int c = 0; c < lrsk_c0_; ++c) { copy_row(dr + c, sr + c); copy_row(dr + lrsk_c0_ + c, sr + c); }
+                    dr += 2 * lrsk_c0_; sr += lrsk_c0_;
+                    for (int c = 0; c < lrsk_c1_; ++c) { copy_row(dr + c, sr + c); copy_row(dr + lrsk_c1_ + c, sr + c); }
+                    dr += 2 * lrsk_c1_; sr += lrsk_c1_;
+                    for (int c = 0; c < lrsk_c2_; ++c) { copy_row(dr + c, sr + c); copy_row(dr + lrsk_c2_ + c, sr + c); }
+                }
+                std::vector<float> wh((size_t)S_ * ro_width_ * lrsk_n_head_out_);
+                for (int z = 0; z < S_; ++z)
+                    for (int r = 0; r < lrsk_n_head_out_; ++r)
+                        for (int k = 0; k < ro_width_; ++k)
+                            wh[((size_t)z * ro_width_ + k) * lrsk_n_head_out_ + r] = whT[((size_t)z * lrsk_n_head_out_ + r) * ro_width_ + k];
+                d_lrsk_W_head_   = upload_vec(model_allocs_, wh);
+                d_lrsk_W_head_T_ = upload_vec(model_allocs_, whT);
+                d_lrsk_b_head_   = upload_vec(model_allocs_, bh);
+            } else {
+                d_lrsk_W_head_   = upload_vec(model_allocs_, b.f32("lrsk_W_head",   {S_, ro_width_, lrsk_n_head_out_}));
+                d_lrsk_W_head_T_ = upload_vec(model_allocs_, b.f32("lrsk_W_head_T", {S_, lrsk_n_head_out_, ro_width_}));
+                d_lrsk_b_head_   = upload_vec(model_allocs_, b.f32("lrsk_b_head",   {S_, lrsk_n_head_out_}));
+            }
+
+            auto wrad = b.f32("lrsk_W_rad", {P2, lrsk_n_terms_, n_base2_});
+            const int nb2_4 = (n_base2_ + 3) / 4;
+            std::vector<float4> wrad4((size_t)P2 * nb2_4 * lrsk_n_terms_pad_, make_float4(0.0f, 0.0f, 0.0f, 0.0f));
+            for (int p = 0; p < P2; ++p) {
+                for (int t = 0; t < lrsk_n_terms_; ++t) {
+                    for (int blk = 0; blk < nb2_4; ++blk) {
+                        const int k0 = blk * 4;
+                        const float* s = wrad.data() + ((size_t)p * lrsk_n_terms_ + t) * n_base2_ + k0;
+                        float4 v = make_float4(
+                            (k0 + 0 < n_base2_) ? s[0] : 0.0f,
+                            (k0 + 1 < n_base2_) ? s[1] : 0.0f,
+                            (k0 + 2 < n_base2_) ? s[2] : 0.0f,
+                            (k0 + 3 < n_base2_) ? s[3] : 0.0f);
+                        wrad4[((size_t)p * nb2_4 + blk) * lrsk_n_terms_pad_ + t] = v;
+                    }
+                }
+            }
+            d_lrsk_W_rad4_ = upload_vec(model_allocs_, wrad4);
+
+            if (lrsk_pol_field_) {
+                const int f_dim = lrsk_pol_gram_
+                    ? (lrsk_c0_ + (lrsk_c1_ * (lrsk_c1_ + 1)) / 2 + lrsk_c1_ * lrsk_c1_)
+                    : (lrsk_c0_ + 2 * lrsk_c1_);
+                const int in_dim = f_dim + ro_width_;
+                d_lrsk_pol_W0_ = upload_vec(model_allocs_, b.f32("lrsk_pol_W0", {in_dim, lrsk_pol_width_}));
+                d_lrsk_pol_b0_ = upload_vec(model_allocs_, b.f32("lrsk_pol_b0", {lrsk_pol_width_}));
+                d_lrsk_pol_u_  = upload_vec(model_allocs_, b.f32("lrsk_pol_u",  {S_, lrsk_pol_width_}));
+            }
+        }
+    }
+
+    // Keep ZBL inline on main stream by default (avoids 4 cross-stream CUDA-graph event syncs/step for 0.5 us kernels!)
+    const char* zbl_st_env = std::getenv("LOUP_ZBL_STREAM");
+    if (use_zbl_switch_ && zbl_st_env && zbl_st_env[0] == '1') {
+        CUDA_CHECK_THROW(cudaStreamCreateWithFlags(&zbl_stream_, cudaStreamNonBlocking));
+        CUDA_CHECK_THROW(cudaEventCreateWithFlags(&zbl_ev_fork_, cudaEventDisableTiming));
+        CUDA_CHECK_THROW(cudaEventCreateWithFlags(&zbl_ev_join_, cudaEventDisableTiming));
+    }
 }
 
 std::string IlmlipModel::kernel_signature() const {
@@ -6327,21 +7772,28 @@ void IlmlipModel::alloc_system(int N) {
     auto align256 = [](size_t b) { return (b + 255) & ~size_t(255); };
 
     // Contiguous zero-initialized slab for atomic backward accumulators (dI_node + df0_bf)
-    size_t zbytes = align256(n * sizeof(float));
-    for (int l = 0; l <= lmsg_; ++l) zbytes += align256(n * (2 * l + 1) * n_msg_ * sizeof(float));
-    CUDA_CHECK_THROW(device_malloc(&d_zero_slab_, zbytes));
-    zero_slab_bytes_ = zbytes;
-    sys_bytes_ += zbytes;
-    sys_max_alloc_ = std::max(sys_max_alloc_, zbytes);
-    char* zb = static_cast<char*>(d_zero_slab_);
-    size_t zoff = 0;
-    auto zalloc = [&](size_t floats) -> float* {
-        float* p = reinterpret_cast<float*>(zb + zoff);
-        zoff += align256(floats * sizeof(float));
-        return p;
-    };
-    d_df0_bf_ = zalloc(n);
-    for (int l = 0; l <= lmsg_; ++l) d_dI_[l] = zalloc(n * (2 * l + 1) * n_msg_);
+    if (has_l2_) {
+        size_t zbytes = align256(n * sizeof(float));
+        for (int l = 0; l <= lmsg_; ++l) zbytes += align256(n * (2 * l + 1) * n_msg_ * sizeof(float));
+        CUDA_CHECK_THROW(device_malloc(&d_zero_slab_, zbytes));
+        zero_slab_bytes_ = zbytes;
+        sys_bytes_ += zbytes;
+        sys_max_alloc_ = std::max(sys_max_alloc_, zbytes);
+        char* zb = static_cast<char*>(d_zero_slab_);
+        size_t zoff = 0;
+        auto zalloc = [&](size_t floats) -> float* {
+            float* p = reinterpret_cast<float*>(zb + zoff);
+            zoff += align256(floats * sizeof(float));
+            return p;
+        };
+        d_df0_bf_ = zalloc(n);
+        for (int l = 0; l <= lmsg_; ++l) d_dI_[l] = zalloc(n * (2 * l + 1) * n_msg_);
+    } else {
+        d_zero_slab_ = nullptr;
+        zero_slab_bytes_ = 0;
+        d_df0_bf_ = nullptr;
+        for (int l = 0; l < kMaxL; ++l) d_dI_[l] = nullptr;
+    }
 
     for (int l = 0; l <= lmax_; ++l) {
         d_A1_[l] = alloc(n * (2 * l + 1) * n_l_[l]);
@@ -6359,44 +7811,73 @@ void IlmlipModel::alloc_system(int N) {
         d_w_zbl_ = alloc(n);
         int* zf = nullptr;
         CUDA_CHECK_THROW(device_malloc(&zf, 256));
+        CUDA_CHECK_THROW(cudaMemset(zf, 0, 256));
         sys_bytes_ += 256;
         sys_allocs_.push_back(zf);
         d_zbl_flag_ = zf;
     }
 
-    for (int l = 0; l <= lmsg_; ++l) {
-        d_Bcat_[l] = alloc(n * (2 * l + 1) * msg_in_dim_[l]);
-        d_dBcat_[l] = alloc(n * (2 * l + 1) * msg_in_dim_[l]);
-        d_I_[l] = alloc(n * (2 * l + 1) * n_msg_);
-    }
+    if (has_l2_) {
+        for (int l = 0; l <= lmsg_; ++l) {
+            d_Bcat_[l] = alloc(n * (2 * l + 1) * msg_in_dim_[l]);
+            d_dBcat_[l] = alloc(n * (2 * l + 1) * msg_in_dim_[l]);
+            d_I_[l] = alloc(n * (2 * l + 1) * n_msg_);
+        }
 
-    for (int L = 0; L <= lout2_; ++L) {
-        if (l2_c_[L] == 0) continue;
-        d_A2_[L] = alloc(n * (2 * L + 1) * l2_c_[L]);
-        d_dA2_[L] = alloc(n * (2 * L + 1) * l2_c_[L]);
-        if (L == 0 && r_bisp_ > 0) {
-            d_Q0_ = alloc(n * r_bisp_);
-            d_dQ0_ = alloc(n * r_bisp_);
+        for (int L = 0; L <= lout2_; ++L) {
+            if (l2_c_[L] == 0) continue;
+            d_A2_[L] = alloc(n * (2 * L + 1) * l2_c_[L]);
+            d_dA2_[L] = alloc(n * (2 * L + 1) * l2_c_[L]);
+            if (L == 0 && r_bisp_ > 0) {
+                d_Q0_ = alloc(n * r_bisp_);
+                d_dQ0_ = alloc(n * r_bisp_);
+            }
+            if (L >= 1 && r_gb_ > 0) {
+                d_PQ_[L] = alloc(n * (2 * L + 1) * r_gb_);
+                d_dPQ_[L] = alloc(n * (2 * L + 1) * r_gb_);
+            }
         }
-        if (L >= 1 && r_gb_ > 0) {
-            d_PQ_[L] = alloc(n * (2 * L + 1) * r_gb_);
-            d_dPQ_[L] = alloc(n * (2 * L + 1) * r_gb_);
+        const bool dual_r2_a = (fabsf(r_max2_ - r_max_) > 1e-6f);
+        const bool nb2_same_bf = (!dual_r2_a) && (!remove_backflow_ || n_base2_ == n_base_);
+        const bool nb1_fast_alloc = (n_base_ == 8 || n_base_ == 12 || n_base_ == 14 || n_base_ == 16);
+        const bool nb2_fast_alloc = (n_base2_ == 8 || n_base2_ == 12 || n_base2_ == 14 || n_base2_ == 16);
+        const bool v1_n8_nb_alloc = nb2_fast_alloc &&
+            ((!dual_r2_a && (!remove_backflow_ || n_base2_ == n_base_)) ||
+             (!remove_backflow_) ||
+             (n_base2_ == 8 && nb1_fast_alloc));
+        if (lmsg_ == 1 && lfeat2_ == 1 && (lout2_ == 1 || lout2_ == 2) && n_msg_ <= 8 && v1_n8_nb_alloc) {
+            const size_t pack_floats = (n_msg_ <= 4) ? ((lout2_ == 2) ? 64 : 32) : ((lout2_ == 2) ? 128 : 64);
+            d_dA2_pack_ = alloc(n * pack_floats);  // 128-byte cache-line aligned!
+            float4* ip4 = nullptr;
+            const size_t ip4_bytes = n * (size_t)n_msg_ * sizeof(float4);
+            sys_max_alloc_ = std::max(sys_max_alloc_, ip4_bytes);
+            CUDA_CHECK_THROW(device_malloc(&ip4, ip4_bytes));
+            sys_bytes_ += ip4_bytes;
+            sys_allocs_.push_back(ip4);
+            d_I_pack4_ = ip4;
+        } else if (lmsg_ == 1 && lout2_ == 2 && lfeat2_ == 1 && n_msg_ <= 16 && n_base2_ == 8 && nb2_same_bf) {
+            d_dA2_pack_ = alloc(n * 208);  // 13*16 floats/atom (3x float4 + 1x float, exact FP32, 16-byte aligned!)
+            float4* ip4 = nullptr;
+            const size_t ip4_bytes = n * (size_t)n_msg_ * sizeof(float4);
+            sys_max_alloc_ = std::max(sys_max_alloc_, ip4_bytes);
+            CUDA_CHECK_THROW(device_malloc(&ip4, ip4_bytes));
+            sys_bytes_ += ip4_bytes;
+            sys_allocs_.push_back(ip4);
+            d_I_pack4_ = ip4;
+        } else if (lmsg_ == 0 && (lfeat2_ == 1 || lfeat2_ == 2) && lout2_ == lfeat2_ && n_msg_ <= 16 && n_base2_ == 8 && nb2_same_bf) {
+            d_dA2_pack_ = alloc(n * ((lfeat2_ == 1) ? 64 : 144));
+        } else if (lfeat2_ == 2 && lout2_ == 2 && (lmsg_ == 1 || lmsg_ == 2) && n_msg_ <= 32 &&
+                   n_base2_ <= 16 && (!remove_backflow_ || n_base_ <= 16)) {
+            const size_t subw = (n_msg_ <= 8) ? 8 : ((n_msg_ <= 16) ? 16 : 32);
+            const size_t n_vec4 = (lmsg_ == 1) ? 6 : 9;
+            d_dA2_pack_ = alloc(n * n_vec4 * 4 * subw);
         }
+        d_f1_ = alloc(n);
     }
-    if (lmsg_ == 1 && lout2_ == 2 && lfeat2_ == 1 && n_msg_ <= 16 && n_base_ == 8) {
-        d_dA2_pack_ = alloc(n * 208);  // 13*16 floats/atom (3x float4 + 1x float, exact FP32, 16-byte aligned!)
-        float4* ip4 = nullptr;
-        const size_t ip4_bytes = n * (size_t)n_msg_ * sizeof(float4);
-        sys_max_alloc_ = std::max(sys_max_alloc_, ip4_bytes);
-        CUDA_CHECK_THROW(device_malloc(&ip4, ip4_bytes));
-        sys_bytes_ += ip4_bytes;
-        sys_allocs_.push_back(ip4);
-        d_I_pack4_ = ip4;
-    }
-    d_f1_ = alloc(n);
 
     d_x_ = alloc(n * n_feat_pad_);
     d_dx_ = alloc(n * n_feat_pad_);
+    d_am_l1_ = alloc(n);
     {
         int8_t* ea = nullptr;
         const size_t ea_bytes = align256(n * sizeof(int8_t));
@@ -6415,15 +7896,113 @@ void IlmlipModel::alloc_system(int N) {
     }
     d_dh_[0] = alloc(n * ro_width_);
     d_dh_[1] = alloc(n * ro_width_);
+    d_forces_f32_ = alloc(n * 3);
+    CUDA_CHECK_THROW(cudaMemset(d_forces_f32_, 0, n * 3 * sizeof(float)));
+
+    if (has_lrsk_) {
+        for (int l = 0; l <= lmsg_; ++l) {
+            d_Bcat_[l]  = alloc(n * (2 * l + 1) * msg_in_dim_[l]);
+            d_dBcat_[l] = alloc(n * (2 * l + 1) * msg_in_dim_[l]);
+        }
+        if (d_dBcat_[0]) CUDA_CHECK_THROW(cudaMemset(d_dBcat_[0], 0, n * msg_in_dim_[0] * sizeof(float)));
+        if (lrsk_fast_sym_) {
+            auto alloc_f4 = [&](size_t cnt) -> float4* {
+                if (cnt == 0) return nullptr;
+                float4* p = nullptr;
+                const size_t bytes = cnt * sizeof(float4);
+                sys_max_alloc_ = std::max(sys_max_alloc_, bytes);
+                CUDA_CHECK_THROW(device_malloc(&p, bytes));
+                sys_bytes_ += bytes;
+                sys_allocs_.push_back(p);
+                return p;
+            };
+            const int nm = lrsk_i_stride_;
+            if (lfeat_ == 2) {
+                d_lrsk_I0_dum_  = alloc(n * nm);
+                d_lrsk_dI0_dum_ = alloc(n * nm);
+                CUDA_CHECK_THROW(cudaMemset(d_lrsk_dI0_dum_, 0, n * nm * sizeof(float)));
+            }
+            if (lrsk_c1_ > 0 || lfeat_ == 2) {
+                d_lrsk_I1_  = alloc(n * 3 * nm);
+                d_lrsk_dI1_ = alloc(n * 3 * nm);
+            }
+            if (lrsk_c2_ > 0) {
+                d_lrsk_I2_  = alloc(n * 5 * nm);
+                d_lrsk_dI2_ = alloc(n * 5 * nm);
+            }
+            d_lrsk_qp4_  = alloc_f4(n * 4);
+            d_lrsk_dqp4_ = alloc_f4(n * 4);
+            d_lrsk_g1A_  = alloc(n * 4);
+            if (lrsk_sw_mp_ || lrsk_mp_cap_ > 0.0f) {
+                d_lrsk_q_raw_ = alloc(n * 4);
+            }
+            d_lrsk_es_   = alloc(n);
+            d_lrsk_elr_  = alloc(n);
+            d_lrsk_sw_   = alloc(n);
+            if (lrsk_c2_ > 0) {
+                d_lrsk_Q03_  = alloc_f4(n * 4);
+                d_lrsk_Q4_   = alloc(n * 4);
+                d_lrsk_dQ03_ = alloc_f4(n * 4);
+                d_lrsk_dQ4_  = alloc(n * 4);
+                d_lrsk_g2A_  = alloc(n * 4);
+            }
+            {
+                int8_t* ep = nullptr;
+                const size_t ep_b = align256(n * sizeof(int8_t));
+                CUDA_CHECK_THROW(device_malloc(&ep, ep_b));
+                sys_bytes_ += ep_b;
+                sys_allocs_.push_back(ep);
+                d_lrsk_eA_pol_ = ep;
+            }
+            d_lrsk_qp_dpol8_ = nullptr;
+            if (lrsk_pol_field_) {
+                d_lrsk_pol_ef4_  = alloc_f4(n * 4);
+                d_lrsk_dpol_ef4_ = alloc_f4(n * 4);
+                d_lrsk_qp_dpol8_ = alloc_f4(n * 8);
+                d_lrsk_pol_in_   = alloc(n * lrsk_pol_in_pad_);
+                d_lrsk_pol_pre_  = alloc(n * lrsk_pol_w_pad_);
+                d_lrsk_pol_din_  = alloc(n * lrsk_pol_in_pad_);
+            }
+        } else {
+            if (lrsk_c1_ > 0) {
+                d_lrsk_I1_  = alloc(n * 3 * 2 * lrsk_c1_);
+                d_lrsk_dI1_ = alloc(n * 3 * 2 * lrsk_c1_);
+            }
+            if (lrsk_c2_ > 0) {
+                d_lrsk_I2_  = alloc(n * 5 * 2 * lrsk_c2_);
+                d_lrsk_dI2_ = alloc(n * 5 * 2 * lrsk_c2_);
+            }
+            d_lrsk_qA_  = alloc(n * 16);  d_lrsk_qB_  = alloc(n * 16);
+            d_lrsk_pA_  = alloc(n * 48);  d_lrsk_pB_  = alloc(n * 48);
+            d_lrsk_QA_  = alloc(n * 40);  d_lrsk_QB_  = alloc(n * 40);
+            d_lrsk_g1A_ = alloc(n * 16);  d_lrsk_g1B_ = alloc(n * 16);
+            d_lrsk_g2A_ = alloc(n * 8);   d_lrsk_g2B_ = alloc(n * 8);
+            d_lrsk_es_  = alloc(n);       d_lrsk_elr_ = alloc(n);
+            d_lrsk_sw_  = alloc(n);
+            d_lrsk_dqA_ = alloc(n * 16);  d_lrsk_dqB_ = alloc(n * 16);
+            d_lrsk_dpA_ = alloc(n * 48);  d_lrsk_dpB_ = alloc(n * 48);
+            d_lrsk_dQA_ = alloc(n * 40);  d_lrsk_dQB_ = alloc(n * 40);
+            if (lrsk_pol_field_) {
+                d_lrsk_Phi_  = alloc(n * 16);  d_lrsk_Ef_  = alloc(n * 48);
+                d_lrsk_dPhi_ = alloc(n * 16);  d_lrsk_dEf_ = alloc(n * 48);
+            }
+        }
+    }
     N_ = N;
 }
 
 void IlmlipModel::record(const GenericPassInputs& in) {
     const int N = in.N;
     cudaStream_t st = in.stream;
+    const int* row_end = in.act_row_end ? in.act_row_end : (in.act_row_ptr + 1);
+    const bool dual_r2 = (fabsf(r_max2_ - r_max_) > 1e-6f);
+    const bool rev_r2  = (r_max2_ > r_max_ + 1e-6f);
+    const int* row_end1 = (rev_r2 && in.act_row_end2) ? in.act_row_end2 : row_end;
+    const int* row_end2 = (!rev_r2 && dual_r2 && in.act_row_end2) ? in.act_row_end2 : row_end;
     const unsigned warp_grid = (unsigned)((N + 3) / 4);
     const unsigned half_grid = (unsigned)((N + 7) / 8);
-    const float inv_rmax = r_max_;  // pass exact r_max into eval_cheb
+    const ChebParam inv_rmax = make_cheb_param(r_max_, radial_warp_);    // exact 2-FMA r_max1 + warp
+    const ChebParam inv_rmax2 = make_cheb_param(r_max2_, radial_warp_);  // exact 2-FMA r_max2 + warp
 
     Int4 nl4{{n_l_[0], n_l_[1], n_l_[2], n_l_[3]}};
     Int4 l1off4{{l1_off_[0], l1_off_[1], l1_off_[2], l1_off_[3]}};
@@ -6446,50 +8025,139 @@ void IlmlipModel::record(const GenericPassInputs& in) {
     CPtr4 cPQ{{nullptr, d_PQ_[1], d_PQ_[2], d_PQ_[3]}};
     Ptr4 pdPQ{{nullptr, d_dPQ_[1], d_dPQ_[2], d_dPQ_[3]}};
 
-    const bool use_nb16 = (n_base_ <= 16);
-    const bool use_fast_l2 = (lmsg_ == 1 && lout2_ == 2 && (lfeat2_ == 1 || lfeat2_ == 2));
-    const bool use_l2_sp = (lmsg_ == 1 && lout2_ == 2 && lfeat2_ == 1 && n_msg_ <= 16 && n_base_ == 8 && S_ <= 4);
+    const char* no_lf2_env = std::getenv("LOUP_ILMLIP_NO_LF2_FAST");
+    const bool no_lf2_fast = (no_lf2_env && no_lf2_env[0] == '1');
+    const char* no_nh2_env = std::getenv("LOUP_ILMLIP_NO_NODE_H2");
+    const bool do_node_h2 = use_node_h2_ && (bool)in.gemm_h2_row && !(no_nh2_env && no_nh2_env[0] == '1');
+    const bool use_nb16 = (n_base2_ <= 16);
+    const bool nb2_bf_ok = (!dual_r2) && (!remove_backflow_ || n_base2_ == n_base_);
+    const bool use_fast_l2 = has_l2_ && nb2_bf_ok && (lmsg_ == 1 && lout2_ == 2 && (lfeat2_ == 1 || lfeat2_ == 2));
+    const bool use_l2_sp = has_l2_ && nb2_bf_ok && (lmsg_ == 1 && lout2_ == 2 && lfeat2_ == 1 && n_msg_ <= 16 && n_base2_ == 8 && S_ <= 4);
+    const bool use_l2_s0 = has_l2_ && nb2_bf_ok && (lmsg_ == 0 && lfeat2_ == 0 && lout2_ == 0 && n_msg_ <= 16 && n_base2_ == 8 && S_ <= 4);
+    const bool use_l2_smma = has_l2_ && nb2_bf_ok && (lmsg_ == 0 && (lfeat2_ == 1 || lfeat2_ == 2) && lout2_ == lfeat2_ &&
+                                                      n_msg_ <= 16 && n_base2_ == 8 && S_ <= 4);
+    const bool use_smma_sw8 = use_l2_smma && (n_msg_ <= 8) && (r_gram_ <= 8);
+    const bool use_smma_inv_fused = use_l2_smma && (r_bisp_ == 0) && (r_gram_ > 0) && (r_gram_ <= 16) &&
+                                    (l2_c_[0] == n_msg_) && (l2_c_[1] == n_msg_) &&
+                                    (lfeat2_ == 1 || l2_c_[2] == n_msg_);
+    const bool nb1_fast_ok = (n_base_ == 8 || n_base_ == 12 || n_base_ == 14 || n_base_ == 16);
+    const bool nb2_fast_ok = (n_base2_ == 8 || n_base2_ == 12 || n_base2_ == 14 || n_base2_ == 16);
+    const bool v1_same_g = (!dual_r2) && (!remove_backflow_ || n_base2_ == n_base_);
+    const bool v1_nb_ok = nb2_fast_ok && (v1_same_g || !remove_backflow_ || (n_base2_ == 8 && nb1_fast_ok));
+    const bool use_l2_v1_n8 = has_l2_ && (!dual_r2 || in.act_row_end2 != nullptr) && v1_nb_ok &&
+                              (lmsg_ == 1 && lfeat2_ == 1 && (lout2_ == 1 || lout2_ == 2) && n_msg_ <= 8 && S_ <= 4);
+    const bool use_l2_v1_n4 = use_l2_v1_n8 && (n_msg_ <= 4);
+    const bool use_v1_n4_inv_fused = use_l2_v1_n4 && (r_bisp_ == 0) && (r_gram_ > 0) && (r_gram_ <= 4) &&
+                                     (l2_c_[0] == 2 * n_msg_) && (l2_c_[1] == 2 * n_msg_) &&
+                                     (lout2_ == 1 || l2_c_[2] == n_msg_);
+    const bool use_v1_n8_inv_fused = use_l2_v1_n8 && !use_l2_v1_n4 && (r_bisp_ == 0) && (r_gram_ > 0) && (r_gram_ <= 8) &&
+                                     (l2_c_[0] == 2 * n_msg_) && (l2_c_[1] == 2 * n_msg_) &&
+                                     (lout2_ == 1 || l2_c_[2] == n_msg_);
+    const bool lf2_dual_g = remove_backflow_ && (dual_r2 || n_base2_ != n_base_);
+    const bool use_l2_lf2 = has_l2_ && (!dual_r2 || in.act_row_end2 != nullptr) && !no_lf2_fast &&
+                            (lfeat2_ == 2 && lout2_ == 2 && (lmsg_ == 1 || lmsg_ == 2) &&
+                             n_msg_ <= (lf2_dual_g ? 16 : 32) && n_base2_ <= 16 && (!remove_backflow_ || n_base_ <= 16));
     const unsigned l2_sp_grid = (unsigned)((N + 15) / 16);
+    const unsigned l2_v1_n4_grid = (unsigned)((N + 31) / 32);
     const size_t l2_sp_smem = (size_t)S_ * S_ * 8 * 16 * sizeof(float2) * (remove_backflow_ ? 2 : 1);
-    const bool use_l1_sumswap = (S_ <= 4 && (n_base_ == 8 || n_base_ == 12 || n_base_ == 16) && max_nl_ <= 32 &&
+    const size_t l2_s0_smem = (size_t)S_ * S_ * 8 * n_msg_ * sizeof(float) * (remove_backflow_ ? 2 : 1);
+    const size_t l2_smma_smem = (size_t)S_ * S_ * 8 * ((lfeat2_ + 1) + (remove_backflow_ ? 1 : 0)) * (use_smma_sw8 ? 8 : 16) * sizeof(float);
+    const int v1_nb2_4 = (n_base2_ + 3) / 4;
+    const int v1_nb1_4 = (n_base_ + 3) / 4;
+    const size_t l2_v1_smem = (size_t)S_ * S_ * 2 * 8 * sizeof(float4) * (v1_nb2_4 + (remove_backflow_ ? v1_nb1_4 : 0));
+    const size_t l2_v1_n4_smem = (size_t)S_ * S_ * 2 * 4 * sizeof(float4) * (v1_nb2_4 + (remove_backflow_ ? v1_nb1_4 : 0));
+    const bool use_l1_sumswap = (S_ <= 4 && (n_base_ == 8 || n_base_ == 12 || n_base_ == 14 || n_base_ == 16) &&
+                                 n_l_[0] <= 64 && n_l_[1] <= 32 && n_l_[2] <= 32 && n_l_[3] <= 32 &&
                                  (lmax_ == 2 || lmax_ == 3));
     const bool use_l1_packed = (n_l_[0] <= 32 && n_l_[1] <= 16 && n_l_[2] <= 16 && n_l_[3] <= 8);
     const bool l2_is_16 = (n_l_[2] > 8);
     const size_t c1_bytes = (size_t)S_ * S_ * n_base_ * n_tot1_ * sizeof(float);
     const bool use_smem_c1_fwd = (c1_bytes <= 32768);
-    const size_t l2_c_bytes = (size_t)S_ * S_ * n_base_ * ((lfeat2_ + 1) + (remove_backflow_ ? 2 : 0)) * n_msg_ * sizeof(float);
-    const bool use_smem_c2 = (l2_c_bytes <= 32768);
+    const size_t l2_c_bytes = (size_t)S_ * S_ *
+        ((size_t)n_base2_ * (lfeat2_ + 1) + (remove_backflow_ ? (size_t)n_base_ * (lmsg_ + 1) : 0)) *
+        n_msg_ * sizeof(float);
+    const bool use_smem_c2 = (l2_c_bytes <= (lf2_dual_g ? 16384u : 28672u));
+    const int lf2_subw = (n_msg_ <= 8) ? 8 : ((n_msg_ <= 16) ? 16 : 32);
+    const size_t lf2_c_bytes = (n_base2_ == 8 && !lf2_dual_g)
+        ? ((size_t)S_ * S_ * 8 * (3 + (remove_backflow_ ? (lmsg_ + 1) : 0)) * lf2_subw * sizeof(float))
+        : l2_c_bytes;
+    const bool use_smem_c2_lf2 = (lf2_c_bytes <= (lf2_dual_g ? 16384u : 57344u));
 
     // 1. Layer-1 Edge Forward (ZBL decoupled via d_zbl_flag_ on sumswap path -> <=80 regs!)
     const float a0_s0 = a0_ / sigma0_;
     const float inv_d1_s0k = 1.0f / ((float)D_A1_ * sigma0_ * sigma0_ * kappa_ * kappa_);
+    const unsigned zbl_grid = std::min(warp_grid, 128u);
     if (use_l1_sumswap) {
-        if (use_zbl_switch_) CUDA_CHECK_THROW(cudaMemsetAsync(d_zbl_flag_, 0, sizeof(int), st));
-        auto launch_l1_ss = [&](auto lm_tag, auto nb_tag, auto s3_tag) {
+        const char* sw16_env = std::getenv("LOUP_ILMLIP_L1_SW16");
+        const bool allow_l1_sw16 = !(sw16_env && sw16_env[0] == '0');
+        // SW=16 gives -18 us on LMAX=2 (70 regs, full occ) while LMAX=3 prefers SW=32 (80 vs 113-122 regs).
+        const bool use_ss16 = allow_l1_sw16 && (lmax_ == 2) && (n_base_ == 8) && (n_l_[0] <= 32 && n_l_[1] <= 32 && n_l_[2] <= 16);
+        const bool pack_vs = (in.act_senders == nullptr);
+        auto launch_l1_ss = [&](auto lm_tag, auto nb_tag, auto sm_tag) {
             constexpr int LM = decltype(lm_tag)::value;
             constexpr int NB = decltype(nb_tag)::value;
-            constexpr bool S3 = decltype(s3_tag)::value;
-            ilmlip_l1_edge_fwd_sumswap_kernel<LM, NB, S3><<<warp_grid, 128, 0, st>>>(
+            constexpr int SM = decltype(sm_tag)::value;
+            if constexpr (LM == 2 && NB == 8) {
+                if (use_ss16) {
+                    if (pack_vs) {
+                        ilmlip_l1_edge_fwd_sumswap16_kernel<LM, SM, true><<<half_grid, 128, 0, st>>>(
+                            N, S_, n_tot1_, nl4, l1off4, inv_rmax, a0_s0, inv_d1_s0k,
+                            in.act_row_ptr, row_end1, nullptr, in.act_vec_len, in.species, d_C1_,
+                            use_zbl_switch_ ? d_rs_pair_f32_ : nullptr, use_zbl_switch_ ? d_zbl_flag_ : nullptr,
+                            pA1, d_f0_, use_zbl_switch_ ? d_e_zbl_ : nullptr);
+                    } else {
+                        ilmlip_l1_edge_fwd_sumswap16_kernel<LM, SM, false><<<half_grid, 128, 0, st>>>(
+                            N, S_, n_tot1_, nl4, l1off4, inv_rmax, a0_s0, inv_d1_s0k,
+                            in.act_row_ptr, row_end1, in.act_senders, in.act_vec_len, in.species, d_C1_,
+                            use_zbl_switch_ ? d_rs_pair_f32_ : nullptr, use_zbl_switch_ ? d_zbl_flag_ : nullptr,
+                            pA1, d_f0_, use_zbl_switch_ ? d_e_zbl_ : nullptr);
+                    }
+                    return;
+                }
+            }
+            if constexpr (NB == 8 || NB == 12) {
+                if (pack_vs) {
+                    ilmlip_l1_edge_fwd_sumswap_kernel<LM, NB, SM, true><<<warp_grid, 128, 0, st>>>(
+                        N, S_, n_tot1_, nl4, l1off4, inv_rmax, a0_s0, inv_d1_s0k,
+                        in.act_row_ptr, row_end1, nullptr, in.act_vec_len, in.species, d_C1_,
+                        use_zbl_switch_ ? d_rs_pair_f32_ : nullptr, use_zbl_switch_ ? d_zbl_flag_ : nullptr,
+                        pA1, d_f0_, use_zbl_switch_ ? d_e_zbl_ : nullptr);
+                    return;
+                }
+            }
+            auto kfn = ilmlip_l1_edge_fwd_sumswap_kernel<LM, NB, SM, false>;
+            kfn<<<warp_grid, 128, 0, st>>>(
                 N, S_, n_tot1_, nl4, l1off4, inv_rmax, a0_s0, inv_d1_s0k,
-                in.act_row_ptr, in.act_senders, in.act_vec_len, in.species, d_C1_,
+                in.act_row_ptr, row_end1, in.act_senders, in.act_vec_len, in.species, d_C1_,
                 use_zbl_switch_ ? d_rs_pair_f32_ : nullptr, use_zbl_switch_ ? d_zbl_flag_ : nullptr,
                 pA1, d_f0_, use_zbl_switch_ ? d_e_zbl_ : nullptr);
         };
-        auto disp_s3 = [&](auto lm_tag, auto nb_tag) {
-            if (S_ <= 3) launch_l1_ss(lm_tag, nb_tag, std::true_type{});
-            else         launch_l1_ss(lm_tag, nb_tag, std::false_type{});
+        auto disp_sm = [&](auto lm_tag, auto nb_tag) {
+            if (S_ <= 2)      launch_l1_ss(lm_tag, nb_tag, std::integral_constant<int, 2>{});
+            else if (S_ == 3) launch_l1_ss(lm_tag, nb_tag, std::integral_constant<int, 3>{});
+            else              launch_l1_ss(lm_tag, nb_tag, std::integral_constant<int, 4>{});
         };
         auto disp_nb = [&](auto lm_tag) {
-            if (n_base_ == 8)       disp_s3(lm_tag, std::integral_constant<int, 8>{});
-            else if (n_base_ == 12) disp_s3(lm_tag, std::integral_constant<int, 12>{});
-            else                    disp_s3(lm_tag, std::integral_constant<int, 16>{});
+            if (n_base_ == 8)       disp_sm(lm_tag, std::integral_constant<int, 8>{});
+            else if (n_base_ == 12) disp_sm(lm_tag, std::integral_constant<int, 12>{});
+            else if (n_base_ == 14) disp_sm(lm_tag, std::integral_constant<int, 14>{});
+            else                    disp_sm(lm_tag, std::integral_constant<int, 16>{});
         };
         if (lmax_ == 2) disp_nb(std::integral_constant<int, 2>{});
         else            disp_nb(std::integral_constant<int, 3>{});
         if (use_zbl_switch_) {
-            ilmlip_zbl_fwd_kernel<<<warp_grid, 128, 0, st>>>(
-                N, S_, d_zbl_flag_, in.act_row_ptr, in.act_senders, in.act_vec_len, in.species, in.pos64,
-                d_rs_pair_, d_zz_pair_, d_au_pair_, d_e_zbl_);
+            if (zbl_stream_) {
+                CUDA_CHECK_THROW(cudaEventRecord(zbl_ev_fork_, st));
+                CUDA_CHECK_THROW(cudaStreamWaitEvent(zbl_stream_, zbl_ev_fork_, 0));
+                ilmlip_zbl_fwd_kernel<<<zbl_grid, 128, 0, zbl_stream_>>>(
+                    N, S_, d_zbl_flag_, in.energy_only != 0, in.act_row_ptr, row_end1, in.act_senders, in.act_vec_len, in.species, in.pos64,
+                    d_rs_pair_, d_zz_pair_, d_au_pair_, d_e_zbl_);
+                CUDA_CHECK_THROW(cudaEventRecord(zbl_ev_join_, zbl_stream_));
+            } else {
+                ilmlip_zbl_fwd_kernel<<<zbl_grid, 128, 0, st>>>(
+                    N, S_, d_zbl_flag_, in.energy_only != 0, in.act_row_ptr, row_end1, in.act_senders, in.act_vec_len, in.species, in.pos64,
+                    d_rs_pair_, d_zz_pair_, d_au_pair_, d_e_zbl_);
+            }
         }
     } else if (use_l1_packed) {
         auto launch_l1_pk = [&](auto lm_tag, auto nb_tag, auto zb_tag, auto sm_tag, auto l216_tag) {
@@ -6500,7 +8168,7 @@ void IlmlipModel::record(const GenericPassInputs& in) {
             constexpr bool L216 = decltype(l216_tag)::value;
             ilmlip_l1_edge_fwd_packed_kernel<LM, NB, ZB, SM, L216><<<warp_grid, 128, SM ? c1_bytes : 0, st>>>(
                 N, S_, n_base_, n_tot1_, nl4, l1off4, inv_rmax, a0_s0, inv_d1_s0k,
-                in.act_row_ptr, in.act_senders, in.act_vec_len, in.species, in.pos64, d_C1_,
+                in.act_row_ptr, row_end1, in.act_senders, in.act_vec_len, in.species, in.pos64, d_C1_,
                 d_rs_pair_, d_zz_pair_, d_au_pair_, pA1, d_f0_, d_e_zbl_);
         };
         auto disp_l216 = [&](auto lm_tag, auto nb_tag, auto zb_tag, auto sm_tag) {
@@ -6529,7 +8197,7 @@ void IlmlipModel::record(const GenericPassInputs& in) {
             constexpr bool ZB = decltype(zbl_tag)::value;
             ilmlip_l1_edge_fwd_kernel<LM, CP, NB, ZB><<<warp_grid, 128, 0, st>>>(
                 N, S_, n_base_, n_tot1_, nl4, l1off4, inv_rmax, a0_s0, inv_d1_s0k,
-                in.act_row_ptr, in.act_senders, in.act_vec_len, in.species, in.pos64, d_C1_,
+                in.act_row_ptr, row_end1, in.act_senders, in.act_vec_len, in.species, in.pos64, d_C1_,
                 d_rs_pair_, d_zz_pair_, d_au_pair_, pA1, d_f0_, d_e_zbl_);
         };
         auto disp_l1_fwd_zb = [&](auto lm_tag, auto ch_tag, auto nb_tag) {
@@ -6548,25 +8216,928 @@ void IlmlipModel::record(const GenericPassInputs& in) {
         else            disp_l1_fwd_ch(std::integral_constant<int, 3>{});
     }
 
-    // 2. Layer-1 Node Forward (ACE nu=2,3) + W_msg GEMMs (SMEM-staged 256-thr fused + float4 I_pack4!)
+    // 2. Layer-1 Node Forward (ACE nu=2,3) + W_msg GEMMs (or LR-SK unified path!)
     const size_t l1n_tbl_bytes = (size_t)(n_nu2_ * 9 + n_nu3_ * 8 + cg_count_ * 2) * sizeof(int32_t);
     const bool l1n_smem_tbl = (l1n_tbl_bytes <= 16384);
     const int n_sh_l1 = (lmax_ <= 2) ? 9 : 16;
-    const size_t w_msg_smem = (lmsg_ == 1) ? (size_t)(msg_in_dim_[0] + msg_in_dim_[1]) * n_msg_ * sizeof(float) : 0;
-    const bool use_fused_l1_msg = fast_l1_node_lf1_ && (max_nl_ <= 32) && (n_msg_ <= 16) && (w_msg_smem <= 32768);
-    const bool use_I_pack4 = use_fused_l1_msg && use_l2_sp && d_I_pack4_;
-    if (use_fused_l1_msg) {
+    const char* f64f_env = std::getenv("LOUP_ILMLIP_F64_FORCES");
+    const bool use_f32_forces = (d_forces_f32_ != nullptr) && !(f64f_env && f64f_env[0] == '1');
+    bool used_f32_forces = false;
+    const bool use_l1_pre = use_l1_sumswap && (S_ * n_base_ <= 64) && (D_A1_ <= ((lmax_ == 2) ? 256 : 416));
+    const bool zbl_bwd_async = !has_lrsk_ && use_l1_pre && use_zbl_switch_ && (zbl_stream_ != nullptr);
+    auto launch_gate_bwd = [&](int n_deg, const Int4& C_deg, float inv_s, CPtr4 A, Ptr4 dA,
+                               const float* f_arr, const float* df_ext) {
+        if (n_deg == 2)
+            ilmlip_gate_bwd_kernel<2><<<warp_grid, 128, 0, st>>>(N, C_deg, inv_s, A, dA, f_arr, df_ext);
+        else if (n_deg == 3)
+            ilmlip_gate_bwd_kernel<3><<<warp_grid, 128, 0, st>>>(N, C_deg, inv_s, A, dA, f_arr, df_ext);
+        else
+            ilmlip_gate_bwd_kernel<4><<<warp_grid, 128, 0, st>>>(N, C_deg, inv_s, A, dA, f_arr, df_ext);
+    };
+
+    if (has_lrsk_) {
+        if (in.n_ghost > 0) throw std::runtime_error("ilmlip lrsk: ghost atoms not yet supported");
+        if (lrsk_fast_sym_) {
+            const int nm = lrsk_i_stride_;
+            const bool use_lrsk_lf1_v5 = fast_l1_node_lf1_ && (max_nl_ <= 32) && (lrsk_c1_ > 0) &&
+                                         (lrsk_c2_ == 0) && (nm <= 4) &&
+                                         ((size_t)nm * msg_in_dim_[1] * sizeof(float) <= 32768u) &&
+                                         (msg_in_dim_[0] == n_inv1_);
+            const size_t lf2_smem_l = (lfeat_ == 2 && (lmsg_ == 1 || lmsg_ == 2))
+                ? (size_t)(msg_in_dim_[1] + (lmsg_ == 2 ? msg_in_dim_[2] : 0)) * nm * sizeof(float)
+                : 0;
+            const bool use_lrsk_lf2_fused = fast_l1_node_lf2_ && !no_lf2_fast && (max_nl_ <= 32) &&
+                                            (lmsg_ == 1 || lmsg_ == 2) && (nm <= 4) &&
+                                            (msg_in_dim_[0] == n_inv1_) && (lf2_smem_l <= 24576u) &&
+                                            (lrsk_c1_ > 0) && (lrsk_c2_ > 0 || lmsg_ == 1);
+            const bool lf2_nl16 = (max_nl_ <= 16);
+
+            // 2a. Fused Layer-1 Node Forward + W_p1/W_p2 + Standardization + eA_x!
+            if (use_lrsk_lf1_v5) {
+                lrsk_fast::launch_l1_node_fwd_lf1_lrsk(
+                    st, lmax_, (max_nl_ <= 16), N, n_feat_pad_, nm,
+                    n_l_[0], n_l_[1], n_l_[2], n_l_[3], msg_in_dim_[1],
+                    d_A1_[0], d_A1_[1], d_A1_[2], d_A1_[3],
+                    d_lrsk_W_p1_T_, d_mu_x_, d_inv_std_x_, d_x_, d_eA_x_, d_lrsk_I1_);
+            } else if (use_lrsk_lf2_fused) {
+                Ptr4 pIr{{d_lrsk_I0_dum_, d_lrsk_I1_, d_lrsk_I2_, nullptr}};
+                auto launch_lf2f = [&](auto lm_tag, auto lmsg_tag) {
+                    constexpr int LM = decltype(lm_tag)::value;
+                    constexpr int LMSG = decltype(lmsg_tag)::value;
+                    if constexpr (LM == 2) {
+                        if (lf2_nl16) {
+                            const dim3 grid((unsigned)((N + 7) / 8));
+                            const dim3 blk(16, 8);
+                            auto kfn = ilmlip_l1_node_fwd_lf2_msg_L2_kernel<LMSG, 4, true, true, false>;
+                            if (lf2_smem_l > 20480u)
+                                CUDA_CHECK_THROW(cudaFuncSetAttribute(kfn, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)lf2_smem_l));
+                            kfn<<<grid, blk, lf2_smem_l, st>>>(
+                                N, n_feat_pad_, nm, nl4, mid4, cA1, nullptr, d_lrsk_W_p1_T_, d_lrsk_W_p2_T_,
+                                d_mu_x_, d_inv_std_x_, d_x_, nullptr, nullptr, pIr, d_eA_x_);
+                        } else {
+                            const dim3 grid((unsigned)((N + 3) / 4));
+                            const dim3 blk(32, 4);
+                            auto kfn = ilmlip_l1_node_fwd_lf2_msg_L2_kernel<LMSG, 4, true, false, false>;
+                            if (lf2_smem_l > 20480u)
+                                CUDA_CHECK_THROW(cudaFuncSetAttribute(kfn, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)lf2_smem_l));
+                            kfn<<<grid, blk, lf2_smem_l, st>>>(
+                                N, n_feat_pad_, nm, nl4, mid4, cA1, nullptr, d_lrsk_W_p1_T_, d_lrsk_W_p2_T_,
+                                d_mu_x_, d_inv_std_x_, d_x_, nullptr, nullptr, pIr, d_eA_x_);
+                        }
+                    } else {
+                        if (lf2_nl16) {
+                            const dim3 grid((unsigned)((N + 7) / 8));
+                            const dim3 blk(16, 8);
+                            auto kfn = ilmlip_l1_node_fwd_lf2_msg_L3_kernel<LMSG, 4, true, true, false>;
+                            if (lf2_smem_l > 12288u)
+                                CUDA_CHECK_THROW(cudaFuncSetAttribute(kfn, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)lf2_smem_l));
+                            kfn<<<grid, blk, lf2_smem_l, st>>>(
+                                N, n_feat_pad_, nm, nl4, mid4, cA1, nullptr, d_lrsk_W_p1_T_, d_lrsk_W_p2_T_,
+                                d_mu_x_, d_inv_std_x_, d_x_, nullptr, nullptr, pIr, d_eA_x_);
+                        } else {
+                            const dim3 grid((unsigned)((N + 3) / 4));
+                            const dim3 blk(32, 4);
+                            auto kfn = ilmlip_l1_node_fwd_lf2_msg_L3_kernel<LMSG, 4, true, false, false>;
+                            if (lf2_smem_l > 12288u)
+                                CUDA_CHECK_THROW(cudaFuncSetAttribute(kfn, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)lf2_smem_l));
+                            kfn<<<grid, blk, lf2_smem_l, st>>>(
+                                N, n_feat_pad_, nm, nl4, mid4, cA1, nullptr, d_lrsk_W_p1_T_, d_lrsk_W_p2_T_,
+                                d_mu_x_, d_inv_std_x_, d_x_, nullptr, nullptr, pIr, d_eA_x_);
+                        }
+                    }
+                };
+                if (lmax_ == 2) {
+                    if (lmsg_ == 1) launch_lf2f(std::integral_constant<int, 2>{}, std::integral_constant<int, 1>{});
+                    else            launch_lf2f(std::integral_constant<int, 2>{}, std::integral_constant<int, 2>{});
+                } else {
+                    if (lmsg_ == 1) launch_lf2f(std::integral_constant<int, 3>{}, std::integral_constant<int, 1>{});
+                    else            launch_lf2f(std::integral_constant<int, 3>{}, std::integral_constant<int, 2>{});
+                }
+            } else {
+                const unsigned gy = (unsigned)((max_nl_ + 31) / 32);
+                if (fast_l1_node_lf1_) {
+                    const dim3 grid((unsigned)((N + 7) / 8), gy);
+                    const dim3 blk(32, 8);
+                    if (lmax_ == 2) ilmlip_l1_node_fwd_lf1_kernel<2><<<grid, blk, 0, st>>>(N, n_feat_pad_, nl4, mid4, cA1, d_x_, pBcat);
+                    else            ilmlip_l1_node_fwd_lf1_kernel<3><<<grid, blk, 0, st>>>(N, n_feat_pad_, nl4, mid4, cA1, d_x_, pBcat);
+                } else if (fast_l1_node_lf2_ && !no_lf2_fast) {
+                    const dim3 grid((unsigned)((N + 3) / 4), gy);
+                    const dim3 blk(32, 4);
+                    if (lmax_ == 2) {
+                        if (lmsg_ == 1) ilmlip_l1_node_fwd_lf2_L2_kernel<1><<<grid, blk, 0, st>>>(N, n_feat_pad_, nl4, mid4, cA1, d_x_, pBcat);
+                        else            ilmlip_l1_node_fwd_lf2_L2_kernel<2><<<grid, blk, 0, st>>>(N, n_feat_pad_, nl4, mid4, cA1, d_x_, pBcat);
+                    } else {
+                        if (lmsg_ == 1) ilmlip_l1_node_fwd_lf2_L3_kernel<1><<<grid, blk, 0, st>>>(N, n_feat_pad_, nl4, mid4, cA1, d_x_, pBcat);
+                        else            ilmlip_l1_node_fwd_lf2_L3_kernel<2><<<grid, blk, 0, st>>>(N, n_feat_pad_, nl4, mid4, cA1, d_x_, pBcat);
+                    }
+                } else {
+                    const int per_atom_f = n_sh_l1 + std::max(b2_scalars_, 1);
+                    const size_t tbl_b = l1n_smem_tbl ? l1n_tbl_bytes : 0;
+                    const int apb = ((size_t)4 * per_atom_f * 32 * sizeof(float) + tbl_b <= 48000) ? 4 : 2;
+                    const dim3 l1n_grid((unsigned)((N + apb - 1) / apb), gy);
+                    const dim3 l1n_blk(32, (unsigned)apb);
+                    const size_t l1n_smem_fwd = tbl_b + (size_t)apb * per_atom_f * 32 * sizeof(float);
+                    if (lmax_ <= 2) {
+                        if (l1n_smem_tbl) ilmlip_l1_node_fwd_kernel<2, true><<<l1n_grid, l1n_blk, l1n_smem_fwd, st>>>(N, lmsg_, n_nu2_, n_nu3_, cg_count_, n_feat_pad_, b2_scalars_, nl4, mid4, d_nu2_, d_nu3_, d_cg_idx_, d_cg_val_, cA1, d_x_, pBcat);
+                        else              ilmlip_l1_node_fwd_kernel<2, false><<<l1n_grid, l1n_blk, l1n_smem_fwd, st>>>(N, lmsg_, n_nu2_, n_nu3_, cg_count_, n_feat_pad_, b2_scalars_, nl4, mid4, d_nu2_, d_nu3_, d_cg_idx_, d_cg_val_, cA1, d_x_, pBcat);
+                    } else {
+                        if (l1n_smem_tbl) ilmlip_l1_node_fwd_kernel<3, true><<<l1n_grid, l1n_blk, l1n_smem_fwd, st>>>(N, lmsg_, n_nu2_, n_nu3_, cg_count_, n_feat_pad_, b2_scalars_, nl4, mid4, d_nu2_, d_nu3_, d_cg_idx_, d_cg_val_, cA1, d_x_, pBcat);
+                        else              ilmlip_l1_node_fwd_kernel<3, false><<<l1n_grid, l1n_blk, l1n_smem_fwd, st>>>(N, lmsg_, n_nu2_, n_nu3_, cg_count_, n_feat_pad_, b2_scalars_, nl4, mid4, d_nu2_, d_nu3_, d_cg_idx_, d_cg_val_, cA1, d_x_, pBcat);
+                    }
+                }
+                ilmlip_norm_x_1L_kernel<<<warp_grid, 128, 0, st>>>(N, n_feat_, n_feat_pad_, d_mu_x_, d_inv_std_x_, d_x_, d_eA_x_);
+                if (lrsk_c1_ > 0) {
+                    in.gemm(false, 3 * N, lrsk_c1_, msg_in_dim_[1], 1.0f, d_Bcat_[1], msg_in_dim_[1],
+                            d_lrsk_W_p1_, lrsk_c1_, 0.0f, d_lrsk_I1_, nm);
+                }
+                if (lrsk_c2_ > 0) {
+                    in.gemm(false, 5 * N, lrsk_c2_, msg_in_dim_[2], 1.0f, d_Bcat_[2], msg_in_dim_[2],
+                            d_lrsk_W_p2_, lrsk_c2_, 0.0f, d_lrsk_I2_, nm);
+                }
+            }
+
+            if (use_l1_sumswap && use_zbl_switch_ && zbl_stream_) {
+                CUDA_CHECK_THROW(cudaStreamWaitEvent(st, zbl_ev_join_, 0));
+            }
+
+            // 2b. Site MLP Forward (v34 fused 2-layer w=64 kernel eliminates h0/eA_h0 DRAM & 2nd launch!)
+            const bool do_ro_h2 = use_ro_h2_ && (bool)in.gemm_h2_row && (N >= 128);
+            const char* ro2f_env = std::getenv("LOUP_LRSK_RO2_FUSE");
+            const int ro2f_mode = ro2f_env ? (ro2f_env[0] - '0') : -1;
+            // v35 wave gate: fused 2-layer w=64 launches ceil(N/64) CTAs (2/SM = 72/wave on 36-SM 5060 Ti);
+            // N <= 4608 fits in 1 wave (-8.5 us on n3tbu), while N=5184 (81 CTAs) prefers unfused (-10.1 us on Water).
+            const bool allow_lrsk_ro2_fuse = (ro2f_mode == 2) || (ro2f_mode != 0 && N <= 4608);
+            if (allow_lrsk_ro2_fuse && ro_depth_ == 2 && do_ro_h2 && ro_width_ == 64 &&
+                ((n_feat_pad_ % 64) == 0) && d_ro_h2_B_[0] && d_ro_h2_B_[1] && d_eA_x_ != nullptr) {
+                hgemm2_lrsk_ro2_fwd64(
+                    N, n_feat_pad_, in.species, d_x_, d_eA_x_, d_alpha_Z_,
+                    d_ro_h2_B_[0], d_ro_h2_pB_[0], d_ro_h2_B_[1], d_ro_h2_pB_[1],
+                    d_pre_[0], d_pre_[1], st);
+            } else {
+                for (int d = 0; d < ro_depth_; ++d) {
+                    const float* inp = (d == 0) ? d_x_ : d_h_[d - 1];
+                    const int K = (d == 0) ? n_feat_pad_ : ro_width_;
+                    const int8_t* eA_in = (d == 0) ? d_eA_x_ : d_lrsk_eA_pol_;
+                    if (do_ro_h2 && d_ro_h2_B_[d] && (d + 1 < ro_depth_) && ro_width_ == 64 && eA_in != nullptr) {
+                        hgemm2_f32a_row_silu_fwd64(
+                            N, K, inp, d_ro_h2_B_[d], d_ro_h2_pB_[d],
+                            d == 0, in.species, (d == 0) ? d_alpha_Z_ : d_ro_b_[d],
+                            d_pre_[d], d_h_[d], d_lrsk_eA_pol_, eA_in, st);
+                    } else {
+                        if (do_ro_h2 && d_ro_h2_B_[d]) {
+                            in.gemm_h2_row(N, ro_width_, K, inp, d_ro_h2_B_[d], d_ro_h2_pB_[d], d_pre_[d], 0.0f, eA_in);
+                        } else {
+                            in.gemm(false, N, ro_width_, K, 1.0f, inp, K, d_ro_W_[d], ro_width_, 0.0f, d_pre_[d], ro_width_);
+                        }
+                        if (d + 1 < ro_depth_) {
+                            lrsk_fast::launch_bias_silu_exp(
+                                st, N, ro_width_, d == 0, in.species,
+                                (d == 0) ? d_alpha_Z_ : d_ro_b_[d],
+                                d_pre_[d], d_h_[d], do_ro_h2 ? d_lrsk_eA_pol_ : nullptr);
+                        }
+                    }
+                }
+            }
+
+            // 2c. Config, buffers, & Grid-Stride SMEM-Resident Heads Forward + Fused Last-Layer Bias/SiLU
+            const bool need_grad = (in.energy_only == 0);
+            lrsk_fast::Cfg fcfg{};
+            fcfg.c0 = lrsk_c0_; fcfg.c1 = lrsk_c1_; fcfg.c2 = lrsk_c2_;
+            fcfg.c01 = std::min(lrsk_c0_, lrsk_c1_);
+            fcfg.c02 = std::min(lrsk_c0_, lrsk_c2_);
+            fcfg.c12 = std::min(lrsk_c1_, lrsk_c2_);
+            fcfg.n_head_out = lrsk_n_head_out_;
+            fcfg.pol_width = lrsk_pol_width_;
+            fcfg.pol_gram = lrsk_pol_gram_;
+            fcfg.sw_mp = lrsk_sw_mp_;
+            fcfg.bo_width = lrsk_bo_width_;
+            fcfg.half_esc = 0.5f * energy_scale_;
+            fcfg.inv_zc = 1.0f / z_c_;
+            fcfg.inv_mp_cap2 = (lrsk_mp_cap_ > 0.0f) ? (1.0f / (lrsk_mp_cap_ * lrsk_mp_cap_)) : 0.0f;
+            fcfg.inv_ef_cap2 = (lrsk_ef_cap_ > 0.0f) ? (1.0f / (lrsk_ef_cap_ * lrsk_ef_cap_)) : 0.0f;
+            lrsk_fast::BoWeights fbo{d_lrsk_bo_Wx_fwd_, d_lrsk_bo_Wx_bwd4_, d_lrsk_bo_Wr4_, d_lrsk_bo_bv_};
+            const int nb2_k = (n_base2_ <= 4) ? 4 : ((n_base2_ <= 8) ? 8 : 12);
+
+            lrsk_fast::Bufs fbuf{
+                d_lrsk_qp4_, d_lrsk_Q03_, d_lrsk_Q4_,
+                d_lrsk_g1A_, d_lrsk_g2A_, d_lrsk_q_raw_,
+                d_lrsk_es_, d_lrsk_elr_, d_lrsk_sw_,
+                d_lrsk_dqp4_, d_lrsk_dQ03_, d_lrsk_dQ4_,
+                d_lrsk_pol_ef4_, d_lrsk_dpol_ef4_, d_lrsk_qp_dpol8_,
+                (need_grad && use_l1_sumswap && use_zbl_switch_) ? d_zbl_flag_ : nullptr
+            };
+            lrsk_fast::ChebParamF cp2{inv_rmax2.r_max, inv_rmax2.q0, inv_rmax2.q1, inv_rmax2.warp};
+
+            const int d_last = ro_depth_ - 1;
+            const bool has_c2 = (lrsk_c2_ > 0);
+            lrsk_fast::launch_heads_fwd_silu(
+                st, N, S_, ro_width_, nm, (use_zbl_switch_ != 0), has_c2, (d_last == 0), fcfg,
+                in.species, (d_last == 0) ? d_alpha_Z_ : d_ro_b_[d_last],
+                d_pre_[d_last], d_h_[d_last],
+                d_lrsk_W_head_p16_, d_lrsk_b_head_p16_, d_lrsk_I1_, d_lrsk_I2_,
+                use_zbl_switch_ ? d_e_zbl_ : nullptr, fbuf);
+
+            // 2d. Ultra-Fast 4-Lane (32 atoms/CTA) Symmetric LR-SK Edge Kernel(s) + Fused Pol-MLP!
+            float* f32_ptr = use_f32_forces ? d_forces_f32_ : nullptr;
+            const float* h_last = d_h_[d_last];
+
+            if (!lrsk_pol_field_) {
+                if (!need_grad) {
+                    lrsk_fast::launch_edge_sym_pol_fwd(
+                        st, nb2_k, has_c2, false, N, S_, fcfg, cp2,
+                        in.act_row_ptr, row_end2, in.act_senders, in.act_vec_len, in.species, d_lrsk_W_fast4_, fbo, fbuf);
+                } else {
+                    if (use_f32_forces) used_f32_forces = true;
+                    lrsk_fast::launch_edge_sym_1p(
+                        st, nb2_k, has_c2, (in.compute_stress != 0), N, S_, fcfg, cp2,
+                        in.act_row_ptr, row_end2, in.act_senders, in.act_vec_len, in.species, d_lrsk_W_fast4_, fbo, fbuf,
+                        in.forces, f32_ptr, in.virial);
+                }
+                lrsk_fast::launch_energy_zbl_pure(
+                    st, (use_zbl_switch_ != 0), need_grad, N, fcfg, d_lrsk_es_, d_lrsk_elr_,
+                    use_zbl_switch_ ? d_e_zbl_ : nullptr, in.energy, in.atom_energy, need_grad ? d_w_zbl_ : nullptr);
+                if (!need_grad) return;
+            } else {
+                // When need_grad=true, skip BO-MLP in pol_fwd (0 us!) and accumulate its exact energy & ZBL weight once in pol_bwd!
+                lrsk_fast::launch_edge_sym_pol_fwd(
+                    st, nb2_k, has_c2, need_grad, N, S_, fcfg, cp2,
+                    in.act_row_ptr, row_end2, in.act_senders, in.act_vec_len, in.species, d_lrsk_W_fast4_, fbo, fbuf);
+
+                const int f_dim_pol = lrsk_pol_gram_
+                    ? (lrsk_c0_ + (lrsk_c1_ * (lrsk_c1_ + 1)) / 2 + lrsk_c1_ * lrsk_c1_)
+                    : (lrsk_c0_ + 2 * lrsk_c1_);
+                const int pol_in_raw = f_dim_pol + ro_width_;
+                const bool use_pol_fused = (d_lrsk_pol_cHL_ != nullptr) && (d_lrsk_pol_rHL_ != nullptr);
+                if (use_pol_fused) {
+                    lrsk_fast::launch_pol_mlp_fused(
+                        st, (use_zbl_switch_ != 0), need_grad, (lrsk_pol_gram_ != 0), N, S_, ro_width_, lrsk_pol_inv_sW_, fcfg,
+                        in.species, h_last, d_lrsk_pol_cHL_, d_lrsk_pol_rHL_, d_lrsk_pol_b0_, d_lrsk_pol_u_,
+                        use_zbl_switch_ ? d_e_zbl_ : nullptr, fbuf,
+                        in.energy, in.atom_energy, need_grad ? d_w_zbl_ : nullptr, need_grad ? d_dh_[0] : nullptr);
+                    if (!need_grad) return;
+                } else {
+                    const bool do_pol_h2 = lrsk_pol_h2_ && (bool)in.gemm_h2_row && (N >= 128);
+                    lrsk_fast::launch_pol_pack_in_sym(
+                        st, N, ro_width_, lrsk_pol_in_pad_, fcfg, h_last, fbuf, d_lrsk_pol_in_,
+                        do_pol_h2 ? d_lrsk_eA_pol_ : nullptr);
+                    if (do_pol_h2) {
+                        in.gemm_h2_row(N, lrsk_pol_w_pad_, lrsk_pol_in_pad_, d_lrsk_pol_in_,
+                                       d_lrsk_pol_h2_B_, d_lrsk_pol_h2_pB_, d_lrsk_pol_pre_, 0.0f, d_lrsk_eA_pol_);
+                    } else {
+                        in.gemm(false, N, lrsk_pol_w_pad_, lrsk_pol_in_pad_, 1.0f, d_lrsk_pol_in_, lrsk_pol_in_pad_,
+                                d_lrsk_pol_W0_pad_, lrsk_pol_w_pad_, 0.0f, d_lrsk_pol_pre_, lrsk_pol_w_pad_);
+                    }
+                    lrsk_fast::launch_pol_act_energy_zbl(
+                        st, (use_zbl_switch_ != 0), need_grad, N, lrsk_pol_width_, lrsk_pol_w_pad_, fcfg,
+                        in.species, d_lrsk_pol_b0_, d_lrsk_pol_u_, d_lrsk_es_, d_lrsk_elr_, d_lrsk_sw_,
+                        use_zbl_switch_ ? d_e_zbl_ : nullptr, d_lrsk_pol_pre_,
+                        (need_grad && do_pol_h2) ? d_lrsk_eA_pol_ : nullptr,
+                        in.energy, in.atom_energy, need_grad ? d_w_zbl_ : nullptr);
+                    if (!need_grad) return;
+                    if (do_pol_h2) {
+                        in.gemm_h2_row(N, lrsk_pol_in_pad_, lrsk_pol_w_pad_, d_lrsk_pol_pre_,
+                                       d_lrsk_pol_h2_BT_, d_lrsk_pol_h2_pBT_, d_lrsk_pol_din_, 0.0f, d_lrsk_eA_pol_);
+                    } else {
+                        in.gemm(true, N, lrsk_pol_in_pad_, lrsk_pol_w_pad_, 1.0f, d_lrsk_pol_pre_, lrsk_pol_w_pad_,
+                                d_lrsk_pol_W0_pad_, lrsk_pol_w_pad_, 0.0f, d_lrsk_pol_din_, lrsk_pol_in_pad_);
+                    }
+                    lrsk_fast::launch_pol_unpack_grad_sym(
+                        st, (use_zbl_switch_ != 0), N, ro_width_, lrsk_pol_in_pad_, fcfg, d_lrsk_pol_din_,
+                        use_zbl_switch_ ? d_e_zbl_ : nullptr, d_w_zbl_, fbuf, d_dh_[0]);
+                }
+
+                if (use_f32_forces) used_f32_forces = true;
+                lrsk_fast::launch_edge_sym_pol_bwd(
+                    st, nb2_k, has_c2, (in.compute_stress != 0), N, S_, fcfg, cp2,
+                    in.act_row_ptr, row_end2, in.act_senders, in.act_vec_len, in.species, d_lrsk_W_fast4_, fbo, fbuf,
+                    use_zbl_switch_ ? d_e_zbl_ : nullptr, in.energy, in.atom_energy,
+                    use_zbl_switch_ ? d_w_zbl_ : nullptr,
+                    in.forces, f32_ptr, in.virial);
+            }
+
+            // 2e + 2f. Grid-Stride SMEM-Resident Heads Backward (fused with last-layer bias+SiLU bwd + row-exp!) -> Site MLP Backward
+            lrsk_fast::launch_heads_bwd_silu(
+                st, N, S_, ro_width_, nm, (lrsk_pol_field_ != 0), has_c2, (use_zbl_switch_ != 0), (d_last == 0), fcfg,
+                in.species, (d_last == 0) ? d_alpha_Z_ : d_ro_b_[d_last],
+                d_lrsk_W_head_p16_, d_lrsk_I1_, d_lrsk_I2_,
+                d_pre_[d_last], d_dh_[0], use_zbl_switch_ ? d_e_zbl_ : nullptr, d_w_zbl_,
+                fbuf, d_lrsk_dI1_, d_lrsk_dI2_,
+                d_dh_[1], do_ro_h2 ? d_lrsk_eA_pol_ : nullptr);
+
+            if (allow_lrsk_ro2_fuse && ro_depth_ == 2 && do_ro_h2 && ro_width_ == 64 &&
+                ((n_feat_pad_ % 64) == 0) && d_ro_h2_BT_[1] && d_ro_h2_BT_[0]) {
+                // v34 Fused ro1_bwd + silu_bwd + ro0_bwd (ZERO dpre0/eA_dpre0 DRAM & ZERO 2nd launch!)
+                hgemm2_lrsk_ro2_bwd64(
+                    N, n_feat_pad_, d_dh_[1], d_lrsk_eA_pol_, d_pre_[0],
+                    d_ro_h2_BT_[1], d_ro_h2_pBT_[1], d_ro_h2_BT_[0], d_ro_h2_pBT_[0],
+                    d_dx_, st);
+            } else if (ro_depth_ == 2 && do_ro_h2 && ro_width_ == 64 && d_ro_h2_BT_[1] && d_ro_h2_BT_[0]) {
+                // Fused ro1_bwd + silu_bwd_exp (ZERO dh0 DRAM round-trip, ZERO silu_bwd_exp launch!)
+                hgemm2_f32a_row_silu_bwd64(
+                    N, 64, d_dh_[1], d_ro_h2_BT_[1], d_ro_h2_pBT_[1],
+                    d_pre_[0], d_dh_[0], d_eA_x_, d_lrsk_eA_pol_, st);
+                in.gemm_h2_row(N, n_feat_pad_, 64, d_dh_[0], d_ro_h2_BT_[0], d_ro_h2_pBT_[0], d_dx_, 0.0f, d_eA_x_);
+            } else {
+                for (int d = d_last; d >= 0; --d) {
+                    float* dpre = d_dh_[1];
+                    if (d < d_last) {
+                        lrsk_fast::launch_silu_bwd_exp(
+                            st, N, ro_width_, d_pre_[d], d_dh_[0], dpre,
+                            do_ro_h2 ? d_lrsk_eA_pol_ : nullptr);
+                    }
+                    if (d > 0) {
+                        if (do_ro_h2 && d_ro_h2_BT_[d]) {
+                            in.gemm_h2_row(N, ro_width_, ro_width_, dpre, d_ro_h2_BT_[d], d_ro_h2_pBT_[d], d_dh_[0], 0.0f, d_lrsk_eA_pol_);
+                        } else {
+                            in.gemm(true, N, ro_width_, ro_width_, 1.0f, dpre, ro_width_, d_ro_W_[d], ro_width_, 0.0f, d_dh_[0], ro_width_);
+                        }
+                    } else {
+                        if (do_ro_h2 && d_ro_h2_BT_[0]) {
+                            in.gemm_h2_row(N, n_feat_pad_, ro_width_, dpre, d_ro_h2_BT_[0], d_ro_h2_pBT_[0], d_dx_, 0.0f, d_lrsk_eA_pol_);
+                        } else {
+                            in.gemm(true, N, n_feat_pad_, ro_width_, 1.0f, dpre, ro_width_, d_ro_W_[0], ro_width_, 0.0f, d_dx_, n_feat_pad_);
+                        }
+                    }
+                }
+            }
+
+            // 2g. Fused Layer-1 Node Backward (+ fused inv_std_x + W_p1^T/W_p2^T!)
+            if (use_lrsk_lf1_v5) {
+                lrsk_fast::launch_l1_node_bwd_lf1_lrsk(
+                    st, lmax_, (max_nl_ <= 16), N, n_feat_pad_, nm,
+                    n_l_[0], n_l_[1], n_l_[2], n_l_[3], msg_in_dim_[1],
+                    d_A1_[0], d_A1_[1], d_A1_[2], d_A1_[3],
+                    d_inv_std_x_, d_dx_, d_lrsk_dI1_, d_lrsk_W_p1_T_,
+                    d_dA1_[0], d_dA1_[1], d_dA1_[2], d_dA1_[3]);
+            } else if (use_lrsk_lf2_fused) {
+                CPtr4 cdIr{{d_lrsk_dI0_dum_, d_lrsk_dI1_, d_lrsk_dI2_, nullptr}};
+                auto launch_lf2b = [&](auto lm_tag, auto lmsg_tag) {
+                    constexpr int LM = decltype(lm_tag)::value;
+                    constexpr int LMSG = decltype(lmsg_tag)::value;
+                    if constexpr (LM == 2) {
+                        if (lf2_nl16) {
+                            const dim3 grid((unsigned)((N + 7) / 8));
+                            const dim3 blk(16, 8);
+                            auto kfn = ilmlip_l1_node_bwd_lf2_msg_L2_kernel<LMSG, 4, true, true, false>;
+                            if (lf2_smem_l > 12288u)
+                                CUDA_CHECK_THROW(cudaFuncSetAttribute(kfn, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)lf2_smem_l));
+                            kfn<<<grid, blk, lf2_smem_l, st>>>(
+                                N, n_feat_pad_, nm, nl4, mid4, cA1, d_inv_std_x_, d_dx_, cdIr,
+                                nullptr, d_lrsk_W_p1_T_, d_lrsk_W_p2_T_, pdA1);
+                        } else {
+                            const dim3 grid((unsigned)((N + 3) / 4));
+                            const dim3 blk(32, 4);
+                            auto kfn = ilmlip_l1_node_bwd_lf2_msg_L2_kernel<LMSG, 4, true, false, false>;
+                            if (lf2_smem_l > 12288u)
+                                CUDA_CHECK_THROW(cudaFuncSetAttribute(kfn, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)lf2_smem_l));
+                            kfn<<<grid, blk, lf2_smem_l, st>>>(
+                                N, n_feat_pad_, nm, nl4, mid4, cA1, d_inv_std_x_, d_dx_, cdIr,
+                                nullptr, d_lrsk_W_p1_T_, d_lrsk_W_p2_T_, pdA1);
+                        }
+                    } else {
+                        if (lf2_nl16) {
+                            const dim3 grid((unsigned)((N + 7) / 8));
+                            const dim3 blk(16, 8);
+                            auto kfn = ilmlip_l1_node_bwd_lf2_msg_L3_kernel<LMSG, 4, true, true, false>;
+                            if (lf2_smem_l > 12288u)
+                                CUDA_CHECK_THROW(cudaFuncSetAttribute(kfn, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)lf2_smem_l));
+                            kfn<<<grid, blk, lf2_smem_l, st>>>(
+                                N, n_feat_pad_, nm, nl4, mid4, cA1, d_inv_std_x_, d_dx_, cdIr,
+                                nullptr, d_lrsk_W_p1_T_, d_lrsk_W_p2_T_, pdA1);
+                        } else {
+                            const dim3 grid((unsigned)((N + 3) / 4));
+                            const dim3 blk(32, 4);
+                            auto kfn = ilmlip_l1_node_bwd_lf2_msg_L3_kernel<LMSG, 4, true, false, false>;
+                            if (lf2_smem_l > 12288u)
+                                CUDA_CHECK_THROW(cudaFuncSetAttribute(kfn, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)lf2_smem_l));
+                            kfn<<<grid, blk, lf2_smem_l, st>>>(
+                                N, n_feat_pad_, nm, nl4, mid4, cA1, d_inv_std_x_, d_dx_, cdIr,
+                                nullptr, d_lrsk_W_p1_T_, d_lrsk_W_p2_T_, pdA1);
+                        }
+                    }
+                };
+                if (lmax_ == 2) {
+                    if (lmsg_ == 1) launch_lf2b(std::integral_constant<int, 2>{}, std::integral_constant<int, 1>{});
+                    else            launch_lf2b(std::integral_constant<int, 2>{}, std::integral_constant<int, 2>{});
+                } else {
+                    if (lmsg_ == 1) launch_lf2b(std::integral_constant<int, 3>{}, std::integral_constant<int, 1>{});
+                    else            launch_lf2b(std::integral_constant<int, 3>{}, std::integral_constant<int, 2>{});
+                }
+            } else {
+                ilmlip_scale_dx_1L_kernel<<<warp_grid, 128, 0, st>>>(N, n_feat_, n_feat_pad_, d_inv_std_x_, d_dx_);
+                if (lrsk_c1_ > 0) {
+                    in.gemm(true, 3 * N, msg_in_dim_[1], lrsk_c1_, 1.0f, d_lrsk_dI1_, nm,
+                            d_lrsk_W_p1_, lrsk_c1_, 0.0f, d_dBcat_[1], msg_in_dim_[1]);
+                }
+                if (lrsk_c2_ > 0) {
+                    in.gemm(true, 5 * N, msg_in_dim_[2], lrsk_c2_, 1.0f, d_lrsk_dI2_, nm,
+                            d_lrsk_W_p2_, lrsk_c2_, 0.0f, d_dBcat_[2], msg_in_dim_[2]);
+                }
+                const unsigned gy = (unsigned)((max_nl_ + 31) / 32);
+                if (fast_l1_node_lf1_) {
+                    const dim3 grid((unsigned)((N + 7) / 8), gy);
+                    const dim3 blk(32, 8);
+                    if (lmax_ == 2) ilmlip_l1_node_bwd_lf1_kernel<2><<<grid, blk, 0, st>>>(N, n_feat_pad_, nl4, mid4, cA1, d_dx_, cdBcat, pdA1);
+                    else            ilmlip_l1_node_bwd_lf1_kernel<3><<<grid, blk, 0, st>>>(N, n_feat_pad_, nl4, mid4, cA1, d_dx_, cdBcat, pdA1);
+                } else if (fast_l1_node_lf2_ && !no_lf2_fast) {
+                    const dim3 grid((unsigned)((N + 1) / 2), gy);
+                    const dim3 blk(32, 2);
+                    if (lmax_ == 2) {
+                        if (lmsg_ == 1) ilmlip_l1_node_bwd_lf2_L2_kernel<1><<<grid, blk, 0, st>>>(N, n_feat_pad_, nl4, mid4, cA1, d_dx_, cdBcat, pdA1);
+                        else            ilmlip_l1_node_bwd_lf2_L2_kernel<2><<<grid, blk, 0, st>>>(N, n_feat_pad_, nl4, mid4, cA1, d_dx_, cdBcat, pdA1);
+                    } else {
+                        if (lmsg_ == 1) ilmlip_l1_node_bwd_lf2_L3_kernel<1><<<grid, blk, 0, st>>>(N, n_feat_pad_, nl4, mid4, cA1, d_dx_, cdBcat, pdA1);
+                        else            ilmlip_l1_node_bwd_lf2_L3_kernel<2><<<grid, blk, 0, st>>>(N, n_feat_pad_, nl4, mid4, cA1, d_dx_, cdBcat, pdA1);
+                    }
+                } else {
+                    const size_t tbl_b = l1n_smem_tbl ? l1n_tbl_bytes : 0;
+                    const int per_atom_b = 2 * (n_sh_l1 + std::max(b2_scalars_, 1));
+                    const int apb = ((size_t)4 * per_atom_b * 32 * sizeof(float) + tbl_b <= 48000) ? 4 : 2;
+                    const dim3 l1nb_grid((unsigned)((N + apb - 1) / apb), gy);
+                    const dim3 l1nb_blk(32, (unsigned)apb);
+                    const size_t l1nb_smem = tbl_b + (size_t)apb * per_atom_b * 32 * sizeof(float);
+                    if (lmax_ <= 2) {
+                        if (l1n_smem_tbl) ilmlip_l1_node_bwd_kernel<2, true><<<l1nb_grid, l1nb_blk, l1nb_smem, st>>>(N, lmsg_, n_nu2_, n_nu3_, cg_count_, n_feat_pad_, b2_scalars_, nl4, mid4, d_nu2_, d_nu3_, d_cg_idx_, d_cg_val_, cA1, d_dx_, cdBcat, pdA1);
+                        else              ilmlip_l1_node_bwd_kernel<2, false><<<l1nb_grid, l1nb_blk, l1nb_smem, st>>>(N, lmsg_, n_nu2_, n_nu3_, cg_count_, n_feat_pad_, b2_scalars_, nl4, mid4, d_nu2_, d_nu3_, d_cg_idx_, d_cg_val_, cA1, d_dx_, cdBcat, pdA1);
+                    } else {
+                        if (l1n_smem_tbl) ilmlip_l1_node_bwd_kernel<3, true><<<l1nb_grid, l1nb_blk, l1nb_smem, st>>>(N, lmsg_, n_nu2_, n_nu3_, cg_count_, n_feat_pad_, b2_scalars_, nl4, mid4, d_nu2_, d_nu3_, d_cg_idx_, d_cg_val_, cA1, d_dx_, cdBcat, pdA1);
+                        else              ilmlip_l1_node_bwd_kernel<3, false><<<l1nb_grid, l1nb_blk, l1nb_smem, st>>>(N, lmsg_, n_nu2_, n_nu3_, cg_count_, n_feat_pad_, b2_scalars_, nl4, mid4, d_nu2_, d_nu3_, d_cg_idx_, d_cg_val_, cA1, d_dx_, cdBcat, pdA1);
+                    }
+                }
+            }
+        } else {
+        // 2a. General LR-SK Layer-1 Node Forward (B_cat[0] -> d_x_, B_cat[1..lmsg] -> d_Bcat_[1..lmsg])
+        const unsigned gy = (unsigned)((max_nl_ + 31) / 32);
+        if (fast_l1_node_lf1_) {
+            const dim3 grid((unsigned)((N + 7) / 8), gy);
+            const dim3 blk(32, 8);
+            if (lmax_ == 2)
+                ilmlip_l1_node_fwd_lf1_kernel<2><<<grid, blk, 0, st>>>(N, n_feat_pad_, nl4, mid4, cA1, d_x_, pBcat);
+            else
+                ilmlip_l1_node_fwd_lf1_kernel<3><<<grid, blk, 0, st>>>(N, n_feat_pad_, nl4, mid4, cA1, d_x_, pBcat);
+        } else if (fast_l1_node_lf2_ && !no_lf2_fast) {
+            const dim3 grid((unsigned)((N + 3) / 4), gy);
+            const dim3 blk(32, 4);
+            if (lmax_ == 2) {
+                if (lmsg_ == 1) ilmlip_l1_node_fwd_lf2_L2_kernel<1><<<grid, blk, 0, st>>>(N, n_feat_pad_, nl4, mid4, cA1, d_x_, pBcat);
+                else            ilmlip_l1_node_fwd_lf2_L2_kernel<2><<<grid, blk, 0, st>>>(N, n_feat_pad_, nl4, mid4, cA1, d_x_, pBcat);
+            } else {
+                if (lmsg_ == 1) ilmlip_l1_node_fwd_lf2_L3_kernel<1><<<grid, blk, 0, st>>>(N, n_feat_pad_, nl4, mid4, cA1, d_x_, pBcat);
+                else            ilmlip_l1_node_fwd_lf2_L3_kernel<2><<<grid, blk, 0, st>>>(N, n_feat_pad_, nl4, mid4, cA1, d_x_, pBcat);
+            }
+        } else {
+            const int per_atom_f = n_sh_l1 + std::max(b2_scalars_, 1);
+            const size_t tbl_b = l1n_smem_tbl ? l1n_tbl_bytes : 0;
+            const int atoms_per_blk_fwd = ((size_t)4 * per_atom_f * 32 * sizeof(float) + tbl_b <= 48000) ? 4 : 2;
+            const dim3 l1n_grid((unsigned)((N + atoms_per_blk_fwd - 1) / atoms_per_blk_fwd), gy);
+            const dim3 l1n_blk(32, (unsigned)atoms_per_blk_fwd);
+            const size_t l1n_smem_fwd = tbl_b + (size_t)atoms_per_blk_fwd * per_atom_f * 32 * sizeof(float);
+            if (lmax_ <= 2) {
+                if (l1n_smem_tbl) ilmlip_l1_node_fwd_kernel<2, true><<<l1n_grid, l1n_blk, l1n_smem_fwd, st>>>(N, lmsg_, n_nu2_, n_nu3_, cg_count_, n_feat_pad_, b2_scalars_, nl4, mid4, d_nu2_, d_nu3_, d_cg_idx_, d_cg_val_, cA1, d_x_, pBcat);
+                else              ilmlip_l1_node_fwd_kernel<2, false><<<l1n_grid, l1n_blk, l1n_smem_fwd, st>>>(N, lmsg_, n_nu2_, n_nu3_, cg_count_, n_feat_pad_, b2_scalars_, nl4, mid4, d_nu2_, d_nu3_, d_cg_idx_, d_cg_val_, cA1, d_x_, pBcat);
+            } else {
+                if (l1n_smem_tbl) ilmlip_l1_node_fwd_kernel<3, true><<<l1n_grid, l1n_blk, l1n_smem_fwd, st>>>(N, lmsg_, n_nu2_, n_nu3_, cg_count_, n_feat_pad_, b2_scalars_, nl4, mid4, d_nu2_, d_nu3_, d_cg_idx_, d_cg_val_, cA1, d_x_, pBcat);
+                else              ilmlip_l1_node_fwd_kernel<3, false><<<l1n_grid, l1n_blk, l1n_smem_fwd, st>>>(N, lmsg_, n_nu2_, n_nu3_, cg_count_, n_feat_pad_, b2_scalars_, nl4, mid4, d_nu2_, d_nu3_, d_cg_idx_, d_cg_val_, cA1, d_x_, pBcat);
+            }
+        }
+        ilmlip_norm_x_1L_kernel<<<warp_grid, 128, 0, st>>>(N, n_feat_, n_feat_pad_, d_mu_x_, d_inv_std_x_, d_x_, d_eA_x_);
+
+        // 2b. Linear projections of B_cat[1] -> I_raw1 [3N, 2*c1] and B_cat[2] -> I_raw2 [5N, 2*c2]
+        if (lrsk_c1_ > 0) {
+            const int M = 3 * N, K = msg_in_dim_[1], Nc = 2 * lrsk_c1_;
+            if (Nc <= 16 && K >= 64 && (int64_t)K * Nc <= 4096) {
+                ilmlip_skinny_gemm_n16_kernel<<<(unsigned)((M + 31) / 32), 128, (size_t)K * Nc * sizeof(float), st>>>(
+                    M, Nc, K, d_Bcat_[1], d_lrsk_W_p1_, d_lrsk_I1_);
+            } else {
+                in.gemm(false, M, Nc, K, 1.0f, d_Bcat_[1], K, d_lrsk_W_p1_, Nc, 0.0f, d_lrsk_I1_, Nc);
+            }
+        }
+        if (lrsk_c2_ > 0) {
+            const int M = 5 * N, K = msg_in_dim_[2], Nc = 2 * lrsk_c2_;
+            if (Nc <= 16 && K >= 64 && (int64_t)K * Nc <= 4096) {
+                ilmlip_skinny_gemm_n16_kernel<<<(unsigned)((M + 31) / 32), 128, (size_t)K * Nc * sizeof(float), st>>>(
+                    M, Nc, K, d_Bcat_[2], d_lrsk_W_p2_, d_lrsk_I2_);
+            } else {
+                in.gemm(false, M, Nc, K, 1.0f, d_Bcat_[2], K, d_lrsk_W_p2_, Nc, 0.0f, d_lrsk_I2_, Nc);
+            }
+        }
+
+        if (use_l1_sumswap && use_zbl_switch_ && zbl_stream_) {
+            CUDA_CHECK_THROW(cudaStreamWaitEvent(st, zbl_ev_join_, 0));
+        }
+
+        // 2c. Site MLP Forward (hgemm2 TC GEMMs + SiLU!)
+        const bool do_ro_h2 = use_ro_h2_ && (bool)in.gemm_h2_row && (N >= 128);
+        for (int d = 0; d < ro_depth_; ++d) {
+            const float* inp = (d == 0) ? d_x_ : d_h_[d - 1];
+            const int K = (d == 0) ? n_feat_pad_ : ro_width_;
+            if (do_ro_h2 && d_ro_h2_B_[d]) {
+                in.gemm_h2_row(N, ro_width_, K, inp, d_ro_h2_B_[d], d_ro_h2_pB_[d], d_pre_[d], 0.0f, (d == 0) ? d_eA_x_ : nullptr);
+            } else {
+                in.gemm(false, N, ro_width_, K, 1.0f, inp, K, d_ro_W_[d], ro_width_, 0.0f, d_pre_[d], ro_width_);
+            }
+            if ((ro_width_ & 3) == 0) {
+                ilmlip_bias_silu_fwd_vec4_kernel<<<warp_grid, 128, 0, st>>>(
+                    N, ro_width_ >> 2, d == 0, in.species,
+                    reinterpret_cast<const float4*>((d == 0) ? d_alpha_Z_ : d_ro_b_[d]),
+                    reinterpret_cast<float4*>(d_pre_[d]), reinterpret_cast<float4*>(d_h_[d]));
+            } else {
+                const int64_t tot = (int64_t)N * ro_width_;
+                ilmlip_bias_silu_fwd_kernel<<<(unsigned)((tot + 255) / 256), 256, 0, st>>>(
+                    N, ro_width_, d == 0, in.species, (d == 0) ? d_alpha_Z_ : d_ro_b_[d], d_pre_[d], d_h_[d]);
+            }
+        }
+
+        // 2d. Build LR-SK config & buffers
+        const int c0 = lrsk_c0_, c1 = lrsk_c1_, c2 = lrsk_c2_;
+        const int c01 = std::min(c0, c1), c02 = std::min(c0, c2), c12 = std::min(c1, c2);
+        LrskCfg lcfg{};
+        lcfg.c0 = c0; lcfg.c1 = c1; lcfg.c2 = c2; lcfg.c01 = c01; lcfg.c02 = c02; lcfg.c12 = c12;
+        int cur = 1;
+        lcfg.off_w0   = cur; cur += c0;
+        lcfg.off_w01  = cur; cur += c01;
+        lcfg.off_w1s  = cur; cur += c1;
+        lcfg.off_w1p  = cur; cur += c1;
+        lcfg.off_w02  = cur; cur += c02;
+        lcfg.off_w12s = cur; cur += c12;
+        lcfg.off_w12p = cur; cur += c12;
+        lcfg.off_w2s  = cur; cur += c2;
+        lcfg.off_w2p  = cur; cur += c2;
+        lcfg.off_w2d  = cur; cur += c2;
+        lcfg.n_terms_pad = lrsk_n_terms_pad_;
+        lcfg.n_head_out = lrsk_n_head_out_;
+        int ho = 1;
+        lcfg.head_qA_off  = ho; ho += c0;
+        lcfg.head_qB_off  = ho; ho += c0;
+        lcfg.head_g1A_off = ho; ho += c1;
+        lcfg.head_g1B_off = ho; ho += c1;
+        lcfg.head_g2A_off = ho; ho += c2;
+        lcfg.head_g2B_off = ho; ho += c2;
+        lcfg.pol_width = lrsk_pol_width_;
+        lcfg.half_esc = 0.5f * energy_scale_;
+        lcfg.inv_zc = 1.0f / z_c_;
+
+        LrskBufs lbuf{
+            d_lrsk_qA_, d_lrsk_qB_, d_lrsk_pA_, d_lrsk_pB_, d_lrsk_QA_, d_lrsk_QB_,
+            d_lrsk_g1A_, d_lrsk_g1B_, d_lrsk_g2A_, d_lrsk_g2B_,
+            d_lrsk_es_, d_lrsk_elr_, d_lrsk_sw_,
+            d_lrsk_dqA_, d_lrsk_dqB_, d_lrsk_dpA_, d_lrsk_dpB_, d_lrsk_dQA_, d_lrsk_dQB_,
+            d_lrsk_Phi_, d_lrsk_Ef_, d_lrsk_dPhi_, d_lrsk_dEf_
+        };
+
+        // 2e. Site Multipole Heads Forward (e_site, qA/B, pA/B, QA/B, sw)
+        const float* h_last = d_h_[ro_depth_ - 1];
+        if (use_zbl_switch_) {
+            lrsk_heads_fwd_kernel<true><<<warp_grid, 128, 0, st>>>(
+                N, ro_width_, lcfg, in.species, h_last, d_lrsk_W_head_, d_lrsk_b_head_,
+                d_lrsk_I1_, d_lrsk_I2_, d_e_zbl_, lbuf);
+        } else {
+            lrsk_heads_fwd_kernel<false><<<warp_grid, 128, 0, st>>>(
+                N, ro_width_, lcfg, in.species, h_last, d_lrsk_W_head_, d_lrsk_b_head_,
+                d_lrsk_I1_, d_lrsk_I2_, nullptr, lbuf);
+        }
+
+        const bool need_grad = (in.energy_only == 0);
+        const int nb2_4 = (n_base2_ + 3) / 4;
+        const size_t wrad_bytes = (size_t)S_ * S_ * nb2_4 * lrsk_n_terms_pad_ * sizeof(float4);
+        const bool smem_w = (wrad_bytes <= 20480u);
+        const size_t wrad_smem = smem_w ? wrad_bytes : 0;
+
+        if (!lrsk_pol_field_) {
+            if (need_grad && use_f32_forces) used_f32_forces = true;
+            auto launch_lrsk_1p = [&](auto nb_tag, auto sm_tag, auto st_tag, auto f32_tag, auto ng_tag) {
+                lrsk_edge_fwd_bwd_kernel<decltype(nb_tag)::value, decltype(sm_tag)::value,
+                                         decltype(st_tag)::value, decltype(f32_tag)::value,
+                                         decltype(ng_tag)::value>
+                    <<<warp_grid, 128, wrad_smem, st>>>(
+                        N, S_, lcfg, inv_rmax2, in.act_row_ptr, row_end2, in.act_senders, in.act_vec_len, in.species,
+                        d_lrsk_W_rad4_, lbuf, in.forces, d_forces_f32_, in.virial);
+            };
+            auto d1_ng = [&](auto nb, auto sm, auto stt, auto f32) {
+                if (need_grad) launch_lrsk_1p(nb, sm, stt, f32, std::true_type{});
+                else           launch_lrsk_1p(nb, sm, stt, f32, std::false_type{});
+            };
+            auto d1_f32 = [&](auto nb, auto sm, auto stt) {
+                if (use_f32_forces) d1_ng(nb, sm, stt, std::true_type{});
+                else                d1_ng(nb, sm, stt, std::false_type{});
+            };
+            auto d1_st = [&](auto nb, auto sm) {
+                if (in.compute_stress) d1_f32(nb, sm, std::true_type{});
+                else                   d1_f32(nb, sm, std::false_type{});
+            };
+            auto d1_sm = [&](auto nb) {
+                if (smem_w) d1_st(nb, std::true_type{});
+                else        d1_st(nb, std::false_type{});
+            };
+            if (n_base2_ == 8)       d1_sm(std::integral_constant<int, 8>{});
+            else if (n_base2_ == 12) d1_sm(std::integral_constant<int, 12>{});
+            else if (n_base2_ == 14) d1_sm(std::integral_constant<int, 14>{});
+            else                     d1_sm(std::integral_constant<int, 16>{});
+
+            const unsigned egrid = (unsigned)((N + 127) / 128);
+            if (use_zbl_switch_) {
+                if (need_grad) lrsk_energy_zbl_kernel<true, true><<<egrid, 128, 0, st>>>(N, lcfg, d_lrsk_es_, d_lrsk_elr_, d_e_zbl_, in.energy, in.atom_energy, d_w_zbl_);
+                else           lrsk_energy_zbl_kernel<true, false><<<egrid, 128, 0, st>>>(N, lcfg, d_lrsk_es_, d_lrsk_elr_, d_e_zbl_, in.energy, in.atom_energy, nullptr);
+            } else {
+                if (need_grad) lrsk_energy_zbl_kernel<false, true><<<egrid, 128, 0, st>>>(N, lcfg, d_lrsk_es_, d_lrsk_elr_, nullptr, in.energy, in.atom_energy, nullptr);
+                else           lrsk_energy_zbl_kernel<false, false><<<egrid, 128, 0, st>>>(N, lcfg, d_lrsk_es_, d_lrsk_elr_, nullptr, in.energy, in.atom_energy, nullptr);
+            }
+            if (!need_grad) return;
+        } else {
+            // Pass 1: Fwd field gather (e_lr, Phi, Ef)
+            auto launch_pf_fwd = [&](auto nb_tag, auto sm_tag) {
+                lrsk_edge_fwd_field_kernel<decltype(nb_tag)::value, decltype(sm_tag)::value>
+                    <<<half_grid, 128, wrad_smem, st>>>(
+                        N, S_, lcfg, inv_rmax2, in.act_row_ptr, row_end2, in.act_senders, in.act_vec_len, in.species,
+                        d_lrsk_W_rad4_, lbuf);
+            };
+            auto dpf_sm = [&](auto nb) {
+                if (smem_w) launch_pf_fwd(nb, std::true_type{});
+                else        launch_pf_fwd(nb, std::false_type{});
+            };
+            if (n_base2_ == 8)       dpf_sm(std::integral_constant<int, 8>{});
+            else if (n_base2_ == 12) dpf_sm(std::integral_constant<int, 12>{});
+            else if (n_base2_ == 14) dpf_sm(std::integral_constant<int, 14>{});
+            else                     dpf_sm(std::integral_constant<int, 16>{});
+
+            // Pol MLP fwd + bwd + total energy + ZBL switch (seeds dpA with dpA_pol, writes dh_pol into d_dh_[0])
+            if (use_zbl_switch_) {
+                if (need_grad)
+                    lrsk_pol_mlp_fwd_bwd_kernel<true, true><<<warp_grid, 128, 0, st>>>(
+                        N, ro_width_, lcfg, in.species, h_last, d_lrsk_pol_W0_, d_lrsk_pol_b0_, d_lrsk_pol_u_,
+                        d_e_zbl_, lbuf, in.energy, in.atom_energy, d_w_zbl_, d_dh_[0]);
+                else
+                    lrsk_pol_mlp_fwd_bwd_kernel<true, false><<<warp_grid, 128, 0, st>>>(
+                        N, ro_width_, lcfg, in.species, h_last, d_lrsk_pol_W0_, d_lrsk_pol_b0_, d_lrsk_pol_u_,
+                        d_e_zbl_, lbuf, in.energy, in.atom_energy, nullptr, nullptr);
+            } else {
+                if (need_grad)
+                    lrsk_pol_mlp_fwd_bwd_kernel<false, true><<<warp_grid, 128, 0, st>>>(
+                        N, ro_width_, lcfg, in.species, h_last, d_lrsk_pol_W0_, d_lrsk_pol_b0_, d_lrsk_pol_u_,
+                        nullptr, lbuf, in.energy, in.atom_energy, nullptr, d_dh_[0]);
+                else
+                    lrsk_pol_mlp_fwd_bwd_kernel<false, false><<<warp_grid, 128, 0, st>>>(
+                        N, ro_width_, lcfg, in.species, h_last, d_lrsk_pol_W0_, d_lrsk_pol_b0_, d_lrsk_pol_u_,
+                        nullptr, lbuf, in.energy, in.atom_energy, nullptr, nullptr);
+            }
+            if (!need_grad) return;
+
+            // Pass 2: Fused zero-atomic edge backward (e_lr + Phi + Ef)!
+            if (use_f32_forces) used_f32_forces = true;
+            auto launch_pf_bwd = [&](auto nb_tag, auto sm_tag, auto st_tag, auto f32_tag) {
+                lrsk_edge_bwd_pol_kernel<decltype(nb_tag)::value, decltype(sm_tag)::value,
+                                         decltype(st_tag)::value, decltype(f32_tag)::value>
+                    <<<warp_grid, 128, wrad_smem, st>>>(
+                        N, S_, lcfg, inv_rmax2, in.act_row_ptr, row_end2, in.act_senders, in.act_vec_len, in.species,
+                        d_lrsk_W_rad4_, lbuf, in.forces, d_forces_f32_, in.virial);
+            };
+            auto dpb_f32 = [&](auto nb, auto sm, auto stt) {
+                if (use_f32_forces) launch_pf_bwd(nb, sm, stt, std::true_type{});
+                else                launch_pf_bwd(nb, sm, stt, std::false_type{});
+            };
+            auto dpb_st = [&](auto nb, auto sm) {
+                if (in.compute_stress) dpb_f32(nb, sm, std::true_type{});
+                else                   dpb_f32(nb, sm, std::false_type{});
+            };
+            auto dpb_sm = [&](auto nb) {
+                if (smem_w) dpb_st(nb, std::true_type{});
+                else        dpb_st(nb, std::false_type{});
+            };
+            if (n_base2_ == 8)       dpb_sm(std::integral_constant<int, 8>{});
+            else if (n_base2_ == 12) dpb_sm(std::integral_constant<int, 12>{});
+            else if (n_base2_ == 14) dpb_sm(std::integral_constant<int, 14>{});
+            else                     dpb_sm(std::integral_constant<int, 16>{});
+        }
+
+        // 2f. Site Multipole Heads Backward -> dI_raw1, dI_raw2, total dh in d_dh_[0]
+        if (lrsk_pol_field_) {
+            lrsk_heads_bwd_kernel<true><<<warp_grid, 128, 0, st>>>(
+                N, ro_width_, lcfg, in.species, d_lrsk_W_head_T_, d_lrsk_I1_, d_lrsk_I2_, lbuf,
+                d_lrsk_dI1_, d_lrsk_dI2_, d_dh_[0]);
+        } else {
+            lrsk_heads_bwd_kernel<false><<<warp_grid, 128, 0, st>>>(
+                N, ro_width_, lcfg, in.species, d_lrsk_W_head_T_, d_lrsk_I1_, d_lrsk_I2_, lbuf,
+                d_lrsk_dI1_, d_lrsk_dI2_, d_dh_[0]);
+        }
+
+        // 2g. Site MLP Backward -> d_dx_
+        for (int d = ro_depth_ - 1; d >= 0; --d) {
+            const int64_t tot = (int64_t)N * ro_width_;
+            float* dpre = d_dh_[1];
+            if ((tot & 3) == 0) {
+                const int64_t tot4 = tot >> 2;
+                ilmlip_silu_bwd_vec4_kernel<<<(unsigned)((tot4 + 255) / 256), 256, 0, st>>>(
+                    tot4, reinterpret_cast<const float4*>(d_pre_[d]),
+                    reinterpret_cast<const float4*>(d_dh_[0]), reinterpret_cast<float4*>(dpre));
+            } else {
+                ilmlip_silu_bwd_kernel<<<(unsigned)((tot + 255) / 256), 256, 0, st>>>(
+                    N, ro_width_, d_pre_[d], d_dh_[0], dpre);
+            }
+            if (d > 0) {
+                if (do_ro_h2 && d_ro_h2_BT_[d]) {
+                    in.gemm_h2_row(N, ro_width_, ro_width_, dpre, d_ro_h2_BT_[d], d_ro_h2_pBT_[d], d_dh_[0], 0.0f, nullptr);
+                } else {
+                    in.gemm(true, N, ro_width_, ro_width_, 1.0f, dpre, ro_width_, d_ro_W_[d], ro_width_, 0.0f, d_dh_[0], ro_width_);
+                }
+            } else {
+                if (do_ro_h2 && d_ro_h2_BT_[0]) {
+                    in.gemm_h2_row(N, n_feat_pad_, ro_width_, dpre, d_ro_h2_BT_[0], d_ro_h2_pBT_[0], d_dx_, 0.0f, nullptr);
+                } else {
+                    in.gemm(true, N, n_feat_pad_, ro_width_, 1.0f, dpre, ro_width_, d_ro_W_[0], ro_width_, 0.0f, d_dx_, n_feat_pad_);
+                }
+            }
+        }
+        ilmlip_scale_dx_1L_kernel<<<warp_grid, 128, 0, st>>>(N, n_feat_, n_feat_pad_, d_inv_std_x_, d_dx_);
+
+        // 2h. W_p1^T & W_p2^T backward -> d_dBcat_[1..2] + Layer-1 Node Backward -> d_dA1_
+        if (lrsk_c1_ > 0) {
+            in.gemm(true, 3 * N, msg_in_dim_[1], 2 * lrsk_c1_, 1.0f, d_lrsk_dI1_, 2 * lrsk_c1_,
+                    d_lrsk_W_p1_, 2 * lrsk_c1_, 0.0f, d_dBcat_[1], msg_in_dim_[1]);
+        }
+        if (lrsk_c2_ > 0) {
+            in.gemm(true, 5 * N, msg_in_dim_[2], 2 * lrsk_c2_, 1.0f, d_lrsk_dI2_, 2 * lrsk_c2_,
+                    d_lrsk_W_p2_, 2 * lrsk_c2_, 0.0f, d_dBcat_[2], msg_in_dim_[2]);
+        }
+        if (fast_l1_node_lf1_) {
+            const dim3 grid((unsigned)((N + 7) / 8), gy);
+            const dim3 blk(32, 8);
+            if (lmax_ == 2)
+                ilmlip_l1_node_bwd_lf1_kernel<2><<<grid, blk, 0, st>>>(N, n_feat_pad_, nl4, mid4, cA1, d_dx_, cdBcat, pdA1);
+            else
+                ilmlip_l1_node_bwd_lf1_kernel<3><<<grid, blk, 0, st>>>(N, n_feat_pad_, nl4, mid4, cA1, d_dx_, cdBcat, pdA1);
+        } else if (fast_l1_node_lf2_ && !no_lf2_fast) {
+            const dim3 grid((unsigned)((N + 1) / 2), gy);
+            const dim3 blk(32, 2);
+            if (lmax_ == 2) {
+                if (lmsg_ == 1) ilmlip_l1_node_bwd_lf2_L2_kernel<1><<<grid, blk, 0, st>>>(N, n_feat_pad_, nl4, mid4, cA1, d_dx_, cdBcat, pdA1);
+                else            ilmlip_l1_node_bwd_lf2_L2_kernel<2><<<grid, blk, 0, st>>>(N, n_feat_pad_, nl4, mid4, cA1, d_dx_, cdBcat, pdA1);
+            } else {
+                if (lmsg_ == 1) ilmlip_l1_node_bwd_lf2_L3_kernel<1><<<grid, blk, 0, st>>>(N, n_feat_pad_, nl4, mid4, cA1, d_dx_, cdBcat, pdA1);
+                else            ilmlip_l1_node_bwd_lf2_L3_kernel<2><<<grid, blk, 0, st>>>(N, n_feat_pad_, nl4, mid4, cA1, d_dx_, cdBcat, pdA1);
+            }
+        } else {
+            const size_t tbl_b = l1n_smem_tbl ? l1n_tbl_bytes : 0;
+            const int per_atom_b = 2 * (n_sh_l1 + std::max(b2_scalars_, 1));
+            const int atoms_per_blk_bwd = ((size_t)4 * per_atom_b * 32 * sizeof(float) + tbl_b <= 48000) ? 4 : 2;
+            const dim3 l1nb_grid((unsigned)((N + atoms_per_blk_bwd - 1) / atoms_per_blk_bwd), gy);
+            const dim3 l1nb_blk(32, (unsigned)atoms_per_blk_bwd);
+            const size_t l1nb_smem = tbl_b + (size_t)atoms_per_blk_bwd * per_atom_b * 32 * sizeof(float);
+            if (lmax_ <= 2) {
+                if (l1n_smem_tbl) ilmlip_l1_node_bwd_kernel<2, true><<<l1nb_grid, l1nb_blk, l1nb_smem, st>>>(N, lmsg_, n_nu2_, n_nu3_, cg_count_, n_feat_pad_, b2_scalars_, nl4, mid4, d_nu2_, d_nu3_, d_cg_idx_, d_cg_val_, cA1, d_dx_, cdBcat, pdA1);
+                else              ilmlip_l1_node_bwd_kernel<2, false><<<l1nb_grid, l1nb_blk, l1nb_smem, st>>>(N, lmsg_, n_nu2_, n_nu3_, cg_count_, n_feat_pad_, b2_scalars_, nl4, mid4, d_nu2_, d_nu3_, d_cg_idx_, d_cg_val_, cA1, d_dx_, cdBcat, pdA1);
+            } else {
+                if (l1n_smem_tbl) ilmlip_l1_node_bwd_kernel<3, true><<<l1nb_grid, l1nb_blk, l1nb_smem, st>>>(N, lmsg_, n_nu2_, n_nu3_, cg_count_, n_feat_pad_, b2_scalars_, nl4, mid4, d_nu2_, d_nu3_, d_cg_idx_, d_cg_val_, cA1, d_dx_, cdBcat, pdA1);
+                else              ilmlip_l1_node_bwd_kernel<3, false><<<l1nb_grid, l1nb_blk, l1nb_smem, st>>>(N, lmsg_, n_nu2_, n_nu3_, cg_count_, n_feat_pad_, b2_scalars_, nl4, mid4, d_nu2_, d_nu3_, d_cg_idx_, d_cg_val_, cA1, d_dx_, cdBcat, pdA1);
+            }
+        }
+        }  // end if (lrsk_fast_sym_) / else
+    } else {
+    const size_t w_msg_smem = (has_l2_ && lmsg_ == 1) ? (size_t)(msg_in_dim_[0] + msg_in_dim_[1]) * n_msg_ * sizeof(float) : 0;
+    const size_t w_msg0_smem = (has_l2_ && lmsg_ == 0) ? (size_t)msg_in_dim_[0] * n_msg_ * sizeof(float) : 0;
+    const bool use_fused_l1_msg = has_l2_ && fast_l1_node_lf1_ && (max_nl_ <= 32) && (n_msg_ <= 16) && (w_msg_smem <= 32768);
+    const int m0p_v5 = (msg_in_dim_[0] + 3) & ~3;
+    const int m1p_v5 = (msg_in_dim_[1] + 3) & ~3;
+    const bool v5_m4 = (n_msg_ <= 4);
+    const int qmax_v5 = v5_m4 ? 4 : 8;
+    const size_t l1_msg_v5_smem = (size_t)((qmax_v5 + 4) * m0p_v5 + (qmax_v5 + 12) * m1p_v5) * sizeof(float);
+    const bool use_l1_msg_v5 = use_fused_l1_msg && (n_msg_ <= 8) && (l1_msg_v5_smem <= 32768) && (msg_in_dim_[0] == n_inv1_);
+    const size_t lf2_w_smem = (has_l2_ && (lmsg_ == 1 || lmsg_ == 2))
+        ? (size_t)(msg_in_dim_[0] + msg_in_dim_[1] + (lmsg_ == 2 ? msg_in_dim_[2] : 0)) * n_msg_ * sizeof(float)
+        : 0;
+    const bool use_fused_l1_lf2_msg = has_l2_ && fast_l1_node_lf2_ && !no_lf2_fast && (max_nl_ <= 32) &&
+                                      (lmsg_ == 1 || lmsg_ == 2) && (n_msg_ <= 8) && (msg_in_dim_[0] == n_inv1_) &&
+                                      (lf2_w_smem <= 24576u);
+    const bool fuse_v5_norm_v1n8 = (use_l1_msg_v5 || use_fused_l1_lf2_msg) && (use_v1_n4_inv_fused || use_v1_n8_inv_fused) && (d_am_l1_ != nullptr);
+    const bool use_fused_l1_s0  = has_l2_ && fast_l1_node_lf1_s0_ && (max_nl_ <= 32) && (n_msg_ <= 16) && (w_msg0_smem <= 32768);
+    const bool use_I_pack4 = (use_fused_l1_msg || (use_fused_l1_lf2_msg && lmsg_ == 1)) && (use_l2_sp || use_l2_v1_n8) && d_I_pack4_;
+    bool eA_x_valid = false;
+
+    if (!has_l2_) {
+        const unsigned gy = (unsigned)((max_nl_ + 31) / 32);
+        if (fast_l1_node_1L_lf1_) {
+            const dim3 grid((unsigned)((N + 7) / 8), gy);
+            const dim3 blk(32, 8);
+            if (lmax_ == 2)
+                ilmlip_l1_node_fwd_1L_lf1_kernel<2><<<grid, blk, 0, st>>>(N, n_feat_pad_, nl4, cA1, d_mu_x_, d_inv_std_x_, d_x_, gy == 1 ? d_eA_x_ : nullptr);
+            else
+                ilmlip_l1_node_fwd_1L_lf1_kernel<3><<<grid, blk, 0, st>>>(N, n_feat_pad_, nl4, cA1, d_mu_x_, d_inv_std_x_, d_x_, gy == 1 ? d_eA_x_ : nullptr);
+            eA_x_valid = (gy == 1);
+        } else if (fast_l1_node_1L_lf2_ && !no_lf2_fast) {
+            const dim3 grid((unsigned)((N + 3) / 4), gy);
+            const dim3 blk(32, 4);
+            if (lmax_ == 2)
+                ilmlip_l1_node_fwd_1L_lf2_L2_kernel<<<grid, blk, 0, st>>>(N, n_feat_pad_, nl4, cA1, d_mu_x_, d_inv_std_x_, d_x_, gy == 1 ? d_eA_x_ : nullptr);
+            else
+                ilmlip_l1_node_fwd_1L_lf2_L3_kernel<<<grid, blk, 0, st>>>(N, n_feat_pad_, nl4, cA1, d_mu_x_, d_inv_std_x_, d_x_, gy == 1 ? d_eA_x_ : nullptr);
+            eA_x_valid = (gy == 1);
+        } else {
+            const int per_atom_f = n_sh_l1 + std::max(b2_scalars_, 1);
+            const size_t tbl_b = l1n_smem_tbl ? l1n_tbl_bytes : 0;
+            const int atoms_per_blk_fwd = ((size_t)4 * per_atom_f * 32 * sizeof(float) + tbl_b <= 48000) ? 4 : 2;
+            const dim3 l1n_grid((unsigned)((N + atoms_per_blk_fwd - 1) / atoms_per_blk_fwd), gy);
+            const dim3 l1n_blk(32, (unsigned)atoms_per_blk_fwd);
+            const size_t l1n_smem_fwd = tbl_b + (size_t)atoms_per_blk_fwd * per_atom_f * 32 * sizeof(float);
+            if (lmax_ <= 2) {
+                if (l1n_smem_tbl) ilmlip_l1_node_fwd_kernel<2, true><<<l1n_grid, l1n_blk, l1n_smem_fwd, st>>>(N, -1, n_nu2_, n_nu3_, cg_count_, n_feat_pad_, b2_scalars_, nl4, mid4, d_nu2_, d_nu3_, d_cg_idx_, d_cg_val_, cA1, d_x_, pBcat);
+                else              ilmlip_l1_node_fwd_kernel<2, false><<<l1n_grid, l1n_blk, l1n_smem_fwd, st>>>(N, -1, n_nu2_, n_nu3_, cg_count_, n_feat_pad_, b2_scalars_, nl4, mid4, d_nu2_, d_nu3_, d_cg_idx_, d_cg_val_, cA1, d_x_, pBcat);
+            } else {
+                if (l1n_smem_tbl) ilmlip_l1_node_fwd_kernel<3, true><<<l1n_grid, l1n_blk, l1n_smem_fwd, st>>>(N, -1, n_nu2_, n_nu3_, cg_count_, n_feat_pad_, b2_scalars_, nl4, mid4, d_nu2_, d_nu3_, d_cg_idx_, d_cg_val_, cA1, d_x_, pBcat);
+                else              ilmlip_l1_node_fwd_kernel<3, false><<<l1n_grid, l1n_blk, l1n_smem_fwd, st>>>(N, -1, n_nu2_, n_nu3_, cg_count_, n_feat_pad_, b2_scalars_, nl4, mid4, d_nu2_, d_nu3_, d_cg_idx_, d_cg_val_, cA1, d_x_, pBcat);
+            }
+            ilmlip_norm_x_1L_kernel<<<warp_grid, 128, 0, st>>>(N, n_feat_, n_feat_pad_, d_mu_x_, d_inv_std_x_, d_x_, d_eA_x_);
+            eA_x_valid = true;
+        }
+    } else if (use_l1_msg_v5) {
+        Ptr4 pI{{d_I_[0], d_I_[1], d_I_[2], d_I_[3]}};
+        const float* mux = fuse_v5_norm_v1n8 ? d_mu_x_ : nullptr;
+        const float* isx = fuse_v5_norm_v1n8 ? d_inv_std_x_ : nullptr;
+        float* aml = fuse_v5_norm_v1n8 ? d_am_l1_ : nullptr;
+        auto launch_v6_fwd = [&](auto lm_tag, auto nm_tag, auto m4_tag) {
+            auto kfn = ilmlip_l1_node_fwd_lf1_msg_v5_kernel<decltype(lm_tag)::value, decltype(nm_tag)::value, decltype(m4_tag)::value>;
+            kfn<<<half_grid, 128, l1_msg_v5_smem, st>>>(
+                N, n_feat_pad_, n_msg_, nl4, mid4, cA1, d_W_msg_T_[0], d_W_msg_T_[1],
+                mux, isx, d_x_, aml, use_I_pack4 ? d_I_pack4_ : nullptr, pI);
+        };
+        auto dv6_m4 = [&](auto lm_tag, auto nm_tag) {
+            if (v5_m4) launch_v6_fwd(lm_tag, nm_tag, std::true_type{});
+            else       launch_v6_fwd(lm_tag, nm_tag, std::false_type{});
+        };
+        auto dv6_nm = [&](auto lm_tag) {
+            if (fuse_v5_norm_v1n8) dv6_m4(lm_tag, std::true_type{});
+            else                   dv6_m4(lm_tag, std::false_type{});
+        };
+        if (lmax_ == 2) dv6_nm(std::integral_constant<int, 2>{});
+        else            dv6_nm(std::integral_constant<int, 3>{});
+    } else if (use_fused_l1_msg) {
         Ptr4 pI{{d_I_[0], d_I_[1], d_I_[2], d_I_[3]}};
         const unsigned g256 = (unsigned)((N + 7) / 8);
-        if (lmax_ == 2) {
-            ilmlip_l1_node_fwd_lf1_msg_kernel<2><<<g256, 256, w_msg_smem, st>>>(
-                N, n_feat_pad_, n_msg_, nl4, mid4, cA1, d_W_msg_[0], d_W_msg_[1],
-                d_x_, use_I_pack4 ? d_I_pack4_ : nullptr, pI);
-        } else {
-            ilmlip_l1_node_fwd_lf1_msg_kernel<3><<<g256, 256, w_msg_smem, st>>>(
-                N, n_feat_pad_, n_msg_, nl4, mid4, cA1, d_W_msg_[0], d_W_msg_[1],
-                d_x_, use_I_pack4 ? d_I_pack4_ : nullptr, pI);
-        }
+        auto launch_msg_fwd = [&](auto lm_tag, auto m8_tag) {
+            ilmlip_l1_node_fwd_lf1_msg_kernel<decltype(lm_tag)::value, decltype(m8_tag)::value>
+                <<<g256, 256, w_msg_smem, st>>>(
+                    N, n_feat_pad_, n_msg_, nl4, mid4, cA1, d_W_msg_[0], d_W_msg_[1],
+                    d_x_, use_I_pack4 ? d_I_pack4_ : nullptr, pI);
+        };
+        auto dmsg_m8 = [&](auto lm_tag) {
+            if (n_msg_ <= 8) launch_msg_fwd(lm_tag, std::true_type{});
+            else             launch_msg_fwd(lm_tag, std::false_type{});
+        };
+        if (lmax_ == 2) dmsg_m8(std::integral_constant<int, 2>{});
+        else            dmsg_m8(std::integral_constant<int, 3>{});
+    } else if (use_fused_l1_lf2_msg) {
+        Ptr4 pI{{d_I_[0], d_I_[1], d_I_[2], d_I_[3]}};
+        const float* mux = fuse_v5_norm_v1n8 ? d_mu_x_ : nullptr;
+        const float* isx = fuse_v5_norm_v1n8 ? d_inv_std_x_ : nullptr;
+        float* aml = fuse_v5_norm_v1n8 ? d_am_l1_ : nullptr;
+        const dim3 grid((unsigned)((N + 3) / 4));
+        const dim3 blk(32, 4);
+        auto launch_lf2_msg_fwd = [&](auto lm_tag, auto lmsg_tag, auto qm_tag, auto nm_tag) {
+            constexpr int LM = decltype(lm_tag)::value;
+            constexpr int LMSG = decltype(lmsg_tag)::value;
+            constexpr int QM = decltype(qm_tag)::value;
+            constexpr bool NM = decltype(nm_tag)::value;
+            if constexpr (LM == 2) {
+                auto kfn = ilmlip_l1_node_fwd_lf2_msg_L2_kernel<LMSG, QM, NM>;
+                if (lf2_w_smem > 20480u)
+                    CUDA_CHECK_THROW(cudaFuncSetAttribute(kfn, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)lf2_w_smem));
+                kfn<<<grid, blk, lf2_w_smem, st>>>(
+                    N, n_feat_pad_, n_msg_, nl4, mid4, cA1, d_W_msg_T_[0], d_W_msg_T_[1], d_W_msg_T_[2],
+                    mux, isx, d_x_, aml, (LMSG == 1 && use_I_pack4) ? d_I_pack4_ : nullptr, pI, nullptr);
+            } else {
+                auto kfn = ilmlip_l1_node_fwd_lf2_msg_L3_kernel<LMSG, QM, NM>;
+                if (lf2_w_smem > 12288u)
+                    CUDA_CHECK_THROW(cudaFuncSetAttribute(kfn, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)lf2_w_smem));
+                kfn<<<grid, blk, lf2_w_smem, st>>>(
+                    N, n_feat_pad_, n_msg_, nl4, mid4, cA1, d_W_msg_T_[0], d_W_msg_T_[1], d_W_msg_T_[2],
+                    mux, isx, d_x_, aml, (LMSG == 1 && use_I_pack4) ? d_I_pack4_ : nullptr, pI, nullptr);
+            }
+        };
+        auto dlf2_nm = [&](auto lm_tag, auto lmsg_tag, auto qm_tag) {
+            if (fuse_v5_norm_v1n8) launch_lf2_msg_fwd(lm_tag, lmsg_tag, qm_tag, std::true_type{});
+            else                   launch_lf2_msg_fwd(lm_tag, lmsg_tag, qm_tag, std::false_type{});
+        };
+        auto dlf2_qm = [&](auto lm_tag, auto lmsg_tag) {
+            if (n_msg_ <= 4) dlf2_nm(lm_tag, lmsg_tag, std::integral_constant<int, 4>{});
+            else             dlf2_nm(lm_tag, lmsg_tag, std::integral_constant<int, 8>{});
+        };
+        auto dlf2_lmsg = [&](auto lm_tag) {
+            if (lmsg_ == 1) dlf2_qm(lm_tag, std::integral_constant<int, 1>{});
+            else            dlf2_qm(lm_tag, std::integral_constant<int, 2>{});
+        };
+        if (lmax_ == 2) dlf2_lmsg(std::integral_constant<int, 2>{});
+        else            dlf2_lmsg(std::integral_constant<int, 3>{});
+    } else if (use_fused_l1_s0) {
+        const unsigned g256 = (unsigned)((N + 7) / 8);
+        auto launch_s0_fwd = [&](auto lm_tag, auto m8_tag) {
+            ilmlip_l1_node_fwd_lf1_s0_kernel<decltype(lm_tag)::value, decltype(m8_tag)::value>
+                <<<g256, 256, w_msg0_smem, st>>>(
+                    N, n_feat_pad_, n_msg_, nl4, msg_in_dim_[0], cA1, d_W_msg_[0], d_x_, d_I_[0]);
+        };
+        auto ds0_m8 = [&](auto lm_tag) {
+            if (n_msg_ <= 8) launch_s0_fwd(lm_tag, std::true_type{});
+            else             launch_s0_fwd(lm_tag, std::false_type{});
+        };
+        if (lmax_ == 2) ds0_m8(std::integral_constant<int, 2>{});
+        else            ds0_m8(std::integral_constant<int, 3>{});
     } else {
         if (fast_l1_node_lf1_) {
             const dim3 grid((unsigned)((N + 7) / 8), (unsigned)((max_nl_ + 31) / 32));
@@ -6575,6 +9146,16 @@ void IlmlipModel::record(const GenericPassInputs& in) {
                 ilmlip_l1_node_fwd_lf1_kernel<2><<<grid, blk, 0, st>>>(N, n_feat_pad_, nl4, mid4, cA1, d_x_, pBcat);
             else
                 ilmlip_l1_node_fwd_lf1_kernel<3><<<grid, blk, 0, st>>>(N, n_feat_pad_, nl4, mid4, cA1, d_x_, pBcat);
+        } else if (fast_l1_node_lf2_ && !no_lf2_fast) {
+            const dim3 grid((unsigned)((N + 3) / 4), (unsigned)((max_nl_ + 31) / 32));
+            const dim3 blk(32, 4);
+            if (lmax_ == 2) {
+                if (lmsg_ == 1) ilmlip_l1_node_fwd_lf2_L2_kernel<1><<<grid, blk, 0, st>>>(N, n_feat_pad_, nl4, mid4, cA1, d_x_, pBcat);
+                else            ilmlip_l1_node_fwd_lf2_L2_kernel<2><<<grid, blk, 0, st>>>(N, n_feat_pad_, nl4, mid4, cA1, d_x_, pBcat);
+            } else {
+                if (lmsg_ == 1) ilmlip_l1_node_fwd_lf2_L3_kernel<1><<<grid, blk, 0, st>>>(N, n_feat_pad_, nl4, mid4, cA1, d_x_, pBcat);
+                else            ilmlip_l1_node_fwd_lf2_L3_kernel<2><<<grid, blk, 0, st>>>(N, n_feat_pad_, nl4, mid4, cA1, d_x_, pBcat);
+            }
         } else {
             const int per_atom_f = n_sh_l1 + std::max(b2_scalars_, 1);
             const size_t tbl_b = l1n_smem_tbl ? l1n_tbl_bytes : 0;
@@ -6605,28 +9186,202 @@ void IlmlipModel::record(const GenericPassInputs& in) {
                 const unsigned g = (unsigned)((M + 31) / 32);
                 const size_t sm = (size_t)K * n_msg_ * sizeof(float);
                 ilmlip_skinny_gemm_n16_kernel<<<g, 128, sm, st>>>(M, n_msg_, K, d_Bcat_[l], d_W_msg_[l], d_I_[l]);
+            } else if (do_node_h2 && d_W_msg_h2_B_[l] && M >= 128 && M <= 262144) {
+                in.gemm_h2_row(M, n_msg_, K, d_Bcat_[l], d_W_msg_h2_B_[l], d_W_msg_h2_pB_[l], d_I_[l], 0.0f, nullptr);
             } else {
                 in.gemm(false, M, n_msg_, K, 1.0f, d_Bcat_[l], K, d_W_msg_[l], n_msg_, 0.0f, d_I_[l], n_msg_);
             }
         }
     }
 
-    // 3. Layer-2 Edge Forward
+    // 3. Layer-2 Edge Forward + 4. Layer-2 Invariants & Standardization
     const float a0_s1 = a0_ / sigma1_;
-    const float inv_d2_s1k = 1.0f / ((float)D_A2_ * sigma1_ * sigma1_ * kappa_ * kappa_);
+    const float inv_d2_s1k = has_l2_ ? (1.0f / ((float)D_A2_ * sigma1_ * sigma1_ * kappa_ * kappa_)) : 0.0f;
+    const size_t bisp_tbl_bytes = (has_l2_ && r_bisp_ > 0 && n_bisp_ > 0)
+        ? (size_t)(n_bisp_ * 5 + bisp_idx_count_ * 2) * sizeof(int32_t) : 0;
     const float4* I_pack4_ptr = use_I_pack4 ? d_I_pack4_ : nullptr;
-    if (use_l2_sp) {
+    if (has_l2_) {
+        if (use_l2_s0) {
+            if (remove_backflow_) {
+                ilmlip_l2_edge_fwd_s0_norm_kernel<true><<<half_grid, 128, l2_s0_smem, st>>>(
+                    N, S_, n_msg_, n_inv1_, n_feat_pad_, inv_rmax, a0_s1, inv_d2_s1k,
+                    in.act_row_ptr, row_end, in.act_senders, in.act_vec_len, in.species,
+                    d_C2_, d_Cbf_, d_f0_, d_I_[0], d_mu_x_, d_inv_std_x_, d_A2_[0], d_f1_, d_x_, d_eA_x_);
+            } else {
+                ilmlip_l2_edge_fwd_s0_norm_kernel<false><<<half_grid, 128, l2_s0_smem, st>>>(
+                    N, S_, n_msg_, n_inv1_, n_feat_pad_, inv_rmax, a0_s1, inv_d2_s1k,
+                    in.act_row_ptr, row_end, in.act_senders, in.act_vec_len, in.species,
+                    d_C2_, d_Cbf_, d_f0_, d_I_[0], d_mu_x_, d_inv_std_x_, d_A2_[0], d_f1_, d_x_, d_eA_x_);
+            }
+            eA_x_valid = true;
+        } else if (use_l2_smma) {
+            auto launch_smma_fwd = [&](auto sw_tag, auto lf_tag, auto bf_tag) {
+                constexpr int SW = decltype(sw_tag)::value;
+                const unsigned g = (SW == 8) ? l2_sp_grid : half_grid;
+                ilmlip_l2_edge_fwd_smma_kernel<SW, decltype(lf_tag)::value, decltype(bf_tag)::value>
+                    <<<g, 128, l2_smma_smem, st>>>(
+                        N, S_, n_msg_, inv_rmax, a0_s1, inv_d2_s1k,
+                        in.act_row_ptr, row_end, in.act_senders, in.act_vec_len, in.species,
+                        d_C2_, d_Cbf_, d_f0_, d_I_[0], pA2, d_f1_);
+            };
+            auto d_smma_bf = [&](auto sw_tag, auto lf_tag) {
+                if (remove_backflow_) launch_smma_fwd(sw_tag, lf_tag, std::true_type{});
+                else                  launch_smma_fwd(sw_tag, lf_tag, std::false_type{});
+            };
+            auto d_smma_lf = [&](auto sw_tag) {
+                if (lfeat2_ == 1) d_smma_bf(sw_tag, std::integral_constant<int, 1>{});
+                else              d_smma_bf(sw_tag, std::integral_constant<int, 2>{});
+            };
+            if (use_smma_sw8) d_smma_lf(std::integral_constant<int, 8>{});
+            else              d_smma_lf(std::integral_constant<int, 16>{});
+        } else if (use_l2_v1_n4) {
+            auto launch_v1_n4_fwd = [&](auto nb2_tag, auto nb1_tag, auto sg_tag, auto q_tag, auto bf_tag) {
+                constexpr int NB2 = decltype(nb2_tag)::value;
+                constexpr int NB1 = decltype(nb1_tag)::value;
+                constexpr bool SG = decltype(sg_tag)::value;
+                constexpr bool QUAD = decltype(q_tag)::value;
+                constexpr bool BF = decltype(bf_tag)::value;
+                auto kfn = ilmlip_l2_edge_fwd_v1_n4_kernel<NB2, NB1, SG, QUAD, BF>;
+                if (l2_v1_n4_smem > 28672) {
+                    CUDA_CHECK_THROW(cudaFuncSetAttribute(kfn, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)l2_v1_n4_smem));
+                }
+                kfn<<<l2_v1_n4_grid, 128, l2_v1_n4_smem, st>>>(
+                    N, S_, n_msg_, inv_rmax2, inv_rmax, a0_s1, inv_d2_s1k,
+                    in.act_row_ptr, row_end2, in.act_senders, in.act_vec_len, in.species,
+                    d_C2_, d_Cbf_, d_f0_, I_pack4_ptr, cI, pA2, d_f1_);
+            };
+            auto dv4_bf_sg = [&](auto nb2_tag, auto q_tag) {
+                if (remove_backflow_) launch_v1_n4_fwd(nb2_tag, nb2_tag, std::true_type{}, q_tag, std::true_type{});
+                else                  launch_v1_n4_fwd(nb2_tag, nb2_tag, std::true_type{}, q_tag, std::false_type{});
+            };
+            auto dv4_q_sg = [&](auto nb2_tag) {
+                if (lout2_ == 2) dv4_bf_sg(nb2_tag, std::true_type{});
+                else             dv4_bf_sg(nb2_tag, std::false_type{});
+            };
+            auto dv4_dual_q = [&](auto nb1_tag) {
+                if (lout2_ == 2) launch_v1_n4_fwd(std::integral_constant<int, 8>{}, nb1_tag, std::false_type{}, std::true_type{}, std::true_type{});
+                else             launch_v1_n4_fwd(std::integral_constant<int, 8>{}, nb1_tag, std::false_type{}, std::false_type{}, std::true_type{});
+            };
+            if (v1_same_g || !remove_backflow_) {
+                if (n_base2_ == 8)       dv4_q_sg(std::integral_constant<int, 8>{});
+                else if (n_base2_ == 12) dv4_q_sg(std::integral_constant<int, 12>{});
+                else if (n_base2_ == 14) dv4_q_sg(std::integral_constant<int, 14>{});
+                else                     dv4_q_sg(std::integral_constant<int, 16>{});
+            } else {
+                if (n_base_ == 8)       dv4_dual_q(std::integral_constant<int, 8>{});
+                else if (n_base_ == 12) dv4_dual_q(std::integral_constant<int, 12>{});
+                else if (n_base_ == 14) dv4_dual_q(std::integral_constant<int, 14>{});
+                else                    dv4_dual_q(std::integral_constant<int, 16>{});
+            }
+        } else if (use_l2_v1_n8) {
+            auto launch_v1_fwd = [&](auto nb2_tag, auto nb1_tag, auto sg_tag, auto q_tag, auto bf_tag) {
+                constexpr int NB2 = decltype(nb2_tag)::value;
+                constexpr int NB1 = decltype(nb1_tag)::value;
+                constexpr bool SG = decltype(sg_tag)::value;
+                constexpr bool QUAD = decltype(q_tag)::value;
+                constexpr bool BF = decltype(bf_tag)::value;
+                auto kfn = ilmlip_l2_edge_fwd_v1_n8_kernel<NB2, NB1, SG, QUAD, BF>;
+                if (l2_v1_smem > 28672) {
+                    CUDA_CHECK_THROW(cudaFuncSetAttribute(kfn, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)l2_v1_smem));
+                }
+                kfn<<<l2_sp_grid, 128, l2_v1_smem, st>>>(
+                    N, S_, n_msg_, inv_rmax2, inv_rmax, a0_s1, inv_d2_s1k,
+                    in.act_row_ptr, row_end2, in.act_senders, in.act_vec_len, in.species,
+                    d_C2_, d_Cbf_, d_f0_, I_pack4_ptr, cI, pA2, d_f1_);
+            };
+            auto dv1_bf_sg = [&](auto nb2_tag, auto q_tag) {
+                if (remove_backflow_) launch_v1_fwd(nb2_tag, nb2_tag, std::true_type{}, q_tag, std::true_type{});
+                else                  launch_v1_fwd(nb2_tag, nb2_tag, std::true_type{}, q_tag, std::false_type{});
+            };
+            auto dv1_q_sg = [&](auto nb2_tag) {
+                if (lout2_ == 2) dv1_bf_sg(nb2_tag, std::true_type{});
+                else             dv1_bf_sg(nb2_tag, std::false_type{});
+            };
+            auto dv1_dual_q = [&](auto nb1_tag) {
+                if (lout2_ == 2) launch_v1_fwd(std::integral_constant<int, 8>{}, nb1_tag, std::false_type{}, std::true_type{}, std::true_type{});
+                else             launch_v1_fwd(std::integral_constant<int, 8>{}, nb1_tag, std::false_type{}, std::false_type{}, std::true_type{});
+            };
+            if (v1_same_g || !remove_backflow_) {
+                if (n_base2_ == 8)       dv1_q_sg(std::integral_constant<int, 8>{});
+                else if (n_base2_ == 12) dv1_q_sg(std::integral_constant<int, 12>{});
+                else if (n_base2_ == 14) dv1_q_sg(std::integral_constant<int, 14>{});
+                else                     dv1_q_sg(std::integral_constant<int, 16>{});
+            } else {
+                if (n_base_ == 8)       dv1_dual_q(std::integral_constant<int, 8>{});
+                else if (n_base_ == 12) dv1_dual_q(std::integral_constant<int, 12>{});
+                else if (n_base_ == 14) dv1_dual_q(std::integral_constant<int, 14>{});
+                else                    dv1_dual_q(std::integral_constant<int, 16>{});
+            }
+        } else if (use_l2_sp) {
         if (remove_backflow_) {
             ilmlip_l2_edge_fwd_sp_kernel<true><<<l2_sp_grid, 256, l2_sp_smem, st>>>(
                 N, S_, n_msg_, l2c4, inv_rmax, a0_s1, inv_d2_s1k,
-                in.act_row_ptr, in.act_senders, in.act_vec_len, in.species,
+                in.act_row_ptr, row_end, in.act_senders, in.act_vec_len, in.species,
                 d_C2_, d_Cbf_, d_f0_, I_pack4_ptr, cI, pA2, d_f1_);
         } else {
             ilmlip_l2_edge_fwd_sp_kernel<false><<<l2_sp_grid, 256, l2_sp_smem, st>>>(
                 N, S_, n_msg_, l2c4, inv_rmax, a0_s1, inv_d2_s1k,
-                in.act_row_ptr, in.act_senders, in.act_vec_len, in.species,
+                in.act_row_ptr, row_end, in.act_senders, in.act_vec_len, in.species,
                 d_C2_, d_Cbf_, d_f0_, I_pack4_ptr, cI, pA2, d_f1_);
         }
+    } else if (use_l2_lf2) {
+        auto launch_l2_lf2 = [&](auto lm_tag, auto sw_tag, auto nb_tag, auto bf_tag, auto sm_tag, auto dg_tag) {
+            constexpr int LM = decltype(lm_tag)::value;
+            constexpr int SW = decltype(sw_tag)::value;
+            constexpr int NB = decltype(nb_tag)::value;
+            constexpr bool BF = decltype(bf_tag)::value;
+            constexpr bool SM = decltype(sm_tag)::value;
+            constexpr bool DG = decltype(dg_tag)::value;
+            const unsigned grid = (SW == 8) ? l2_sp_grid : ((SW == 16) ? half_grid : warp_grid);
+            if constexpr (LM == 1) {
+                auto kfn = ilmlip_l2_edge_fwd_lf2_m1_kernel<SW, NB, BF, SM, DG>;
+                if constexpr (SM) {
+                    if (lf2_c_bytes > 20480u)
+                        CUDA_CHECK_THROW(cudaFuncSetAttribute(kfn, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)lf2_c_bytes));
+                }
+                kfn<<<grid, 128, SM ? lf2_c_bytes : 0, st>>>(
+                    N, S_, n_base2_, n_base_, n_msg_, l2c4, inv_rmax2, inv_rmax, a0_s1, inv_d2_s1k,
+                    in.act_row_ptr, row_end2, in.act_senders, in.act_vec_len, in.species,
+                    d_C2_, d_Cbf_, d_f0_, cI, pA2, d_f1_);
+            } else {
+                auto kfn = ilmlip_l2_edge_fwd_lf2_m2_kernel<SW, NB, BF, SM, DG>;
+                if constexpr (SM) {
+                    if (lf2_c_bytes > 20480u)
+                        CUDA_CHECK_THROW(cudaFuncSetAttribute(kfn, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)lf2_c_bytes));
+                }
+                kfn<<<grid, 128, SM ? lf2_c_bytes : 0, st>>>(
+                    N, S_, n_base2_, n_base_, n_msg_, l2c4, inv_rmax2, inv_rmax, a0_s1, inv_d2_s1k,
+                    in.act_row_ptr, row_end2, in.act_senders, in.act_vec_len, in.species,
+                    d_C2_, d_Cbf_, d_f0_, cI, pA2, d_f1_);
+            }
+        };
+        auto disp_dg = [&](auto lm_tag, auto sw_tag, auto nb_tag, auto bf_tag, auto sm_tag) {
+            if constexpr (decltype(bf_tag)::value && decltype(sw_tag)::value <= 16) {
+                if (lf2_dual_g) launch_l2_lf2(lm_tag, sw_tag, nb_tag, bf_tag, sm_tag, std::true_type{});
+                else            launch_l2_lf2(lm_tag, sw_tag, nb_tag, bf_tag, sm_tag, std::false_type{});
+            } else {
+                launch_l2_lf2(lm_tag, sw_tag, nb_tag, bf_tag, sm_tag, std::false_type{});
+            }
+        };
+        auto disp_sm = [&](auto lm_tag, auto sw_tag, auto nb_tag, auto bf_tag) {
+            if (use_smem_c2_lf2) disp_dg(lm_tag, sw_tag, nb_tag, bf_tag, std::true_type{});
+            else                 disp_dg(lm_tag, sw_tag, nb_tag, bf_tag, std::false_type{});
+        };
+        auto disp_bf = [&](auto lm_tag, auto sw_tag, auto nb_tag) {
+            if (remove_backflow_) disp_sm(lm_tag, sw_tag, nb_tag, std::true_type{});
+            else                  disp_sm(lm_tag, sw_tag, nb_tag, std::false_type{});
+        };
+        auto disp_nb = [&](auto lm_tag, auto sw_tag) {
+            if (n_base2_ == 8) disp_bf(lm_tag, sw_tag, std::integral_constant<int, 8>{});
+            else               disp_bf(lm_tag, sw_tag, std::integral_constant<int, 16>{});
+        };
+        auto disp_sw = [&](auto lm_tag) {
+            if (n_msg_ <= 8)       disp_nb(lm_tag, std::integral_constant<int, 8>{});
+            else if (n_msg_ <= 16) disp_nb(lm_tag, std::integral_constant<int, 16>{});
+            else                   disp_nb(lm_tag, std::integral_constant<int, 32>{});
+        };
+        if (lmsg_ == 1) disp_sw(std::integral_constant<int, 1>{});
+        else            disp_sw(std::integral_constant<int, 2>{});
     } else if (use_fast_l2) {
         auto launch_l2_fast = [&](auto lf_tag, auto sw_tag, auto mp_tag, auto nb_tag, auto bf_tag, auto sm_tag) {
             constexpr int LF = decltype(lf_tag)::value;
@@ -6637,8 +9392,8 @@ void IlmlipModel::record(const GenericPassInputs& in) {
             constexpr bool SM = decltype(sm_tag)::value;
             const unsigned grid = (SW == 16) ? half_grid : warp_grid;
             ilmlip_l2_edge_fwd_fast_kernel<LF, SW, MP, NB, BF, SM><<<grid, 128, SM ? l2_c_bytes : 0, st>>>(
-                N, S_, n_base_, n_msg_, l2c4, inv_rmax, a0_s1, inv_d2_s1k,
-                in.act_row_ptr, in.act_senders, in.act_vec_len, in.species,
+                N, S_, n_base2_, n_msg_, l2c4, inv_rmax, a0_s1, inv_d2_s1k,
+                in.act_row_ptr, row_end, in.act_senders, in.act_vec_len, in.species,
                 d_C2_, d_Cbf_, d_f0_, cI, pA2, d_f1_);
         };
         auto disp_sm = [&](auto lf_tag, auto sw_tag, auto mp_tag, auto nb_tag, auto bf_tag) {
@@ -6666,8 +9421,8 @@ void IlmlipModel::record(const GenericPassInputs& in) {
             constexpr int MO = decltype(out_tag)::value;
             constexpr bool BF = decltype(bf_tag)::value;
             ilmlip_l2_edge_fwd_kernel<MP, MO, BF><<<warp_grid, 128, 0, st>>>(
-                N, S_, lfeat2_, lmsg_, lout2_, n_base_, n_msg_, n_l2_paths_, l2c4,
-                inv_rmax, a0_s1, inv_d2_s1k, in.act_row_ptr, in.act_senders, in.act_vec_len, in.species,
+                N, S_, lfeat2_, lmsg_, lout2_, n_base2_, n_base_, n_msg_, n_l2_paths_, l2c4,
+                inv_rmax2, inv_rmax, a0_s1, inv_d2_s1k, in.act_row_ptr, row_end2, in.act_senders, in.act_vec_len, in.species,
                 d_C2_, d_Cbf_, d_f0_, cI, d_l2p_, d_cg_idx_, d_cg_val_, pA2, d_f1_);
         };
         auto disp_l2_fwd_bf = [&](auto mp_tag, auto out_tag) {
@@ -6683,52 +9438,195 @@ void IlmlipModel::record(const GenericPassInputs& in) {
     }
 
     // 4. Layer-2 Projections + Invariants + Standardization + Readout MLP
-    const size_t bisp_tbl_bytes = (r_bisp_ > 0 && n_bisp_ > 0)
-        ? (size_t)(n_bisp_ * 5 + bisp_idx_count_ * 2) * sizeof(int32_t) : 0;
+        if (use_smma_inv_fused) {
+            auto launch_smma_inv_fwd = [&](auto sw_tag, auto lf_tag) {
+                constexpr int SW = decltype(sw_tag)::value;
+                constexpr int LF = decltype(lf_tag)::value;
+                const unsigned g = (SW == 8) ? l2_sp_grid : half_grid;
+                ilmlip_smma_inv_fwd_kernel<SW, LF><<<g, 128, 0, st>>>(
+                    N, n_msg_, r_gram_, n_inv1_, n_feat_pad_, goff4,
+                    d_triu_i_, d_triu_j_, d_W_GB_[1], (LF == 2) ? d_W_GB_[2] : nullptr,
+                    cA2, d_mu_x_, d_inv_std_x_, d_x_, d_eA_x_);
+            };
+            auto d_inv_lf = [&](auto sw_tag) {
+                if (lfeat2_ == 1) launch_smma_inv_fwd(sw_tag, std::integral_constant<int, 1>{});
+                else              launch_smma_inv_fwd(sw_tag, std::integral_constant<int, 2>{});
+            };
+            if (use_smma_sw8) d_inv_lf(std::integral_constant<int, 8>{});
+            else              d_inv_lf(std::integral_constant<int, 16>{});
+            eA_x_valid = true;
+        } else if (use_v1_n4_inv_fused) {
+            if (lout2_ == 2) {
+                ilmlip_v1_n4_inv_fwd_kernel<true><<<l2_v1_n4_grid, 128, 0, st>>>(
+                    N, n_msg_, r_gram_, n_inv1_, n_feat_pad_, goff4,
+                    d_W_GB_[1], d_W_GB_[2],
+                    cA2, d_mu_x_, d_inv_std_x_, d_x_, d_eA_x_,
+                    fuse_v5_norm_v1n8 ? d_am_l1_ : nullptr);
+            } else {
+                ilmlip_v1_n4_inv_fwd_kernel<false><<<l2_v1_n4_grid, 128, 0, st>>>(
+                    N, n_msg_, r_gram_, n_inv1_, n_feat_pad_, goff4,
+                    d_W_GB_[1], nullptr,
+                    cA2, d_mu_x_, d_inv_std_x_, d_x_, d_eA_x_,
+                    fuse_v5_norm_v1n8 ? d_am_l1_ : nullptr);
+            }
+            eA_x_valid = true;
+        } else if (use_v1_n8_inv_fused) {
+            if (lout2_ == 2) {
+                ilmlip_v1_n8_inv_fwd_kernel<true><<<l2_sp_grid, 128, 0, st>>>(
+                    N, n_msg_, r_gram_, n_inv1_, n_feat_pad_, goff4,
+                    d_triu_i_, d_triu_j_, d_W_GB_[1], d_W_GB_[2],
+                    cA2, d_mu_x_, d_inv_std_x_, d_x_, d_eA_x_,
+                    fuse_v5_norm_v1n8 ? d_am_l1_ : nullptr);
+            } else {
+                ilmlip_v1_n8_inv_fwd_kernel<false><<<l2_sp_grid, 128, 0, st>>>(
+                    N, n_msg_, r_gram_, n_inv1_, n_feat_pad_, goff4,
+                    d_triu_i_, d_triu_j_, d_W_GB_[1], nullptr,
+                    cA2, d_mu_x_, d_inv_std_x_, d_x_, d_eA_x_,
+                    fuse_v5_norm_v1n8 ? d_am_l1_ : nullptr);
+            }
+            eA_x_valid = true;
+        } else if (!use_l2_s0) {
+            if (l2_c_[0] > 0 && r_bisp_ > 0) {
+                if (do_node_h2 && d_W_B0_h2_B_ && N >= 128 && N <= 262144) {
+                    in.gemm_h2_row(N, r_bisp_, l2_c_[0], d_A2_[0], d_W_B0_h2_B_, d_W_B0_h2_pB_, d_Q0_, 0.0f, nullptr);
+                } else {
+                    in.gemm(false, N, r_bisp_, l2_c_[0], 1.0f, d_A2_[0], l2_c_[0], d_W_B0_, r_bisp_, 0.0f, d_Q0_, r_bisp_);
+                }
+            }
+            for (int L = 1; L <= lout2_; ++L) {
+                if (l2_c_[L] == 0 || r_gb_ == 0) continue;
+                const int M = N * (2 * L + 1);
+                const int K = l2_c_[L];
+                if (do_node_h2 && d_W_GB_h2_B_[L] && M >= 128 && M <= 262144) {
+                    in.gemm_h2_row(M, r_gb_, K, d_A2_[L], d_W_GB_h2_B_[L], d_W_GB_h2_pB_[L], d_PQ_[L], 0.0f, nullptr);
+                } else {
+                    in.gemm(false, M, r_gb_, K, 1.0f, d_A2_[L], K, d_W_GB_[L], r_gb_, 0.0f, d_PQ_[L], r_gb_);
+                }
+            }
+            if (fast_bisp_l2_ && r_gram_ <= 32) {
+                const size_t sm = (r_gram_ > 0) ? (size_t)4 * 5 * (r_gram_ + 1) * sizeof(float) : 0;
+                ilmlip_l2_inv_fwd_l2_kernel<<<warp_grid, 128, sm, st>>>(
+                    N, r_gram_, r_bisp_, n_inv1_, n_feat_pad_, bisp_off_, l2c4, goff4,
+                    d_triu_i_, d_triu_j_, d_A2_[0], d_Q0_, cPQ, d_mu_x_, d_inv_std_x_, d_x_, d_eA_x_);
+                eA_x_valid = true;
+            } else {
+                const size_t inv_fwd_smem = bisp_tbl_bytes +
+                    ((r_bisp_ > 0 && n_bisp_ > 0 && lout2_ <= 2 && r_bisp_ <= 32) ? (size_t)4 * 9 * r_bisp_ * sizeof(float) : 0);
+                ilmlip_l2_inv_and_norm_fwd_kernel<<<warp_grid, 128, inv_fwd_smem, st>>>(
+                    N, lout2_, r_gram_, r_bisp_, n_bisp_, bisp_idx_count_, n_inv1_, n_feat_pad_, bisp_off_, l2c4, goff4,
+                    d_triu_i_, d_triu_j_, d_bisp_, d_bisp_idx_, d_bisp_val_, d_A2_[0], d_Q0_, cPQ,
+                    d_mu_x_, d_inv_std_x_, d_x_);
+            }
+        }
+    }  // end if (has_l2_)
 
-    if (l2_c_[0] > 0 && r_bisp_ > 0) {
-        in.gemm(false, N, r_bisp_, l2_c_[0], 1.0f, d_A2_[0], l2_c_[0], d_W_B0_, r_bisp_, 0.0f, d_Q0_, r_bisp_);
-    }
-    for (int L = 1; L <= lout2_; ++L) {
-        if (l2_c_[L] == 0 || r_gb_ == 0) continue;
-        const int M = N * (2 * L + 1);
-        const int K = l2_c_[L];
-        in.gemm(false, M, r_gb_, K, 1.0f, d_A2_[L], K, d_W_GB_[L], r_gb_, 0.0f, d_PQ_[L], r_gb_);
-    }
-    if (fast_bisp_l2_ && r_gram_ <= 32) {
-        const size_t sm = (r_gram_ > 0) ? (size_t)4 * 5 * (r_gram_ + 1) * sizeof(float) : 0;
-        ilmlip_l2_inv_fwd_l2_kernel<<<warp_grid, 128, sm, st>>>(
-            N, r_gram_, r_bisp_, n_inv1_, n_feat_pad_, bisp_off_, l2c4, goff4,
-            d_triu_i_, d_triu_j_, d_A2_[0], d_Q0_, cPQ, d_mu_x_, d_inv_std_x_, d_x_, d_eA_x_);
-    } else {
-        const size_t inv_fwd_smem = bisp_tbl_bytes +
-            ((r_bisp_ > 0 && n_bisp_ > 0 && lout2_ <= 2 && r_bisp_ <= 32) ? (size_t)4 * 9 * r_bisp_ * sizeof(float) : 0);
-        ilmlip_l2_inv_and_norm_fwd_kernel<<<warp_grid, 128, inv_fwd_smem, st>>>(
-            N, lout2_, r_gram_, r_bisp_, n_bisp_, bisp_idx_count_, n_inv1_, n_feat_pad_, bisp_off_, l2c4, goff4,
-            d_triu_i_, d_triu_j_, d_bisp_, d_bisp_idx_, d_bisp_val_, d_A2_[0], d_Q0_, cPQ,
-            d_mu_x_, d_inv_std_x_, d_x_);
+    if (use_l1_sumswap && use_zbl_switch_ && zbl_stream_) {
+        CUDA_CHECK_THROW(cudaStreamWaitEvent(st, zbl_ev_join_, 0));
     }
 
     const bool do_ro_h2 = use_ro_h2_ && (bool)in.gemm_h2_row && (N >= 128);
-    const int8_t* eA_x_ptr = (fast_bisp_l2_ && r_gram_ <= 32) ? d_eA_x_ : nullptr;
+    const int8_t* eA_x_ptr = eA_x_valid ? d_eA_x_ : nullptr;
     const float inv_zc = 1.0f / z_c_;
     const bool need_grad = (in.energy_only == 0);
     const char* ro_fuse_env = std::getenv("LOUP_ILMLIP_RO_FUSE");
-    const bool use_ro_tail_fused = do_ro_h2 && need_grad && (ro_depth_ == 2) && (ro_width_ == 128) &&
+    const char* ro_full_env = std::getenv("LOUP_ILMLIP_RO_FULL");
+    const bool allow_ro_fuse = !(ro_fuse_env && ro_fuse_env[0] == '0');
+    const bool allow_ro_full = allow_ro_fuse && !(ro_full_env && ro_full_env[0] == '0');
+    const bool force_ro_single = (ro_full_env && ro_full_env[0] == '2');
+    const bool force_ro_split  = (ro_full_env && ro_full_env[0] == '3');
+    const bool use_ro1_full_fused = do_ro_h2 && need_grad && allow_ro_full && !force_ro_split &&
+                                    (ro_depth_ == 1) && (ro_width_ == 64 || ro_width_ == 32) &&
+                                    ((n_feat_pad_ % 64) == 0) &&
+                                    d_ro_h2_B_[0] && d_ro_h2_BT_[0];
+    const bool use_ro1_fwd_tail = do_ro_h2 && need_grad && allow_ro_full && !use_ro1_full_fused &&
+                                  (ro_depth_ == 1) && (ro_width_ == 64 || ro_width_ == 32) &&
+                                  ((n_feat_pad_ % 32) == 0) &&
+                                  d_ro_h2_B_[0] && d_ro_h2_BT_[0];
+    const bool ro2_w64_ok = do_ro_h2 && need_grad && allow_ro_full &&
+                            (ro_depth_ == 2) && (ro_width_ == 64) &&
+                            ((n_feat_pad_ % 32) == 0) &&
+                            d_ro_h2_B_[0] && d_ro_h2_B_[1] && d_ro_h2_BT_[1] && d_ro_h2_BT_[0];
+    const bool use_ro2_full_fused = ro2_w64_ok && ((n_feat_pad_ % 64) == 0) &&
+                                    (force_ro_single || (!force_ro_split && ((N + 63) / 64 <= 72)));
+    const bool use_ro2_fwd_tail = ro2_w64_ok && !use_ro2_full_fused;
+    const bool use_ro_tail_fused = do_ro_h2 && need_grad && (ro_depth_ == 2) && (ro_width_ == 128 || ro_width_ == 64) &&
                                    d_ro_h2_B_[0] && d_ro_h2_B_[1] && d_ro_h2_BT_[1] && d_ro_h2_BT_[0] &&
-                                   !(ro_fuse_env && ro_fuse_env[0] == '0');
+                                   allow_ro_fuse;
+    const bool use_ro1_tail_fused = need_grad && (ro_depth_ == 1) && (ro_width_ == 64) &&
+                                    allow_ro_fuse;
 
-    if (use_ro_tail_fused) {
+    if (use_ro1_fwd_tail) {
+        // Fused fwd+tail (ZERO pre0/h0 DRAM, 3 CTAs/SM) + parallel 2D gemm_h2_row(W0^T, cached eA_dpre0)!
+        hgemm2_ilmlip_ro1_fwd_tail(
+            N, n_feat_pad_, ro_width_, use_zbl_switch_ != 0, inv_zc, in.species,
+            d_x_, eA_x_ptr, d_alpha_Z_, d_u_Z_,
+            d_ro_h2_B_[0], d_ro_h2_pB_[0],
+            d_e_zbl_, in.energy, in.atom_energy, d_w_zbl_, d_dh_[0], d_eA_x_, d_eA_x_, st);
+        in.gemm_h2_row(N, n_feat_pad_, ro_width_, d_dh_[0], d_ro_h2_BT_[0], d_ro_h2_pBT_[0], d_dx_, 0.0f, d_eA_x_);
+    } else if (use_ro1_full_fused) {
+        // Single-kernel full-fused 1-layer readout: x -> W0 -> +alpha_Z -> silu -> .u_Z (+ZBL) -> silu_bwd -> W0^T -> dx!
+        hgemm2_ilmlip_ro1_fused(
+            N, n_feat_pad_, ro_width_, use_zbl_switch_ != 0, inv_zc, in.species,
+            d_x_, eA_x_ptr, d_alpha_Z_, d_u_Z_,
+            d_ro_h2_B_[0], d_ro_h2_pB_[0], d_ro_h2_BT_[0], d_ro_h2_pBT_[0],
+            d_e_zbl_, in.energy, in.atom_energy, d_w_zbl_, d_dx_, d_eA_x_, st);
+    } else if (use_ro2_full_fused) {
+        // Single-kernel full-fused 2-layer readout (w64, N <= 4608 = 1 wave): x -> W0 -> W1 -> energy (+ZBL) -> W1^T -> W0^T -> dx!
+        hgemm2_ilmlip_ro2_fused_w64(
+            N, n_feat_pad_, use_zbl_switch_ != 0, inv_zc, in.species,
+            d_x_, eA_x_ptr, d_alpha_Z_, d_ro_b_[1], d_u_Z_,
+            d_ro_h2_B_[0], d_ro_h2_pB_[0], d_ro_h2_BT_[0], d_ro_h2_pBT_[0],
+            d_ro_h2_B_[1], d_ro_h2_pB_[1], d_ro_h2_BT_[1], d_ro_h2_pBT_[1],
+            d_e_zbl_, in.energy, in.atom_energy, d_w_zbl_, d_dx_, d_eA_x_, st);
+    } else if (use_ro2_fwd_tail) {
+        // Fused fwd+tail (w64, N > 4608) + parallel 2D gemm_h2_row(W0^T, cached eA_dpre0)!
+        hgemm2_ilmlip_ro2_fwd_tail_w64(
+            N, n_feat_pad_, use_zbl_switch_ != 0, inv_zc, in.species,
+            d_x_, eA_x_ptr, d_alpha_Z_, d_ro_b_[1], d_u_Z_,
+            d_ro_h2_B_[0], d_ro_h2_pB_[0],
+            d_ro_h2_B_[1], d_ro_h2_pB_[1], d_ro_h2_BT_[1], d_ro_h2_pBT_[1],
+            d_e_zbl_, in.energy, in.atom_energy, d_w_zbl_, d_dh_[0], d_eA_x_, d_eA_x_, st);
+        in.gemm_h2_row(N, n_feat_pad_, 64, d_dh_[0], d_ro_h2_BT_[0], d_ro_h2_pBT_[0], d_dx_, 0.0f, d_eA_x_);
+    } else if (use_ro_tail_fused) {
         // 1) ro_W_0 fwd using cached eA_x_ptr (ZERO h2r_row_exp_kernel!)
         in.gemm_h2_row(N, ro_width_, n_feat_pad_, d_x_, d_ro_h2_B_[0], d_ro_h2_pB_[0], d_pre_[0], 0.0f, eA_x_ptr);
         // 2) Fused Readout Tail: collapses 7 kernels (bias_silu x2, W1 fwd, energy_ro+ZBL, silu_bwd x2, W1 bwd) into ONE CTA!
-        hgemm2_ilmlip_ro_tail_w128(
-            N, use_zbl_switch_ != 0, inv_zc, in.species,
-            d_pre_[0], d_alpha_Z_, d_ro_b_[1], d_u_Z_,
-            d_ro_h2_B_[1], d_ro_h2_pB_[1], d_ro_h2_BT_[1], d_ro_h2_pBT_[1],
-            d_e_zbl_, in.energy, in.atom_energy, d_w_zbl_, d_dh_[0], st);
-        // 3) ro_W_0 bwd: d_dx = dpre0 @ ro_W_0^T
-        in.gemm_h2_row(N, n_feat_pad_, ro_width_, d_dh_[0], d_ro_h2_BT_[0], d_ro_h2_pBT_[0], d_dx_, 0.0f, nullptr);
+        if (ro_width_ == 128) {
+            hgemm2_ilmlip_ro_tail_w128(
+                N, use_zbl_switch_ != 0, inv_zc, in.species,
+                d_pre_[0], d_alpha_Z_, d_ro_b_[1], d_u_Z_,
+                d_ro_h2_B_[1], d_ro_h2_pB_[1], d_ro_h2_BT_[1], d_ro_h2_pBT_[1],
+                d_e_zbl_, in.energy, in.atom_energy, d_w_zbl_, d_dh_[0], d_eA_x_, st);
+        } else {
+            hgemm2_ilmlip_ro_tail_w64(
+                N, use_zbl_switch_ != 0, inv_zc, in.species,
+                d_pre_[0], d_alpha_Z_, d_ro_b_[1], d_u_Z_,
+                d_ro_h2_B_[1], d_ro_h2_pB_[1], d_ro_h2_BT_[1], d_ro_h2_pBT_[1],
+                d_e_zbl_, in.energy, in.atom_energy, d_w_zbl_, d_dh_[0], d_eA_x_, st);
+        }
+        // 3) ro_W_0 bwd: d_dx = dpre0 @ ro_W_0^T (uses cached eA_dpre0 for BOTH w64 & w128 -> ZERO h2r_row_exp_kernel!)
+        in.gemm_h2_row(N, n_feat_pad_, ro_width_, d_dh_[0], d_ro_h2_BT_[0], d_ro_h2_pBT_[0], d_dx_, 0.0f, d_eA_x_);
+    } else if (use_ro1_tail_fused) {
+        if (do_ro_h2 && d_ro_h2_B_[0]) {
+            in.gemm_h2_row(N, 64, n_feat_pad_, d_x_, d_ro_h2_B_[0], d_ro_h2_pB_[0], d_pre_[0], 0.0f, eA_x_ptr);
+        } else {
+            in.gemm(false, N, 64, n_feat_pad_, 1.0f, d_x_, n_feat_pad_, d_ro_W_[0], 64, 0.0f, d_pre_[0], 64);
+        }
+        const bool want_ea = (do_ro_h2 && d_ro_h2_BT_[0]);
+        if (use_zbl_switch_) {
+            ilmlip_ro1_tail_w64_kernel<true><<<half_grid, 128, 0, st>>>(
+                N, inv_zc, in.species, d_pre_[0], d_alpha_Z_, d_u_Z_, d_e_zbl_,
+                in.energy, in.atom_energy, d_w_zbl_, d_dh_[0], want_ea ? d_eA_x_ : nullptr);
+        } else {
+            ilmlip_ro1_tail_w64_kernel<false><<<half_grid, 128, 0, st>>>(
+                N, inv_zc, in.species, d_pre_[0], d_alpha_Z_, d_u_Z_, nullptr,
+                in.energy, in.atom_energy, nullptr, d_dh_[0], want_ea ? d_eA_x_ : nullptr);
+        }
+        if (want_ea) {
+            in.gemm_h2_row(N, n_feat_pad_, 64, d_dh_[0], d_ro_h2_BT_[0], d_ro_h2_pBT_[0], d_dx_, 0.0f, d_eA_x_);
+        } else {
+            in.gemm(true, N, n_feat_pad_, 64, 1.0f, d_dh_[0], 64, d_ro_W_[0], 64, 0.0f, d_dx_, n_feat_pad_);
+        }
     } else {
         for (int d = 0; d < ro_depth_; ++d) {
             const float* inp = (d == 0) ? d_x_ : d_h_[d - 1];
@@ -6805,73 +9703,396 @@ void IlmlipModel::record(const GenericPassInputs& in) {
         }
     }
 
-    // 6. Layer-2 Invariants Backward + merged W_GB^T GEMMs + f1 Gate Backward
-    auto launch_gate_bwd = [&](int n_deg, const Int4& C_deg, float inv_s, CPtr4 A, Ptr4 dA,
-                               const float* f_arr, const float* df_ext) {
-        if (n_deg == 2)
-            ilmlip_gate_bwd_kernel<2><<<warp_grid, 128, 0, st>>>(N, C_deg, inv_s, A, dA, f_arr, df_ext);
-        else if (n_deg == 3)
-            ilmlip_gate_bwd_kernel<3><<<warp_grid, 128, 0, st>>>(N, C_deg, inv_s, A, dA, f_arr, df_ext);
-        else
-            ilmlip_gate_bwd_kernel<4><<<warp_grid, 128, 0, st>>>(N, C_deg, inv_s, A, dA, f_arr, df_ext);
-    };
-    const float inv_d2_ak = 1.0f / ((float)D_A2_ * a0_ * a0_ * kappa_ * kappa_);
-
-    if (fast_bisp_l2_ && r_gram_ <= 32) {
-        const int n_tri = (r_gram_ > 0) ? ((r_gram_ * (r_gram_ + 1)) >> 1) : 0;
-        const size_t sm = (r_gram_ > 0)
-            ? ((size_t)2 * n_tri * sizeof(int32_t) + (size_t)4 * (5 + r_gram_) * (r_gram_ + 1) * sizeof(float))
-            : 0;
-        ilmlip_l2_inv_bwd_l2_kernel<<<warp_grid, 128, sm, st>>>(
-            N, r_gram_, r_bisp_, n_inv1_, n_feat_pad_, bisp_off_, l2c4, goff4,
-            d_triu_i_, d_triu_j_, d_inv_std_x_, d_dx_, d_dA2_[0], d_Q0_, d_dQ0_, cPQ, pdPQ);
-    } else {
-        const int n_tri = (r_gram_ * (r_gram_ + 1)) >> 1;
-        const size_t g_work = (r_gram_ > 0 && r_gram_ <= 16) ? (size_t)4 * n_tri * sizeof(float) : 0;
-        const size_t q_work = (r_bisp_ > 0 && n_bisp_ > 0 && lout2_ <= 2 && r_bisp_ <= 32)
-            ? (size_t)4 * 18 * r_bisp_ * sizeof(float) : 0;
-        const size_t inv_bwd_smem = bisp_tbl_bytes + std::max(g_work, q_work);
-        ilmlip_l2_inv_bwd_kernel<<<warp_grid, 128, inv_bwd_smem, st>>>(
-            N, lout2_, r_gram_, r_bisp_, n_bisp_, bisp_idx_count_, n_inv1_, n_feat_pad_, bisp_off_, l2c4, goff4,
-            d_bisp_, d_bisp_idx_, d_bisp_val_, d_inv_std_x_, d_dx_, d_dA2_[0], d_Q0_, d_dQ0_, cPQ, pdPQ);
-    }
-
-    if (l2_c_[0] > 0 && r_bisp_ > 0) {
-        in.gemm(true, N, l2_c_[0], r_bisp_, 1.0f, d_dQ0_, r_bisp_, d_W_B0_, r_bisp_, 1.0f, d_dA2_[0], l2_c_[0]);
-    }
-    for (int L = 1; L <= lout2_; ++L) {
-        if (l2_c_[L] == 0) continue;
-        const int M = N * (2 * L + 1);
-        const int cL = l2_c_[L];
-        if (r_gb_ > 0) {
-            in.gemm(true, M, cL, r_gb_, 1.0f, d_dPQ_[L], r_gb_, d_W_GB_[L], r_gb_, 0.0f, d_dA2_[L], cL);
+    if (zbl_bwd_async) {
+        CUDA_CHECK_THROW(cudaEventRecord(zbl_ev_fork_, st));
+        CUDA_CHECK_THROW(cudaStreamWaitEvent(zbl_stream_, zbl_ev_fork_, 0));
+        if (in.compute_stress) {
+            ilmlip_zbl_bwd_kernel<true><<<zbl_grid, 128, 0, zbl_stream_>>>(
+                N, S_, d_zbl_flag_, in.act_row_ptr, row_end, in.act_senders, in.act_vec_len, in.species, in.pos64,
+                d_rs_pair_, d_zz_pair_, d_au_pair_, d_w_zbl_, in.forces, in.virial);
         } else {
-            CUDA_CHECK_THROW(cudaMemsetAsync(d_dA2_[L], 0, (size_t)M * cL * sizeof(float), st));
+            ilmlip_zbl_bwd_kernel<false><<<zbl_grid, 128, 0, zbl_stream_>>>(
+                N, S_, d_zbl_flag_, in.act_row_ptr, row_end, in.act_senders, in.act_vec_len, in.species, in.pos64,
+                d_rs_pair_, d_zz_pair_, d_au_pair_, d_w_zbl_, in.forces, in.virial);
         }
+        CUDA_CHECK_THROW(cudaEventRecord(zbl_ev_join_, zbl_stream_));
     }
 
-    // 7. Layer-2 Gate Backward + Layer-2 Edge Backward
+    // 6. Layer-2 Invariants Backward + merged W_GB^T GEMMs + f1 Gate Backward + 7. Layer-2 Edge Backward
+    const float inv_d2_ak = has_l2_ ? (1.0f / ((float)D_A2_ * a0_ * a0_ * kappa_ * kappa_)) : 0.0f;
     const char* l2_snd_env = std::getenv("LOUP_ILMLIP_L2_SENDER");
-    const bool use_l2_sender = use_l2_sp && d_dA2_pack_ && (in.n_ghost == 0) &&
-                               !(l2_snd_env && l2_snd_env[0] == '0');
-    if (use_l2_sender) {
+    const bool allow_l2_snd = (in.n_ghost == 0) && !(l2_snd_env && l2_snd_env[0] == '0');
+
+    if (has_l2_) {
+        const bool use_l2_s0_sender = use_l2_s0 && allow_l2_snd;
+        const bool use_l2_smma_sender = use_l2_smma && d_dA2_pack_ && allow_l2_snd;
+        const bool use_smma_bwd_fused = use_l2_smma_sender && use_smma_inv_fused;
+        const bool use_l2_v1_n4_sender = use_l2_v1_n4 && d_dA2_pack_ && allow_l2_snd;
+        const bool use_v1_n4_bwd_fused = use_l2_v1_n4_sender && use_v1_n4_inv_fused;
+        const bool use_l2_v1_n8_sender = use_l2_v1_n8 && !use_l2_v1_n4 && d_dA2_pack_ && allow_l2_snd;
+        const bool use_v1_n8_bwd_fused = use_l2_v1_n8_sender && use_v1_n8_inv_fused;
+        const bool use_l2_sender = use_l2_sp && d_dA2_pack_ && allow_l2_snd;
+        const bool use_l2_lf2_sender = use_l2_lf2 && d_dA2_pack_ && allow_l2_snd;
+        if (!use_l2_s0 && !use_smma_bwd_fused && !use_v1_n4_bwd_fused && !use_v1_n8_bwd_fused) {
+            if (fast_bisp_l2_ && r_gram_ <= 32) {
+                const int n_tri = (r_gram_ > 0) ? ((r_gram_ * (r_gram_ + 1)) >> 1) : 0;
+                const size_t sm = (r_gram_ > 0)
+                    ? ((size_t)2 * n_tri * sizeof(int32_t) + (size_t)4 * (5 + r_gram_) * (r_gram_ + 1) * sizeof(float))
+                    : 0;
+                ilmlip_l2_inv_bwd_l2_kernel<<<warp_grid, 128, sm, st>>>(
+                    N, r_gram_, r_bisp_, n_inv1_, n_feat_pad_, bisp_off_, l2c4, goff4,
+                    d_triu_i_, d_triu_j_, d_inv_std_x_, d_dx_, d_dA2_[0], d_Q0_, d_dQ0_, cPQ, pdPQ);
+            } else {
+                const int n_tri = (r_gram_ * (r_gram_ + 1)) >> 1;
+                const size_t g_work = (r_gram_ > 0 && r_gram_ <= 16) ? (size_t)4 * n_tri * sizeof(float) : 0;
+                const size_t q_work = (r_bisp_ > 0 && n_bisp_ > 0 && lout2_ <= 2 && r_bisp_ <= 32)
+                    ? (size_t)4 * 18 * r_bisp_ * sizeof(float) : 0;
+                const size_t inv_bwd_smem = bisp_tbl_bytes + std::max(g_work, q_work);
+                ilmlip_l2_inv_bwd_kernel<<<warp_grid, 128, inv_bwd_smem, st>>>(
+                    N, lout2_, r_gram_, r_bisp_, n_bisp_, bisp_idx_count_, n_inv1_, n_feat_pad_, bisp_off_, l2c4, goff4,
+                    d_bisp_, d_bisp_idx_, d_bisp_val_, d_inv_std_x_, d_dx_, d_dA2_[0], d_Q0_, d_dQ0_, cPQ, pdPQ);
+            }
+
+            if (l2_c_[0] > 0 && r_bisp_ > 0) {
+                if (do_node_h2 && d_W_B0_h2_BT_ && N >= 128 && N <= 262144) {
+                    in.gemm_h2_row(N, l2_c_[0], r_bisp_, d_dQ0_, d_W_B0_h2_BT_, d_W_B0_h2_pBT_, d_dA2_[0], 1.0f, nullptr);
+                } else {
+                    in.gemm(true, N, l2_c_[0], r_bisp_, 1.0f, d_dQ0_, r_bisp_, d_W_B0_, r_bisp_, 1.0f, d_dA2_[0], l2_c_[0]);
+                }
+            }
+            for (int L = 1; L <= lout2_; ++L) {
+                if (l2_c_[L] == 0) continue;
+                const int M = N * (2 * L + 1);
+                const int cL = l2_c_[L];
+                if (r_gb_ > 0) {
+                    if (do_node_h2 && d_W_GB_h2_BT_[L] && M >= 128 && M <= 262144) {
+                        in.gemm_h2_row(M, cL, r_gb_, d_dPQ_[L], d_W_GB_h2_BT_[L], d_W_GB_h2_pBT_[L], d_dA2_[L], 0.0f, nullptr);
+                    } else {
+                        in.gemm(true, M, cL, r_gb_, 1.0f, d_dPQ_[L], r_gb_, d_W_GB_[L], r_gb_, 0.0f, d_dA2_[L], cL);
+                    }
+                } else {
+                    CUDA_CHECK_THROW(cudaMemsetAsync(d_dA2_[L], 0, (size_t)M * cL * sizeof(float), st));
+                }
+            }
+        }
+
+        if (use_l2_s0_sender) {
+            ilmlip_gate_bwd_s0_norm_kernel<<<half_grid, 128, 0, st>>>(
+                N, n_msg_, n_inv1_, n_feat_pad_, inv_d2_ak, d_inv_std_x_, d_dx_, d_A2_[0], d_f1_, d_dA2_[0]);
+            if (use_f32_forces) used_f32_forces = true;
+            auto launch_s0 = [&](auto bf_tag, auto st_tag, auto f32_tag) {
+                ilmlip_l2_edge_bwd_s0_sender_kernel<decltype(bf_tag)::value, decltype(st_tag)::value, decltype(f32_tag)::value>
+                    <<<half_grid, 128, l2_s0_smem, st>>>(
+                        N, S_, n_msg_, inv_rmax, in.act_row_ptr, row_end, in.act_senders, in.act_vec_len, in.species,
+                        d_C2_, d_Cbf_, d_f0_, d_I_[0], d_dA2_[0], d_dI_[0], d_df0_bf_,
+                        in.forces, d_forces_f32_, in.virial);
+            };
+            auto ds0_f32 = [&](auto bf, auto stt) {
+                if (use_f32_forces) launch_s0(bf, stt, std::true_type{});
+                else                launch_s0(bf, stt, std::false_type{});
+            };
+            if (remove_backflow_) {
+                if (in.compute_stress) ds0_f32(std::true_type{}, std::true_type{});
+                else                   ds0_f32(std::true_type{}, std::false_type{});
+            } else {
+                if (in.compute_stress) ds0_f32(std::false_type{}, std::true_type{});
+                else                   ds0_f32(std::false_type{}, std::false_type{});
+            }
+        } else if (use_l2_smma_sender) {
+            auto launch_smma_pack = [&](auto sw_tag, auto lf_tag) {
+                constexpr int SW = decltype(sw_tag)::value;
+                constexpr int LF = decltype(lf_tag)::value;
+                const unsigned g = (SW == 8) ? l2_sp_grid : half_grid;
+                if (use_smma_bwd_fused) {
+                    ilmlip_smma_inv_gate_bwd_pack_kernel<SW, LF><<<g, 128, 0, st>>>(
+                        N, n_msg_, r_gram_, n_inv1_, n_feat_pad_, inv_d2_ak, goff4,
+                        d_triu_i_, d_triu_j_, d_W_GB_[1], (LF == 2) ? d_W_GB_[2] : nullptr,
+                        d_inv_std_x_, d_dx_, cA2, d_f1_, d_dA2_pack_);
+                } else {
+                    ilmlip_gate_bwd_pack_smma_kernel<SW, LF><<<g, 128, 0, st>>>(
+                        N, n_msg_, inv_d2_ak, cA2, cdA2, d_f1_, d_dA2_pack_);
+                }
+            };
+            if (use_smma_sw8) {
+                if (lfeat2_ == 1) launch_smma_pack(std::integral_constant<int, 8>{}, std::integral_constant<int, 1>{});
+                else              launch_smma_pack(std::integral_constant<int, 8>{}, std::integral_constant<int, 2>{});
+            } else {
+                if (lfeat2_ == 1) launch_smma_pack(std::integral_constant<int, 16>{}, std::integral_constant<int, 1>{});
+                else              launch_smma_pack(std::integral_constant<int, 16>{}, std::integral_constant<int, 2>{});
+            }
+            if (use_f32_forces) used_f32_forces = true;
+            auto launch_smma_bwd = [&](auto sw_tag, auto lf_tag, auto bf_tag, auto st_tag, auto f32_tag) {
+                constexpr int SW = decltype(sw_tag)::value;
+                const unsigned g = (SW == 8) ? l2_sp_grid : half_grid;
+                ilmlip_l2_edge_bwd_smma_sender_kernel<SW, decltype(lf_tag)::value, decltype(bf_tag)::value, decltype(st_tag)::value, decltype(f32_tag)::value>
+                    <<<g, 128, l2_smma_smem, st>>>(
+                        N, S_, n_msg_, inv_rmax, in.act_row_ptr, row_end, in.act_senders, in.act_vec_len, in.species,
+                        d_C2_, d_Cbf_, d_f0_, d_I_[0], d_dA2_pack_, d_dI_[0], d_df0_bf_,
+                        in.forces, d_forces_f32_, in.virial);
+            };
+            auto dsm_f32 = [&](auto sw, auto lf, auto bf, auto stt) {
+                if (use_f32_forces) launch_smma_bwd(sw, lf, bf, stt, std::true_type{});
+                else                launch_smma_bwd(sw, lf, bf, stt, std::false_type{});
+            };
+            auto dsm_st = [&](auto sw, auto lf, auto bf) {
+                if (in.compute_stress) dsm_f32(sw, lf, bf, std::true_type{});
+                else                   dsm_f32(sw, lf, bf, std::false_type{});
+            };
+            auto dsm_bf = [&](auto sw, auto lf) {
+                if (remove_backflow_) dsm_st(sw, lf, std::true_type{});
+                else                  dsm_st(sw, lf, std::false_type{});
+            };
+            auto dsm_lf = [&](auto sw) {
+                if (lfeat2_ == 1) dsm_bf(sw, std::integral_constant<int, 1>{});
+                else              dsm_bf(sw, std::integral_constant<int, 2>{});
+            };
+            if (use_smma_sw8) dsm_lf(std::integral_constant<int, 8>{});
+            else              dsm_lf(std::integral_constant<int, 16>{});
+        } else if (use_l2_v1_n4_sender) {
+            if (use_v1_n4_bwd_fused) {
+                if (lout2_ == 2) {
+                    ilmlip_v1_n4_inv_gate_bwd_pack_kernel<true><<<l2_v1_n4_grid, 128, 0, st>>>(
+                        N, n_msg_, r_gram_, n_inv1_, n_feat_pad_, inv_d2_ak, goff4,
+                        d_W_GB_[1], d_W_GB_[2],
+                        d_inv_std_x_, d_dx_, cA2, d_f1_, d_dA2_pack_,
+                        use_l1_msg_v5 || use_fused_l1_lf2_msg);
+                } else {
+                    ilmlip_v1_n4_inv_gate_bwd_pack_kernel<false><<<l2_v1_n4_grid, 128, 0, st>>>(
+                        N, n_msg_, r_gram_, n_inv1_, n_feat_pad_, inv_d2_ak, goff4,
+                        d_W_GB_[1], nullptr,
+                        d_inv_std_x_, d_dx_, cA2, d_f1_, d_dA2_pack_,
+                        use_l1_msg_v5 || use_fused_l1_lf2_msg);
+                }
+            } else {
+                if (lout2_ == 2) {
+                    ilmlip_gate_bwd_pack_l2_v1_n4_kernel<true><<<l2_v1_n4_grid, 128, 0, st>>>(
+                        N, n_msg_, inv_d2_ak, cA2, cdA2, d_f1_, d_dA2_pack_);
+                } else {
+                    ilmlip_gate_bwd_pack_l2_v1_n4_kernel<false><<<l2_v1_n4_grid, 128, 0, st>>>(
+                        N, n_msg_, inv_d2_ak, cA2, cdA2, d_f1_, d_dA2_pack_);
+                }
+            }
+            if (use_f32_forces) used_f32_forces = true;
+            auto launch_v4 = [&](auto nb2_tag, auto nb1_tag, auto sg_tag, auto q_tag, auto bf_tag, auto st_tag, auto f32_tag) {
+                constexpr int NB2 = decltype(nb2_tag)::value;
+                constexpr int NB1 = decltype(nb1_tag)::value;
+                constexpr bool SG = decltype(sg_tag)::value;
+                constexpr bool QUAD = decltype(q_tag)::value;
+                constexpr bool BF = decltype(bf_tag)::value;
+                constexpr bool ST = decltype(st_tag)::value;
+                constexpr bool F32 = decltype(f32_tag)::value;
+                auto kfn = ilmlip_l2_edge_bwd_v1_n4_sender_kernel<NB2, NB1, SG, QUAD, BF, ST, F32>;
+                if (l2_v1_n4_smem > 28672) {
+                    CUDA_CHECK_THROW(cudaFuncSetAttribute(kfn, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)l2_v1_n4_smem));
+                }
+                kfn<<<l2_v1_n4_grid, 128, l2_v1_n4_smem, st>>>(
+                    N, S_, n_msg_, inv_rmax2, inv_rmax, in.act_row_ptr, row_end2, in.act_senders, in.act_vec_len, in.species,
+                    d_C2_, d_Cbf_, d_f0_, I_pack4_ptr, cI, d_dA2_pack_, pdI, d_df0_bf_,
+                    in.forces, d_forces_f32_, in.virial);
+            };
+            auto dv4_f32 = [&](auto nb2, auto nb1, auto sg, auto q, auto bf, auto stt) {
+                if (use_f32_forces) launch_v4(nb2, nb1, sg, q, bf, stt, std::true_type{});
+                else                launch_v4(nb2, nb1, sg, q, bf, stt, std::false_type{});
+            };
+            auto dv4_st = [&](auto nb2, auto nb1, auto sg, auto q, auto bf) {
+                if (in.compute_stress) dv4_f32(nb2, nb1, sg, q, bf, std::true_type{});
+                else                   dv4_f32(nb2, nb1, sg, q, bf, std::false_type{});
+            };
+            auto dv4_bf_sg = [&](auto nb2, auto q) {
+                if (remove_backflow_) dv4_st(nb2, nb2, std::true_type{}, q, std::true_type{});
+                else                  dv4_st(nb2, nb2, std::true_type{}, q, std::false_type{});
+            };
+            auto dv4_q_sg = [&](auto nb2) {
+                if (lout2_ == 2) dv4_bf_sg(nb2, std::true_type{});
+                else             dv4_bf_sg(nb2, std::false_type{});
+            };
+            auto dv4_dual_q = [&](auto nb1) {
+                if (lout2_ == 2) dv4_st(std::integral_constant<int, 8>{}, nb1, std::false_type{}, std::true_type{}, std::true_type{});
+                else             dv4_st(std::integral_constant<int, 8>{}, nb1, std::false_type{}, std::false_type{}, std::true_type{});
+            };
+            if (v1_same_g || !remove_backflow_) {
+                if (n_base2_ == 8)       dv4_q_sg(std::integral_constant<int, 8>{});
+                else if (n_base2_ == 12) dv4_q_sg(std::integral_constant<int, 12>{});
+                else if (n_base2_ == 14) dv4_q_sg(std::integral_constant<int, 14>{});
+                else                     dv4_q_sg(std::integral_constant<int, 16>{});
+            } else {
+                if (n_base_ == 8)       dv4_dual_q(std::integral_constant<int, 8>{});
+                else if (n_base_ == 12) dv4_dual_q(std::integral_constant<int, 12>{});
+                else if (n_base_ == 14) dv4_dual_q(std::integral_constant<int, 14>{});
+                else                    dv4_dual_q(std::integral_constant<int, 16>{});
+            }
+        } else if (use_l2_v1_n8_sender) {
+            if (use_v1_n8_bwd_fused) {
+                if (lout2_ == 2) {
+                    ilmlip_v1_n8_inv_gate_bwd_pack_kernel<true><<<l2_sp_grid, 128, 0, st>>>(
+                        N, n_msg_, r_gram_, n_inv1_, n_feat_pad_, inv_d2_ak, goff4,
+                        d_triu_i_, d_triu_j_, d_W_GB_[1], d_W_GB_[2],
+                        d_inv_std_x_, d_dx_, cA2, d_f1_, d_dA2_pack_,
+                        use_l1_msg_v5 || use_fused_l1_lf2_msg);
+                } else {
+                    ilmlip_v1_n8_inv_gate_bwd_pack_kernel<false><<<l2_sp_grid, 128, 0, st>>>(
+                        N, n_msg_, r_gram_, n_inv1_, n_feat_pad_, inv_d2_ak, goff4,
+                        d_triu_i_, d_triu_j_, d_W_GB_[1], nullptr,
+                        d_inv_std_x_, d_dx_, cA2, d_f1_, d_dA2_pack_,
+                        use_l1_msg_v5 || use_fused_l1_lf2_msg);
+                }
+            } else {
+                if (lout2_ == 2) {
+                    ilmlip_gate_bwd_pack_l2_v1_n8_kernel<true><<<l2_sp_grid, 128, 0, st>>>(
+                        N, n_msg_, inv_d2_ak, cA2, cdA2, d_f1_, d_dA2_pack_);
+                } else {
+                    ilmlip_gate_bwd_pack_l2_v1_n8_kernel<false><<<l2_sp_grid, 128, 0, st>>>(
+                        N, n_msg_, inv_d2_ak, cA2, cdA2, d_f1_, d_dA2_pack_);
+                }
+            }
+            if (use_f32_forces) used_f32_forces = true;
+            auto launch_v1 = [&](auto nb2_tag, auto nb1_tag, auto sg_tag, auto q_tag, auto bf_tag, auto st_tag, auto f32_tag) {
+                constexpr int NB2 = decltype(nb2_tag)::value;
+                constexpr int NB1 = decltype(nb1_tag)::value;
+                constexpr bool SG = decltype(sg_tag)::value;
+                constexpr bool QUAD = decltype(q_tag)::value;
+                constexpr bool BF = decltype(bf_tag)::value;
+                constexpr bool ST = decltype(st_tag)::value;
+                constexpr bool F32 = decltype(f32_tag)::value;
+                auto kfn = ilmlip_l2_edge_bwd_v1_n8_sender_kernel<NB2, NB1, SG, QUAD, BF, ST, F32>;
+                if (l2_v1_smem > 28672) {
+                    CUDA_CHECK_THROW(cudaFuncSetAttribute(kfn, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)l2_v1_smem));
+                }
+                kfn<<<l2_sp_grid, 128, l2_v1_smem, st>>>(
+                    N, S_, n_msg_, inv_rmax2, inv_rmax, in.act_row_ptr, row_end2, in.act_senders, in.act_vec_len, in.species,
+                    d_C2_, d_Cbf_, d_f0_, I_pack4_ptr, cI, d_dA2_pack_, pdI, d_df0_bf_,
+                    in.forces, d_forces_f32_, in.virial);
+            };
+            auto dv1_f32 = [&](auto nb2, auto nb1, auto sg, auto q, auto bf, auto stt) {
+                if (use_f32_forces) launch_v1(nb2, nb1, sg, q, bf, stt, std::true_type{});
+                else                launch_v1(nb2, nb1, sg, q, bf, stt, std::false_type{});
+            };
+            auto dv1_st = [&](auto nb2, auto nb1, auto sg, auto q, auto bf) {
+                if (in.compute_stress) dv1_f32(nb2, nb1, sg, q, bf, std::true_type{});
+                else                   dv1_f32(nb2, nb1, sg, q, bf, std::false_type{});
+            };
+            auto dv1_bf_sg = [&](auto nb2, auto q) {
+                if (remove_backflow_) dv1_st(nb2, nb2, std::true_type{}, q, std::true_type{});
+                else                  dv1_st(nb2, nb2, std::true_type{}, q, std::false_type{});
+            };
+            auto dv1_q_sg = [&](auto nb2) {
+                if (lout2_ == 2) dv1_bf_sg(nb2, std::true_type{});
+                else             dv1_bf_sg(nb2, std::false_type{});
+            };
+            auto dv1_dual_q = [&](auto nb1) {
+                if (lout2_ == 2) dv1_st(std::integral_constant<int, 8>{}, nb1, std::false_type{}, std::true_type{}, std::true_type{});
+                else             dv1_st(std::integral_constant<int, 8>{}, nb1, std::false_type{}, std::false_type{}, std::true_type{});
+            };
+            if (v1_same_g || !remove_backflow_) {
+                if (n_base2_ == 8)       dv1_q_sg(std::integral_constant<int, 8>{});
+                else if (n_base2_ == 12) dv1_q_sg(std::integral_constant<int, 12>{});
+                else if (n_base2_ == 14) dv1_q_sg(std::integral_constant<int, 14>{});
+                else                     dv1_q_sg(std::integral_constant<int, 16>{});
+            } else {
+                if (n_base_ == 8)       dv1_dual_q(std::integral_constant<int, 8>{});
+                else if (n_base_ == 12) dv1_dual_q(std::integral_constant<int, 12>{});
+                else if (n_base_ == 14) dv1_dual_q(std::integral_constant<int, 14>{});
+                else                    dv1_dual_q(std::integral_constant<int, 16>{});
+            }
+        } else if (use_l2_sender) {
         // Fused f1 gate backward + pack [g0..g6, g7c, w00..w22] -> ZERO atomicAdd(dI_node) & ZERO zero-slab memset!
         ilmlip_gate_bwd_pack_l2_kernel<<<half_grid, 128, 0, st>>>(
             N, n_msg_, l2c4, inv_d2_ak, cA2, cdA2, d_f1_, d_dA2_pack_);
-        auto launch_l2_snd = [&](auto bf_tag, auto st_tag) {
-            ilmlip_l2_edge_bwd_sender_kernel<decltype(bf_tag)::value, decltype(st_tag)::value><<<half_grid, 128, 0, st>>>(
+        if (use_f32_forces) used_f32_forces = true;
+        auto launch_l2_snd = [&](auto bf_tag, auto st_tag, auto f32_tag) {
+            ilmlip_l2_edge_bwd_sender_kernel<decltype(bf_tag)::value, decltype(st_tag)::value, decltype(f32_tag)::value><<<half_grid, 128, 0, st>>>(
                 N, S_, n_msg_, inv_rmax,
-                in.act_row_ptr, in.act_senders, in.act_vec_len, in.species,
+                in.act_row_ptr, row_end, in.act_senders, in.act_vec_len, in.species,
                 d_C2_, d_Cbf_, d_f0_, I_pack4_ptr, cI, d_dA2_pack_,
-                pdI, d_df0_bf_, in.forces, in.virial);
+                pdI, d_df0_bf_, in.forces, d_forces_f32_, in.virial);
+        };
+        auto disp_l2_f32 = [&](auto bf_tag, auto st_tag) {
+            if (use_f32_forces) launch_l2_snd(bf_tag, st_tag, std::true_type{});
+            else                launch_l2_snd(bf_tag, st_tag, std::false_type{});
         };
         if (remove_backflow_) {
-            if (in.compute_stress) launch_l2_snd(std::true_type{}, std::true_type{});
-            else                   launch_l2_snd(std::true_type{}, std::false_type{});
+            if (in.compute_stress) disp_l2_f32(std::true_type{}, std::true_type{});
+            else                   disp_l2_f32(std::true_type{}, std::false_type{});
         } else {
-            if (in.compute_stress) launch_l2_snd(std::false_type{}, std::true_type{});
-            else                   launch_l2_snd(std::false_type{}, std::false_type{});
+            if (in.compute_stress) disp_l2_f32(std::false_type{}, std::true_type{});
+            else                   disp_l2_f32(std::false_type{}, std::false_type{});
         }
+    } else if (use_l2_lf2_sender) {
+        // Fused f1 gate backward + pack + SENDER-OWNED ZERO-ATOMIC L2 edge backward for lfeat2=2, lmsg in {1,2}!
+        if (use_f32_forces) used_f32_forces = true;
+        auto launch_lf2_snd = [&](auto lm_tag, auto sw_tag, auto nb_tag, auto bf_tag, auto st_tag, auto f32_tag, auto sm_tag, auto dg_tag) {
+            constexpr int LM = decltype(lm_tag)::value;
+            constexpr int SW = decltype(sw_tag)::value;
+            constexpr int NB = decltype(nb_tag)::value;
+            constexpr bool BF = decltype(bf_tag)::value;
+            constexpr bool ST = decltype(st_tag)::value;
+            constexpr bool F32 = decltype(f32_tag)::value;
+            constexpr bool SM = decltype(sm_tag)::value;
+            constexpr bool DG = decltype(dg_tag)::value;
+            const unsigned grid = (SW == 8) ? l2_sp_grid : ((SW == 16) ? half_grid : warp_grid);
+            if constexpr (LM == 1) {
+                ilmlip_gate_bwd_pack_l2_lf2_m1_kernel<SW><<<grid, 128, 0, st>>>(
+                    N, n_msg_, l2c4, inv_d2_ak, cA2, cdA2, d_f1_, d_dA2_pack_);
+                auto kfn = ilmlip_l2_edge_bwd_lf2_m1_sender_kernel<SW, NB, BF, ST, F32, SM, DG>;
+                if constexpr (SM) {
+                    if (lf2_c_bytes > 20480u)
+                        CUDA_CHECK_THROW(cudaFuncSetAttribute(kfn, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)lf2_c_bytes));
+                }
+                kfn<<<grid, 128, SM ? lf2_c_bytes : 0, st>>>(
+                    N, S_, n_base2_, n_base_, n_msg_, inv_rmax2, inv_rmax,
+                    in.act_row_ptr, row_end2, in.act_senders, in.act_vec_len, in.species,
+                    d_C2_, d_Cbf_, d_f0_, cI, d_dA2_pack_,
+                    pdI, d_df0_bf_, in.forces, d_forces_f32_, in.virial);
+            } else {
+                ilmlip_gate_bwd_pack_l2_lf2_m2_kernel<SW><<<grid, 128, 0, st>>>(
+                    N, n_msg_, l2c4, inv_d2_ak, cA2, cdA2, d_f1_, d_dA2_pack_);
+                auto kfn = ilmlip_l2_edge_bwd_lf2_m2_sender_kernel<SW, NB, BF, ST, F32, SM, DG>;
+                if constexpr (SM) {
+                    if (lf2_c_bytes > 20480u)
+                        CUDA_CHECK_THROW(cudaFuncSetAttribute(kfn, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)lf2_c_bytes));
+                }
+                kfn<<<grid, 128, SM ? lf2_c_bytes : 0, st>>>(
+                    N, S_, n_base2_, n_base_, n_msg_, inv_rmax2, inv_rmax,
+                    in.act_row_ptr, row_end2, in.act_senders, in.act_vec_len, in.species,
+                    d_C2_, d_Cbf_, d_f0_, cI, d_dA2_pack_,
+                    pdI, d_df0_bf_, in.forces, d_forces_f32_, in.virial);
+            }
+        };
+        auto d_dg = [&](auto lm, auto sw, auto nb, auto bf, auto stt, auto f32, auto sm) {
+            if constexpr (decltype(bf)::value && decltype(sw)::value <= 16) {
+                if (lf2_dual_g) launch_lf2_snd(lm, sw, nb, bf, stt, f32, sm, std::true_type{});
+                else            launch_lf2_snd(lm, sw, nb, bf, stt, f32, sm, std::false_type{});
+            } else {
+                launch_lf2_snd(lm, sw, nb, bf, stt, f32, sm, std::false_type{});
+            }
+        };
+        auto d_sm = [&](auto lm, auto sw, auto nb, auto bf, auto stt, auto f32) {
+            if (use_smem_c2_lf2) d_dg(lm, sw, nb, bf, stt, f32, std::true_type{});
+            else                 d_dg(lm, sw, nb, bf, stt, f32, std::false_type{});
+        };
+        auto d_f32 = [&](auto lm, auto sw, auto nb, auto bf, auto stt) {
+            if (use_f32_forces) d_sm(lm, sw, nb, bf, stt, std::true_type{});
+            else                d_sm(lm, sw, nb, bf, stt, std::false_type{});
+        };
+        auto d_st = [&](auto lm, auto sw, auto nb, auto bf) {
+            if (in.compute_stress) d_f32(lm, sw, nb, bf, std::true_type{});
+            else                   d_f32(lm, sw, nb, bf, std::false_type{});
+        };
+        auto d_bf = [&](auto lm, auto sw, auto nb) {
+            if (remove_backflow_) d_st(lm, sw, nb, std::true_type{});
+            else                  d_st(lm, sw, nb, std::false_type{});
+        };
+        auto d_nb = [&](auto lm, auto sw) {
+            if (n_base2_ == 8) d_bf(lm, sw, std::integral_constant<int, 8>{});
+            else               d_bf(lm, sw, std::integral_constant<int, 16>{});
+        };
+        auto d_sw = [&](auto lm) {
+            if (n_msg_ <= 8)       d_nb(lm, std::integral_constant<int, 8>{});
+            else if (n_msg_ <= 16) d_nb(lm, std::integral_constant<int, 16>{});
+            else                   d_nb(lm, std::integral_constant<int, 32>{});
+        };
+        if (lmsg_ == 1) d_sw(std::integral_constant<int, 1>{});
+        else            d_sw(std::integral_constant<int, 2>{});
     } else {
         launch_gate_bwd(lout2_ + 1, l2c4, inv_d2_ak, cA2, pdA2, d_f1_, nullptr);
         CUDA_CHECK_THROW(cudaMemsetAsync(d_zero_slab_, 0, zero_slab_bytes_, st));
@@ -6879,7 +10100,7 @@ void IlmlipModel::record(const GenericPassInputs& in) {
             auto launch_l2_sp = [&](auto bf_tag, auto st_tag) {
                 ilmlip_l2_edge_bwd_sp_kernel<decltype(bf_tag)::value, decltype(st_tag)::value><<<half_grid, 128, 0, st>>>(
                     N, S_, n_msg_, l2c4, inv_rmax,
-                    in.act_row_ptr, in.act_senders, in.act_vec_len, in.species,
+                    in.act_row_ptr, row_end, in.act_senders, in.act_vec_len, in.species,
                     d_C2_, d_Cbf_, d_f0_, I_pack4_ptr, cI, cdA2,
                     pdI, d_df0_bf_, in.forces, in.virial);
             };
@@ -6901,8 +10122,8 @@ void IlmlipModel::record(const GenericPassInputs& in) {
                 constexpr bool SM = decltype(sm_tag)::value;
                 const unsigned grid = (SW == 16) ? half_grid : warp_grid;
                 ilmlip_l2_edge_bwd_fast_kernel<LF, SW, MP, NB, BF, ST, SM><<<grid, 128, SM ? l2_c_bytes : 0, st>>>(
-                    N, S_, n_base_, n_msg_, l2c4, inv_rmax,
-                    in.act_row_ptr, in.act_senders, in.act_vec_len, in.species,
+                    N, S_, n_base2_, n_msg_, l2c4, inv_rmax,
+                    in.act_row_ptr, row_end, in.act_senders, in.act_vec_len, in.species,
                     d_C2_, d_Cbf_, d_f0_, cI, cdA2,
                     pdI, d_df0_bf_, in.forces, in.virial);
             };
@@ -6936,8 +10157,8 @@ void IlmlipModel::record(const GenericPassInputs& in) {
                 constexpr bool BF = decltype(bf_tag)::value;
                 constexpr bool ST = decltype(st_tag)::value;
                 ilmlip_l2_edge_bwd_kernel<MP, MO, BF, ST><<<warp_grid, 128, 0, st>>>(
-                    N, S_, lfeat2_, lmsg_, lout2_, n_base_, n_msg_, n_l2_paths_, l2c4, inv_rmax,
-                    in.act_row_ptr, in.act_senders, in.act_vec_len, in.species,
+                    N, S_, lfeat2_, lmsg_, lout2_, n_base2_, n_base_, n_msg_, n_l2_paths_, l2c4, inv_rmax2, inv_rmax,
+                    in.act_row_ptr, row_end2, in.act_senders, in.act_vec_len, in.species,
                     d_C2_, d_Cbf_, d_f0_, cI, cdA2, d_l2p_, d_cg_idx_, d_cg_val_,
                     pdI, d_df0_bf_, in.forces, in.virial);
             };
@@ -6956,24 +10177,140 @@ void IlmlipModel::record(const GenericPassInputs& in) {
             if (n_msg_ <= 32) disp_l2_bwd_out(std::integral_constant<int, 1>{});
             else              disp_l2_bwd_out(std::integral_constant<int, 2>{});
         }
-    }
+        }  // end if (use_l2_s0_sender / v1_n8 / sp / lf2 / else)
+    }  // end if (has_l2_)
 
     // 8. Layer-1 W_msg^T GEMMs + Node Backward + f0 Gate Backward + Edge-Parallel Layer-1 Edge Backward (+ ZBL)
-    if (use_fused_l1_msg) {
+    if (!has_l2_) {
+        const unsigned gy = (unsigned)((max_nl_ + 31) / 32);
+        if (fast_l1_node_1L_lf1_) {
+            const dim3 grid((unsigned)((N + 7) / 8), gy);
+            const dim3 blk(32, 8);
+            if (lmax_ == 2)
+                ilmlip_l1_node_bwd_1L_lf1_kernel<2><<<grid, blk, 0, st>>>(N, n_feat_pad_, nl4, cA1, d_inv_std_x_, d_dx_, pdA1);
+            else
+                ilmlip_l1_node_bwd_1L_lf1_kernel<3><<<grid, blk, 0, st>>>(N, n_feat_pad_, nl4, cA1, d_inv_std_x_, d_dx_, pdA1);
+        } else if (fast_l1_node_1L_lf2_ && !no_lf2_fast) {
+            const dim3 grid((unsigned)((N + 3) / 4), gy);
+            const dim3 blk(32, 4);
+            if (lmax_ == 2)
+                ilmlip_l1_node_bwd_1L_lf2_L2_kernel<<<grid, blk, 0, st>>>(N, n_feat_pad_, nl4, cA1, d_inv_std_x_, d_dx_, pdA1);
+            else
+                ilmlip_l1_node_bwd_1L_lf2_L3_kernel<<<grid, blk, 0, st>>>(N, n_feat_pad_, nl4, cA1, d_inv_std_x_, d_dx_, pdA1);
+        } else {
+            ilmlip_scale_dx_1L_kernel<<<warp_grid, 128, 0, st>>>(N, n_feat_, n_feat_pad_, d_inv_std_x_, d_dx_);
+            const size_t tbl_b = l1n_smem_tbl ? l1n_tbl_bytes : 0;
+            const int per_atom_b = 2 * (n_sh_l1 + std::max(b2_scalars_, 1));
+            const int atoms_per_blk_bwd = ((size_t)4 * per_atom_b * 32 * sizeof(float) + tbl_b <= 48000) ? 4 : 2;
+            const dim3 l1nb_grid((unsigned)((N + atoms_per_blk_bwd - 1) / atoms_per_blk_bwd), gy);
+            const dim3 l1nb_blk(32, (unsigned)atoms_per_blk_bwd);
+            const size_t l1nb_smem = tbl_b + (size_t)atoms_per_blk_bwd * per_atom_b * 32 * sizeof(float);
+            if (lmax_ <= 2) {
+                if (l1n_smem_tbl) ilmlip_l1_node_bwd_kernel<2, true><<<l1nb_grid, l1nb_blk, l1nb_smem, st>>>(N, -1, n_nu2_, n_nu3_, cg_count_, n_feat_pad_, b2_scalars_, nl4, mid4, d_nu2_, d_nu3_, d_cg_idx_, d_cg_val_, cA1, d_dx_, cdBcat, pdA1);
+                else              ilmlip_l1_node_bwd_kernel<2, false><<<l1nb_grid, l1nb_blk, l1nb_smem, st>>>(N, -1, n_nu2_, n_nu3_, cg_count_, n_feat_pad_, b2_scalars_, nl4, mid4, d_nu2_, d_nu3_, d_cg_idx_, d_cg_val_, cA1, d_dx_, cdBcat, pdA1);
+            } else {
+                if (l1n_smem_tbl) ilmlip_l1_node_bwd_kernel<3, true><<<l1nb_grid, l1nb_blk, l1nb_smem, st>>>(N, -1, n_nu2_, n_nu3_, cg_count_, n_feat_pad_, b2_scalars_, nl4, mid4, d_nu2_, d_nu3_, d_cg_idx_, d_cg_val_, cA1, d_dx_, cdBcat, pdA1);
+                else              ilmlip_l1_node_bwd_kernel<3, false><<<l1nb_grid, l1nb_blk, l1nb_smem, st>>>(N, -1, n_nu2_, n_nu3_, cg_count_, n_feat_pad_, b2_scalars_, nl4, mid4, d_nu2_, d_nu3_, d_cg_idx_, d_cg_val_, cA1, d_dx_, cdBcat, pdA1);
+            }
+        }
+    } else if (use_l1_msg_v5) {
+        CPtr4 cdI{{d_dI_[0], d_dI_[1], d_dI_[2], d_dI_[3]}};
+        const bool v1_bwd_skipped_inv1 = (use_v1_n4_inv_fused || use_v1_n8_inv_fused) && d_dA2_pack_ && allow_l2_snd;
+        const float* isx = v1_bwd_skipped_inv1 ? d_inv_std_x_ : nullptr;
+        auto launch_v6_bwd = [&](auto lm_tag, auto sd_tag, auto m4_tag) {
+            auto kfn = ilmlip_l1_node_bwd_lf1_msg_v5_kernel<decltype(lm_tag)::value, decltype(sd_tag)::value, decltype(m4_tag)::value>;
+            kfn<<<half_grid, 128, l1_msg_v5_smem, st>>>(
+                N, n_feat_pad_, n_msg_, nl4, mid4, cA1, isx, d_dx_, cdI, d_W_msg_T_[0], d_W_msg_T_[1], pdA1);
+        };
+        auto dv6_m4 = [&](auto lm_tag, auto sd_tag) {
+            if (v5_m4) launch_v6_bwd(lm_tag, sd_tag, std::true_type{});
+            else       launch_v6_bwd(lm_tag, sd_tag, std::false_type{});
+        };
+        auto dv6_sd = [&](auto lm_tag) {
+            if (v1_bwd_skipped_inv1) dv6_m4(lm_tag, std::true_type{});
+            else                     dv6_m4(lm_tag, std::false_type{});
+        };
+        if (lmax_ == 2) dv6_sd(std::integral_constant<int, 2>{});
+        else            dv6_sd(std::integral_constant<int, 3>{});
+    } else if (use_fused_l1_msg) {
         CPtr4 cdI{{d_dI_[0], d_dI_[1], d_dI_[2], d_dI_[3]}};
         const unsigned g256 = (unsigned)((N + 7) / 8);
-        if (lmax_ == 2) {
-            ilmlip_l1_node_bwd_lf1_msg_kernel<2><<<g256, 256, w_msg_smem, st>>>(
-                N, n_feat_pad_, n_msg_, nl4, mid4, cA1, d_dx_, cdI, d_W_msg_T_[0], d_W_msg_T_[1], pdA1);
-        } else {
-            ilmlip_l1_node_bwd_lf1_msg_kernel<3><<<g256, 256, w_msg_smem, st>>>(
-                N, n_feat_pad_, n_msg_, nl4, mid4, cA1, d_dx_, cdI, d_W_msg_T_[0], d_W_msg_T_[1], pdA1);
-        }
+        auto launch_msg_bwd = [&](auto lm_tag, auto m8_tag) {
+            ilmlip_l1_node_bwd_lf1_msg_kernel<decltype(lm_tag)::value, decltype(m8_tag)::value>
+                <<<g256, 256, w_msg_smem, st>>>(
+                    N, n_feat_pad_, n_msg_, nl4, mid4, cA1, d_dx_, cdI, d_W_msg_T_[0], d_W_msg_T_[1], pdA1);
+        };
+        auto dmsg_bwd_m8 = [&](auto lm_tag) {
+            if (n_msg_ <= 8) launch_msg_bwd(lm_tag, std::true_type{});
+            else             launch_msg_bwd(lm_tag, std::false_type{});
+        };
+        if (lmax_ == 2) dmsg_bwd_m8(std::integral_constant<int, 2>{});
+        else            dmsg_bwd_m8(std::integral_constant<int, 3>{});
+    } else if (use_fused_l1_lf2_msg) {
+        CPtr4 cdI{{d_dI_[0], d_dI_[1], d_dI_[2], d_dI_[3]}};
+        const bool v1_bwd_skipped_inv1 = (use_v1_n4_inv_fused || use_v1_n8_inv_fused) && d_dA2_pack_ && allow_l2_snd;
+        const float* isx = v1_bwd_skipped_inv1 ? d_inv_std_x_ : nullptr;
+        auto launch_lf2_msg_bwd = [&](auto lm_tag, auto lmsg_tag, auto qm_tag, auto sd_tag) {
+            constexpr int LM = decltype(lm_tag)::value;
+            constexpr int LMSG = decltype(lmsg_tag)::value;
+            constexpr int QM = decltype(qm_tag)::value;
+            constexpr bool SD = decltype(sd_tag)::value;
+            if constexpr (LM == 2) {
+                const dim3 grid((unsigned)((N + 3) / 4));
+                const dim3 blk(32, 4);
+                auto kfn = ilmlip_l1_node_bwd_lf2_msg_L2_kernel<LMSG, QM, SD>;
+                if (lf2_w_smem > 12288u)
+                    CUDA_CHECK_THROW(cudaFuncSetAttribute(kfn, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)lf2_w_smem));
+                kfn<<<grid, blk, lf2_w_smem, st>>>(
+                    N, n_feat_pad_, n_msg_, nl4, mid4, cA1, isx, d_dx_, cdI,
+                    d_W_msg_T_[0], d_W_msg_T_[1], d_W_msg_T_[2], pdA1);
+            } else {
+                const dim3 grid((unsigned)((N + 3) / 4));
+                const dim3 blk(32, 4);
+                auto kfn = ilmlip_l1_node_bwd_lf2_msg_L3_kernel<LMSG, QM, SD>;
+                if (lf2_w_smem > 12288u)
+                    CUDA_CHECK_THROW(cudaFuncSetAttribute(kfn, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)lf2_w_smem));
+                kfn<<<grid, blk, lf2_w_smem, st>>>(
+                    N, n_feat_pad_, n_msg_, nl4, mid4, cA1, isx, d_dx_, cdI,
+                    d_W_msg_T_[0], d_W_msg_T_[1], d_W_msg_T_[2], pdA1);
+            }
+        };
+        auto db_sd = [&](auto lm_tag, auto lmsg_tag, auto qm_tag) {
+            if (v1_bwd_skipped_inv1) launch_lf2_msg_bwd(lm_tag, lmsg_tag, qm_tag, std::true_type{});
+            else                     launch_lf2_msg_bwd(lm_tag, lmsg_tag, qm_tag, std::false_type{});
+        };
+        auto db_qm = [&](auto lm_tag, auto lmsg_tag) {
+            if (n_msg_ <= 4) db_sd(lm_tag, lmsg_tag, std::integral_constant<int, 4>{});
+            else             db_sd(lm_tag, lmsg_tag, std::integral_constant<int, 8>{});
+        };
+        auto db_lmsg = [&](auto lm_tag) {
+            if (lmsg_ == 1) db_qm(lm_tag, std::integral_constant<int, 1>{});
+            else            db_qm(lm_tag, std::integral_constant<int, 2>{});
+        };
+        if (lmax_ == 2) db_lmsg(std::integral_constant<int, 2>{});
+        else            db_lmsg(std::integral_constant<int, 3>{});
+    } else if (use_fused_l1_s0) {
+        const unsigned g256 = (unsigned)((N + 7) / 8);
+        auto launch_s0_bwd = [&](auto lm_tag, auto m8_tag) {
+            ilmlip_l1_node_bwd_lf1_s0_kernel<decltype(lm_tag)::value, decltype(m8_tag)::value>
+                <<<g256, 256, w_msg0_smem, st>>>(
+                    N, n_feat_pad_, n_msg_, nl4, msg_in_dim_[0], cA1, d_dx_, d_dI_[0], d_W_msg_T_[0], pdA1);
+        };
+        auto ds0_bwd_m8 = [&](auto lm_tag) {
+            if (n_msg_ <= 8) launch_s0_bwd(lm_tag, std::true_type{});
+            else             launch_s0_bwd(lm_tag, std::false_type{});
+        };
+        if (lmax_ == 2) ds0_bwd_m8(std::integral_constant<int, 2>{});
+        else            ds0_bwd_m8(std::integral_constant<int, 3>{});
     } else {
         for (int l = 0; l <= lmsg_; ++l) {
             const int M = N * (2 * l + 1);
             const int K = msg_in_dim_[l];
-            in.gemm(true, M, K, n_msg_, 1.0f, d_dI_[l], n_msg_, d_W_msg_[l], n_msg_, 0.0f, d_dBcat_[l], K);
+            if (do_node_h2 && d_W_msg_h2_BT_[l] && M >= 128 && M <= 262144) {
+                in.gemm_h2_row(M, K, n_msg_, d_dI_[l], d_W_msg_h2_BT_[l], d_W_msg_h2_pBT_[l], d_dBcat_[l], 0.0f, nullptr);
+            } else {
+                in.gemm(true, M, K, n_msg_, 1.0f, d_dI_[l], n_msg_, d_W_msg_[l], n_msg_, 0.0f, d_dBcat_[l], K);
+            }
         }
 
         if (fast_l1_node_lf1_) {
@@ -6983,6 +10320,16 @@ void IlmlipModel::record(const GenericPassInputs& in) {
                 ilmlip_l1_node_bwd_lf1_kernel<2><<<grid, blk, 0, st>>>(N, n_feat_pad_, nl4, mid4, cA1, d_dx_, cdBcat, pdA1);
             else
                 ilmlip_l1_node_bwd_lf1_kernel<3><<<grid, blk, 0, st>>>(N, n_feat_pad_, nl4, mid4, cA1, d_dx_, cdBcat, pdA1);
+        } else if (fast_l1_node_lf2_ && !no_lf2_fast) {
+            const dim3 grid((unsigned)((N + 1) / 2), (unsigned)((max_nl_ + 31) / 32));
+            const dim3 blk(32, 2);
+            if (lmax_ == 2) {
+                if (lmsg_ == 1) ilmlip_l1_node_bwd_lf2_L2_kernel<1><<<grid, blk, 0, st>>>(N, n_feat_pad_, nl4, mid4, cA1, d_dx_, cdBcat, pdA1);
+                else            ilmlip_l1_node_bwd_lf2_L2_kernel<2><<<grid, blk, 0, st>>>(N, n_feat_pad_, nl4, mid4, cA1, d_dx_, cdBcat, pdA1);
+            } else {
+                if (lmsg_ == 1) ilmlip_l1_node_bwd_lf2_L3_kernel<1><<<grid, blk, 0, st>>>(N, n_feat_pad_, nl4, mid4, cA1, d_dx_, cdBcat, pdA1);
+                else            ilmlip_l1_node_bwd_lf2_L3_kernel<2><<<grid, blk, 0, st>>>(N, n_feat_pad_, nl4, mid4, cA1, d_dx_, cdBcat, pdA1);
+            }
         } else {
             const size_t tbl_b = l1n_smem_tbl ? l1n_tbl_bytes : 0;
             const int per_atom_b = 2 * (n_sh_l1 + std::max(b2_scalars_, 1));
@@ -7006,45 +10353,102 @@ void IlmlipModel::record(const GenericPassInputs& in) {
             else            disp_l1nb_st(std::integral_constant<int, 3>{});
         }
     }
+    }  // end if (has_lrsk_) / else
 
     const float inv_d1_ak = 1.0f / ((float)D_A1_ * a0_ * a0_ * kappa_ * kappa_);
-    const bool use_l1_pre = use_l1_sumswap && (S_ * n_base_ <= 32) && (D_A1_ <= ((lmax_ == 2) ? 256 : 384));
     if (use_l1_pre) {
         // f0 gate backward is FUSED into Phase 1a; ZBL is decoupled via d_zbl_flag_ -> 72 regs (67% occ)!
-        auto launch_l1_pre = [&](auto lm_tag, auto nb_tag, auto st_tag) {
+        if (use_f32_forces) used_f32_forces = true;
+        const char* sw16_env = std::getenv("LOUP_ILMLIP_L1_SW16");
+        const char* pre16_env = std::getenv("LOUP_ILMLIP_PRE_SW16");
+        const bool allow_pre_sw16 = pre16_env ? (pre16_env[0] != '0') : !(sw16_env && sw16_env[0] == '0');
+        const bool force_pre_l3_sw16 = (pre16_env && pre16_env[0] == '1');
+        const bool pack_vs_pre = (in.act_senders == nullptr);
+        auto launch_l1_pre = [&](auto lm_tag, auto nb_tag, auto st_tag, auto f32_tag) {
             constexpr int LM = decltype(lm_tag)::value;
             constexpr int NB = decltype(nb_tag)::value;
             constexpr bool ST = decltype(st_tag)::value;
-            ilmlip_l1_edge_bwd_precontract_kernel<LM, NB, false, ST><<<warp_grid, 128, 0, st>>>(
+            constexpr bool F32 = decltype(f32_tag)::value;
+            constexpr int GT_STR = (LM == 3) ? (NB * 16 + 4) : (NB * 12 + 4);
+            const int ga_str = n_l_[0] + 3 * n_l_[1] + 5 * n_l_[2] + (LM == 3 ? 7 * n_l_[3] : 0);
+            const size_t pre_smem_16 = (size_t)8 * ((size_t)S_ * GT_STR + ga_str) * sizeof(float);
+            if constexpr (LM == 2 || (LM == 3 && (NB == 8 || NB == 12))) {
+                const bool want16 = (LM == 2) ? allow_pre_sw16 : force_pre_l3_sw16;
+                if (want16 && pre_smem_16 <= 32768u) {
+                    if constexpr (NB == 8 || NB == 12) {
+                        if (pack_vs_pre) {
+                            auto kfn = ilmlip_l1_edge_bwd_precontract_kernel<LM, NB, false, ST, F32, 16, true>;
+                            if (pre_smem_16 > 20480u)
+                                CUDA_CHECK_THROW(cudaFuncSetAttribute(kfn, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)pre_smem_16));
+                            kfn<<<half_grid, 128, pre_smem_16, st>>>(
+                                N, S_, n_tot1_, nl4, l1off4, inv_rmax, inv_d1_ak,
+                                in.act_row_ptr, row_end1, nullptr, in.act_vec_len, in.species, nullptr, d_C1_zick_,
+                                nullptr, nullptr, nullptr, nullptr,
+                                cA1, cdA1, d_f0_, (has_l2_ && remove_backflow_) ? d_df0_bf_ : nullptr, in.forces, d_forces_f32_, in.virial);
+                            return;
+                        }
+                    }
+                    auto kfn = ilmlip_l1_edge_bwd_precontract_kernel<LM, NB, false, ST, F32, 16, false>;
+                    if (pre_smem_16 > 20480u)
+                        CUDA_CHECK_THROW(cudaFuncSetAttribute(kfn, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)pre_smem_16));
+                    kfn<<<half_grid, 128, pre_smem_16, st>>>(
+                        N, S_, n_tot1_, nl4, l1off4, inv_rmax, inv_d1_ak,
+                        in.act_row_ptr, row_end1, in.act_senders, in.act_vec_len, in.species, nullptr, d_C1_zick_,
+                        nullptr, nullptr, nullptr, nullptr,
+                        cA1, cdA1, d_f0_, (has_l2_ && remove_backflow_) ? d_df0_bf_ : nullptr, in.forces, d_forces_f32_, in.virial);
+                    return;
+                }
+            }
+            const size_t pre_smem = (size_t)4 * ((size_t)S_ * GT_STR + ga_str) * sizeof(float);
+            if constexpr (NB == 8 || NB == 12) {
+                if (pack_vs_pre) {
+                    auto kfn = ilmlip_l1_edge_bwd_precontract_kernel<LM, NB, false, ST, F32, 32, true>;
+                    kfn<<<warp_grid, 128, pre_smem, st>>>(
+                        N, S_, n_tot1_, nl4, l1off4, inv_rmax, inv_d1_ak,
+                        in.act_row_ptr, row_end1, nullptr, in.act_vec_len, in.species, nullptr, d_C1_zick_,
+                        nullptr, nullptr, nullptr, nullptr,
+                        cA1, cdA1, d_f0_, (has_l2_ && remove_backflow_) ? d_df0_bf_ : nullptr, in.forces, d_forces_f32_, in.virial);
+                    return;
+                }
+            }
+            auto kfn = ilmlip_l1_edge_bwd_precontract_kernel<LM, NB, false, ST, F32, 32, false>;
+            kfn<<<warp_grid, 128, pre_smem, st>>>(
                 N, S_, n_tot1_, nl4, l1off4, inv_rmax, inv_d1_ak,
-                in.act_row_ptr, in.act_senders, in.act_vec_len, in.species, nullptr, d_C1_zick_,
+                in.act_row_ptr, row_end1, in.act_senders, in.act_vec_len, in.species, nullptr, d_C1_zick_,
                 nullptr, nullptr, nullptr, nullptr,
-                cA1, cdA1, d_f0_, remove_backflow_ ? d_df0_bf_ : nullptr, in.forces, in.virial);
+                cA1, cdA1, d_f0_, (has_l2_ && remove_backflow_) ? d_df0_bf_ : nullptr, in.forces, d_forces_f32_, in.virial);
+        };
+        auto disp_f32 = [&](auto lm_tag, auto nb_tag, auto st_tag) {
+            if (use_f32_forces) launch_l1_pre(lm_tag, nb_tag, st_tag, std::true_type{});
+            else                launch_l1_pre(lm_tag, nb_tag, st_tag, std::false_type{});
         };
         auto disp_st = [&](auto lm_tag, auto nb_tag) {
-            if (in.compute_stress) launch_l1_pre(lm_tag, nb_tag, std::true_type{});
-            else                   launch_l1_pre(lm_tag, nb_tag, std::false_type{});
+            if (in.compute_stress) disp_f32(lm_tag, nb_tag, std::true_type{});
+            else                   disp_f32(lm_tag, nb_tag, std::false_type{});
         };
         auto disp_nb = [&](auto lm_tag) {
             if (n_base_ == 8)       disp_st(lm_tag, std::integral_constant<int, 8>{});
             else if (n_base_ == 12) disp_st(lm_tag, std::integral_constant<int, 12>{});
+            else if (n_base_ == 14) disp_st(lm_tag, std::integral_constant<int, 14>{});
             else                    disp_st(lm_tag, std::integral_constant<int, 16>{});
         };
         if (lmax_ == 2) disp_nb(std::integral_constant<int, 2>{});
         else            disp_nb(std::integral_constant<int, 3>{});
         if (use_zbl_switch_) {
-            if (in.compute_stress) {
-                ilmlip_zbl_bwd_kernel<true><<<warp_grid, 128, 0, st>>>(
-                    N, S_, d_zbl_flag_, in.act_row_ptr, in.act_senders, in.act_vec_len, in.species, in.pos64,
+            if (zbl_bwd_async) {
+                CUDA_CHECK_THROW(cudaStreamWaitEvent(st, zbl_ev_join_, 0));
+            } else if (in.compute_stress) {
+                ilmlip_zbl_bwd_kernel<true><<<zbl_grid, 128, 0, st>>>(
+                    N, S_, d_zbl_flag_, in.act_row_ptr, row_end1, in.act_senders, in.act_vec_len, in.species, in.pos64,
                     d_rs_pair_, d_zz_pair_, d_au_pair_, d_w_zbl_, in.forces, in.virial);
             } else {
-                ilmlip_zbl_bwd_kernel<false><<<warp_grid, 128, 0, st>>>(
-                    N, S_, d_zbl_flag_, in.act_row_ptr, in.act_senders, in.act_vec_len, in.species, in.pos64,
+                ilmlip_zbl_bwd_kernel<false><<<zbl_grid, 128, 0, st>>>(
+                    N, S_, d_zbl_flag_, in.act_row_ptr, row_end1, in.act_senders, in.act_vec_len, in.species, in.pos64,
                     d_rs_pair_, d_zz_pair_, d_au_pair_, d_w_zbl_, in.forces, in.virial);
             }
         }
     } else {
-        launch_gate_bwd(lmax_ + 1, nl4, inv_d1_ak, cA1, pdA1, d_f0_, remove_backflow_ ? d_df0_bf_ : nullptr);
+        launch_gate_bwd(lmax_ + 1, nl4, inv_d1_ak, cA1, pdA1, d_f0_, (has_l2_ && remove_backflow_) ? d_df0_bf_ : nullptr);
         const size_t ga_bytes = (size_t)D_A1_ * sizeof(float);
         const size_t c1_zi_bytes = (size_t)S_ * n_base_ * n_tot1_ * sizeof(float);
         const bool use_smem_c1_bwd = (ga_bytes + c1_zi_bytes <= 36864);
@@ -7057,7 +10461,7 @@ void IlmlipModel::record(const GenericPassInputs& in) {
             constexpr bool SM = decltype(sm_tag)::value;
             ilmlip_l1_edge_bwd_edgepar_kernel<LM, NB, ZB, ST, SM><<<(unsigned)N, 128, l1b_smem, st>>>(
                 N, S_, n_base_, n_tot1_, nl4, l1off4, inv_rmax,
-                in.act_row_ptr, in.act_senders, in.act_vec_len, in.species, in.pos64, d_C1_,
+                in.act_row_ptr, row_end1, in.act_senders, in.act_vec_len, in.species, in.pos64, d_C1_,
                 d_rs_pair_, d_zz_pair_, d_au_pair_, d_w_zbl_, cdA1, in.forces, in.virial);
         };
         auto disp_l1ep_sm = [&](auto lm_tag, auto nb_tag, auto zb_tag, auto st_tag) {
@@ -7078,6 +10482,11 @@ void IlmlipModel::record(const GenericPassInputs& in) {
         };
         if (lmax_ <= 2) disp_l1ep_nb(std::integral_constant<int, 2>{});
         else            disp_l1ep_nb(std::integral_constant<int, 3>{});
+    }
+    if (used_f32_forces && !in.defer_f32_flush) {
+        const int n3 = 3 * N;
+        ilmlip_add_forces_f32_kernel<<<(unsigned)((n3 + 255) / 256), 256, 0, st>>>(
+            n3, d_forces_f32_, in.forces);
     }
 }
 

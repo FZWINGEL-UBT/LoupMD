@@ -11,7 +11,7 @@ from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from loupmd.distill import curvature as c, curvature_train as child, train
+from loupgym.distill import curvature as c, curvature_train as child, train
 
 
 def run(root):

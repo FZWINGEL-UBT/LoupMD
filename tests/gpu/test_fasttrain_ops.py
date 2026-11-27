@@ -5,9 +5,9 @@ import torch
 triton = pytest.importorskip('triton')
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason='needs CUDA')
 
-from loupmd.fasttrain.data import add_csr  # noqa: E402
-from loupmd.fasttrain.model import Batch, conv_reference  # noqa: E402
-from loupmd.fasttrain.ops import conv_triton  # noqa: E402
+from loupgym.fasttrain.data import add_csr  # noqa: E402
+from loupgym.fasttrain.model import Batch, conv_reference  # noqa: E402
+from loupgym.fasttrain.ops import conv_triton  # noqa: E402
 
 
 def _graph(dtype, N=7, E=40, C=64, seed=0):

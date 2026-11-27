@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from loupmd.distill import water_protocol as wp
+from loupgym.distill import water_protocol as wp
 
 
 def option(cmd, key):
@@ -55,7 +55,7 @@ def test_release_binds_actual_colab_wrapper_and_both_complete_recipes(tmp_path):
     import numpy as np
     from ase import Atoms
     from ase.io import write
-    from loupmd.distill.train import file_digest
+    from loupgym.distill.train import file_digest
 
     for role, steps in [('train',[1,2]), ('valid',[3]), ('teacher-test',[4])]:
         frames = []
@@ -80,7 +80,7 @@ def test_release_binds_actual_colab_wrapper_and_both_complete_recipes(tmp_path):
 def test_swapped_independently_gated_students_fail_closed(tmp_path):
     import hashlib
     import json
-    from loupmd.distill.train import BASE_SPLITS, file_digest
+    from loupgym.distill.train import BASE_SPLITS, file_digest
 
     data = tmp_path/'dispatch'
     data.mkdir()

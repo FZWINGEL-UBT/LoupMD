@@ -24,7 +24,7 @@ OUT_TERMS = OUT.with_name('_product_terms.py')     # K and TERMS alone (no Trito
 
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-from loupmd.fasttrain.polyterms import model_terms  # noqa: E402
+from loupgym.fasttrain.polyterms import model_terms  # noqa: E402
 
 
 def mono(m):

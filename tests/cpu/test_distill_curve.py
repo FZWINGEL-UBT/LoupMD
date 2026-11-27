@@ -8,7 +8,7 @@ import pytest
 from ase import Atoms
 from ase.io import read, write
 
-from loupmd.distill import curve
+from loupgym.distill import curve
 
 
 SHA = hashlib.sha256(b'teacher').hexdigest()

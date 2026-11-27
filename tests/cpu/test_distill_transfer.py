@@ -4,7 +4,7 @@ import subprocess
 
 import pytest
 
-from loupmd.distill.transfer import assemble, chunks
+from loupgym.distill.transfer import assemble, chunks
 from tools.dev import colab_distill
 
 

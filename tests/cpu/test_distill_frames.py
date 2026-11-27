@@ -8,7 +8,7 @@ from ase.io import read, write
 from fake_core import SpringEngine
 
 import loupmd as lm
-from loupmd.distill import frames
+from loupgym.distill import frames
 
 
 # Distinguishable analytic single points on the *supplied* geometry. For MD, reuse the

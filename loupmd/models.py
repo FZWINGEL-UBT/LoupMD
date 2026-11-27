@@ -413,11 +413,20 @@ def sha256_of(path):
     return digest.hexdigest()
 
 
-def check_trust(resolved, digest, sha256=None, trusted=False):
-    """Decide whether the file may be unpickled; returns "label", "sha256" or "trusted".
+def is_loup_bundle(path) -> bool:
+    """Return True if ``path`` begins with the LoupMD binary bundle magic (zero-pickle format)."""
+    try:
+        with open(path, "rb") as f:
+            return f.read(8) == b"LOUPC001"
+    except OSError:
+        return False
 
-    ``sha256=`` must match the file. A label's file must match the table. A file without either needs
-    ``trusted=True``. This rule is never weakened (PLAN.md section 2).
+
+def check_trust(resolved, digest, sha256=None, trusted=False):
+    """Decide whether the file may be unpickled/loaded; returns "label", "sha256", "bundle" or "trusted".
+
+    ``sha256=`` must match the file. A label's file must match the table. Binary ``.loup`` bundles
+    (header ``LOUPC001``) contain no pickle data and are trusted unless a conflicting ``sha256=`` was given.
     """
     if sha256 is not None:
         if digest != sha256.lower():
@@ -425,6 +434,8 @@ def check_trust(resolved, digest, sha256=None, trusted=False):
                 f"{resolved.path} has SHA-256 {digest}, not the expected {sha256}",
                 why="the file is not the one whose hash was given, so it was not unpickled")
         return "sha256"
+    if is_loup_bundle(resolved.path):
+        return "bundle"
     if resolved.label is not None:
         if digest == resolved.label.checkpoint.sha256:
             return "label"

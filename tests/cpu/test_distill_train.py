@@ -10,7 +10,7 @@ from ase.io import read, write
 
 
 # Colab can stage just this script and the extxyz files, without installing LoupMD.
-train = runpy.run_path(str(Path(__file__).resolve().parents[2] / 'loupmd/distill/train.py'))
+train = runpy.run_path(str(Path(__file__).resolve().parents[2] / 'loupgym/distill/train.py'))
 
 
 def frame(role, i, energy):
@@ -136,7 +136,7 @@ def test_export_restores_species_offsets_in_model_order_at_reference_precision()
 
 
 def test_molecular_pair_uses_training_only_scales_and_preserves_ids(tmp_path, splits):
-    from loupmd.distill import train as module
+    from loupgym.distill import train as module
 
     for name in ('train', 'valid', 'teacher-test'):
         path = tmp_path / f'{name}.xyz'

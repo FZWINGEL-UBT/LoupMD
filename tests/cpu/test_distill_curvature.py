@@ -5,8 +5,8 @@ from ase import Atoms
 import numpy as np
 import pytest
 
-from loupmd.distill import curvature as c
-from loupmd.distill.curvature_train import auxiliary, paired_batch
+from loupgym.distill import curvature as c
+from loupgym.distill.curvature_train import auxiliary, paired_batch
 
 
 def test_pair_shuffle_is_reproducible_complete_and_epoch_local():

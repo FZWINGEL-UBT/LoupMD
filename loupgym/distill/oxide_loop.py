@@ -233,7 +233,7 @@ def sample(path, role, r, job, sha, replica):
         options = schedule(r, role)
         options['first_replica'] = replica
         options['replicas'] = 1
-        gpu(f'{role} round {r} replica {replica}', '-m', 'loupmd.distill.frames', '--split', role,
+        gpu(f'{role} round {r} replica {replica}', '-m', 'loupgym.distill.frames', '--split', role,
             '--teacher', 'mh1', '--teacher-head',
             'omat_pbe', '--student', job / 'student.model', '--student-sha256', sha, '--output', path,
             *(v for k, x in options.items() for v in ('--' + k.replace('_', '-'), x)))
@@ -312,13 +312,13 @@ def main(argv=None):
     if r and m['pre_stage_two_sha256'] != load(baseline / 'checked/manifest.json')['pre_stage_two_sha256']:
         raise ValueError('child did not preserve the baseline epoch-110 EMA')
     if r and not (run / 'release').exists():
-        gpu(f'gate round {r}', '-m', 'loupmd.distill.publish', job, base/'teacher-test.xyz', run/'release',
+        gpu(f'gate round {r}', '-m', 'loupgym.distill.publish', job, base/'teacher-test.xyz', run/'release',
             '--ref-device', 'cuda')
     check_gate(run, sha)
     own, scored = run / 'fixed-student-test.xyz', run / 'teacher-scored.xyz'
     if r:
         if not scored.exists():
-            gpu(f'teacher-test rescore round {r}', '-m', 'loupmd.distill.frames',
+            gpu(f'teacher-test rescore round {r}', '-m', 'loupgym.distill.frames',
                 '--rescore', base/'teacher-test.xyz', '--output', scored,
                 '--student', job/'student.model', '--student-sha256', sha)
         parts = [work / f'own-{i}.xyz' for i in range(2)]

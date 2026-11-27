@@ -52,6 +52,7 @@ __all__ = [
     "ForceField", "GateFailed", "GateUnavailable", "GpuInfo", "InputError", "LoupEngine", "LoupError", "LoupMDStats",
     "ModelElementError", "NonFiniteError", "Output", "PlanRefused", "RestartMismatch", "RunResult", "RuntimeInfo",
     "Simulation", "UnsupportedModel",
-    "__version__", "calc", "config", "dispersion", "ensure_loup_bundle", "exporter_fingerprint", "last_error", "library_path",
-    "integrators", "library_version", "load", "mc", "md", "optimize", "protocols", "runtime_info",
+    "__version__", "calc", "config", "dispersion", "ensure_loup_bundle", "exporter_fingerprint",
+    "last_error", "library_path", "integrators", "library_version", "load", "mc", "md", "optimize",
+    "protocols", "runtime_info",
 ]

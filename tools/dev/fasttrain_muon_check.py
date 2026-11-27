@@ -1,5 +1,5 @@
 """The training library's fused Muon step (lst_set_muon, ABI 5) against the torch reference of
-loupmd.fasttrain.muon (the library's gradient pass per step, the Muon / Adam update and the EMA in torch).
+loupgym.fasttrain.muon (the library's gradient pass per step, the Muon / Adam update and the EMA in torch).
 
 FP64 should agree to ~1e-14 relative after a dozen steps, FP32 to ~1e-6. --time also times the fused step with
 and without Muon.
@@ -48,8 +48,8 @@ def main():
     from torch_ema import ExponentialMovingAverage
     from mace.modules.loss import WeightedEnergyForcesStressLoss
     from fasttrain_parity import load_items
-    from loupmd.fasttrain import muon
-    from loupmd.fasttrain.cuda import CudaTrainer
+    from loupgym.fasttrain import muon
+    from loupgym.fasttrain.cuda import CudaTrainer
 
     def setup(dtype, items):
         m = torch.load(a.model, map_location='cpu', weights_only=False).to(dtype).cuda()

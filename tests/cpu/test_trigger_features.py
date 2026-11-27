@@ -8,7 +8,7 @@ import pytest
 from ase import Atoms
 from ase.io import iread, write
 
-from loupmd.distill import trigger_features as features
+from loupgym.distill import trigger_features as features
 
 
 SHA = 'a1' * 32

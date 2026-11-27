@@ -24,8 +24,8 @@ def parity(args):
     from fasttrain_parity import load_items
     from mace.tools import torch_geometric
     from mace.modules.loss import WeightedEnergyForcesStressLoss
-    from loupmd.fasttrain.data import frames_from_dataset
-    from loupmd.fasttrain.engine import PaddedFrames, FastStudent
+    from loupgym.fasttrain.data import frames_from_dataset
+    from loupgym.fasttrain.engine import PaddedFrames, FastStudent
     dtype, dev = getattr(torch, args.dtype), torch.device('cuda')
     model = torch.load(args.model, map_location='cpu').to(dtype)
     items = load_items(args.xyz, model, dtype, 7)
@@ -80,7 +80,7 @@ def bench(args):
     from fasttrain_parity import load_items
     from mace.modules.loss import WeightedEnergyForcesStressLoss
     from torch_ema import ExponentialMovingAverage
-    from loupmd.fasttrain.engine import GraphTrainer
+    from loupgym.fasttrain.engine import GraphTrainer
     dtype, dev = torch.float32, torch.device('cuda')
     model = torch.load(args.model, map_location='cpu').to(dtype)
     items = load_items(args.xyz, model, dtype, args.frames)

@@ -5,9 +5,9 @@ set -euo pipefail
 root=$(pwd -P); d=$HOME/loup-s-stage0/molten-salt; py=$HOME/environments/mace_cueq_latest/bin/python
 export LOUP_LIB=$root/build/sm_120/libloupmd.so LOUPMD_MODELS=$HOME/models PYTHONPATH=$root TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD=1
 arm=${1:?teacher, trajectory, or mix}; cd "$d"; out=thermo/$arm; mkdir -p "$out"
-case $arm in teacher) role=teacher; model=(--model mh1-omat --head omat_pbe);; trajectory|mix) role=student; j=$arm-s1-v1; sha=$("$py" -m loupmd.distill.salt_admission "$arm"); model=(--model "$j/checked/student.model" --sha256 "$sha");; *) exit 2;; esac
-obs() { "$py" -m loupmd.distill.observables "$@"; }
-md() { local name=$1 steps=$2; shift 2; if [[ ! -f $out/$name/segment-$steps.json ]]; then python3 /mnt/d/Margraf/FastMACE/tools/ci/local_gpu.py run --purpose "salt-$arm-$name" --wait-minutes 240 -- "$py" -m loupmd.distill.observables md --input liquid0.extxyz --temperature-K 1200 --role "$role" "${model[@]}" --directory "$out/$name" --steps "$steps" "$@"; fi; }
+case $arm in teacher) role=teacher; model=(--model mh1-omat --head omat_pbe);; trajectory|mix) role=student; j=$arm-s1-v1; sha=$("$py" -m loupgym.distill.salt_admission "$arm"); model=(--model "$j/checked/student.model" --sha256 "$sha");; *) exit 2;; esac
+obs() { "$py" -m loupgym.distill.observables "$@"; }
+md() { local name=$1 steps=$2; shift 2; if [[ ! -f $out/$name/segment-$steps.json ]]; then python3 /mnt/d/Margraf/FastMACE/tools/ci/local_gpu.py run --purpose "salt-$arm-$name" --wait-minutes 240 -- "$py" -m loupgym.distill.observables md --input liquid0.extxyz --temperature-K 1200 --role "$role" "${model[@]}" --directory "$out/$name" --steps "$steps" "$@"; fi; }
 for seed in 99001 99002; do md npt$seed 10000 --seed "$seed" --ensemble npt --timestep-fs 1 --stride 20 --pressure-GPa .0001; done
 md nve1 4000 --seed 99003 --ensemble nve --timestep-fs 1 --stride 10
 md nve05 8000 --seed 99003 --ensemble nve --timestep-fs .5 --stride 20

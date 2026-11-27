@@ -1,7 +1,7 @@
 """Parity of the training engine against stock mace-torch on real frames.
 
 Compares energy, forces, stress and the parameter gradient of the stock stress loss (create_graph
-path) between ``mace`` and ``loupmd.fasttrain`` for one packed batch. Run on CPU in float64 or on a
+path) between ``mace`` and ``loupgym.fasttrain`` for one packed batch. Run on CPU in float64 or on a
 GPU in float32 (``--device cuda --dtype float32``) under the local GPU reservation.
 """
 from __future__ import annotations
@@ -50,8 +50,8 @@ def main():
     dev = torch.device(args.device)
     from mace.tools import torch_geometric
     from mace.modules.loss import WeightedEnergyForcesStressLoss
-    from loupmd.fasttrain.model import Student, loss_terms
-    from loupmd.fasttrain.data import frames_from_dataset, DeviceFrames
+    from loupgym.fasttrain.model import Student, loss_terms
+    from loupgym.fasttrain.data import frames_from_dataset, DeviceFrames
 
     model = torch.load(args.model, map_location='cpu')
     model = model.to(dtype)
@@ -69,11 +69,11 @@ def main():
 
     conv = None
     if args.conv == 'triton':
-        from loupmd.fasttrain.ops import conv_triton
+        from loupgym.fasttrain.ops import conv_triton
         conv = conv_triton
     basis = None
     if args.basis == 'fused':
-        from loupmd.fasttrain.ops import edge_basis as basis
+        from loupgym.fasttrain.ops import edge_basis as basis
     student = Student(model, conv=conv, basis=basis, product=args.product, tangent=args.tangent)
     frames = frames_from_dataset(items, model)
     dfr = DeviceFrames(frames, dtype, dev)

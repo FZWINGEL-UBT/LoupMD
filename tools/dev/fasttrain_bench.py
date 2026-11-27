@@ -34,8 +34,8 @@ def main():
     ap.add_argument('--engine', default='fast', choices=('fast', 'mace'))
     args = ap.parse_args()
     from fasttrain_parity import load_items
-    from loupmd.fasttrain.model import Student, loss_terms
-    from loupmd.fasttrain.data import frames_from_dataset, DeviceFrames
+    from loupgym.fasttrain.model import Student, loss_terms
+    from loupgym.fasttrain.data import frames_from_dataset, DeviceFrames
     dtype, dev = torch.float32, torch.device('cuda')
     model = torch.load(args.model, map_location='cpu').to(dtype)
     t0 = time.time()
@@ -44,11 +44,11 @@ def main():
     model = model.to(dev)
     conv = None
     if args.conv == 'triton':
-        from loupmd.fasttrain.ops import conv_triton
+        from loupgym.fasttrain.ops import conv_triton
         conv = conv_triton
     basis = None
     if args.basis == 'fused':
-        from loupmd.fasttrain.ops import edge_basis as basis
+        from loupgym.fasttrain.ops import edge_basis as basis
     student = Student(model, conv=conv, basis=basis, product=args.product, tangent=args.tangent)
     frames = frames_from_dataset(items, model)
     dfr = DeviceFrames(frames, dtype, dev)

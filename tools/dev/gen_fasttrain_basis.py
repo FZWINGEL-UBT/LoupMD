@@ -89,5 +89,5 @@ def edge_basis_kernel(V, Y, JY, EF, DEF, U, BW, PR, E, P: tl.constexpr, NB: tl.c
         tl.store(EF + e * NB + n, f * env, mask=mask)
         tl.store(DEF + e * NB + n, df * env + f * denv, mask=mask)
 '''
-Path(__file__).resolve().parents[2].joinpath('loupmd/fasttrain/_edge_basis.py').write_text(src)
+Path(__file__).resolve().parents[2].joinpath('loupgym/fasttrain/_edge_basis.py').write_text(src)
 print('written')

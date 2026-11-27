@@ -6,7 +6,7 @@ import tarfile
 
 import pytest
 
-from loupmd.distill.results import unpack
+from loupgym.distill.results import unpack
 
 
 def archive(tmp_path, *, corrupt=False, swap_test=False, failed=False):

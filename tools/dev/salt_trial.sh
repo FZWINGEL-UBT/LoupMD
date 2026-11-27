@@ -26,12 +26,12 @@ PY
 if [[ $mode == plan ]]; then cat "$data/plan.json"; exit; fi
 printf '%s\n' "${args[@]}" > "$data/train.args"
 "$py" tools/dev/colab_distill.py --account 1 --gpu L4 --hours 6 --output "$run" "$trainer/colab_train.sh" "$train" "$data/train.args" "${files[@]}"
-"$py" -m loupmd.distill.results "$run" "$data"
+"$py" -m loupgym.distill.results "$run" "$data"
 export LOUP_LIB=$PWD/build/sm_120/libloupmd.so LOUPMD_MODELS="$HOME/models" TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD=1
 reserve=/mnt/d/Margraf/FastMACE/tools/ci/local_gpu.py
 python3 "$reserve" status
 gpu(){ local why=$1; shift; python3 "$reserve" run --purpose "salt $arm $why" --wait-minutes 240 -- "$py" -m "$@"; }
-gpu export loupmd.distill.publish "$run/checked" "${files[2]}" "$run/release" --ref-device cuda
+gpu export loupgym.distill.publish "$run/checked" "${files[2]}" "$run/release" --ref-device cuda
 model=$run/checked/student.model; sha=$(sha256sum "$model" | cut -d' ' -f1)
-gpu valid loupmd.distill.frames --rescore "${files[1]}" --student "$model" --student-sha256 "$sha" --output "$run/valid-scored.xyz"
-gpu teacher-test loupmd.distill.frames --rescore "${files[2]}" --student "$model" --student-sha256 "$sha" --output "$run/teacher-scored.xyz"
+gpu valid loupgym.distill.frames --rescore "${files[1]}" --student "$model" --student-sha256 "$sha" --output "$run/valid-scored.xyz"
+gpu teacher-test loupgym.distill.frames --rescore "${files[2]}" --student "$model" --student-sha256 "$sha" --output "$run/teacher-scored.xyz"

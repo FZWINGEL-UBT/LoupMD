@@ -6,7 +6,7 @@ import pytest
 from ase import Atoms
 from ase.io import write
 
-from loupmd.distill.fidelity import compare_round, main, score_frames
+from loupgym.distill.fidelity import compare_round, main, score_frames
 
 
 def frame(symbols="OH", *, name="a", split="fixed-student-test", sampler="student"):

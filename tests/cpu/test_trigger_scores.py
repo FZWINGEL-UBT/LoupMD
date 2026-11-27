@@ -4,7 +4,7 @@ import json
 import numpy as np
 import pytest
 
-from loupmd.distill.trigger_scores import evaluate, fit, load_frame, main, ranking
+from loupgym.distill.trigger_scores import evaluate, fit, load_frame, main, ranking
 
 
 def frame(directory, split, h, *, idx=0, energy=None, numbers=None, error=None,

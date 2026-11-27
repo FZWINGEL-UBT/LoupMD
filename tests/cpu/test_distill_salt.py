@@ -2,7 +2,7 @@ import numpy as np
 import pytest
 from ase import Atoms
 
-from loupmd.distill.salt import paired, transport
+from loupgym.distill.salt import paired, transport
 
 
 def test_paired_balances_each_regime_and_relabels_only_changed():

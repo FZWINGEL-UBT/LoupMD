@@ -897,7 +897,7 @@ void GenericModel::load(const Bundle& b) {
         ilmlip_->load(b);
         S_ = ilmlip_->S();
         Z_ = ilmlip_->atomic_numbers();
-        r_max_ = ilmlip_->r_max();
+        r_max_ = std::max(ilmlip_->r_max(), ilmlip_->r_max2());
         e0_ = ilmlip_->e0();
         n_layers_ = 2;
         return;
@@ -2085,6 +2085,19 @@ std::string GenericModel::kernel_signature() const {
         out += (L && L->prod && L->prod->sig) ? L->prod->sig : "?";
     }
     return out;
+}
+
+float* GenericModel::ilmlip_forces_f32() const {
+    return ilmlip_ ? ilmlip_->forces_f32() : nullptr;
+}
+float GenericModel::ilmlip_r_max1() const {
+    return ilmlip_ ? ilmlip_->r_max() : r_max_;
+}
+float GenericModel::ilmlip_r_max2() const {
+    return ilmlip_ ? ilmlip_->r_max2() : r_max_;
+}
+bool GenericModel::ilmlip_supports_pack_vs() const {
+    return ilmlip_ ? ilmlip_->supports_pack_vs() : false;
 }
 
 

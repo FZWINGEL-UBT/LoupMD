@@ -7,7 +7,7 @@ import pytest
 from ase import Atoms
 from ase.io import read, write
 
-from loupmd.distill import reissue
+from loupgym.distill import reissue
 
 
 def digest(path):

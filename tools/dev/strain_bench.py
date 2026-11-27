@@ -42,17 +42,17 @@ def main():
     items = load_items(args.xyz, model, dt, args.frames)
     model = model.to('cuda')
     if args.engine == 'cuda':
-        from loupmd.fasttrain.cuda import CudaTrainer
+        from loupgym.fasttrain.cuda import CudaTrainer
         tr = CudaTrainer(model, items, batch_size=args.batch, dtype=dt)
     else:
-        from loupmd.fasttrain.engine import GraphTrainer
+        from loupgym.fasttrain.engine import GraphTrainer
         tr = GraphTrainer(model, items, batch_size=args.batch, dtype=dt)
     d = tr.data
     print(f'{args.engine} {args.dtype}: {len(items)} frames, batch {args.batch}: N {d.N_pad} E {d.E_pad} '
           f'P {getattr(d, "P_pad", 0)}, setup {tr.setup_seconds:.1f} s')
     opt, ema = make_opt(model, lr=0.01)
     if args.muon and args.engine == 'cuda':
-        from loupmd.fasttrain import muon
+        from loupgym.fasttrain import muon
         tr.set_muon(muon.library_blocks(model, tr.params), 0.95, True, 0.2, 8, 2)
         if args.soap:
             tr.set_soap(every=args.soap, max_dim=64)

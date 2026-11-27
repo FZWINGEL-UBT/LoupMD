@@ -5,8 +5,8 @@ import torch
 triton = pytest.importorskip('triton')
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason='needs CUDA')
 
-from loupmd.fasttrain import _product_poly as pp  # noqa: E402
-from loupmd.fasttrain.ops import product_poly, product_poly_cm  # noqa: E402
+from loupgym.fasttrain import _product_poly as pp  # noqa: E402
+from loupgym.fasttrain.ops import product_poly, product_poly_cm  # noqa: E402
 
 
 def _dense():

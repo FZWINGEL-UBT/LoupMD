@@ -13,8 +13,8 @@ import json
 from ase.io import read
 import numpy as np
 
-from loupmd.distill.observable_io import file_hash
-from loupmd.distill.salt import transport
+from loupgym.distill.observable_io import file_hash
+from loupgym.distill.salt import transport
 
 
 def report(directory):

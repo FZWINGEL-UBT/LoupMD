@@ -2,7 +2,7 @@
 import pytest
 from ase import Atoms
 
-from loupmd.distill.oxide_loop import audit_streams, decision, schedule, verify_parent
+from loupgym.distill.oxide_loop import audit_streams, decision, schedule, verify_parent
 
 
 def frame(i, trajectory, seed):
@@ -35,7 +35,7 @@ def test_common_initial_stream_only_between_fixed_tests():
 
 def test_upload_receipt_binds_actual_child_payload(tmp_path):
     import json
-    from loupmd.distill.oxide_loop import verify_upload
+    from loupgym.distill.oxide_loop import verify_upload
     (tmp_path / 'paired-inputs.sha256').write_text('a' * 64 + '  /paired/pre_stage_two.pt\n')
     run = tmp_path / 'training'
     run.mkdir()
@@ -49,7 +49,7 @@ def test_upload_receipt_binds_actual_child_payload(tmp_path):
 
 
 def test_native_replay_pass_does_not_excuse_bad_stored_training_label():
-    from loupmd.distill.oxide_loop import check_stored, LIB_SHA, TEACHER_SHA
+    from loupgym.distill.oxide_loop import check_stored, LIB_SHA, TEACHER_SHA
     row = dict(frame_id='harvest-a', historical={'passed': True})
     gate = dict(passed=True, library_sha256=LIB_SHA, teacher_sha256=TEACHER_SHA, teacher_head='omat_pbe',
                 frames=1, source_sha256='data-hash', rows=[row])
@@ -71,8 +71,8 @@ def test_protocol_streams_and_conditional_hot_round():
 
 def test_parent_rejects_obsolete_or_wrong_precision(tmp_path):
     import json
-    from loupmd.distill.oxide_loop import BASE, RECIPE
-    from loupmd.distill.train import file_digest
+    from loupgym.distill.oxide_loop import BASE, RECIPE
+    from loupgym.distill.train import file_digest
     (tmp_path / 'student.model').write_bytes(b'student')
     (tmp_path / 'pre_stage_two.pt').write_bytes(b'ema')
     sources = [dict(role=k, frames=v[0], sha256=v[1]) for k, v in BASE.items()]

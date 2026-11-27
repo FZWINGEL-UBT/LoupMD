@@ -595,7 +595,7 @@ def main(argv=None):
 if __name__ == '__main__':
     # run from the package module: the recipe's ``from .run import evaluate`` must see the stock functions and
     # evaluator caches that install() set, not a second copy of this file (``python -m`` runs it as __main__)
-    from loupmd.fasttrain import run as _package_run
+    from loupgym.fasttrain import run as _package_run
     _package_run.main()
     if os.environ.get('LOUP_FT_FAST_EXIT', '1') != '0':
         # the run's files are written and closed; skip the interpreter's teardown (module and CUDA state, ~0.6 s):

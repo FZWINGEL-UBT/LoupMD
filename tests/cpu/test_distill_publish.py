@@ -2,7 +2,7 @@ import json
 
 import pytest
 
-from loupmd.distill.publish import finish
+from loupgym.distill.publish import finish
 from loupmd.errors import GateFailed
 
 

@@ -68,12 +68,13 @@ Changelog = "https://github.com/FZWINGEL-UBT/LoupMD/blob/release/v1/CHANGELOG.md
 
 [project.scripts]
 loupmd = "loupmd.cli:main"
+loupgym = "loupgym.cli:main"
 
 [tool.setuptools.dynamic]
 version = { attr = "loupmd.__version__" }
 
 [tool.setuptools.packages.find]
-include = ["loupmd*"]
+include = ["loupmd*", "loupgym*"]
 
 [tool.setuptools.package-data]
 # _lib/ is filled by the wheel build (PLAN.md S2-T02) and is not tracked: the library, the tensor-core cubins, the

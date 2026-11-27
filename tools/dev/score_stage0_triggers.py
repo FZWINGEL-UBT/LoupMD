@@ -14,7 +14,7 @@ from tempfile import TemporaryDirectory
 
 import numpy as np
 from ase.io import iread
-from loupmd.distill.trigger_scores import _Provenance, fit, ranking
+from loupgym.distill.trigger_scores import _Provenance, fit, ranking
 
 
 class Identity:

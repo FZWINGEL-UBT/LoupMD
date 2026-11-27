@@ -3,7 +3,7 @@ import pytest
 from ase import Atoms
 from ase.io import read, write
 
-from loupmd.distill.harvest import select
+from loupgym.distill.harvest import select
 
 
 def test_harvest_uses_same_geometry_and_never_trains_on_test(tmp_path):

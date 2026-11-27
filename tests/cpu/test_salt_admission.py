@@ -4,7 +4,7 @@ import shutil
 
 import pytest
 
-from loupmd.distill.salt_admission import admitted
+from loupgym.distill.salt_admission import admitted
 
 
 def sha(blob):

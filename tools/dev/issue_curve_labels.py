@@ -12,8 +12,8 @@ import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from loupmd.distill import curve, reissue
-from loupmd.distill.train import file_digest
+from loupgym.distill import curve, reissue
+from loupgym.distill.train import file_digest
 
 
 RELEASE = 'curve-labels-v2'

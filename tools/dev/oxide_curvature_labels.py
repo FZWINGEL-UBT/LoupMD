@@ -9,8 +9,8 @@ from tempfile import TemporaryDirectory
 import numpy as np
 
 import loupmd as lm
-from loupmd.distill import curvature as c
-from loupmd.distill.frames import _labels
+from loupgym.distill import curvature as c
+from loupgym.distill.frames import _labels
 from loupmd.validate import gate, references
 
 

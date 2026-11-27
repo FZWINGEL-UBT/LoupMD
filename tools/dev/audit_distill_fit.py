@@ -19,7 +19,7 @@ from tempfile import TemporaryDirectory
 import numpy as np
 from ase.io import iread
 
-from loupmd.distill import train
+from loupgym.distill import train
 
 
 def teacher_replay(raw, calc, student_forces, atom):

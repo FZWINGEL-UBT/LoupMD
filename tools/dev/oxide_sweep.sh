@@ -7,7 +7,7 @@ usage(){ echo 'usage: oxide_sweep.sh plan|run cutoff45|cutoff60|width32|width96|
 mode=$1; arm=$2; dtype=$3; root=$(realpath "$4"); [[ $mode == plan || $mode == run ]] || usage
 [[ $dtype == float64 || $dtype == float32 ]] || usage
 cd "$(dirname "$0")/../.."; export PYTHONPATH=$PWD
-py="$HOME/environments/mace_cueq_latest/bin/python"; train=loupmd/distill/train.py
+py="$HOME/environments/mace_cueq_latest/bin/python"; train=loupgym/distill/train.py
 base=$root/base-labels-v2; data=$base; width=64; cutoff=5; epochs=150; boundary=111
 case $arm in
     cutoff45) cutoff=4.5;; cutoff60) cutoff=6;; width32) width=32;; width96) width=96;;
@@ -23,7 +23,7 @@ else
     "$py" - "$base" "$data" "${arm#curve}" <<'PY'
 import sys
 from pathlib import Path
-from loupmd.distill.curve import verify_training_release
+from loupgym.distill.curve import verify_training_release
 verify_training_release(Path(sys.argv[1]), Path(sys.argv[2]), int(sys.argv[3]))
 PY
 fi

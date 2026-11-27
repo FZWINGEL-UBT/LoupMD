@@ -3,12 +3,12 @@
 set -euo pipefail
 root=$(pwd -P); d=$HOME/loup-s-stage0/molten-salt; py=$HOME/environments/mace_cueq_latest/bin/python
 export LOUP_LIB=$root/build/sm_120/libloupmd.so LOUPMD_MODELS=$HOME/models PYTHONPATH=$root TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD=1
-run() { python3 /mnt/d/Margraf/FastMACE/tools/ci/local_gpu.py run --purpose "salt-$1" --wait-minutes 240 -- "$py" -m loupmd.distill.frames "${@:2}"; }
+run() { python3 /mnt/d/Margraf/FastMACE/tools/ci/local_gpu.py run --purpose "salt-$1" --wait-minutes 240 -- "$py" -m loupgym.distill.frames "${@:2}"; }
 cd "$d"; sha256sum -c inputs.sha256
 declare -A admitted
 for arm in trajectory mix; do
   job=$arm-s1-v1
-  admitted[$arm]=$("$py" -m loupmd.distill.salt_admission "$arm")
+  admitted[$arm]=$("$py" -m loupgym.distill.salt_admission "$arm")
   test -s "$job/teacher-scored.xyz"
 done
 traj=trajectory-s1-v1/checked/student.model; ts=${admitted[trajectory]}
@@ -23,12 +23,12 @@ for arm in trajectory mix; do
      if [[ ! -f $job/own$i.xyz ]]; then run mix-own$i --teacher mh1-omat --teacher-head omat_pbe --split fixed-student-test --student "$model" --student-sha256 "$sha" --input fixed-cool$i.extxyz --input-index -1 --seed $((98000+i)) --target-K 1200 --target-frames 24 --stride 125 --burn-in 1500 "${extra[@]}" --output "$job/own$i.xyz"; fi
    done
    cat "$job"/own{4,5}.xyz > "$job/own.xyz"
-   "$py" -m loupmd.distill.fidelity "$job/anchor-scored.xyz" --output "$job/anchor.json"
+   "$py" -m loupgym.distill.fidelity "$job/anchor-scored.xyz" --output "$job/anchor.json"
  else
    cp fixed-student-test.extxyz "$job/own.xyz"
  fi
- "$py" -m loupmd.distill.fidelity "$job/own.xyz" --regime target --teacher-test "$job/teacher-scored.xyz" --round 0 --output "$job/own-target.json"
- "$py" -m loupmd.distill.fidelity "$job/own.xyz" --regime hot --output "$job/own-hard.json"
+ "$py" -m loupgym.distill.fidelity "$job/own.xyz" --regime target --teacher-test "$job/teacher-scored.xyz" --round 0 --output "$job/own-target.json"
+ "$py" -m loupgym.distill.fidelity "$job/own.xyz" --regime hot --output "$job/own-hard.json"
  for i in 0 1 2 3; do
    if [[ ! -f $job/transport$i.extxyz ]]; then run "$arm-transport$i" --teacher mh1-omat --teacher-head omat_pbe --split fixed-student-test --student "$model" --student-sha256 "$sha" --input liquid$i.extxyz --output "$job/transport$i.extxyz" --seed $((93000+i)) --target-K 1200 --burn-in 2000 --stride 50 --target-frames 200 --rattle-A 0 --strain 0 --shear 0; fi
  done

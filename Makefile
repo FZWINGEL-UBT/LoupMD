@@ -6,7 +6,7 @@ OBJDIR = build/$(CUDA_ARCH)
 NVCCFLAGS = -O3 -std=c++17 -arch=$(CUDA_ARCH) -Iinclude -Isrc -diag-suppress=1046 -Xcompiler -fPIC -MMD -MP $(CPPFLAGS)
 LDFLAGS = -lcublas -lcublasLt -lcudart -ldl
 
-SRCS = src/bundle.cu src/generic.cu src/ilmlip.cu src/generated_generic.cu src/polar.cu src/neighbors.cu src/integrator.cu src/minimize.cu src/cell.cu src/thermo.cu src/sgemm.cu src/hgemm2.cu src/tile_plan.cu src/engine.cu \
+SRCS = src/bundle.cu src/generic.cu src/ilmlip.cu src/ilmlip_lrsk_fast.cu src/generated_generic.cu src/polar.cu src/neighbors.cu src/integrator.cu src/minimize.cu src/cell.cu src/thermo.cu src/sgemm.cu src/hgemm2.cu src/tile_plan.cu src/engine.cu \
        src/jit.cu src/kernel_ir.cu src/dispersion/d3_pair.cu
 OBJS = $(patsubst src/%.cu,$(OBJDIR)/%.o,$(SRCS))
 DEPS = $(OBJS:.o=.d)
@@ -73,25 +73,49 @@ $(WHEELDIR)/jit.o: $(WHEEL_JIT_INCS)
 $(WHEELDIR)/libloupmd.so: $(WHEEL_OBJS)
 	$(NVCC) -shared $(WHEEL_OBJS) $(LDFLAGS) -o $@
 
-# Loup-S training library (loupmd/fasttrain/cuda.py): its own objects and artifact, never part of libloupmd.so.
-# src/train/generated_train.cuh comes from tools/dev/gen_strain_kernels.py.
-TRAIN_SRCS = src/train/strain.cu
+# Loup-S training library (loupgym/fasttrain/cuda.py): its own objects and artifact, never part of libloupmd.so.
+# src/train/strain/generated_train.cuh comes from tools/dev/gen_strain_kernels.py.
+TRAIN_SRCS = src/train/strain/strain.cu
 TRAIN_OBJS = $(patsubst src/%.cu,$(OBJDIR)/%.o,$(TRAIN_SRCS))
 TRAIN_CC = $(patsubst sm_%,%,$(CUDA_ARCH))
 TRAIN_GENCODE ?= -gencode arch=compute_$(TRAIN_CC),code=$(CUDA_ARCH)
 TRAIN_LEAN ?= 0
 TRAIN_DEFS = $(if $(filter 1,$(TRAIN_LEAN)),-DLST_LEAN=1,)
-.PHONY: train-lib train-cli
-$(OBJDIR)/train/strain.o: src/train/strain.cu | $(OBJDIR)
+.PHONY: train-lib train-cli lrsk-train-lib
+$(OBJDIR)/train/strain/strain.o: src/train/strain/strain.cu | $(OBJDIR)
 	@mkdir -p $(dir $@)
-	$(NVCC) -O3 -std=c++17 $(TRAIN_GENCODE) $(TRAIN_DEFS) -Iinclude -Isrc -diag-suppress=1046 -Xcompiler -fPIC -MMD -MP $(CPPFLAGS) -MF $(@:.o=.d) -c $< -o $@
+	$(NVCC) -O3 -std=c++17 $(TRAIN_GENCODE) $(TRAIN_DEFS) -Iinclude -Isrc -Isrc/train/strain -diag-suppress=1046 -Xcompiler -fPIC -MMD -MP $(CPPFLAGS) -MF $(@:.o=.d) -c $< -o $@
 train-lib: $(OBJDIR)/libloupstrain.so
 $(OBJDIR)/libloupstrain.so: $(TRAIN_OBJS)
 	$(NVCC) -shared $(TRAIN_GENCODE) $(TRAIN_OBJS) -lcublas -lcudart -o $@
 
+LRSK_TRAIN_SRCS = src/train/lrsk/lrsk_train.cu src/train/lrsk/lrsk_full_train.cu
+LRSK_TRAIN_OBJS = $(patsubst src/train/lrsk/%.cu,$(OBJDIR)/train/lrsk/%.o,$(LRSK_TRAIN_SRCS))
+$(OBJDIR)/train/lrsk/lrsk_train.o: src/train/lrsk/lrsk_train.cu | $(OBJDIR)
+	@mkdir -p $(dir $@)
+	$(NVCC) -O3 -std=c++17 $(TRAIN_GENCODE) -Iinclude -Isrc -Isrc/train/lrsk -diag-suppress=1046 -Xcompiler -fPIC -MMD -MP $(CPPFLAGS) -MF $(@:.o=.d) -c $< -o $@
+$(OBJDIR)/train/lrsk/lrsk_full_train.o: src/train/lrsk/lrsk_full_train.cu | $(OBJDIR)
+	@mkdir -p $(dir $@)
+	$(NVCC) -O3 -std=c++17 $(TRAIN_GENCODE) -Iinclude -Isrc -Isrc/train/lrsk -diag-suppress=1046 -Xcompiler -fPIC -MMD -MP $(CPPFLAGS) -MF $(@:.o=.d) -c $< -o $@
+lrsk-train-lib: build/libloup_lrsk_full_train_v3.so
+build/libloup_lrsk_full_train_v3.so: $(LRSK_TRAIN_OBJS)
+	@mkdir -p build
+	$(NVCC) -shared $(TRAIN_GENCODE) $(LRSK_TRAIN_OBJS) -lcublas -lcudart -o $@
+
+# Full pure-CUDA foundation MACE fine-tuning library (libloupmd_ft.so): zero PyTorch!
+MACE_FT_OBJS = $(OBJDIR)/train/mace_ft/mace_ft_train.o $(OBJDIR)/bundle.o $(OBJDIR)/jit.o $(OBJDIR)/polar.o $(OBJDIR)/hgemm2.o
+$(OBJDIR)/train/mace_ft/mace_ft_train.o: src/train/mace_ft/mace_ft_train.cu | $(OBJDIR)
+	@mkdir -p $(dir $@)
+	$(NVCC) -O3 -std=c++17 $(TRAIN_GENCODE) -Iinclude -Isrc -Isrc/train/mace_ft -diag-suppress=1046 -Xcompiler -fPIC -MMD -MP $(CPPFLAGS) -MF $(@:.o=.d) -c $< -o $@
+.PHONY: mace-ft-lib
+mace-ft-lib: $(OBJDIR)/libloupmd_ft.so
+	cp $(OBJDIR)/libloupmd_ft.so libloupmd_ft.so
+$(OBJDIR)/libloupmd_ft.so: $(MACE_FT_OBJS)
+	$(NVCC) -shared $(TRAIN_GENCODE) $(MACE_FT_OBJS) -lcublas -lcudart -ldl -o $@
+
 train-cli: $(OBJDIR)/loupstrain_cli
-$(OBJDIR)/loupstrain_cli: src/train/loupstrain_cli.cu $(OBJDIR)/libloupstrain.so | $(OBJDIR)
-	$(NVCC) -O3 -std=c++17 $(TRAIN_GENCODE) -Iinclude -Isrc $< -Xcompiler -pthread -Xlinker -rpath -Xlinker '$$ORIGIN' -Xlinker -L$(OBJDIR) -Xlinker -lloupstrain -lcudart -o $@
+$(OBJDIR)/loupstrain_cli: src/train/strain/loupstrain_cli.cu $(OBJDIR)/libloupstrain.so | $(OBJDIR)
+	$(NVCC) -O3 -std=c++17 $(TRAIN_GENCODE) -Iinclude -Isrc -Isrc/train/strain $< -Xcompiler -pthread -Xlinker -rpath -Xlinker '$$ORIGIN' -Xlinker -L$(OBJDIR) -Xlinker -lloupstrain -lcudart -o $@
 
 clean:
 	rm -rf build libloupmd.so

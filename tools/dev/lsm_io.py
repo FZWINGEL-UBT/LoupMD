@@ -34,8 +34,8 @@ NP = 26
 
 def dump_model(model_path: str, lsm_path: str) -> None:
     import torch
-    from loupmd.fasttrain.cuda import PARAM_NAMES
-    from loupmd.fasttrain.model import check_supported, check_poly_terms, silu_norm_constant
+    from loupgym.fasttrain.cuda import PARAM_NAMES
+    from loupgym.fasttrain.model import check_supported, check_poly_terms, silu_norm_constant
 
     m = torch.load(model_path, map_location="cpu", weights_only=False)
     check_supported(m)
@@ -109,7 +109,7 @@ def dump_model(model_path: str, lsm_path: str) -> None:
 def apply_lsm(template_model: str, lsm_path: str, out_model: str) -> None:
     import numpy as np
     import torch
-    from loupmd.fasttrain.cuda import PARAM_NAMES
+    from loupgym.fasttrain.cuda import PARAM_NAMES
 
     with open(lsm_path, "rb") as fh:
         hdr_sz = struct.calcsize(HEADER_FMT)

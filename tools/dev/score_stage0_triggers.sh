@@ -53,7 +53,7 @@ if [[ $1 == _capture ]]; then
     digest=$(python3 -c 'import json;print(json.load(open("training-manifest.json"))["student_sha256"])'); guard=/mnt/d/Margraf/FastMACE/tools/ci/local_gpu.py
     export PYTHONPATH=$repo LOUP_LIB=$repo/build/sm_120/libloupmd.so TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD=1 OMP_NUM_THREADS=2 OPENBLAS_NUM_THREADS=1 PYTHONDONTWRITEBYTECODE=1
     python3 "$guard" status
-    exec python3 "$guard" run --purpose "Stage 0 $(cat system) trigger $part" --wait-minutes 20 -- "$HOME/environments/mace_cueq_latest/bin/python" -m loupmd.distill.trigger_features --model student.model --sha256 "$digest" --device cuda --split "$split" --frames "$part.xyz" --out "$part-features"
+    exec python3 "$guard" run --purpose "Stage 0 $(cat system) trigger $part" --wait-minutes 20 -- "$HOME/environments/mace_cueq_latest/bin/python" -m loupgym.distill.trigger_features --model student.model --sha256 "$digest" --device cuda --split "$split" --frames "$part.xyz" --out "$part-features"
 fi
 export MSYS2_ARG_CONV_EXCL='*'
 repo=$(cd "$(dirname "$0")/../.." && pwd -P); cd "$repo"; self=$(wsl.exe -e wslpath -u "$(cygpath -w "$repo/tools/dev/score_stage0_triggers.sh")" | tr -d '\r\n')

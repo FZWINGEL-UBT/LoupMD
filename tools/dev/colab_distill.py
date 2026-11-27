@@ -15,7 +15,7 @@ import time
 import uuid
 from pathlib import Path
 
-from loupmd.distill import transfer
+from loupgym.distill import transfer
 
 REMOTE = '/content/loup-s'
 
