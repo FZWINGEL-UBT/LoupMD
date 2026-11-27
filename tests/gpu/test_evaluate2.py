@@ -40,6 +40,35 @@ CASES = [
 IDS = ["omat0-medium", "omat0-small", "mh1", "polar1-s"]
 
 
+def test_reused_evaluator_follows_periodic_cell(sto_bundle):
+    at = _oxide()
+    pos = at.positions.copy()
+    initial = at.cell.array.copy()
+    strained = initial.copy()
+    strained[0, 0] *= 1.025
+    strained[1, 0] += 0.16
+    # Compute the controls before arming the reused engine: loading another engine can
+    # synchronize the device. Moving one atom beyond half the skin forces a list rebuild.
+    moved = pos.copy()
+    moved[0, 0] += 0.3
+    queries = [(pos, strained), (moved, strained), (moved, initial), (pos, initial)]
+    controls = []
+    for xyz, cell in queries:
+        fresh = LoupEngine(sto_bundle)
+        fresh.set_system(at.numbers, at.get_masses(), skin=0.5)
+        controls.append(fresh.evaluate(xyz, cell, compute_stress=True))
+        del fresh
+    reused = LoupEngine(sto_bundle)
+    reused.set_system(at.numbers, at.get_masses(), skin=0.5)
+    for _ in range(3):
+        reused.evaluate(pos, initial, compute_stress=True)
+    for (xyz, cell), (ref_e, ref_f, ref_s) in zip(queries, controls):
+        e, f, s = reused.evaluate(xyz, cell, compute_stress=True)
+        assert abs(e - ref_e) / len(at) < 1e-5
+        np.testing.assert_allclose(f, ref_f, atol=1e-5, rtol=1e-6)
+        np.testing.assert_allclose(s, ref_s, atol=1e-7, rtol=1e-6)
+
+
 @pytest.mark.parametrize("model,structure,generic", CASES, ids=IDS)
 @pytest.mark.parametrize("scale", [1.0, 0.78], ids=["relaxed", "compressed"])
 def test_energy_only_equals_the_full_calls_energy(model, structure, generic, scale):

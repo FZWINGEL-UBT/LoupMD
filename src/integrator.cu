@@ -57,19 +57,159 @@ __global__ void nve_first_half_kernel(
     record_step_disp2(d2, max_step_disp2);
 }
 
-__global__ void nve_second_half_kernel(
-    int N, double dt_ase,
-    const double* __restrict__ forces,
+__global__ void nve_first_half_skin_zero_kernel(
+    int N, double dt_ase, double half_skin,
+    double* __restrict__ forces,
+    double* __restrict__ energy,
+    double* __restrict__ virial,
     const double* __restrict__ inv_masses,
-    double* __restrict__ vel64
+    const double* __restrict__ ref_pos64,
+    double* __restrict__ pos64,
+    double* __restrict__ vel64,
+    float4* __restrict__ delta_f32,
+    unsigned int* __restrict__ max_step_disp2,
+    int* __restrict__ need_rebuild,
+    const int* __restrict__ skip_if_nz
 ) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (skip_if_nz && *skip_if_nz) {
+        if (i == 0) *need_rebuild = 1;
+        return;
+    }
+    if (i == 0) {
+        *energy = 0.0;
+        #pragma unroll
+        for (int k = 0; k < 6; ++k) virial[k] = 0.0;
+    }
+    double d2 = 0.0;
+    double r2 = 0.0;
+    if (i < N) {
+        const double im = inv_masses[i];
+        const double half_dt_im = 0.5 * dt_ase * im;
+        double dr[3];
+        #pragma unroll
+        for (int c = 0; c < 3; ++c) {
+            const int idx = i * 3 + c;
+            const double f = forces[idx];
+            forces[idx] = 0.0;
+            const double v = vel64[idx] + half_dt_im * f;
+            vel64[idx] = v;
+            const double dx = dt_ase * v;
+            const double p = pos64[idx] + dx;
+            pos64[idx] = p;
+            d2 += dx * dx;
+            dr[c] = p - ref_pos64[idx];
+            r2 += dr[c] * dr[c];
+        }
+        if (delta_f32) delta_f32[i] = make_float4((float)dr[0], (float)dr[1], (float)dr[2], 0.0f);
+        if (half_skin <= 0.0 || r2 > half_skin * half_skin) *need_rebuild = 1;
+    }
+    record_step_disp2(d2, max_step_disp2);
+    const unsigned int rbits = __float_as_uint((float)r2);
+    const unsigned int rm = __reduce_max_sync(0xffffffffu, rbits);
+    if ((threadIdx.x & 31) == 0 && rm != 0u) atomicMax(max_step_disp2 + 2, rm);
+}
+
+// Fused NVE inter-step transition inside flat burst graph: completes step s-1 (second half + f32 force flush +
+// done_steps++) and performs step s first-half + output zero + skin check in ONE kernel launch!
+// Reads read-only skip_if_nz (&flags[s]) and writes write-only need_rebuild (&flags[s+1]) -> zero races!
+__global__ void nve_mid_step_skin_zero_kernel(
+    int N, double dt_ase, double half_skin,
+    double* __restrict__ forces,
+    float* __restrict__ forces_f32_flush,
+    double* __restrict__ energy,
+    double* __restrict__ virial,
+    const double* __restrict__ inv_masses,
+    const double* __restrict__ ref_pos64,
+    double* __restrict__ pos64,
+    double* __restrict__ vel64,
+    float4* __restrict__ delta_f32,
+    unsigned int* __restrict__ max_step_disp2,
+    const int* __restrict__ skip_if_nz,
+    int* __restrict__ need_rebuild,
+    unsigned int* __restrict__ done_steps
+) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (skip_if_nz && *skip_if_nz) {
+        if (i == 0) *need_rebuild = 1;
+        if (forces_f32_flush && i < N) {
+            forces_f32_flush[i * 3 + 0] = 0.0f;
+            forces_f32_flush[i * 3 + 1] = 0.0f;
+            forces_f32_flush[i * 3 + 2] = 0.0f;
+        }
+        return;
+    }
+    if (i == 0) {
+        if (done_steps) (*done_steps) += 1u;
+        *energy = 0.0;
+        #pragma unroll
+        for (int k = 0; k < 6; ++k) virial[k] = 0.0;
+    }
+    double d2 = 0.0;
+    double r2 = 0.0;
+    if (i < N) {
+        const double im = inv_masses[i];
+        const double half_dt_im = 0.5 * dt_ase * im;
+        double dr[3];
+        #pragma unroll
+        for (int c = 0; c < 3; ++c) {
+            const int idx = i * 3 + c;
+            double f = forces[idx];
+            if (forces_f32_flush) {
+                f += (double)forces_f32_flush[idx];
+                forces_f32_flush[idx] = 0.0f;
+            }
+            forces[idx] = 0.0;
+            double v = vel64[idx] + half_dt_im * f;  // step s-1 second half
+            v = v + half_dt_im * f;                  // step s first half (bit-exact order)
+            vel64[idx] = v;
+            const double dx = dt_ase * v;
+            const double p = pos64[idx] + dx;
+            pos64[idx] = p;
+            d2 += dx * dx;
+            dr[c] = p - ref_pos64[idx];
+            r2 += dr[c] * dr[c];
+        }
+        if (delta_f32) delta_f32[i] = make_float4((float)dr[0], (float)dr[1], (float)dr[2], 0.0f);
+        if (half_skin <= 0.0 || r2 > half_skin * half_skin) *need_rebuild = 1;
+    }
+    record_step_disp2(d2, max_step_disp2);
+    const unsigned int rbits = __float_as_uint((float)r2);
+    const unsigned int rm = __reduce_max_sync(0xffffffffu, rbits);
+    if ((threadIdx.x & 31) == 0 && rm != 0u) atomicMax(max_step_disp2 + 2, rm);
+}
+
+__global__ void nve_second_half_kernel(
+    int N, double dt_ase,
+    double* __restrict__ forces,
+    const double* __restrict__ inv_masses,
+    double* __restrict__ vel64,
+    const int* __restrict__ skip_if_nz,
+    float* __restrict__ forces_f32_flush,
+    unsigned int* __restrict__ done_steps
+) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (skip_if_nz && *skip_if_nz) {
+        if (forces_f32_flush && i < N) {
+            forces_f32_flush[i * 3 + 0] = 0.0f;
+            forces_f32_flush[i * 3 + 1] = 0.0f;
+            forces_f32_flush[i * 3 + 2] = 0.0f;
+        }
+        return;
+    }
+    if (i == 0 && done_steps) (*done_steps) += 1u;
     if (i >= N) return;
     double half_dt_im = 0.5 * dt_ase * inv_masses[i];
     #pragma unroll
     for (int c = 0; c < 3; ++c) {
         int idx = i * 3 + c;
-        vel64[idx] += half_dt_im * forces[idx];
+        double f = forces[idx];
+        if (forces_f32_flush) {
+            f += (double)forces_f32_flush[idx];
+            forces_f32_flush[idx] = 0.0f;
+            forces[idx] = f;
+        }
+        vel64[idx] += half_dt_im * f;
     }
 }
 
@@ -125,6 +265,191 @@ __global__ void __launch_bounds__(96) langevin_first_half_kernel(
     s_d2[a][c] = dx * dx;
     __syncthreads();
     if (t < 32) record_step_disp2(s_d2[t][0] + s_d2[t][1] + s_d2[t][2], max_step_disp2);
+}
+
+// Fused Langevin first-half + output zeroing + exact skin check + delta_f32 (flat MD path, zero separate check_skin/zero!).
+// Uses identical Philox RNG draws and arithmetic to langevin_first_half_kernel.
+__global__ void __launch_bounds__(96) langevin_first_half_skin_zero_kernel(
+    int N, double dt_ase, double c1, double c2, double half_skin,
+    const double* __restrict__ target,
+    unsigned long long seed, const unsigned long long* __restrict__ step_counter,
+    double* __restrict__ forces,
+    double* __restrict__ energy,
+    double* __restrict__ virial,
+    const double* __restrict__ inv_masses,
+    const double* __restrict__ sqrt_inv_masses,
+    const double* __restrict__ ref_pos64,
+    double* __restrict__ pos64,
+    double* __restrict__ vel64,
+    double* __restrict__ rnd_vel_save,
+    float4* __restrict__ delta_f32,
+    unsigned int* __restrict__ max_step_disp2,
+    int* __restrict__ need_rebuild,
+    const int* __restrict__ skip_if_nz
+) {
+    __shared__ double s_n[32][6];
+    __shared__ double s_d2[32][3];
+    __shared__ double s_dr[32][3];
+    const int t = threadIdx.x, a = t / 3, c = t - 3 * a;
+    if (skip_if_nz && *skip_if_nz) {
+        if (blockIdx.x == 0 && t == 0) *need_rebuild = 1;
+        return;
+    }
+    if (blockIdx.x == 0 && t == 0) {
+        *energy = 0.0;
+        #pragma unroll
+        for (int k = 0; k < 6; ++k) virial[k] = 0.0;
+    }
+    const int i = blockIdx.x * 32 + a;
+    if (i < N) {
+        curandStatePhilox4_32_10_t rng;
+        curand_init(seed, (unsigned long long)i, *step_counter * 16ULL + 4ULL * c, &rng);
+        const double2 n = curand_normal2_double(&rng);
+        s_n[a][2 * c] = n.x;
+        s_n[a][2 * c + 1] = n.y;
+    }
+    __syncthreads();
+    double dx = 0.0;
+    double dr = 0.0;
+    if (i < N) {
+        const double xi = s_n[a][c], eta = s_n[a][3 + c];
+        const double im = inv_masses[i];
+        const double sim = sqrt_inv_masses[i];
+        const double c3 = target[2] * sim;
+        const double c4 = target[3] * sim;
+        const double c5 = target[4] * sim;
+        const int idx = i * 3 + c;
+        const double f = forces[idx];
+        forces[idx] = 0.0;
+        const double rnd_p = c5 * eta;
+        const double rnd_v = c3 * xi - c4 * eta;
+        rnd_vel_save[idx] = rnd_v;
+        const double v = vel64[idx] + c1 * f * im - c2 * vel64[idx] + rnd_v;
+        dx = dt_ase * v + rnd_p;
+        const double p = pos64[idx] + dx;
+        pos64[idx] = p;
+        vel64[idx] = (dx - rnd_p) / dt_ase;
+        dr = p - ref_pos64[idx];
+    }
+    s_d2[a][c] = dx * dx;
+    s_dr[a][c] = dr;
+    __syncthreads();
+    if (t < 32) {
+        record_step_disp2(s_d2[t][0] + s_d2[t][1] + s_d2[t][2], max_step_disp2);
+        const int gi = blockIdx.x * 32 + t;
+        double r2 = 0.0;
+        if (gi < N) {
+            const double rx = s_dr[t][0], ry = s_dr[t][1], rz = s_dr[t][2];
+            r2 = rx * rx + ry * ry + rz * rz;
+            if (delta_f32) delta_f32[gi] = make_float4((float)rx, (float)ry, (float)rz, 0.0f);
+            if (half_skin <= 0.0 || r2 > half_skin * half_skin) *need_rebuild = 1;
+        }
+        const unsigned int rbits = __float_as_uint((float)r2);
+        const unsigned int rm = __reduce_max_sync(0xffffffffu, rbits);
+        if (t == 0 && rm != 0u) atomicMax(max_step_disp2 + 2, rm);
+    }
+}
+
+// Fused Langevin inter-step transition inside flat burst graph: completes step s-1 (second half + f32 force flush +
+// done_steps++) and performs step s first-half + output zero + skin check in ONE kernel launch!
+// Reads *step_counter + step_off and target[0] + step_off * target[1] without mutating them (race-free across blocks);
+// burst_publish_kernel advances *step_counter and target ONCE by `done` steps at the end of the burst.
+__global__ void __launch_bounds__(96) langevin_mid_step_skin_zero_kernel(
+    int N, double dt_ase, double c1, double c2, double half_skin,
+    const double* __restrict__ target, double a3, double a4, double a5, double two_fr_kb,
+    unsigned long long seed, const unsigned long long* __restrict__ step_counter, unsigned long long step_off,
+    double* __restrict__ forces, float* __restrict__ forces_f32_flush,
+    double* __restrict__ energy, double* __restrict__ virial,
+    const double* __restrict__ inv_masses, const double* __restrict__ sqrt_inv_masses,
+    const double* __restrict__ ref_pos64, double* __restrict__ pos64, double* __restrict__ vel64,
+    double* __restrict__ rnd_vel_save, float4* __restrict__ delta_f32,
+    unsigned int* __restrict__ max_step_disp2,
+    const int* __restrict__ skip_if_nz, int* __restrict__ need_rebuild,
+    unsigned int* __restrict__ done_steps
+) {
+    __shared__ double s_n[32][6];
+    __shared__ double s_d2[32][3];
+    __shared__ double s_dr[32][3];
+    const int t = threadIdx.x, a = t / 3, c = t - 3 * a;
+    const int i = blockIdx.x * 32 + a;
+    if (skip_if_nz && *skip_if_nz) {
+        if (blockIdx.x == 0 && t == 0) *need_rebuild = 1;
+        if (forces_f32_flush && i < N) forces_f32_flush[i * 3 + c] = 0.0f;
+        return;
+    }
+    if (blockIdx.x == 0 && t == 0) {
+        if (done_steps) (*done_steps) += 1u;
+        *energy = 0.0;
+        #pragma unroll
+        for (int k = 0; k < 6; ++k) virial[k] = 0.0;
+    }
+    if (i < N) {
+        curandStatePhilox4_32_10_t rng;
+        curand_init(seed, (unsigned long long)i, (*step_counter + step_off) * 16ULL + 4ULL * c, &rng);
+        const double2 n = curand_normal2_double(&rng);
+        s_n[a][2 * c] = n.x;
+        s_n[a][2 * c + 1] = n.y;
+    }
+    __syncthreads();
+    double dx = 0.0;
+    double dr = 0.0;
+    if (i < N) {
+        const double xi = s_n[a][c], eta = s_n[a][3 + c];
+        const double im = inv_masses[i];
+        const double sim = sqrt_inv_masses[i];
+        double t_c3, t_c4, t_c5;
+        const double dt_ramp = target[1];
+        if (dt_ramp == 0.0) {
+            t_c3 = target[2];
+            t_c4 = target[3];
+            t_c5 = target[4];
+        } else {
+            double t_cur = target[0];
+            for (unsigned long long k = 0; k < step_off; ++k) t_cur += dt_ramp;
+            const double sigma = sqrt(two_fr_kb * fmax(t_cur, 0.0));
+            t_c3 = a3 * sigma;
+            t_c4 = a4 * sigma;
+            t_c5 = a5 * sigma;
+        }
+        const double c3 = t_c3 * sim;
+        const double c4 = t_c4 * sim;
+        const double c5 = t_c5 * sim;
+        const int idx = i * 3 + c;
+        double f = forces[idx];
+        if (forces_f32_flush) {
+            f += (double)forces_f32_flush[idx];
+            forces_f32_flush[idx] = 0.0f;
+        }
+        forces[idx] = 0.0;
+        const double v_prev = vel64[idx];
+        const double v_end = v_prev + (c1 * f * im - c2 * v_prev + rnd_vel_save[idx]);  // step s-1 second half (bit-exact)
+        const double rnd_p = c5 * eta;
+        const double rnd_v = c3 * xi - c4 * eta;
+        rnd_vel_save[idx] = rnd_v;
+        const double v = v_end + c1 * f * im - c2 * v_end + rnd_v;  // step s first half
+        dx = dt_ase * v + rnd_p;
+        const double p = pos64[idx] + dx;
+        pos64[idx] = p;
+        vel64[idx] = (dx - rnd_p) / dt_ase;
+        dr = p - ref_pos64[idx];
+    }
+    s_d2[a][c] = dx * dx;
+    s_dr[a][c] = dr;
+    __syncthreads();
+    if (t < 32) {
+        record_step_disp2(s_d2[t][0] + s_d2[t][1] + s_d2[t][2], max_step_disp2);
+        const int gi = blockIdx.x * 32 + t;
+        double r2 = 0.0;
+        if (gi < N) {
+            const double rx = s_dr[t][0], ry = s_dr[t][1], rz = s_dr[t][2];
+            r2 = rx * rx + ry * ry + rz * rz;
+            if (delta_f32) delta_f32[gi] = make_float4((float)rx, (float)ry, (float)rz, 0.0f);
+            if (half_skin <= 0.0 || r2 > half_skin * half_skin) *need_rebuild = 1;
+        }
+        const unsigned int rbits = __float_as_uint((float)r2);
+        const unsigned int rm = __reduce_max_sync(0xffffffffu, rbits);
+        if (t == 0 && rm != 0u) atomicMax(max_step_disp2 + 2, rm);
+    }
 }
 
 // ---- fix_com: the noise of a step conditioned on a centre of mass at rest ----
@@ -235,29 +560,49 @@ __global__ void momentum_remove_kernel(int N, double inv_total_mass, const doubl
 // first-half read of them for this step has completed.
 __global__ void langevin_second_half_kernel(
     int N, double c1, double c2,
-    const double* __restrict__ forces,
+    double* __restrict__ forces,
     const double* __restrict__ inv_masses,
     const double* __restrict__ rnd_vel_save,
     double* __restrict__ vel64,
     unsigned long long* __restrict__ step_counter,
-    double* __restrict__ target, double a3, double a4, double a5, double two_fr_kb
+    double* __restrict__ target, double a3, double a4, double a5, double two_fr_kb,
+    const int* __restrict__ skip_if_nz,
+    float* __restrict__ forces_f32_flush,
+    unsigned int* __restrict__ done_steps
 ) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (skip_if_nz && *skip_if_nz) {
+        if (forces_f32_flush && i < N) {
+            forces_f32_flush[i * 3 + 0] = 0.0f;
+            forces_f32_flush[i * 3 + 1] = 0.0f;
+            forces_f32_flush[i * 3 + 2] = 0.0f;
+        }
+        return;
+    }
     if (i == 0) {
-        (*step_counter) += 1ULL;
-        const double next = target[0] + target[1];
-        const double sigma = sqrt(two_fr_kb * fmax(next, 0.0));
-        target[0] = next;
-        target[2] = a3 * sigma;
-        target[3] = a4 * sigma;
-        target[4] = a5 * sigma;
+        if (done_steps) (*done_steps) += 1u;
+        if (step_counter) (*step_counter) += 1ULL;
+        if (target) {
+            const double next = target[0] + target[1];
+            const double sigma = sqrt(two_fr_kb * fmax(next, 0.0));
+            target[0] = next;
+            target[2] = a3 * sigma;
+            target[3] = a4 * sigma;
+            target[4] = a5 * sigma;
+        }
     }
     if (i >= N) return;
     double im = inv_masses[i];
     #pragma unroll
     for (int c = 0; c < 3; ++c) {
         int idx = i * 3 + c;
-        vel64[idx] += c1 * forces[idx] * im - c2 * vel64[idx] + rnd_vel_save[idx];
+        double f = forces[idx];
+        if (forces_f32_flush) {
+            f += (double)forces_f32_flush[idx];
+            forces_f32_flush[idx] = 0.0f;
+            forces[idx] = f;
+        }
+        vel64[idx] += c1 * f * im - c2 * vel64[idx] + rnd_vel_save[idx];
     }
 }
 

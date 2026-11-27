@@ -47,6 +47,7 @@ with the environment.
 | `plans` | `plans_*.bin` files in the root itself (and a `<root>/plans/` folder, which no current version writes) | GEMM plans: the timed choice of GEMM kernel per shape and GPU | yes |
 | `gate_refs` | `<root>/gate_refs/` | MACE float64 and float32 references of the accuracy gate | yes |
 | `lib` | `<root>/lib/` | kernel plugins built by `loupmd build-kernels` | only with `--kind lib` |
+| `train` | `<root>/train/` | what training runs derive and can make again: mace's Clebsch-Gordan matrices (`loupmd.fasttrain`) | yes |
 
 `loupmd cache list` shows every cached file with its size and last use, `loupmd cache size` the bytes per kind, and
 `loupmd cache prune --older-than DAYS` or `--max-size SIZE` removes files ([Command-line reference](cli.md)). Prune

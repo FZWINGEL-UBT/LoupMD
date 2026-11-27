@@ -17,12 +17,16 @@
 
 #include "bundle.hpp"
 #include "generated_generic.cuh"
+#include "ilmlip.hpp"
 #include "kernel_plugin.h"
 #include "model.hpp"
 #include "polar.hpp"
 #include "jit.hpp"
 #include "kernel_ir.hpp"
 #include "layer0_kernels.cuh"
+#ifdef LOUP_STUDENT_LAUNCH_BENCH
+#include "../tools/dev/student_projection_group.cuh"
+#endif
 
 namespace loup {
 
@@ -272,7 +276,7 @@ __global__ void gate_fwd_kernel(int N, int C, int lx, const float* __restrict__ 
                                 const float* __restrict__ res1, const float* __restrict__ res2, float* __restrict__ o0,
                                 float* __restrict__ o1, float* __restrict__ o2, float* __restrict__ o3, unsigned fused) {
     const int a = blockIdx.x, c = threadIdx.x;
-    if (a >= N) return;
+    if (a >= N || c >= C) return;
     const float s = 1.0f / (D[a] * beta + alpha);
     const int64_t r0 = (int64_t)a * 4 * C, q0 = res0_sp ? (int64_t)res0_sp[a] * 4 * C : r0;
     auto pre0 = [&](int col) { return lin0[r0 + col] * s + (res0 ? res0[q0 + col] : 0.0f); };
@@ -317,6 +321,7 @@ __global__ void gate_bwd_kernel(int N, int C, int lx, const float* __restrict__ 
     const int64_t r0 = (int64_t)a * 4 * C, q0 = res0_sp ? (int64_t)res0_sp[a] * 4 * C : r0;
     auto pre0 = [&](int col) { return lin0[r0 + col] * s + (res0 ? res0[q0 + col] : 0.0f); };
     float acc = 0.0f, accq = 0.0f;  // sum dpre * lin; sum dgout * v (vform degrees)
+    if (c < C) {
     if (!(fused & 1u)) {
         const float p = pre0(c);
         const float d = g0[(int64_t)a * C + c] * cs * dsilu_f(p);
@@ -367,6 +372,7 @@ __global__ void gate_bwd_kernel(int N, int C, int lx, const float* __restrict__ 
         if (dp0) dp0[r0 + l * C + c] = dgp;
         dl0[r0 + l * C + c] = dgp * s;
         acc = fmaf(dgp, lin0[r0 + l * C + c], acc);
+    }
     }
     #pragma unroll
     for (int off = 16; off > 0; off >>= 1) {
@@ -879,6 +885,8 @@ GenericModel::~GenericModel() {
 }
 
 void GenericModel::free_model() {
+    delete ilmlip_;
+    ilmlip_ = nullptr;
     delete lr_;
     lr_ = nullptr;
     for (auto* l : layers_) delete l;
@@ -897,6 +905,16 @@ void GenericModel::free_model() {
 
 void GenericModel::load(const Bundle& b) {
     free_model();
+    if (b.meta("arch") == "ilmlip") {
+        ilmlip_ = new IlmlipModel();
+        ilmlip_->load(b);
+        S_ = ilmlip_->S();
+        Z_ = ilmlip_->atomic_numbers();
+        r_max_ = std::max(ilmlip_->r_max(), ilmlip_->r_max2());
+        e0_ = ilmlip_->e0();
+        n_layers_ = 2;
+        return;
+    }
     if (b.meta("arch") != "generic") throw std::runtime_error("not a generic bundle");
     if (b.meta_int("exporter_version") != 2)
         throw std::runtime_error("generic bundle exporter version " + b.meta("exporter_version") + ", expected 2 (re-export)");
@@ -962,12 +980,12 @@ void GenericModel::load(const Bundle& b) {
         if (L->kind < 0 || L->kind > 4 || L->lmax_x > 2 || L->lmax_in > 3 || L->lmax_out > 2 || L->lmax_x > L->lmax_in)
             throw std::runtime_error("generic bundle layer " + std::to_string(t) + ": unsupported shape");
         // Hidden widths (C_in / C_msg / C_out: GEMMs, gates with one thread per channel, products on 128-channel
-        // blocks) up to 1024; the conv width C_x up to 512 (the conv kernels size threads and shared memory by it),
-        // except in the hidden-table layer 0, which runs no conv (C_x feeds only its GEMMs).
+        // blocks) 16..1024 (multiples of 16); the conv width C_x 16..512 (the conv kernels size threads and shared
+        // memory by it), except in the hidden-table layer 0, which runs no conv (C_x feeds only its GEMMs).
         for (int c : {L->C_in, L->C_msg, L->C_out})
-            if (c < 32 || c > 1024 || c % 32) throw std::runtime_error("generic bundle: hidden channel counts must be 32..1024, multiples of 32");
-        if (L->C_x < 32 || L->C_x > (L->first_hidden ? 1024 : 512) || L->C_x % 32)
-            throw std::runtime_error("generic bundle: conv channel count must be 32..512, multiples of 32");
+            if (c < 16 || c > 1024 || c % 16) throw std::runtime_error("generic bundle: hidden channel counts must be 16..1024, multiples of 16");
+        if (L->C_x < 16 || L->C_x > (L->first_hidden ? 1024 : 512) || L->C_x % 16)
+            throw std::runtime_error("generic bundle: conv channel count must be 16..512, multiples of 16");
         if (L->C_msg != L->C_out) throw std::runtime_error("generic bundle: product channels differ from the hidden channels");
         if (t == 0 && (L->lmax_in != 0 || L->C_in != C0_)) throw std::runtime_error("generic bundle: layer 0 input");
         if (t > 0) {
@@ -1132,6 +1150,14 @@ void GenericModel::load(const Bundle& b) {
                     for (size_t pi = 0; pi < PI; ++pi) dens[pi] = src[pi * L->Q1 + Q];
                     L->density_table = upload(W, dens);
                 }
+#ifdef LOUP_CONV_TABLE_FP32
+                std::vector<float4> raw(sp_n);
+                for (size_t pi = 0; pi < PI; ++pi)
+                    std::copy_n(src + pi * L->Q1, Q, raw.data() + pi * Q);
+                // The launch ABI passes one pointer in either build. conv_table()
+                // recovers the true element type before ANY row/column indexing.
+                L->packed_table = reinterpret_cast<uint2*>(upload(W, raw));
+#else
                 int emin = 1000, emax = -1000;
                 std::vector<int> exps(sp_n, 0);
                 for (size_t pi = 0; pi < PI; ++pi) {
@@ -1212,6 +1238,7 @@ void GenericModel::load(const Bundle& b) {
                                              std::to_string(rel) + " of the column maximum exceeds " +
                                              std::to_string(loup::kPackedTableMaxRelErr));
                 L->packed_table = upload(W, host_cubic);
+#endif
             }
         }
         // product
@@ -1403,6 +1430,7 @@ void GenericModel::load(const Bundle& b) {
 // fold's skip terms without the S59 tables (Wh). With the fold and the tables every consumer reads a species table
 // instead, and the gather is skipped.
 void GenericModel::update_h0_read() {
+    if (ilmlip_ || layers_.empty()) { h0_read_ = false; return; }
     const GenericLayer* L0 = layers_[0];
     h0_read_ = n_layers_ == 1 || ((!L0->first_hidden || L0->kind == 4) && !L0->res0_table);
     if (chain_fold_) {
@@ -1414,6 +1442,7 @@ void GenericModel::update_h0_read() {
 
 void GenericModel::use_chain_fold(bool on, bool sweeps) {
     if (N_ > 0) throw std::logic_error("generic: use_chain_fold with a system allocated");
+    if (ilmlip_) { chain_fold_ = fold_sweeps_ = false; return; }
     // list 20: a domain folds only with two layers, whose sweeps then hand layer 1's x and the readout hidden over
     chain_fold_ = on && chain_fold_built_ && (!sweeps || n_layers_ == 2);
     fold_sweeps_ = sweeps && chain_fold_;
@@ -2007,7 +2036,7 @@ void GenericModel::setup_chain_fold(const Bundle& b) {
         for (int l = 0; l < 3; ++l) layers_[t]->fold[l] = std::move(out[t][l]);
     chain_fold_ = chain_fold_built_ = true;
 }
-size_t GenericModel::system_bytes() const { return sys_bytes_ + (lr_ ? lr_->system_bytes() : 0); }
+size_t GenericModel::system_bytes() const { return ilmlip_ ? ilmlip_->system_bytes() : sys_bytes_ + (lr_ ? lr_->system_bytes() : 0); }
 float* GenericModel::layer_out(int t, int l) const { return layers_[t]->hout[l]; }
 float* GenericModel::layer_out_grad(int t, int l) const { return layers_[t]->dhout[l]; }
 int GenericModel::out_width(int t) const { return layers_[t]->C_out; }
@@ -2062,12 +2091,26 @@ __global__ void add_row_vector_kernel(int N, int C, const float* __restrict__ w,
 }  // namespace
 
 std::string GenericModel::kernel_signature() const {
+    if (ilmlip_) return ilmlip_->kernel_signature();
     std::string out;
     for (const GenericLayer* L : layers_) {
         if (!out.empty()) out += ';';
         out += (L && L->prod && L->prod->sig) ? L->prod->sig : "?";
     }
     return out;
+}
+
+float* GenericModel::ilmlip_forces_f32() const {
+    return ilmlip_ ? ilmlip_->forces_f32() : nullptr;
+}
+float GenericModel::ilmlip_r_max1() const {
+    return ilmlip_ ? ilmlip_->r_max() : r_max_;
+}
+float GenericModel::ilmlip_r_max2() const {
+    return ilmlip_ ? ilmlip_->r_max2() : r_max_;
+}
+bool GenericModel::ilmlip_supports_pack_vs() const {
+    return ilmlip_ ? ilmlip_->supports_pack_vs() : false;
 }
 
 
@@ -2176,6 +2219,7 @@ bool GenericModel::set_cell(const double* cell) { return lr_ ? lr_->set_cell(cel
 // times them on any GPU (tests). Returns -1 before a pass has been recorded for this system (call again later), 0 if
 // nothing changed, 1 if a variant changed.
 int GenericModel::tune_conv_variants(cudaStream_t st) {
+    if (ilmlip_) return 0;
     if (conv_tune_env_ == 0) return 0;
     if (!(lr_ ? device_is_tuned_cc() : device_is_tuned_generic_cc()) && conv_tune_env_ != 1) return 0;
     if (conv_var_override_ >= 0) return 0;  // forced variant: nothing to time
@@ -2225,6 +2269,12 @@ int GenericModel::tune_conv_variants(cudaStream_t st) {
 }
 
 void GenericModel::free_system() {
+    if (ilmlip_) {
+        ilmlip_->free_system();
+        N_ = 0;
+        sys_bytes_ = sys_bytes_unshared_ = sys_max_alloc_ = 0;
+        return;
+    }
     conv_args_ = ConvTuneArgs{};
     for (auto* L : layers_) L->fwd_var = 0;
     if (lr_) lr_->free_system();
@@ -2255,6 +2305,13 @@ void GenericModel::free_system() {
 
 void GenericModel::alloc_system(int N) {
     free_system();
+    if (ilmlip_) {
+        ilmlip_->alloc_system(N);
+        N_ = N;
+        sys_bytes_ = sys_bytes_unshared_ = ilmlip_->system_bytes();
+        sys_max_alloc_ = ilmlip_->largest_buffer_bytes();
+        return;
+    }
     sys_bytes_ = 0;
     sys_max_alloc_ = 0;
     auto alloc = [&](size_t floats) -> float* {
@@ -2473,6 +2530,7 @@ void GenericModel::alloc_system(int N) {
 }
 
 void GenericModel::ensure_edges(int E_cap) {
+    if (ilmlip_) { edge_bytes_ = 0; return; }
     if (E_cap <= E_cap_) return;
     if (d_edge_dvec_) cudaFree(d_edge_dvec_);
     d_edge_dvec_ = nullptr;
@@ -2491,14 +2549,20 @@ static const GenericLayer* pick_preloc_layer(const std::vector<GenericLayer*>& l
     return nullptr;
 }
 const SplineGrid* GenericModel::preloc_grid() const {
+    if (ilmlip_) return nullptr;
     const GenericLayer* L = pick_preloc_layer(layers_);
     return L ? &L->grid : nullptr;
 }
 int GenericModel::preloc_pair_sym() const {
+    if (ilmlip_) return 1;
     const GenericLayer* L = pick_preloc_layer(layers_);
     return L ? L->pair_sym : 1;
 }
 void GenericModel::record(const GenericPassInputs& in) {
+    if (ilmlip_) {
+        ilmlip_->record(in);
+        return;
+    }
     const SplineGrid* pg = preloc_grid();
     const int pg_psym = preloc_pair_sym();
     auto can_preloc = [&](const GenericLayer* L) {
@@ -2580,6 +2644,14 @@ void GenericModel::record(const GenericPassInputs& in) {
                     transB ? K : Nc, beta, C + row0 * Nc, Nc);
         }
     };
+#ifdef LOUP_STUDENT_LAUNCH_BENCH
+    StudentProjectionGroup group{};
+    const bool group_species = std::getenv("LOUP_BENCH_GROUP_PROJECTIONS") != nullptr;
+    auto flush_group = [&] {
+        if (group.used) launch_student_projection_group(group, st);
+        group.used = group.row_tiles = 0;
+    };
+#endif
     // list 24 item 4: species_gemm (beta 0) on hgemm2f_kernel for each species with panels in ps (LOUP_LIN_HALF_PARTS
     // bit 128), else the FP32 GEMM; slot: LOUP_DEBUG_LIN_AMAX's record of A over every row of the degree
     auto species_proj = [&](const std::vector<GenericLayer::H2Proj>& ps, int slot, bool transB, int l, int K, int Nc,
@@ -2591,6 +2663,18 @@ void GenericModel::record(const GenericPassInputs& in) {
             if (lane_base >= 0) lane(lane_base + s);
             const int64_t row0 = (int64_t)start[s] * d;
             const GenericLayer::H2Proj* p = (size_t)s < ps.size() ? &ps[s] : nullptr;
+#ifdef LOUP_STUDENT_LAUNCH_BENCH
+            // Only combine existing unsplit H2 launches. Leave every FP32 fallback and the per-matrix tail tiles intact.
+            if (group_species && p && p->B && in.gemm_h2_fwd && count[s] * d >= lin_half_srows_ && K < 1024) {
+                if (group.used == 12 || (group.used && (group.cols != Nc || group.inner != K))) flush_group();
+                group.cols = Nc;
+                group.inner = K;
+                group.matrix[group.used++] = {A + row0 * K, p->B, C + row0 * Nc, count[s] * d, group.row_tiles,
+                                               p->sA, p->os};
+                group.row_tiles += (count[s] * d + 127) / 128;
+                continue;
+            }
+#endif
             if (p && p->B && in.gemm_h2_fwd && (int64_t)count[s] * d >= lin_half_srows_)
                 in.gemm_h2_fwd(count[s] * d, Nc, K, A + row0 * K, p->sA, p->B, p->os, C + row0 * Nc, 0.0f);
             else
@@ -2754,6 +2838,9 @@ void GenericModel::record(const GenericPassInputs& in) {
                 for (int l = 0; l < 4; ++l)
                     species_proj(L->hs_flin[l], 16 * t + l, false, l, Kh, Cm, L->S0[l], L->C0[l], (int64_t)Kh * Cm,
                                  L->msgf[l], 4 * l);
+#ifdef LOUP_STUDENT_LAUNCH_BENCH
+                flush_group();
+#endif
                 join();
             } else {
                 // Residual-free degrees l >= 1 (l > lmax_x; res0 from the S59 table) whose projection can take the gate
@@ -2898,7 +2985,8 @@ void GenericModel::record(const GenericPassInputs& in) {
         if (L->kind == 4) {
             const float* res0 = L->res0_table ? L->res0_table : L->res[0];
             const int* res0_sp = L->res0_table ? in.species : nullptr;
-            gate_fwd_kernel<<<N, Cm, 0, st>>>(N, Cm, L->lmax_x, L->D, L->alpha, L->beta, L->gate_cs, L->gate_cg,
+            const int gblk = ((Cm + 31) / 32) * 32;
+            gate_fwd_kernel<<<N, gblk, 0, st>>>(N, Cm, L->lmax_x, L->D, L->alpha, L->beta, L->gate_cs, L->gate_cg,
                                               L->lin[0], L->lin[1], L->lin[2], L->lin[3], res0, res0_sp,
                                               L->lmax_x >= 1 ? L->res[1] : nullptr,
                                               L->lmax_x >= 2 ? L->res[2] : nullptr, L->gout[0], L->gout[1],
@@ -3245,13 +3333,15 @@ void GenericModel::record(const GenericPassInputs& in) {
                 else run_gemm(true, N * dimL(l), Cm, Cm, 1.0f, L->dmsgf[l], Cm, L->W_2[l], Cm, 0.0f, L->dgout[l], Cm);
             }
             join();
-            if (fused != 15u)
-                gate_bwd_kernel<<<N, Cm, 0, st>>>(N, Cm, L->lmax_x, L->D, L->alpha, L->beta, L->gate_cs, L->gate_cg,
+            if (fused != 15u) {
+                const int gblk = ((Cm + 31) / 32) * 32;
+                gate_bwd_kernel<<<N, gblk, 0, st>>>(N, Cm, L->lmax_x, L->D, L->alpha, L->beta, L->gate_cs, L->gate_cg,
                                                   L->lin[0], lins[1], lins[2], lins[3], res0, res0_sp, ress[1],
                                                   ress[2], L->dgout[0], L->dgout[1], L->dgout[2], L->dgout[3], dpre0,
                                                   (t > 0 && !rdl && L->lmax_x >= 1) ? L->dpre[1] : nullptr,
                                                   (t > 0 && !rdl && L->lmax_x >= 2) ? L->dpre[2] : nullptr, L->dlin[0],
                                                   L->dlin[1], L->dlin[2], L->dlin[3], L->dD, fused, vform, rform);
+            }
         }
         const bool density = L->kind >= 2;
         if (L->first_hidden) {
@@ -3262,6 +3352,9 @@ void GenericModel::record(const GenericPassInputs& in) {
                 for (int l = 0; l < 4; ++l)
                     species_proj(L->hs_blin[l], 16 * t + 8 + l, true, l, Cm, Kh, L->dmsgf[l], L->C0[l],
                                  (int64_t)Kh * Cm, L->S0[l], 4 * l);
+#ifdef LOUP_STUDENT_LAUNCH_BENCH
+                flush_group();
+#endif
                 join();
             } else {
                 fork();

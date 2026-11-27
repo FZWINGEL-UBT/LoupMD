@@ -7,10 +7,14 @@ __version__ = "0.0.2"
 
 # Lazy front end so `import loupgym` stays light and zero-torch by default.
 _LAZY = {
+    "auto_distill": ("distill", "auto_distill"),
+    "DistillResult": ("distill", "DistillResult"),
+    "distill": ("distill", None),
     "finetune": ("finetune", "finetune"),
     "finetune_cuda": ("finetune", "finetune_cuda"),
     "FinetuneResult": ("finetune", "FinetuneResult"),
     "CudaMaceTrainer": ("finetune", "CudaMaceTrainer"),
+    "fasttrain": ("fasttrain", None),
 }
 
 
@@ -24,8 +28,12 @@ def __getattr__(name: str):
 
 __all__ = [
     "CudaMaceTrainer",
+    "DistillResult",
     "FinetuneResult",
     "__version__",
+    "auto_distill",
+    "distill",
+    "fasttrain",
     "finetune",
     "finetune_cuda",
 ]

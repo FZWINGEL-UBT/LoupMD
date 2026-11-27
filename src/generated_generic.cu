@@ -23,8 +23,11 @@ extern "C" __global__ void __launch_bounds__(128) gprod_fwd_dd662f9d3a2b5b2b(
     int N, int C, const float* __restrict__ m0, const float* __restrict__ m1, const float* __restrict__ m2, const float* __restrict__ m3, const float* __restrict__ D, const float* __restrict__ w, int64_t w_stride, const int* __restrict__ sp, float* __restrict__ y0, float* __restrict__ y1,
     const float* __restrict__ ro_w, double* __restrict__ energy) {
   const int a = blockIdx.x, c = blockIdx.y * blockDim.x + threadIdx.x;
+  const bool active = c < C;
   const float s = D ? 1.0f / (D[a] + 1.0f) : 1.0f;
   const float* wr = w + (int64_t)sp[a] * w_stride + c;
+  float o0 = 0.0f, o1 = 0.0f, o2 = 0.0f, o3 = 0.0f;
+  if (active) {
   const float x0 = __ldg(m0 + ((int64_t)a * 1 + 0) * C + c) * s;
   const float x1 = __ldg(m1 + ((int64_t)a * 3 + 0) * C + c) * s;
   const float x2 = __ldg(m1 + ((int64_t)a * 3 + 1) * C + c) * s;
@@ -271,7 +274,6 @@ extern "C" __global__ void __launch_bounds__(128) gprod_fwd_dd662f9d3a2b5b2b(
   const float v227 = fmaf(v123, v226, fmaf(v122, v217, v121 * v211));
   const float v228 = fmaf(v126, v226, fmaf(v125, v217, v122 * v211));
   const float v229 = fmaf(v128, v226, fmaf(v126, v217, v123 * v211));
-  float o0 = 0.0f, o1 = 0.0f, o2 = 0.0f, o3 = 0.0f;
   { const float wb = __ldg(wr + 0 * C);
     o0 = fmaf(wb, x0, o0);
   }
@@ -395,8 +397,9 @@ extern "C" __global__ void __launch_bounds__(128) gprod_fwd_dd662f9d3a2b5b2b(
   y1[((int64_t)a * 3 + 0) * C + c] = o1;
   y1[((int64_t)a * 3 + 1) * C + c] = o2;
   y1[((int64_t)a * 3 + 2) * C + c] = o3;
+  }
   if (ro_w) {
-    double e = (double)o0 * (double)__ldg(ro_w + c);
+    double e = active ? (double)o0 * (double)__ldg(ro_w + c) : 0.0;
     #pragma unroll
     for (int off = 16; off > 0; off >>= 1) e += __shfl_xor_sync(0xffffffffu, e, off);
     __shared__ double s_e[4];
@@ -414,8 +417,11 @@ extern "C" __global__ void __launch_bounds__(128) gprod_bwd_dd662f9d3a2b5b2b(
     int N, int C, const float* __restrict__ m0, const float* __restrict__ m1, const float* __restrict__ m2, const float* __restrict__ m3, const float* __restrict__ D, const float* __restrict__ w, int64_t w_stride, const int* __restrict__ sp, const float* __restrict__ gin0, const float* __restrict__ gin1,
     float* __restrict__ dm0, float* __restrict__ dm1, float* __restrict__ dm2, float* __restrict__ dm3, float* __restrict__ dD, const float* __restrict__ gseed) {
   const int a = blockIdx.x, c = blockIdx.y * blockDim.x + threadIdx.x;
+  const bool active = c < C;
   const float s = D ? 1.0f / (D[a] + 1.0f) : 1.0f;
   const float* wr = w + (int64_t)sp[a] * w_stride + c;
+  float dot = 0.0f;
+  if (active) {
   const float x0 = __ldg(m0 + ((int64_t)a * 1 + 0) * C + c) * s;
   const float x1 = __ldg(m1 + ((int64_t)a * 3 + 0) * C + c) * s;
   const float x2 = __ldg(m1 + ((int64_t)a * 3 + 1) * C + c) * s;
@@ -1399,7 +1405,6 @@ extern "C" __global__ void __launch_bounds__(128) gprod_bwd_dd662f9d3a2b5b2b(
   dv0 = fmaf(dv1, x0, dv0);
   dx0 = fmaf(dv0, x0, dx0);
   dx0 = fmaf(dv0, x0, dx0);
-  float dot = 0.0f;
   dot = fmaf(dx0, x0, dot);
   dm0[((int64_t)a * 1 + 0) * C + c] = dx0 * s;
   dot = fmaf(dx1, x1, dot);
@@ -1432,6 +1437,7 @@ extern "C" __global__ void __launch_bounds__(128) gprod_bwd_dd662f9d3a2b5b2b(
   dm3[((int64_t)a * 7 + 5) * C + c] = dx14 * s;
   dot = fmaf(dx15, x15, dot);
   dm3[((int64_t)a * 7 + 6) * C + c] = dx15 * s;
+  }
   if (dD) {
     #pragma unroll
     for (int off = 16; off > 0; off >>= 1) dot += __shfl_xor_sync(0xffffffffu, dot, off);
@@ -1442,7 +1448,9 @@ extern "C" __global__ void __launch_bounds__(128) gprod_bwd_dd662f9d3a2b5b2b(
 extern "C" __global__ void __launch_bounds__(128) gprod_fwdc_dd662f9d3a2b5b2b(
     int N, int C, int kept, int n_ang, int wl0, int wl1, int wl2, int wl3, const int* __restrict__ order, const int* __restrict__ pos, const float* __restrict__ m0, const float* __restrict__ m1, const float* __restrict__ m2, const float* __restrict__ m3, const float* __restrict__ D, const float* __restrict__ w, int64_t w_stride, const int* __restrict__ sp, float* __restrict__ y0, float* __restrict__ y1,
     const float* __restrict__ ro_w, double* __restrict__ energy) {
-  const int a = blockIdx.x, c = blockIdx.y * blockDim.x + threadIdx.x, oc = order[c];
+  const int a = blockIdx.x, c = blockIdx.y * blockDim.x + threadIdx.x;
+  const bool active = c < C;
+  const int oc = active ? order[c] : 0;
   const float s = D ? 1.0f / (D[a] + 1.0f) : 1.0f;
   const float* wr = w + (int64_t)sp[a] * w_stride + c;
   float o0 = 0.0f, o1 = 0.0f, o2 = 0.0f, o3 = 0.0f;
@@ -1795,12 +1803,14 @@ extern "C" __global__ void __launch_bounds__(128) gprod_fwdc_dd662f9d3a2b5b2b(
     o0 = fmaf(w1, v0, o0);
     o0 = fmaf(w2, v1, o0);
   }
+  if (active) {
   y0[((int64_t)a * 1 + 0) * C + oc] = o0;
   y1[((int64_t)a * 3 + 0) * C + oc] = o1;
   y1[((int64_t)a * 3 + 1) * C + oc] = o2;
   y1[((int64_t)a * 3 + 2) * C + oc] = o3;
+  }
   if (ro_w) {
-    double e = (double)o0 * (double)__ldg(ro_w + oc);
+    double e = active ? (double)o0 * (double)__ldg(ro_w + oc) : 0.0;
     #pragma unroll
     for (int off = 16; off > 0; off >>= 1) e += __shfl_xor_sync(0xffffffffu, e, off);
     __shared__ double s_e[4];
@@ -1817,13 +1827,15 @@ extern "C" __global__ void __launch_bounds__(128) gprod_fwdc_dd662f9d3a2b5b2b(
 extern "C" __global__ void __launch_bounds__(128) gprod_bwdc_dd662f9d3a2b5b2b(
     int N, int C, int kept, int n_ang, int wl0, int wl1, int wl2, int wl3, const int* __restrict__ order, const int* __restrict__ pos, const float* __restrict__ m0, const float* __restrict__ m1, const float* __restrict__ m2, const float* __restrict__ m3, const float* __restrict__ D, const float* __restrict__ w, int64_t w_stride, const int* __restrict__ sp, const float* __restrict__ gin0, const float* __restrict__ gin1,
     float* __restrict__ dm0, float* __restrict__ dm1, float* __restrict__ dm2, float* __restrict__ dm3, float* __restrict__ dD, const float* __restrict__ gseed) {
-  const int a = blockIdx.x, c = blockIdx.y * blockDim.x + threadIdx.x, oc = order[c];
+  const int a = blockIdx.x, c = blockIdx.y * blockDim.x + threadIdx.x;
+  const bool active = c < C;
+  const int oc = active ? order[c] : 0;
   const float s = D ? 1.0f / (D[a] + 1.0f) : 1.0f;
   const float* wr = w + (int64_t)sp[a] * w_stride + c;
-  const float g0 = __ldg(gin0 + ((int64_t)a * 1 + 0) * C + oc) + (gseed ? __ldg(gseed + oc) : 0.0f);
-  const float g1 = __ldg(gin1 + ((int64_t)a * 3 + 0) * C + oc);
-  const float g2 = __ldg(gin1 + ((int64_t)a * 3 + 1) * C + oc);
-  const float g3 = __ldg(gin1 + ((int64_t)a * 3 + 2) * C + oc);
+  const float g0 = active ? (__ldg(gin0 + ((int64_t)a * 1 + 0) * C + oc) + (gseed ? __ldg(gseed + oc) : 0.0f)) : 0.0f;
+  const float g1 = active ? (__ldg(gin1 + ((int64_t)a * 3 + 0) * C + oc)) : 0.0f;
+  const float g2 = active ? (__ldg(gin1 + ((int64_t)a * 3 + 1) * C + oc)) : 0.0f;
+  const float g3 = active ? (__ldg(gin1 + ((int64_t)a * 3 + 2) * C + oc)) : 0.0f;
   float dot = 0.0f;
   if (c < n_ang) {
     const int p1 = pos[c], p2 = pos[n_ang + c], p3 = pos[2 * n_ang + c];
@@ -2868,8 +2880,11 @@ extern "C" __global__ void __launch_bounds__(128) gprod_bwd_h2_dd662f9d3a2b5b2b(
     int N, int C, const float* __restrict__ m0, const float* __restrict__ m1, const float* __restrict__ m2, const float* __restrict__ m3, const float* __restrict__ D, const float* __restrict__ w, int64_t w_stride, const int* __restrict__ sp, const float* __restrict__ gin0, const float* __restrict__ gin1,
     float* __restrict__ dm0, float* __restrict__ dm1, float* __restrict__ dm2, float* __restrict__ dm3, float* __restrict__ dD, const float* __restrict__ gseed) {
   const int a = blockIdx.x, c = blockIdx.y * blockDim.x + threadIdx.x;
+  const bool active = c < C;
   const float s = D ? 1.0f / (D[a] + 1.0f) : 1.0f;
   const float* wr = w + (int64_t)sp[a] * w_stride + c;
+  float dot = 0.0f;
+  if (active) {
   const float x0 = __ldg(m0 + ((int64_t)a * 1 + 0) * C + c) * s;
   const float x1 = __ldg(m1 + ((int64_t)a * 3 + 0) * C + c) * s;
   const float x2 = __ldg(m1 + ((int64_t)a * 3 + 1) * C + c) * s;
@@ -3853,7 +3868,6 @@ extern "C" __global__ void __launch_bounds__(128) gprod_bwd_h2_dd662f9d3a2b5b2b(
   dv0 = fmaf(dv1, x0, dv0);
   dx0 = fmaf(dv0, x0, dx0);
   dx0 = fmaf(dv0, x0, dx0);
-  float dot = 0.0f;
   dot = fmaf(dx0, x0, dot);
   loup_store_h2(dm0, ((int64_t)a * 1 + 0) * C + c, (int64_t)N * 1 * C, dx0 * s);
   dot = fmaf(dx1, x1, dot);
@@ -3886,6 +3900,7 @@ extern "C" __global__ void __launch_bounds__(128) gprod_bwd_h2_dd662f9d3a2b5b2b(
   loup_store_h2(dm3, ((int64_t)a * 7 + 5) * C + c, (int64_t)N * 7 * C, dx14 * s);
   dot = fmaf(dx15, x15, dot);
   loup_store_h2(dm3, ((int64_t)a * 7 + 6) * C + c, (int64_t)N * 7 * C, dx15 * s);
+  }
   if (dD) {
     #pragma unroll
     for (int off = 16; off > 0; off >>= 1) dot += __shfl_xor_sync(0xffffffffu, dot, off);
@@ -3897,8 +3912,11 @@ extern "C" __global__ void __launch_bounds__(128) gprod_fwd_ae0a447b65f4fcd4(
     int N, int C, const float* __restrict__ m0, const float* __restrict__ m1, const float* __restrict__ m2, const float* __restrict__ m3, const float* __restrict__ D, const float* __restrict__ w, int64_t w_stride, const int* __restrict__ sp, float* __restrict__ y0,
     const float* __restrict__ ro_w, double* __restrict__ energy) {
   const int a = blockIdx.x, c = blockIdx.y * blockDim.x + threadIdx.x;
+  const bool active = c < C;
   const float s = D ? 1.0f / (D[a] + 1.0f) : 1.0f;
   const float* wr = w + (int64_t)sp[a] * w_stride + c;
+  float o0 = 0.0f;
+  if (active) {
   const float x0 = __ldg(m0 + ((int64_t)a * 1 + 0) * C + c) * s;
   const float x1 = __ldg(m1 + ((int64_t)a * 3 + 0) * C + c) * s;
   const float x2 = __ldg(m1 + ((int64_t)a * 3 + 1) * C + c) * s;
@@ -4015,7 +4033,6 @@ extern "C" __global__ void __launch_bounds__(128) gprod_fwd_ae0a447b65f4fcd4(
   const float v97 = x15 * x13;
   const float v98 = fmaf(-0x1.f3a92c0000000p-2f, v97, fmaf(-0x1.f3a92c0000000p-1f, v96, fmaf(-0x1.f3a92c0000000p-2f, v95, fmaf(0x1.83091e0000000p-2f, v18, -0x1.83091e0000000p-2f * v16))));
   const float v99 = fmaf(v35, v98, fmaf(v34, v94, fmaf(v33, v88, fmaf(v32, v87, v31 * v81))));
-  float o0 = 0.0f;
   { const float wb = __ldg(wr + 0 * C);
     o0 = fmaf(wb, x0, o0);
   }
@@ -4056,8 +4073,9 @@ extern "C" __global__ void __launch_bounds__(128) gprod_fwd_ae0a447b65f4fcd4(
     o0 = fmaf(wb, v99, o0);
   }
   y0[((int64_t)a * 1 + 0) * C + c] = o0;
+  }
   if (ro_w) {
-    double e = (double)o0 * (double)__ldg(ro_w + c);
+    double e = active ? (double)o0 * (double)__ldg(ro_w + c) : 0.0;
     #pragma unroll
     for (int off = 16; off > 0; off >>= 1) e += __shfl_xor_sync(0xffffffffu, e, off);
     __shared__ double s_e[4];
@@ -4075,8 +4093,11 @@ extern "C" __global__ void __launch_bounds__(128) gprod_bwd_ae0a447b65f4fcd4(
     int N, int C, const float* __restrict__ m0, const float* __restrict__ m1, const float* __restrict__ m2, const float* __restrict__ m3, const float* __restrict__ D, const float* __restrict__ w, int64_t w_stride, const int* __restrict__ sp, const float* __restrict__ gin0,
     float* __restrict__ dm0, float* __restrict__ dm1, float* __restrict__ dm2, float* __restrict__ dm3, float* __restrict__ dD, const float* __restrict__ gseed) {
   const int a = blockIdx.x, c = blockIdx.y * blockDim.x + threadIdx.x;
+  const bool active = c < C;
   const float s = D ? 1.0f / (D[a] + 1.0f) : 1.0f;
   const float* wr = w + (int64_t)sp[a] * w_stride + c;
+  float dot = 0.0f;
+  if (active) {
   const float x0 = __ldg(m0 + ((int64_t)a * 1 + 0) * C + c) * s;
   const float x1 = __ldg(m1 + ((int64_t)a * 3 + 0) * C + c) * s;
   const float x2 = __ldg(m1 + ((int64_t)a * 3 + 1) * C + c) * s;
@@ -4485,7 +4506,6 @@ extern "C" __global__ void __launch_bounds__(128) gprod_bwd_ae0a447b65f4fcd4(
   dv0 = fmaf(dv1, x0, dv0);
   dx0 = fmaf(dv0, x0, dx0);
   dx0 = fmaf(dv0, x0, dx0);
-  float dot = 0.0f;
   dot = fmaf(dx0, x0, dot);
   dm0[((int64_t)a * 1 + 0) * C + c] = dx0 * s;
   dot = fmaf(dx1, x1, dot);
@@ -4518,6 +4538,7 @@ extern "C" __global__ void __launch_bounds__(128) gprod_bwd_ae0a447b65f4fcd4(
   dm3[((int64_t)a * 7 + 5) * C + c] = dx14 * s;
   dot = fmaf(dx15, x15, dot);
   dm3[((int64_t)a * 7 + 6) * C + c] = dx15 * s;
+  }
   if (dD) {
     #pragma unroll
     for (int off = 16; off > 0; off >>= 1) dot += __shfl_xor_sync(0xffffffffu, dot, off);
@@ -4533,24 +4554,25 @@ __global__ void __launch_bounds__(MAX_B, MIN_BLK) gprod_ro1_fused_ae0a447b65f4fc
     float* __restrict__ dm0, float* __restrict__ dm1, float* __restrict__ dm2, float* __restrict__ dm3, float* __restrict__ dD) {
   const int a = blockIdx.x, c = threadIdx.x;
   if (a >= N) return;
+  const bool active = c < C;
   const float s = D ? 1.0f / (D[a] + 1.0f) : 1.0f;
   const float* wr = w + (int64_t)sp[a] * w_stride + c;
-  const float x0 = __ldg(m0 + ((int64_t)a * 1 + 0) * C + c) * s;
-  const float x1 = __ldg(m1 + ((int64_t)a * 3 + 0) * C + c) * s;
-  const float x2 = __ldg(m1 + ((int64_t)a * 3 + 1) * C + c) * s;
-  const float x3 = __ldg(m1 + ((int64_t)a * 3 + 2) * C + c) * s;
-  const float x4 = __ldg(m2 + ((int64_t)a * 5 + 0) * C + c) * s;
-  const float x5 = __ldg(m2 + ((int64_t)a * 5 + 1) * C + c) * s;
-  const float x6 = __ldg(m2 + ((int64_t)a * 5 + 2) * C + c) * s;
-  const float x7 = __ldg(m2 + ((int64_t)a * 5 + 3) * C + c) * s;
-  const float x8 = __ldg(m2 + ((int64_t)a * 5 + 4) * C + c) * s;
-  const float x9 = __ldg(m3 + ((int64_t)a * 7 + 0) * C + c) * s;
-  const float x10 = __ldg(m3 + ((int64_t)a * 7 + 1) * C + c) * s;
-  const float x11 = __ldg(m3 + ((int64_t)a * 7 + 2) * C + c) * s;
-  const float x12 = __ldg(m3 + ((int64_t)a * 7 + 3) * C + c) * s;
-  const float x13 = __ldg(m3 + ((int64_t)a * 7 + 4) * C + c) * s;
-  const float x14 = __ldg(m3 + ((int64_t)a * 7 + 5) * C + c) * s;
-  const float x15 = __ldg(m3 + ((int64_t)a * 7 + 6) * C + c) * s;
+  const float x0 = active ? __ldg(m0 + ((int64_t)a * 1 + 0) * C + c) * s : 0.0f;
+  const float x1 = active ? __ldg(m1 + ((int64_t)a * 3 + 0) * C + c) * s : 0.0f;
+  const float x2 = active ? __ldg(m1 + ((int64_t)a * 3 + 1) * C + c) * s : 0.0f;
+  const float x3 = active ? __ldg(m1 + ((int64_t)a * 3 + 2) * C + c) * s : 0.0f;
+  const float x4 = active ? __ldg(m2 + ((int64_t)a * 5 + 0) * C + c) * s : 0.0f;
+  const float x5 = active ? __ldg(m2 + ((int64_t)a * 5 + 1) * C + c) * s : 0.0f;
+  const float x6 = active ? __ldg(m2 + ((int64_t)a * 5 + 2) * C + c) * s : 0.0f;
+  const float x7 = active ? __ldg(m2 + ((int64_t)a * 5 + 3) * C + c) * s : 0.0f;
+  const float x8 = active ? __ldg(m2 + ((int64_t)a * 5 + 4) * C + c) * s : 0.0f;
+  const float x9 = active ? __ldg(m3 + ((int64_t)a * 7 + 0) * C + c) * s : 0.0f;
+  const float x10 = active ? __ldg(m3 + ((int64_t)a * 7 + 1) * C + c) * s : 0.0f;
+  const float x11 = active ? __ldg(m3 + ((int64_t)a * 7 + 2) * C + c) * s : 0.0f;
+  const float x12 = active ? __ldg(m3 + ((int64_t)a * 7 + 3) * C + c) * s : 0.0f;
+  const float x13 = active ? __ldg(m3 + ((int64_t)a * 7 + 4) * C + c) * s : 0.0f;
+  const float x14 = active ? __ldg(m3 + ((int64_t)a * 7 + 5) * C + c) * s : 0.0f;
+  const float x15 = active ? __ldg(m3 + ((int64_t)a * 7 + 6) * C + c) * s : 0.0f;
   const float v0 = x0 * x0;
   const float v1 = x0 * v0;
   const float v2 = x1 * x1;
@@ -4652,38 +4674,38 @@ __global__ void __launch_bounds__(MAX_B, MIN_BLK) gprod_ro1_fused_ae0a447b65f4fc
   const float v98 = fmaf(-0x1.f3a92c0000000p-2f, v97, fmaf(-0x1.f3a92c0000000p-1f, v96, fmaf(-0x1.f3a92c0000000p-2f, v95, fmaf(0x1.83091e0000000p-2f, v18, -0x1.83091e0000000p-2f * v16))));
   const float v99 = fmaf(v35, v98, fmaf(v34, v94, fmaf(v33, v88, fmaf(v32, v87, v31 * v81))));
   float y0 = 0.0f;
-  const float w0 = __ldg(wr + 0 * C);
+  const float w0 = active ? __ldg(wr + 0 * C) : 0.0f;
   y0 = fmaf(w0, x0, y0);
-  const float w1 = __ldg(wr + 1 * C);
+  const float w1 = active ? __ldg(wr + 1 * C) : 0.0f;
   y0 = fmaf(w1, v0, y0);
-  const float w2 = __ldg(wr + 2 * C);
+  const float w2 = active ? __ldg(wr + 2 * C) : 0.0f;
   y0 = fmaf(w2, v1, y0);
-  const float w3 = __ldg(wr + 3 * C);
+  const float w3 = active ? __ldg(wr + 3 * C) : 0.0f;
   y0 = fmaf(w3, v5, y0);
-  const float w4 = __ldg(wr + 4 * C);
+  const float w4 = active ? __ldg(wr + 4 * C) : 0.0f;
   y0 = fmaf(w4, v6, y0);
-  const float w5 = __ldg(wr + 5 * C);
+  const float w5 = active ? __ldg(wr + 5 * C) : 0.0f;
   y0 = fmaf(w5, v12, y0);
-  const float w6 = __ldg(wr + 6 * C);
+  const float w6 = active ? __ldg(wr + 6 * C) : 0.0f;
   y0 = fmaf(w6, v13, y0);
-  const float w7 = __ldg(wr + 7 * C);
+  const float w7 = active ? __ldg(wr + 7 * C) : 0.0f;
   y0 = fmaf(w7, v21, y0);
-  const float w8 = __ldg(wr + 8 * C);
+  const float w8 = active ? __ldg(wr + 8 * C) : 0.0f;
   y0 = fmaf(w8, v22, y0);
-  const float w9 = __ldg(wr + 9 * C);
+  const float w9 = active ? __ldg(wr + 9 * C) : 0.0f;
   y0 = fmaf(w9, v36, y0);
-  const float w10 = __ldg(wr + 10 * C);
+  const float w10 = active ? __ldg(wr + 10 * C) : 0.0f;
   y0 = fmaf(w10, v51, y0);
-  const float w11 = __ldg(wr + 11 * C);
+  const float w11 = active ? __ldg(wr + 11 * C) : 0.0f;
   y0 = fmaf(w11, v76, y0);
-  const float w12 = __ldg(wr + 12 * C);
+  const float w12 = active ? __ldg(wr + 12 * C) : 0.0f;
   y0 = fmaf(w12, v99, y0);
   __shared__ float s_y[512];
   __shared__ float s_part[32][16];
   __shared__ float s_dh[16];
-  s_y[c] = y0;
+  if (active) s_y[c] = y0;
   __syncthreads();
-  {
+  if (active) {
     const int k = c & 15, c0 = (c >> 4) * 16;
     float p = 0.0f;
     #pragma unroll
@@ -4707,8 +4729,10 @@ __global__ void __launch_bounds__(MAX_B, MIN_BLK) gprod_ro1_fused_ae0a447b65f4fc
   }
   __syncthreads();
   float g0 = 0.0f;
-  #pragma unroll
-  for (int k = 0; k < 16; ++k) g0 = fmaf(s_dh[k], __ldg(ro_W1 + c * 16 + k), g0);
+  if (active) {
+    #pragma unroll
+    for (int k = 0; k < 16; ++k) g0 = fmaf(s_dh[k], __ldg(ro_W1 + c * 16 + k), g0);
+  }
   float dx0 = w0 * g0;
   float dv0 = w1 * g0;
   float dv1 = w2 * g0;
@@ -4989,37 +5013,37 @@ __global__ void __launch_bounds__(MAX_B, MIN_BLK) gprod_ro1_fused_ae0a447b65f4fc
   dx0 = fmaf(dv0, x0, dx0);
   float dot = 0.0f;
   dot = fmaf(dx0, x0, dot);
-  dm0[((int64_t)a * 1 + 0) * C + c] = dx0 * s;
+  if (active) dm0[((int64_t)a * 1 + 0) * C + c] = dx0 * s;
   dot = fmaf(dx1, x1, dot);
-  dm1[((int64_t)a * 3 + 0) * C + c] = dx1 * s;
+  if (active) dm1[((int64_t)a * 3 + 0) * C + c] = dx1 * s;
   dot = fmaf(dx2, x2, dot);
-  dm1[((int64_t)a * 3 + 1) * C + c] = dx2 * s;
+  if (active) dm1[((int64_t)a * 3 + 1) * C + c] = dx2 * s;
   dot = fmaf(dx3, x3, dot);
-  dm1[((int64_t)a * 3 + 2) * C + c] = dx3 * s;
+  if (active) dm1[((int64_t)a * 3 + 2) * C + c] = dx3 * s;
   dot = fmaf(dx4, x4, dot);
-  dm2[((int64_t)a * 5 + 0) * C + c] = dx4 * s;
+  if (active) dm2[((int64_t)a * 5 + 0) * C + c] = dx4 * s;
   dot = fmaf(dx5, x5, dot);
-  dm2[((int64_t)a * 5 + 1) * C + c] = dx5 * s;
+  if (active) dm2[((int64_t)a * 5 + 1) * C + c] = dx5 * s;
   dot = fmaf(dx6, x6, dot);
-  dm2[((int64_t)a * 5 + 2) * C + c] = dx6 * s;
+  if (active) dm2[((int64_t)a * 5 + 2) * C + c] = dx6 * s;
   dot = fmaf(dx7, x7, dot);
-  dm2[((int64_t)a * 5 + 3) * C + c] = dx7 * s;
+  if (active) dm2[((int64_t)a * 5 + 3) * C + c] = dx7 * s;
   dot = fmaf(dx8, x8, dot);
-  dm2[((int64_t)a * 5 + 4) * C + c] = dx8 * s;
+  if (active) dm2[((int64_t)a * 5 + 4) * C + c] = dx8 * s;
   dot = fmaf(dx9, x9, dot);
-  dm3[((int64_t)a * 7 + 0) * C + c] = dx9 * s;
+  if (active) dm3[((int64_t)a * 7 + 0) * C + c] = dx9 * s;
   dot = fmaf(dx10, x10, dot);
-  dm3[((int64_t)a * 7 + 1) * C + c] = dx10 * s;
+  if (active) dm3[((int64_t)a * 7 + 1) * C + c] = dx10 * s;
   dot = fmaf(dx11, x11, dot);
-  dm3[((int64_t)a * 7 + 2) * C + c] = dx11 * s;
+  if (active) dm3[((int64_t)a * 7 + 2) * C + c] = dx11 * s;
   dot = fmaf(dx12, x12, dot);
-  dm3[((int64_t)a * 7 + 3) * C + c] = dx12 * s;
+  if (active) dm3[((int64_t)a * 7 + 3) * C + c] = dx12 * s;
   dot = fmaf(dx13, x13, dot);
-  dm3[((int64_t)a * 7 + 4) * C + c] = dx13 * s;
+  if (active) dm3[((int64_t)a * 7 + 4) * C + c] = dx13 * s;
   dot = fmaf(dx14, x14, dot);
-  dm3[((int64_t)a * 7 + 5) * C + c] = dx14 * s;
+  if (active) dm3[((int64_t)a * 7 + 5) * C + c] = dx14 * s;
   dot = fmaf(dx15, x15, dot);
-  dm3[((int64_t)a * 7 + 6) * C + c] = dx15 * s;
+  if (active) dm3[((int64_t)a * 7 + 6) * C + c] = dx15 * s;
   if (dD) {
     #pragma unroll
     for (int off = 16; off > 0; off >>= 1) dot += __shfl_xor_sync(0xffffffffu, dot, off);
@@ -5028,7 +5052,7 @@ __global__ void __launch_bounds__(MAX_B, MIN_BLK) gprod_ro1_fused_ae0a447b65f4fc
     __syncthreads();
     if (c == 0) {
       float total = 0.0f;
-      const int nw = C >> 5;
+      const int nw = (int)(blockDim.x >> 5);
       for (int w_i = 0; w_i < nw; ++w_i) total += red[w_i];
       atomicAdd(dD + a, -s * total);
     }
@@ -5043,24 +5067,25 @@ __global__ void __launch_bounds__(MAX_B, MIN_BLK) gprod_ro1s_fused_ae0a447b65f4f
     float* __restrict__ dm0, float* __restrict__ dm1, float* __restrict__ dm2, float* __restrict__ dm3, float* __restrict__ dD) {
   const int a = blockIdx.x, c = threadIdx.x;
   if (a >= N) return;
+  const bool active = c < C;
   const float s = D ? 1.0f / (D[a] + 1.0f) : 1.0f;
   const float* wr = w + (int64_t)sp[a] * w_stride + c;
-  const float x0 = __ldg(m0 + (int64_t)a * C + c) * s;
+  const float x0 = active ? __ldg(m0 + (int64_t)a * C + c) * s : 0.0f;
   const float v0 = x0 * x0;
   const float v1 = x0 * v0;
   float y0 = 0.0f;
-  const float w0 = __ldg(wr + 0 * C);
+  const float w0 = active ? __ldg(wr + 0 * C) : 0.0f;
   y0 = fmaf(w0, x0, y0);
-  const float w1 = __ldg(wr + 1 * C);
+  const float w1 = active ? __ldg(wr + 1 * C) : 0.0f;
   y0 = fmaf(w1, v0, y0);
-  const float w2 = __ldg(wr + 2 * C);
+  const float w2 = active ? __ldg(wr + 2 * C) : 0.0f;
   y0 = fmaf(w2, v1, y0);
   __shared__ float s_y[512];
   __shared__ float s_part[32][16];
   __shared__ float s_dh[16];
-  s_y[c] = y0;
+  if (active) s_y[c] = y0;
   __syncthreads();
-  {
+  if (active) {
     const int k = c & 15, c0 = (c >> 4) * 16;
     float p = 0.0f;
     #pragma unroll
@@ -5084,8 +5109,10 @@ __global__ void __launch_bounds__(MAX_B, MIN_BLK) gprod_ro1s_fused_ae0a447b65f4f
   }
   __syncthreads();
   float g0 = 0.0f;
-  #pragma unroll
-  for (int k = 0; k < 16; ++k) g0 = fmaf(s_dh[k], __ldg(ro_W1 + c * 16 + k), g0);
+  if (active) {
+    #pragma unroll
+    for (int k = 0; k < 16; ++k) g0 = fmaf(s_dh[k], __ldg(ro_W1 + c * 16 + k), g0);
+  }
   float dx0 = w0 * g0;
   float dv0 = w1 * g0;
   float dv1 = w2 * g0;
@@ -5093,7 +5120,7 @@ __global__ void __launch_bounds__(MAX_B, MIN_BLK) gprod_ro1s_fused_ae0a447b65f4f
   dv0 = fmaf(dv1, x0, dv0);
   dx0 = fmaf(dv0, x0, dx0);
   dx0 = fmaf(dv0, x0, dx0);
-  dm0[(int64_t)a * C + c] = dx0 * s;
+  if (active) dm0[(int64_t)a * C + c] = dx0 * s;
   if (dD) {
     float dot = dx0 * x0;
     #pragma unroll
@@ -5103,7 +5130,7 @@ __global__ void __launch_bounds__(MAX_B, MIN_BLK) gprod_ro1s_fused_ae0a447b65f4f
     __syncthreads();
     if (c == 0) {
       float total = 0.0f;
-      const int nw = C >> 5;
+      const int nw = (int)(blockDim.x >> 5);
       for (int w_i = 0; w_i < nw; ++w_i) total += red[w_i];
       atomicAdd(dD + a, -s * total);
     }
@@ -5785,7 +5812,9 @@ __global__ void __launch_bounds__(MAX_B, MIN_BLK) gprod_ro1c_fused_ae0a447b65f4f
 extern "C" __global__ void __launch_bounds__(128) gprod_fwdc_ae0a447b65f4fcd4(
     int N, int C, int kept, int n_ang, int wl0, int wl1, int wl2, int wl3, const int* __restrict__ order, const int* __restrict__ pos, const float* __restrict__ m0, const float* __restrict__ m1, const float* __restrict__ m2, const float* __restrict__ m3, const float* __restrict__ D, const float* __restrict__ w, int64_t w_stride, const int* __restrict__ sp, float* __restrict__ y0,
     const float* __restrict__ ro_w, double* __restrict__ energy) {
-  const int a = blockIdx.x, c = blockIdx.y * blockDim.x + threadIdx.x, oc = order[c];
+  const int a = blockIdx.x, c = blockIdx.y * blockDim.x + threadIdx.x;
+  const bool active = c < C;
+  const int oc = active ? order[c] : 0;
   const float s = D ? 1.0f / (D[a] + 1.0f) : 1.0f;
   const float* wr = w + (int64_t)sp[a] * w_stride + c;
   float o0 = 0.0f;
@@ -5944,9 +5973,11 @@ extern "C" __global__ void __launch_bounds__(128) gprod_fwdc_ae0a447b65f4fcd4(
     o0 = fmaf(w1, v0, o0);
     o0 = fmaf(w2, v1, o0);
   }
+  if (active) {
   y0[((int64_t)a * 1 + 0) * C + oc] = o0;
+  }
   if (ro_w) {
-    double e = (double)o0 * (double)__ldg(ro_w + oc);
+    double e = active ? (double)o0 * (double)__ldg(ro_w + oc) : 0.0;
     #pragma unroll
     for (int off = 16; off > 0; off >>= 1) e += __shfl_xor_sync(0xffffffffu, e, off);
     __shared__ double s_e[4];
@@ -5963,10 +5994,12 @@ extern "C" __global__ void __launch_bounds__(128) gprod_fwdc_ae0a447b65f4fcd4(
 extern "C" __global__ void __launch_bounds__(128) gprod_bwdc_ae0a447b65f4fcd4(
     int N, int C, int kept, int n_ang, int wl0, int wl1, int wl2, int wl3, const int* __restrict__ order, const int* __restrict__ pos, const float* __restrict__ m0, const float* __restrict__ m1, const float* __restrict__ m2, const float* __restrict__ m3, const float* __restrict__ D, const float* __restrict__ w, int64_t w_stride, const int* __restrict__ sp, const float* __restrict__ gin0,
     float* __restrict__ dm0, float* __restrict__ dm1, float* __restrict__ dm2, float* __restrict__ dm3, float* __restrict__ dD, const float* __restrict__ gseed) {
-  const int a = blockIdx.x, c = blockIdx.y * blockDim.x + threadIdx.x, oc = order[c];
+  const int a = blockIdx.x, c = blockIdx.y * blockDim.x + threadIdx.x;
+  const bool active = c < C;
+  const int oc = active ? order[c] : 0;
   const float s = D ? 1.0f / (D[a] + 1.0f) : 1.0f;
   const float* wr = w + (int64_t)sp[a] * w_stride + c;
-  const float g0 = __ldg(gin0 + ((int64_t)a * 1 + 0) * C + oc) + (gseed ? __ldg(gseed + oc) : 0.0f);
+  const float g0 = active ? (__ldg(gin0 + ((int64_t)a * 1 + 0) * C + oc) + (gseed ? __ldg(gseed + oc) : 0.0f)) : 0.0f;
   float dot = 0.0f;
   if (c < n_ang) {
     const int p1 = pos[c], p2 = pos[n_ang + c], p3 = pos[2 * n_ang + c];
@@ -6439,8 +6472,11 @@ extern "C" __global__ void __launch_bounds__(128) gprod_bwd_h2_ae0a447b65f4fcd4(
     int N, int C, const float* __restrict__ m0, const float* __restrict__ m1, const float* __restrict__ m2, const float* __restrict__ m3, const float* __restrict__ D, const float* __restrict__ w, int64_t w_stride, const int* __restrict__ sp, const float* __restrict__ gin0,
     float* __restrict__ dm0, float* __restrict__ dm1, float* __restrict__ dm2, float* __restrict__ dm3, float* __restrict__ dD, const float* __restrict__ gseed) {
   const int a = blockIdx.x, c = blockIdx.y * blockDim.x + threadIdx.x;
+  const bool active = c < C;
   const float s = D ? 1.0f / (D[a] + 1.0f) : 1.0f;
   const float* wr = w + (int64_t)sp[a] * w_stride + c;
+  float dot = 0.0f;
+  if (active) {
   const float x0 = __ldg(m0 + ((int64_t)a * 1 + 0) * C + c) * s;
   const float x1 = __ldg(m1 + ((int64_t)a * 3 + 0) * C + c) * s;
   const float x2 = __ldg(m1 + ((int64_t)a * 3 + 1) * C + c) * s;
@@ -6849,7 +6885,6 @@ extern "C" __global__ void __launch_bounds__(128) gprod_bwd_h2_ae0a447b65f4fcd4(
   dv0 = fmaf(dv1, x0, dv0);
   dx0 = fmaf(dv0, x0, dx0);
   dx0 = fmaf(dv0, x0, dx0);
-  float dot = 0.0f;
   dot = fmaf(dx0, x0, dot);
   loup_store_h2(dm0, ((int64_t)a * 1 + 0) * C + c, (int64_t)N * 1 * C, dx0 * s);
   dot = fmaf(dx1, x1, dot);
@@ -6882,6 +6917,7 @@ extern "C" __global__ void __launch_bounds__(128) gprod_bwd_h2_ae0a447b65f4fcd4(
   loup_store_h2(dm3, ((int64_t)a * 7 + 5) * C + c, (int64_t)N * 7 * C, dx14 * s);
   dot = fmaf(dx15, x15, dot);
   loup_store_h2(dm3, ((int64_t)a * 7 + 6) * C + c, (int64_t)N * 7 * C, dx15 * s);
+  }
   if (dD) {
     #pragma unroll
     for (int off = 16; off > 0; off >>= 1) dot += __shfl_xor_sync(0xffffffffu, dot, off);
@@ -6897,24 +6933,25 @@ __global__ void __launch_bounds__(MAX_B, MIN_BLK) gprod_ro1_fused_h2_ae0a447b65f
     float* __restrict__ dm0, float* __restrict__ dm1, float* __restrict__ dm2, float* __restrict__ dm3, float* __restrict__ dD) {
   const int a = blockIdx.x, c = threadIdx.x;
   if (a >= N) return;
+  const bool active = c < C;
   const float s = D ? 1.0f / (D[a] + 1.0f) : 1.0f;
   const float* wr = w + (int64_t)sp[a] * w_stride + c;
-  const float x0 = __ldg(m0 + ((int64_t)a * 1 + 0) * C + c) * s;
-  const float x1 = __ldg(m1 + ((int64_t)a * 3 + 0) * C + c) * s;
-  const float x2 = __ldg(m1 + ((int64_t)a * 3 + 1) * C + c) * s;
-  const float x3 = __ldg(m1 + ((int64_t)a * 3 + 2) * C + c) * s;
-  const float x4 = __ldg(m2 + ((int64_t)a * 5 + 0) * C + c) * s;
-  const float x5 = __ldg(m2 + ((int64_t)a * 5 + 1) * C + c) * s;
-  const float x6 = __ldg(m2 + ((int64_t)a * 5 + 2) * C + c) * s;
-  const float x7 = __ldg(m2 + ((int64_t)a * 5 + 3) * C + c) * s;
-  const float x8 = __ldg(m2 + ((int64_t)a * 5 + 4) * C + c) * s;
-  const float x9 = __ldg(m3 + ((int64_t)a * 7 + 0) * C + c) * s;
-  const float x10 = __ldg(m3 + ((int64_t)a * 7 + 1) * C + c) * s;
-  const float x11 = __ldg(m3 + ((int64_t)a * 7 + 2) * C + c) * s;
-  const float x12 = __ldg(m3 + ((int64_t)a * 7 + 3) * C + c) * s;
-  const float x13 = __ldg(m3 + ((int64_t)a * 7 + 4) * C + c) * s;
-  const float x14 = __ldg(m3 + ((int64_t)a * 7 + 5) * C + c) * s;
-  const float x15 = __ldg(m3 + ((int64_t)a * 7 + 6) * C + c) * s;
+  const float x0 = active ? __ldg(m0 + ((int64_t)a * 1 + 0) * C + c) * s : 0.0f;
+  const float x1 = active ? __ldg(m1 + ((int64_t)a * 3 + 0) * C + c) * s : 0.0f;
+  const float x2 = active ? __ldg(m1 + ((int64_t)a * 3 + 1) * C + c) * s : 0.0f;
+  const float x3 = active ? __ldg(m1 + ((int64_t)a * 3 + 2) * C + c) * s : 0.0f;
+  const float x4 = active ? __ldg(m2 + ((int64_t)a * 5 + 0) * C + c) * s : 0.0f;
+  const float x5 = active ? __ldg(m2 + ((int64_t)a * 5 + 1) * C + c) * s : 0.0f;
+  const float x6 = active ? __ldg(m2 + ((int64_t)a * 5 + 2) * C + c) * s : 0.0f;
+  const float x7 = active ? __ldg(m2 + ((int64_t)a * 5 + 3) * C + c) * s : 0.0f;
+  const float x8 = active ? __ldg(m2 + ((int64_t)a * 5 + 4) * C + c) * s : 0.0f;
+  const float x9 = active ? __ldg(m3 + ((int64_t)a * 7 + 0) * C + c) * s : 0.0f;
+  const float x10 = active ? __ldg(m3 + ((int64_t)a * 7 + 1) * C + c) * s : 0.0f;
+  const float x11 = active ? __ldg(m3 + ((int64_t)a * 7 + 2) * C + c) * s : 0.0f;
+  const float x12 = active ? __ldg(m3 + ((int64_t)a * 7 + 3) * C + c) * s : 0.0f;
+  const float x13 = active ? __ldg(m3 + ((int64_t)a * 7 + 4) * C + c) * s : 0.0f;
+  const float x14 = active ? __ldg(m3 + ((int64_t)a * 7 + 5) * C + c) * s : 0.0f;
+  const float x15 = active ? __ldg(m3 + ((int64_t)a * 7 + 6) * C + c) * s : 0.0f;
   const float v0 = x0 * x0;
   const float v1 = x0 * v0;
   const float v2 = x1 * x1;
@@ -7016,38 +7053,38 @@ __global__ void __launch_bounds__(MAX_B, MIN_BLK) gprod_ro1_fused_h2_ae0a447b65f
   const float v98 = fmaf(-0x1.f3a92c0000000p-2f, v97, fmaf(-0x1.f3a92c0000000p-1f, v96, fmaf(-0x1.f3a92c0000000p-2f, v95, fmaf(0x1.83091e0000000p-2f, v18, -0x1.83091e0000000p-2f * v16))));
   const float v99 = fmaf(v35, v98, fmaf(v34, v94, fmaf(v33, v88, fmaf(v32, v87, v31 * v81))));
   float y0 = 0.0f;
-  const float w0 = __ldg(wr + 0 * C);
+  const float w0 = active ? __ldg(wr + 0 * C) : 0.0f;
   y0 = fmaf(w0, x0, y0);
-  const float w1 = __ldg(wr + 1 * C);
+  const float w1 = active ? __ldg(wr + 1 * C) : 0.0f;
   y0 = fmaf(w1, v0, y0);
-  const float w2 = __ldg(wr + 2 * C);
+  const float w2 = active ? __ldg(wr + 2 * C) : 0.0f;
   y0 = fmaf(w2, v1, y0);
-  const float w3 = __ldg(wr + 3 * C);
+  const float w3 = active ? __ldg(wr + 3 * C) : 0.0f;
   y0 = fmaf(w3, v5, y0);
-  const float w4 = __ldg(wr + 4 * C);
+  const float w4 = active ? __ldg(wr + 4 * C) : 0.0f;
   y0 = fmaf(w4, v6, y0);
-  const float w5 = __ldg(wr + 5 * C);
+  const float w5 = active ? __ldg(wr + 5 * C) : 0.0f;
   y0 = fmaf(w5, v12, y0);
-  const float w6 = __ldg(wr + 6 * C);
+  const float w6 = active ? __ldg(wr + 6 * C) : 0.0f;
   y0 = fmaf(w6, v13, y0);
-  const float w7 = __ldg(wr + 7 * C);
+  const float w7 = active ? __ldg(wr + 7 * C) : 0.0f;
   y0 = fmaf(w7, v21, y0);
-  const float w8 = __ldg(wr + 8 * C);
+  const float w8 = active ? __ldg(wr + 8 * C) : 0.0f;
   y0 = fmaf(w8, v22, y0);
-  const float w9 = __ldg(wr + 9 * C);
+  const float w9 = active ? __ldg(wr + 9 * C) : 0.0f;
   y0 = fmaf(w9, v36, y0);
-  const float w10 = __ldg(wr + 10 * C);
+  const float w10 = active ? __ldg(wr + 10 * C) : 0.0f;
   y0 = fmaf(w10, v51, y0);
-  const float w11 = __ldg(wr + 11 * C);
+  const float w11 = active ? __ldg(wr + 11 * C) : 0.0f;
   y0 = fmaf(w11, v76, y0);
-  const float w12 = __ldg(wr + 12 * C);
+  const float w12 = active ? __ldg(wr + 12 * C) : 0.0f;
   y0 = fmaf(w12, v99, y0);
   __shared__ float s_y[512];
   __shared__ float s_part[32][16];
   __shared__ float s_dh[16];
-  s_y[c] = y0;
+  if (active) s_y[c] = y0;
   __syncthreads();
-  {
+  if (active) {
     const int k = c & 15, c0 = (c >> 4) * 16;
     float p = 0.0f;
     #pragma unroll
@@ -7071,8 +7108,10 @@ __global__ void __launch_bounds__(MAX_B, MIN_BLK) gprod_ro1_fused_h2_ae0a447b65f
   }
   __syncthreads();
   float g0 = 0.0f;
-  #pragma unroll
-  for (int k = 0; k < 16; ++k) g0 = fmaf(s_dh[k], __ldg(ro_W1 + c * 16 + k), g0);
+  if (active) {
+    #pragma unroll
+    for (int k = 0; k < 16; ++k) g0 = fmaf(s_dh[k], __ldg(ro_W1 + c * 16 + k), g0);
+  }
   float dx0 = w0 * g0;
   float dv0 = w1 * g0;
   float dv1 = w2 * g0;
@@ -7353,37 +7392,37 @@ __global__ void __launch_bounds__(MAX_B, MIN_BLK) gprod_ro1_fused_h2_ae0a447b65f
   dx0 = fmaf(dv0, x0, dx0);
   float dot = 0.0f;
   dot = fmaf(dx0, x0, dot);
-  loup_store_h2(dm0, ((int64_t)a * 1 + 0) * C + c, (int64_t)N * 1 * C, dx0 * s);
+  if (active) loup_store_h2(dm0, ((int64_t)a * 1 + 0) * C + c, (int64_t)N * 1 * C, dx0 * s);
   dot = fmaf(dx1, x1, dot);
-  loup_store_h2(dm1, ((int64_t)a * 3 + 0) * C + c, (int64_t)N * 3 * C, dx1 * s);
+  if (active) loup_store_h2(dm1, ((int64_t)a * 3 + 0) * C + c, (int64_t)N * 3 * C, dx1 * s);
   dot = fmaf(dx2, x2, dot);
-  loup_store_h2(dm1, ((int64_t)a * 3 + 1) * C + c, (int64_t)N * 3 * C, dx2 * s);
+  if (active) loup_store_h2(dm1, ((int64_t)a * 3 + 1) * C + c, (int64_t)N * 3 * C, dx2 * s);
   dot = fmaf(dx3, x3, dot);
-  loup_store_h2(dm1, ((int64_t)a * 3 + 2) * C + c, (int64_t)N * 3 * C, dx3 * s);
+  if (active) loup_store_h2(dm1, ((int64_t)a * 3 + 2) * C + c, (int64_t)N * 3 * C, dx3 * s);
   dot = fmaf(dx4, x4, dot);
-  loup_store_h2(dm2, ((int64_t)a * 5 + 0) * C + c, (int64_t)N * 5 * C, dx4 * s);
+  if (active) loup_store_h2(dm2, ((int64_t)a * 5 + 0) * C + c, (int64_t)N * 5 * C, dx4 * s);
   dot = fmaf(dx5, x5, dot);
-  loup_store_h2(dm2, ((int64_t)a * 5 + 1) * C + c, (int64_t)N * 5 * C, dx5 * s);
+  if (active) loup_store_h2(dm2, ((int64_t)a * 5 + 1) * C + c, (int64_t)N * 5 * C, dx5 * s);
   dot = fmaf(dx6, x6, dot);
-  loup_store_h2(dm2, ((int64_t)a * 5 + 2) * C + c, (int64_t)N * 5 * C, dx6 * s);
+  if (active) loup_store_h2(dm2, ((int64_t)a * 5 + 2) * C + c, (int64_t)N * 5 * C, dx6 * s);
   dot = fmaf(dx7, x7, dot);
-  loup_store_h2(dm2, ((int64_t)a * 5 + 3) * C + c, (int64_t)N * 5 * C, dx7 * s);
+  if (active) loup_store_h2(dm2, ((int64_t)a * 5 + 3) * C + c, (int64_t)N * 5 * C, dx7 * s);
   dot = fmaf(dx8, x8, dot);
-  loup_store_h2(dm2, ((int64_t)a * 5 + 4) * C + c, (int64_t)N * 5 * C, dx8 * s);
+  if (active) loup_store_h2(dm2, ((int64_t)a * 5 + 4) * C + c, (int64_t)N * 5 * C, dx8 * s);
   dot = fmaf(dx9, x9, dot);
-  loup_store_h2(dm3, ((int64_t)a * 7 + 0) * C + c, (int64_t)N * 7 * C, dx9 * s);
+  if (active) loup_store_h2(dm3, ((int64_t)a * 7 + 0) * C + c, (int64_t)N * 7 * C, dx9 * s);
   dot = fmaf(dx10, x10, dot);
-  loup_store_h2(dm3, ((int64_t)a * 7 + 1) * C + c, (int64_t)N * 7 * C, dx10 * s);
+  if (active) loup_store_h2(dm3, ((int64_t)a * 7 + 1) * C + c, (int64_t)N * 7 * C, dx10 * s);
   dot = fmaf(dx11, x11, dot);
-  loup_store_h2(dm3, ((int64_t)a * 7 + 2) * C + c, (int64_t)N * 7 * C, dx11 * s);
+  if (active) loup_store_h2(dm3, ((int64_t)a * 7 + 2) * C + c, (int64_t)N * 7 * C, dx11 * s);
   dot = fmaf(dx12, x12, dot);
-  loup_store_h2(dm3, ((int64_t)a * 7 + 3) * C + c, (int64_t)N * 7 * C, dx12 * s);
+  if (active) loup_store_h2(dm3, ((int64_t)a * 7 + 3) * C + c, (int64_t)N * 7 * C, dx12 * s);
   dot = fmaf(dx13, x13, dot);
-  loup_store_h2(dm3, ((int64_t)a * 7 + 4) * C + c, (int64_t)N * 7 * C, dx13 * s);
+  if (active) loup_store_h2(dm3, ((int64_t)a * 7 + 4) * C + c, (int64_t)N * 7 * C, dx13 * s);
   dot = fmaf(dx14, x14, dot);
-  loup_store_h2(dm3, ((int64_t)a * 7 + 5) * C + c, (int64_t)N * 7 * C, dx14 * s);
+  if (active) loup_store_h2(dm3, ((int64_t)a * 7 + 5) * C + c, (int64_t)N * 7 * C, dx14 * s);
   dot = fmaf(dx15, x15, dot);
-  loup_store_h2(dm3, ((int64_t)a * 7 + 6) * C + c, (int64_t)N * 7 * C, dx15 * s);
+  if (active) loup_store_h2(dm3, ((int64_t)a * 7 + 6) * C + c, (int64_t)N * 7 * C, dx15 * s);
   if (dD) {
     #pragma unroll
     for (int off = 16; off > 0; off >>= 1) dot += __shfl_xor_sync(0xffffffffu, dot, off);
@@ -7392,7 +7431,7 @@ __global__ void __launch_bounds__(MAX_B, MIN_BLK) gprod_ro1_fused_h2_ae0a447b65f
     __syncthreads();
     if (c == 0) {
       float total = 0.0f;
-      const int nw = C >> 5;
+      const int nw = (int)(blockDim.x >> 5);
       for (int w_i = 0; w_i < nw; ++w_i) total += red[w_i];
       atomicAdd(dD + a, -s * total);
     }
@@ -7403,8 +7442,11 @@ extern "C" __global__ void __launch_bounds__(128) gprod_fwd_00dc9085957f7969(
     int N, int C, const float* __restrict__ m0, const float* __restrict__ m1, const float* __restrict__ m2, const float* __restrict__ m3, const float* __restrict__ D, const float* __restrict__ w, int64_t w_stride, const int* __restrict__ sp, float* __restrict__ y0, float* __restrict__ y1, float* __restrict__ y2,
     const float* __restrict__ ro_w, double* __restrict__ energy) {
   const int a = blockIdx.x, c = blockIdx.y * blockDim.x + threadIdx.x;
+  const bool active = c < C;
   const float s = D ? 1.0f / (D[a] + 1.0f) : 1.0f;
   const float* wr = w + (int64_t)sp[a] * w_stride + c;
+  float o0 = 0.0f, o1 = 0.0f, o2 = 0.0f, o3 = 0.0f, o4 = 0.0f, o5 = 0.0f, o6 = 0.0f, o7 = 0.0f, o8 = 0.0f;
+  if (active) {
   const float x0 = __ldg(m0 + ((int64_t)a * 1 + 0) * C + c) * s;
   const float x1 = __ldg(m1 + ((int64_t)a * 3 + 0) * C + c) * s;
   const float x2 = __ldg(m1 + ((int64_t)a * 3 + 1) * C + c) * s;
@@ -7756,7 +7798,6 @@ extern "C" __global__ void __launch_bounds__(128) gprod_fwd_00dc9085957f7969(
   const float v332 = fmaf(v98, v325, fmaf(v94, v324, fmaf(v88, v323, fmaf(v87, v319, v81 * v315))));
   const float v333 = fmaf(v98, v314, fmaf(v94, v327, fmaf(v88, v324, fmaf(v87, v320, v81 * v316))));
   const float v334 = fmaf(v98, v313, fmaf(v94, v314, fmaf(v88, v325, v87 * v321)));
-  float o0 = 0.0f, o1 = 0.0f, o2 = 0.0f, o3 = 0.0f, o4 = 0.0f, o5 = 0.0f, o6 = 0.0f, o7 = 0.0f, o8 = 0.0f;
   { const float wb = __ldg(wr + 0 * C);
     o0 = fmaf(wb, x0, o0);
   }
@@ -8025,8 +8066,9 @@ extern "C" __global__ void __launch_bounds__(128) gprod_fwd_00dc9085957f7969(
   y2[((int64_t)a * 5 + 2) * C + c] = o6;
   y2[((int64_t)a * 5 + 3) * C + c] = o7;
   y2[((int64_t)a * 5 + 4) * C + c] = o8;
+  }
   if (ro_w) {
-    double e = (double)o0 * (double)__ldg(ro_w + c);
+    double e = active ? (double)o0 * (double)__ldg(ro_w + c) : 0.0;
     #pragma unroll
     for (int off = 16; off > 0; off >>= 1) e += __shfl_xor_sync(0xffffffffu, e, off);
     __shared__ double s_e[4];
@@ -8044,8 +8086,11 @@ extern "C" __global__ void __launch_bounds__(128) gprod_bwd_00dc9085957f7969(
     int N, int C, const float* __restrict__ m0, const float* __restrict__ m1, const float* __restrict__ m2, const float* __restrict__ m3, const float* __restrict__ D, const float* __restrict__ w, int64_t w_stride, const int* __restrict__ sp, const float* __restrict__ gin0, const float* __restrict__ gin1, const float* __restrict__ gin2,
     float* __restrict__ dm0, float* __restrict__ dm1, float* __restrict__ dm2, float* __restrict__ dm3, float* __restrict__ dD, const float* __restrict__ gseed) {
   const int a = blockIdx.x, c = blockIdx.y * blockDim.x + threadIdx.x;
+  const bool active = c < C;
   const float s = D ? 1.0f / (D[a] + 1.0f) : 1.0f;
   const float* wr = w + (int64_t)sp[a] * w_stride + c;
+  float dot = 0.0f;
+  if (active) {
   const float x0 = __ldg(m0 + ((int64_t)a * 1 + 0) * C + c) * s;
   const float x1 = __ldg(m1 + ((int64_t)a * 3 + 0) * C + c) * s;
   const float x2 = __ldg(m1 + ((int64_t)a * 3 + 1) * C + c) * s;
@@ -9578,7 +9623,6 @@ extern "C" __global__ void __launch_bounds__(128) gprod_bwd_00dc9085957f7969(
   dv0 = fmaf(dv1, x0, dv0);
   dx0 = fmaf(dv0, x0, dx0);
   dx0 = fmaf(dv0, x0, dx0);
-  float dot = 0.0f;
   dot = fmaf(dx0, x0, dot);
   dm0[((int64_t)a * 1 + 0) * C + c] = dx0 * s;
   dot = fmaf(dx1, x1, dot);
@@ -9611,6 +9655,7 @@ extern "C" __global__ void __launch_bounds__(128) gprod_bwd_00dc9085957f7969(
   dm3[((int64_t)a * 7 + 5) * C + c] = dx14 * s;
   dot = fmaf(dx15, x15, dot);
   dm3[((int64_t)a * 7 + 6) * C + c] = dx15 * s;
+  }
   if (dD) {
     #pragma unroll
     for (int off = 16; off > 0; off >>= 1) dot += __shfl_xor_sync(0xffffffffu, dot, off);
@@ -9621,7 +9666,9 @@ extern "C" __global__ void __launch_bounds__(128) gprod_bwd_00dc9085957f7969(
 extern "C" __global__ void __launch_bounds__(128) gprod_fwdc_00dc9085957f7969(
     int N, int C, int kept, int n_ang, int wl0, int wl1, int wl2, int wl3, const int* __restrict__ order, const int* __restrict__ pos, const float* __restrict__ m0, const float* __restrict__ m1, const float* __restrict__ m2, const float* __restrict__ m3, const float* __restrict__ D, const float* __restrict__ w, int64_t w_stride, const int* __restrict__ sp, float* __restrict__ y0, float* __restrict__ y1, float* __restrict__ y2,
     const float* __restrict__ ro_w, double* __restrict__ energy) {
-  const int a = blockIdx.x, c = blockIdx.y * blockDim.x + threadIdx.x, oc = order[c];
+  const int a = blockIdx.x, c = blockIdx.y * blockDim.x + threadIdx.x;
+  const bool active = c < C;
+  const int oc = active ? order[c] : 0;
   const float s = D ? 1.0f / (D[a] + 1.0f) : 1.0f;
   const float* wr = w + (int64_t)sp[a] * w_stride + c;
   float o0 = 0.0f, o1 = 0.0f, o2 = 0.0f, o3 = 0.0f, o4 = 0.0f, o5 = 0.0f, o6 = 0.0f, o7 = 0.0f, o8 = 0.0f;
@@ -10199,6 +10246,7 @@ extern "C" __global__ void __launch_bounds__(128) gprod_fwdc_00dc9085957f7969(
     o0 = fmaf(w1, v0, o0);
     o0 = fmaf(w2, v1, o0);
   }
+  if (active) {
   y0[((int64_t)a * 1 + 0) * C + oc] = o0;
   y1[((int64_t)a * 3 + 0) * C + oc] = o1;
   y1[((int64_t)a * 3 + 1) * C + oc] = o2;
@@ -10208,8 +10256,9 @@ extern "C" __global__ void __launch_bounds__(128) gprod_fwdc_00dc9085957f7969(
   y2[((int64_t)a * 5 + 2) * C + oc] = o6;
   y2[((int64_t)a * 5 + 3) * C + oc] = o7;
   y2[((int64_t)a * 5 + 4) * C + oc] = o8;
+  }
   if (ro_w) {
-    double e = (double)o0 * (double)__ldg(ro_w + oc);
+    double e = active ? (double)o0 * (double)__ldg(ro_w + oc) : 0.0;
     #pragma unroll
     for (int off = 16; off > 0; off >>= 1) e += __shfl_xor_sync(0xffffffffu, e, off);
     __shared__ double s_e[4];
@@ -10226,18 +10275,20 @@ extern "C" __global__ void __launch_bounds__(128) gprod_fwdc_00dc9085957f7969(
 extern "C" __global__ void __launch_bounds__(128) gprod_bwdc_00dc9085957f7969(
     int N, int C, int kept, int n_ang, int wl0, int wl1, int wl2, int wl3, const int* __restrict__ order, const int* __restrict__ pos, const float* __restrict__ m0, const float* __restrict__ m1, const float* __restrict__ m2, const float* __restrict__ m3, const float* __restrict__ D, const float* __restrict__ w, int64_t w_stride, const int* __restrict__ sp, const float* __restrict__ gin0, const float* __restrict__ gin1, const float* __restrict__ gin2,
     float* __restrict__ dm0, float* __restrict__ dm1, float* __restrict__ dm2, float* __restrict__ dm3, float* __restrict__ dD, const float* __restrict__ gseed) {
-  const int a = blockIdx.x, c = blockIdx.y * blockDim.x + threadIdx.x, oc = order[c];
+  const int a = blockIdx.x, c = blockIdx.y * blockDim.x + threadIdx.x;
+  const bool active = c < C;
+  const int oc = active ? order[c] : 0;
   const float s = D ? 1.0f / (D[a] + 1.0f) : 1.0f;
   const float* wr = w + (int64_t)sp[a] * w_stride + c;
-  const float g0 = __ldg(gin0 + ((int64_t)a * 1 + 0) * C + oc) + (gseed ? __ldg(gseed + oc) : 0.0f);
-  const float g1 = __ldg(gin1 + ((int64_t)a * 3 + 0) * C + oc);
-  const float g2 = __ldg(gin1 + ((int64_t)a * 3 + 1) * C + oc);
-  const float g3 = __ldg(gin1 + ((int64_t)a * 3 + 2) * C + oc);
-  const float g4 = __ldg(gin2 + ((int64_t)a * 5 + 0) * C + oc);
-  const float g5 = __ldg(gin2 + ((int64_t)a * 5 + 1) * C + oc);
-  const float g6 = __ldg(gin2 + ((int64_t)a * 5 + 2) * C + oc);
-  const float g7 = __ldg(gin2 + ((int64_t)a * 5 + 3) * C + oc);
-  const float g8 = __ldg(gin2 + ((int64_t)a * 5 + 4) * C + oc);
+  const float g0 = active ? (__ldg(gin0 + ((int64_t)a * 1 + 0) * C + oc) + (gseed ? __ldg(gseed + oc) : 0.0f)) : 0.0f;
+  const float g1 = active ? (__ldg(gin1 + ((int64_t)a * 3 + 0) * C + oc)) : 0.0f;
+  const float g2 = active ? (__ldg(gin1 + ((int64_t)a * 3 + 1) * C + oc)) : 0.0f;
+  const float g3 = active ? (__ldg(gin1 + ((int64_t)a * 3 + 2) * C + oc)) : 0.0f;
+  const float g4 = active ? (__ldg(gin2 + ((int64_t)a * 5 + 0) * C + oc)) : 0.0f;
+  const float g5 = active ? (__ldg(gin2 + ((int64_t)a * 5 + 1) * C + oc)) : 0.0f;
+  const float g6 = active ? (__ldg(gin2 + ((int64_t)a * 5 + 2) * C + oc)) : 0.0f;
+  const float g7 = active ? (__ldg(gin2 + ((int64_t)a * 5 + 3) * C + oc)) : 0.0f;
+  const float g8 = active ? (__ldg(gin2 + ((int64_t)a * 5 + 4) * C + oc)) : 0.0f;
   float dot = 0.0f;
   if (c < n_ang) {
     const int p1 = pos[c], p2 = pos[n_ang + c], p3 = pos[2 * n_ang + c];
@@ -11826,8 +11877,11 @@ extern "C" __global__ void __launch_bounds__(128) gprod_bwd_h2_00dc9085957f7969(
     int N, int C, const float* __restrict__ m0, const float* __restrict__ m1, const float* __restrict__ m2, const float* __restrict__ m3, const float* __restrict__ D, const float* __restrict__ w, int64_t w_stride, const int* __restrict__ sp, const float* __restrict__ gin0, const float* __restrict__ gin1, const float* __restrict__ gin2,
     float* __restrict__ dm0, float* __restrict__ dm1, float* __restrict__ dm2, float* __restrict__ dm3, float* __restrict__ dD, const float* __restrict__ gseed) {
   const int a = blockIdx.x, c = blockIdx.y * blockDim.x + threadIdx.x;
+  const bool active = c < C;
   const float s = D ? 1.0f / (D[a] + 1.0f) : 1.0f;
   const float* wr = w + (int64_t)sp[a] * w_stride + c;
+  float dot = 0.0f;
+  if (active) {
   const float x0 = __ldg(m0 + ((int64_t)a * 1 + 0) * C + c) * s;
   const float x1 = __ldg(m1 + ((int64_t)a * 3 + 0) * C + c) * s;
   const float x2 = __ldg(m1 + ((int64_t)a * 3 + 1) * C + c) * s;
@@ -13360,7 +13414,6 @@ extern "C" __global__ void __launch_bounds__(128) gprod_bwd_h2_00dc9085957f7969(
   dv0 = fmaf(dv1, x0, dv0);
   dx0 = fmaf(dv0, x0, dx0);
   dx0 = fmaf(dv0, x0, dx0);
-  float dot = 0.0f;
   dot = fmaf(dx0, x0, dot);
   loup_store_h2(dm0, ((int64_t)a * 1 + 0) * C + c, (int64_t)N * 1 * C, dx0 * s);
   dot = fmaf(dx1, x1, dot);
@@ -13393,6 +13446,7 @@ extern "C" __global__ void __launch_bounds__(128) gprod_bwd_h2_00dc9085957f7969(
   loup_store_h2(dm3, ((int64_t)a * 7 + 5) * C + c, (int64_t)N * 7 * C, dx14 * s);
   dot = fmaf(dx15, x15, dot);
   loup_store_h2(dm3, ((int64_t)a * 7 + 6) * C + c, (int64_t)N * 7 * C, dx15 * s);
+  }
   if (dD) {
     #pragma unroll
     for (int off = 16; off > 0; off >>= 1) dot += __shfl_xor_sync(0xffffffffu, dot, off);
@@ -13404,8 +13458,11 @@ extern "C" __global__ void __launch_bounds__(128) gprod_fwd_6f194247389dfa5c(
     int N, int C, const float* __restrict__ m0, const float* __restrict__ m1, const float* __restrict__ m2, const float* __restrict__ m3, const float* __restrict__ D, const float* __restrict__ w, int64_t w_stride, const int* __restrict__ sp, float* __restrict__ y0, float* __restrict__ y1, float* __restrict__ y2,
     const float* __restrict__ ro_w, double* __restrict__ energy) {
   const int a = blockIdx.x, c = blockIdx.y * blockDim.x + threadIdx.x;
+  const bool active = c < C;
   const float s = D ? 1.0f / (D[a] + 1.0f) : 1.0f;
   const float* wr = w + (int64_t)sp[a] * w_stride + c;
+  float o0 = 0.0f, o1 = 0.0f, o2 = 0.0f, o3 = 0.0f, o4 = 0.0f, o5 = 0.0f, o6 = 0.0f, o7 = 0.0f, o8 = 0.0f;
+  if (active) {
   const float x0 = __ldg(m0 + ((int64_t)a * 1 + 0) * C + c) * s;
   const float x1 = __ldg(m1 + ((int64_t)a * 3 + 0) * C + c) * s;
   const float x2 = __ldg(m1 + ((int64_t)a * 3 + 1) * C + c) * s;
@@ -13561,7 +13618,6 @@ extern "C" __global__ void __launch_bounds__(128) gprod_fwd_6f194247389dfa5c(
   const float v136 = x14 * x12;
   const float v137 = x15 * x13;
   const float v138 = fmaf(-0x1.f3a92c0000000p-2f, v137, fmaf(-0x1.f3a92c0000000p-1f, v136, fmaf(-0x1.f3a92c0000000p-2f, v135, fmaf(0x1.83091e0000000p-2f, v15, -0x1.83091e0000000p-2f * v13))));
-  float o0 = 0.0f, o1 = 0.0f, o2 = 0.0f, o3 = 0.0f, o4 = 0.0f, o5 = 0.0f, o6 = 0.0f, o7 = 0.0f, o8 = 0.0f;
   { const float wb = __ldg(wr + 0 * C);
     o0 = fmaf(wb, x0, o0);
   }
@@ -13648,8 +13704,9 @@ extern "C" __global__ void __launch_bounds__(128) gprod_fwd_6f194247389dfa5c(
   y2[((int64_t)a * 5 + 2) * C + c] = o6;
   y2[((int64_t)a * 5 + 3) * C + c] = o7;
   y2[((int64_t)a * 5 + 4) * C + c] = o8;
+  }
   if (ro_w) {
-    double e = (double)o0 * (double)__ldg(ro_w + c);
+    double e = active ? (double)o0 * (double)__ldg(ro_w + c) : 0.0;
     #pragma unroll
     for (int off = 16; off > 0; off >>= 1) e += __shfl_xor_sync(0xffffffffu, e, off);
     __shared__ double s_e[4];
@@ -13667,8 +13724,11 @@ extern "C" __global__ void __launch_bounds__(128) gprod_bwd_6f194247389dfa5c(
     int N, int C, const float* __restrict__ m0, const float* __restrict__ m1, const float* __restrict__ m2, const float* __restrict__ m3, const float* __restrict__ D, const float* __restrict__ w, int64_t w_stride, const int* __restrict__ sp, const float* __restrict__ gin0, const float* __restrict__ gin1, const float* __restrict__ gin2,
     float* __restrict__ dm0, float* __restrict__ dm1, float* __restrict__ dm2, float* __restrict__ dm3, float* __restrict__ dD, const float* __restrict__ gseed) {
   const int a = blockIdx.x, c = blockIdx.y * blockDim.x + threadIdx.x;
+  const bool active = c < C;
   const float s = D ? 1.0f / (D[a] + 1.0f) : 1.0f;
   const float* wr = w + (int64_t)sp[a] * w_stride + c;
+  float dot = 0.0f;
+  if (active) {
   const float x0 = __ldg(m0 + ((int64_t)a * 1 + 0) * C + c) * s;
   const float x1 = __ldg(m1 + ((int64_t)a * 3 + 0) * C + c) * s;
   const float x2 = __ldg(m1 + ((int64_t)a * 3 + 1) * C + c) * s;
@@ -14225,7 +14285,6 @@ extern "C" __global__ void __launch_bounds__(128) gprod_bwd_6f194247389dfa5c(
   dx1 = fmaf(dv1, x1, dx1);
   dx0 = fmaf(dv0, x0, dx0);
   dx0 = fmaf(dv0, x0, dx0);
-  float dot = 0.0f;
   dot = fmaf(dx0, x0, dot);
   dm0[((int64_t)a * 1 + 0) * C + c] = dx0 * s;
   dot = fmaf(dx1, x1, dot);
@@ -14258,6 +14317,7 @@ extern "C" __global__ void __launch_bounds__(128) gprod_bwd_6f194247389dfa5c(
   dm3[((int64_t)a * 7 + 5) * C + c] = dx14 * s;
   dot = fmaf(dx15, x15, dot);
   dm3[((int64_t)a * 7 + 6) * C + c] = dx15 * s;
+  }
   if (dD) {
     #pragma unroll
     for (int off = 16; off > 0; off >>= 1) dot += __shfl_xor_sync(0xffffffffu, dot, off);
@@ -14268,7 +14328,9 @@ extern "C" __global__ void __launch_bounds__(128) gprod_bwd_6f194247389dfa5c(
 extern "C" __global__ void __launch_bounds__(128) gprod_fwdc_6f194247389dfa5c(
     int N, int C, int kept, int n_ang, int wl0, int wl1, int wl2, int wl3, const int* __restrict__ order, const int* __restrict__ pos, const float* __restrict__ m0, const float* __restrict__ m1, const float* __restrict__ m2, const float* __restrict__ m3, const float* __restrict__ D, const float* __restrict__ w, int64_t w_stride, const int* __restrict__ sp, float* __restrict__ y0, float* __restrict__ y1, float* __restrict__ y2,
     const float* __restrict__ ro_w, double* __restrict__ energy) {
-  const int a = blockIdx.x, c = blockIdx.y * blockDim.x + threadIdx.x, oc = order[c];
+  const int a = blockIdx.x, c = blockIdx.y * blockDim.x + threadIdx.x;
+  const bool active = c < C;
+  const int oc = active ? order[c] : 0;
   const float s = D ? 1.0f / (D[a] + 1.0f) : 1.0f;
   const float* wr = w + (int64_t)sp[a] * w_stride + c;
   float o0 = 0.0f, o1 = 0.0f, o2 = 0.0f, o3 = 0.0f, o4 = 0.0f, o5 = 0.0f, o6 = 0.0f, o7 = 0.0f, o8 = 0.0f;
@@ -14499,6 +14561,7 @@ extern "C" __global__ void __launch_bounds__(128) gprod_fwdc_6f194247389dfa5c(
     o0 = fmaf(w0, x0, o0);
     o0 = fmaf(w1, v0, o0);
   }
+  if (active) {
   y0[((int64_t)a * 1 + 0) * C + oc] = o0;
   y1[((int64_t)a * 3 + 0) * C + oc] = o1;
   y1[((int64_t)a * 3 + 1) * C + oc] = o2;
@@ -14508,8 +14571,9 @@ extern "C" __global__ void __launch_bounds__(128) gprod_fwdc_6f194247389dfa5c(
   y2[((int64_t)a * 5 + 2) * C + oc] = o6;
   y2[((int64_t)a * 5 + 3) * C + oc] = o7;
   y2[((int64_t)a * 5 + 4) * C + oc] = o8;
+  }
   if (ro_w) {
-    double e = (double)o0 * (double)__ldg(ro_w + oc);
+    double e = active ? (double)o0 * (double)__ldg(ro_w + oc) : 0.0;
     #pragma unroll
     for (int off = 16; off > 0; off >>= 1) e += __shfl_xor_sync(0xffffffffu, e, off);
     __shared__ double s_e[4];
@@ -14526,18 +14590,20 @@ extern "C" __global__ void __launch_bounds__(128) gprod_fwdc_6f194247389dfa5c(
 extern "C" __global__ void __launch_bounds__(128) gprod_bwdc_6f194247389dfa5c(
     int N, int C, int kept, int n_ang, int wl0, int wl1, int wl2, int wl3, const int* __restrict__ order, const int* __restrict__ pos, const float* __restrict__ m0, const float* __restrict__ m1, const float* __restrict__ m2, const float* __restrict__ m3, const float* __restrict__ D, const float* __restrict__ w, int64_t w_stride, const int* __restrict__ sp, const float* __restrict__ gin0, const float* __restrict__ gin1, const float* __restrict__ gin2,
     float* __restrict__ dm0, float* __restrict__ dm1, float* __restrict__ dm2, float* __restrict__ dm3, float* __restrict__ dD, const float* __restrict__ gseed) {
-  const int a = blockIdx.x, c = blockIdx.y * blockDim.x + threadIdx.x, oc = order[c];
+  const int a = blockIdx.x, c = blockIdx.y * blockDim.x + threadIdx.x;
+  const bool active = c < C;
+  const int oc = active ? order[c] : 0;
   const float s = D ? 1.0f / (D[a] + 1.0f) : 1.0f;
   const float* wr = w + (int64_t)sp[a] * w_stride + c;
-  const float g0 = __ldg(gin0 + ((int64_t)a * 1 + 0) * C + oc) + (gseed ? __ldg(gseed + oc) : 0.0f);
-  const float g1 = __ldg(gin1 + ((int64_t)a * 3 + 0) * C + oc);
-  const float g2 = __ldg(gin1 + ((int64_t)a * 3 + 1) * C + oc);
-  const float g3 = __ldg(gin1 + ((int64_t)a * 3 + 2) * C + oc);
-  const float g4 = __ldg(gin2 + ((int64_t)a * 5 + 0) * C + oc);
-  const float g5 = __ldg(gin2 + ((int64_t)a * 5 + 1) * C + oc);
-  const float g6 = __ldg(gin2 + ((int64_t)a * 5 + 2) * C + oc);
-  const float g7 = __ldg(gin2 + ((int64_t)a * 5 + 3) * C + oc);
-  const float g8 = __ldg(gin2 + ((int64_t)a * 5 + 4) * C + oc);
+  const float g0 = active ? (__ldg(gin0 + ((int64_t)a * 1 + 0) * C + oc) + (gseed ? __ldg(gseed + oc) : 0.0f)) : 0.0f;
+  const float g1 = active ? (__ldg(gin1 + ((int64_t)a * 3 + 0) * C + oc)) : 0.0f;
+  const float g2 = active ? (__ldg(gin1 + ((int64_t)a * 3 + 1) * C + oc)) : 0.0f;
+  const float g3 = active ? (__ldg(gin1 + ((int64_t)a * 3 + 2) * C + oc)) : 0.0f;
+  const float g4 = active ? (__ldg(gin2 + ((int64_t)a * 5 + 0) * C + oc)) : 0.0f;
+  const float g5 = active ? (__ldg(gin2 + ((int64_t)a * 5 + 1) * C + oc)) : 0.0f;
+  const float g6 = active ? (__ldg(gin2 + ((int64_t)a * 5 + 2) * C + oc)) : 0.0f;
+  const float g7 = active ? (__ldg(gin2 + ((int64_t)a * 5 + 3) * C + oc)) : 0.0f;
+  const float g8 = active ? (__ldg(gin2 + ((int64_t)a * 5 + 4) * C + oc)) : 0.0f;
   float dot = 0.0f;
   if (c < n_ang) {
     const int p1 = pos[c], p2 = pos[n_ang + c], p3 = pos[2 * n_ang + c];
@@ -15145,8 +15211,11 @@ extern "C" __global__ void __launch_bounds__(128) gprod_bwd_h2_6f194247389dfa5c(
     int N, int C, const float* __restrict__ m0, const float* __restrict__ m1, const float* __restrict__ m2, const float* __restrict__ m3, const float* __restrict__ D, const float* __restrict__ w, int64_t w_stride, const int* __restrict__ sp, const float* __restrict__ gin0, const float* __restrict__ gin1, const float* __restrict__ gin2,
     float* __restrict__ dm0, float* __restrict__ dm1, float* __restrict__ dm2, float* __restrict__ dm3, float* __restrict__ dD, const float* __restrict__ gseed) {
   const int a = blockIdx.x, c = blockIdx.y * blockDim.x + threadIdx.x;
+  const bool active = c < C;
   const float s = D ? 1.0f / (D[a] + 1.0f) : 1.0f;
   const float* wr = w + (int64_t)sp[a] * w_stride + c;
+  float dot = 0.0f;
+  if (active) {
   const float x0 = __ldg(m0 + ((int64_t)a * 1 + 0) * C + c) * s;
   const float x1 = __ldg(m1 + ((int64_t)a * 3 + 0) * C + c) * s;
   const float x2 = __ldg(m1 + ((int64_t)a * 3 + 1) * C + c) * s;
@@ -15703,7 +15772,6 @@ extern "C" __global__ void __launch_bounds__(128) gprod_bwd_h2_6f194247389dfa5c(
   dx1 = fmaf(dv1, x1, dx1);
   dx0 = fmaf(dv0, x0, dx0);
   dx0 = fmaf(dv0, x0, dx0);
-  float dot = 0.0f;
   dot = fmaf(dx0, x0, dot);
   loup_store_h2(dm0, ((int64_t)a * 1 + 0) * C + c, (int64_t)N * 1 * C, dx0 * s);
   dot = fmaf(dx1, x1, dot);
@@ -15736,6 +15804,7 @@ extern "C" __global__ void __launch_bounds__(128) gprod_bwd_h2_6f194247389dfa5c(
   loup_store_h2(dm3, ((int64_t)a * 7 + 5) * C + c, (int64_t)N * 7 * C, dx14 * s);
   dot = fmaf(dx15, x15, dot);
   loup_store_h2(dm3, ((int64_t)a * 7 + 6) * C + c, (int64_t)N * 7 * C, dx15 * s);
+  }
   if (dD) {
     #pragma unroll
     for (int off = 16; off > 0; off >>= 1) dot += __shfl_xor_sync(0xffffffffu, dot, off);
@@ -15747,8 +15816,11 @@ extern "C" __global__ void __launch_bounds__(128) gprod_fwd_4715eda4cc3ebda5(
     int N, int C, const float* __restrict__ m0, const float* __restrict__ m1, const float* __restrict__ m2, const float* __restrict__ m3, const float* __restrict__ D, const float* __restrict__ w, int64_t w_stride, const int* __restrict__ sp, float* __restrict__ y0,
     const float* __restrict__ ro_w, double* __restrict__ energy) {
   const int a = blockIdx.x, c = blockIdx.y * blockDim.x + threadIdx.x;
+  const bool active = c < C;
   const float s = D ? 1.0f / (D[a] + 1.0f) : 1.0f;
   const float* wr = w + (int64_t)sp[a] * w_stride + c;
+  float o0 = 0.0f;
+  if (active) {
   const float x0 = __ldg(m0 + ((int64_t)a * 1 + 0) * C + c) * s;
   const float x1 = __ldg(m1 + ((int64_t)a * 3 + 0) * C + c) * s;
   const float x2 = __ldg(m1 + ((int64_t)a * 3 + 1) * C + c) * s;
@@ -15784,7 +15856,6 @@ extern "C" __global__ void __launch_bounds__(128) gprod_fwd_4715eda4cc3ebda5(
   const float v16 = x14 * x14;
   const float v17 = x15 * x15;
   const float v18 = fmaf(0x1.83091e0000000p-2f, v17, fmaf(0x1.83091e0000000p-2f, v16, fmaf(0x1.83091e0000000p-2f, v15, fmaf(0x1.83091e0000000p-2f, v14, fmaf(0x1.83091e0000000p-2f, v13, fmaf(0x1.83091e0000000p-2f, v12, 0x1.83091e0000000p-2f * v11))))));
-  float o0 = 0.0f;
   { const float wb = __ldg(wr + 0 * C);
     o0 = fmaf(wb, x0, o0);
   }
@@ -15801,8 +15872,9 @@ extern "C" __global__ void __launch_bounds__(128) gprod_fwd_4715eda4cc3ebda5(
     o0 = fmaf(wb, v18, o0);
   }
   y0[((int64_t)a * 1 + 0) * C + c] = o0;
+  }
   if (ro_w) {
-    double e = (double)o0 * (double)__ldg(ro_w + c);
+    double e = active ? (double)o0 * (double)__ldg(ro_w + c) : 0.0;
     #pragma unroll
     for (int off = 16; off > 0; off >>= 1) e += __shfl_xor_sync(0xffffffffu, e, off);
     __shared__ double s_e[4];
@@ -15820,8 +15892,11 @@ extern "C" __global__ void __launch_bounds__(128) gprod_bwd_4715eda4cc3ebda5(
     int N, int C, const float* __restrict__ m0, const float* __restrict__ m1, const float* __restrict__ m2, const float* __restrict__ m3, const float* __restrict__ D, const float* __restrict__ w, int64_t w_stride, const int* __restrict__ sp, const float* __restrict__ gin0,
     float* __restrict__ dm0, float* __restrict__ dm1, float* __restrict__ dm2, float* __restrict__ dm3, float* __restrict__ dD, const float* __restrict__ gseed) {
   const int a = blockIdx.x, c = blockIdx.y * blockDim.x + threadIdx.x;
+  const bool active = c < C;
   const float s = D ? 1.0f / (D[a] + 1.0f) : 1.0f;
   const float* wr = w + (int64_t)sp[a] * w_stride + c;
+  float dot = 0.0f;
+  if (active) {
   const float x0 = __ldg(m0 + ((int64_t)a * 1 + 0) * C + c) * s;
   const float x1 = __ldg(m1 + ((int64_t)a * 3 + 0) * C + c) * s;
   const float x2 = __ldg(m1 + ((int64_t)a * 3 + 1) * C + c) * s;
@@ -15915,7 +15990,6 @@ extern "C" __global__ void __launch_bounds__(128) gprod_bwd_4715eda4cc3ebda5(
   dx1 = fmaf(dv1, x1, dx1);
   dx0 = fmaf(dv0, x0, dx0);
   dx0 = fmaf(dv0, x0, dx0);
-  float dot = 0.0f;
   dot = fmaf(dx0, x0, dot);
   dm0[((int64_t)a * 1 + 0) * C + c] = dx0 * s;
   dot = fmaf(dx1, x1, dot);
@@ -15948,6 +16022,7 @@ extern "C" __global__ void __launch_bounds__(128) gprod_bwd_4715eda4cc3ebda5(
   dm3[((int64_t)a * 7 + 5) * C + c] = dx14 * s;
   dot = fmaf(dx15, x15, dot);
   dm3[((int64_t)a * 7 + 6) * C + c] = dx15 * s;
+  }
   if (dD) {
     #pragma unroll
     for (int off = 16; off > 0; off >>= 1) dot += __shfl_xor_sync(0xffffffffu, dot, off);
@@ -15963,24 +16038,25 @@ __global__ void __launch_bounds__(MAX_B, MIN_BLK) gprod_ro1_fused_4715eda4cc3ebd
     float* __restrict__ dm0, float* __restrict__ dm1, float* __restrict__ dm2, float* __restrict__ dm3, float* __restrict__ dD) {
   const int a = blockIdx.x, c = threadIdx.x;
   if (a >= N) return;
+  const bool active = c < C;
   const float s = D ? 1.0f / (D[a] + 1.0f) : 1.0f;
   const float* wr = w + (int64_t)sp[a] * w_stride + c;
-  const float x0 = __ldg(m0 + ((int64_t)a * 1 + 0) * C + c) * s;
-  const float x1 = __ldg(m1 + ((int64_t)a * 3 + 0) * C + c) * s;
-  const float x2 = __ldg(m1 + ((int64_t)a * 3 + 1) * C + c) * s;
-  const float x3 = __ldg(m1 + ((int64_t)a * 3 + 2) * C + c) * s;
-  const float x4 = __ldg(m2 + ((int64_t)a * 5 + 0) * C + c) * s;
-  const float x5 = __ldg(m2 + ((int64_t)a * 5 + 1) * C + c) * s;
-  const float x6 = __ldg(m2 + ((int64_t)a * 5 + 2) * C + c) * s;
-  const float x7 = __ldg(m2 + ((int64_t)a * 5 + 3) * C + c) * s;
-  const float x8 = __ldg(m2 + ((int64_t)a * 5 + 4) * C + c) * s;
-  const float x9 = __ldg(m3 + ((int64_t)a * 7 + 0) * C + c) * s;
-  const float x10 = __ldg(m3 + ((int64_t)a * 7 + 1) * C + c) * s;
-  const float x11 = __ldg(m3 + ((int64_t)a * 7 + 2) * C + c) * s;
-  const float x12 = __ldg(m3 + ((int64_t)a * 7 + 3) * C + c) * s;
-  const float x13 = __ldg(m3 + ((int64_t)a * 7 + 4) * C + c) * s;
-  const float x14 = __ldg(m3 + ((int64_t)a * 7 + 5) * C + c) * s;
-  const float x15 = __ldg(m3 + ((int64_t)a * 7 + 6) * C + c) * s;
+  const float x0 = active ? __ldg(m0 + ((int64_t)a * 1 + 0) * C + c) * s : 0.0f;
+  const float x1 = active ? __ldg(m1 + ((int64_t)a * 3 + 0) * C + c) * s : 0.0f;
+  const float x2 = active ? __ldg(m1 + ((int64_t)a * 3 + 1) * C + c) * s : 0.0f;
+  const float x3 = active ? __ldg(m1 + ((int64_t)a * 3 + 2) * C + c) * s : 0.0f;
+  const float x4 = active ? __ldg(m2 + ((int64_t)a * 5 + 0) * C + c) * s : 0.0f;
+  const float x5 = active ? __ldg(m2 + ((int64_t)a * 5 + 1) * C + c) * s : 0.0f;
+  const float x6 = active ? __ldg(m2 + ((int64_t)a * 5 + 2) * C + c) * s : 0.0f;
+  const float x7 = active ? __ldg(m2 + ((int64_t)a * 5 + 3) * C + c) * s : 0.0f;
+  const float x8 = active ? __ldg(m2 + ((int64_t)a * 5 + 4) * C + c) * s : 0.0f;
+  const float x9 = active ? __ldg(m3 + ((int64_t)a * 7 + 0) * C + c) * s : 0.0f;
+  const float x10 = active ? __ldg(m3 + ((int64_t)a * 7 + 1) * C + c) * s : 0.0f;
+  const float x11 = active ? __ldg(m3 + ((int64_t)a * 7 + 2) * C + c) * s : 0.0f;
+  const float x12 = active ? __ldg(m3 + ((int64_t)a * 7 + 3) * C + c) * s : 0.0f;
+  const float x13 = active ? __ldg(m3 + ((int64_t)a * 7 + 4) * C + c) * s : 0.0f;
+  const float x14 = active ? __ldg(m3 + ((int64_t)a * 7 + 5) * C + c) * s : 0.0f;
+  const float x15 = active ? __ldg(m3 + ((int64_t)a * 7 + 6) * C + c) * s : 0.0f;
   const float v0 = x0 * x0;
   const float v1 = x1 * x1;
   const float v2 = x2 * x2;
@@ -16001,22 +16077,22 @@ __global__ void __launch_bounds__(MAX_B, MIN_BLK) gprod_ro1_fused_4715eda4cc3ebd
   const float v17 = x15 * x15;
   const float v18 = fmaf(0x1.83091e0000000p-2f, v17, fmaf(0x1.83091e0000000p-2f, v16, fmaf(0x1.83091e0000000p-2f, v15, fmaf(0x1.83091e0000000p-2f, v14, fmaf(0x1.83091e0000000p-2f, v13, fmaf(0x1.83091e0000000p-2f, v12, 0x1.83091e0000000p-2f * v11))))));
   float y0 = 0.0f;
-  const float w0 = __ldg(wr + 0 * C);
+  const float w0 = active ? __ldg(wr + 0 * C) : 0.0f;
   y0 = fmaf(w0, x0, y0);
-  const float w1 = __ldg(wr + 1 * C);
+  const float w1 = active ? __ldg(wr + 1 * C) : 0.0f;
   y0 = fmaf(w1, v0, y0);
-  const float w2 = __ldg(wr + 2 * C);
+  const float w2 = active ? __ldg(wr + 2 * C) : 0.0f;
   y0 = fmaf(w2, v4, y0);
-  const float w3 = __ldg(wr + 3 * C);
+  const float w3 = active ? __ldg(wr + 3 * C) : 0.0f;
   y0 = fmaf(w3, v10, y0);
-  const float w4 = __ldg(wr + 4 * C);
+  const float w4 = active ? __ldg(wr + 4 * C) : 0.0f;
   y0 = fmaf(w4, v18, y0);
   __shared__ float s_y[512];
   __shared__ float s_part[32][16];
   __shared__ float s_dh[16];
-  s_y[c] = y0;
+  if (active) s_y[c] = y0;
   __syncthreads();
-  {
+  if (active) {
     const int k = c & 15, c0 = (c >> 4) * 16;
     float p = 0.0f;
     #pragma unroll
@@ -16040,8 +16116,10 @@ __global__ void __launch_bounds__(MAX_B, MIN_BLK) gprod_ro1_fused_4715eda4cc3ebd
   }
   __syncthreads();
   float g0 = 0.0f;
-  #pragma unroll
-  for (int k = 0; k < 16; ++k) g0 = fmaf(s_dh[k], __ldg(ro_W1 + c * 16 + k), g0);
+  if (active) {
+    #pragma unroll
+    for (int k = 0; k < 16; ++k) g0 = fmaf(s_dh[k], __ldg(ro_W1 + c * 16 + k), g0);
+  }
   float dx0 = w0 * g0;
   float dv0 = w1 * g0;
   float dv4 = w2 * g0;
@@ -16096,37 +16174,37 @@ __global__ void __launch_bounds__(MAX_B, MIN_BLK) gprod_ro1_fused_4715eda4cc3ebd
   dx0 = fmaf(dv0, x0, dx0);
   float dot = 0.0f;
   dot = fmaf(dx0, x0, dot);
-  dm0[((int64_t)a * 1 + 0) * C + c] = dx0 * s;
+  if (active) dm0[((int64_t)a * 1 + 0) * C + c] = dx0 * s;
   dot = fmaf(dx1, x1, dot);
-  dm1[((int64_t)a * 3 + 0) * C + c] = dx1 * s;
+  if (active) dm1[((int64_t)a * 3 + 0) * C + c] = dx1 * s;
   dot = fmaf(dx2, x2, dot);
-  dm1[((int64_t)a * 3 + 1) * C + c] = dx2 * s;
+  if (active) dm1[((int64_t)a * 3 + 1) * C + c] = dx2 * s;
   dot = fmaf(dx3, x3, dot);
-  dm1[((int64_t)a * 3 + 2) * C + c] = dx3 * s;
+  if (active) dm1[((int64_t)a * 3 + 2) * C + c] = dx3 * s;
   dot = fmaf(dx4, x4, dot);
-  dm2[((int64_t)a * 5 + 0) * C + c] = dx4 * s;
+  if (active) dm2[((int64_t)a * 5 + 0) * C + c] = dx4 * s;
   dot = fmaf(dx5, x5, dot);
-  dm2[((int64_t)a * 5 + 1) * C + c] = dx5 * s;
+  if (active) dm2[((int64_t)a * 5 + 1) * C + c] = dx5 * s;
   dot = fmaf(dx6, x6, dot);
-  dm2[((int64_t)a * 5 + 2) * C + c] = dx6 * s;
+  if (active) dm2[((int64_t)a * 5 + 2) * C + c] = dx6 * s;
   dot = fmaf(dx7, x7, dot);
-  dm2[((int64_t)a * 5 + 3) * C + c] = dx7 * s;
+  if (active) dm2[((int64_t)a * 5 + 3) * C + c] = dx7 * s;
   dot = fmaf(dx8, x8, dot);
-  dm2[((int64_t)a * 5 + 4) * C + c] = dx8 * s;
+  if (active) dm2[((int64_t)a * 5 + 4) * C + c] = dx8 * s;
   dot = fmaf(dx9, x9, dot);
-  dm3[((int64_t)a * 7 + 0) * C + c] = dx9 * s;
+  if (active) dm3[((int64_t)a * 7 + 0) * C + c] = dx9 * s;
   dot = fmaf(dx10, x10, dot);
-  dm3[((int64_t)a * 7 + 1) * C + c] = dx10 * s;
+  if (active) dm3[((int64_t)a * 7 + 1) * C + c] = dx10 * s;
   dot = fmaf(dx11, x11, dot);
-  dm3[((int64_t)a * 7 + 2) * C + c] = dx11 * s;
+  if (active) dm3[((int64_t)a * 7 + 2) * C + c] = dx11 * s;
   dot = fmaf(dx12, x12, dot);
-  dm3[((int64_t)a * 7 + 3) * C + c] = dx12 * s;
+  if (active) dm3[((int64_t)a * 7 + 3) * C + c] = dx12 * s;
   dot = fmaf(dx13, x13, dot);
-  dm3[((int64_t)a * 7 + 4) * C + c] = dx13 * s;
+  if (active) dm3[((int64_t)a * 7 + 4) * C + c] = dx13 * s;
   dot = fmaf(dx14, x14, dot);
-  dm3[((int64_t)a * 7 + 5) * C + c] = dx14 * s;
+  if (active) dm3[((int64_t)a * 7 + 5) * C + c] = dx14 * s;
   dot = fmaf(dx15, x15, dot);
-  dm3[((int64_t)a * 7 + 6) * C + c] = dx15 * s;
+  if (active) dm3[((int64_t)a * 7 + 6) * C + c] = dx15 * s;
   if (dD) {
     #pragma unroll
     for (int off = 16; off > 0; off >>= 1) dot += __shfl_xor_sync(0xffffffffu, dot, off);
@@ -16135,7 +16213,7 @@ __global__ void __launch_bounds__(MAX_B, MIN_BLK) gprod_ro1_fused_4715eda4cc3ebd
     __syncthreads();
     if (c == 0) {
       float total = 0.0f;
-      const int nw = C >> 5;
+      const int nw = (int)(blockDim.x >> 5);
       for (int w_i = 0; w_i < nw; ++w_i) total += red[w_i];
       atomicAdd(dD + a, -s * total);
     }
@@ -16150,21 +16228,22 @@ __global__ void __launch_bounds__(MAX_B, MIN_BLK) gprod_ro1s_fused_4715eda4cc3eb
     float* __restrict__ dm0, float* __restrict__ dm1, float* __restrict__ dm2, float* __restrict__ dm3, float* __restrict__ dD) {
   const int a = blockIdx.x, c = threadIdx.x;
   if (a >= N) return;
+  const bool active = c < C;
   const float s = D ? 1.0f / (D[a] + 1.0f) : 1.0f;
   const float* wr = w + (int64_t)sp[a] * w_stride + c;
-  const float x0 = __ldg(m0 + (int64_t)a * C + c) * s;
+  const float x0 = active ? __ldg(m0 + (int64_t)a * C + c) * s : 0.0f;
   const float v0 = x0 * x0;
   float y0 = 0.0f;
-  const float w0 = __ldg(wr + 0 * C);
+  const float w0 = active ? __ldg(wr + 0 * C) : 0.0f;
   y0 = fmaf(w0, x0, y0);
-  const float w1 = __ldg(wr + 1 * C);
+  const float w1 = active ? __ldg(wr + 1 * C) : 0.0f;
   y0 = fmaf(w1, v0, y0);
   __shared__ float s_y[512];
   __shared__ float s_part[32][16];
   __shared__ float s_dh[16];
-  s_y[c] = y0;
+  if (active) s_y[c] = y0;
   __syncthreads();
-  {
+  if (active) {
     const int k = c & 15, c0 = (c >> 4) * 16;
     float p = 0.0f;
     #pragma unroll
@@ -16188,13 +16267,15 @@ __global__ void __launch_bounds__(MAX_B, MIN_BLK) gprod_ro1s_fused_4715eda4cc3eb
   }
   __syncthreads();
   float g0 = 0.0f;
-  #pragma unroll
-  for (int k = 0; k < 16; ++k) g0 = fmaf(s_dh[k], __ldg(ro_W1 + c * 16 + k), g0);
+  if (active) {
+    #pragma unroll
+    for (int k = 0; k < 16; ++k) g0 = fmaf(s_dh[k], __ldg(ro_W1 + c * 16 + k), g0);
+  }
   float dx0 = w0 * g0;
   float dv0 = w1 * g0;
   dx0 = fmaf(dv0, x0, dx0);
   dx0 = fmaf(dv0, x0, dx0);
-  dm0[(int64_t)a * C + c] = dx0 * s;
+  if (active) dm0[(int64_t)a * C + c] = dx0 * s;
   if (dD) {
     float dot = dx0 * x0;
     #pragma unroll
@@ -16204,7 +16285,7 @@ __global__ void __launch_bounds__(MAX_B, MIN_BLK) gprod_ro1s_fused_4715eda4cc3eb
     __syncthreads();
     if (c == 0) {
       float total = 0.0f;
-      const int nw = C >> 5;
+      const int nw = (int)(blockDim.x >> 5);
       for (int w_i = 0; w_i < nw; ++w_i) total += red[w_i];
       atomicAdd(dD + a, -s * total);
     }
@@ -16466,7 +16547,9 @@ __global__ void __launch_bounds__(MAX_B, MIN_BLK) gprod_ro1c_fused_4715eda4cc3eb
 extern "C" __global__ void __launch_bounds__(128) gprod_fwdc_4715eda4cc3ebda5(
     int N, int C, int kept, int n_ang, int wl0, int wl1, int wl2, int wl3, const int* __restrict__ order, const int* __restrict__ pos, const float* __restrict__ m0, const float* __restrict__ m1, const float* __restrict__ m2, const float* __restrict__ m3, const float* __restrict__ D, const float* __restrict__ w, int64_t w_stride, const int* __restrict__ sp, float* __restrict__ y0,
     const float* __restrict__ ro_w, double* __restrict__ energy) {
-  const int a = blockIdx.x, c = blockIdx.y * blockDim.x + threadIdx.x, oc = order[c];
+  const int a = blockIdx.x, c = blockIdx.y * blockDim.x + threadIdx.x;
+  const bool active = c < C;
+  const int oc = active ? order[c] : 0;
   const float s = D ? 1.0f / (D[a] + 1.0f) : 1.0f;
   const float* wr = w + (int64_t)sp[a] * w_stride + c;
   float o0 = 0.0f;
@@ -16525,9 +16608,11 @@ extern "C" __global__ void __launch_bounds__(128) gprod_fwdc_4715eda4cc3ebda5(
     o0 = fmaf(w0, x0, o0);
     o0 = fmaf(w1, v0, o0);
   }
+  if (active) {
   y0[((int64_t)a * 1 + 0) * C + oc] = o0;
+  }
   if (ro_w) {
-    double e = (double)o0 * (double)__ldg(ro_w + oc);
+    double e = active ? (double)o0 * (double)__ldg(ro_w + oc) : 0.0;
     #pragma unroll
     for (int off = 16; off > 0; off >>= 1) e += __shfl_xor_sync(0xffffffffu, e, off);
     __shared__ double s_e[4];
@@ -16544,10 +16629,12 @@ extern "C" __global__ void __launch_bounds__(128) gprod_fwdc_4715eda4cc3ebda5(
 extern "C" __global__ void __launch_bounds__(128) gprod_bwdc_4715eda4cc3ebda5(
     int N, int C, int kept, int n_ang, int wl0, int wl1, int wl2, int wl3, const int* __restrict__ order, const int* __restrict__ pos, const float* __restrict__ m0, const float* __restrict__ m1, const float* __restrict__ m2, const float* __restrict__ m3, const float* __restrict__ D, const float* __restrict__ w, int64_t w_stride, const int* __restrict__ sp, const float* __restrict__ gin0,
     float* __restrict__ dm0, float* __restrict__ dm1, float* __restrict__ dm2, float* __restrict__ dm3, float* __restrict__ dD, const float* __restrict__ gseed) {
-  const int a = blockIdx.x, c = blockIdx.y * blockDim.x + threadIdx.x, oc = order[c];
+  const int a = blockIdx.x, c = blockIdx.y * blockDim.x + threadIdx.x;
+  const bool active = c < C;
+  const int oc = active ? order[c] : 0;
   const float s = D ? 1.0f / (D[a] + 1.0f) : 1.0f;
   const float* wr = w + (int64_t)sp[a] * w_stride + c;
-  const float g0 = __ldg(gin0 + ((int64_t)a * 1 + 0) * C + oc) + (gseed ? __ldg(gseed + oc) : 0.0f);
+  const float g0 = active ? (__ldg(gin0 + ((int64_t)a * 1 + 0) * C + oc) + (gseed ? __ldg(gseed + oc) : 0.0f)) : 0.0f;
   float dot = 0.0f;
   if (c < n_ang) {
     const int p1 = pos[c], p2 = pos[n_ang + c], p3 = pos[2 * n_ang + c];
@@ -16700,8 +16787,11 @@ extern "C" __global__ void __launch_bounds__(128) gprod_bwd_h2_4715eda4cc3ebda5(
     int N, int C, const float* __restrict__ m0, const float* __restrict__ m1, const float* __restrict__ m2, const float* __restrict__ m3, const float* __restrict__ D, const float* __restrict__ w, int64_t w_stride, const int* __restrict__ sp, const float* __restrict__ gin0,
     float* __restrict__ dm0, float* __restrict__ dm1, float* __restrict__ dm2, float* __restrict__ dm3, float* __restrict__ dD, const float* __restrict__ gseed) {
   const int a = blockIdx.x, c = blockIdx.y * blockDim.x + threadIdx.x;
+  const bool active = c < C;
   const float s = D ? 1.0f / (D[a] + 1.0f) : 1.0f;
   const float* wr = w + (int64_t)sp[a] * w_stride + c;
+  float dot = 0.0f;
+  if (active) {
   const float x0 = __ldg(m0 + ((int64_t)a * 1 + 0) * C + c) * s;
   const float x1 = __ldg(m1 + ((int64_t)a * 3 + 0) * C + c) * s;
   const float x2 = __ldg(m1 + ((int64_t)a * 3 + 1) * C + c) * s;
@@ -16795,7 +16885,6 @@ extern "C" __global__ void __launch_bounds__(128) gprod_bwd_h2_4715eda4cc3ebda5(
   dx1 = fmaf(dv1, x1, dx1);
   dx0 = fmaf(dv0, x0, dx0);
   dx0 = fmaf(dv0, x0, dx0);
-  float dot = 0.0f;
   dot = fmaf(dx0, x0, dot);
   loup_store_h2(dm0, ((int64_t)a * 1 + 0) * C + c, (int64_t)N * 1 * C, dx0 * s);
   dot = fmaf(dx1, x1, dot);
@@ -16828,6 +16917,7 @@ extern "C" __global__ void __launch_bounds__(128) gprod_bwd_h2_4715eda4cc3ebda5(
   loup_store_h2(dm3, ((int64_t)a * 7 + 5) * C + c, (int64_t)N * 7 * C, dx14 * s);
   dot = fmaf(dx15, x15, dot);
   loup_store_h2(dm3, ((int64_t)a * 7 + 6) * C + c, (int64_t)N * 7 * C, dx15 * s);
+  }
   if (dD) {
     #pragma unroll
     for (int off = 16; off > 0; off >>= 1) dot += __shfl_xor_sync(0xffffffffu, dot, off);
@@ -16843,24 +16933,25 @@ __global__ void __launch_bounds__(MAX_B, MIN_BLK) gprod_ro1_fused_h2_4715eda4cc3
     float* __restrict__ dm0, float* __restrict__ dm1, float* __restrict__ dm2, float* __restrict__ dm3, float* __restrict__ dD) {
   const int a = blockIdx.x, c = threadIdx.x;
   if (a >= N) return;
+  const bool active = c < C;
   const float s = D ? 1.0f / (D[a] + 1.0f) : 1.0f;
   const float* wr = w + (int64_t)sp[a] * w_stride + c;
-  const float x0 = __ldg(m0 + ((int64_t)a * 1 + 0) * C + c) * s;
-  const float x1 = __ldg(m1 + ((int64_t)a * 3 + 0) * C + c) * s;
-  const float x2 = __ldg(m1 + ((int64_t)a * 3 + 1) * C + c) * s;
-  const float x3 = __ldg(m1 + ((int64_t)a * 3 + 2) * C + c) * s;
-  const float x4 = __ldg(m2 + ((int64_t)a * 5 + 0) * C + c) * s;
-  const float x5 = __ldg(m2 + ((int64_t)a * 5 + 1) * C + c) * s;
-  const float x6 = __ldg(m2 + ((int64_t)a * 5 + 2) * C + c) * s;
-  const float x7 = __ldg(m2 + ((int64_t)a * 5 + 3) * C + c) * s;
-  const float x8 = __ldg(m2 + ((int64_t)a * 5 + 4) * C + c) * s;
-  const float x9 = __ldg(m3 + ((int64_t)a * 7 + 0) * C + c) * s;
-  const float x10 = __ldg(m3 + ((int64_t)a * 7 + 1) * C + c) * s;
-  const float x11 = __ldg(m3 + ((int64_t)a * 7 + 2) * C + c) * s;
-  const float x12 = __ldg(m3 + ((int64_t)a * 7 + 3) * C + c) * s;
-  const float x13 = __ldg(m3 + ((int64_t)a * 7 + 4) * C + c) * s;
-  const float x14 = __ldg(m3 + ((int64_t)a * 7 + 5) * C + c) * s;
-  const float x15 = __ldg(m3 + ((int64_t)a * 7 + 6) * C + c) * s;
+  const float x0 = active ? __ldg(m0 + ((int64_t)a * 1 + 0) * C + c) * s : 0.0f;
+  const float x1 = active ? __ldg(m1 + ((int64_t)a * 3 + 0) * C + c) * s : 0.0f;
+  const float x2 = active ? __ldg(m1 + ((int64_t)a * 3 + 1) * C + c) * s : 0.0f;
+  const float x3 = active ? __ldg(m1 + ((int64_t)a * 3 + 2) * C + c) * s : 0.0f;
+  const float x4 = active ? __ldg(m2 + ((int64_t)a * 5 + 0) * C + c) * s : 0.0f;
+  const float x5 = active ? __ldg(m2 + ((int64_t)a * 5 + 1) * C + c) * s : 0.0f;
+  const float x6 = active ? __ldg(m2 + ((int64_t)a * 5 + 2) * C + c) * s : 0.0f;
+  const float x7 = active ? __ldg(m2 + ((int64_t)a * 5 + 3) * C + c) * s : 0.0f;
+  const float x8 = active ? __ldg(m2 + ((int64_t)a * 5 + 4) * C + c) * s : 0.0f;
+  const float x9 = active ? __ldg(m3 + ((int64_t)a * 7 + 0) * C + c) * s : 0.0f;
+  const float x10 = active ? __ldg(m3 + ((int64_t)a * 7 + 1) * C + c) * s : 0.0f;
+  const float x11 = active ? __ldg(m3 + ((int64_t)a * 7 + 2) * C + c) * s : 0.0f;
+  const float x12 = active ? __ldg(m3 + ((int64_t)a * 7 + 3) * C + c) * s : 0.0f;
+  const float x13 = active ? __ldg(m3 + ((int64_t)a * 7 + 4) * C + c) * s : 0.0f;
+  const float x14 = active ? __ldg(m3 + ((int64_t)a * 7 + 5) * C + c) * s : 0.0f;
+  const float x15 = active ? __ldg(m3 + ((int64_t)a * 7 + 6) * C + c) * s : 0.0f;
   const float v0 = x0 * x0;
   const float v1 = x1 * x1;
   const float v2 = x2 * x2;
@@ -16881,22 +16972,22 @@ __global__ void __launch_bounds__(MAX_B, MIN_BLK) gprod_ro1_fused_h2_4715eda4cc3
   const float v17 = x15 * x15;
   const float v18 = fmaf(0x1.83091e0000000p-2f, v17, fmaf(0x1.83091e0000000p-2f, v16, fmaf(0x1.83091e0000000p-2f, v15, fmaf(0x1.83091e0000000p-2f, v14, fmaf(0x1.83091e0000000p-2f, v13, fmaf(0x1.83091e0000000p-2f, v12, 0x1.83091e0000000p-2f * v11))))));
   float y0 = 0.0f;
-  const float w0 = __ldg(wr + 0 * C);
+  const float w0 = active ? __ldg(wr + 0 * C) : 0.0f;
   y0 = fmaf(w0, x0, y0);
-  const float w1 = __ldg(wr + 1 * C);
+  const float w1 = active ? __ldg(wr + 1 * C) : 0.0f;
   y0 = fmaf(w1, v0, y0);
-  const float w2 = __ldg(wr + 2 * C);
+  const float w2 = active ? __ldg(wr + 2 * C) : 0.0f;
   y0 = fmaf(w2, v4, y0);
-  const float w3 = __ldg(wr + 3 * C);
+  const float w3 = active ? __ldg(wr + 3 * C) : 0.0f;
   y0 = fmaf(w3, v10, y0);
-  const float w4 = __ldg(wr + 4 * C);
+  const float w4 = active ? __ldg(wr + 4 * C) : 0.0f;
   y0 = fmaf(w4, v18, y0);
   __shared__ float s_y[512];
   __shared__ float s_part[32][16];
   __shared__ float s_dh[16];
-  s_y[c] = y0;
+  if (active) s_y[c] = y0;
   __syncthreads();
-  {
+  if (active) {
     const int k = c & 15, c0 = (c >> 4) * 16;
     float p = 0.0f;
     #pragma unroll
@@ -16920,8 +17011,10 @@ __global__ void __launch_bounds__(MAX_B, MIN_BLK) gprod_ro1_fused_h2_4715eda4cc3
   }
   __syncthreads();
   float g0 = 0.0f;
-  #pragma unroll
-  for (int k = 0; k < 16; ++k) g0 = fmaf(s_dh[k], __ldg(ro_W1 + c * 16 + k), g0);
+  if (active) {
+    #pragma unroll
+    for (int k = 0; k < 16; ++k) g0 = fmaf(s_dh[k], __ldg(ro_W1 + c * 16 + k), g0);
+  }
   float dx0 = w0 * g0;
   float dv0 = w1 * g0;
   float dv4 = w2 * g0;
@@ -16976,37 +17069,37 @@ __global__ void __launch_bounds__(MAX_B, MIN_BLK) gprod_ro1_fused_h2_4715eda4cc3
   dx0 = fmaf(dv0, x0, dx0);
   float dot = 0.0f;
   dot = fmaf(dx0, x0, dot);
-  loup_store_h2(dm0, ((int64_t)a * 1 + 0) * C + c, (int64_t)N * 1 * C, dx0 * s);
+  if (active) loup_store_h2(dm0, ((int64_t)a * 1 + 0) * C + c, (int64_t)N * 1 * C, dx0 * s);
   dot = fmaf(dx1, x1, dot);
-  loup_store_h2(dm1, ((int64_t)a * 3 + 0) * C + c, (int64_t)N * 3 * C, dx1 * s);
+  if (active) loup_store_h2(dm1, ((int64_t)a * 3 + 0) * C + c, (int64_t)N * 3 * C, dx1 * s);
   dot = fmaf(dx2, x2, dot);
-  loup_store_h2(dm1, ((int64_t)a * 3 + 1) * C + c, (int64_t)N * 3 * C, dx2 * s);
+  if (active) loup_store_h2(dm1, ((int64_t)a * 3 + 1) * C + c, (int64_t)N * 3 * C, dx2 * s);
   dot = fmaf(dx3, x3, dot);
-  loup_store_h2(dm1, ((int64_t)a * 3 + 2) * C + c, (int64_t)N * 3 * C, dx3 * s);
+  if (active) loup_store_h2(dm1, ((int64_t)a * 3 + 2) * C + c, (int64_t)N * 3 * C, dx3 * s);
   dot = fmaf(dx4, x4, dot);
-  loup_store_h2(dm2, ((int64_t)a * 5 + 0) * C + c, (int64_t)N * 5 * C, dx4 * s);
+  if (active) loup_store_h2(dm2, ((int64_t)a * 5 + 0) * C + c, (int64_t)N * 5 * C, dx4 * s);
   dot = fmaf(dx5, x5, dot);
-  loup_store_h2(dm2, ((int64_t)a * 5 + 1) * C + c, (int64_t)N * 5 * C, dx5 * s);
+  if (active) loup_store_h2(dm2, ((int64_t)a * 5 + 1) * C + c, (int64_t)N * 5 * C, dx5 * s);
   dot = fmaf(dx6, x6, dot);
-  loup_store_h2(dm2, ((int64_t)a * 5 + 2) * C + c, (int64_t)N * 5 * C, dx6 * s);
+  if (active) loup_store_h2(dm2, ((int64_t)a * 5 + 2) * C + c, (int64_t)N * 5 * C, dx6 * s);
   dot = fmaf(dx7, x7, dot);
-  loup_store_h2(dm2, ((int64_t)a * 5 + 3) * C + c, (int64_t)N * 5 * C, dx7 * s);
+  if (active) loup_store_h2(dm2, ((int64_t)a * 5 + 3) * C + c, (int64_t)N * 5 * C, dx7 * s);
   dot = fmaf(dx8, x8, dot);
-  loup_store_h2(dm2, ((int64_t)a * 5 + 4) * C + c, (int64_t)N * 5 * C, dx8 * s);
+  if (active) loup_store_h2(dm2, ((int64_t)a * 5 + 4) * C + c, (int64_t)N * 5 * C, dx8 * s);
   dot = fmaf(dx9, x9, dot);
-  loup_store_h2(dm3, ((int64_t)a * 7 + 0) * C + c, (int64_t)N * 7 * C, dx9 * s);
+  if (active) loup_store_h2(dm3, ((int64_t)a * 7 + 0) * C + c, (int64_t)N * 7 * C, dx9 * s);
   dot = fmaf(dx10, x10, dot);
-  loup_store_h2(dm3, ((int64_t)a * 7 + 1) * C + c, (int64_t)N * 7 * C, dx10 * s);
+  if (active) loup_store_h2(dm3, ((int64_t)a * 7 + 1) * C + c, (int64_t)N * 7 * C, dx10 * s);
   dot = fmaf(dx11, x11, dot);
-  loup_store_h2(dm3, ((int64_t)a * 7 + 2) * C + c, (int64_t)N * 7 * C, dx11 * s);
+  if (active) loup_store_h2(dm3, ((int64_t)a * 7 + 2) * C + c, (int64_t)N * 7 * C, dx11 * s);
   dot = fmaf(dx12, x12, dot);
-  loup_store_h2(dm3, ((int64_t)a * 7 + 3) * C + c, (int64_t)N * 7 * C, dx12 * s);
+  if (active) loup_store_h2(dm3, ((int64_t)a * 7 + 3) * C + c, (int64_t)N * 7 * C, dx12 * s);
   dot = fmaf(dx13, x13, dot);
-  loup_store_h2(dm3, ((int64_t)a * 7 + 4) * C + c, (int64_t)N * 7 * C, dx13 * s);
+  if (active) loup_store_h2(dm3, ((int64_t)a * 7 + 4) * C + c, (int64_t)N * 7 * C, dx13 * s);
   dot = fmaf(dx14, x14, dot);
-  loup_store_h2(dm3, ((int64_t)a * 7 + 5) * C + c, (int64_t)N * 7 * C, dx14 * s);
+  if (active) loup_store_h2(dm3, ((int64_t)a * 7 + 5) * C + c, (int64_t)N * 7 * C, dx14 * s);
   dot = fmaf(dx15, x15, dot);
-  loup_store_h2(dm3, ((int64_t)a * 7 + 6) * C + c, (int64_t)N * 7 * C, dx15 * s);
+  if (active) loup_store_h2(dm3, ((int64_t)a * 7 + 6) * C + c, (int64_t)N * 7 * C, dx15 * s);
   if (dD) {
     #pragma unroll
     for (int off = 16; off > 0; off >>= 1) dot += __shfl_xor_sync(0xffffffffu, dot, off);
@@ -17015,7 +17108,7 @@ __global__ void __launch_bounds__(MAX_B, MIN_BLK) gprod_ro1_fused_h2_4715eda4cc3
     __syncthreads();
     if (c == 0) {
       float total = 0.0f;
-      const int nw = C >> 5;
+      const int nw = (int)(blockDim.x >> 5);
       for (int w_i = 0; w_i < nw; ++w_i) total += red[w_i];
       atomicAdd(dD + a, -s * total);
     }
@@ -17141,12 +17234,14 @@ static void conv_launch(void (*fn)(P...), const void* jk, dim3 g, dim3 b, size_t
         fn<<<N, 256, 0, st>>>(N, C, S, I, sg, perm, psym, rp, snd, vl, act_slab, act_t_sx, sp, packed, dens,            \
                               bias_shift, x[0], x[1], mid[0], mid[1], mid[2], mid[3], D, z0, z1);                       \
     } else if (C <= 256) {                                                                                              \
+        const int blk = ((C + 31) / 32) * 32;                                                                           \
         auto fn = preloc ? K<1, false, 256, true> : K<1, false, 256, false>;                                            \
-        conv_launch(fn, jf0, N, C, 0, st, N, C, S, I, sg, perm, psym, rp, snd, vl, act_slab, act_t_sx, sp, packed,      \
+        conv_launch(fn, jf0, N, blk, 0, st, N, C, S, I, sg, perm, psym, rp, snd, vl, act_slab, act_t_sx, sp, packed,    \
                     dens, bias_shift, x[0], x[1], mid[0], mid[1], mid[2], mid[3], D, z0, z1);                           \
     } else {                                                                                                            \
+        const int blk = ((C + 31) / 32) * 32;                                                                           \
         auto fn = preloc ? K<1, false, 512, true> : K<1, false, 512, false>;                                            \
-        conv_launch(fn, jf0, N, C, 0, st, N, C, S, I, sg, perm, psym, rp, snd, vl, act_slab, act_t_sx, sp, packed,      \
+        conv_launch(fn, jf0, N, blk, 0, st, N, C, S, I, sg, perm, psym, rp, snd, vl, act_slab, act_t_sx, sp, packed,    \
                     dens, bias_shift, x[0], x[1], mid[0], mid[1], mid[2], mid[3], D, z0, z1);                           \
     }
 #define LOUP_LAUNCH_BWD_L1(K, QS)                                                                                      \
@@ -17185,12 +17280,14 @@ void launch_conv_fwd(int lx, cudaStream_t st, int N, int C, int S, int I, const 
             fn<<<N, 128, 0, st>>>(N, C, S, I, sg, perm, psym, rp, snd, vl, act_slab, act_t_sx, sp, packed, dens,
                                   bias_shift, x[0], mid[0], mid[1], mid[2], mid[3], D, z0);
         } else if (C <= 256) {
+            const int blk = ((C + 31) / 32) * 32;
             auto fn = preloc ? gconv_fwd_L0<1, false, 256, true> : gconv_fwd_L0<1, false, 256, false>;
-            conv_launch(fn, jf0, N, C, 0, st, N, C, S, I, sg, perm, psym, rp, snd, vl, act_slab, act_t_sx, sp, packed,
+            conv_launch(fn, jf0, N, blk, 0, st, N, C, S, I, sg, perm, psym, rp, snd, vl, act_slab, act_t_sx, sp, packed,
                         dens, bias_shift, x[0], mid[0], mid[1], mid[2], mid[3], D, z0);
         } else {
+            const int blk = ((C + 31) / 32) * 32;
             auto fn = preloc ? gconv_fwd_L0<1, false, 512, true> : gconv_fwd_L0<1, false, 512, false>;
-            conv_launch(fn, jf0, N, C, 0, st, N, C, S, I, sg, perm, psym, rp, snd, vl, act_slab, act_t_sx, sp, packed,
+            conv_launch(fn, jf0, N, blk, 0, st, N, C, S, I, sg, perm, psym, rp, snd, vl, act_slab, act_t_sx, sp, packed,
                         dens, bias_shift, x[0], mid[0], mid[1], mid[2], mid[3], D, z0);
         }
     } else if (lx == 1) {
@@ -17218,19 +17315,21 @@ void launch_conv_fwd(int lx, cudaStream_t st, int N, int C, int S, int I, const 
                                   bias_shift, x[0], x[1], x[2], mid[0], mid[1], mid[2], mid[3], D, nullptr, nullptr,
                                   nullptr);
         } else if (C <= 256) {
+            const int blk = ((C + 31) / 32) * 32;
             auto fa = preloc ? gconv_fwd_L2a<1, true, 256, true> : gconv_fwd_L2a<1, true, 256, false>;
             auto fb = preloc ? gconv_fwd_L2b<1, true, 256, true> : gconv_fwd_L2b<1, true, 256, false>;
-            conv_launch(fa, jf0, N, C, 0, st, N, C, S, I, sg, perm, psym, rp, snd, vl, act_slab, act_t_sx, sp, packed,
+            conv_launch(fa, jf0, N, blk, 0, st, N, C, S, I, sg, perm, psym, rp, snd, vl, act_slab, act_t_sx, sp, packed,
                         dens, bias_shift, x[0], x[1], x[2], mid[0], mid[1], mid[2], mid[3], D, z0, z1, z2);
-            conv_launch(fb, jf1, N, C, 0, st, N, C, S, I, sg, perm, psym, rp, snd, vl, act_slab, act_t_sx, sp, packed,
+            conv_launch(fb, jf1, N, blk, 0, st, N, C, S, I, sg, perm, psym, rp, snd, vl, act_slab, act_t_sx, sp, packed,
                         nullptr, bias_shift, x[0], x[1], x[2], mid[0], mid[1], mid[2], mid[3], D, nullptr, nullptr,
                         nullptr);
         } else {
+            const int blk = ((C + 31) / 32) * 32;
             auto fa = preloc ? gconv_fwd_L2a<1, false, 512, true> : gconv_fwd_L2a<1, false, 512, false>;
             auto fb = preloc ? gconv_fwd_L2b<1, false, 512, true> : gconv_fwd_L2b<1, false, 512, false>;
-            conv_launch(fa, jf0, N, C, 0, st, N, C, S, I, sg, perm, psym, rp, snd, vl, act_slab, act_t_sx, sp, packed,
+            conv_launch(fa, jf0, N, blk, 0, st, N, C, S, I, sg, perm, psym, rp, snd, vl, act_slab, act_t_sx, sp, packed,
                         dens, bias_shift, x[0], x[1], x[2], mid[0], mid[1], mid[2], mid[3], D, z0, z1, z2);
-            conv_launch(fb, jf1, N, C, 0, st, N, C, S, I, sg, perm, psym, rp, snd, vl, act_slab, act_t_sx, sp, packed,
+            conv_launch(fb, jf1, N, blk, 0, st, N, C, S, I, sg, perm, psym, rp, snd, vl, act_slab, act_t_sx, sp, packed,
                         nullptr, bias_shift, x[0], x[1], x[2], mid[0], mid[1], mid[2], mid[3], D, nullptr, nullptr,
                         nullptr);
         }
@@ -17323,7 +17422,7 @@ void launch_prod(const GProdKernels* k, bool backward, cudaStream_t st, int N, i
         args.push_back(&energy);
     }
     const int blk = (C % 128 == 0) ? 128 : 32;
-    check_cuda(cudaLaunchKernel(backward ? k->bwd : k->fwd, dim3(N, C / blk), dim3(blk), args.data(), 0, st));
+    check_cuda(cudaLaunchKernel(backward ? k->bwd : k->fwd, dim3(N, (C + blk - 1) / blk), dim3(blk), args.data(), 0, st));
 }
 
 void launch_prod_ro1_fused(const GProdKernels* k, cudaStream_t st, int N, int C, float* const* m, const float* D,
@@ -17335,9 +17434,10 @@ void launch_prod_ro1_fused(const GProdKernels* k, cudaStream_t st, int N, int C,
                     &ro_act_c,   &d_hidden16,  &out_energy,  (void*)&dm[0], (void*)&dm[1], (void*)&dm[2],
                     (void*)&dm[3], &dD};
     // S127: scalar_only = the layer's message has only its scalar part (S125), the zero-propagated kernel
-    const void* fn = scalar_only ? ((C <= 128) ? k->ro1s_128 : (C <= 256) ? k->ro1s_256 : k->ro1s_512)
-                                 : ((C <= 128) ? k->ro1_128 : (C <= 256) ? k->ro1_256 : k->ro1_512);
-    check_cuda(cudaLaunchKernel(fn, dim3(N), dim3(C), args, 0, st));
+    const int blk = ((C + 31) / 32) * 32;
+    const void* fn = scalar_only ? ((blk <= 128) ? k->ro1s_128 : (blk <= 256) ? k->ro1s_256 : k->ro1s_512)
+                                 : ((blk <= 128) ? k->ro1_128 : (blk <= 256) ? k->ro1_256 : k->ro1_512);
+    check_cuda(cudaLaunchKernel(fn, dim3(N), dim3(blk), args, 0, st));
 }
 
 void launch_prod_ro1c_fused(const GProdKernels* k, cudaStream_t st, int N, int C, int n_ang, const int* wl,
@@ -17380,7 +17480,7 @@ void launch_prod_c(const GProdKernels* k, bool backward, cudaStream_t st, int N,
         args.push_back(&energy);
     }
     const int blk = (C % 128 == 0) ? 128 : 32;
-    check_cuda(cudaLaunchKernel(backward ? k->bwdc : k->fwdc, dim3(N, C / blk), dim3(blk), args.data(), 0, st));
+    check_cuda(cudaLaunchKernel(backward ? k->bwdc : k->fwdc, dim3(N, (C + blk - 1) / blk), dim3(blk), args.data(), 0, st));
 }
 
 }  // namespace loup

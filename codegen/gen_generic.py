@@ -227,23 +227,41 @@ def cart1_consts():
 
 
 def _decode_into(k, outs, pad):
-    """The packed-table decode of path k's coefficients, then ``name = expr`` for each (name, expr) of ``outs``."""
-    ls = [f"{pad}const uint2 c = __ldg(tq + {k} * C + ch);",
-          f"{pad}const unsigned eb0 = (c.y & 0x0F800000u) + bias_shift;",
-          f"{pad}const float eb_f = __uint_as_float(eb0);",
-          f"{pad}const float r0 = __uint_as_float((c.x & 0x7FFFF8u) | eb0);",
-          f"{pad}const float r1 = __uint_as_float((c.y & 0x7FFFF0u) | eb0);",
-          f"{pad}const float r2 = __uint_as_float((__funnelshift_l(c.x, c.x, 20) & 0x7FF800u) | eb0);",
-          f"{pad}const float r3 = __uint_as_float((__funnelshift_l(c.y, c.y, 19) & 0x7F8000u) | eb0);"]
-    return ls + [f"{pad}{name} = {expr};" for name, expr in outs]
+    """Emit the original MD decode verbatim; only the side build reads the float4 table."""
+    return ["#ifdef LOUP_CONV_TABLE_FP32",
+            f"{pad}const auto cubic = loup::conv_cubic(tq + {k} * C + ch, bias_shift);",
+            *(f"{pad}{name} = {full};" for name, (full, _) in outs),
+            "#else",
+            f"{pad}const uint2 c = __ldg(tq + {k} * C + ch);",
+            f"{pad}const unsigned eb0 = (c.y & 0x0F800000u) + bias_shift;",
+            f"{pad}const float eb_f = __uint_as_float(eb0);",
+            f"{pad}const float r0 = __uint_as_float((c.x & 0x7FFFF8u) | eb0);",
+            f"{pad}const float r1 = __uint_as_float((c.y & 0x7FFFF0u) | eb0);",
+            f"{pad}const float r2 = __uint_as_float((__funnelshift_l(c.x, c.x, 20) & 0x7FF800u) | eb0);",
+            f"{pad}const float r3 = __uint_as_float((__funnelshift_l(c.y, c.y, 19) & 0x7F8000u) | eb0);",
+            *(f"{pad}{name} = {packed};" for name, (_, packed) in outs), "#endif"]
 
 
 def _w_fwd(pw):
-    return f"fmaf({pw}.z, r3, fmaf({pw}.y, r2, fmaf({pw}.x, r1, fmaf({pw}.w, eb_f, r0))))"
+    return (f"cubic.value({pw})",
+            f"fmaf({pw}.z, r3, fmaf({pw}.y, r2, fmaf({pw}.x, r1, fmaf({pw}.w, eb_f, r0))))")
 
 
-W_BWD = "fmaf(s3, r3, fmaf(s2, r2, fmaf(s1, r1, fmaf(nw_hb, eb_f, r0))))"
-DW_BWD = "fmaf(ds3, r3, fmaf(ds2, r2, fmaf(ndt_hb, eb_f, r1)))"
+W_BWD = "cubic.value(pw)", "fmaf(s3, r3, fmaf(s2, r2, fmaf(s1, r1, fmaf(nw_hb, eb_f, r0))))"
+DW_BWD = "cubic.slope(dp)", "fmaf(ds3, r3, fmaf(ds2, r2, fmaf(ndt_hb, eb_f, r1)))"
+
+
+def _backward_table(n_paths):
+    return f"""#ifdef LOUP_CONV_TABLE_FP32
+    const float4 pw = loup::conv_basis(t), dp = loup::conv_slope_basis(t);
+    const auto* tq = loup::conv_table(packed_table) + slab * ({n_paths} * (int64_t)C);
+#else
+    const float s = t - 0.5f, s_sq = s * s;
+    const float s1 = s * 0x1.0p-8f, s2 = s_sq * 0x1.0p-14f, s3 = s * s_sq * 0x1.0p-19f;
+    const float ds2 = (2.0f * s) * 0x1.0p-6f, ds3 = (3.0f * s_sq) * 0x1.0p-11f;
+    const float nw_hb = -1.5f * (1.0f + s1 + s2 + s3), ndt_hb = -1.5f * (1.0f + ds2 + ds3);
+    const uint2* tq = packed_table + slab * ({n_paths} * (int64_t)C);
+#endif"""
 
 
 def _cart_bwd(cart, GS, gofs):
@@ -575,6 +593,7 @@ __global__ void __launch_bounds__(MAX_T) {name}(
   const int half = R == 1 ? 0 : (threadIdx.x >> 7), ch = R == 1 ? threadIdx.x : (threadIdx.x & 127);
   const int rcv = blockIdx.x * R + half;
   if (rcv >= N) return;
+  const bool active = (C_FIX && (C_FIX & 31) == 0) ? true : (ch < C);
   {{  // S99: before the edge loop, so the zero targets are dead during it (no register pressure there)
     const int tpr = R == 1 ? (int)blockDim.x : 128;
 {zero_rows}
@@ -595,7 +614,7 @@ __global__ void __launch_bounds__(MAX_T) {name}(
   }};
   for (int base = eb; base < ee; base += TILE) {{
     const int cnt = (ee - base < TILE) ? (ee - base) : TILE;
-    if (ch >= 32 && ch - 32 < cnt) {{
+    if (C >= 64 && ch >= 32 && ch - 32 < cnt) {{
       const float4 vl = __ldg(vec_len + base + (ch - 32));
 {sh_hi}
     }}
@@ -616,10 +635,15 @@ __global__ void __launch_bounds__(MAX_T) {name}(
           locate_spline(grid, vl.w, iv, t, sxi);
           slab = (int64_t)pr * I + iv;
         }}
+#ifdef LOUP_CONV_TABLE_FP32
+        s_snd[ch] = snd;
+        s_pw[ch] = loup::conv_basis(t);
+#else
         const float s = t - 0.5f, s_sq = s * s;
         const float s1 = s * 0x1.0p-8f, s2 = s_sq * 0x1.0p-14f, s3 = s * s_sq * 0x1.0p-19f;
         s_snd[ch] = snd;
         s_pw[ch] = make_float4(s1, s2, s3, -1.5f * (1.0f + s1 + s2 + s3));
+#endif
         s_tq[ch] = slab * ({n_paths} * (int64_t)C);
         if (density_table) {{
           const float4 dc = __ldg(density_table + slab);
@@ -637,11 +661,16 @@ __global__ void __launch_bounds__(MAX_T) {name}(
       }}
     }}
     sync_grp();
+    if (active) {{
     for (int k = 0; k < cnt;) {{
       const int snd = s_snd[k];
       const float4 pw = s_pw[k];
       const float* she = s_sh + k * ED;
+#ifdef LOUP_CONV_TABLE_FP32
+      const auto* tq = loup::conv_table(packed_table) + s_tq[k];
+#else
       const uint2* tq = packed_table + s_tq[k];
+#endif
       if (PAIR && k + 1 < cnt && s_tq[k + 1] == s_tq[k]) {{
         const int sndB = s_snd[k + 1];
         const float4 pwB = s_pw[k + 1];
@@ -653,10 +682,13 @@ __global__ void __launch_bounds__(MAX_T) {name}(
         k += 1;
       }}
     }}
+    }}
     sync_grp();
   }}
   if (density_table && ch == 0) D[rcv] = dsum;
+  if (active) {{
 {chr(10).join(stores)}
+  }}
 }}
 """
 
@@ -748,15 +780,7 @@ def emit_conv_bwd_lp(lx, l3s=(0, 1, 2, 3), name=None, qs_name=None):
 
     for k, l1, l2, l3, form, q0, sz in slots:
         ch_body.append(f"      {{ // path {k} ({l1},{l2},{l3}) {form}")
-        ch_body.append(f"        const uint2 c = __ldg(tq + {k} * C + ch);")
-        ch_body.append("        const unsigned eb0 = (c.y & 0x0F800000u) + bias_shift;")
-        ch_body.append("        const float eb_f = __uint_as_float(eb0);")
-        ch_body.append("        const float r0 = __uint_as_float((c.x & 0x7FFFF8u) | eb0);")
-        ch_body.append("        const float r1 = __uint_as_float((c.y & 0x7FFFF0u) | eb0);")
-        ch_body.append("        const float r2 = __uint_as_float((__funnelshift_l(c.x, c.x, 20) & 0x7FF800u) | eb0);")
-        ch_body.append("        const float r3 = __uint_as_float((__funnelshift_l(c.y, c.y, 19) & 0x7F8000u) | eb0);")
-        ch_body.append("        const float w = fmaf(s3, r3, fmaf(s2, r2, fmaf(s1, r1, fmaf(nw_hb, eb_f, r0))));")
-        ch_body.append("        const float dw = fmaf(ds3, r3, fmaf(ds2, r2, fmaf(ndt_hb, eb_f, r1)));")
+        ch_body += _decode_into(k, [("const float w", W_BWD), ("const float dw", DW_BWD)], "        ")
         qs = [q_ref(q0 + i) for i in range(sz)]
         if l3 == 1 and form != "raise":
             ch_body.append(f"        const float h = {qs[0]} * nx + {qs[1]} * ny + {qs[2]} * nz;")
@@ -886,11 +910,7 @@ __global__ void __launch_bounds__(512) {name}(
       const int pr = loup::table_pair(pair_sym, species[snd], sa, S);
       slab = (int64_t)pr * I + iv;
     }}
-    const float s = t - 0.5f, s_sq = s * s;
-    const float s1 = s * 0x1.0p-8f, s2 = s_sq * 0x1.0p-14f, s3 = s * s_sq * 0x1.0p-19f;
-    const float ds2 = (2.0f * s) * 0x1.0p-6f, ds3 = (3.0f * s_sq) * 0x1.0p-11f;
-    const float nw_hb = -1.5f * (1.0f + s1 + s2 + s3), ndt_hb = -1.5f * (1.0f + ds2 + ds3);
-    const uint2* tq = packed_table + slab * ({n_paths} * (int64_t)C);
+{_backward_table(n_paths)}
     float pull_Gx = 0.0f, pull_Gy = 0.0f, pull_Gz = 0.0f, pull_R = 0.0f;
     for (int ch = lane; ch < C; ch += 32) {{
 {chr(10).join(ch_body)}
@@ -903,7 +923,7 @@ __global__ void __launch_bounds__(512) {name}(
         ddens = fmaf(t, fmaf(3.0f * dc.w, t, 2.0f * dc.z), dc.y) * sxi;
       }}
       const float fn = pull_Gx * nx + pull_Gy * ny + pull_Gz * nz;
-      const float rad = fmaf(pull_R, sxi * 0x1.0p-8f, dD1_r * ddens);
+      const float rad = fmaf(pull_R, sxi * loup::kConvSlopeScale, dD1_r * ddens);
       float fx = fmaf(nx, rad - fn * inv_d, pull_Gx * inv_d);
       float fy = fmaf(ny, rad - fn * inv_d, pull_Gy * inv_d);
       float fz = fmaf(nz, rad - fn * inv_d, pull_Gz * inv_d);
@@ -935,16 +955,7 @@ def emit_conv_bwd_l1s_sender():
     j0, j1 = slot[k0][1], slot[k1][1]
 
     def decode(k):
-        return "\n".join([
-            f"        const uint2 c = __ldg(tq + {k} * C + ch);",
-            "        const unsigned eb0 = (c.y & 0x0F800000u) + bias_shift;",
-            "        const float eb_f = __uint_as_float(eb0);",
-            "        const float r0 = __uint_as_float((c.x & 0x7FFFF8u) | eb0);",
-            "        const float r1 = __uint_as_float((c.y & 0x7FFFF0u) | eb0);",
-            "        const float r2 = __uint_as_float((__funnelshift_l(c.x, c.x, 20) & 0x7FF800u) | eb0);",
-            "        const float r3 = __uint_as_float((__funnelshift_l(c.y, c.y, 19) & 0x7F8000u) | eb0);",
-            "        const float w = fmaf(s3, r3, fmaf(s2, r2, fmaf(s1, r1, fmaf(nw_hb, eb_f, r0))));",
-            "        const float dw = fmaf(ds3, r3, fmaf(ds2, r2, fmaf(ndt_hb, eb_f, r1)));"])
+        return "\n".join(_decode_into(k, [("const float w", W_BWD), ("const float dw", DW_BWD)], "        "))
 
     return f"""template <int NCH, bool WANT_DX, bool PRELOC>
 __global__ void __launch_bounds__(128) gconv_bwd_L1sr(
@@ -992,11 +1003,7 @@ __global__ void __launch_bounds__(128) gconv_bwd_L1sr(
       locate_spline(grid, vl.w, iv, t, sxi);
     }}
     const int64_t slab = (int64_t)loup::table_pair(pair_sym, sj, species[i], S) * I + iv;
-    const float s = t - 0.5f, s_sq = s * s;
-    const float s1 = s * 0x1.0p-8f, s2 = s_sq * 0x1.0p-14f, s3 = s * s_sq * 0x1.0p-19f;
-    const float ds2 = (2.0f * s) * 0x1.0p-6f, ds3 = (3.0f * s_sq) * 0x1.0p-11f;
-    const float nw_hb = -1.5f * (1.0f + s1 + s2 + s3), ndt_hb = -1.5f * (1.0f + ds2 + ds3);
-    const uint2* tq = packed_table + slab * ({n_paths} * (int64_t)C);
+{_backward_table(n_paths)}
     const float* gi = dmid0 + (int64_t)i * {count[0]} * C;
     float pull_Gx = 0.0f, pull_Gy = 0.0f, pull_Gz = 0.0f, pull_R = 0.0f;
     #pragma unroll
@@ -1028,7 +1035,7 @@ __global__ void __launch_bounds__(128) gconv_bwd_L1sr(
         }}
       }}
       const float fn = pull_Gx * nx + pull_Gy * ny + pull_Gz * nz;
-      const float rad = fmaf(pull_R, sxi * 0x1.0p-8f, dDi * ddens);
+      const float rad = fmaf(pull_R, sxi * loup::kConvSlopeScale, dDi * ddens);
       float fx = fmaf(nx, rad - fn * inv_d, pull_Gx * inv_d);
       float fy = fmaf(ny, rad - fn * inv_d, pull_Gy * inv_d);
       float fz = fmaf(nz, rad - fn * inv_d, pull_Gz * inv_d);
@@ -1107,15 +1114,7 @@ def emit_conv_bwd_L2(groups=(0, 1, 2)):
             _, j = slot[k]
             n = count[l3]
             ch_body.append(f"        {{ // path {k} ({l1},{l2},{l3})")
-            ch_body.append(f"          const uint2 c = __ldg(tq + {k} * C + ch);")
-            ch_body.append("          const unsigned eb0 = (c.y & 0x0F800000u) + bias_shift;")
-            ch_body.append("          const float eb_f = __uint_as_float(eb0);")
-            ch_body.append("          const float r0 = __uint_as_float((c.x & 0x7FFFF8u) | eb0);")
-            ch_body.append("          const float r1 = __uint_as_float((c.y & 0x7FFFF0u) | eb0);")
-            ch_body.append("          const float r2 = __uint_as_float((__funnelshift_l(c.x, c.x, 20) & 0x7FF800u) | eb0);")
-            ch_body.append("          const float r3 = __uint_as_float((__funnelshift_l(c.y, c.y, 19) & 0x7F8000u) | eb0);")
-            ch_body.append("          const float R = fmaf(s3, r3, fmaf(s2, r2, fmaf(s1, r1, fmaf(nw_hb, eb_f, r0))));")
-            ch_body.append("          const float dw = fmaf(ds3, r3, fmaf(ds2, r2, fmaf(ndt_hb, eb_f, r1)));")
+            ch_body += _decode_into(k, [("const float R", W_BWD), ("const float dw", DW_BWD)], "          ")
             for m3 in range(2 * l3 + 1):
                 ch_body.append(f"          const float g{m3} = s_g[ch * {GS} + {gofs[k] + m3}];")
             A = {}
@@ -1200,11 +1199,7 @@ __global__ void __launch_bounds__(128) gconv_bwd_L2(
       const int pr = loup::table_pair(pair_sym, species[snd], sa, S);
       slab = (int64_t)pr * I + iv;
     }}
-    const float s = t - 0.5f, s_sq = s * s;
-    const float s1 = s * 0x1.0p-8f, s2 = s_sq * 0x1.0p-14f, s3 = s * s_sq * 0x1.0p-19f;
-    const float ds2 = (2.0f * s) * 0x1.0p-6f, ds3 = (3.0f * s_sq) * 0x1.0p-11f;
-    const float nw_hb = -1.5f * (1.0f + s1 + s2 + s3), ndt_hb = -1.5f * (1.0f + ds2 + ds3);
-    const uint2* tq = packed_table + slab * ({n_paths} * (int64_t)C);
+{_backward_table(n_paths)}
     float dY[16];
     #pragma unroll
     for (int i = 0; i < 16; ++i) dY[i] = 0.0f;
@@ -1242,7 +1237,7 @@ __global__ void __launch_bounds__(128) gconv_bwd_L2(
       float gx, gy, gz;
       sh16_grad(nx, ny, nz, s_dy[wid], gx, gy, gz);
       const float dot = nx * gx + ny * gy + nz * gz;
-      const float rad = fmaf(pull_R, sxi * 0x1.0p-8f, dD1_r * ddens);
+      const float rad = fmaf(pull_R, sxi * loup::kConvSlopeScale, dD1_r * ddens);
       float fx = fmaf(nx, rad - dot * inv_d, gx * inv_d);
       float fy = fmaf(ny, rad - dot * inv_d, gy * inv_d);
       float fz = fmaf(nz, rad - dot * inv_d, gz * inv_d);
@@ -1385,12 +1380,14 @@ static void conv_launch(void (*fn)(P...), const void* jk, dim3 g, dim3 b, size_t
         fn<<<N, 256, 0, st>>>(N, C, S, I, sg, perm, psym, rp, snd, vl, act_slab, act_t_sx, sp, packed, dens,            \\
                               bias_shift, x[0], x[1], mid[0], mid[1], mid[2], mid[3], D, z0, z1);                       \\
     } else if (C <= 256) {                                                                                              \\
+        const int blk = ((C + 31) / 32) * 32;                                                                           \\
         auto fn = preloc ? K<1, false, 256, true> : K<1, false, 256, false>;                                            \\
-        conv_launch(fn, jf0, N, C, 0, st, N, C, S, I, sg, perm, psym, rp, snd, vl, act_slab, act_t_sx, sp, packed,      \\
+        conv_launch(fn, jf0, N, blk, 0, st, N, C, S, I, sg, perm, psym, rp, snd, vl, act_slab, act_t_sx, sp, packed,    \\
                     dens, bias_shift, x[0], x[1], mid[0], mid[1], mid[2], mid[3], D, z0, z1);                           \\
     } else {                                                                                                            \\
+        const int blk = ((C + 31) / 32) * 32;                                                                           \\
         auto fn = preloc ? K<1, false, 512, true> : K<1, false, 512, false>;                                            \\
-        conv_launch(fn, jf0, N, C, 0, st, N, C, S, I, sg, perm, psym, rp, snd, vl, act_slab, act_t_sx, sp, packed,      \\
+        conv_launch(fn, jf0, N, blk, 0, st, N, C, S, I, sg, perm, psym, rp, snd, vl, act_slab, act_t_sx, sp, packed,    \\
                     dens, bias_shift, x[0], x[1], mid[0], mid[1], mid[2], mid[3], D, z0, z1);                           \\
     }
 #define LOUP_LAUNCH_BWD_L1(K, QS)                                                                                      \\
@@ -1429,12 +1426,14 @@ void launch_conv_fwd(int lx, cudaStream_t st, int N, int C, int S, int I, const 
             fn<<<N, 128, 0, st>>>(N, C, S, I, sg, perm, psym, rp, snd, vl, act_slab, act_t_sx, sp, packed, dens,
                                   bias_shift, x[0], mid[0], mid[1], mid[2], mid[3], D, z0);
         } else if (C <= 256) {
+            const int blk = ((C + 31) / 32) * 32;
             auto fn = preloc ? gconv_fwd_L0<1, false, 256, true> : gconv_fwd_L0<1, false, 256, false>;
-            conv_launch(fn, jf0, N, C, 0, st, N, C, S, I, sg, perm, psym, rp, snd, vl, act_slab, act_t_sx, sp, packed,
+            conv_launch(fn, jf0, N, blk, 0, st, N, C, S, I, sg, perm, psym, rp, snd, vl, act_slab, act_t_sx, sp, packed,
                         dens, bias_shift, x[0], mid[0], mid[1], mid[2], mid[3], D, z0);
         } else {
+            const int blk = ((C + 31) / 32) * 32;
             auto fn = preloc ? gconv_fwd_L0<1, false, 512, true> : gconv_fwd_L0<1, false, 512, false>;
-            conv_launch(fn, jf0, N, C, 0, st, N, C, S, I, sg, perm, psym, rp, snd, vl, act_slab, act_t_sx, sp, packed,
+            conv_launch(fn, jf0, N, blk, 0, st, N, C, S, I, sg, perm, psym, rp, snd, vl, act_slab, act_t_sx, sp, packed,
                         dens, bias_shift, x[0], mid[0], mid[1], mid[2], mid[3], D, z0);
         }
     } else if (lx == 1) {
@@ -1462,19 +1461,21 @@ void launch_conv_fwd(int lx, cudaStream_t st, int N, int C, int S, int I, const 
                                   bias_shift, x[0], x[1], x[2], mid[0], mid[1], mid[2], mid[3], D, nullptr, nullptr,
                                   nullptr);
         } else if (C <= 256) {
+            const int blk = ((C + 31) / 32) * 32;
             auto fa = preloc ? gconv_fwd_L2a<1, true, 256, true> : gconv_fwd_L2a<1, true, 256, false>;
             auto fb = preloc ? gconv_fwd_L2b<1, true, 256, true> : gconv_fwd_L2b<1, true, 256, false>;
-            conv_launch(fa, jf0, N, C, 0, st, N, C, S, I, sg, perm, psym, rp, snd, vl, act_slab, act_t_sx, sp, packed,
+            conv_launch(fa, jf0, N, blk, 0, st, N, C, S, I, sg, perm, psym, rp, snd, vl, act_slab, act_t_sx, sp, packed,
                         dens, bias_shift, x[0], x[1], x[2], mid[0], mid[1], mid[2], mid[3], D, z0, z1, z2);
-            conv_launch(fb, jf1, N, C, 0, st, N, C, S, I, sg, perm, psym, rp, snd, vl, act_slab, act_t_sx, sp, packed,
+            conv_launch(fb, jf1, N, blk, 0, st, N, C, S, I, sg, perm, psym, rp, snd, vl, act_slab, act_t_sx, sp, packed,
                         nullptr, bias_shift, x[0], x[1], x[2], mid[0], mid[1], mid[2], mid[3], D, nullptr, nullptr,
                         nullptr);
         } else {
+            const int blk = ((C + 31) / 32) * 32;
             auto fa = preloc ? gconv_fwd_L2a<1, false, 512, true> : gconv_fwd_L2a<1, false, 512, false>;
             auto fb = preloc ? gconv_fwd_L2b<1, false, 512, true> : gconv_fwd_L2b<1, false, 512, false>;
-            conv_launch(fa, jf0, N, C, 0, st, N, C, S, I, sg, perm, psym, rp, snd, vl, act_slab, act_t_sx, sp, packed,
+            conv_launch(fa, jf0, N, blk, 0, st, N, C, S, I, sg, perm, psym, rp, snd, vl, act_slab, act_t_sx, sp, packed,
                         dens, bias_shift, x[0], x[1], x[2], mid[0], mid[1], mid[2], mid[3], D, z0, z1, z2);
-            conv_launch(fb, jf1, N, C, 0, st, N, C, S, I, sg, perm, psym, rp, snd, vl, act_slab, act_t_sx, sp, packed,
+            conv_launch(fb, jf1, N, blk, 0, st, N, C, S, I, sg, perm, psym, rp, snd, vl, act_slab, act_t_sx, sp, packed,
                         nullptr, bias_shift, x[0], x[1], x[2], mid[0], mid[1], mid[2], mid[3], D, nullptr, nullptr,
                         nullptr);
         }
@@ -1567,7 +1568,7 @@ void launch_prod(const GProdKernels* k, bool backward, cudaStream_t st, int N, i
         args.push_back(&energy);
     }
     const int blk = (C % 128 == 0) ? 128 : 32;
-    check_cuda(cudaLaunchKernel(backward ? k->bwd : k->fwd, dim3(N, C / blk), dim3(blk), args.data(), 0, st));
+    check_cuda(cudaLaunchKernel(backward ? k->bwd : k->fwd, dim3(N, (C + blk - 1) / blk), dim3(blk), args.data(), 0, st));
 }
 
 void launch_prod_ro1_fused(const GProdKernels* k, cudaStream_t st, int N, int C, float* const* m, const float* D,
@@ -1579,9 +1580,10 @@ void launch_prod_ro1_fused(const GProdKernels* k, cudaStream_t st, int N, int C,
                     &ro_act_c,   &d_hidden16,  &out_energy,  (void*)&dm[0], (void*)&dm[1], (void*)&dm[2],
                     (void*)&dm[3], &dD};
     // S127: scalar_only = the layer's message has only its scalar part (S125), the zero-propagated kernel
-    const void* fn = scalar_only ? ((C <= 128) ? k->ro1s_128 : (C <= 256) ? k->ro1s_256 : k->ro1s_512)
-                                 : ((C <= 128) ? k->ro1_128 : (C <= 256) ? k->ro1_256 : k->ro1_512);
-    check_cuda(cudaLaunchKernel(fn, dim3(N), dim3(C), args, 0, st));
+    const int blk = ((C + 31) / 32) * 32;
+    const void* fn = scalar_only ? ((blk <= 128) ? k->ro1s_128 : (blk <= 256) ? k->ro1s_256 : k->ro1s_512)
+                                 : ((blk <= 128) ? k->ro1_128 : (blk <= 256) ? k->ro1_256 : k->ro1_512);
+    check_cuda(cudaLaunchKernel(fn, dim3(N), dim3(blk), args, 0, st));
 }
 
 void launch_prod_ro1c_fused(const GProdKernels* k, cudaStream_t st, int N, int C, int n_ang, const int* wl,
@@ -1624,7 +1626,7 @@ void launch_prod_c(const GProdKernels* k, bool backward, cudaStream_t st, int N,
         args.push_back(&energy);
     }
     const int blk = (C % 128 == 0) ? 128 : 32;
-    check_cuda(cudaLaunchKernel(backward ? k->bwdc : k->fwdc, dim3(N, C / blk), dim3(blk), args.data(), 0, st));
+    check_cuda(cudaLaunchKernel(backward ? k->bwdc : k->fwdc, dim3(N, (C + blk - 1) / blk), dim3(blk), args.data(), 0, st));
 }
 
 }  // namespace loup
@@ -1639,9 +1641,9 @@ def _hash_files(paths):
     return h.hexdigest()[:16]
 
 
-# Products the generator emits kernels for (GenericModel's bounds: hidden width C in 32..1024, a multiple of 32, and
+# Products the generator emits kernels for (GenericModel's bounds: hidden width C in 16..1024, a multiple of 16, and
 # 16 input segments). Part of the IR cache key: the cached per-model items record which products were skipped.
-PRODUCT_C_MIN, PRODUCT_C_MAX = 32, 1024
+PRODUCT_C_MIN, PRODUCT_C_MAX = 16, 1024
 
 
 def _ir_hash():
@@ -1780,7 +1782,7 @@ def main():
                     sc = pr.symmetric_contractions
                     sh = shape_of(sc)
                     if (sh is None or sh[0] != 16 or sh[3] < PRODUCT_C_MIN or sh[3] > PRODUCT_C_MAX
-                            or sh[3] % 32 != 0):
+                            or sh[3] % 16 != 0):
                         ir_items.append({"idx": idx, "skip": str(sh)})
                         continue
                     prog, feats, _ = factor(merged_terms(sc.etp.polynomial), sh[0], sh[1], sh[2])
@@ -1984,7 +1986,7 @@ def write_plugins(model_path: Path, out_dir: Path):
     for idx, product in enumerate(convert_e3nn_cueq(model).products):
         sc = product.symmetric_contractions
         sh = sc_generated.shape_of(sc)
-        if sh is None or sh[0] != 16 or sh[3] < PRODUCT_C_MIN or sh[3] > PRODUCT_C_MAX or sh[3] % 32 != 0:
+        if sh is None or sh[0] != 16 or sh[3] < PRODUCT_C_MIN or sh[3] > PRODUCT_C_MAX or sh[3] % 16 != 0:
             print(f"skip {idx} {sh}")
             continue
         prog, feats, _ = sc_factored.factor(sc_generated.merged_terms(sc.etp.polynomial), sh[0], sh[1], sh[2])

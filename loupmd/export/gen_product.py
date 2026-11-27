@@ -31,8 +31,11 @@ def _half_variant(lines, stores, old_name, new_name):
     assert len(hits) == 1, (old_name, hits)
     out[hits[0]] = out[hits[0]].replace(old_name + "(", new_name + "(")
     for i, l, idx, val in stores:
-        assert out[i].startswith(f"  dm{l}["), out[i]
-        out[i] = f"  loup_store_h2(dm{l}, {idx}, (int64_t)N * {2 * l + 1} * C, {val});"
+        s = out[i]
+        key = f"dm{l}["
+        pos = s.find(key)
+        assert pos >= 0, s
+        out[i] = f"{s[:pos]}loup_store_h2(dm{l}, {idx}, (int64_t)N * {2 * l + 1} * C, {val});"
     return out
 
 
@@ -52,6 +55,7 @@ def emit_product(sig, prog, feats, sh, dm_half=False):
     used = prog.used(roots)
     head = [
         "  const int a = blockIdx.x, c = blockIdx.y * blockDim.x + threadIdx.x;",
+        "  const bool active = c < C;",
         "  const float s = D ? 1.0f / (D[a] + 1.0f) : 1.0f;",
         "  const float* wr = w + (int64_t)sp[a] * w_stride + c;",
     ]
@@ -59,6 +63,10 @@ def emit_product(sig, prog, feats, sh, dm_half=False):
     for l in range(4):
         for m in range(2 * l + 1):
             loads.append(f"  const float x{l * l + m} = __ldg(m{l} + ((int64_t)a * {2 * l + 1} + {m}) * C + c) * s;")
+    loads_g = []
+    for l in range(4):
+        for m in range(2 * l + 1):
+            loads_g.append(f"  const float x{l * l + m} = active ? __ldg(m{l} + ((int64_t)a * {2 * l + 1} + {m}) * C + c) * s : 0.0f;")
     args_in = "int N, int C, " + _ptr_args("m", range(4)) + \
         ", const float* __restrict__ D, const float* __restrict__ w, int64_t w_stride, const int* __restrict__ sp"
     # S100: ro_w / energy (nullable): a folded linear readout of y0 (S73's energy target), E += sum_a y0[a] . ro_w in
@@ -66,10 +74,12 @@ def emit_product(sig, prog, feats, sh, dm_half=False):
     # writes the seed into the upstream gradient buffer.
     F = [f'extern "C" __global__ void __launch_bounds__(128) gprod_fwd_{sig}(',
          f"    {args_in}, {_ptr_args('y', range(lo + 1), const=False)},",
-         "    const float* __restrict__ ro_w, double* __restrict__ energy) {"] + head + loads
+         "    const float* __restrict__ ro_w, double* __restrict__ energy) {"] + head
+    F.append("  float " + ", ".join(f"o{cc} = 0.0f" for cc in range(seg_out)) + ";")
+    F.append("  if (active) {")
+    F += loads
     for i in used:
         _ssa(F, i, prog.nodes[i])
-    F.append("  float " + ", ".join(f"o{cc} = 0.0f" for cc in range(seg_out)) + ";")
     for b, f in enumerate(feats):
         items = [(cc, u) for cc, u in sorted((f or {}).items()) if u is not None]
         if items:
@@ -79,8 +89,9 @@ def emit_product(sig, prog, feats, sh, dm_half=False):
     for l in range(lo + 1):
         for m in range(2 * l + 1):
             F.append(f"  y{l}[((int64_t)a * {2 * l + 1} + {m}) * C + c] = o{l * l + m};")
+    F.append("  }")
     F += ["  if (ro_w) {",
-          "    double e = (double)o0 * (double)__ldg(ro_w + c);",
+          "    double e = active ? (double)o0 * (double)__ldg(ro_w + c) : 0.0;",
           "    #pragma unroll",
           "    for (int off = 16; off > 0; off >>= 1) e += __shfl_xor_sync(0xffffffffu, e, off);",
           "    __shared__ double s_e[4];",
@@ -97,7 +108,7 @@ def emit_product(sig, prog, feats, sh, dm_half=False):
     B = [f'extern "C" __global__ void __launch_bounds__(128) gprod_bwd_{sig}(',
          f"    {args_in}, {_ptr_args('gin', range(lo + 1))},",
          f"    {_ptr_args('dm', range(4), const=False)}, float* __restrict__ dD, const float* __restrict__ gseed) {{"] + \
-        head + loads
+        head + ["  float dot = 0.0f;", "  if (active) {"] + loads
     for l in range(lo + 1):
         for m in range(2 * l + 1):
             seed = " + (gseed ? __ldg(gseed + c) : 0.0f)" if l == 0 else ""
@@ -136,7 +147,6 @@ def emit_product(sig, prog, feats, sh, dm_half=False):
             for a_, b_ in op[1]:
                 add(a_, (da, _expr(b_)))
                 add(b_, (da, _expr(a_)))
-    B.append("  float dot = 0.0f;")
     b_stores = []
     for l in range(4):
         for m in range(2 * l + 1):
@@ -145,7 +155,8 @@ def emit_product(sig, prog, feats, sh, dm_half=False):
             B.append(f"  dot = fmaf({dx}, x{i}, dot);")
             b_stores.append((len(B), l, f"((int64_t)a * {2 * l + 1} + {m}) * C + c", f"{dx} * s"))
             B.append(f"  dm{l}[((int64_t)a * {2 * l + 1} + {m}) * C + c] = {dx} * s;")
-    B += ["  if (dD) {",
+    B += ["  }",
+          "  if (dD) {",
           "    #pragma unroll",
           "    for (int off = 16; off > 0; off >>= 1) dot += __shfl_xor_sync(0xffffffffu, dot, off);",
           "    if ((threadIdx.x & 31) == 0) atomicAdd(dD + a, -s * dot);",
@@ -213,7 +224,9 @@ def emit_product(sig, prog, feats, sh, dm_half=False):
               "const int* __restrict__ pos, " + _ptr_args("m", range(4)) +
               ", const float* __restrict__ D, const float* __restrict__ w, int64_t w_stride, const int* __restrict__ sp")
     head_c = [
-        "  const int a = blockIdx.x, c = blockIdx.y * blockDim.x + threadIdx.x, oc = order[c];",
+        "  const int a = blockIdx.x, c = blockIdx.y * blockDim.x + threadIdx.x;",
+        "  const bool active = c < C;",
+        "  const int oc = active ? order[c] : 0;",
         "  const float s = D ? 1.0f / (D[a] + 1.0f) : 1.0f;",
         "  const float* wr = w + (int64_t)sp[a] * w_stride + c;",
     ]
@@ -234,11 +247,13 @@ def emit_product(sig, prog, feats, sh, dm_half=False):
     for b, f in enumerate(feats_s):
         FC += [f"    o{cc} = fmaf(w{b}, {_expr(u)}, o{cc});" for cc, u in sorted(f.items())]
     FC.append("  }")
+    FC.append("  if (active) {")
     for l in range(lo + 1):
         for m in range(2 * l + 1):
             FC.append(f"  y{l}[((int64_t)a * {2 * l + 1} + {m}) * C + oc] = o{l * l + m};")
+    FC.append("  }")
     FC += ["  if (ro_w) {",
-           "    double e = (double)o0 * (double)__ldg(ro_w + oc);",
+           "    double e = active ? (double)o0 * (double)__ldg(ro_w + oc) : 0.0;",
            "    #pragma unroll",
            "    for (int off = 16; off > 0; off >>= 1) e += __shfl_xor_sync(0xffffffffu, e, off);",
            "    __shared__ double s_e[4];",
@@ -258,7 +273,7 @@ def emit_product(sig, prog, feats, sh, dm_half=False):
     for l in range(lo + 1):
         for m in range(2 * l + 1):
             seed = " + (gseed ? __ldg(gseed + oc) : 0.0f)" if l == 0 else ""
-            BC.append(f"  const float g{l * l + m} = __ldg(gin{l} + ((int64_t)a * {2 * l + 1} + {m}) * C + oc){seed};")
+            BC.append(f"  const float g{l * l + m} = active ? (__ldg(gin{l} + ((int64_t)a * {2 * l + 1} + {m}) * C + oc){seed}) : 0.0f;")
     BC += ["  float dot = 0.0f;", "  if (c < n_ang) {"] + cload_lines("wl0")
     for i in used:
         _ssa(BC, i, prog.nodes[i])
@@ -287,8 +302,7 @@ def emit_product(sig, prog, feats, sh, dm_half=False):
     compact_src = "\n".join(FC) + "\n\n" + "\n".join(BC) + "\n"
     if lo == 0:
         # Fused product fwd + linear/bias/silu/linear readout fwd&bwd (ro_H = 16) + product bwd, one block per atom
-        # (blockDim = C, 32..512, multiple of 32; generic.cu uses it only for C <= 512): generalises sc1_fused across
-        # all model families.
+        # (blockDim = C rounded up to 32, C in 16..512, multiple of 16; generic.cu uses it only for C <= 512).
         RF = [
             "template <int MAX_B, int MIN_BLK>",
             f"__global__ void __launch_bounds__(MAX_B, MIN_BLK) gprod_ro1_fused_{sig}(",
@@ -298,20 +312,56 @@ def emit_product(sig, prog, feats, sh, dm_half=False):
             f"    {_ptr_args('dm', range(4), const=False)}, float* __restrict__ dD) {{",
             "  const int a = blockIdx.x, c = threadIdx.x;",
             "  if (a >= N) return;",
+            "  const bool active = c < C;",
             "  const float s = D ? 1.0f / (D[a] + 1.0f) : 1.0f;",
             "  const float* wr = w + (int64_t)sp[a] * w_stride + c;",
-        ] + loads
+        ] + loads_g
         for i in used:
             _ssa(RF, i, prog.nodes[i])
         RF.append("  float y0 = 0.0f;")
         for b, f in enumerate(feats):
             items = [(cc, u) for cc, u in sorted((f or {}).items()) if u is not None]
             if items:
-                RF.append(f"  const float w{b} = __ldg(wr + {b} * C);")
+                RF.append(f"  const float w{b} = active ? __ldg(wr + {b} * C) : 0.0f;")
                 for cc, u in items:
                     assert cc == 0
                     RF.append(f"  y0 = fmaf(w{b}, {_expr(u)}, y0);")
         ro_block = [
+            "  __shared__ float s_y[512];",
+            "  __shared__ float s_part[32][16];",
+            "  __shared__ float s_dh[16];",
+            "  if (active) s_y[c] = y0;",
+            "  __syncthreads();",
+            "  if (active) {",
+            "    const int k = c & 15, c0 = (c >> 4) * 16;",
+            "    float p = 0.0f;",
+            "    #pragma unroll",
+            "    for (int q = 0; q < 16; ++q) p = fmaf(s_y[c0 + q], __ldg(ro_W1 + (c0 + q) * 16 + k), p);",
+            "    s_part[c >> 4][k] = p;",
+            "  }",
+            "  __syncthreads();",
+            "  if (c < 16) {",
+            "    float hsum = (sc_skip16 ? __ldg(sc_skip16 + (int64_t)a * 16 + c) : 0.0f) + __ldg(ro_b1 + c);",
+            "    const int n_chunks = C >> 4;",
+            "    for (int j = 0; j < n_chunks; ++j) hsum += s_part[j][c];",
+            "    const float sig = 1.0f / (1.0f + expf(-hsum));",
+            "    const float w2 = __ldg(ro_W2 + c) * ro_act_c;",
+            "    double e = (double)(hsum * sig) * (double)w2;",
+            "    const float dh = sig * (1.0f + hsum * (1.0f - sig)) * w2;",
+            "    s_dh[c] = dh;",
+            "    d_hidden16[(int64_t)a * 16 + c] = dh;",
+            "    #pragma unroll",
+            "    for (int off = 8; off > 0; off >>= 1) e += __shfl_xor_sync(0x0000ffffu, e, off);",
+            "    if (c == 0) atomicAdd(out_energy, e);",
+            "  }",
+            "  __syncthreads();",
+            "  float g0 = 0.0f;",
+            "  if (active) {",
+            "    #pragma unroll",
+            "    for (int k = 0; k < 16; ++k) g0 = fmaf(s_dh[k], __ldg(ro_W1 + c * 16 + k), g0);",
+            "  }",
+        ]
+        ro_block_c = [
             "  __shared__ float s_y[512];",
             "  __shared__ float s_part[32][16];",
             "  __shared__ float s_dh[16];",
@@ -327,7 +377,7 @@ def emit_product(sig, prog, feats, sh, dm_half=False):
             "  __syncthreads();",
             "  if (c < 16) {",
             "    float hsum = (sc_skip16 ? __ldg(sc_skip16 + (int64_t)a * 16 + c) : 0.0f) + __ldg(ro_b1 + c);",
-            "    const int n_chunks = C >> 4;",
+            "    const int n_chunks = (int)(blockDim.x >> 4);",
             "    for (int j = 0; j < n_chunks; ++j) hsum += s_part[j][c];",
             "    const float sig = 1.0f / (1.0f + expf(-hsum));",
             "    const float w2 = __ldg(ro_W2 + c) * ro_act_c;",
@@ -381,7 +431,7 @@ def emit_product(sig, prog, feats, sh, dm_half=False):
                 dx = adj_rf.get(-1 - i, "0.0f")
                 RF.append(f"  dot = fmaf({dx}, x{i}, dot);")
                 rf_stores.append((len(RF), l, f"((int64_t)a * {2 * l + 1} + {m}) * C + c", f"{dx} * s"))
-                RF.append(f"  dm{l}[((int64_t)a * {2 * l + 1} + {m}) * C + c] = {dx} * s;")
+                RF.append(f"  if (active) dm{l}[((int64_t)a * {2 * l + 1} + {m}) * C + c] = {dx} * s;")
         RF += [
             "  if (dD) {",
             "    #pragma unroll",
@@ -391,7 +441,7 @@ def emit_product(sig, prog, feats, sh, dm_half=False):
             "    __syncthreads();",
             "    if (c == 0) {",
             "      float total = 0.0f;",
-            "      const int nw = C >> 5;",
+            "      const int nw = (int)(blockDim.x >> 5);",
             "      for (int w_i = 0; w_i < nw; ++w_i) total += red[w_i];",
             "      atomicAdd(dD + a, -s * total);",
             "    }",
@@ -411,16 +461,17 @@ def emit_product(sig, prog, feats, sh, dm_half=False):
             f"    {_ptr_args('dm', range(4), const=False)}, float* __restrict__ dD) {{",
             "  const int a = blockIdx.x, c = threadIdx.x;",
             "  if (a >= N) return;",
+            "  const bool active = c < C;",
             "  const float s = D ? 1.0f / (D[a] + 1.0f) : 1.0f;",
             "  const float* wr = w + (int64_t)sp[a] * w_stride + c;",
-            "  const float x0 = __ldg(m0 + (int64_t)a * C + c) * s;",
+            "  const float x0 = active ? __ldg(m0 + (int64_t)a * C + c) * s : 0.0f;",
         ]
         for i in used_s:
             _ssa(RS, i, ops_s[i])
         RS.append("  float y0 = 0.0f;")
         for b, f in enumerate(feats_s):
             if f:
-                RS.append(f"  const float w{b} = __ldg(wr + {b} * C);")
+                RS.append(f"  const float w{b} = active ? __ldg(wr + {b} * C) : 0.0f;")
                 RS += [f"  y0 = fmaf(w{b}, {_expr(u)}, y0);" for _, u in sorted(f.items())]
         RS += ro_block
         adj_s = {}
@@ -450,7 +501,7 @@ def emit_product(sig, prog, feats, sh, dm_half=False):
                     add_s(b_, (da, _expr(a_)))
         dx0 = adj_s.get(-1, "0.0f")
         RS += [
-            f"  dm0[(int64_t)a * C + c] = {dx0} * s;",
+            f"  if (active) dm0[(int64_t)a * C + c] = {dx0} * s;",
             "  if (dD) {",
             f"    float dot = {dx0} * x0;",
             "    #pragma unroll",
@@ -460,7 +511,7 @@ def emit_product(sig, prog, feats, sh, dm_half=False):
             "    __syncthreads();",
             "    if (c == 0) {",
             "      float total = 0.0f;",
-            "      const int nw = C >> 5;",
+            "      const int nw = (int)(blockDim.x >> 5);",
             "      for (int w_i = 0; w_i < nw; ++w_i) total += red[w_i];",
             "      atomicAdd(dD + a, -s * total);",
             "    }",
@@ -502,8 +553,7 @@ def emit_product(sig, prog, feats, sh, dm_half=False):
         for b, f in enumerate(feats_s):
             RC += [f"    y0 = fmaf(w{b}, {_expr(u)}, y0);" for _, u in sorted(f.items())]
         RC.append("  }")
-        RC += [ln.replace("const int n_chunks = C >> 4;", "const int n_chunks = (int)(blockDim.x >> 4);")
-               for ln in ro_block]
+        RC += ro_block_c
         RC += ["  float dot = 0.0f;", "  if (c < n_ang) {"] + cloads
         for i in used:
             _ssa(RC, i, prog.nodes[i])

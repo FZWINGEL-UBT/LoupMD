@@ -10,9 +10,10 @@ import sys
 
 from loupmd.errors import LoupError
 
+from . import distill as _distill
 from . import finetune as _finetune
 
-COMMANDS = (_finetune,)
+COMMANDS = (_distill, _finetune)
 
 
 def build_parser() -> argparse.ArgumentParser:

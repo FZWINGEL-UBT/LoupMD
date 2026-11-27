@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+- New `loupgym` training package (`loupgym finetune`, `loupgym distill`) keeping `loupmd` free of training entry points:
+  - Pure-CUDA foundation MACE fine-tuning (`libloupmd_ft.so`, zero PyTorch in training or inference) covering all foundation model families (density, residual, multi-head MH-1, OFF, OMOL-0, and POLAR-1 with `PolarLR`).
+  - Automatic student distillation (`loupgym.auto_distill`) with ILMLIP / FastLR-SK pure-CUDA training and direct `.loup` bundle loading in `loupmd`.
+- Fixed history-dependent energies, forces and stress when reusing an evaluator across periodic cell changes. The graph that rebuilds the neighbor list on the GPU now uses the current cell instead of replaying a previous cell's periodic images.
+- `make CUDA_ARCH=sm_89 label-lib` builds `build/sm_89-label/libloupmd.so` without replacing the MD library. Set `LOUP_LIB` to that absolute path when qualifying teacher labels sensitive to convolution-table packing.
+- Per-system MACE distillation: periodic engine labels with stress, two-phase training, gated bundle export and student-trajectory fidelity reports.
+
 ## 0.0.3 (24 November 2026)
 
 - MACE-POLAR-1 takes the cell's total charge and spin multiplicity: `charge=` and `spin_multiplicity=`, or

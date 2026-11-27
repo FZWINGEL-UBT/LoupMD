@@ -1,0 +1,74 @@
+{
+ "name": "soap72t",
+ "epochs": 72,
+ "batch_size": 1,
+ "seed": 1,
+ "lr": {
+  "schedule": "piecewise",
+  "points": [
+   [
+    0,
+    0.005
+   ],
+   [
+    1,
+    0.05
+   ],
+   [
+    64.8,
+    0.0015
+   ],
+   [
+    72,
+    0.0001
+   ]
+  ]
+ },
+ "weights": [
+  {
+   "from_epoch": 0,
+   "energy": 1,
+   "forces": 100,
+   "stress": 30
+  },
+  {
+   "from_epoch": 64.8,
+   "energy": 1000,
+   "forces": 100,
+   "stress": 10,
+   "ramp_epochs": 1
+  }
+ ],
+ "ema_decay": 0.99,
+ "max_grad_norm": 1.0,
+ "optimizer": {
+  "kind": "muon",
+  "muon_lr_mult": 1.5,
+  "ns_steps": 8,
+  "ns_polish": 2,
+  "weight_decay": 0.0,
+  "matrix": "soap",
+  "soap_every": 10,
+  "soap_max_dim": 64,
+  "cautious": "adam",
+  "soap_sweeps": 2,
+  "soap_block": true,
+  "betas": [
+   0.9,
+   0.99
+  ],
+  "math": "tf32",
+  "math_until": 64.8,
+  "soap_betas": [
+   0.995,
+   0.995
+  ]
+ },
+ "eval_every": 5,
+ "sampling": {
+  "power": 2.0,
+  "uniform": 0.5,
+  "is_beta": 0.5,
+  "smooth": 0.5
+ }
+}

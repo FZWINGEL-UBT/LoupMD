@@ -1,7 +1,8 @@
 """LoupMD's cache root and its sub-directories (PLAN.md section 4.7).
 
 One root, ``$LOUPMD_CACHE`` (default ``~/.cache/loupmd``; ``LOUP_CACHE_DIR`` is accepted as an older name), with
-``models/``, ``bundles/``, ``plans/``, ``gate_refs/`` and ``lib/``. The root must lie outside the Python
+``models/``, ``bundles/``, ``plans/``, ``gate_refs/``, ``lib/`` and ``train/`` (data the training runs derive, such as
+mace's Clebsch-Gordan matrices). The root must lie outside the Python
 installation (``sys.prefix``): a cache inside it would be removed with the environment and shipped by tools that
 copy environments.
 """
@@ -20,7 +21,7 @@ from .errors import CacheLocationError, InputError
 
 CACHE_VARIABLE = "LOUPMD_CACHE"
 OLD_CACHE_VARIABLE = "LOUP_CACHE_DIR"
-KINDS = ("models", "bundles", "plans", "gate_refs", "lib")
+KINDS = ("models", "bundles", "plans", "gate_refs", "lib", "train")
 
 
 def cache_root(environ=None) -> Path:
@@ -160,7 +161,7 @@ def sizes(environ=None) -> dict:
     return out
 
 
-PRUNABLE = ("bundles", "plans", "gate_refs")   # what LoupMD can make again by itself; models and lib only by name
+PRUNABLE = ("bundles", "plans", "gate_refs", "train")   # what LoupMD can make again; models and lib only by name
 
 
 def prune(older_than_days=None, max_size=None, kinds=PRUNABLE, keep=(), dry_run=False, environ=None, now=None) -> list:

@@ -40,7 +40,7 @@ Several things happen once and are then cached or reused:
 ## Where is the cache, and how do I clean it?
 
 The cache root is `LOUPMD_CACHE`, default `~/.cache/loupmd` (`LOUP_CACHE_DIR` is accepted as an older name). It
-holds `models/`, `bundles/`, `gate_refs/` and `lib/`, and must lie outside the Python installation. The engine
+holds `models/`, `bundles/`, `gate_refs/`, `lib/` and `train/`, and must lie outside the Python installation. The engine
 writes its GEMM plan files (`plans_*.bin`) into the root itself.
 
 ```bash

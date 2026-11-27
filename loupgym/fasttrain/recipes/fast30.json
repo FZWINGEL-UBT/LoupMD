@@ -1,0 +1,56 @@
+{
+ "name": "fast30",
+ "epochs": 30,
+ "batch_size": 4,
+ "seed": 1,
+ "lr": {
+  "schedule": "piecewise",
+  "points": [
+   [
+    0,
+    0.012
+   ],
+   [
+    1,
+    0.12
+   ],
+   [
+    24,
+    0.006
+   ],
+   [
+    26,
+    0.0015
+   ],
+   [
+    30,
+    0.0001
+   ]
+  ]
+ },
+ "weights": [
+  {
+   "from_epoch": 0,
+   "energy": 1,
+   "forces": 100,
+   "stress": 1
+  },
+  {
+   "from_epoch": 26,
+   "energy": 1000,
+   "forces": 100,
+   "stress": 10,
+   "ramp_epochs": 2
+  }
+ ],
+ "ema_decay": 0.99,
+ "max_grad_norm": 1.0,
+ "optimizer": {
+  "kind": "muon",
+  "muon_lr_mult": 1.0,
+  "ns_steps": 8,
+  "ns_polish": 2,
+  "weight_decay": 0.0
+ },
+ "eval_every": 1
+}

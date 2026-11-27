@@ -3531,3 +3531,509 @@ A Colab L4 (the Ada's compute capability at 72 W) confirms today's defaults: eve
 ### 6.71 List 37, second part: MACE-POLAR-1 on the A100 (24 November 2026)
 
 Measured on a second Colab A100-SXM4-40GB with the missing module shipped along (ledger `ideas-20261123-list37`, item 4): POLAR-1's row two-half path, species tables and hidden fold run POLAR-1-M NbCl5 at `0.568` of the previous cc 8.0 step (14.40 -> 8.18 ms), NaCl216 at `0.695`, POLAR-1-L NaCl216 at `0.597` and POLAR-1-S NaCl216 at `0.836`. The row path carries nearly all of it. The six POLAR gate runs pass there except the POLAR-1-L SrTiO3 configuration on which that checkpoint blows up on every device. These three are now the default on compute capability 8.0; the long-range models' conv timing is the one tuned default the A100 does not have (not measured). The Alex jobs queued for this never started and were cancelled.
+
+### 6.72 Loup-S Stage 0: student baseline and workflow
+
+**5060 Ti only — export/gate preflight, not a fidelity result.** List 15 `s64l0.model` on the first 320-atom `test.xyz` frame, two 0.05 Å rattles, default engine at `0b1107b`. `python -m loupmd validate --model … --sha256 … --structure sto320.xyz --ref-device cuda --json gate.json`: **2/2 pass**. Worst ratios to the student's own float32–float64 deviation: E 0.01, F 0.41, S 0.40. No teacher comparison, local time or memory figure. Record: WSL `~/loup-s-stage0/preflight/gate.json`.
+
+**5060 Ti only — fresh teacher labels.** MH-1 `omat_pbe`, SrTiO3 320, 300 train / 30 validation / 60 independent teacher-test frames with all nine potential stress entries, total energy and atomic forces. On the two unstrained 300 K teacher-test trajectories the RMS Cartesian force is 0.56025 eV/Å pooled; O 0.53729, Sr 0.41718, Ti 0.72754. This sets the scale of the teacher-test errors, **not** the student's own-MD bar. Split digests and sampling protocol: `plans/loup-s-stage0.md`.
+
+**T4 smoke training; 5060 Ti only for gate and fidelity.** Two-phase stress loss on 8/4/4 train/valid/test frames, four epochs; checkpoint after epoch 1, final physical model after epoch 3. Plain Bessel input, no species transform, radial widths 64/64/64. Model `1099e33e23ad6f32…`, bundle `389fe4334e6c8ebb…`. Two rattles: 3× gate **2/2**, worst F 1.336e-6 eV/Å (0.35×), S 5.157e-9 eV/Å³ (0.15×). This measures engine arithmetic, not physical fidelity.
+
+On a separate pair of 300 K smoke-student trajectories (4 frames each, burn 250, stride 25), the teacher relabel gives overall F RMSE **2.3772 eV/Å (95.04%)**, O 90.77%, Sr 91.54%, Ti 96.92%. Per-atom error norm p99.9 / max 23.662 / 38.184 eV/Å vs p99.9 cap 0.2501; energy RMSE 393.35 meV/atom; symmetric stress RMSE 0.04459 eV/Å³. **Fails fidelity.** No deterministic or equilibrium-observable pass claimed. Records `~/loup-s-stage0/sto320/t4-smoke-1/{out/manifest.json,gated/gate.json,fidelity.json}`. This intentionally short smoke does not answer falsifier 1.
+
+**5060 Ti only, MH-1 NVE on SrTiO3.** Same equilibrated geometry and seed 51, fixed cell, initial 300 K; 501 samples spaced 10 fs in matched 5 ps runs, five blocks. At 1 / 0.5 fs respectively: mean-centred total-energy RMS **0.002650 / 0.000622 meV/atom**; drift **−0.0000242 / +0.00000851 meV/atom/ps**, smaller in magnitude than the block errors on the slopes (0.000447 / 0.000113). Select 0.5 fs as the conserving-step comparison here: RMS drops 4.26× without a resolved drift. Not an extrapolation to liquid water. Record `~/loup-s-stage0/sto320/observables/teacher-nve.json`.
+
+**5060 Ti only, SrTiO3 teacher spread and domain coverage.** Isotropic MTK NPT, 0 GPa, 300 K, 1 fs, seeds 51 and 53, 30 ps each; discarded first 5 ps, ten 2.5 ps blocks, 50 fs sampling. The two density estimates are **4.876890 ± 0.000433** and **4.877223 ± 0.000390 g/cm³** (block SEM); two-seed spread 0.000333 g/cm³, not a confidence interval. Mean 4×4×4 cell edge 15.87171 Å, spread 0.00036 Å. Six partial RDFs and three species' RMS displacements at 50/200/500 fs, with component-wise spread and SEM: `observables/teacher-stat.json` under the WSL run root above. **Coverage risk:** the 300 training frames span only 15.49501–15.76053 Å in volume-equivalent edge. Leave the paired baseline files frozen. Evaluate the students at NPT; if necessary, acquire new training trajectories around zero-pressure equilibrium rather than leaking these evaluation seeds.
+
+**5060 Ti only, deterministic SrTiO3 references.** Independent relaxations of the same starting geometry to 0.001 and 0.0005 eV/Å changed any lattice edge by at most 0.00953%; the coarser relaxation gives 3.95999 / 3.95806 / 3.95921 Å per primitive repeat. On that 320-atom relaxed geometry, central differences at 0.01 and 0.005 Å change the 960 sorted, signed supercell-Γ frequencies by at most 0.00502 THz (at most 2.76% of the applicable design tolerance). Keep the oxide limits of 0.2% on cell lengths and max(3%, 0.1 THz) on frequencies; neither check determines the other systems' tolerances. Artifacts: `observables/{relaxation*,hessian*,spectrum*}.json`.
+
+**5060 Ti only, trigger workflow smoke.** The four-epoch student's actual first-product features, hidden readout, atom energy and periodic edges gave 30 score variants on disjoint 8/4/8 train/validation/student-visited frames. At the diagnostic threshold of 0.1 eV/Å, **2,559 of 2,560 fixed-test atoms** exceeded the force-error threshold. This can verify the scoring path but cannot select a useful trigger. `t4-smoke-1/triggers.json`; repeat on the trained variants and hard sets.
+
+**Ada only (leeloo), reusing the same teacher for learning-curve frames.** Teacher checkpoint SHA256 `a522eb7f59c7879963d41586528f4980baf33e086c94aa92e3eafdeccad3be47`, head `omat_pbe`, engine `sm_89` library above. Re-evaluating the frozen first 320-atom training geometry from the 5060 Ti gave absolute deltas of **9.90e−9 eV/atom** in energy, **2.235e−6 eV/Å** max component in forces and **3.934e−9 eV/Å³** max component in stress. This checks cross-card labelling on one common geometry, not the student gate. The first 25 new independent 300 K training frames passed finite E/F/3×3 stress, teacher digest, temperature, split, replica and unique-ID checks (`part-00.xyz`, SHA256 `c1646d7f1f53763a2258e966f107ce9fced47b4ee74c4677d7f70aece8a69de5`). No step times measured.
+
+**5060 Ti only, 3,000-frame learning-curve increment.** Local `frames` produced `curve-3000-local/part-28.xyz` (SHA256 `eda7794067c46f9551e375a615d951084a2c97bab48c127408203418c1e88891`): 25 independent 320-atom MH-1 `omat_pbe` frames, seed 7901, replicas 700–724, one terminal frame each after 1 ps at 300 K. Geometry distribution as for the Ada increment; replicas 0–699 are assigned to Ada. `label-check.py` passed teacher identity, trajectory and frame uniqueness, replica, split, temperature, finite energy, forces and 3×3 stress. No timing or VRAM measurement.
+
+**A4000 only (Coraline, Ampere, not Ada).** Separate `sm_86` side build from the same archived engine sources, SHA256 `86c8e30f6c261be523fe2c9e833ef9bf36c396542ae4f66ec0f26fc0fa9f7b5d`, no direct `libstdc++.so` dependency. Guard admitted the empty card. Compared to the same frozen 5060 Ti geometry and MH-1 `omat_pbe` labels used for leeloo, absolute energy delta was **8.464e−9 eV/atom**; max absolute component differences were **2.086e−6 eV/Å** in force and **2.749e−9 eV/Å³** in stress. The first 25 validated independent frames, shard 09 at 300 K, SHA256 `b5d7fc167cc8a1b97451a700b9950de068b8cccfc4e4fb15d76639faf0962cd3`, passed read-back SHA too. This is a teacher data-source check; never use it for a student gate or an Ada timing.
+
+**SrTiO3 learning data, counts not benchmarks.** The first verified nested set is 1,000/30/60 train/validation/teacher-test frames. It preserves the 5060 Ti baseline plus 28 verified shards from leeloo (Ada) and Coraline (Ampere). Training SHA256 `830df9257fa3ffbc0c2e448a933ee1e821b7e5df8ae7ad4cb6a78dcd15dde287`; source digests, temperature counts and held-out identities in `curve-extended/results/curve-1000/manifest.json` under the shared Stage 0 root.
+
+The 3,000-frame set includes the frozen 300 plus 2,700 independent trajectories from the local 5060 Ti, leeloo and Coraline. Its training SHA256 is `10e3a72308ce024c3eba5645ccc456a538136d6cd5e6ad3373cac261b205fee0`. The NFS and WSL files passed SHA256; `cmp` verified the 1,000-frame training prefix and unchanged validation and teacher-test files. The 10,000-frame set and student learning-curve fidelity results are still pending.
+
+**CPU only, training data shape and control; L4 only for interim validation metrics.** On the byte-verified 300/3,000 training extxyz files, `ase.io.iread` + `matscipy.neighbours.neighbour_list("ijS", …, cutoff=5.0)` with full PBC and only the zero-image self pair excluded gives **4,651,748 / 44,469,794 directed edges**. Min/median/max per frame: 14,910/15,574/15,780 and 13,616/14,893/15,780. These are data counts, not student engine edges with a skin. At 86 FP64 scalars per directed edge the proposed full cache is **2.98 / 28.49 GiB** by arithmetic, before topology or activations; no device memory was measured. `1000 * sqrt(mean(REF_forces**2))` over Cartesian components gives 908.92/651.29 meV/Å for the frozen **train/validation** split (not teacher-test). For comparison seed-1 L4 validation at zero-based epoch 129 (`s64l0`): 1,170.77 meV/Å; at epoch 105 (`s64r8`): 283.53. Comparing to the zero predictor flags a fit problem, not its cause or a final fidelity failure.
+
+**L4 training; 5060 Ti only, first full student export.** `s64l0`, seed 1, FP64, final epoch 149: validation E/F/stress RMSE 56.92 meV/atom, 1,257.72 meV/Å, 68.55 meV/Å³. `student.model` SHA256 `d262260426c0b51373b7de3e1e52ef7ef3e74b4780a311d17907b0820b361659`, epoch-110 boundary `f46d65ed2f8c34bdd100bc8b509445ae300566ba2fa2a9a990c154bc162cc8af`. `python -m loupmd.distill.publish JOB/out teacher-test.xyz JOB/gated --ref-device cuda` under `local_gpu.py run`: **2/2 passed**, worst E/F/stress ratios 0.02/2.15/1.29; exact released bundle SHA256 `f5954064e74d1fb2f42cbe10d3364a2f3e607aec37b96a9d59eb68004041d81b`. This is student-vs-engine numerical agreement; teacher fidelity is an independent test.
+
+**5060 Ti only, `s64l0` seed 1, round 0 before any harvest.** `frames --split fixed-student-test`: seed 3101, two independently initialized 300 K trajectories, 1,000-step burn-in then 30 frames each every 50 steps; both models scored on each geometry. `distill.fidelity --regime target --teacher-test … --round 0`: overall F RMSE **0.07232 eV/Å (13.18%)**; O 12.74%, Sr 15.05%, Ti 13.28% (target ≤2% each). Per-atom norm p99.9/max **0.43857/0.96798 eV/Å**, cap 0.05487. E RMSE 35.46 meV/atom (limit 1); symmetric stress RMSE 0.07987 eV/Å³. The separately rescored 60 teacher-test frames give 0.08230 eV/Å: own/teacher ratio **0.879**. The absolute label bar fails; this ratio is **not** the after-two-rounds falsifier. Physical-observable MD fidelity not evaluated. Evidence: `~/loup-s-stage0/sto320/l4-s64l0-seed1/fidelity.json`.
+
+**5060 Ti only, teacher label diagnostic.** Independently evaluated ten distinct frozen trajectories' first selected frames in Torch FP64 `MACECalculator`, verified teacher SHA and `omat_pbe` head: four train, four validation (two each target/hot in both splits), two teacher-test. Across these frames the maximum stored-label deviations were 7.56e−7 eV/atom energy, 2.04e−5 eV/Å force component and 8.20e−8 eV/Å³ stress component. This check does not support a large teacher/label mismatch on the sampled frames; it does not exonerate the whole dataset, certify materialized training inputs or explain the validation regression. Individual IDs/deltas: `l4-s64l0-seed1/teacher-label-spotcheck.json`.
+
+**CPU only, pre-Stage-1 design checks (not GPU timing or measured VRAM).** All 3,000 frozen train graphs passed a reverse-edge multiset comparison including signed periodic images: 22,234,897 radial pair rows. A 20-double-per-pair layout needs 3.31 GiB plus 0.166 GiB for one int32 pair ID per directed row, before live training memory. On a separate nonlinear FP64 toy with a skew cell and periodic self-image, a first-order affine geometry bridge and a detached-sensitivity JVP each reproduced the ordinary full loss's parameter gradient to max absolute `8.9e−16`. This is not a MACE-backend parity or adoption result. Scope, logical-validation reduction check and rejected controls: [training review](plans/loup-s-training-review.md).
+
+**L4 only for training; 5060 Ti only for publication and fidelity.** `s64r8` FP64 seed 1 finished epoch 149: validation E/F/stress RMSE **56.51 meV/atom, 314.44 meV/Å, 68.73 meV/Å³**. Median epoch intervals 10→30 and 120→140 were **43.5305 and 43.532 s** on the L4 with the stock save/validation cadence. Hash-verified student `c7ac9c74c18d71f15a56733a21e0bfa375efb22b62e50d1de410e4d87bc5e339`, epoch-110 boundary `1f20d7dec0201b935d5c6be95149719807d4637ce547e52b4e948cd130ff8190`; the file-recovery watcher retrieved both before closing the L4. `distill.publish … --ref-device cuda`: 2/2, worst E/F/stress ratios **0.00/0.57/0.36**; released bundle SHA256 `be153ee5d6cda750486114e74f85b59c64a04c653c479a03925fb3bcbd57a636`. Radial input: 8 Bessels, 5 Å, order-5 cutoff before `[64,64,8]` MLP, no distance transform or species dependence.
+
+**5060 Ti only, narrow student round 0.** Same frozen sampling protocol as the wide-head seed (3101, two 300 K replicas, 60 own frames). Own F RMSE **0.06919 eV/Å (12.65%)**, by species O **12.17%**, Sr **14.62%**, Ti **12.77%**; atom-norm p99.9/max **0.40479/0.76251 eV/Å** vs 0.05469 cap. E **35.33 meV/atom**, symmetric stress **0.07927 eV/Å³**. On 60 separate teacher-test frames F RMSE was 0.07715 eV/Å, ratio **0.897**. The absolute §4 label bar fails; no post-retraining falsifier or dynamics acceptance claimed. Files in WSL `~/loup-s-stage0/sto320/l4-s64r8-seed1-r3/{out,gated,fidelity.json}`.
+
+**CPU FP64 replay and 5060 Ti only for the native repeated-call check — label integrity failure.** On frozen `valid-80d66c…:700` (600 K, replica 0), O atom 138 (zero-based), `Fy` in eV/Å: stored **3.777774**, stock MH-1 `omat_pbe` **3.847173**, final wide/narrow students **163.879766 / 4.046275**. A centered finite difference of the wide student's own energy gives **163.879772** at `1e−5 Å`. The force spike is a learned energy slope, not merely a logged unit error. Independently on the same serialized geometry, a freshly loaded native teacher yields **3.847180**, while a handle reused in frozen validation order yields **3.777775**. Maximum force-component differences vs stored labels for fresh vs sequential calls are **1.30833** vs **2.37e−6 eV/Å** on this frame; the sequential call order reproduces all 30 stored frames within **4.28e−6 eV/Å**. Thus history dependence on this path is established, not its kernel-level cause. Stored E/F/stress and their resulting metrics remain historical, not qualified teacher measurements. WSL evidence: `l4-s64l0-seed1/{hot700-force-check,native-validation-rescore}.json`.
+
+**leto CPU only, zero Colab CU — extent of the label and fit failures.** [Fit audit](tools/dev/audit_distill_fit.py): the 300 train and 30 validation frames survive FP64 materialization and MACE parsing without a change in geometry, E/F/stress, order or loss weights; fitted E0s agree. No fixed test set scored for diagnosis. Validation component RMSE reproduced the logs at both epoch 110 (1.247280 eV/Å) and 149 (1.257718). Hot replica 0, step 700 accounts for 92.39% and 90.57% of the frozen-validation force SSE at these checkpoints. Without that one frame the final RMSE is 0.39279 vs 0.64571 for zero forces; this is an attribution, **not a reason to drop it**. Full train RMSE 0.51814 vs 0.90892 for zero; validation exceeded zero at epoch 77, before the phase-two switch. Historical per-step gradient norms were not saved.
+
+Independent checkpoint/head-verified FP64 teacher: all 24 first trajectory frames matched within 2.92e−5 eV/Å per component; **19/20 second training frames** and **17/26 later validation frames** exceeded 1e−4 (maxima **10.21970** and **1.50215**). Rescoring the student against fresh labels still gives **1.24555 vs 0.63743 eV/Å** for zero. In four discrepant frames, using the **first cell of the split** with the **current Cartesian positions** reproduces frozen F to ≤2.90e−5 eV/Å and E to ≤6.69e−7 eV/atom. It does not reproduce all stress components (up to 0.00390 eV/Å³); do not “correct” a dataset by replacing cell metadata. Reproduce with `PYTHONPATH=. python tools/dev/audit_distill_fit.py SPLITS JOB/out new.json --teacher PATH_TO_MH1`; use `--pre-stage-two` for the epoch-110 control. WSL `l4-s64l0-seed1/out/audit_{distill_fit,distill_fit_ep110,distill_fit_teacher_replay,first_cell}.json`. Originals unchanged. Diagnose fixed-cell graph invalidation and qualify a new label release, not an optimizer change on the old splits.
+
+**Ada only — measured inference census for both gated seed-1 bundles.** Leeloo RTX 4000 Ada, driver 595.99.02, build `0.0.2+f0e24b7e604d923f`. Fixed cubic periodic SrTiO3, 300 K Langevin, 1 fs, 5 Å cutoff, 0.5 Å skin, seeded thermal velocities; ≥3 s of back-to-back MD with clocks/power recorded, latter-half unprofiled timing. `MiB` is sampled NVML per-process peak, not tensor allocations. Separate 16-step graph-node captures. Archived results `/mnt/homes/zwingel/loup-s-stage0/census-seed1/{s64l0.1,s64r8.1}/` contain `*.time.json`, `*.kernels.json`, `*.trace.json`, `.nsys-rep` and `summary.json`; `sweep.exit` = 0. SHA256s in `bundles.sha256`: `f5954064…` and `be153ee5…` respectively.
+
+| Bundle | Atoms | Clean ms/step | Peak MiB | Latter-half MHz | Latter-half W | Launches/step | Gap % of kernel span |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| s64l0 | 320 | 0.18973 | 238 | 2370 | 102.9–103.3 | 57.06 | 37.0 |
+| s64r8 | 320 | 0.17800 | 232 | 2370 | 89.1–89.3 | 57.06 | 36.7 |
+| s64l0 | 5,000 | 2.29780 | 488 | 1860–1875 | 125.8–125.9 | 57.00 | 6.0 |
+| s64r8 | 5,000 | 1.76999 | 436 | 1980–1995 | 126.1–126.4 | 57.06 | 7.4 |
+| s64l0 | 40,000 | 20.53507 | 2,022 | 1965–2010 | 128.8–129.0 | 58.31 | 0.7 |
+| s64r8 | 40,000 | 16.55524 | 1,632 | 2040–2070 | 126.6–126.8 | 57.12 | 0.8 |
+
+5k→40k NVML slopes: **45.96 / 35.83 kB per atom** (decimal). §6.4 estimated 48 for `s64l0`; the measured slope is 4.3% below it. The measured reduction with the rank-8 head is 10.13 kB/atom, vs the 11.3 kB/atom reduction counted for `S0` alone. Neither measurement tests the proposed 33 kB/atom Loup-S architecture.
+
+**Falsifier 6: not established on Ada.** Gaps are much larger at 320, but the profiled kernel spans there are 0.3013/0.2735 ms per step (unions 0.1899/0.1731), versus clean wall times 0.1897/0.1780. Counting that extra profiled time as avoidable launches would misstate the opportunity. The census does not justify dropping the small-cell target or declaring it launch-bound. A same-work, reduced-launch vs unfused comparison at 320 on this card would discriminate; do not infer its gain from the gap. At 5k, §6.5 reports actual kernel families and shared GEMMs together rather than guessing `C0` time. The label hold does not change the elapsed times for these particular weights.
+
+**Cell-change repair, 5060 Ti only, no timing.** `048489b907` keys the optional CUDA graph neighbor-rebuild branch on the cell whose periodic wrapping and bin/count/fill kernel arguments it captured. Fixed-cell MD continues to reuse its graph. With the old library, forcing a rebuild after straining/shearing the same 135-atom system produced a 1.7412 eV difference from a fresh handle. With the patched `sm_120` build, `pytest -q tests/gpu/test_evaluate2.py::test_reused_evaluator_follows_periodic_cell tests/gpu/test_md_graph_reuse.py::test_short_calls_reuse_the_graphs_and_the_forces` passed **2/2** with MH-1.
+
+On the original 30 validation geometries (three cell transitions), the stock FP32-vs-FP64 3× gate passed **30/30 reused and 30/30 fresh**, versus **13/30 stored**. Maximum reused-vs-FP64 deviations: **0.000678 meV/atom, 2.613e−5 eV/Å, 7.94e−8 eV/Å³**; maximum reused-vs-fresh force difference **8.27e−7 eV/Å**. Hot:700 O138 `Fy`: **3.8471802** sequential, **3.8471798** fresh, **3.8471733** FP64, **3.7777745** historical. Frozen bytes unchanged. Report: `~/loup-s-stage0/sto320/fixed-cell-gates-v2/valid.json`; native library SHA256 `d12e88dee68635570258ef678111637bd859966d942cae25627a09c3992ba048`.
+
+The teacher-test gate passed **60/60** for all three sets of values (fresh, reused, historical) on the 5060 Ti. Separately, the native changed-cell regression passed **1/1 per card** on leeloo (RTX 4000 Ada, `sm_89` library SHA256 `c147f325…`) and Coraline (RTX A4000, `sm_86` `a536f453…`), under their GPU guards. `tests/cpu/test_distill_reissue.py` on leto: **15 passed**. The new shard queue first published ID 299 on Coraline and 300 on leeloo. Neither reads or releases the old queue.
+
+**5060 Ti only — corrected base release.** `base-labels-v2` has 300 train, 30 validation and 60 teacher-test frames. **390/390 sequential and 390/390 fresh** passed the stock 3× E/F/S gate; original labels passed **39/300, 13/30, 60/60** respectively. The release separately requires same-geometry fresh/reused differences within 1e−5 eV/atom, 1e−5 eV/Å and 1e−7 eV/Å³ regardless of stock FP32 error. Observed maxima **4.89e−9, 9.08e−7, 4.54e−9**, respectively. Source MD used one fixed cell and a fresh integration handle per trajectory (20/4/2 trajectories); the separate cached label evaluator was the path affected. Issued the exact gated values on the original geometries without overwriting any source. Train/valid/test output digests `cfcb2131…`, `b01df402…`, `e015fe99…` verified with their SHA256 sidecars; full digests, source/gate/library identities and original sampler builds in `~/loup-s-stage0/sto320/base-labels-v2/manifest.json`. Leto CPU release tests: **18 passed**.
+
+5060 Ti only, shared-step regression controls: `pytest -q tests/gpu/test_variable_cell_gpu.py tests/gpu/test_berendsen_npt_gpu.py::test_the_pressure_goes_to_the_target_and_calls_continue -k 'not what_the_variable_cell_step_costs'` — **7 passed, 1 timing test deselected**. Device-variable-cell graphs do not capture the fixed-cell rebuild branch.
+
+**Colab L4 only — centered FP32 vs FP64, corrected `s64l0` seed 1, 22:23 UTC.** Two concurrent sessions, same 300/30 split, batch 4, energy/force/stress loss. Phase-one training log timestamps, eight consecutive epoch intervals ending at epochs 6–13: median **17.4 s/epoch FP32, 48.2 s/epoch FP64; 2.76×**. At FP32 epoch 17, validation RMSE was **2.21 meV/atom energy, 28.09 meV/Å forces, 9.07 meV/Å³ stress**. This is validation during training, not held-out §4 fidelity or a 3× export gate. Both phases and both FP64 seeds are needed for the precision decision.
+
+**22:37 UTC, Colab L4 only.** Matched epoch 30 validation RMSE (centered FP32 / FP64): energy **2.30 / 3.24 meV/atom**, forces **21.93 / 20.90 meV/Å**, stress **8.93 / 10.89 meV/Å³**. The FP32 run had since logged epoch 65 (0.42 meV/atom, 15.18 meV/Å, 1.86 meV/Å³). Both runs remained in phase one.
+
+**Centered-FP32 `s64l0` seed 1 completed (Colab L4 only).** Zero-based epoch 149 validation RMSE: 0.05 meV/atom, 12.60 meV/Å, 0.18 meV/Å³. Median epoch time 17.471 s for intervals ending at epochs 6–100 and 17.470 s for 113–149. Detached exit 0; recovered physical student SHA256 `c608e501c692b0881964a2b5b9b73122e5e5a3b72bb987ac00c9d22de2d31ac2` and epoch-110 checkpoint `ec97637bc20cd21bdb22dbbe7515c9de9efced58a9d5024c86afb5657d354b4d` match manifest.
+
+**5060 Ti only, no timing.** `distill.publish --ref-device cuda`: 2/2, worst energy/force/stress ratios 0.01/0.49/1.30 (limit 3× or floor). `distill.fidelity --regime target`, corrected 320-atom SrTiO3, both sets 60 frames; teacher = MH-1 `omat_pbe`. All species ≤2%, both tails and energy pass.
+
+| Sampling | Force RMSE (meV/Å; relative) | O / Sr / Ti relative (%) | p99.9 / cap (meV/Å) | E RMSE (meV/atom) | Stress RMSE (meV/Å³) |
+|---|---:|---:|---:|---:|---:|
+| Frozen teacher-test | 8.799; 1.571% | 1.598 / 1.410 / 1.576 | 45.30 / 56.02 | 0.0301 | 0.0655 |
+| Own-student target (2 replicas, 300 K, seed 3101) | 8.860; 1.579% | 1.622 / 1.452 / 1.549 | 45.66 / 56.10 | 0.0284 | 0.0659 |
+
+Round-0 student/teacher force-RMSE ratio 1.0068. `v2-l4-s64l0-fp32-seed1-r2/{release/gate.json,teacher-score.json,fidelity.json}` under the WSL campaign root. No claim for later closed-loop rounds, MD observables, or the two-FP64-seed spread.
+
+**5060 Ti only — corrected FP32 oxide static fidelity.** Relaxed lattice axes pass the 0.2% tolerance (largest deviation 0.09301%). At both 0.010 and 0.005 Å central displacements, **8 of 960** sorted phonon frequencies exceeded `max(3%, 0.1 THz)`; worst error was 1.73 times its limit. Thus the force/energy label pass does **not** qualify the full §4 fidelity bar. Compare with matched FP64 students before attributing this to dtype. Reports: `~/loup-s-stage0/sto320/observables-v2-fp32-r2/static{.01,.005}.json`.
+
+**Ada only — launch grouping at 320 atoms.** Compare 20 separate projection launches with two grouped launches at identical GEMM tiles, weights, geometry and integrator seeds. Four adjacent arms per model (A B B A), 24,576 steps/arm, 4.14–4.63 s/arm; latter halves timed at 2,385 MHz. A→B differences in the forward and reverse order:
+
+| Model | Launches/step A→B | AB (µs/step A→B) | BA (µs/step A→B) | Saving AB / BA |
+|---|---:|---:|---:|---:|
+| `s64l0` | 57→39 | 188.14→176.48 | 188.80→176.47 | 6.20% / 6.53% |
+| `s64r8` | 56.5→38.5 | 176.53→168.70 | 176.93→168.77 | 4.44% / 4.61% |
+
+Median board power: wide 98–100→103–104 W; narrow 86–87→89 W. Separate profiles leave projection block counts unchanged (8,320 / 5,504). Three displaced geometries per student: inter-arm max |ΔE| 5.23e−8 eV, |ΔF| 3.88e−7 eV/Å, |Δσ| 1.72e−9 eV/Å³. Falsifier 6: retain the 320-atom target on the strength of the wide student's reproducible ≥5% reduction. The intervention also changes scheduling, so it does not isolate a pure launch cost or show majority launch overhead. No default change. Evidence: `/mnt/homes/zwingel/loup-s-stage0/launch-discriminator-v1/` (build SHA `397d1f35…`, `run.exit=0`).
+
+**5060 Ti only — oxide fixed set / trigger calibration, not timing.** For the corrected full FP32 wide student, 60 target frames from two trajectories and 40 hard frames from eight independent hot/strained trajectories passed stock-reference checks on all 100 serialized MH-1 labels. The 300 training frames alone fit feature statistics; the 30 validation frames selected candidates and thresholds. Fixed-set manifest SHA256 `8b4b8ee337bc86694668a6ea13af2b6b1fb7f2eae214f71f954f3fb617fab8ad` in `v2-l4-s64l0-fp32-seed1-r2/oxide-trigger-v1`. Keep these frames unchanged for cross-model comparison.
+
+At atom force-error norm >30 meV/Å, neighbour-averaged normalized clustered features had average precision **0.0511 vs 0.0290** for site energy at target temperature and **0.9531 vs 0.9005** on the hard set. Their validation-selected operating point recovered just **3/556** nominal positives; shortest distance alone had nominal AP 0.0548. Do not adopt a universal atom trigger. Retain the 5× target tail cap: measured `p99.9 atom-norm / (0.02 × teacher RMS force component)` was 4.27 on target validation, 4.04 on teacher-test and 4.07 on student-visited target frames. A 3% teacher-audit threshold flagged 0/60 nominal and 40/40 hard frames (4%: 0/60 and 33/40). Two nominal trajectories do not establish a production false-alarm rate.
+
+**Validation resolution (CPU analysis, 5060 Ti teacher labels/gates).** Corrected 300 K validation has 20 frames in two trajectories: 6,400 atomic observations, only 6.4 nominal top-0.1% observations (1.28 each for Sr and Ti) before accounting for correlation. Teacher component RMS 0.54732 eV/Å; 5× tail cap 0.05473 eV/Å. Worst native-vs-stock FP64 component difference 2.345e−5 eV/Å, a bound, not an RMSE. This resolves the proposed thresholds numerically, not statistically. The 3% audit rounding rule was proposed after analysis; retain the general 4% audit until prospective qualification. `sto320/bar-calibration-valid-v1.json`, SHA256 `e525e09df709107f02fc694c0177211ef28f48c0c9a5bebc72212571416aeaef`.
+
+**Ada only — teacher precision qualification, not timing.** On corrected learning-curve replica 365 the packed MH-1 spline gave max absolute stress error 1.16e−7 eV/Å³, above the 1e−7 floor despite agreement of fresh and reused evaluators. Holding weights and geometry fixed, the FP64 bundle interpreter gave 1.156e−8 without packing and 1.255e−7 emulating it. A separate **native** labelling build keeps non-density convolution coefficients in the bundle's original FP32 rather than the MD format. On the 364→365 pair, current/fresh native gates **2/2 each**; old stored labels **1/2**. Replica 365: 8.054e−9 eV/Å³ reused, 7.982e−9 fresh against stock FP64. No change to gate constants. Reports: `corrected-curve-v2/diagnostics/{partition-365,native-exact-364-365}.json`; source-pinned sm_89 binary SHA256 `87b7fd19c73ae80a7216804b16edb82858cb96079538cb4022a44f041e55280b`. The final sm_89 build's 122 convolution kernels have the same instructions as the checked strict build, and all 122 packed kernels as the original MD build (`label-table-final/machine-code.json`).
+
+**5060 Ti only — corrected FP32 NVE and curvature probes.** At matched 1/0.5 fs, fixed-cell 5 ps, the strict no-worse-than-teacher test failed (1 fs drift; 0.5 fs RMS and drift). Teacher vs student energy RMS (meV/atom): 0.00265186 vs 0.00260249, and 0.000620824 vs 0.000621151. Absolute drift (meV/atom/ps): 2.04e−5 vs 7.69e−5 and 7.44e−6 vs 2.27e−5. Differences unresolved at ten-block SEM. Separately, 25 training-only probe centers yielded 50 native force labels; differenced-force error of the representative stock-checked pair was 0.000910 eV/Å² versus its 0.004924 limit. Neither a trained curvature child nor an improved phonon spectrum follows from this test.
+
+**Corrected learning-curve release, Ada and A4000 labelling workflow, not timing:** WSL `sto320/curve-v2-1000` contains 1,000/30/60 with training digest `3fb54e0f6cbb1df3c3517952de46bd8d577042fbc79e26b766c7b296c5b9c188`. Seven inherited 100-frame sets passed correction; groups starting at shards 12 and 24 used the qualified native FP32 coefficients after the packed gate rejected the group. The first 300 frames and both held-out splits remain unchanged. Cold schedule 45 epochs, phase two begins at 33. This is an admissible corpus and plan, not a measured learning-curve accuracy.
+
+**5060 Ti only — flexible water teacher, OFF24 medium, 300 K.** Five-ps NVE at matched 1/0.5 fs: total energy RMS 0.05435/0.01391 meV/atom, drift −0.001095/−0.000979 meV/atom/ps. Keep 0.5 fs as the more conserving comparison. Two 20 ps NPT seeds after 4 ps discard: densities 1.06232 ± 0.00506 and 1.07324 ± 0.00354 g/cm³; O diffusion 1.874e−5 ± 1.972e−6 and 1.643e−5 ± 7.89e−7 cm²/s (4 ps block SEM). With 8 ps blocks the O estimates are 1.836e−5 and 1.611e−5. `water/observables/{nve-5ps,npt-block-200,npt-block-400}.json` retains the raw endpoint digests, RDF and displacement series. Validation-only water teacher target force bar 0.0159432 eV/Å; 5× cap 0.0797161 eV/Å, 20 frames from **one** 300 K trajectory. Resolution is sufficient to test a future student, not to choose an operational threshold.
+
+**5060 Ti only — four-species melt teacher.** At 1200 K the two independent MH-1 `omat_pbe` NPT runs gave 1.22457 ± 0.01061 and 1.18863 ± 0.01585 g/cm³ (four 2 ps blocks/seed); ten partial RDFs and displacement curves for all four species are retained. Paired 4 ps NVE at 1/0.5 fs: RMS 0.004249/0.001149 meV/atom; drift −4.65e−5/−1.48e−6 meV/atom/ps, block SEM 4.30e−4/2.49e−4. Use 0.5 fs as the better-resolved RMS comparison, not evidence of long-time drift. `molten-salt/thermo/teacher/measured.sha256` verifies the common initial liquid, both statistics reports and NVE report. Frozen validation: 30 frames, one trajectory, 2% teacher-component force bar 0.00941863 eV/Å and 5× tail cap 0.0470932 eV/Å. A student trigger or transport result cannot be inferred from the teacher.
+
+**5060 Ti only — teacher self diffusion, independent of the NPT seeds above.** MH-1 melt at 1200 K, friction 0.01/fs, four fixed-cell replicas, 1.25–5 ps fit lags. Mean ± across-seed SEM (Å²/ps): Cl 0.48083 ± 0.01363, K 0.51014 ± 0.01421, Li 0.71809 ± 0.04751, Na 0.70836 ± 0.10097. All four estimates per species are positive; Na has the widest range (0.44280–0.89986). `tools/dev/molten_salt_transport.py` records seed identities, input digests, each estimate and fits on the two halves. Report SHA256 `b8f703ce2944efb59faf0c9b1801a6b2912b7925401683a30e34a9d4ea6caa51`. This calibrates the paired student comparison, not a physical conductivity.
+
+**Workstation labelling, no timing — corrected 3,000-frame curve corpus.** The released training SHA256 is `8240882d2e39c7f023d063b3434bd9758f87a4128e951aab60bb627eaac7567d`. It extends the corrected 1,000 frames with no changes to the two held-out files. The kept cold-plan verifier accepted the 3,000/30/60 release, 15 epochs and switch at 11. No trained accuracy yet.
+
+**5060 Ti only — matched salt corpora.** Both 152-frame training arms and the common 30/60 validation/test are sealed. Stored teacher, fresh native and sequential native each passed 394/394 frame checks across six shards (not 394 distinct configurations). Largest stored-label stress ratio to the FP32 reference error or floor was 0.298 on the teacher-test shard. The cold `s64r8` recipe differs only in training bytes: `molten-salt/{train,train-mix}-plan.json`. The 50% Gaussian intervention was applied only to training, not transport or held-out labels. See `molten-salt/inputs.sha256`. **Water sampling:** target molecular orientation still has normalized correlation 0.868 at the 0.2 ps training stride, despite near-zero lag-one force/torque correlations. Do not treat the saved frames as independent orientational environments.
+
+**L4 only — first corrected wide FP64/centered-FP32 pair completed.** Same seed, architecture, data and stock schedule. Median adjacent validation-epoch timestamps over epochs 10–30/120–140 (phase one/two): FP64 48.172/48.193 s, FP32 17.458/17.460 s. Speed ratio 2.76× in each phase. These are training wall times, not MD step times or time to qualified fidelity. **5060 Ti only — FP64 export and held-out fidelity:** corrected FP64 physical model SHA256 `11cc53a9e4a9db243111562e10d72500dbc1aa89d0d004c30dfaf1c5d5a5e529`, export gate 2/2 (worst E/F/stress ratios 0.02495/0.30557/0.51830). On 60 frozen teacher-test frames, F RMSE 8.535 meV/Å (1.523%; O/Sr/Ti 1.573/1.382/1.485%); atom-error p99.9/max 44.82/63.18 meV/Å against the 56.02 p99.9 cap. Energy 0.06058 meV/atom, six-component stress RMSE 5.249e−5 eV/Å³. `sto320/v2-l4-s64l0-seed1/{release/gate,teacher-score}.json`. Teacher-test excludes student-visited labels and MD observables.
+
+**5060 Ti only — corrected FP64 round 0:** force RMSE on 60 newly visited frames 8.506 meV/Å (1.516%; O/Sr/Ti 1.585/1.414/1.434%). Atom-error p99.9/max 41.92/53.25 meV/Å, cap 56.10; energy 0.05413 meV/atom, stress RMSE 4.768e−5 eV/Å³. Both absolute label bars pass. Own/teacher-trajectory RMSE ratio **0.99668**; see `sto320/oxide-loop-v1/fp64/round-0/evaluation.json`. Do not use round 0 to answer falsifier 1.
+
+**5060 Ti only — corrected FP32 matched oxide NPT fails §4.** Hydrostatic MTK at 300 K / 0 GPa, 1 fs, 30 ps × two seeds each for teacher and student (51, 53); discard through 5 ps. Same gate decisions with 2.5 or 5 ps blocks. All three cell edges (paired shift −0.008079 Å vs teacher-seed spread 0.000360 Å; approximate contrast SEM 0.000415 Å) and density (+0.007450 vs 0.000332 g/cm³; SEM 0.000381) missed. Outside the teacher-spread band: 157/420 partial RDF bins and 5/9 RMS displacements (O at 200 fs, Sr at 50/200/500 fs, Ti at 500 fs). Solid-state displacement, not diffusion. `sto320/observables-v2-fp32-r2/stats-{50,100}.json`; 5 ps-block report SHA256 `9640b53f9f810731afa8b12cfef2978417356581c0aa49db5581948914345f24`. No causal attribution to precision before the matched FP64 comparison.
+
+**5060 Ti only — both wide seed-1 students on identical geometries.** Common set SHA256 `6674adbf2f7b4be2c295547aa614e3f9dbdf2e9d62c472e9b81f4aec4f30f9f9`: the FP32 student's 60 target and 40 independent 1000 K, strained/rattled frames. Ordered frame IDs match in both precision reports. Common target component force RMSE: FP64 8.505, FP32 8.860 meV/Å (1.516% / 1.579%); hard: 217.97 / 221.72 meV/Å (15.91% / 16.18%). Hard atom-error p99.9 3.712 / 3.890 eV/Å, hard E RMSE 7.475 / 7.177 meV/atom and stress RMSE 0.003324 / 0.002329 eV/Å³. The hard set is an unfiltered robustness diagnostic, not equilibrium target MD. `v2-l4-s64l0-seed1/common-oxide-v1/{target,hot}.json`; the FP64-on-FP32-frame result is not a substitute for the FP64 student's own-trajectory label gate.
+
+**L4 only — corrected `s64r8` FP64 seed 1.** Same v2 300/30/60 as wide; final epoch 149 and pre-phase-two epoch 110 recovered, model SHA256 `08a94acddebdd905b25254bba1a45613dc519758ddbd6e61b539d999fada33ff`, boundary `2b2c6f42cedcad4ce61cb3644ce140fc838c58feaa4a1013a8c1029be30cb9be`. Phases 1/2 medians over epochs 10–30/120–140: 43.483/43.493 s. Radial input is 8 species-independent Bessels, no distance transform; order-5 cutoff applied before the radial MLP with widths [64,64,8]. **5060 Ti only — native export gate 2/2**, worst E/F/stress ratios 0.0212/0.2751/0.2748; bundle `a0c57ba3d0d7280df957aebece8ddef66c9c5b24561c2d8d5c5b02f480eb4d02`. Teacher-test vs independent 300 K own frames: force RMSE 8.987 vs 8.953 meV/Å (1.604% vs 1.596%, ratio 0.99620). Own O/Sr/Ti 1.649/1.515/1.532%; atom-norm p99.9/max 43.47/57.52 meV/Å (p99.9 cap 56.10). Own energy 0.03477 meV/atom; stress 6.598e−5 eV/Å³. Both absolute label bars pass. `sto320/v2-l4-s64r8-seed1-r2/{release/gate,teacher-score,fidelity}.json`. No inference timing or full MD fidelity inferred from this run.
+
+**5060 Ti only — corrected narrow on the already frozen common set.** Target: 8.949 meV/Å component force RMSE (1.595%). Hard: 175.46 meV/Å (12.804%), p99.9/max atom errors 2.740/12.92 eV/Å, energy 6.048 meV/atom and stress 0.002123 eV/Å³. Same ordered 60/40 frame IDs as the corrected wide models (`v2-l4-s64r8-seed1-r2/common-oxide-v1`). Not an independent narrow rollout.
+
+**Water label qualification (5060 Ti sampling, leto CPU references, no timing).** The 300/30/60 release for flexible 216-molecule water passed all 390 serialized OFF24-medium energy/force/stress comparisons, across all six shards. Twelve independent 300/450 K streams. Both cold arm plans verified the sealed trainer and identical split bytes; molecular net-force/torque scales 11.49792/18.15226 were calculated from training labels only. `water/dispatch/release.json` SHA256 `a2cd3317317df6a24936d0c8cc94bde72bf3423bffada66da68ed1f31b9be300`. Falsifier 2 awaits the students, not a teacher-label verdict.
+
+**Teacher labels, leeloo (RTX 4000 Ada) and Coraline (RTX A4000), no timing.** Corrected 10,000/30/60 oxide learning-curve release. All 9,700 additional geometries are independent trajectories; five temperatures, 300–600 K. Packed label tables missed the unchanged stress gate on 28 frames across 21 of 97 groups. Requalifying whole groups with the native FP32-table label build yielded 9,700/9,700 passing comparisons each for sequential and fresh native paths. Final groups by table: leeloo 33 packed + 13 FP32; Coraline 43 packed + 8 FP32. Worst sequential–fresh differences were 2.01e−8 eV/atom, 2.09e−6 eV/Å and 5.16e−9 eV/Å³. The released bytes preserve the exact 3,000-frame prefix and 30/60 held-outs. `sto320/curve-v2-gates-10000/work/curve-10000-evidence.json` SHA256 `638a943a3a3f1f7714aeb30749ce5c8b93278eb05d6c01bd8314b7837b7837c8`; WSL and NFS train SHA256 `56fc22530be81ae516b7a7c1240bb2006640e599be91ee7eab7b1d123a2997a5`. Cold-plan verified; full accuracy curve awaits training.
+
+**RTX 4000 Ada only — corrected oxide seed-1 inference, no adoption.** `leeloo`, `cell-fix-048489b9` ordinary MD build SHA256 `c147f32501f36ba57bb10a016b6611ecb3701f0fff5dd89c68ab76e61095d494`; wide/narrow bundles `c9f65166…9db3ab6` / `a0c57ba3…0eb4d02`. First sweep (`census-corrected-v2`) returned 0.18734/2.23495/20.16339 and 0.17340/1.72568/16.27052 ms for 320/5k/40k; after just 100 warm-up steps the 40k read windows were still at 283.11/286.84 K. Do not use these as the 300 K baseline.
+
+Repeat `student_census.py sweep` (`ae158cb6`, script SHA `5783248d…6c8cbb4`) after a fixed 1,000 Langevin steps at 1 fs, identical starting cell and velocity seed. Empty GPU on admission. ≥3 s uninterrupted back-to-back blocks; read the latter half only. Clocks and power below are ranges over its NVML samples; peaks are unprofiled process memory. Separate 16-step `nsys` captures report gaps as a fraction of the kernel span, not the unprofiled time.
+
+| Student | Atoms | ms/step | Median K | SM MHz | Power W | Peak MiB | Launches/step | Gap % |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| s64l0 | 320 | 0.18699 | 291.58 | 2400 | 96.49–96.74 | 234 | 57.00 | 35.41 |
+| s64l0 | 5,000 | 2.25013 | 300.97 | 1920–1935 | 123.45–123.51 | 486 | 57.06 | 5.97 |
+| s64l0 | 40,000 | 20.25978 | 300.55 | 1995–2040 | 127.70–127.79 | 2,020 | 57.19 | 0.68 |
+| s64r8 | 320 | 0.17371 | 293.26 | 2385 | 89.82–89.87 | 230 | 57.06 | 37.87 |
+| s64r8 | 5,000 | 1.75044 | 300.57 | 1965–1980 | 123.92–124.28 | 434 | 57.06 | 7.71 |
+| s64r8 | 40,000 | 16.38892 | 300.43 | 2010–2070 | 125.61–125.79 | 1,630 | 57.19 | 0.82 |
+
+Trace-conditioning median K, size order above: wide 308.79/300.09/300.55, narrow 291.88/297.47/299.90. At 5,000 the kernel unions are 2.13790 and 1.62757 ms/step; piecewise durations in design §6.5. 5k→40k slopes 45,958 and 35,831 B/atom; wide vs §6.4's rounded 48 kB/atom count −4.3%. Evidence: `/mnt/homes/zwingel/loup-s-stage0/census-corrected-equilibrated/{s64l0,s64r8}/1/` (`*.time.json`, `*.trace.json`, `*.kernels.json`, SQLite, `summary.json`). The original grouped-launch A/B is separate; no change to its verdict.
+
+**5060 Ti only — corrected wide FP64 seed 1, matched §4 physics (no timing).** Same MH-1 references, initial states, block lengths, pressures, and timestep choices as centered FP32. Relaxed lattice passed 3/3 edges (maximum 0.0278%). Phonons passed 960/960 at *each* of 0.01 and 0.005 Å (worst 0.989× tolerance); FP32 missed eight at both displacements.
+
+At 300 K, zero pressure, two 30 ps NPT seeds: both passed 601/601 geometry checks. **99/420 partial RDF bins** exceed the teacher spread (O–O 19, O–Sr 20, O–Ti 30, Sr–Sr 13, Sr–Ti 5, Ti–Ti 12). **2/9 RMS displacements** miss, Ti at 200/500 fs. All three isotropically coupled cell edges miss (+0.000382 Å vs 0.000360 spread); density misses (−0.000355 g/cm³ vs 0.000332). These two shifts are smaller than the 5 ps block contrast SEM (0.000440 Å and 0.000405 g/cm³). Same strict decisions with 2.5 ps blocks. FP32 missed 157 RDF bins and five displacement components.
+
+Strict 5 ps NVE RMS/drift comparison passes 1/4: 1 fs RMS 0.002511 vs teacher 0.002652 meV/atom passes; absolute drift 0.0000744 vs 0.0000204 meV/atom/ps fails. At 0.5 fs, RMS 0.0006947 vs 0.0006208 and absolute drift 0.0000321 vs 0.00000744 both fail. Drift differences unresolved at block uncertainty; do not relax the preregistered bar. Evidence: WSL `sto320/v2-l4-s64l0-seed1/observables-v2/{static.01,static.005,stats-50,stats-100,nve,nve-10blocks}.json`. Neither wide precision is a full §4 pass.
+
+**5060 Ti only — corrected narrow FP64 seed-1 static check (no timing).** `s64r8` relaxed lattice passes 3/3, worst 0.094675% vs 0.2% limit. The same ten sorted frequency indices (zero-based 3, 4, 340–341, 348–353) miss among 960 at **both** displacements. Max error divided by the §4 tolerance: 2.72014 at 0.01 Å, 2.72275 at 0.005 Å. Wide FP64 passes on these references. WSL `sto320/v2-l4-s64r8-seed1-r2/observables-v2/static{.01,.005}.json`, record SHAs `f75ebb1a…4cc69cd` / `3cc54294…02082d1`. Lower nominal force RMSE than the bar and a shorter step do not qualify the narrow model's phonons.
+
+**5060 Ti only — corrected narrow FP64 seed-1 matched MD (no timing).** At 300 K / 0 GPa, 141/420 partial RDF bins miss the teacher spread. The isotropic cell-edge shift is −0.007334 Å vs 0.000360 Å spread; density +0.006765 vs 0.000332 g/cm³. With the primary 2.5 ps blocks, 4/9 RMS displacements miss (Sr and Ti at 200/500 fs); with 5 ps blocks, 3/9 miss (Sr at 200 fs changes verdict). Strict 1 and 0.5 fs NVE misses **4/4**: energy RMS 0.00268484/0.00066644 meV/atom; signed drift +0.00011422/−0.00004458 meV/atom/ps. Neither drift is resolved at block uncertainty. Same frozen teacher runs as wide; narrow `observables-v2/{stats-50,stats-100,nve}.json` record SHAs `af378cf3…3a557fa`, `26b8e517…a2a8dba`, `4ab16f5e…fb860a4e`.
+
+**Ada census protocol clarification, no new timing:** `ae158cb6` collected the six corrected baselines and their six traces. For subsequent runs `08d0642b` uses the documented 290–315 K operational range on the measured-window median, not a size-dependent rule derived from independent kinetic-energy samples. All twelve recorded medians above fall inside that band; neither the 40k transient rejection nor §6.5 changes. No GPU rerun or A/B implied.
+
+**L4 only — corrected `s64r8` FP64 seed 2.** Same 300/30/60 splits, 8 radial Bessels, 5 Å and polynomial order 5 before a 64→64→8 radial MLP, no species input or distance transform. Completed 150 epochs; median elapsed epoch at 10–30 / 120–140 was 43.323 / 43.348 s. Allocation `ls0-22441b5ad3b1` stopped after retrieval (4.04 estimated CU, including setup). Result archive `00a5020b05eba5cffdf890fe7f213d9c133f5335ce8c75910b739c7c9948d544`, physical model `d4eea40dc6fe1d6abde75489ec5adb9ec861924efa3e417d798a03e5204a700b`.
+
+**5060 Ti only — narrow FP64 seed-2 gate and force fidelity (no timing).** `sto320/v2-l4-s64r8-seed2` contains `release/gate.json` (2/2; worst E/F/S tolerance ratios 0.00845/0.448/0.604), `fidelity.json` (own two fresh target trajectories) and `teacher-score.json` (previously frozen teacher-test). Bundle SHA `9a5900fe16c59e7699c930d6598e5a9747aef3e168cf91e15bba7f4dd61acfef`.
+
+| Trajectory (60 frames each) | Force RMSE meV/Å | Relative overall | O / Sr / Ti relative, % | p99.9 vector / cap, meV/Å | E RMSE meV/atom | Stress RMSE meV/Å³ |
+| --- | ---: | ---: | --- | --- | ---: | ---: |
+| Student | 10.624 | 1.894% | 1.930 / 1.802 / 1.864 | 53.02 / 56.09 | 0.03464 | 0.10357 |
+| Teacher | 10.710 | 1.912% | 1.931 / 1.756 / 1.929 | 54.65 / 56.02 | 0.02966 | 0.10311 |
+
+Both nominal label sets pass. The student-visited force error rose from 1.596% at narrow seed 1; neither the 3× gate nor these target-frame metrics establish matched MD fidelity or close falsifier 1.
+
+**5060 Ti only — matched narrow FP64 seed-2 physics, no timing.** Frozen teacher, same protocols as seed 1. All three relaxed axes pass (maximum 0.07554%); all 960 phonons pass at both displacements (worst 0.789× tolerance). The ten seed-1 phonon misses do not recur.
+
+The 300 K, zero-pressure NPT runs both have 601/601 valid frames. Cell edge −0.0102504 Å vs 0.00035975 Å teacher spread; density +0.0094574 vs 0.00033235 g/cm³. 159/420 partial RDF bins and 4/9 RMS displacement components miss. All three Sr lags miss at both block lengths; the fourth miss is Ti at 500 fs for primary blocking and O at 200 fs for 5 ps blocks. In NVE, 1 fs energy RMS 0.00259348 meV/atom passes, signed drift +0.00015083 meV/atom/ps misses. At 0.5 fs, RMS 0.00067248 and drift −0.00004036 both miss. Neither drift difference is resolved at block uncertainty. Neither narrow seed meets the full §4 bar.
+
+Evidence: `sto320/v2-l4-s64r8-seed2/observables-v2`. Canonical record SHA256 prefixes for `static.01`, `static.005`, `stats-50`, `stats-100`, `nve`: `cc67ef1f`, `1cc371d2`, `94dacbf9`, `3c2e590c`, `0ff055cc`, respectively.
+
+**L4 only — corrected wide FP64 seed 2.** Completed 150/150 logged epochs, medians 48.527/48.531 s per epoch in the phase-one/two windows above. Same 8 Bessels, 5 Å and order-5 cutoff before the 64→64→64 MLP; no species input or distance transform. Verified archive `96445cf1e2a693ed2dd48cb9ca5f631025b24713f8bf2db3bfb7f86cc4d6db07`; physical model `ed087d550cd71ceb0492bf637dc574ddd63d7159b7bcbbd5a97b6a81e3bebe75`, epoch-110 boundary `774a385052d5e6ecd5d7cf3371ffd620e21dbafba52c0f8a17e6d04c42271e34`.
+
+**5060 Ti only — wide FP64 seed 2, no timing.** Native export passes 2/2; worst E/F/S ratios against stock FP32 deviations 0.01/0.74/0.99 (3× rule). Bundle `078e1936faf41d6616faa3db9132b01cac3fe4d63b6a77f0f06abef94f55b12a`. `sto320/v2-l4-s64l0-seed2/{fidelity,teacher-score}.json`:
+
+Gate device provenance: `release/gate.json` identifies RTX 5060 Ti, driver 621.14, compute capability 12.0 for the selected native device; the uncached reference independently reports `cuda:NVIDIA GeForce RTX 5060 Ti:sm120:cuda13.0`. WSL enumerates only that card. The `GPU information: NVIDIA RTX A6000, 8, 6, ...` line in the same process is from the installed `cuequivariance_ops.triton.cache_manager.get_gpu_information`: after NVML returns `Not Supported`, it prints hardcoded A6000 tuning defaults for a name absent from its table. That line is not an execution-device or VRAM measurement.
+
+| Trajectory (60 frames each) | Force RMSE meV/Å | Relative overall | O / Sr / Ti relative, % | p99.9 vector / cap, meV/Å | E RMSE meV/atom | Stress RMSE meV/Å³ |
+| --- | ---: | ---: | --- | --- | ---: | ---: |
+| Student | 9.223 | 1.644% | 1.706 / 1.500 / 1.585 | 45.79 / 56.10 | 0.03756 | 0.04314 |
+| Teacher | 9.227 | 1.647% | 1.696 / 1.465 / 1.622 | 46.34 / 56.02 | 0.03978 | 0.05086 |
+
+**Whole-schedule precision screen:** `tools/dev/oxide_precision.py` verified three completed cold runs against identical dataset hashes, schedule and ordered teacher-test frame IDs. Centered FP32 seed 1 at 8.79944 meV/Å lies inside the observed FP64 range [8.53480, 9.22650]; all three pass both nominal label checks. Two seeds define an observed range, not a confidence interval. The numeric criterion passes. The centered FP32 student's measured §4 MD failures above still prevent adoption; neither a rate difference nor these two seeds establish their cause. Report: `sto320/sweep-plans/precision.json`.
+
+**5060 Ti only — fixed-set comparison, both FP64 seed-2 models.** Same ordered 60 target and 40 hot/strained frames for both models and the seed-1 controls. Target/hard force RMSE (% of teacher RMS) is **1.645/18.460** for wide and **1.892/22.565** for narrow. Hard p99.9 vector errors are **3.934/4.122 eV/Å** wide/narrow. Narrow had lower hard RMSE than wide at seed 1 (12.804% vs 15.91%); that ordering reverses at seed 2. Do not rank radial width from a single seed. Sealed `common-oxide-v1/{target,hot}.json` under both corrected seed-2 runs; independent own-trajectory tests above.
+
+**5060 Ti only — completed SrTiO₃ static comparison.** Wide FP64 seed 2 required a second relaxation block (1,800 + 1,027 FIRE iterations) to reach the unchanged force threshold (final 0.0004971 eV/Å). All three relaxed axes pass, worst 0.08103%. Phonon errors are signed in the records; `phonon_pass` compares their absolute values with the mode-wise limits. Counts below are identical at 0.01 and 0.005 Å. The ratio is the largest absolute error divided by its limit across both displacements.
+
+| Architecture / training dtype | Seed | Passing frequencies / 960 | Worst ratio | Failed sorted indices (zero-based) |
+| --- | ---: | ---: | ---: | --- |
+| Wide FP64 | 1 | 960 | 0.989 | none |
+| Wide FP64 | 2 | 954 | 1.164 | 348–353 |
+| Wide centered FP32 | 1 | 952 | 1.732 | 3–4, 348–353 |
+| Narrow FP64 | 1 | 950 | 2.723 | 3–4, 340–341, 348–353 |
+| Narrow FP64 | 2 | 960 | 0.789 | none |
+
+Six sorted frequencies outside the band for centered FP32 also miss at wide FP64 seed 2. Neither architecture passed all modes at both FP64 seeds. These indices compare sorted spectra, not matched eigenvectors. Wide seed-2 canonical records: `sto320/v2-l4-s64l0-seed2/observables-v2/static{.01,.005}.json`, SHA prefixes `a8be1c4d`, `03206c45`.
+
+**5060 Ti only — wide FP64 seed-2 dynamics.** Both matched 300 K / zero-pressure NPT trajectories pass 601/601 geometry checks. Relative to the teacher, the mean cell edge shifts −0.00460860 Å (teacher spread 0.00035975; 5 ps block contrast SEM 0.00043203), and density +0.00424807 g/cm³ (spread 0.00033235; SEM 0.00039799). 126/420 partial RDF bins miss: O–O 32, O–Sr 29, O–Ti 25, Sr–Sr 14, Sr–Ti 11, Ti–Ti 15. Displacements miss 5/9: O at 200 fs, Sr and Ti at 200 and 500 fs; unchanged with 2.5/5 ps blocks.
+
+Strict NVE passes 0/4. At 1/0.5 fs, student vs teacher energy RMS (meV/atom) is 0.00273269/0.000651019 vs 0.00265186/0.000620824. Signed drift (meV/atom/ps) is −0.000070965/−0.000019104 vs −0.000020397/+0.000007441. Neither drift difference is resolved at ten-block uncertainty. Same `observables-v2` directory; canonical record SHA prefixes: `stats-50` `6d3c16b4`, `stats-100` `41df628f`, `nve` `52e8fe8b`, `nve-10blocks` `3a0c184d`. None of the four corrected FP64 baselines meets the complete §4 physics bar despite all four passing the nominal label bar.
+
+**L4 only — first wide FP64 closed-loop child.** Base 300 + 30 selected and independently gated student-visited training frames; frozen validation/test unchanged. Starting checkpoint and recovered pre-phase-two SHA both `0ada20eb25bfbe00645adc4887f53767b3746bb0fc6f6b8e0c7ef24f3f739bcd`. All epochs 111–149 logged; median 52.806 s per epoch over 120–140. Allocation stopped after collection (1.26 CU estimated). Archive `ef71b0bf86f1fdc5e09811143fe058de833eebd29481a943b0b6f1e2e2d6d741`, verified physical child `38413c4702dea5fb808a2818447007800b8fbc1fe3651eec2af98487f0a2d0d8`. Training completion is not a teacher-fidelity verdict.
+
+**5060 Ti only — first FP64 loop round, held-out fidelity.** The child passes native export on both configurations (worst E/F/S ratios 0.041/0.362/0.342). Own/teacher-test force RMSE **8.51823/8.54416 meV/Å**, ratio **0.996965** vs 0.99668 at round 0. Both target label bars pass. This does not demonstrate improved accuracy: the own geometries differ by round; on the unchanged teacher geometries RMSE was 8.535 before retraining.
+
+| Split (60 frames each) | Relative force RMSE | O / Sr / Ti, % | Atom p99.9 / cap, meV/Å | E RMSE meV/atom | Stress RMSE meV/Å³ |
+| --- | ---: | --- | --- | ---: | ---: |
+| Round-1 student | 1.518% | 1.586 / 1.415 / 1.438 | 41.96 / 56.10 | 0.04913 | 0.04466 |
+| Frozen teacher | 1.525% | 1.574 / 1.383 / 1.487 | 44.78 / 56.02 | 0.05531 | 0.05010 |
+
+`sto320/oxide-loop-v1/fp64/round-1/evaluation.json` SHA `01fb792fb4a5d56ddc7a91d8030198c2d3be7cad57aa46d548751f0f213532fb`. The protocol requires round 2 before answering falsifier 1; no MD fidelity or convergence claim from round 1.
+
+**5060 Ti only — round-2 oxide harvest qualification, no timing.** Seed 57102, fresh trajectories from round-1 child `38413c47…2d0d8`; selected the worst 30/100 as prescribed. Stored, sequential and fresh teacher checks each passed 30/30. Selected file SHA `abf958a0011a7d5cfcb82bffd8af6e80958397fd927eb1dca9441c0ff214bbd9`. All ten inputs to the 360-frame round-2 replay verified (`paired-inputs.sha256` digest `45d54fe8bd41158254d11b975a6da6dff63f6d26060361274a69ff5ed9c31699`); original boundary unchanged, no held-out geometry added. No round-2 student result yet.
+
+**L4 only — cold 32-channel oxide variant.** Compared with `s64l0` FP64 seed 1 on the same 300/30/60 data and 150 epochs: change hidden width 64→32; keep the radial MLP 64→64→64, eight Bessels, 5 Å and order-5 cutoff. Warm epoch medians 28.510/28.478 s for width 32 vs 48.172/48.193 s for width 64 (about 1.69× throughput, not inference speed). Successful allocation 2.43 CU estimated; interrupted attempt 1.79 CU separately. Archive `b3700854ec8eb5a7925f94df74a50a72e40c56209c593dcbfa24f89a5f611d59`; physical model `dd39728655f99acd6afd8ade6fdf2890b9da4dad4fb8e0065dff73f3723cf9b1`.
+
+**5060 Ti only — width 32 verification, no timing.** Native export passes 2/2 (worst E/F/S ratios 0.025/0.685/0.187); bundle `5d7ff09e3578b1e41536ae45dd013123e7f54f1098b57d4ca6db3d5ec6219b81`. Both nominal label bars pass:
+
+| Trajectory (60 frames each) | Force RMSE meV/Å | Relative overall | O / Sr / Ti, % | p99.9 vector / cap, meV/Å | E RMSE meV/atom | Stress RMSE meV/Å³ |
+| --- | ---: | ---: | --- | --- | ---: | ---: |
+| Student | 9.822 | 1.750% | 1.791 / 1.680 / 1.706 | 49.79 / 56.12 | 0.03378 | 0.10148 |
+| Teacher | 9.897 | 1.767% | 1.788 / 1.658 / 1.765 | 50.80 / 56.02 | 0.02440 | 0.10862 |
+
+On the identical 60 target / 40 hot or strained frames, width 32 relative force errors are 1.749% / 16.974% vs 1.516% / 15.905% at width 64. Hard p99.9 vector errors go the other way: 3.226 vs 3.712 eV/Å. Single seed, no §4 MD or adoption claim. Evidence: `sto320/v2-l4-width32-float64-seed1/{checked,release,fidelity.json,teacher-score.json,common-oxide-v1}`.
+
+
+## 7. Loup-S training engine (`loupmd/fasttrain`), 24 November 2026, 5060 Ti only
+
+An in-house FP32 training backend for the Loup-S students: stock mace-torch 0.3.16 `ScaleShiftMACE`, 64x0e,
+two interactions, l <= 3, correlation 3, radial MLP [8, 64, 64, 64, 256], ZBL pair repulsion. It trains the
+mace model's own parameter tensors; mace keeps the data, optimizer, scheduler, SWA stage two, EMA, checkpoints and
+logs (`python -m loupmd.fasttrain.run <run_train arguments>`, the same arguments as `loupmd/distill/train.py`
+passes to `mace.cli.run_train`). Only the local RTX 5060 Ti was used (owner, 24 November 2026); nothing here was
+measured on `sm_89` or an A100.
+
+**What replaces what.** `run.py` replaces `mace.tools.train.train_one_epoch` (and `evaluate`, during training
+and for the final error tables). Each epoch's batches come from mace's own loader iterator (`_next_index`), so
+the sampler and its generator draw exactly as in stock mace. `LOUP_FASTTRAIN=0` runs stock mace,
+`LOUP_FASTTRAIN_EVAL=0` / `LOUP_FASTTRAIN_TABLES=0` keep mace's evaluation; LBFGS, distributed runs, loader
+worker processes, other losses, optimizers and architectures fall back to mace's loop (logged).
+
+**How a step runs** (`engine.py`, `ops.py`): every frame resident on the device; batches padded to one static
+shape (dummy nodes with up to 32 self-loop slack edges, their vectors beyond the cutoff, a dummy graph slot; the
+loss divides by the real counts); the whole optimizer step (forward, force pass, loss, backward, clipping, fused
+capturable Adam/AMSGrad with device learning rates, EMA) captured in one CUDA graph after three warm-up steps.
+The model: fused edge basis (Triton, generated: Y, dY, Bessel x cutoff and its r-derivative); radial MLPs with
+their forward-mode r-tangent (no double backward through the MLP); the conv as multilinear Triton kernels closed
+under differentiation; the correlation-3 product as 28 generated invariant polynomials (293 terms); linear layers
+folded on tape; the force pass takes dE/d(conv outputs) by autograd and forms the edge gradient in one fused
+kernel (`force_edge`). Since every edge has its reverse at the same length (all 300 + 30 frames), the radial MLPs
+run once per edge pair and the conv kernels read R and T through a pair index (`PAIRS`, `pidx`).
+
+**Correctness.**
+
+| Check | Result |
+| --- | --- |
+| FP64, one padded batch (4 graphs in 5 slots) against mace's autograd | energy 3.6e-14 eV, forces rel 9.6e-15, stress rel 2.6e-15, loss equal to 15 digits, worst parameter-gradient rel 6.3e-14 |
+| FP32 graph replay against eager | losses equal to every printed digit |
+| 6 epochs (stage two from 3), engine vs stock mace e3nn, same seed | validation loss 0.886388 / 0.330494 / 0.154913 / 0.145707 / 0.121968 / 0.115397 vs 0.886388 / 0.330493 / 0.154946 / 0.145722 / 0.121979 / 0.115409; final tables identical to the printed digit |
+| 150 epochs (default recipe, stage two from 111) vs the stock FP32 reference `v2-l4-s64l0-fp32-seed1-r2` | final stage-two model RMSE F: train 11.8 / 11.9, valid 12.5 / 12.6, test 8.7 / 8.8 meV/A (engine / reference); stage one 12.0 / 12.0, 12.7 / 12.7, 8.9 / 8.9; E and stress RMSE <= 0.2 meV/atom and meV/A^3 in both |
+
+FP32 runs are not bitwise repeatable (atomics): two engine runs both reach the same final errors but differ at the
+stage-two switch (epoch 111 validation E RMSE 21.6 vs 0.37 meV/atom), as stock mace does (reference: 5.7).
+
+**Speed** (300 frames of 320 atoms, ~15.5k directed edges each, batch 4, 75 steps per epoch, FP32):
+
+| Path | s / epoch | ms / step |
+| --- | ---: | ---: |
+| stock mace-torch, e3nn (`baseline-e3nn`, 6 epochs) | 16.3 | |
+| stock mace-torch, cuEquivariance (`baseline-cueq`) | 6.56 | |
+| stock reference 150-epoch run (43 min, `v2-l4-s64l0-fp32-seed1-r2`) | ~17 | |
+| engine steps only (`fasttrain_engine_check.py --mode bench`) | 1.05 | 13.9 |
+| engine inside `run_train`, validation and checkpoints included | 1.23 | |
+| C++/CUDA library (`libloupstrain.so`), steps only | 0.553 | 7.37 |
+| C++/CUDA library inside `run_train`, validation cached (`fast-e150cache`) | 0.66 | |
+
+The 150-epoch job: 185 s of epochs (10:00:21 to 10:03:27), 242 s wall with input writing, the 5.5 s set-up and the
+final tables; the reference took 43 minutes. Step-time history (ms per step, steps only): 60.4 eager reference
+student -> 52.2 fused basis -> 40.3 polynomial product -> 36.8 tangent MLP -> 30.6 static padded eager -> 27.75
+CUDA graph -> 25.4 (layout and fold fixes) -> 23.5 edge-parallel slots and per-MLP GEMMs -> 20.3 fused force-pass
+edge kernel -> 13.9 edge pairs. Ledger: the `ft-*` rows.
+
+**Profile** (eager, 10 steps, ms per step, after edge pairs): cuBLAS/cutlass GEMMs ~4.8 (radial MLPs and the
+node projections), `_silu_tb` fwd + bwd 2.0, small elementwise kernels 1.6 (42 launches), `_node_x` 1.47,
+`_node_g` 1.44, `_edge_pair` 1.28, `_force_edge` 0.73, `edge_basis` 0.18. Open ideas: one Triton kernel for each
+radial MLP pass (layers in shared memory, SiLU in the epilogue, no `z`/`h` round trips); fusing the remaining
+elementwise chains (loss, stress, EMA); node kernels over channel tiles of 64.
+
+**C++/CUDA library (the default since 24 November).** `src/train/strain.cu` (+ `mlp_fused.cuh`, `gemm_tn.cuh`,
+`include/loupstrain.h`, ABI 3) builds `libloupstrain.so`; `loupmd/fasttrain/cuda.py` (`CudaTrainer`) drives it on
+the mace model's own parameter, Adam-state and EMA tensors. The batch is assembled on the device from per-frame
+topology; one CUDA graph per step; own edge, conv, slot, force, product, loss, Adam / AMSGrad, clipping and EMA
+kernels; the radial MLPs as two fused kernels (forward, backward), cuBLAS for the node GEMMs and dW4. FP64 parity
+1.5e-15 after four Adam steps; FP32 gradients within 1.1e-6 of FP64. Steps: 13.9 (Triton) -> 8.33 -> 7.37 ms.
+`LOUP_FASTTRAIN_ENGINE=triton` keeps the Triton engine. A DRAM survey (ncu `dram__bytes.sum`, 1.9 GB per step,
+floor 4.27 ms at 448 GB/s) leaves about 1.0 ms of slack in the MLP backward (issue- and latency-bound), 0.4 ms in
+its forward, 1.1 ms in the conv and slot kernels and 0.24 ms in expand / basis; the cuBLAS dW4 GEMM sits at 94%
+of DRAM bandwidth. Rejected: split MLP backward, own split-K weight-gradient GEMM (ledger).
+
+150 epochs (mace's recipe, stage two from 111), test / valid / train F RMSE: library 8.9 / 12.7 / 11.9 meV/A in
+120 s of epochs (179 s wall); with the validation cache (`ft-eval-cache`, 138 -> 64 ms per validation pass)
+9.0 / 12.8 / 12.1 in 98.9 s of epochs; Triton engine 8.7 / 12.5 / 11.8 in 186 s; stock FP32 reference 8.8 / 12.6 /
+11.9 in 43 minutes.
+
+**Recipes (`loupmd/fasttrain/recipe.py`, `--loup_recipe NAME|path.json`).** A JSON recipe replaces mace's epoch
+loop (`mace.tools.train`): epochs, batch size, seed, lr schedule per optimizer step (constant, cosine, linear,
+exp, piecewise; linear warm-up), loss-weight phases with linear ramps, EMA decay, clipping, validation interval,
+time budget and force-error target. The library takes per-step lr and loss-weight tables (`lst_begin_epoch_steps`),
+so a schedule costs nothing per step. Validation runs under the EMA weights with mace's metrics and logs; every
+evaluation is a row of `<results>/recipe_log.jsonl` (epoch, wall, step and validation seconds, lr, weights,
+errors); the final EMA model is saved as mace's stage-one and stage-two checkpoints, so mace's tables and model
+export follow. `mace-constant` (mace's settings) reproduces mace's own validation curve within 0.5 meV/A
+(epochs 5-35). Screens so far (ledger `ft-recipe`): the lr is what limits progress at mace's 0.01; a peak of
+0.03 with a late drop and the energy / stress weights switched only below lr 2e-3 (`p30-75`) gives valid F 13.7,
+E 0.05, test F 9.3 in 75 epochs (about 50 s of steps and validation), against 12.8 / 0.05 / 9.0 after mace's 150;
+switching the weights at lr 6e-3 costs 10+ meV/A; peaks >= 0.02 spike early, and repeat runs of one recipe differ
+by more than some recipes do. With gradient clipping at 1 (mace: 10) and a 0.05 peak, `r50-60-clip1` gives
+valid F 12.10 / 12.55 / 12.08 (seeds 1-3), test 8.3-8.6, E <= 0.05, S <= 0.19 in 39-40 s of steps and validation:
+better than mace's 150-epoch recipe (12.8 / 9.0) in 40% of its training time.
+
+**Post-training** (`ft-post-train`, `ft-frames-batched`): mace's stage-one / stage-two tables and training plots
+now run on the evaluator, results are reused when both stages are the same model, and frames are converted once
+(batched on the device). A 60-epoch recipe run: set-up 6.6 s (trainer 3.0 s), training and validation 39 s,
+post-training 12.2 s (was 37 s), 66 s wall (was 99 s). Stock mace's post-training is 34-47 s.
+With `ft-e2e-tables` (no plots in recipe runs, light table batches, reused evaluators, no cuEquivariance /
+OpenEquivariance imports): imports 3.6 s, set-up 5.9 s, training 33.5 s, validation 4.1 s, post-training 3.3 s,
+**51.7 s wall** for a 60-epoch recipe (valid F 12.03-12.11, test 8.1-8.3).
+
+**Muon and precision (24 November, ledger `ft-muon`, `ft-muon-no-l2`, `ft-dpa4-hybridmuon`, `ft-tf32-bf16`).**
+Recipe `optimizer.kind = "muon"` runs Muon on the matrix blocks in the fused step (7.58 against 7.37 ms per step):
+at 60 epochs valid F 7.6-8.1 against Adam's 12.0-12.9, at 240 epochs 5.86 (test 3.6) in 161 s wall. mace's L2
+weight decay (5e-7) cost both optimizers: Muon tensors no longer take it (ABI 6), and `optimizer.weight_decay` 0
+brings Muon to 7.63 / 7.91 and Adam to 11.00 / 11.45 (seeds). DPA4's 8 + 2 Newton-Schulz steps help a little
+(7.36-7.74); its Magma-lite damping, decoupled weight decay and WSD did not. `optimizer.math` `tf32` / `bf16`
+(cuBLAS compute types, tensor-core radial MLPs): 6.86 / 6.75 ms per step with valid F unchanged at 60 epochs
+(E 0.049 / 0.553 meV/atom against 0.026); on this card TF32 tensor cores run at about the FP32 rate; on the RTX
+4000 Ada both modes save 14% (8.34 -> 7.17 / 7.14 ms), and A100-class cards should gain more.
+
+**Named recipes** (`--loup_recipe fastNN`, ledger `ft-recipe-fast`, FP32): `fast30` valid / test F 8.77 / 5.8
+meV/A in 35 s wall, `fast40` 8.13 / 5.3 in 41 s, `fast60` 7.28 / 4.6 in 54 s, `fast120` 6.23 / 3.9 in 99 s
+(RTX 4000 Ada); stock mace's 150-epoch recipe: 12.8 / 9.0 in about 40 minutes.
+Batch 1 + blocked SOAP (`--loup_recipe soapNN`, ledger `ft-recipe-b1`; Muon / SOAP lr x1.5, Adam beta2 0.99):
+`soap30` valid F 5.98-6.01, `soap40` 5.66-5.69, `soap60` 5.30 / 5.47, `soap120` 4.91 (leeloo); on the 5060 Ti
+with today's defaults 40 epochs take about 44 s wall and 60 epochs about 56 s. `soap40` reaches what the batch-4
+`fast120` did not (6.23) in about a third of its time.
+On cards whose TF32 tensor rate is well above FP32 (RTX 4000 Ada, A100 / H100 class): `soap36t` / `soap48t` / `soap72t` (ledger `ft-tf32-phase`): 1.2x the epochs with TF32 until the energy-weighted end phase (`optimizer.math_until`, `lst_set_math`), about soap30 / 40 / 60's training time on the 4000 Ada with valid F 5.82 / 5.57 / 5.27 against 6.01 / 5.71 / 5.36 and the same energy error; no gain at 120 epochs. On the 5060 Ti (TF32 at about the FP32 rate) keep the FP32 soapNN.
+
+**Batch size (24 November; for later: automatic choice).** Two separate questions. (1) Throughput: time per
+frame falls from batch 1 (2.53 ms) to batch 4 (1.86 ms) and stops there (batch 8 about 2.0 ms per frame in an
+Adam-era round, 0.6 s per epoch, no faster than batch 4): the 5060 Ti is full at about 1,000-1,500 atoms per step
+for this model (4 SrTiO3 frames of about 350 atoms). The saturation point depends on atoms per step against the
+GPU's size and the model's width (an A100's 108 SMs need more; a 3,000-atom frame fills this card at batch 1),
+not on the dataset. (2) Learning: on 300 frames the number of updates limits progress, so smaller batches win per
+epoch (batch 1 + blocked SOAP 5.48-5.57 against 5.77 at batch 4; batch 8 Adam 14.45 against 12.22 at batch 4);
+the best batch for learning depends mostly on the dataset (frames, gradient noise) and the optimizer (SOAP /
+Muon tolerate larger batches than Adam), and a frame's hundreds of force labels make per-frame gradients
+informative, so MLIP batches stay small. Plan for an automatic choice (not built): (a) at start-up, time about
+20 captured steps at batch 1, 2, 4, 8, 16 (seconds) and keep the smallest batch within 5-10% of the best time
+per frame; (b) estimate the gradient noise scale B_noise = tr(Sigma) / |G|^2 (McCandlish et al. 2018, "An
+Empirical Model of Large-Batch Training") from gradient norms at two batch sizes, at start-up and occasionally
+during training (it grows as the loss falls: the case for a batch ramp); (c) pick B maximising steps per second(B)
+x 1 / (1 + B_noise / B). The learning rate must move with B (our recipes are tuned per batch; square-root scaling
+for Adam-like optimizers, Muon / SOAP to be checked), and (b)-(c) need validating against real time-to-quality
+runs before use; (a) alone is a small change in `run.py`. A step-time sweep over batch 1-16 with today's library
+is round 38 (`.tmp_o/r38.sh`).
+
+**Kernel rounds, 24-25 November (batch 1 first; ledger `ft-kern-*`).** Method: an ncu `--set full` profile of
+one SOAP refresh step at batch 1 (`.tmp_o/prof27/det-b1.md`, `ncu_detail.py`: per kernel waves, occupancy,
+SM / memory / DRAM %, issue, SM balance, top stalls, a floor `t max(SM%, MEM%)`), read together with the nsys
+in-graph times (ncu serialises kernels and flushes L2 before each one, so its DRAM figures overstate the graph's).
+At batch 1 (349 atoms, 15,780 edges) 82% of the kernel time is under-filled grids (0.5-0.8 waves, long-scoreboard
+stalls), not bandwidth or FLOPs. Each change is a switch read at engine creation (one library, A/B by environment,
+mirrored order); FP64 gradients against the reference stay at 1e-15 for all of them.
+
+| Switch | What | Batch 1 ms / step | Batch 4 |
+| --- | --- | --- | --- |
+| `LST_CB_WS=0` | no cuBLAS workspace (no split-K) | 2.54 -> 3.82: REJECTED | 7.48 -> 12.55 |
+| `LST_FORCE_WPB`, `LST_SLOT_NPB` | k_force_node / k_slot block sizes | ties | ties |
+| `LST_SEG_GEMM=1` | the per-degree node GEMMs (`per_l`) as one segmented launch (`seg_gemm.cuh`) | 2.52 -> 2.40 (-5%) | 7.45 -> 7.34 (-1.5%) |
+| `LST_CONV_ES=2` / `4` | k_conv: a node's edges over 2 / 4 thread groups, summed in shared memory | 2.52 -> 2.47 alone; with SEG 2.53 -> 2.37 / 2.35 | 7.47 -> 7.37; with SEG 7.54 -> 7.23 / 7.26 |
+| `LST_GEMM_TN=1` | own split-K for the weight gradients on top of SEG | tie | tie |
+| `LST_NO_DEADW=1 LST_ZERO_FUSED=1` | no gy / se writes outside debug steps; one zeroing kernel instead of nine memset nodes | 2.37 -> 2.34 | 7.21 -> 7.19 |
+| `LST_FORCE_JYW=1` | JY^T gy over 16 lanes in k_force_node | tie | tie |
+| `LST_FPAIR_WARP=1` | k_forces_pair one warp per atom (grid was 2 blocks at batch 1) | 2.35 -> 2.33 | tie |
+| `LST_MULTI_GEMM=1` | the weight-only products (6 + 12 small GEMMs) as one launch each (`multi_gemm.cuh`) | 2.33 -> 2.29 | tie |
+| vector rows (unconditional) | k_basis / k_edge_cot store and load 16-wide rows as float4 | 2.29 -> 2.25 | 7.13 -> 6.98 |
+| `LST_SOAP_EIG=1` | SOAP refresh as one CTA per (matrix, side) plus a chunked apply | tie (2.26) | tie (6.98 / 7.00) |
+| `LST_SLOT_ES=2` / `4` | k_slot: a node's edges over 2 / 4 thread groups | 2.26 -> 2.30: REJECTED | 7.01 -> 7.31 |
+| `LST_WG_SIDE=1` | the backward's weight-gradient GEMMs (and the radial MLPs' dW4) on a third stream | 2.25 -> 2.17 | 7.00 -> 6.95 |
+| `LST_PAR=3` | MLP 1 forward, backward slots + MLP 1 on the second stream | 2.25 -> 2.20; with WG_SIDE 2.09 | 6.90; with WG_SIDE 6.87 |
+| `LST_MLP_DUAL=1` | both MLP backwards in one launch (needs PAR bit 2 off) | with WG_SIDE 2.15 -> 2.12; vs PAR=3 2.05 -> 2.08 | tie |
+| `LST_FORCE_ES=2` / `4` | k_force_node: 2 / 4 warps per atom (alternate edges) | with WG + PAR 2.04 -> 2.06 / 2.03 | 7.01 -> 6.87 / 6.83 |
+| `LST_SLOT_PP=1` | k_slot over each node's own pairs (offsets from `k_pair_ptr`), no skipped edges | 1.94 -> 1.94: tie, kept off (ledger ft-kern-slot-pp) | 6.75 -> 6.75 |
+| `LST_MLP_PIPE=0` (default on) | MLP backward `k_mlp_bwdp`: gh3 first through cp.async stages (ledger ft-kern-mlp-pipe) | 1.95 -> 1.90: ADOPTED | 6.75 -> 6.52 |
+| `LST_MLP_GRIDBAL=1` | MLP backward grid cut to ceil(tiles / rounds) | tie: kept off | tie |
+| `LST_MLP_L2PF=1` | k_mlp_bwdp prefetches its next tile's gout into L2 | tie: kept off | tie |
+| `lst_set_node_order` (`LST_FORCE_ORDER=0` off, default on) | k_force_node in each frame's own atom order (ledger ft-kern-force-order) | 1.88 -> 1.86 (k_force_node 141 -> 122 us): ADOPTED | 6.48 -> 6.41 |
+| `LST_PROD_DIRECT=0` (default on) | direct species-reduced `gW0`/`gW1` in `k_prod_rev{1,2}_dir`, dropping `Wp0`/`Wp1` + 2 GEMMs (ledger ft-kern-prod-direct) | 1.88 -> 1.87 (-0.7%; Ada 1.85 -> 1.81): ADOPTED | 6.45 -> 6.35 (-1.6%; Ada 6.46 -> 6.33) |
+| `LST_VG_EARLY`, `LST_MLP_NOZ1`, `LST_MLP_FWD_SWZ` | early view-grads on `s3`; 3-array `k_mlp_bwdp_noz1`; XOR-swizzled `k_mlp_fwd_swz` | ties: kept off | ties / +0.4% |
+| `LST_PAIR_BASIS=0` (default on) | pair-indexed `Y/Yw/gyb/UP` + exact `(-1)^l` parity + matrix-free `JY` (`sh16_pair.cuh`; ledger ft-kern-pair-basis) | 1.85 -> 1.72 (-6.8%; Ada 2.02 -> 1.83, -9.4%): ADOPTED | 6.31 -> 5.79 (-8.2%; Ada 6.94 -> 6.40, -7.7%) |
+| `LST_MLP0_FIRST=0` (default on) | launch `mlp_fwd(0)` on `st` before side-stream `mlp_fwd(1)` (ledger ft-kern-mlp0-first) | 1.715 -> 1.70 (-0.9%; Ada 1.805 -> 1.79): ADOPTED | tie |
+| `LST_M0_SPECIES=0` (default on) | species-sliced `M0` GEMMs + wgrads (`k_spc_group`, `k_seg_gemm_spc`, `k_seg_wgrad_spc`), dropping `k_expand`/`k_pick`/`tmp` (ledger ft-kern-m0-species) | 1.72 -> 1.58 (-8.3%; combined 1.54, Ada 1.83 -> 1.67): ADOPTED | 5.80 -> 5.41 (-6.6%; Ada 6.42 -> 5.98) |
+
+**Defaults since 25 November** (ledger `ft-kern-b1`, `ft-kern-mlp-pipe`, `ft-kern-force-order`, `ft-kern-prod-direct`, `ft-kern-pair-basis`, `ft-kern-mlp0-first`, `ft-kern-m0-species`): `SEG_GEMM`, `CONV_ES=2`, `NO_DEADW`, `ZERO_FUSED`,
+`FPAIR_WARP`, `MULTI_GEMM`, `WG_SIDE`, `PAR=3`, `FORCE_ES=4`, `MLP_PIPE`, `FORCE_ORDER`, `PROD_DIRECT`, `PAIR_BASIS`, `MLP0_FIRST`, `M0_SPECIES` are on without any environment (`=0`, `CONV_ES=1`,
+`FORCE_ES=1` turn them off). Blocked SOAP every 10, everything off -> defaults, ms per step: batch 1 2.46 -> 2.03
+(-17.5%), batch 2 4.24 -> 3.62 (-15%), batch 4 7.43 -> 6.81 (-8%). FP64 gradients 1.1e-15 against the reference with nothing set; everything off against the defaults,
+library against library, 6.5e-15 over 3 x 10 steps (plain Muon). Rejected: `SLOT_ES`, `CB_WS=0`; kept off:
+`SOAP_EIG`, `MLP_DUAL`, `GEMM_TN`, `FORCE_JYW`. nsys at batch 1 after the rounds: 2.21 ms of kernels per step
+serialised, gaps 0.03 ms (the streams overlap about 0.15 ms of it); MLP backward 0.37, force node 0.20, cuBLAS nt
+GEMMs 0.17, MLP forward 0.17, slots 0.22, convolutions 0.38. At batch 4 the MLP backward (1.30 ms) is near the
+card's FP32 rate: the remaining large step is TF32 (`ft-tf32-bf16`), not FP32 kernel work.
+SOAP runs are not bit-reproducible: two runs of one setting differ by 0.1-0.2 in the parameters after 30 steps,
+even in FP64 (atomic-add order, 1e-16, amplified by the tolerance-stopped Jacobi rotations of near-degenerate
+eigenvalues); plain Muon stays at 1e-14. Seeds land within the usual spread.
+
+Checked and not material on this profile: register spills (only k_soap_b, 7,892 spill instructions in a
+1.1 ms refresh-step kernel), shared-memory bank conflicts (k_mlp_fwd / k_mlp_bwd, about 0.4% of their cycles).
+Batch-size sweep with today's library (round 38, SOAP every 10): 2.53 / 4.27 / 7.46 / 16.3 / 29.8 ms per step at
+batch 1 / 2 / 4 / 8 / 16, i.e. 0.76 / 0.64 / 0.56 / 0.62 / 0.57 s per epoch.
+
+**Recipe screens for fewer epochs (25 November, leeloo, ledger `ft-recipe-b1`).** Batch 1 + blocked SOAP, valid
+F (2 seeds): 30 epochs 6.20-6.33, 40 epochs 5.94-5.97, 60 epochs 5.42-5.59; batch-1 Muon 6.78 / 6.31 / 5.76 at
+30 / 40 / 60 epochs, i.e. SOAP saves about a third of the epochs at 30-40. Around the 40-epoch recipe the schedule
+is flat within the seed spread (0.1-0.2): peaks 0.03-0.06, SOAP every 5, EMA 0.995 / 0.998, clip 3, linear decay,
+the weight switch at 0.9 / 0.95 T all land at 5.80-6.03. What did move it: the Muon / SOAP lr multiplier (x1.5: 30 epochs 6.27 -> 6.11, with
+Adam beta2 0.99 6.00, 3 seeds; x2.0 / x2.5 worse again) and beta2 0.99 for the Adam part. Named recipes `soap30` / `soap40` / `soap60` /
+`soap120`: peak 0.05, linear decay to 0.0015 at 0.9 T, weights 1000 / 100 / 10 from 0.9 T, validation every 5
+epochs (each validation costs about 60 ms: 30 frames at about 1 ms per frame of evaluator GPU time plus mace's
+metrics; a captured evaluator saved under 1 ms of it).
+**End to end** (60 epochs batch 1 blocked SOAP, 5060 Ti, cProfile): set-up 6.8 s (frame conversion 2.4 s, model
+build and TorchScript 1.6 s, imports), training 41.0 s, validation 4.7 s, post-training 3.7 s, 62.5 s wall with
+the profiler. Frame conversion is mostly a cold start (first call 2.1 s, warm 0.6 s: the float64 ZBL
+kernels load lazily); the ZBL terms on the CPU only move that cost to the pairing (1.67 s cold): left as is.
+On the defaults (no profiler): 55.7 s wall, of which 36.9 s steps, 4.3 s validation, set-up 6.2
+s, post-training 3.4 s, about 5 s start-up (valid F 5.56); 40 epochs 44.3 s wall (steps 24.7 s, F 5.90).
+Start-up: under WSL, torchmetrics' import-time `shutil.which("latex")` walked the 68 Windows directories on PATH (0.43 s); `run.main` drops `/mnt/<drive>/` entries while mace imports: entry-point import 3.31 -> 2.85 s. The rest of the start-up is mace's own imports (torch, `torch._dynamo`, e3nn, scipy, torchmetrics); an evaluator warm-up thread saved the first validation's 0.55 s cold start but cost as much in set-up (GIL): rejected (ledger ft-e2e-start). On the 4000 Ada, TF32 (`optimizer.math`) cuts soap40's steps 26.7 -> 22.4 s for valid F 5.68 -> 5.75 (screen e9); at equal training time (1.2x the epochs) F 5.74 -> 5.58 at 40 epochs' time and 5.36 -> 5.26 at 60, but valid E 0.02 -> 0.04 meV/atom (screens e10 / e11); on the 5060 Ti the step gains only 5%. Kept as an option for TF32-fast cards; the named recipes stay FP32.
+SOAP kernels (ledger ft-soap-kern): one pass per Jacobi round (`LST_SOAP_JFUSE`, default on), k-major 16-byte tiles with staged loads in the SOAP block GEMMs (bitwise equal), FP32 bias corrections and division-free element loops in the rotated Adam: batch-1 SOAP step 2.04 -> 1.95 ms on the 5060 Ti (k_soap_a 119 -> 67 us, the refresh 540 -> 497 us under ncu), seeds unchanged. Refreshing every 20 steps instead of 10 ties in accuracy but saves only 0.5% of the time now: not adopted. Post-training and exit (ledger ft-e2e-post): the recipe run's `__main__` now uses the package module (one set of caches; the stock-evaluate fallback works again), the final tables in batches of 16, the stage-two TorchScript compile memoized, `os._exit` after flushing: soap30 post-training 3.33 -> 2.27 s, exit 0.7 -> 0.15 s, wall 32.4-33.8 -> 31.7-32.0 s. Set-up (ledger ft-e2e-setup): mace's force-RMS scaling statistics without collating batches (bit for bit) and its Clebsch-Gordan matrices from a disk cache (`<cache root>/train/cg`): soap30 wall -0.54 s (1.7%). A CUDA warm-up thread loads the frame conversion's kernel libraries while mace reads its data (`LOUP_FT_WARM`), and mace's `from_config` and the frame conversion run on one torch thread (`LOUP_FT_DATA_THREADS`, bit for bit; ledger ft-e2e-warm): soap30 wall 32.39 / 30.30 -> 29.55 / 29.07 s (-2.0 s, 6.5%); the same thread also loads cuBLAS's kernel libraries (`LOUP_FT_WARM_GEMM`), a further -0.41 s (29.5 -> 29.1 s). Evaluators share each frame's host topology and each frame list's device arrays with the trainer, and the polynomial and SiLU checks run once (ledger ft-e2e-evalsetup): -0.31 s, post-training 2.11 -> 1.94 s. mace's import-time `torch._dynamo` (for torch.compile, unused in training) is a stand-in module that a recipe run never resolves (its own `disable` defers to the real one once that is imported; dunder lookups such as `inspect.getmodule`'s `__file__` do not resolve it; ledger ft-e2e-lazy-dynamo): soap40 wall 35.24 -> 34.54 s, and 35.00 -> 34.50 s (means of 3) in the final form. The PATH trim of the Windows drives had stopped covering mace's import once `install()` imported mace first; it now runs before `install()` (-0.6 s). Kernel round of 25 November afternoon (5060 Ti only; handoff.md): the pipelined MLP backward `LST_MLP_PIPE` (batch 1 1.95 -> 1.90 ms, batch 4 6.75 -> 6.52, bitwise the same sums), the force pass in the frames' own atom order (`lst_set_node_order`, 1.88 -> 1.86 ms; soap40 train 23.6 -> 22.85 s with both on), and direct product weight-gradient reduction (`LST_PROD_DIRECT`, batch 4 6.45 -> 6.35 ms, batch 1 1.88 -> 1.87 ms) are now defaults; `LST_SLOT_PP`, `LST_MLP_GRIDBAL`, `LST_MLP_L2PF`, `LST_VG_EARLY`, `LST_MLP_NOZ1`, `LST_MLP_FWD_SWZ` tie. Validation and the post-training tables run through the library (`lst_evaluate`, `CudaEvaluator`, parameters by name; ledger ft-e2e-cuda-eval): FP64 3e-15 against the Triton Evaluator, soap40 wall 34.72 -> 33.59 s (means of 3), validation 1.4 -> 0.6 s, post-training 2.3 -> 1.9 s.
+
+**Frame sampling (25 November, ledger `ft-recipe-sampling`; 6 seeds, 5060 Ti and leeloo).** Drawing half of each
+epoch's frames in proportion to the square of their last relative loss, with importance-weighted loss weights
+(exponent 0.5), lowers valid F at equal steps: 30 epochs 6.13 -> 5.82, 40 5.76 -> 5.54, 60 5.45 -> 5.25, 120
+4.99 -> 4.88 (2 seeds); the named `soap30` / `soap40` / `soap60` / `soap120` recipes now sample so, and the TF32 ones (4000 Ada, 3 seeds: soap36t 5.93 -> 5.65, soap48t 5.62 -> 5.33, soap72t 5.30 -> 5.08). A frame's score is an exponential average (0.5) of its relative losses: another 0.04-0.06 at 40 and 60 epochs (6 seeds). Batch 2 with sampling at equal training time ties batch 1. Sampling
+without the importance weights gained only 0.05-0.1, sharper sampling or the full correction lost again. Earlier
+batch-4 Muon screens (ledger `ft-recipe-screens-b4`: AMSGrad and betas, block-RMS / Adam-RMS directions, NorMuon,
+cautious masks on all tensors, z-score clipping, weight averaging, mixed precision, rattled teacher frames,
+per-atom energy targets) tied or lost; batch 2 and cautious Adam were taken up.
+
+**SOAP betas (25 November, ledger `ft-recipe-soap-betas`; 6 seeds, 5060 Ti and leeloo).** SOAP's first- and
+second-moment betas 0.995 / 0.995 instead of the published 0.95 / 0.95: valid F soap30 5.80 -> 4.76, soap40 5.56 ->
+4.52, soap60 5.22 -> 4.28, soap120 4.88 -> 4.01 (2 seeds), so 30 epochs now beat the former 120-epoch recipe. Beta1 at
+or above 0.99 with beta2 0.95 diverges; 0.997 ties, 0.999 loses. All named soap recipes take it. TF32 soap48t 5.33 -> 4.40 (4000 Ada, 3 seeds); frame sampling still gains 0.07-0.12 on top. soap60 / soap120 take 0.997 (4.28 -> 4.21, 4.00 -> 3.89, 3 seeds). The batch-4 Muon recipes fast60 / fast120 take Muon momentum 0.99 (7.32 -> 5.89, 6.23 -> 4.96; ledger ft-recipe-muon-momentum). Every SOAP recipe takes main-phase stress weight 30 (valid F ties; valid E soap30 0.026 -> 0.020, soap40 0.025 -> 0.019, soap60 0.022 -> 0.017, soap120 0.018 -> 0.012 eV; stress error halved to quartered; ledger ft-recipe-stress-weight).
+
+**Recipe screens after the SOAP betas (25 November, e42-e55, 6 seeds each, 5060 Ti and leeloo; ledger
+`ft-recipe-soap-betas`, `ft-recipe-muon-wd`, `ft-recipe-stress-weight`).** At betas 0.995 soap40's valid F sits at
+4.48-4.52 meV/A whatever the schedule or weights: Nesterov off, the sampling's power / correction / uniform share,
+peak 0.035-0.07, Muon multiplier 1.0-3.0, end phase from 34-38, knee 0.0015-0.003, warm-up 1-2 epochs, plateaus at
+the peak to 6-24 epochs (soap60 too), cosine (4.59) and geometric (4.81) decays, decoupled weight decay of the Muon /
+SOAP blocks (new library option `optimizer.muon_wd`, `lst_set_muon_wd`; 1e-4 to 3e-3: 4.53-4.90), forces 50-300
+against energy; a combination of the leaning levers did not hold on fresh seeds 7-12 (4.49 against 4.48). What
+moved: the stress weight. Main-phase stress 30 (from 1) leaves F unchanged and lowers valid E by a quarter to a
+third (soap40 0.025 -> 0.019, soap120 0.018 -> 0.012 eV) and the stress error by half or more, in every SOAP
+recipe. The training error is now below the validation error (soap40 seed 1: 3.4 / 4.5 meV/A; soap120 2.5 / 3.8):
+further gains at a given budget more likely need more or other training frames than another schedule.
+
+**Waves 21-45 & zero-Torch `loupstrain_cli` close-out (26 November 2026, `sm_120` 5060 Ti + `sm_89` RTX 4000 Ada; ledger `ft-e2e-cli-waves21-43`, `ft-kern-wave44-cl80b`, `ft-kern-wave45-cm81`, `ft-arch-screens-w22`).** Standalone zero-Torch C++/CUDA trainer `build/sm_120/loupstrain_cli` (`TRAIN_LEAN=1`, SASS-only, `libloupstrain.so` 6.1 MB `sm_120` / 5.7 MB `sm_89`) with GPU cell-list + Morton/knot sort, K=32 FP16 cubic radial spline, FP16 activations + native HFMA2 pair-folded edge kernels (`edge_h2.cuh`), pre-packed FP16 Tensor Core segmented GEMMs (`LST_SEGG_H16=1`, `k_pack_segg_w_h`, `fast_div_deg`), interleaved zero-PRMT `Y3P_H` (`LST_Y3P=3`), dedicated lean non-QR BF16 TC SOAP (`LST_SOAP_FAST=1`, `k_soap_a_fast_bf16`, `LST_SOAP_MROT=2`, `LST_SOAP_QR=2`), per-atom $E_i^T$ distillation (`--w-ei 300`), VarPro readout (`--varpro`), and unmodified `r_max = 5.5 A` (`c55-e21`).
+
+| Card / Config (`sto320/base-labels-v2`, `c55-e21`, default exact `STAT_EVERY=1`) | `train_gpu` (ms/step) | `TOTAL_WALL` (`REAL`) | 4-seed gates (`EP=21` / `EP=22`) | Valid F / E (`meV/A`, `meV/at`) | Test F / S (`meV/A`, `meV/A^3`) |
+| --- | ---: | ---: | --- | --- | --- |
+| **RTX 4000 Ada (`leto`, `sm_89`)** `cm81f` | **2.572 s** (`0.408 ms/step`, `-51.5 ms` vs `cl80b`) | **2.833-2.876 s** (`2.95 s`; `SE2`: `2.827 s`) | **4/4 + 4/4 PASS** | `4.37-4.49` / `0.014-0.021` | `2.77-2.82` / `0.017-0.033` |
+| **RTX 5060 Ti (`sm_120`)** `cm81f` | **2.636 s** (`0.419 ms/step`, `-22 ms` vs `cl80b`) | **3.360-3.503 s** (`SE2`: `2.628 s` GPU / `3.292 s` wall) | **4/4 + 4/4 PASS** | `4.38-4.47` / `0.015-0.020` | `2.74-2.82` / `0.015-0.032` |
+| **RTX 5060 Ti (`sm_120`)** `c50-e40` (exact 5.0 A control) | **4.676 s** (`0.390 ms/step`) | **5.345 s** | PASS (s1) | `4.48` / `0.019` | `2.82` / `0.027` |
+| **Stock `mace-torch` FP64 round-trip** (`s64l0_c55_e22_s1.model`) | — | — | **PASS** | `4.442` / `0.0356` | `2.761` / `0.0191` |
+
+Fresh Wave 45 `ncu` (`sm_120`, 66 kernels) & `nsys` (`--cuda-graph-trace=node`): `k_slot_xd_opt_v3` `53.3/50.6 us` `ncu` (`38.9/42.6 us` `nsys`, `R=80`, `PRMT 48/64->16`), `k_force_pair_h2` `49.9 us` (`38.6 us` `nsys`), `k_conv_pair_h2` REV2 `44.1/42.0 us` (`34.2/34.5 us` `nsys`, `STACK=0`), `k_soap_a_fast_bf16` `26.4 us` `ncu` (`R=112` `sm_120` / `R=90` `sm_89`; `12.1 us` `nsys` Ada vs `13.8 us` prior), all 8 `k_seg_gemm_*_h_v2` `<8.9 us` `ncu` (`2.8-7.1 us` `nsys` Ada), `k_pack_segg_w_h` `1.4-1.8 us` hidden on `s3`. Compared against Stage 0's `mace-torch` Adam+AMSGrad baseline on the exact same `sto320/base-labels-v2` 300 frames (`~7,230 s` L4 FP64, `tF = 8.54-9.23 meV/A`), `loupstrain_cli` is **~900-2,500x faster and ~3.0x lower force RMSE** (`2.76-2.82 meV/A`).
+
+**Not yet done:** FP64 training timing, `s64r8` (radial head 8), species-dependent radial basis, narrow `C_msg` / vector messages, molecular COM+torque and curvature losses, multihead, restart from a mace checkpoint (`--restart_latest`, untested), automatic batch size (above).
+
+---
+
+## 8. Phase 2 FastLR-SK <=0.050 us/atom-step delivery & Engine `v41` (27 November 2026, `5060 Ti only`)
+
+Promoted Engine `v41` (`build/sm_120/libloupmd_ilmlip_v41.so` -> `libloupmd.so`) plus pure-CUDA `v3` training (`lrsk_full_trainer.py`, `lrsk_full_n3tbu.py`) delivers **<= 0.0500 us/atom-step** in both NVE and Langevin MD across all four target systems on RTX 5060 Ti (`5060 Ti only`, median of 3x500 warmed steps after 200-step warmup, verified in one unified pass):
+
+| System (`final_fast50/*.pt`) | Architecture (`c`, `taper`, `nb`, `r`) | `N` | NVE ms (`us/at`) | LGV ms (`us/at`) | 3x Gate (`E / F / S`) | Domain Accuracy (`float64` PyTorch) |
+| --- | --- | ---: | ---: | ---: | --- | --- |
+| **SrTiO₃** (`sto_final.pt`) | `c=(4,4,0)` `t=[16,16,12,8]` `nb=(8,4)` `r=4.6` | 5000 | `0.2311` (`0.0462`) | `0.2448` (`0.0490`) | PASS (`0.02x/0.17x/0.06x`) | **960/960 phonons** (`max\|df\|=0.327 THz`); `valid=9.88, test=7.28, hard40=53.59 meV/A` |
+| **Molten Salt** (`salt_final.pt`) | `c=(4,4,0)` `t=[24,16,8,4]` `nb=(8,4)` `r=6.2` | 3888 | `0.1753` (`0.0451`) | `0.1845` (`0.0474`) | PASS (`0.00x/0.12x/0.05x`) | `valid=8.19, prod3=8.40, transp3=8.22, hard=12.03 meV/A` (`S=0.019-0.027`) |
+| **`n3tbu_v1`** (`n3tbu_final.pt`) | `c=(4,4,0)` `t=[16,16,8,4]` `nb=(8,4)` `r=(4.2,4.8)` | 4320 | `0.2004` (`0.0464`) | `0.2130` (`0.0493`) | PASS (`0.01x/0.17x/0.30x`) | `valid=20.48, test=20.81 meV/A` (`complete 23.42, dimer 20.54, monomer 16.23`) |
+| **Water** (`water_final.pt`) | `c=(2,2,0)` `t=[16,16,16]` `nb=(8,8)` `r=(4.2,5.8)` | 5184 | `0.2407` (`0.0464`) | `0.2576` (`0.0497`) | PASS (`0.11x/0.31x/0.59x`) | `valid=20.97, test=21.12, target=19.78 meV/A` (`COM=18.1-18.8, TRQ=12.8-13.5`) |
+
+- **Burst MD parity:** 8/8 checks (50 steps NVE & LGV vs `LOUP_NO_FLAT_MD=1` on all 4 real bundles) passed (`dp <= 1.46e-6 A`, `dv <= 5.04e-6 A/fs`).
+- **Key enablers:** (1) `q16_c2` 8-edge-in-16-lane subwarp L2 multipole forward/backward for `c=(2,2,0)` (`nb=(8,8)` on Water without exceeding 50 ns/at), (2) trimming L1 `l=2,3 -> 8,4` on Salt (`12,8` `taper=[16/24,16,12,8]` sat at `0.0509-0.0513 us/at` LGV vs `0.0474` at `[24,16,8,4]`) and `n3tbu` (`taper=[16,16,8,4]`).
+- **Rejected (`5060 Ti only` + workstations/Colab):** `NodeQ` node-only quadrupole contractions / charge field gradient (`nodeQ2` `22.00` target, `nodeQ2_gradG` `21.20` target vs `19.78` pure `c=(2,2,0) nb=(8,8)`), Salt `c=(2,2,0)` (`9.20-10.02 meV/A`), and Water tight `r_L1=3.5-4.0 A` at `r_L2=5.8 A`.

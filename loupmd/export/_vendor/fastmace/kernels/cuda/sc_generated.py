@@ -54,7 +54,7 @@ def merged_terms(polynomial):
 
 def shape_of(module):
     """``(segments_in, segments_w, segments_out, mul)`` of a cuEq ``SymmetricContraction`` whose kernels can be
-    generated, else None: float32, degree 1-3 in x, one multiplicity that is a multiple of 32 up to 1024, uniform
+    generated, else None: float32, degree 1-3 in x, one multiplicity that is a multiple of 16 up to 1024, uniform
     segments of that size."""
     etp = getattr(module, "etp", None)
     polynomial = getattr(etp, "polynomial", etp)
@@ -74,6 +74,6 @@ def shape_of(module):
                 return None
     except (AttributeError, TypeError):
         return None
-    if mul % 32 or not 32 <= mul <= 1024:
+    if mul % 16 or not 16 <= mul <= 1024:
         return None
     return (len(operands[1].segments), len(operands[0].segments), len(operands[2].segments), mul)

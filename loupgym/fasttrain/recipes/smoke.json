@@ -1,0 +1,10 @@
+{
+  "name": "smoke",
+  "epochs": 4,
+  "lr": {"schedule": "cosine", "peak": 0.01, "final": 0.001, "warmup_epochs": 1},
+  "weights": [
+    {"from_epoch": 0, "energy": 1, "forces": 100, "stress": 1},
+    {"from_epoch": 2, "energy": 1000, "forces": 100, "stress": 10, "ramp_epochs": 1}
+  ],
+  "eval_every": 2
+}

@@ -94,10 +94,71 @@ void hgemm2_pack_b_col(int Nr, int Kc, const float* w, bool trans, void* out_pan
 void hgemm2_f32a_row(int M, int N, int K, const float* A, const void* B_panel, const float* inv_sB,
                      float* C, float beta, void* ws, size_t ws_bytes, cudaStream_t stream,
                      const int8_t* eA_cached = nullptr);
+// Fused w=64 readout epilogues for LR-SK:
+//   fwd: pre_out = A @ B + bias; h_out = silu(pre_out); eA_out = row_exp(h_out)
+//   bwd: dh = A @ B; dpre_out = dh * silu'(pre_in); eA_out = row_exp(dpre_out)
+void hgemm2_f32a_row_silu_fwd64(int M, int K, const float* A, const void* B_panel, const float* inv_sB,
+                                bool per_sp_bias, const int* species, const float* bias,
+                                float* pre_out, float* h_out, int8_t* eA_out,
+                                const int8_t* eA_in, cudaStream_t stream);
+void hgemm2_f32a_row_silu_bwd64(int M, int K, const float* A, const void* B_panel, const float* inv_sB,
+                                const float* pre_in, float* dpre_out, int8_t* eA_out,
+                                const int8_t* eA_in, cudaStream_t stream);
+// Fused 2-layer w=64 site MLP forward & backward for LR-SK (32 KB SMEM -> 2-3 CTAs/SM, zero h0/dpre0 DRAM!):
+//   fwd: pre0 = x @ W0 + alpha_Z[sp]; h0 = silu(pre0); pre1 = h0 @ W1 (pre-bias, consumed by lrsk_heads_fwd_silu)
+//   bwd: dh0 = dpre1 @ W1^T; dpre0 = dh0 * silu'(pre0); dx = dpre0 @ W0^T
+void hgemm2_lrsk_ro2_fwd64(int M, int K, const int* species, const float* x, const int8_t* eA_x,
+                           const float* alpha_Z, const void* W0_B, const float* W0_inv_sB,
+                           const void* W1_B, const float* W1_inv_sB,
+                           float* pre0_out, float* pre1_out, cudaStream_t stream);
+void hgemm2_lrsk_ro2_bwd64(int M, int K, const float* dpre1, const int8_t* eA_dpre1,
+                           const float* pre0, const void* W1_BT, const float* W1_inv_sBT,
+                           const void* W0_BT, const float* W0_inv_sBT,
+                           float* dx_out, cudaStream_t stream);
 void hgemm2_f32a_row_gate_bwd(int l, int M, int N, int K, const float* A, const void* B_panel, const float* inv_sB,
                               const GateArgs& g, void* ws, cudaStream_t stream, const int8_t* eA_cached = nullptr);
 void hgemm2_f32a_row_gate_fwd(int l, int M, int N, int K, const float* A, const void* B_panel, const float* inv_sB,
                               const GateArgs& g, void* ws, cudaStream_t stream, const int8_t* eA_cached = nullptr);
+// Fused ILMlip readout tail (depth==2, width==128, need_grad==true):
+// pre0[N,128] -> +alpha_Z -> silu -> @W1 -> +b1 -> silu -> .u_Z (+ZBL switch) -> silu_bwd -> @W1^T -> silu_bwd -> dpre0[N,128]
+void hgemm2_ilmlip_ro_tail_w128(
+    int N, bool zbl_sw, float inv_zc, const int* species,
+    const float* pre0, const float* alpha_Z, const float* b1, const float* u_Z,
+    const void* W1_B, const float* W1_inv_sB, const void* W1_BT, const float* W1_inv_sBT,
+    const double* e_zbl, double* energy, double* atom_energy, float* w_zbl_out, float* dpre0,
+    int8_t* eA_dpre0, cudaStream_t stream);
+void hgemm2_ilmlip_ro_tail_w64(
+    int N, bool zbl_sw, float inv_zc, const int* species,
+    const float* pre0, const float* alpha_Z, const float* b1, const float* u_Z,
+    const void* W1_B, const float* W1_inv_sB, const void* W1_BT, const float* W1_inv_sBT,
+    const double* e_zbl, double* energy, double* atom_energy, float* w_zbl_out, float* dpre0,
+    int8_t* eA_dpre0, cudaStream_t stream);
+void hgemm2_ilmlip_ro1_fused(
+    int N, int K, int rw, bool zbl_sw, float inv_zc, const int* species,
+    const float* x, const int8_t* eA_x, const float* alpha_Z, const float* u_Z,
+    const void* W0_B, const float* W0_inv_sB, const void* W0_BT, const float* W0_inv_sBT,
+    const double* e_zbl, double* energy, double* atom_energy, float* w_zbl_out, float* dx,
+    void* ws, cudaStream_t stream);
+void hgemm2_ilmlip_ro1_fwd_tail(
+    int N, int K, int rw, bool zbl_sw, float inv_zc, const int* species,
+    const float* x, const int8_t* eA_x, const float* alpha_Z, const float* u_Z,
+    const void* W0_B, const float* W0_inv_sB,
+    const double* e_zbl, double* energy, double* atom_energy, float* w_zbl_out,
+    float* dpre0, int8_t* eA_dpre0, void* ws, cudaStream_t stream);
+void hgemm2_ilmlip_ro2_fused_w64(
+    int N, int K, bool zbl_sw, float inv_zc, const int* species,
+    const float* x, const int8_t* eA_x, const float* alpha_Z, const float* b1, const float* u_Z,
+    const void* W0_B, const float* W0_inv_sB, const void* W0_BT, const float* W0_inv_sBT,
+    const void* W1_B, const float* W1_inv_sB, const void* W1_BT, const float* W1_inv_sBT,
+    const double* e_zbl, double* energy, double* atom_energy, float* w_zbl_out, float* dx,
+    void* ws, cudaStream_t stream);
+void hgemm2_ilmlip_ro2_fwd_tail_w64(
+    int N, int K, bool zbl_sw, float inv_zc, const int* species,
+    const float* x, const int8_t* eA_x, const float* alpha_Z, const float* b1, const float* u_Z,
+    const void* W0_B, const float* W0_inv_sB,
+    const void* W1_B, const float* W1_inv_sB, const void* W1_BT, const float* W1_inv_sBT,
+    const double* e_zbl, double* energy, double* atom_energy, float* w_zbl_out,
+    float* dpre0, int8_t* eA_dpre0, void* ws, cudaStream_t stream);
 using GemmH2RowFn = std::function<void(int M, int N, int K, const float* A, const void* B_panel,
                                        const float* inv_sB, float* C, float beta, const int8_t* eA_cached)>;
 using GemmH2RowGateFn = std::function<void(int l, int M, int N, int K, const float* A, const void* B_panel,
@@ -128,6 +189,8 @@ struct GenericPassInputs {
     const int* E_dev;          // device: number of active edges (act_row_ptr[N])
     int E_cap;                 // capacity of the edge arrays
     const int* act_row_ptr;    // [N + 1], receiver rows
+    const int* act_row_end = nullptr;  // [N], exclusive end of receiver row i; nullptr => act_row_ptr + 1
+    const int* act_row_end2 = nullptr; // [N], exclusive end of r < r_max2 edges (arch=ilmlip dual-cutoff); nullptr => act_row_end
     const int* act_senders;    // [E]
     const int* act_receivers;  // [E]
     const float4* act_vec_len; // [E] (pos[rcv] - pos[snd] + shift, |v|)
@@ -142,6 +205,7 @@ struct GenericPassInputs {
     const double* pos64;       // [N, 3] positions (device order; the long-range k-space terms read them)
     int compute_stress;
     int energy_only = 0;       // forward of every layer and the ZBL energy only: no forces, no stress
+    bool defer_f32_flush = false;  // when true, arch=ilmlip skips ilmlip_add_forces_f32_kernel (fused into MD 2nd half!)
     double* atom_energy = nullptr;  // energy_only (S6-T08): also each row's readout and ZBL energy [N], added
                                     // to (the caller zeroes it); the fused product + readout kernel is not used
     // Which part of the pass record() runs (PLAN.md 4.4). SweepAll is the whole pass. The others are one sweep of a
@@ -186,6 +250,7 @@ struct GenericPassInputs {
 struct GenericLayer;
 
 class PolarLR;
+class IlmlipModel;
 
 class GenericModel {
 public:
@@ -228,9 +293,9 @@ public:
     bool hand_locals(int t, int i) const { return hand_[(size_t)t][(size_t)i].locals; }
     // Sweeps need every layer's output to exist (not with the long range) or, with the skip-chain fold, the fold's
     // hand-over (use_chain_fold(on, true)).
-    bool sweeps_available() const { return lr_ == nullptr && (!chain_fold_ || fold_sweeps_); }
+    bool sweeps_available() const { return lr_ == nullptr && ilmlip_ == nullptr && (!chain_fold_ || fold_sweeps_); }
     // Whether the model can sweep once the fold is off (use_chain_fold(false)): every model without long range.
-    bool sweeps_possible() const { return lr_ == nullptr; }
+    bool sweeps_possible() const { return lr_ == nullptr && ilmlip_ == nullptr; }
     // The skip-chain fold (S57, S73) of the systems allocated from now on: on only where setup_chain_fold built it.
     // The fold's composed weights sit beside the plain ones, so a handle switches per system: whole systems fold,
     // tile domains (which sweep) only with `sweeps` (list 20: two-layer models, whose sweeps then hand on the fold's
@@ -291,6 +356,11 @@ public:
     // captured graphs must be re-recorded.
     bool set_cell(const double* cell);
     bool has_lr() const { return lr_ != nullptr; }
+    bool is_ilmlip() const { return ilmlip_ != nullptr; }
+    float* ilmlip_forces_f32() const;
+    float ilmlip_r_max1() const;
+    float ilmlip_r_max2() const;
+    bool ilmlip_supports_pack_vs() const;
     const SplineGrid* preloc_grid() const;
     int preloc_pair_sym() const;
     // Records the whole force pass on in.stream (capturable; no host syncs, no allocation).
@@ -363,6 +433,7 @@ private:
     int C0_ = 0;
     std::vector<GenericLayer*> layers_;
     PolarLR* lr_ = nullptr;
+    IlmlipModel* ilmlip_ = nullptr;
     // ZBL per ordered pair
     float zbl_c_[4] = {0, 0, 0, 0};
     float zbl_p_ = 5.0f, zbl_rmax_ = 0.0f;
