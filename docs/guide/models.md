@@ -95,6 +95,19 @@ The engine does not read PyTorch checkpoints. At the first evaluation or run, th
 bundle for the structure's elements. The export runs in a process of its own and needs the export extra
 (`pip install 'loupmd[export]'`: torch, mace-torch, cuequivariance, graph_longrange).
 
+### Direct `.loup` bundles
+
+If you already have a `.loup` bundle — for example from [LoupGYM fine-tuning](../loupgym/finetune.md) or
+[auto-distillation](../loupgym/distill.md) — pass its path directly to `lm.load` or `lm.md`:
+
+```python
+ff = lm.load("finetuned.loup")
+res = lm.md("structure.cif", model=ff, temperature_K=300, steps=10_000)
+```
+
+Direct `.loup` bundles are binary files (not Python pickles), so they load without PyTorch, skip the export step,
+and still validate element coverage (and an optional `sha256=` checksum if you pass one).
+
 Bundles are kept in `<cache root>/bundles/`. A bundle's file name carries a key over the model file's SHA-256, the
 elements, the head, charge and spin, and the exporter's own sources, the product-kernel generator included. A
 changed exporter never finds an old bundle, and each bundle carries the source of its product kernels. Two processes that need the same bundle export it once: the export runs under a file lock. A

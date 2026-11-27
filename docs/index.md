@@ -40,6 +40,10 @@ version brought.
 - LAMMPS: `pair_style loupmd`, `pair_style loupmd/kk` and `run_style loupmd`, in the package ML-LOUPMD of the
   repository's `lammps/` folder (GPL-2.0, built into LAMMPS, not in the wheel;
   [its guide](https://github.com/FZWINGEL-UBT/LoupMD/blob/release/v1/lammps/README.md)).
+- Direct loading of pre-built `.loup` bundles (`lm.load("finetuned.loup")`, zero PyTorch needed; [models](guide/models.md#direct-loup-bundles)).
+- **LoupGYM** (`loupgym`): companion training package for pure-CUDA foundation MACE fine-tuning (`loupgym finetune`,
+  ~20× faster than PyTorch+CuEq) and automatic student distillation (`loupgym distill`, `< 0.05 µs/atom` MD students);
+  see [LoupGYM](loupgym/index.md).
 
 ## Accuracy
 

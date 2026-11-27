@@ -10,6 +10,7 @@ on:
       - "docs/**"
       - "mkdocs.yml"
       - "loupmd/**"
+      - "loupgym/**"
       - "tools/docs/requirements.txt"
       - ".github/workflows/docs.yml"
   workflow_dispatch:

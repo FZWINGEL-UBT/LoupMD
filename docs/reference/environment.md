@@ -14,6 +14,8 @@ the [FAQ](../faq.md).
 | `LOUP_CACHE_DIR` | directory | unset | an older name of the cache root, used when `LOUPMD_CACHE` is unset; also the directory where the engine keeps its GEMM plan files (below); set from `LOUPMD_CACHE` when only that is set | `loupmd/cache.py`, `src/engine.cu` |
 | `LOUPMD_BENCH_STRUCTURES` | directories separated like `PATH` | unset | folders searched for the structure files of `loupmd bench` that are not shipped with the package | `loupmd/bench/suites.py` |
 | `LOUP_LIB` | path to a `libloupmd.so` | unset | the library this process loads, instead of the one shipped in the package (`loupmd/_lib/libloupmd.so`) or, in a source checkout, the one `make` installs at its root | `loupmd/_core.py` |
+| `LOUP_FT_LIB` | path to a `libloupmd_ft.so` | unset | pure-CUDA foundation fine-tuning library loaded by `loupgym.finetune` (`make mace-ft-lib`) | `loupgym/_lib.py` |
+| `LOUP_LRSK_FT_LIB` | path to a `libloup_lrsk_full_train_v3.so` | unset | pure-CUDA `FastLR-SK` student training library loaded by `loupgym.distill` (`make lrsk-train-lib`) | `loupgym/_lib.py` |
 | `LOUP_KERNEL_PATH` | directories separated like `PATH` | `<cache root>/lib` is appended | folders the engine searches for kernel plugins `loupmd-kernels-<signature>.so` when a bundle needs kernels the library was not built with | `loupmd/kernels.py`, `src/generic.cu` |
 | `LOUP_GATE_CACHE` | directory | `<cache root>/gate_refs` | where the accuracy gate keeps its cached MACE references | `loupmd/validate/references.py` |
 | `CUDA_HOME`, `CUDA_PATH` | CUDA toolkit root | unset | where `loupmd build-kernels` looks for `bin/nvcc` after the `PATH` and before `/usr/local/cuda` | `loupmd/kernels.py` |
@@ -47,7 +49,7 @@ with the environment.
 | `plans` | `plans_*.bin` files in the root itself (and a `<root>/plans/` folder, which no current version writes) | GEMM plans: the timed choice of GEMM kernel per shape and GPU | yes |
 | `gate_refs` | `<root>/gate_refs/` | MACE float64 and float32 references of the accuracy gate | yes |
 | `lib` | `<root>/lib/` | kernel plugins built by `loupmd build-kernels` | only with `--kind lib` |
-| `train` | `<root>/train/` | what training runs derive and can make again: mace's Clebsch-Gordan matrices (`loupmd.fasttrain`) | yes |
+| `train` | `<root>/train/` | what training runs derive and can make again: mace's Clebsch-Gordan matrices (`loupgym.fasttrain`) | yes |
 
 `loupmd cache list` shows every cached file with its size and last use, `loupmd cache size` the bytes per kind, and
 `loupmd cache prune --older-than DAYS` or `--max-size SIZE` removes files ([Command-line reference](cli.md)). Prune

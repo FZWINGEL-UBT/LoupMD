@@ -86,6 +86,11 @@ nav:
       - Coming from FastMACE: guide/from-fastmace.md
       - What LoupMD leaves out: guide/not-in-loupmd.md
       - FAQ: faq.md
+  - LoupGYM (Training):
+      - Overview: loupgym/index.md
+      - Fine-tuning foundation models: loupgym/finetune.md
+      - Auto-distillation: loupgym/distill.md
+      - CLI and Python API: loupgym/reference.md
   - Reference:
       - Command line: reference/cli.md
       - Models: reference/models.md
