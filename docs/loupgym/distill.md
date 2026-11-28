@@ -50,6 +50,18 @@ loupgym distill --dft-data dft_train.extxyz --speed balanced --output ./student_
 | **`n3tbu_v1`** | `c=(4,4,0)` `t=[16,16,8,4]` `nb=(8,4)` `r=(4.2,4.8)` | 4,320 | `0.0464` | `0.0493` | PASS (`0.01× / 0.17× / 0.30×`) | test F = `20.81 meV/Å` |
 | **Water** | `c=(2,2,0)` `t=[16,16,16]` `nb=(8,8)` `r=(4.2,5.8)` | 5,184 | `0.0464` | `0.0497` | PASS (`0.11× / 0.31× / 0.59×`) | target F = `19.78 meV/Å` (COM `18.1`, torque `12.8`) |
 
+## Built-in fast dispersion (Options B, C, and D)
+
+Standard engine D3 (`dispersion="d3bj"`) costs ~8.4 ms on 5,000 atoms (~35× a `fast50` student step). Distilled `arch=ilmlip` bundles support three built-in GPU D3(BJ) options (`--dispersion`) that run on a dedicated side stream, use a `C¹` force-shifted cutoff (exact zero energy and force at `r_cut`), and automatically refuse accidental double-counting if `dispersion="d3bj"` is passed on top:
+
+| Option | CLI flag | Method | 5,000-at SrTiO₃ (`ms/eval`) | GPU Parity vs `float64` (`dE / dF / dS`) | Best for |
+| :--- | :--- | :--- | ---: | :--- | :--- |
+| **B (fixed C6 + tail)** | `--dispersion d3bj` | Force-shifted fixed-C6 D3(BJ) over student neighbour list + live-volume `K/V` tail | `1.104` (`+0.130 ms` vs `0.974` base) | `6.5e-9 / 8.8e-9 / 6.1e-11` | Bulk periodic crystals, salts, liquids (**65× faster** than exact D3) |
+| **C (CN-dependent C6 + tail)** | `--dispersion d3bj-cn` | 3-pass coordination-dependent C6 + exact CN chain-rule forces/virial + `K/V` tail | `1.385` (`+0.411 ms`) | `9.2e-9 / 8.9e-9 / 1.6e-10` | Molecules / liquids needing exact local CN-dependent dispersion |
+| **D (explicit far pairs)** | `--dispersion d3bj-far --dispersion-rcut 10.0` | On-device spatial cell-bin walk out to `r_disp` (9–12 Å) + optional tail beyond `r_disp` | `3.862` (`r_disp = 9 Å`) | `5.2e-9 / 2.1e-8 / 9.3e-10` | Slabs, interfaces, adsorbates, and fibres/clusters in vacuum (`use_tail=False`) |
+
+Set `LOUP_ILMLIP_DISP=0` at runtime to toggle built-in dispersion off (zero overhead when off). On `n3tbu_v1` (ωB97M-D3BJ, 120-epoch matched A/B retrain), subtracting built-in D3(BJ) during training reduced held-out test force RMSE from `62.17 meV/Å` (baseline) to `57.23 meV/Å` (Option B), `58.65 meV/Å` (Option C, best energy `0.554 meV/at`), and `58.53 meV/Å` (Option D 10 Å).
+
 ## Using the distilled student in LoupMD
 
 ```python

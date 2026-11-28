@@ -6913,10 +6913,21 @@ void IlmlipModel::free_model() {
     if (disp_ev_fork_) { cudaEventDestroy(disp_ev_fork_); disp_ev_fork_ = nullptr; }
     if (disp_ev_join_) { cudaEventDestroy(disp_ev_join_); disp_ev_join_ = nullptr; }
     if (disp_stream_)  { cudaStreamDestroy(disp_stream_); disp_stream_  = nullptr; }
-    has_builtin_disp_ = false;
+    disp_mode_ = 0;
     disp_use_tail_ = false;
     disp_rcut_ = 0.0f;
+    disp_s6_ = 1.0f;
+    disp_s8_ = 0.0f;
     d_disp_pair_ = nullptr;
+    d_disp_cn_nref_ = nullptr;
+    d_disp_cn_cnref_ = nullptr;
+    d_disp_cn_rcov_ = nullptr;
+    d_disp_cn_pair_ = nullptr;
+    d_disp_cn_c6ref_ = nullptr;
+    d_disp_far_grid_ = nullptr;
+    d_disp_far_cnt_ = nullptr;
+    d_disp_far_ptr_ = nullptr;
+    d_disp_far_cur_ = nullptr;
     d_disp_tail_per_sp_ = nullptr;
     disp_J_st_.clear();
     disp_cached_counts_.clear();
@@ -6956,6 +6967,9 @@ void IlmlipModel::free_system() {
     sys_bytes_ = 0;
     sys_max_alloc_ = 0;
     N_ = 0;
+    d_disp_w_ = d_disp_dw_ = d_disp_dedcn_ = nullptr;
+    d_disp_far_pos4_ = nullptr;
+    d_disp_far_bin_ = nullptr;
     for (int l = 0; l < kMaxL; ++l) {
         d_A1_[l] = d_dA1_[l] = d_Bcat_[l] = d_dBcat_[l] = d_I_[l] = d_dI_[l] = nullptr;
         d_A2_[l] = d_dA2_[l] = d_PQ_[l] = d_dPQ_[l] = nullptr;
@@ -7762,23 +7776,48 @@ void IlmlipModel::load(const Bundle& b) {
         CUDA_CHECK_THROW(cudaEventCreateWithFlags(&zbl_ev_join_, cudaEventDisableTiming));
     }
 
-    // Built-in Option B force-shifted fixed-C6 D3(BJ) dispersion + analytical K/V tail.
+    // Built-in D3(BJ) dispersion: Option B (d3bj_fixed), Option C (d3bj_cn), Option D (d3bj_far).
     // LOUP_ILMLIP_DISP=0 turns it off cleanly (zero runtime overhead when off).
     const char* disp_env = std::getenv("LOUP_ILMLIP_DISP");
     const bool disp_enabled = !(disp_env && disp_env[0] == '0');
     if (disp_enabled && b.has_meta("has_builtin_disp") && b.meta_int("has_builtin_disp") != 0) {
+        const std::string dm = b.has_meta("disp_method") ? b.meta("disp_method") : "d3bj_fixed";
         auto rc_v = b.f64("disp_rcut", {1});
         disp_rcut_ = (float)rc_v[0];
         disp_use_tail_ = (!b.has_meta("disp_use_tail") || b.meta_int("disp_use_tail") != 0);
-        auto dp = b.f32("disp_pair", {S_ * S_, 6});
-        d_disp_pair_ = upload_vec(model_allocs_, dp);
         disp_J_st_ = b.f64("disp_J_st", {S_, S_});
         std::vector<double> zero_s((size_t)S_, 0.0);
         d_disp_tail_per_sp_ = upload_vec(model_allocs_, zero_s);
+        if (dm == "d3bj_cn") {
+            auto pm = b.f64("disp_params", {4});
+            disp_s6_ = (float)pm[0];
+            disp_s8_ = (float)pm[1];
+            d_disp_cn_nref_ = upload_vec(model_allocs_, b.i32("disp_cn_nref", {S_}));
+            d_disp_cn_cnref_ = upload_vec(model_allocs_, b.f32("disp_cn_cnref", {S_, 5}));
+            d_disp_cn_rcov_ = upload_vec(model_allocs_, b.f32("disp_cn_rcov", {S_}));
+            d_disp_cn_pair_ = upload_vec(model_allocs_, b.f32("disp_cn_pair", {S_ * S_, 5}));
+            d_disp_cn_c6ref_ = upload_vec(model_allocs_, b.f32("disp_cn_c6ref", {S_, S_, 5, 5}));
+            disp_mode_ = 2;
+        } else {
+            auto dp = b.f32("disp_pair", {S_ * S_, 6});
+            d_disp_pair_ = upload_vec(model_allocs_, dp);
+            if (dm == "d3bj_far") {
+                void* gp = nullptr;
+                CUDA_CHECK_THROW(device_malloc(&gp, sizeof(DispFarGrid)));
+                model_allocs_.push_back(gp);
+                d_disp_far_grid_ = gp;
+                std::vector<int> z8k(kDispFarMaxBins + 1, 0);
+                d_disp_far_cnt_ = upload_vec(model_allocs_, z8k);
+                d_disp_far_ptr_ = upload_vec(model_allocs_, z8k);
+                d_disp_far_cur_ = upload_vec(model_allocs_, z8k);
+                disp_mode_ = 3;
+            } else {
+                disp_mode_ = 1;
+            }
+        }
         CUDA_CHECK_THROW(cudaStreamCreateWithFlags(&disp_stream_, cudaStreamNonBlocking));
         CUDA_CHECK_THROW(cudaEventCreateWithFlags(&disp_ev_fork_, cudaEventDisableTiming));
         CUDA_CHECK_THROW(cudaEventCreateWithFlags(&disp_ev_join_, cudaEventDisableTiming));
-        has_builtin_disp_ = true;
     }
 }
 
@@ -8019,6 +8058,22 @@ void IlmlipModel::alloc_system(int N) {
             }
         }
     }
+    if (disp_mode_ == 2) {
+        d_disp_w_ = alloc(n * 5);
+        d_disp_dw_ = alloc(n * 5);
+        d_disp_dedcn_ = alloc(n);
+    } else if (disp_mode_ == 3) {
+        void* p4 = nullptr;
+        CUDA_CHECK_THROW(device_malloc(&p4, n * sizeof(float4)));
+        sys_allocs_.push_back(p4);
+        sys_bytes_ += n * sizeof(float4);
+        d_disp_far_pos4_ = reinterpret_cast<float4*>(p4);
+        void* pb = nullptr;
+        CUDA_CHECK_THROW(device_malloc(&pb, n * sizeof(int)));
+        sys_allocs_.push_back(pb);
+        sys_bytes_ += n * sizeof(int);
+        d_disp_far_bin_ = reinterpret_cast<int*>(pb);
+    }
     N_ = N;
 }
 
@@ -8043,7 +8098,7 @@ void IlmlipModel::record(const GenericPassInputs& in) {
         }
     } disp_guard;
 
-    if (has_builtin_disp_ && d_disp_pair_ && disp_stream_) {
+    if (disp_mode_ != 0 && disp_stream_) {
         if (disp_use_tail_ && in.species_count && (int)in.species_count->size() == S_ &&
             *in.species_count != disp_cached_counts_) {
             disp_cached_counts_ = *in.species_count;
@@ -8064,29 +8119,109 @@ void IlmlipModel::record(const GenericPassInputs& in) {
         CUDA_CHECK_THROW(cudaEventRecord(disp_ev_fork_, st));
         CUDA_CHECK_THROW(cudaStreamWaitEvent(disp_stream_, disp_ev_fork_, 0));
         const unsigned disp_grid = std::min(warp_grid, 256u);
-        const size_t disp_smem = (S_ <= 16) ? ((size_t)S_ * S_ * 6 * sizeof(float)) : 0;
         const bool d_pack_vs = (in.act_senders == nullptr);
         const bool d_eonly = (in.energy_only != 0);
         const bool d_stress = (in.compute_stress != 0) && !d_eonly;
-        auto launch_disp = [&](auto st_tag, auto pv_tag, auto eo_tag) {
-            constexpr bool ST = decltype(st_tag)::value;
-            constexpr bool PV = decltype(pv_tag)::value;
-            constexpr bool EO = decltype(eo_tag)::value;
-            ilmlip_disp_pair_kernel<ST, PV, EO><<<disp_grid, 128, disp_smem, disp_stream_>>>(
-                N, S_, disp_rcut_, in.act_row_ptr, row_end,
-                PV ? nullptr : in.act_senders, in.act_vec_len, in.species, d_disp_pair_,
-                in.energy, in.atom_energy, in.forces, in.virial);
-        };
-        if (d_eonly) {
-            if (d_pack_vs) launch_disp(std::false_type{}, std::true_type{}, std::true_type{});
-            else           launch_disp(std::false_type{}, std::false_type{}, std::true_type{});
-        } else if (d_stress) {
-            if (d_pack_vs) launch_disp(std::true_type{}, std::true_type{}, std::false_type{});
-            else           launch_disp(std::true_type{}, std::false_type{}, std::false_type{});
-        } else {
-            if (d_pack_vs) launch_disp(std::false_type{}, std::true_type{}, std::false_type{});
-            else           launch_disp(std::false_type{}, std::false_type{}, std::false_type{});
+
+        if (disp_mode_ == 1 && d_disp_pair_) {
+            // Option B: fixed-C6 force-shifted D3(BJ) on student neighbour list
+            const size_t disp_smem = (S_ <= 16) ? ((size_t)S_ * S_ * 6 * sizeof(float)) : 0;
+            auto launch_disp = [&](auto st_tag, auto pv_tag, auto eo_tag) {
+                constexpr bool ST = decltype(st_tag)::value;
+                constexpr bool PV = decltype(pv_tag)::value;
+                constexpr bool EO = decltype(eo_tag)::value;
+                ilmlip_disp_pair_kernel<ST, PV, EO><<<disp_grid, 128, disp_smem, disp_stream_>>>(
+                    N, S_, disp_rcut_, in.act_row_ptr, row_end,
+                    PV ? nullptr : in.act_senders, in.act_vec_len, in.species, d_disp_pair_,
+                    in.energy, in.atom_energy, in.forces, in.virial);
+            };
+            if (d_eonly) {
+                if (d_pack_vs) launch_disp(std::false_type{}, std::true_type{}, std::true_type{});
+                else           launch_disp(std::false_type{}, std::false_type{}, std::true_type{});
+            } else if (d_stress) {
+                if (d_pack_vs) launch_disp(std::true_type{}, std::true_type{}, std::false_type{});
+                else           launch_disp(std::true_type{}, std::false_type{}, std::false_type{});
+            } else {
+                if (d_pack_vs) launch_disp(std::false_type{}, std::true_type{}, std::false_type{});
+                else           launch_disp(std::false_type{}, std::false_type{}, std::false_type{});
+            }
+        } else if (disp_mode_ == 2 && d_disp_cn_pair_ && d_disp_w_) {
+            // Option C: coordination-dependent C6 + CN chain-rule forces/virial (3 passes)
+            if (d_pack_vs) {
+                ilmlip_disp_cn1_kernel<true><<<disp_grid, 128, 0, disp_stream_>>>(
+                    N, disp_rcut_, in.act_row_ptr, row_end, nullptr, in.act_vec_len,
+                    in.species, d_disp_cn_nref_, d_disp_cn_cnref_, d_disp_cn_rcov_, d_disp_w_, d_disp_dw_);
+            } else {
+                ilmlip_disp_cn1_kernel<false><<<disp_grid, 128, 0, disp_stream_>>>(
+                    N, disp_rcut_, in.act_row_ptr, row_end, in.act_senders, in.act_vec_len,
+                    in.species, d_disp_cn_nref_, d_disp_cn_cnref_, d_disp_cn_rcov_, d_disp_w_, d_disp_dw_);
+            }
+            auto launch_cn2 = [&](auto st_tag, auto pv_tag, auto eo_tag) {
+                constexpr bool ST = decltype(st_tag)::value;
+                constexpr bool PV = decltype(pv_tag)::value;
+                constexpr bool EO = decltype(eo_tag)::value;
+                ilmlip_disp_cn2_kernel<ST, PV, EO><<<disp_grid, 128, 0, disp_stream_>>>(
+                    N, S_, disp_rcut_, disp_s6_, disp_s8_, in.act_row_ptr, row_end,
+                    PV ? nullptr : in.act_senders, in.act_vec_len, in.species, d_disp_cn_nref_,
+                    d_disp_cn_pair_, d_disp_cn_c6ref_, d_disp_w_, d_disp_dw_, d_disp_dedcn_,
+                    in.energy, in.atom_energy, in.forces, in.virial);
+            };
+            if (d_eonly) {
+                if (d_pack_vs) launch_cn2(std::false_type{}, std::true_type{}, std::true_type{});
+                else           launch_cn2(std::false_type{}, std::false_type{}, std::true_type{});
+            } else if (d_stress) {
+                if (d_pack_vs) {
+                    launch_cn2(std::true_type{}, std::true_type{}, std::false_type{});
+                    ilmlip_disp_cn3_kernel<true, true><<<disp_grid, 128, 0, disp_stream_>>>(
+                        N, disp_rcut_, in.act_row_ptr, row_end, nullptr, in.act_vec_len,
+                        in.species, d_disp_cn_rcov_, d_disp_dedcn_, in.forces, in.virial);
+                } else {
+                    launch_cn2(std::true_type{}, std::false_type{}, std::false_type{});
+                    ilmlip_disp_cn3_kernel<true, false><<<disp_grid, 128, 0, disp_stream_>>>(
+                        N, disp_rcut_, in.act_row_ptr, row_end, in.act_senders, in.act_vec_len,
+                        in.species, d_disp_cn_rcov_, d_disp_dedcn_, in.forces, in.virial);
+                }
+            } else {
+                if (d_pack_vs) {
+                    launch_cn2(std::false_type{}, std::true_type{}, std::false_type{});
+                    ilmlip_disp_cn3_kernel<false, true><<<disp_grid, 128, 0, disp_stream_>>>(
+                        N, disp_rcut_, in.act_row_ptr, row_end, nullptr, in.act_vec_len,
+                        in.species, d_disp_cn_rcov_, d_disp_dedcn_, in.forces, in.virial);
+                } else {
+                    launch_cn2(std::false_type{}, std::false_type{}, std::false_type{});
+                    ilmlip_disp_cn3_kernel<false, false><<<disp_grid, 128, 0, disp_stream_>>>(
+                        N, disp_rcut_, in.act_row_ptr, row_end, in.act_senders, in.act_vec_len,
+                        in.species, d_disp_cn_rcov_, d_disp_dedcn_, in.forces, in.virial);
+                }
+            }
+        } else if (disp_mode_ == 3 && d_disp_pair_ && d_disp_far_grid_ && d_disp_far_pos4_ && in.n_ghost == 0) {
+            // Option D: explicit fixed-C6 force-shifted far pairs to disp_rcut_ via spatial cell-binning
+            DispCell9 ch{};
+            for (int k = 0; k < 9; ++k) ch.h[k] = in.cell_h_host[k];
+            auto* fg = reinterpret_cast<DispFarGrid*>(d_disp_far_grid_);
+            ilmlip_disp_far_grid_kernel<<<1, 1, 0, disp_stream_>>>(in.cell_h_dev, ch, disp_rcut_, fg);
+            CUDA_CHECK_THROW(cudaMemsetAsync(d_disp_far_cnt_, 0, (size_t)kDispFarMaxBins * sizeof(int), disp_stream_));
+            const unsigned nblk = (unsigned)((N + 255) / 256);
+            ilmlip_disp_far_count_kernel<<<nblk, 256, 0, disp_stream_>>>(N, in.pos64, fg, d_disp_far_bin_, d_disp_far_cnt_);
+            ilmlip_disp_far_scan_kernel<<<1, 1, 0, disp_stream_>>>(fg, d_disp_far_cnt_, d_disp_far_ptr_, d_disp_far_cur_);
+            ilmlip_disp_far_scatter_kernel<<<nblk, 256, 0, disp_stream_>>>(
+                N, in.pos64, in.species, fg, d_disp_far_bin_, d_disp_far_cur_, d_disp_far_pos4_);
+            const size_t disp_smem = (S_ <= 16) ? ((size_t)S_ * S_ * 6 * sizeof(float)) : 0;
+            if (d_eonly) {
+                ilmlip_disp_far_walk_kernel<false, true><<<disp_grid, 128, disp_smem, disp_stream_>>>(
+                    N, S_, disp_rcut_, fg, d_disp_far_ptr_, d_disp_far_pos4_, d_disp_far_bin_,
+                    in.pos64, in.species, d_disp_pair_, in.energy, in.atom_energy, in.forces, in.virial);
+            } else if (d_stress) {
+                ilmlip_disp_far_walk_kernel<true, false><<<disp_grid, 128, disp_smem, disp_stream_>>>(
+                    N, S_, disp_rcut_, fg, d_disp_far_ptr_, d_disp_far_pos4_, d_disp_far_bin_,
+                    in.pos64, in.species, d_disp_pair_, in.energy, in.atom_energy, in.forces, in.virial);
+            } else {
+                ilmlip_disp_far_walk_kernel<false, false><<<disp_grid, 128, disp_smem, disp_stream_>>>(
+                    N, S_, disp_rcut_, fg, d_disp_far_ptr_, d_disp_far_pos4_, d_disp_far_bin_,
+                    in.pos64, in.species, d_disp_pair_, in.energy, in.atom_energy, in.forces, in.virial);
+            }
         }
+
         if (disp_use_tail_ && disp_K_tail_ != 0.0 && in.n_ghost == 0) {
             const unsigned tgrid = in.atom_energy ? (unsigned)((N + 255) / 256) : 1u;
             const unsigned tblk = in.atom_energy ? 256u : 1u;

@@ -66,6 +66,7 @@ class FixedD3BJSpec:
     s8: float
     a1: float
     a2: float
+    method: str = "d3bj_fixed"  # "d3bj_fixed" (Option B) or "d3bj_far" (Option D explicit pairs to r_cut)
 
     @property
     def S(self) -> int:
@@ -85,7 +86,7 @@ class FixedD3BJSpec:
         ], axis=1).astype(np.float32)
         meta = {
             "has_builtin_disp": 1,
-            "disp_method": "d3bj_fixed",
+            "disp_method": self.method,
             "disp_functional": self.functional,
             "disp_force_shift": int(bool(self.force_shift)),
             "disp_use_tail": int(bool(self.use_tail)),
@@ -96,6 +97,70 @@ class FixedD3BJSpec:
             "disp_pair": np.ascontiguousarray(pair_f32, dtype=np.float32),
             "disp_J_st": np.ascontiguousarray(self.J_st.reshape(S, S), dtype=np.float64),
             "disp_params": np.array([self.s6, self.s8, self.a1, self.a2], dtype=np.float64),
+        }
+        return meta, tensors
+
+
+@dataclass(frozen=True)
+class CnD3BJSpec:
+    """Option C: coordination-dependent C6 force-shifted D3(BJ) + optional analytical K/V tail.
+
+    Computes exact Grimme D3 coordination numbers CN_i, Gaussian weights w_ia, pair C6_ij(CN_i, CN_j),
+    force-shifted BJ energy/forces/virial, and exact CN chain-rule forces/virial over the student's
+    active neighbour list (r < r_cut).
+    """
+
+    functional: str
+    r_cut: float
+    force_shift: bool
+    use_tail: bool
+    Z: tuple[int, ...]
+    nref: np.ndarray     # [S] int32
+    cnref: np.ndarray    # [S, 5] float64
+    rcov_A: np.ndarray   # [S] float64 (4/3 * r_cov in Angstrom)
+    qq_A2: np.ndarray    # [S, S] float64 (3 * r2r4_s * r2r4_t * BOHR^2, in A^2)
+    f6: np.ndarray       # [S, S] float64 (A^6)
+    f8: np.ndarray       # [S, S] float64 (A^8)
+    c6ref_ev: np.ndarray # [S, S, 5, 5] float64 (Hartree*bohr^6 -> eV*A^6)
+    g_cut: np.ndarray    # [S, S] float64 (dimensionless u(r_cut)/C6_ev in 1/A^6)
+    dg_cut: np.ndarray   # [S, S] float64 (du/dr(r_cut)/C6_ev in 1/A^7)
+    J_st: np.ndarray     # [S, S] float64 (mean-CN tail integral in eV*A^3)
+    s6: float
+    s8: float
+    a1: float
+    a2: float
+
+    @property
+    def S(self) -> int:
+        return len(self.Z)
+
+    def to_bundle_entries(self) -> tuple[dict, dict[str, np.ndarray]]:
+        S = self.S
+        # Pack [S*S, 5] float32: (qq_A2, f6, f8, g_cut, dg_cut)
+        cn_pair_f32 = np.stack([
+            self.qq_A2.reshape(-1),
+            self.f6.reshape(-1),
+            self.f8.reshape(-1),
+            self.g_cut.reshape(-1),
+            self.dg_cut.reshape(-1),
+        ], axis=1).astype(np.float32)
+        meta = {
+            "has_builtin_disp": 1,
+            "disp_method": "d3bj_cn",
+            "disp_functional": self.functional,
+            "disp_force_shift": int(bool(self.force_shift)),
+            "disp_use_tail": int(bool(self.use_tail)),
+            "disp_version": 1,
+        }
+        tensors = {
+            "disp_rcut": np.array([self.r_cut], dtype=np.float64),
+            "disp_params": np.array([self.s6, self.s8, self.a1, self.a2], dtype=np.float64),
+            "disp_J_st": np.ascontiguousarray(self.J_st.reshape(S, S), dtype=np.float64),
+            "disp_cn_nref": np.ascontiguousarray(self.nref.reshape(S), dtype=np.int32),
+            "disp_cn_cnref": np.ascontiguousarray(self.cnref.reshape(S, 5), dtype=np.float32),
+            "disp_cn_rcov": np.ascontiguousarray(self.rcov_A.reshape(S), dtype=np.float32),
+            "disp_cn_pair": np.ascontiguousarray(cn_pair_f32, dtype=np.float32),
+            "disp_cn_c6ref": np.ascontiguousarray(self.c6ref_ev.reshape(S, S, 5, 5), dtype=np.float32),
         }
         return meta, tensors
 
@@ -189,6 +254,7 @@ def fit_fixed_d3bj(
     parameters: dict[str, float] | None = None,
     force_shift: bool = True,
     use_tail: bool = True,
+    method: str = "d3bj_fixed",
 ) -> FixedD3BJSpec:
     """Derive a fixed-C6 D3(BJ) specification from training ``frames`` and ``loupmd/data/d3_tables.npz``."""
     fn_key = functional.lower().strip()
@@ -268,6 +334,75 @@ def fit_fixed_d3bj(
         s8=s8,
         a1=a1,
         a2=a2,
+        method=method,
+    )
+
+
+def fit_cn_d3bj(
+    frames: Sequence[Atoms],
+    Z: Sequence[int],
+    r_cut: float,
+    *,
+    functional: str = "pbe",
+    parameters: dict[str, float] | None = None,
+    force_shift: bool = True,
+    use_tail: bool = True,
+) -> CnD3BJSpec:
+    """Derive an Option C (coordination-dependent C6) D3(BJ) specification."""
+    fixed = fit_fixed_d3bj(
+        frames, Z, r_cut, functional=functional, parameters=parameters,
+        force_shift=force_shift, use_tail=use_tail, method="d3bj_fixed",
+    )
+    tab = d3_tables()
+    Z_t = fixed.Z
+    S = len(Z_t)
+    nref = np.array([int(tab["nref"][z]) for z in Z_t], dtype=np.int32)
+    cnref = np.array([tab["cnref"][z] for z in Z_t], dtype=np.float64)
+    rcov_A = np.array([float(tab["rcov"][z]) * BOHR for z in Z_t], dtype=np.float64)
+    r2r4 = tab["r2r4"]
+    c6ref = tab["c6ref"]
+
+    qq_A2 = np.zeros((S, S), dtype=np.float64)
+    c6ref_ev = np.zeros((S, S, 5, 5), dtype=np.float64)
+    g_cut = np.zeros((S, S), dtype=np.float64)
+    dg_cut = np.zeros((S, S), dtype=np.float64)
+    rc = float(r_cut)
+    rc5, rc6, rc7, rc8 = rc ** 5, rc ** 6, rc ** 7, rc ** 8
+    unit_c6 = HARTREE_TO_EV * (BOHR ** 6)
+
+    for s, zs in enumerate(Z_t):
+        for t, zt in enumerate(Z_t):
+            qq_bohr2 = 3.0 * float(r2r4[zs]) * float(r2r4[zt])
+            qq = qq_bohr2 * (BOHR ** 2)
+            qq_A2[s, t] = qq
+            c6ref_ev[s, t] = c6ref[zs, zt] * unit_c6
+            d6 = rc6 + fixed.f6[s, t]
+            d8 = rc8 + fixed.f8[s, t]
+            g_cut[s, t] = -(fixed.s6 / d6) - (fixed.s8 * qq / d8)
+            dg_cut[s, t] = (
+                (6.0 * fixed.s6 * rc5) / (d6 * d6) + (8.0 * fixed.s8 * qq * rc7) / (d8 * d8)
+            ) if force_shift else 0.0
+
+    return CnD3BJSpec(
+        functional=fixed.functional,
+        r_cut=rc,
+        force_shift=bool(force_shift),
+        use_tail=bool(use_tail),
+        Z=Z_t,
+        nref=nref,
+        cnref=cnref,
+        rcov_A=rcov_A,
+        qq_A2=qq_A2,
+        f6=fixed.f6,
+        f8=fixed.f8,
+        c6ref_ev=c6ref_ev,
+        g_cut=g_cut,
+        dg_cut=dg_cut,
+        J_st=fixed.J_st,
+        s6=fixed.s6,
+        s8=fixed.s8,
+        a1=fixed.a1,
+        a2=fixed.a2,
     )
 
 
@@ -378,14 +513,161 @@ def eval_fixed_d3bj_f64(atoms: Atoms, spec: FixedD3BJSpec) -> dict[str, np.ndarr
     }
 
 
+def eval_cn_d3bj_f64(atoms: Atoms, spec: CnD3BJSpec) -> dict[str, np.ndarray | float]:
+    """Exact float64 reference evaluation of Option C (CN-dependent C6 D3(BJ) + CN chain rule + tail)."""
+    nums = np.asarray(atoms.numbers, dtype=np.int64)
+    N = len(nums)
+    z_to_s = {z: s for s, z in enumerate(spec.Z)}
+    sp = np.array([z_to_s[int(z)] for z in nums], dtype=np.int64)
+
+    atom_e = np.zeros(N, dtype=np.float64)
+    forces = np.zeros((N, 3), dtype=np.float64)
+    virial = np.zeros(6, dtype=np.float64)
+
+    is_per = all(bool(p) for p in atoms.pbc) and abs(float(np.linalg.det(atoms.cell.array))) > 1e-6
+    ii = jj = np.zeros(0, dtype=np.int64)
+    vec = np.zeros((0, 3), dtype=np.float64)
+    r = np.zeros(0, dtype=np.float64)
+    if N > 1:
+        if is_per:
+            ii, jj, DD = neighbor_list("ijD", atoms, spec.r_cut)
+            vec = -DD
+        else:
+            pos = np.asarray(atoms.positions, dtype=np.float64)
+            diff = pos[:, None, :] - pos[None, :, :]
+            dist = np.linalg.norm(diff, axis=-1)
+            mask = (dist > 1e-12) & (dist < spec.r_cut)
+            ii, jj = np.where(mask)
+            vec = diff[ii, jj]
+        if len(ii) > 0:
+            r = np.linalg.norm(vec, axis=1)
+            valid = (r > 1e-12) & (r < spec.r_cut)
+            ii, jj, vec, r = ii[valid], jj[valid], vec[valid], r[valid]
+
+    if len(ii) > 0:
+        si = sp[ii]
+        sj = sp[jj]
+        rco = spec.rcov_A[si] + spec.rcov_A[sj]
+        # Pass 1: CN_i and Gaussian weights w_ia, dw_ia/dCN_i
+        sig = 1.0 / (1.0 + np.exp(-K1_CN * (rco / r - 1.0)))
+        cn = np.zeros(N, dtype=np.float64)
+        np.add.at(cn, ii, sig)
+
+        w = np.zeros((N, 5), dtype=np.float64)
+        dw = np.zeros((N, 5), dtype=np.float64)
+        for a in range(N):
+            sa = sp[a]
+            nr = int(spec.nref[sa])
+            if nr <= 0:
+                continue
+            d_cn = cn[a] - spec.cnref[sa, :nr]
+            lw = -K3_CN * (d_cn ** 2)
+            lw -= np.max(lw)
+            ea = np.exp(lw)
+            z_sum = np.sum(ea)
+            wa = ea / z_sum
+            # d(wa)/dCN = wa * (-2*K3*(CN - cnref_a) - sum_b wb * (-2*K3*(CN - cnref_b)))
+            g_raw = -2.0 * K3_CN * d_cn
+            g_mean = float(np.sum(wa * g_raw))
+            w[a, :nr] = wa
+            dw[a, :nr] = wa * (g_raw - g_mean)
+
+        # Pass 2: pair C6_ij, force-shifted BJ energy/force/virial, and dE/dCN_i
+        c6_ij = np.einsum("ea,eab,eb->e", w[ii], spec.c6ref_ev[si, sj], w[jj])
+        dc6_dcn_i = np.einsum("ea,eab,eb->e", dw[ii], spec.c6ref_ev[si, sj], w[jj])
+
+        qq = spec.qq_A2[si, sj]
+        f6 = spec.f6[si, sj]
+        f8 = spec.f8[si, sj]
+        gc = spec.g_cut[si, sj]
+        dgc = spec.dg_cut[si, sj]
+
+        r2 = r * r
+        r4 = r2 * r2
+        r5 = r4 * r
+        r6 = r4 * r2
+        r7 = r6 * r
+        r8 = r4 * r4
+        inv_d6 = 1.0 / (r6 + f6)
+        inv_d8 = 1.0 / (r8 + f8)
+
+        g_raw = -(spec.s6 * inv_d6) - (spec.s8 * qq * inv_d8)
+        dg_raw = (6.0 * spec.s6 * r5) * (inv_d6 * inv_d6) + (8.0 * spec.s8 * qq * r7) * (inv_d8 * inv_d8)
+
+        g_pair = g_raw - gc - (r - spec.r_cut) * dgc
+        dg_pair = dg_raw - dgc
+
+        np.add.at(atom_e, ii, 0.5 * c6_ij * g_pair)
+        # Direct forces & virial
+        coef_dir = (c6_ij * dg_pair) / r
+        np.add.at(forces, ii, -coef_dir[:, None] * vec)
+
+        # dE/dCN_i = sum_j (dE_ij/dC6_ij) * dC6_ij/dCN_i  (full pair energy = c6_ij * g_pair,
+        # and each pair appears once as (i,j) in row i -> dE/dCN_i = sum_{j in N(i)} g_pair * dc6_dcn_i!)
+        dE_dCN = np.zeros(N, dtype=np.float64)
+        np.add.at(dE_dCN, ii, g_pair * dc6_dcn_i)
+
+        # Pass 3: CN chain-rule forces & virial
+        # d(sig)/dr = sig * (1 - sig) * (-K1 * rco / r^2)
+        dcn_dr = sig * (1.0 - sig) * (-K1_CN * rco / r2)
+        # Total dE/dr from CN chain rule for undirected pair {i, j} is (dE_dCN[i] + dE_dCN[j]) * dcn_dr
+        coef_cn = ((dE_dCN[ii] + dE_dCN[jj]) * dcn_dr) / r
+        np.add.at(forces, ii, -coef_cn[:, None] * vec)
+
+        vc = 0.5 * (coef_dir + coef_cn)
+        virial[0] += float(np.sum(vc * vec[:, 0] * vec[:, 0]))
+        virial[1] += float(np.sum(vc * vec[:, 0] * vec[:, 1]))
+        virial[2] += float(np.sum(vc * vec[:, 0] * vec[:, 2]))
+        virial[3] += float(np.sum(vc * vec[:, 1] * vec[:, 1]))
+        virial[4] += float(np.sum(vc * vec[:, 1] * vec[:, 2]))
+        virial[5] += float(np.sum(vc * vec[:, 2] * vec[:, 2]))
+
+    e_tail = 0.0
+    vol = abs(float(np.linalg.det(atoms.cell.array))) if is_per else 0.0
+    if spec.use_tail and is_per and vol > 1e-12:
+        counts = np.bincount(sp, minlength=spec.S).astype(np.float64)
+        e_per_sp = 0.5 * (spec.J_st @ counts) / vol
+        atom_e += e_per_sp[sp]
+        e_tail = float(0.5 * (counts @ spec.J_st @ counts) / vol)
+        virial[0] -= e_tail
+        virial[3] -= e_tail
+        virial[5] -= e_tail
+
+    energy = float(np.sum(atom_e))
+    stress = np.zeros((3, 3), dtype=np.float64)
+    if is_per and vol > 1e-12:
+        stress[0, 0] = virial[0] / vol
+        stress[0, 1] = stress[1, 0] = virial[1] / vol
+        stress[0, 2] = stress[2, 0] = virial[2] / vol
+        stress[1, 1] = virial[3] / vol
+        stress[1, 2] = stress[2, 1] = virial[4] / vol
+        stress[2, 2] = virial[5] / vol
+
+    return {
+        "energy": energy,
+        "forces": forces,
+        "virial": virial,
+        "stress": stress,
+        "atom_energies": atom_e,
+        "e_tail": e_tail,
+    }
+
+
+def eval_d3_spec_f64(atoms: Atoms, spec: FixedD3BJSpec | CnD3BJSpec) -> dict[str, np.ndarray | float]:
+    """Dispatch float64 reference evaluation for Option B, C, or D."""
+    if isinstance(spec, CnD3BJSpec):
+        return eval_cn_d3bj_f64(atoms, spec)
+    return eval_fixed_d3bj_f64(atoms, spec)
+
+
 def transform_labels_for_d3(
     frames: Sequence[Atoms],
-    spec: FixedD3BJSpec,
+    spec: FixedD3BJSpec | CnD3BJSpec,
     *,
     labels_have_d3: bool = False,
     ref_d3_fn: Callable[[Atoms], dict] | None = None,
 ) -> list[Atoms]:
-    """Transform ``REF_energy``, ``REF_forces``, and ``REF_stress`` for Option B training.
+    """Transform ``REF_energy``, ``REF_forces``, and ``REF_stress`` for Option B, C, or D training.
 
     - If ``labels_have_d3=False`` (e.g. PBE labels without D3): if ``ref_d3_fn`` is provided, adds the
       small local remainder ``(D3_ref_in - V_builtin)``; if ``ref_d3_fn is None``, labels are returned
@@ -398,7 +680,7 @@ def transform_labels_for_d3(
     for at in frames:
         c = at.copy()
         c.calc = None
-        bi = eval_fixed_d3bj_f64(c, spec)
+        bi = eval_d3_spec_f64(c, spec)
         if not labels_have_d3:
             if ref_d3_fn is not None:
                 ref = ref_d3_fn(c)

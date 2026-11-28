@@ -210,6 +210,8 @@ struct GenericPassInputs {
                                     // to (the caller zeroes it); the fused product + readout kernel is not used
     const double* cell_vol_dev = nullptr;  // live device cell volume (variable-cell NPT), or nullptr
     double cell_vol_host = 0.0;            // host cell volume (used when cell_vol_dev == nullptr)
+    const double* cell_h_dev = nullptr;    // live device 3x3 cell (variable-cell NPT), or nullptr
+    double cell_h_host[9] = {0};           // host 3x3 row-major cell (used when cell_h_dev == nullptr)
     // Which part of the pass record() runs (PLAN.md 4.4). SweepAll is the whole pass. The others are one sweep of a
     // domain with ghost atoms; the caller carries the layer outputs and their gradients from sweep to sweep:
     //   SweepForward t (t < L - 1): needs layer t - 1's output rows (receivers and ghosts) in layer_out(t - 1, l);

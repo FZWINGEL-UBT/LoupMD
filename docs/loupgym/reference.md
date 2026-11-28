@@ -53,6 +53,9 @@ Automatically distill a fast `FastLR-SK` (`arch=ilmlip`) student potential.
 | `--speed {fast50,balanced,accurate}` | `fast50` | Target MD speed preset |
 | `--budget {quick,standard,thorough}` | `standard` | Compute budget for candidate search & training |
 | `--temps K [K ...]` | `300 600` | Temperatures (K) for automatic teacher MD sampling |
+| `--dispersion {off,d3bj,d3bj-cn,d3bj-far}` | `off` | Built-in force-shifted D3(BJ): Option B (`d3bj`), Option C (`d3bj-cn`), or Option D (`d3bj-far`) |
+| `--dispersion-functional NAME` | `pbe` | D3(BJ) functional parameters (`pbe`, `r2scan`, `wb97m`, `b3lyp`, `pbe0`) |
+| `--dispersion-rcut FLOAT` | `10.0` | Explicit far-pair cutoff in Å for `--dispersion d3bj-far` |
 | `--active-learning-rounds N` | `0` | Optional student MD active-learning refinement rounds |
 | `--device N` | `0` | CUDA GPU index |
 | `--seed N` | `42` | Random seed |
@@ -83,3 +86,9 @@ Automatically distill a fast `FastLR-SK` (`arch=ilmlip`) student potential.
 ### Shared utilities
 
 ::: loupgym._lib.find_native_lib
+
+::: loupgym.dispersion_d3.fit_fixed_d3bj
+
+::: loupgym.dispersion_d3.fit_cn_d3bj
+
+::: loupgym.dispersion_d3.transform_labels_for_d3

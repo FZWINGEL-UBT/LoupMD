@@ -204,3 +204,24 @@ def test_fixed_d3bj_force_shift_continuity_fd_and_double_count_guard(tmp_path):
     tr = transform_labels_for_d3([sto], spec, labels_have_d3=True)[0]
     assert abs(tr.info["REF_energy"] - (-100.0 - ref["energy"])) < 1e-12
     assert np.allclose(tr.arrays["REF_forces"], -ref["forces"])
+
+    # 5) Option C (CN-dependent C6) exact central FD force & virial check on a water box (unsaturated CN!)
+    from loupgym.dispersion_d3 import eval_cn_d3bj_f64, fit_cn_d3bj
+
+    w1, w2 = molecule("H2O"), molecule("H2O")
+    w2.translate([2.9, 0.2, 0.1])
+    wbox = w1 + w2
+    wbox.set_cell([8.0, 8.0, 8.0])
+    wbox.set_pbc((True, True, True))
+    cn_spec = fit_cn_d3bj([wbox], (1, 8), r_cut=5.4, functional="pbe", force_shift=True, use_tail=True)
+    cn_ref = eval_cn_d3bj_f64(wbox, cn_spec)
+    wp, wm = wbox.copy(), wbox.copy()
+    wp.positions[0, 0] += eps
+    wm.positions[0, 0] -= eps
+    f_cn_fd = -(eval_cn_d3bj_f64(wp, cn_spec)["energy"] - eval_cn_d3bj_f64(wm, cn_spec)["energy"]) / (2.0 * eps)
+    assert abs(cn_ref["forces"][0, 0] - f_cn_fd) < 1e-6
+    wvp, wvm = wbox.copy(), wbox.copy()
+    wvp.set_cell(wbox.cell.array * (1.0 + eps), scale_atoms=True)
+    wvm.set_cell(wbox.cell.array * (1.0 - eps), scale_atoms=True)
+    v_cn_fd = (eval_cn_d3bj_f64(wvp, cn_spec)["energy"] - eval_cn_d3bj_f64(wvm, cn_spec)["energy"]) / (2.0 * eps)
+    assert abs((cn_ref["virial"][0] + cn_ref["virial"][3] + cn_ref["virial"][5]) - v_cn_fd) < 1e-5

@@ -273,11 +273,30 @@ private:
     cudaEvent_t zbl_ev_fork_ = nullptr;
     cudaEvent_t zbl_ev_join_ = nullptr;
 
-    // Built-in Option B force-shifted fixed-C6 D3(BJ) dispersion + analytical K/V tail
-    bool has_builtin_disp_ = false;
+    // Built-in D3(BJ) dispersion: mode 0=off, 1=Option B (d3bj_fixed), 2=Option C (d3bj_cn), 3=Option D (d3bj_far)
+    int disp_mode_ = 0;
     bool disp_use_tail_ = false;
     float disp_rcut_ = 0.0f;
-    float* d_disp_pair_ = nullptr;        // [S*S, 6] float32: c6, c8, f6, f8, e_shift, f_shift
+    float disp_s6_ = 1.0f, disp_s8_ = 0.0f;
+    float* d_disp_pair_ = nullptr;        // mode 1/3: [S*S, 6] float32: c6, c8, f6, f8, e_shift, f_shift
+    // Mode 2 (Option C: CN-dependent C6) model tables
+    int* d_disp_cn_nref_ = nullptr;       // [S]
+    float* d_disp_cn_cnref_ = nullptr;    // [S, 5]
+    float* d_disp_cn_rcov_ = nullptr;     // [S]
+    float* d_disp_cn_pair_ = nullptr;     // [S*S, 5]: qq_A2, f6, f8, g_cut, dg_cut
+    float* d_disp_cn_c6ref_ = nullptr;    // [S*S, 25]
+    // Mode 2 per-system scratch (owned by sys_allocs_)
+    float* d_disp_w_ = nullptr;           // [N, 5]
+    float* d_disp_dw_ = nullptr;          // [N, 5]
+    float* d_disp_dedcn_ = nullptr;       // [N]
+    // Mode 3 (Option D: explicit far-pair spatial cell-bin scratch, owned by model_allocs_ / sys_allocs_)
+    void* d_disp_far_grid_ = nullptr;     // DispFarGrid struct on device
+    int* d_disp_far_cnt_ = nullptr;       // [8192]
+    int* d_disp_far_ptr_ = nullptr;       // [8193]
+    int* d_disp_far_cur_ = nullptr;       // [8192]
+    float4* d_disp_far_pos4_ = nullptr;   // [N] (x, y, z, int_as_float(sp)) sorted by bin
+    int* d_disp_far_bin_ = nullptr;       // [N] bin index per atom
+    // Analytical K/V tail
     std::vector<double> disp_J_st_;       // [S*S] eV*A^3 (host, for K_tail = 0.5 * N^T J N)
     double* d_disp_tail_per_sp_ = nullptr; // [S] 0.5 * (J @ N) eV*A^3 per species
     std::vector<int> disp_cached_counts_;

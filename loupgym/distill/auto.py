@@ -228,6 +228,7 @@ def auto_distill(
     dft_weight: float = 3.0,
     dispersion: str | None = None,
     dispersion_functional: str = "pbe",
+    dispersion_rcut: float | None = None,
     energy_key: str | None = None,
     forces_key: str | None = None,
     stress_key: str | None = None,
@@ -406,18 +407,30 @@ def auto_distill(
 
     disp_spec = None
     if dispersion and str(dispersion).lower() not in ("off", "none"):
-        from ..dispersion_d3 import fit_fixed_d3bj
+        from ..dispersion_d3 import fit_cn_d3bj, fit_fixed_d3bj
 
+        d_mode = str(dispersion).lower()
         use_tail = bool(profile.is_periodic and profile.system_kind != "isolated_molecule")
-        disp_spec = fit_fixed_d3bj(
-            prep.train_frames[: min(16, len(prep.train_frames))],
-            profile.elements,
-            r_cut=r_graph_final,
-            functional=dispersion_functional,
-            force_shift=True,
-            use_tail=use_tail,
-        )
-        log(f"  [dispersion] Built-in force-shifted D3(BJ) ({dispersion_functional}, r_cut={r_graph_final:.2f} A, tail={use_tail})")
+        sample_fr = prep.train_frames[: min(16, len(prep.train_frames))]
+        if d_mode == "d3bj-cn":
+            disp_spec = fit_cn_d3bj(
+                sample_fr, profile.elements, r_cut=r_graph_final,
+                functional=dispersion_functional, force_shift=True, use_tail=use_tail,
+            )
+            log(f"  [dispersion] Built-in Option C CN-dependent D3(BJ) ({dispersion_functional}, r_cut={r_graph_final:.2f} A, tail={use_tail})")
+        elif d_mode == "d3bj-far":
+            rc_far = float(dispersion_rcut) if dispersion_rcut is not None else 10.0
+            disp_spec = fit_fixed_d3bj(
+                sample_fr, profile.elements, r_cut=rc_far,
+                functional=dispersion_functional, force_shift=True, use_tail=use_tail, method="d3bj_far",
+            )
+            log(f"  [dispersion] Built-in Option D far-pair D3(BJ) ({dispersion_functional}, r_disp={rc_far:.2f} A, tail={use_tail})")
+        else:
+            disp_spec = fit_fixed_d3bj(
+                sample_fr, profile.elements, r_cut=r_graph_final,
+                functional=dispersion_functional, force_shift=True, use_tail=use_tail, method="d3bj_fixed",
+            )
+            log(f"  [dispersion] Built-in Option B fixed-C6 D3(BJ) ({dispersion_functional}, r_cut={r_graph_final:.2f} A, tail={use_tail})")
 
     ckpt_out = out_dir / "student.pt"
     save_student_checkpoint(winner_model, ckpt_out, extra_args={"distill_teacher": str(teacher) if teacher else None})

@@ -16,8 +16,12 @@ _LAZY = {
     "CudaMaceTrainer": ("finetune", "CudaMaceTrainer"),
     "fasttrain": ("fasttrain", None),
     "FixedD3BJSpec": ("dispersion_d3", "FixedD3BJSpec"),
+    "CnD3BJSpec": ("dispersion_d3", "CnD3BJSpec"),
     "fit_fixed_d3bj": ("dispersion_d3", "fit_fixed_d3bj"),
+    "fit_cn_d3bj": ("dispersion_d3", "fit_cn_d3bj"),
     "eval_fixed_d3bj_f64": ("dispersion_d3", "eval_fixed_d3bj_f64"),
+    "eval_cn_d3bj_f64": ("dispersion_d3", "eval_cn_d3bj_f64"),
+    "eval_d3_spec_f64": ("dispersion_d3", "eval_d3_spec_f64"),
     "transform_labels_for_d3": ("dispersion_d3", "transform_labels_for_d3"),
 }
 
