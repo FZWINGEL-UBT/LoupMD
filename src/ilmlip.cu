@@ -13,6 +13,7 @@
 #include "kernels_common.cuh"
 #include "model.hpp"
 #include "ilmlip_lrsk_fast_api.hpp"
+#include "ilmlip_disp.cuh"
 
 namespace loup {
 namespace {
@@ -6909,6 +6910,17 @@ void IlmlipModel::free_model() {
     if (zbl_ev_fork_) { cudaEventDestroy(zbl_ev_fork_); zbl_ev_fork_ = nullptr; }
     if (zbl_ev_join_) { cudaEventDestroy(zbl_ev_join_); zbl_ev_join_ = nullptr; }
     if (zbl_stream_)  { cudaStreamDestroy(zbl_stream_); zbl_stream_  = nullptr; }
+    if (disp_ev_fork_) { cudaEventDestroy(disp_ev_fork_); disp_ev_fork_ = nullptr; }
+    if (disp_ev_join_) { cudaEventDestroy(disp_ev_join_); disp_ev_join_ = nullptr; }
+    if (disp_stream_)  { cudaStreamDestroy(disp_stream_); disp_stream_  = nullptr; }
+    has_builtin_disp_ = false;
+    disp_use_tail_ = false;
+    disp_rcut_ = 0.0f;
+    d_disp_pair_ = nullptr;
+    d_disp_tail_per_sp_ = nullptr;
+    disp_J_st_.clear();
+    disp_cached_counts_.clear();
+    disp_K_tail_ = 0.0;
     for (void* p : model_allocs_) cudaFree(p);
     model_allocs_.clear();
     d_C1_ = d_C1_zick_ = d_C2_ = d_Cbf_ = nullptr;
@@ -7749,6 +7761,25 @@ void IlmlipModel::load(const Bundle& b) {
         CUDA_CHECK_THROW(cudaEventCreateWithFlags(&zbl_ev_fork_, cudaEventDisableTiming));
         CUDA_CHECK_THROW(cudaEventCreateWithFlags(&zbl_ev_join_, cudaEventDisableTiming));
     }
+
+    // Built-in Option B force-shifted fixed-C6 D3(BJ) dispersion + analytical K/V tail.
+    // LOUP_ILMLIP_DISP=0 turns it off cleanly (zero runtime overhead when off).
+    const char* disp_env = std::getenv("LOUP_ILMLIP_DISP");
+    const bool disp_enabled = !(disp_env && disp_env[0] == '0');
+    if (disp_enabled && b.has_meta("has_builtin_disp") && b.meta_int("has_builtin_disp") != 0) {
+        auto rc_v = b.f64("disp_rcut", {1});
+        disp_rcut_ = (float)rc_v[0];
+        disp_use_tail_ = (!b.has_meta("disp_use_tail") || b.meta_int("disp_use_tail") != 0);
+        auto dp = b.f32("disp_pair", {S_ * S_, 6});
+        d_disp_pair_ = upload_vec(model_allocs_, dp);
+        disp_J_st_ = b.f64("disp_J_st", {S_, S_});
+        std::vector<double> zero_s((size_t)S_, 0.0);
+        d_disp_tail_per_sp_ = upload_vec(model_allocs_, zero_s);
+        CUDA_CHECK_THROW(cudaStreamCreateWithFlags(&disp_stream_, cudaStreamNonBlocking));
+        CUDA_CHECK_THROW(cudaEventCreateWithFlags(&disp_ev_fork_, cudaEventDisableTiming));
+        CUDA_CHECK_THROW(cudaEventCreateWithFlags(&disp_ev_join_, cudaEventDisableTiming));
+        has_builtin_disp_ = true;
+    }
 }
 
 std::string IlmlipModel::kernel_signature() const {
@@ -8001,6 +8032,78 @@ void IlmlipModel::record(const GenericPassInputs& in) {
     const int* row_end2 = (!rev_r2 && dual_r2 && in.act_row_end2) ? in.act_row_end2 : row_end;
     const unsigned warp_grid = (unsigned)((N + 3) / 4);
     const unsigned half_grid = (unsigned)((N + 7) / 8);
+
+    // Built-in Option B D3(BJ) dispersion: runs overlapped on disp_stream_ and joins on scope exit
+    // before ANY return path (including energy_only and lrsk_fast_sym_).
+    struct DispJoinGuard {
+        cudaStream_t main_st = nullptr;
+        cudaEvent_t join_ev = nullptr;
+        ~DispJoinGuard() {
+            if (main_st && join_ev) cudaStreamWaitEvent(main_st, join_ev, 0);
+        }
+    } disp_guard;
+
+    if (has_builtin_disp_ && d_disp_pair_ && disp_stream_) {
+        if (disp_use_tail_ && in.species_count && (int)in.species_count->size() == S_ &&
+            *in.species_count != disp_cached_counts_) {
+            disp_cached_counts_ = *in.species_count;
+            std::vector<double> per_sp((size_t)S_, 0.0);
+            double K = 0.0;
+            for (int s = 0; s < S_; ++s) {
+                double row_sum = 0.0;
+                for (int t = 0; t < S_; ++t)
+                    row_sum += disp_J_st_[(size_t)s * S_ + t] * (double)disp_cached_counts_[t];
+                per_sp[s] = 0.5 * row_sum;
+                K += (double)disp_cached_counts_[s] * per_sp[s];
+            }
+            disp_K_tail_ = K;
+            CUDA_CHECK_THROW(cudaMemcpyAsync(d_disp_tail_per_sp_, per_sp.data(),
+                                             (size_t)S_ * sizeof(double), cudaMemcpyHostToDevice, st));
+        }
+
+        CUDA_CHECK_THROW(cudaEventRecord(disp_ev_fork_, st));
+        CUDA_CHECK_THROW(cudaStreamWaitEvent(disp_stream_, disp_ev_fork_, 0));
+        const unsigned disp_grid = std::min(warp_grid, 256u);
+        const size_t disp_smem = (S_ <= 16) ? ((size_t)S_ * S_ * 6 * sizeof(float)) : 0;
+        const bool d_pack_vs = (in.act_senders == nullptr);
+        const bool d_eonly = (in.energy_only != 0);
+        const bool d_stress = (in.compute_stress != 0) && !d_eonly;
+        auto launch_disp = [&](auto st_tag, auto pv_tag, auto eo_tag) {
+            constexpr bool ST = decltype(st_tag)::value;
+            constexpr bool PV = decltype(pv_tag)::value;
+            constexpr bool EO = decltype(eo_tag)::value;
+            ilmlip_disp_pair_kernel<ST, PV, EO><<<disp_grid, 128, disp_smem, disp_stream_>>>(
+                N, S_, disp_rcut_, in.act_row_ptr, row_end,
+                PV ? nullptr : in.act_senders, in.act_vec_len, in.species, d_disp_pair_,
+                in.energy, in.atom_energy, in.forces, in.virial);
+        };
+        if (d_eonly) {
+            if (d_pack_vs) launch_disp(std::false_type{}, std::true_type{}, std::true_type{});
+            else           launch_disp(std::false_type{}, std::false_type{}, std::true_type{});
+        } else if (d_stress) {
+            if (d_pack_vs) launch_disp(std::true_type{}, std::true_type{}, std::false_type{});
+            else           launch_disp(std::true_type{}, std::false_type{}, std::false_type{});
+        } else {
+            if (d_pack_vs) launch_disp(std::false_type{}, std::true_type{}, std::false_type{});
+            else           launch_disp(std::false_type{}, std::false_type{}, std::false_type{});
+        }
+        if (disp_use_tail_ && disp_K_tail_ != 0.0 && in.n_ghost == 0) {
+            const unsigned tgrid = in.atom_energy ? (unsigned)((N + 255) / 256) : 1u;
+            const unsigned tblk = in.atom_energy ? 256u : 1u;
+            if (d_stress) {
+                ilmlip_disp_tail_kernel<true><<<tgrid, tblk, 0, disp_stream_>>>(
+                    N, disp_K_tail_, in.cell_vol_dev, in.cell_vol_host,
+                    in.species, d_disp_tail_per_sp_, in.energy, in.atom_energy, in.virial);
+            } else {
+                ilmlip_disp_tail_kernel<false><<<tgrid, tblk, 0, disp_stream_>>>(
+                    N, disp_K_tail_, in.cell_vol_dev, in.cell_vol_host,
+                    in.species, d_disp_tail_per_sp_, in.energy, in.atom_energy, in.virial);
+            }
+        }
+        CUDA_CHECK_THROW(cudaEventRecord(disp_ev_join_, disp_stream_));
+        disp_guard.main_st = st;
+        disp_guard.join_ev = disp_ev_join_;
+    }
     const ChebParam inv_rmax = make_cheb_param(r_max_, radial_warp_);    // exact 2-FMA r_max1 + warp
     const ChebParam inv_rmax2 = make_cheb_param(r_max2_, radial_warp_);  // exact 2-FMA r_max2 + warp
 

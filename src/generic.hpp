@@ -208,6 +208,8 @@ struct GenericPassInputs {
     bool defer_f32_flush = false;  // when true, arch=ilmlip skips ilmlip_add_forces_f32_kernel (fused into MD 2nd half!)
     double* atom_energy = nullptr;  // energy_only (S6-T08): also each row's readout and ZBL energy [N], added
                                     // to (the caller zeroes it); the fused product + readout kernel is not used
+    const double* cell_vol_dev = nullptr;  // live device cell volume (variable-cell NPT), or nullptr
+    double cell_vol_host = 0.0;            // host cell volume (used when cell_vol_dev == nullptr)
     // Which part of the pass record() runs (PLAN.md 4.4). SweepAll is the whole pass. The others are one sweep of a
     // domain with ghost atoms; the caller carries the layer outputs and their gradients from sweep to sweep:
     //   SweepForward t (t < L - 1): needs layer t - 1's output rows (receivers and ghosts) in layer_out(t - 1, l);

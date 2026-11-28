@@ -130,8 +130,11 @@ class ForceField:
             if r_max_arr is not None:
                 import numpy as np
                 self.r_max_A = float(np.asarray(r_max_arr).reshape(-1)[0])
-            self.family = str(meta.get("arch", "bundle"))
-            self.long_range = (self.family == "polar")
+            self.has_builtin_disp = bool(int(meta.get("has_builtin_disp", 0)))
+            disp_disabled = (self._environ or os.environ).get("LOUP_ILMLIP_DISP", "1") == "0"
+            arch = str(meta.get("arch", "bundle"))
+            self.family = "ilmlip-disp" if (self.has_builtin_disp and not disp_disabled) else arch
+            self.long_range = (arch == "polar")
             self.bundle = self.path
             self._bundle_elements = frozenset(elems)
             return

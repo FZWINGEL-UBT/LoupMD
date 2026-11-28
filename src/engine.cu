@@ -2361,6 +2361,8 @@ static void record_force_pass(LoupHandle* h, int compute_stress, bool energy_onl
     in.energy_only = energy_only ? 1 : 0;
     in.defer_f32_flush = defer_f32_flush;
     in.atom_energy = energy_only ? h->pass_atom_energy : nullptr;
+    in.cell_vol_dev = (h->disp_cell_dev && h->d_celldev) ? &h->d_celldev->volume : nullptr;
+    in.cell_vol_host = h->cell_vol;
     in.pos64 = h->d_pos64;
     in.gemm = [h](bool transB, int M, int Nc, int K, float alpha, const float* A, int lda, const float* B, int ldb,
                   float beta, float* C, int ldc) {

@@ -242,7 +242,12 @@ def normalize_ilmlip_cfg(ckpt: dict, energy_scale: float | None = None) -> dict:
     return cfg
 
 
-def export_ilmlip_checkpoint(ckpt_path: str | Path, output_path: str | Path, energy_scale: float | None = None) -> Path:
+def export_ilmlip_checkpoint(
+    ckpt_path: str | Path,
+    output_path: str | Path,
+    energy_scale: float | None = None,
+    dispersion=None,
+) -> Path:
     ckpt = torch.load(str(ckpt_path), map_location="cpu", weights_only=False)
     cfg = normalize_ilmlip_cfg(ckpt, energy_scale=energy_scale)
     sd = ckpt["state_dict"]
@@ -554,6 +559,11 @@ def export_ilmlip_checkpoint(ckpt_path: str | Path, output_path: str | Path, ene
         "msg_in_dim": msg_in_dim,
         **lrsk_meta,
     }
+
+    if dispersion is not None:
+        d_meta, d_tensors = dispersion.to_bundle_entries()
+        meta.update(d_meta)
+        tensors.update(d_tensors)
 
     out = Path(output_path)
     write_bundle(out, meta, tensors)

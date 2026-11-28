@@ -226,6 +226,8 @@ def auto_distill(
     temps_k: Sequence[float] | None = None,
     no_teacher_aug: bool = False,
     dft_weight: float = 3.0,
+    dispersion: str | None = None,
+    dispersion_functional: str = "pbe",
     energy_key: str | None = None,
     forces_key: str | None = None,
     stress_key: str | None = None,
@@ -402,9 +404,24 @@ def auto_distill(
     te_items, _, te_stress = build_graph_items(prep.test_frames, profile.elements, r_graph_final)
     test_sc = eval_model_splits(winner_model, te_items, profile.elements, device=dev_str, has_stress=te_stress)
 
+    disp_spec = None
+    if dispersion and str(dispersion).lower() not in ("off", "none"):
+        from ..dispersion_d3 import fit_fixed_d3bj
+
+        use_tail = bool(profile.is_periodic and profile.system_kind != "isolated_molecule")
+        disp_spec = fit_fixed_d3bj(
+            prep.train_frames[: min(16, len(prep.train_frames))],
+            profile.elements,
+            r_cut=r_graph_final,
+            functional=dispersion_functional,
+            force_shift=True,
+            use_tail=use_tail,
+        )
+        log(f"  [dispersion] Built-in force-shifted D3(BJ) ({dispersion_functional}, r_cut={r_graph_final:.2f} A, tail={use_tail})")
+
     ckpt_out = out_dir / "student.pt"
     save_student_checkpoint(winner_model, ckpt_out, extra_args={"distill_teacher": str(teacher) if teacher else None})
-    export_ilmlip_checkpoint(ckpt_out, bundle_out, energy_scale=float(winner_model.energy_scale))
+    export_ilmlip_checkpoint(ckpt_out, bundle_out, energy_scale=float(winner_model.energy_scale), dispersion=disp_spec)
 
     log(f"[6/6] Verifying exported bundle {bundle_out.name} (3x gate + 50-step MD parity + speed)...")
     gate_ok, md_ok, speed_us, ver_metrics = _verify_bundle_gate_and_md(

@@ -38,6 +38,7 @@ _D3M = ("D. G. A. Smith, L. A. Burns, K. Patkowski, C. D. Sherrill, J. Phys. Che
 _R2SCAN = ("S. Ehlert, U. Huniar, J. Ning, J. W. Furness, J. Sun, A. D. Kaplan, J. P. Perdew, J. G. Brandenburg, "
            "J. Chem. Phys. 154, 061101 (2021), doi:10.1063/5.0041008, Table 1 (the four-digit values torch-dftd and "
            "mace_mp use)")
+_WB97M = ("A. Najibi, L. Goerigk, J. Chem. Theory Comput. 14, 5725 (2018), doi:10.1021/acs.jctc.8b00842")
 
 # (functional, damping) -> parameters and their source. Only the functionals of the models in the label table;
 # any other set is given as raw parameters.
@@ -47,6 +48,7 @@ PARAMETERS = {
     ("pbe", "bjm"): ({"s6": 1.0, "s8": 0.358940, "a1": 0.012092, "a2": 5.938951}, _D3M),
     ("pbe", "zerom"): ({"s6": 1.0, "s8": 0.0, "rs6": 2.340218, "beta": 0.129434, "rs8": 1.0, "alpha": 14.0}, _D3M),
     ("r2scan", "bj"): ({"s6": 1.0, "s8": 0.7898, "a1": 0.4948, "a2": 5.7308}, _R2SCAN),
+    ("wb97m", "bj"): ({"s6": 1.0, "s8": 0.3908, "a1": 0.5660, "a2": 3.1280}, _WB97M),
 }
 
 # Training functionals whose data already contains dispersion, and why.
@@ -56,6 +58,7 @@ _DISPERSION_IN_DATA = {
 }
 _FAMILY_WITH_DISPERSION = {
     "polar": "MACE-POLAR-1 models long-range interactions of their own and name no single training functional",
+    "ilmlip-disp": "this bundle already includes a built-in D3(BJ) dispersion term",
 }
 
 # What each summation method computes exactly, and its known limits (`loupmd dispersion list`, the docs).

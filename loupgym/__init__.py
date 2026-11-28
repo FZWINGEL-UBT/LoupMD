@@ -15,6 +15,10 @@ _LAZY = {
     "FinetuneResult": ("finetune", "FinetuneResult"),
     "CudaMaceTrainer": ("finetune", "CudaMaceTrainer"),
     "fasttrain": ("fasttrain", None),
+    "FixedD3BJSpec": ("dispersion_d3", "FixedD3BJSpec"),
+    "fit_fixed_d3bj": ("dispersion_d3", "fit_fixed_d3bj"),
+    "eval_fixed_d3bj_f64": ("dispersion_d3", "eval_fixed_d3bj_f64"),
+    "transform_labels_for_d3": ("dispersion_d3", "transform_labels_for_d3"),
 }
 
 
@@ -30,10 +34,14 @@ __all__ = [
     "CudaMaceTrainer",
     "DistillResult",
     "FinetuneResult",
+    "FixedD3BJSpec",
     "__version__",
     "auto_distill",
     "distill",
+    "eval_fixed_d3bj_f64",
     "fasttrain",
     "finetune",
     "finetune_cuda",
+    "fit_fixed_d3bj",
+    "transform_labels_for_d3",
 ]

@@ -272,6 +272,19 @@ private:
     cudaStream_t zbl_stream_ = nullptr;
     cudaEvent_t zbl_ev_fork_ = nullptr;
     cudaEvent_t zbl_ev_join_ = nullptr;
+
+    // Built-in Option B force-shifted fixed-C6 D3(BJ) dispersion + analytical K/V tail
+    bool has_builtin_disp_ = false;
+    bool disp_use_tail_ = false;
+    float disp_rcut_ = 0.0f;
+    float* d_disp_pair_ = nullptr;        // [S*S, 6] float32: c6, c8, f6, f8, e_shift, f_shift
+    std::vector<double> disp_J_st_;       // [S*S] eV*A^3 (host, for K_tail = 0.5 * N^T J N)
+    double* d_disp_tail_per_sp_ = nullptr; // [S] 0.5 * (J @ N) eV*A^3 per species
+    std::vector<int> disp_cached_counts_;
+    double disp_K_tail_ = 0.0;
+    cudaStream_t disp_stream_ = nullptr;
+    cudaEvent_t disp_ev_fork_ = nullptr;
+    cudaEvent_t disp_ev_join_ = nullptr;
 };
 
 }  // namespace loup

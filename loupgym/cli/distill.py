@@ -42,6 +42,10 @@ def add_parser(sub):
                         help="disable automatic teacher-MD augmentation when DFT frames are supplied alone")
     parser.add_argument("--dft-weight", type=float, default=3.0,
                         help="relative weight for DFT frames when mixing with teacher frames (default 3.0)")
+    parser.add_argument("--dispersion", choices=("off", "d3bj"), default="off",
+                        help="built-in Option B force-shifted fixed-C6 D3(BJ) + K/V tail (default off)")
+    parser.add_argument("--dispersion-functional", default="pbe",
+                        help="D3(BJ) functional parameters when --dispersion d3bj (pbe, r2scan, wb97m; default pbe)")
     parser.add_argument("--energy-key", default=None, help="custom energy key in ASE info")
     parser.add_argument("--forces-key", default=None, help="custom forces key in ASE arrays")
     parser.add_argument("--stress-key", default=None, help="custom stress key in ASE info")
@@ -77,6 +81,8 @@ def run(args) -> int:
         n_md_frames=args.n_md_frames,
         no_teacher_aug=bool(args.no_teacher_aug),
         dft_weight=float(args.dft_weight),
+        dispersion=None if args.dispersion == "off" else args.dispersion,
+        dispersion_functional=args.dispersion_functional,
         energy_key=args.energy_key,
         forces_key=args.forces_key,
         stress_key=args.stress_key,

@@ -143,3 +143,64 @@ def test_cli_distill_parser():
     assert callable(loupgym.auto_distill)
     assert not hasattr(loupmd, "auto_distill")
     assert not hasattr(loupmd, "DistillResult")
+
+
+def test_fixed_d3bj_force_shift_continuity_fd_and_double_count_guard(tmp_path):
+    from loupmd import dispersion as disp_mod
+    from loupmd.errors import PlanRefused
+    from loupgym.dispersion_d3 import eval_fixed_d3bj_f64, fit_fixed_d3bj, transform_labels_for_d3
+
+    sto = crystal(
+        ["Sr", "Ti", "O"],
+        [(0, 0, 0), (0.5, 0.5, 0.5), (0.5, 0.5, 0)],
+        spacegroup=221,
+        cellpar=[3.905, 3.905, 3.905, 90, 90, 90],
+    ).repeat((2, 2, 2))
+    rng = np.random.default_rng(11)
+    sto.positions += rng.normal(0.0, 0.05, size=sto.positions.shape)
+
+    spec = fit_fixed_d3bj([sto], (8, 22, 38), r_cut=4.6, functional="pbe", force_shift=True, use_tail=True)
+    ref = eval_fixed_d3bj_f64(sto, spec)
+    assert ref["e_tail"] < 0.0
+
+    # 1) Dimer scan across r_cut: C^1 continuity (both E and F vanish smoothly at r_cut)
+    d_in = Atoms("OO", positions=[[0.0, 0.0, 0.0], [4.5999, 0.0, 0.0]], cell=[20.0, 20.0, 20.0], pbc=True)
+    d_out = Atoms("OO", positions=[[0.0, 0.0, 0.0], [4.6001, 0.0, 0.0]], cell=[20.0, 20.0, 20.0], pbc=True)
+    spec_nt = fit_fixed_d3bj([sto], (8, 22, 38), r_cut=4.6, functional="pbe", force_shift=True, use_tail=False)
+    r_in = eval_fixed_d3bj_f64(d_in, spec_nt)
+    r_out = eval_fixed_d3bj_f64(d_out, spec_nt)
+    assert abs(r_in["energy"] - r_out["energy"]) < 1e-8
+    assert float(np.max(np.abs(r_in["forces"] - r_out["forces"]))) < 1e-5
+
+    # 2) Central finite-difference check on atomic force and isotropic volume tail + pair virial
+    eps = 1e-5
+    at_p, at_m = sto.copy(), sto.copy()
+    at_p.positions[0, 0] += eps
+    at_m.positions[0, 0] -= eps
+    f_fd = -(eval_fixed_d3bj_f64(at_p, spec)["energy"] - eval_fixed_d3bj_f64(at_m, spec)["energy"]) / (2.0 * eps)
+    assert abs(ref["forces"][0, 0] - f_fd) < 1e-7
+
+    at_vp, at_vm = sto.copy(), sto.copy()
+    at_vp.set_cell(sto.cell.array * (1.0 + eps), scale_atoms=True)
+    at_vm.set_cell(sto.cell.array * (1.0 - eps), scale_atoms=True)
+    tr_v_fd = (eval_fixed_d3bj_f64(at_vp, spec)["energy"] - eval_fixed_d3bj_f64(at_vm, spec)["energy"]) / (2.0 * eps)
+    tr_v_ana = ref["virial"][0] + ref["virial"][3] + ref["virial"][5]
+    assert abs(tr_v_ana - tr_v_fd) < 1e-5
+
+    # 3) Double-counting guard on a bundle carrying has_builtin_disp=1
+    d_meta, d_tensors = spec.to_bundle_entries()
+    bp = tmp_path / "student_disp.loup"
+    write_bundle(bp, {"arch": "ilmlip", "Z": "8,22,38", "exporter_version": 1, **d_meta}, {"r_max": np.array([4.6]), **d_tensors})
+    ff = loupmd.load(str(bp), engine_factory=_MockEngine)
+    assert ff.has_builtin_disp is True
+    assert ff.family == "ilmlip-disp"
+    with pytest.raises(PlanRefused):
+        disp_mod.resolve("d3bj", functional=ff.functional, family=ff.family, model=ff.name)
+
+    # 4) Label transform sanity check (labels_have_d3=True subtracts builtin+tail)
+    sto.info["REF_energy"] = -100.0
+    sto.arrays["REF_forces"] = np.zeros((len(sto), 3))
+    sto.info["REF_stress"] = np.zeros((3, 3))
+    tr = transform_labels_for_d3([sto], spec, labels_have_d3=True)[0]
+    assert abs(tr.info["REF_energy"] - (-100.0 - ref["energy"])) < 1e-12
+    assert np.allclose(tr.arrays["REF_forces"], -ref["forces"])
