@@ -784,6 +784,13 @@ def train_student_cuda(
     ws: float | None = None,
     wct: float = 0.0,
     sp_w: Sequence[float] | None = None,
+    weight_decay: float = 1e-4,
+    wd_ro: float = 0.0,
+    rad_smooth: float = 0.0,
+    w_lr_reg: float = 1e-4,
+    we_tail: float = 4000.0,
+    e0_frames: Sequence | None = None,
+    calibrate: bool = True,
     device: str | torch.device = "cuda",
     seed: int = 42,
     early_stop_patience: int = 6,
@@ -804,12 +811,14 @@ def train_student_cuda(
 
     r_graph = float(max(model.r_max, model.r_max2))
     tr_items, _, has_stress = build_graph_items(train_frames, zs, r_graph, e0_map=e0_map)
-    tr_items_raw, _, _ = build_graph_items(train_frames, zs, r_graph, e0_map=None)
+    e0_src = e0_frames if e0_frames is not None else train_frames
+    tr_items_raw, _, _ = build_graph_items(e0_src, zs, r_graph, e0_map=None)
     va_items, _, va_has_stress = build_graph_items(val_frames if val_frames else train_frames[:4], zs, r_graph, e0_map=None)
     has_ei = bool(tr_items and getattr(tr_items[0], "ei_ref", None) is not None)
 
     model.e0.zero_()
-    model.calibrate_buffers(tr_items, bs=min(8, max(1, len(tr_items))))
+    if calibrate:
+        model.calibrate_buffers(tr_items, bs=min(8, max(1, len(tr_items))))
     mol_geom, net_s, trq_s = _build_mol_geom_list(train_frames, dev)
     has_mol = mol_geom is not None
 
@@ -827,7 +836,11 @@ def train_student_cuda(
     gw_arr = np.asarray([float(getattr(it, "weight", 1.0)) for it in tr_items], dtype=np.float32)
 
     trainer = CudaFullLRSKTrainer(model, dtype="f32", soap_max_dim=128)
-    trainer.set_optimizer(b_soap, b_soap, 8, 1e-4, 1.0, adam_b1, adam_b2, d_ema_max, 1.0, 1e-4, 0.0, 0.0, sp_w=sp_arr)
+    trainer.set_optimizer(
+        b_soap, b_soap, 8, float(weight_decay), 1.0,
+        adam_b1, adam_b2, d_ema_max, 1.0,
+        float(w_lr_reg), float(rad_smooth), float(wd_ro), sp_w=sp_arr,
+    )
     trainer.upload_dataset(tr_items, mol_list=mol_geom, graph_weights=gw_arr, has_stress=has_stress, device=dev)
 
     best_f = float("inf")
@@ -844,7 +857,7 @@ def train_student_cuda(
         for ep in range(1, epochs + 1):
             lr_ep = _cosine_lr(ep, epochs, peak_lr, min_lr, warmup)
             in_tail = (epochs >= 20) and (ep > tail_ep)
-            we_cur = 4000.0 if in_tail else we
+            we_cur = float(we_tail) if in_tail else we
             wm_cur = (wct_eff * 0.5) if in_tail else wct_eff
             perm = rng.permutation(len(tr_items))
             lr_s = np.full(n_steps, lr_ep, dtype=np.float64)

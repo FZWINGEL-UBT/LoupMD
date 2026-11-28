@@ -6969,6 +6969,7 @@ void IlmlipModel::free_system() {
     N_ = 0;
     d_disp_w_ = d_disp_dw_ = d_disp_dedcn_ = nullptr;
     d_disp_far_pos4_ = nullptr;
+    d_disp_far_idx_ = nullptr;
     d_disp_far_bin_ = nullptr;
     for (int l = 0; l < kMaxL; ++l) {
         d_A1_[l] = d_dA1_[l] = d_Bcat_[l] = d_dBcat_[l] = d_I_[l] = d_dI_[l] = nullptr;
@@ -7797,7 +7798,19 @@ void IlmlipModel::load(const Bundle& b) {
             d_disp_cn_rcov_ = upload_vec(model_allocs_, b.f32("disp_cn_rcov", {S_}));
             d_disp_cn_pair_ = upload_vec(model_allocs_, b.f32("disp_cn_pair", {S_ * S_, 5}));
             d_disp_cn_c6ref_ = upload_vec(model_allocs_, b.f32("disp_cn_c6ref", {S_, S_, 5, 5}));
-            disp_mode_ = 2;
+            if (disp_rcut_ > r_max_ + 1e-4f) {
+                void* gp = nullptr;
+                CUDA_CHECK_THROW(device_malloc(&gp, sizeof(DispFarGrid)));
+                model_allocs_.push_back(gp);
+                d_disp_far_grid_ = gp;
+                std::vector<int> z8k(kDispFarMaxBins + 1, 0);
+                d_disp_far_cnt_ = upload_vec(model_allocs_, z8k);
+                d_disp_far_ptr_ = upload_vec(model_allocs_, z8k);
+                d_disp_far_cur_ = upload_vec(model_allocs_, z8k);
+                disp_mode_ = 4;  // Option C+D: CN-dependent C6 out to disp_rcut_ > r_max_
+            } else {
+                disp_mode_ = 2;
+            }
         } else {
             auto dp = b.f32("disp_pair", {S_ * S_, 6});
             d_disp_pair_ = upload_vec(model_allocs_, dp);
@@ -8058,11 +8071,12 @@ void IlmlipModel::alloc_system(int N) {
             }
         }
     }
-    if (disp_mode_ == 2) {
+    if (disp_mode_ == 2 || disp_mode_ == 4) {
         d_disp_w_ = alloc(n * 5);
         d_disp_dw_ = alloc(n * 5);
         d_disp_dedcn_ = alloc(n);
-    } else if (disp_mode_ == 3) {
+    }
+    if (disp_mode_ == 3 || disp_mode_ == 4) {
         void* p4 = nullptr;
         CUDA_CHECK_THROW(device_malloc(&p4, n * sizeof(float4)));
         sys_allocs_.push_back(p4);
@@ -8073,6 +8087,13 @@ void IlmlipModel::alloc_system(int N) {
         sys_allocs_.push_back(pb);
         sys_bytes_ += n * sizeof(int);
         d_disp_far_bin_ = reinterpret_cast<int*>(pb);
+        if (disp_mode_ == 4) {
+            void* pi = nullptr;
+            CUDA_CHECK_THROW(device_malloc(&pi, n * sizeof(int)));
+            sys_allocs_.push_back(pi);
+            sys_bytes_ += n * sizeof(int);
+            d_disp_far_idx_ = reinterpret_cast<int*>(pi);
+        }
     }
     N_ = N;
 }
@@ -8219,6 +8240,83 @@ void IlmlipModel::record(const GenericPassInputs& in) {
                 ilmlip_disp_far_walk_kernel<false, false><<<disp_grid, 128, disp_smem, disp_stream_>>>(
                     N, S_, disp_rcut_, fg, d_disp_far_ptr_, d_disp_far_pos4_, d_disp_far_bin_,
                     in.pos64, in.species, d_disp_pair_, in.energy, in.atom_energy, in.forces, in.virial);
+            }
+        } else if (disp_mode_ == 4 && d_disp_cn_pair_ && d_disp_w_ && d_disp_far_grid_ && d_disp_far_pos4_ && d_disp_far_idx_ && in.n_ghost == 0) {
+            // Option C+D: coordination-dependent C6 out to arbitrary disp_rcut_ via spatial cell-binning
+            DispCell9 ch{};
+            for (int k = 0; k < 9; ++k) ch.h[k] = in.cell_h_host[k];
+            auto* fg = reinterpret_cast<DispFarGrid*>(d_disp_far_grid_);
+            ilmlip_disp_far_grid_kernel<<<1, 1, 0, disp_stream_>>>(in.cell_h_dev, ch, disp_rcut_, fg);
+            CUDA_CHECK_THROW(cudaMemsetAsync(d_disp_far_cnt_, 0, (size_t)kDispFarMaxBins * sizeof(int), disp_stream_));
+            const unsigned nblk = (unsigned)((N + 255) / 256);
+            ilmlip_disp_far_count_kernel<<<nblk, 256, 0, disp_stream_>>>(N, in.pos64, fg, d_disp_far_bin_, d_disp_far_cnt_);
+            ilmlip_disp_far_scan_kernel<<<1, 1, 0, disp_stream_>>>(fg, d_disp_far_cnt_, d_disp_far_ptr_, d_disp_far_cur_);
+            ilmlip_disp_far_scatter_kernel<<<nblk, 256, 0, disp_stream_>>>(
+                N, in.pos64, in.species, fg, d_disp_far_bin_, d_disp_far_cur_, d_disp_far_pos4_, d_disp_far_idx_);
+            // Coordination number & its chain-rule derivative decay below 1e-9 past ~4 A, so run
+            // cn1 and cn3 on the student's existing CSR neighbour list (when r_max_ >= 4.0 A),
+            // leaving only a single far-grid walk for cn2 (~3x faster).
+            const bool cn_on_csr = (r_max_ >= 4.0f);
+            if (cn_on_csr) {
+                if (d_pack_vs) {
+                    ilmlip_disp_cn1_kernel<true><<<disp_grid, 128, 0, disp_stream_>>>(
+                        N, r_max_, in.act_row_ptr, row_end, nullptr, in.act_vec_len,
+                        in.species, d_disp_cn_nref_, d_disp_cn_cnref_, d_disp_cn_rcov_, d_disp_w_, d_disp_dw_);
+                } else {
+                    ilmlip_disp_cn1_kernel<false><<<disp_grid, 128, 0, disp_stream_>>>(
+                        N, r_max_, in.act_row_ptr, row_end, in.act_senders, in.act_vec_len,
+                        in.species, d_disp_cn_nref_, d_disp_cn_cnref_, d_disp_cn_rcov_, d_disp_w_, d_disp_dw_);
+                }
+            } else {
+                ilmlip_disp_cn_far1_kernel<<<disp_grid, 128, 0, disp_stream_>>>(
+                    N, disp_rcut_, fg, d_disp_far_ptr_, d_disp_far_pos4_, d_disp_far_bin_,
+                    in.pos64, in.species, d_disp_cn_nref_, d_disp_cn_cnref_, d_disp_cn_rcov_, d_disp_w_, d_disp_dw_);
+            }
+            if (d_eonly) {
+                ilmlip_disp_cn_far2_kernel<false, true><<<disp_grid, 128, 0, disp_stream_>>>(
+                    N, S_, disp_rcut_, disp_s6_, disp_s8_, fg, d_disp_far_ptr_, d_disp_far_pos4_, d_disp_far_idx_,
+                    d_disp_far_bin_, in.pos64, in.species, d_disp_cn_nref_, d_disp_cn_pair_, d_disp_cn_c6ref_,
+                    d_disp_w_, d_disp_dw_, d_disp_dedcn_, in.energy, in.atom_energy, in.forces, in.virial);
+            } else if (d_stress) {
+                ilmlip_disp_cn_far2_kernel<true, false><<<disp_grid, 128, 0, disp_stream_>>>(
+                    N, S_, disp_rcut_, disp_s6_, disp_s8_, fg, d_disp_far_ptr_, d_disp_far_pos4_, d_disp_far_idx_,
+                    d_disp_far_bin_, in.pos64, in.species, d_disp_cn_nref_, d_disp_cn_pair_, d_disp_cn_c6ref_,
+                    d_disp_w_, d_disp_dw_, d_disp_dedcn_, in.energy, in.atom_energy, in.forces, in.virial);
+                if (cn_on_csr) {
+                    if (d_pack_vs) {
+                        ilmlip_disp_cn3_kernel<true, true><<<disp_grid, 128, 0, disp_stream_>>>(
+                            N, r_max_, in.act_row_ptr, row_end, nullptr, in.act_vec_len,
+                            in.species, d_disp_cn_rcov_, d_disp_dedcn_, in.forces, in.virial);
+                    } else {
+                        ilmlip_disp_cn3_kernel<true, false><<<disp_grid, 128, 0, disp_stream_>>>(
+                            N, r_max_, in.act_row_ptr, row_end, in.act_senders, in.act_vec_len,
+                            in.species, d_disp_cn_rcov_, d_disp_dedcn_, in.forces, in.virial);
+                    }
+                } else {
+                    ilmlip_disp_cn_far3_kernel<true><<<disp_grid, 128, 0, disp_stream_>>>(
+                        N, disp_rcut_, fg, d_disp_far_ptr_, d_disp_far_pos4_, d_disp_far_idx_, d_disp_far_bin_,
+                        in.pos64, in.species, d_disp_cn_rcov_, d_disp_dedcn_, in.forces, in.virial);
+                }
+            } else {
+                ilmlip_disp_cn_far2_kernel<false, false><<<disp_grid, 128, 0, disp_stream_>>>(
+                    N, S_, disp_rcut_, disp_s6_, disp_s8_, fg, d_disp_far_ptr_, d_disp_far_pos4_, d_disp_far_idx_,
+                    d_disp_far_bin_, in.pos64, in.species, d_disp_cn_nref_, d_disp_cn_pair_, d_disp_cn_c6ref_,
+                    d_disp_w_, d_disp_dw_, d_disp_dedcn_, in.energy, in.atom_energy, in.forces, in.virial);
+                if (cn_on_csr) {
+                    if (d_pack_vs) {
+                        ilmlip_disp_cn3_kernel<false, true><<<disp_grid, 128, 0, disp_stream_>>>(
+                            N, r_max_, in.act_row_ptr, row_end, nullptr, in.act_vec_len,
+                            in.species, d_disp_cn_rcov_, d_disp_dedcn_, in.forces, in.virial);
+                    } else {
+                        ilmlip_disp_cn3_kernel<false, false><<<disp_grid, 128, 0, disp_stream_>>>(
+                            N, r_max_, in.act_row_ptr, row_end, in.act_senders, in.act_vec_len,
+                            in.species, d_disp_cn_rcov_, d_disp_dedcn_, in.forces, in.virial);
+                    }
+                } else {
+                    ilmlip_disp_cn_far3_kernel<false><<<disp_grid, 128, 0, disp_stream_>>>(
+                        N, disp_rcut_, fg, d_disp_far_ptr_, d_disp_far_pos4_, d_disp_far_idx_, d_disp_far_bin_,
+                        in.pos64, in.species, d_disp_cn_rcov_, d_disp_dedcn_, in.forces, in.virial);
+                }
             }
         }
 

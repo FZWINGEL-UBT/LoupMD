@@ -295,6 +295,7 @@ private:
     int* d_disp_far_ptr_ = nullptr;       // [8193]
     int* d_disp_far_cur_ = nullptr;       // [8192]
     float4* d_disp_far_pos4_ = nullptr;   // [N] (x, y, z, int_as_float(sp)) sorted by bin
+    int* d_disp_far_idx_ = nullptr;       // [N] original atom index sorted by bin (mode 4)
     int* d_disp_far_bin_ = nullptr;       // [N] bin index per atom
     // Analytical K/V tail
     std::vector<double> disp_J_st_;       // [S*S] eV*A^3 (host, for K_tail = 0.5 * N^T J N)
